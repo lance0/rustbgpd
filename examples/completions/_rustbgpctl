@@ -670,6 +670,24 @@ _arguments "${_arguments_options[@]}" : \
 '::address -- Neighbor address filter:_default' \
 && ret=0
 ;;
+(events)
+_arguments "${_arguments_options[@]}" : \
+'--address=[Neighbor address filter]:ADDRESS:_default' \
+'-a+[Address family filter]:FAMILY:_default' \
+'--family=[Address family filter]:FAMILY:_default' \
+'--prefix=[Exact prefix filter, e.g. 203.0.113.0/24]:PREFIX:_default' \
+'-l+[Maximum recent events to return]:LIMIT:_default' \
+'--limit=[Maximum recent events to return]:LIMIT:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
 (health)
 _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -1470,6 +1488,10 @@ esac
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(events)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (health)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -1660,6 +1682,7 @@ _rustbgpctl_commands() {
 'flowspec:Manage FlowSpec routes' \
 'evpn:Manage EVPN routes (list, add, delete — RFC 7432)' \
 'watch:Watch route updates (streaming)' \
+'events:Show recent route update events' \
 'health:Check daemon health' \
 'metrics:Show Prometheus metrics' \
 'shutdown:Request daemon shutdown' \
@@ -1678,6 +1701,11 @@ _rustbgpctl_commands() {
 _rustbgpctl__subcmd__completions_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl completions commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__events_commands] )) ||
+_rustbgpctl__subcmd__events_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl events commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__evpn_commands] )) ||
 _rustbgpctl__subcmd__evpn_commands() {
@@ -1873,6 +1901,7 @@ _rustbgpctl__subcmd__help_commands() {
 'flowspec:Manage FlowSpec routes' \
 'evpn:Manage EVPN routes (list, add, delete — RFC 7432)' \
 'watch:Watch route updates (streaming)' \
+'events:Show recent route update events' \
 'health:Check daemon health' \
 'metrics:Show Prometheus metrics' \
 'shutdown:Request daemon shutdown' \
@@ -1891,6 +1920,11 @@ _rustbgpctl__subcmd__help_commands() {
 _rustbgpctl__subcmd__help__subcmd__completions_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help completions commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__events_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__events_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help events commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn_commands] )) ||
 _rustbgpctl__subcmd__help__subcmd__evpn_commands() {

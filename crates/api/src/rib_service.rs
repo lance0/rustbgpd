@@ -335,9 +335,43 @@ fn parse_prefix_request(prefix: &str, prefix_length: u32) -> Result<Prefix, Stat
     let len = u8::try_from(prefix_length)
         .map_err(|_| Status::invalid_argument("prefix_length must be 0-128"))?;
     Ok(match addr {
+        IpAddr::V4(_) if len > 32 => {
+            return Err(Status::invalid_argument(
+                "prefix_length must be 0-32 for IPv4",
+            ));
+        }
+        IpAddr::V6(_) if len > 128 => {
+            return Err(Status::invalid_argument(
+                "prefix_length must be 0-128 for IPv6",
+            ));
+        }
         IpAddr::V4(v4) => Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(v4, len)),
         IpAddr::V6(v6) => Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(v6, len)),
     })
+}
+
+#[allow(clippy::result_large_err)]
+fn parse_route_event_prefix_filter(
+    prefix: &str,
+    prefix_length: u32,
+    afi: Option<Afi>,
+) -> Result<Option<Prefix>, Status> {
+    if prefix.is_empty() {
+        if prefix_length != 0 {
+            return Err(Status::invalid_argument(
+                "prefix_length requires a non-empty prefix",
+            ));
+        }
+        return Ok(None);
+    }
+
+    let parsed = parse_prefix_request(prefix, prefix_length)?;
+    match (afi, parsed) {
+        (Some(Afi::Ipv4), Prefix::V6(_)) | (Some(Afi::Ipv6), Prefix::V4(_)) => Err(
+            Status::invalid_argument("prefix family does not match requested address family"),
+        ),
+        (_, prefix) => Ok(Some(prefix)),
+    }
 }
 
 fn explain_modifications_to_proto(
@@ -710,6 +744,7 @@ impl proto::rib_service_server::RibService for RibService {
     ) -> Result<Response<proto::ListRouteEventsResponse>, Status> {
         let req = request.into_inner();
         let afi = route_event_afi_filter(req.afi_safi)?;
+        let prefix = parse_route_event_prefix_filter(&req.prefix, req.prefix_length, afi)?;
         let peer: Option<IpAddr> = if req.neighbor_address.is_empty() {
             None
         } else {
@@ -725,6 +760,7 @@ impl proto::rib_service_server::RibService for RibService {
             .send(RibUpdate::QueryRouteEventHistory {
                 peer,
                 afi,
+                prefix,
                 limit: req.limit as usize,
                 reply: reply_tx,
             })
@@ -1554,6 +1590,39 @@ mod tests {
         let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32));
         assert!(!prefix_contains(&v4, &v6));
         assert!(!prefix_contains(&v6, &v4));
+    }
+
+    #[test]
+    fn route_event_prefix_filter_accepts_matching_family() {
+        let prefix = parse_route_event_prefix_filter("203.0.113.0", 24, Some(Afi::Ipv4)).unwrap();
+        assert_eq!(
+            prefix,
+            Some(Prefix::V4(Ipv4Prefix::new(
+                Ipv4Addr::new(203, 0, 113, 0),
+                24
+            )))
+        );
+    }
+
+    #[test]
+    fn route_event_prefix_filter_rejects_family_mismatch() {
+        let err = parse_route_event_prefix_filter("2001:db8::", 64, Some(Afi::Ipv4)).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("prefix family"));
+    }
+
+    #[test]
+    fn route_event_prefix_filter_rejects_empty_prefix_with_length() {
+        let err = parse_route_event_prefix_filter("", 24, None).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("non-empty prefix"));
+    }
+
+    #[test]
+    fn route_event_prefix_filter_rejects_ipv4_length_over_32() {
+        let err = parse_route_event_prefix_filter("203.0.113.0", 33, None).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("0-32 for IPv4"));
     }
 
     #[test]

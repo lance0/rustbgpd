@@ -2,7 +2,8 @@ use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{self, JsonRouteEvent};
 use crate::proto::rib_service_client::RibServiceClient;
-use crate::proto::{ListRouteEventsRequest, RouteEvent, WatchRoutesRequest};
+use crate::proto::{AddressFamily, ListRouteEventsRequest, RouteEvent, WatchRoutesRequest};
+use std::net::IpAddr;
 
 fn format_event_type(t: i32) -> &'static str {
     match t {
@@ -83,9 +84,34 @@ pub async fn history(
     connection: Connection,
     neighbor: Option<String>,
     family: Option<i32>,
+    prefix: Option<String>,
     limit: u32,
     json: bool,
 ) -> Result<(), CliError> {
+    let (prefix, prefix_length) = if let Some(prefix) = prefix {
+        let parsed = output::parse_prefix(&prefix).map_err(CliError::Argument)?;
+        let addr: IpAddr = parsed
+            .0
+            .parse()
+            .map_err(|_| CliError::Argument(format!("invalid IP address in prefix: {prefix}")))?;
+        match (family, addr) {
+            (Some(f), IpAddr::V4(_)) if f == AddressFamily::Ipv6Unicast as i32 => {
+                return Err(CliError::Argument(
+                    "--prefix family does not match --family".into(),
+                ));
+            }
+            (Some(f), IpAddr::V6(_)) if f == AddressFamily::Ipv4Unicast as i32 => {
+                return Err(CliError::Argument(
+                    "--prefix family does not match --family".into(),
+                ));
+            }
+            _ => {}
+        }
+        parsed
+    } else {
+        (String::new(), 0)
+    };
+
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let response = client
@@ -93,6 +119,8 @@ pub async fn history(
             neighbor_address: neighbor.unwrap_or_default(),
             afi_safi: family.unwrap_or(0),
             limit,
+            prefix,
+            prefix_length,
         })
         .await?
         .into_inner();
