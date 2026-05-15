@@ -636,8 +636,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
-    use std::time::SystemTime;
-    use std::time::UNIX_EPOCH;
+    use tempfile::TempDir;
     use tokio::sync::oneshot;
     use tokio_stream::wrappers::UnixListenerStream;
     use tonic::Request;
@@ -687,12 +686,13 @@ mod tests {
         t
     }
 
-    fn unique_uds_path() -> PathBuf {
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("rustbgpd-cli-evpn-it-{suffix}.sock"))
+    fn unique_uds_path() -> (TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("rustbgpd-cli-evpn-it-")
+            .tempdir()
+            .unwrap();
+        let path = dir.path().join("evpn.sock");
+        (dir, path)
     }
 
     /// Spawn a real `EvpnServiceServer` over the given UDS path with the
@@ -756,7 +756,7 @@ mod tests {
     /// position with the expected canonical formatting.
     #[tokio::test]
     async fn evpn_service_returns_resolved_table_over_grpc() {
-        let path = unique_uds_path();
+        let (_dir, path) = unique_uds_path();
         let table = Arc::new(fixture_table());
         let _shutdown = spawn_real_evpn_server(path.clone(), table);
         wait_for_uds(&path).await;
@@ -804,7 +804,7 @@ mod tests {
     /// execute without panic / error against a populated table.
     #[tokio::test]
     async fn list_instances_command_runs_against_real_service() {
-        let path = unique_uds_path();
+        let (_dir, path) = unique_uds_path();
         let table = Arc::new(fixture_table());
         let _shutdown = spawn_real_evpn_server(path.clone(), table);
         wait_for_uds(&path).await;
@@ -825,7 +825,7 @@ mod tests {
     /// not error or panic on the empty Arc.
     #[tokio::test]
     async fn empty_table_returns_empty_list() {
-        let path = unique_uds_path();
+        let (_dir, path) = unique_uds_path();
         let table = Arc::new(EvpnInstanceTable::new());
         let _shutdown = spawn_real_evpn_server(path.clone(), table);
         wait_for_uds(&path).await;

@@ -2918,15 +2918,18 @@ async fn route_event_history_filters_previous_peer_and_limit() {
     .await
     .unwrap();
 
-    let history = query_route_event_history(&tx, Some(peer1), Some(Afi::Ipv4), 1).await;
-    assert_eq!(history.len(), 1);
+    let history = query_route_event_history(&tx, Some(peer1), Some(Afi::Ipv4), 2).await;
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].event_type, crate::event::RouteEventType::Added);
+    assert!(matches!(history[0].prefix, Prefix::V4(_)));
+    assert_eq!(history[0].peer, Some(peer1));
     assert_eq!(
-        history[0].event_type,
+        history[1].event_type,
         crate::event::RouteEventType::BestChanged
     );
-    assert_eq!(history[0].prefix, Prefix::V4(prefix1));
-    assert_eq!(history[0].peer, Some(peer2));
-    assert_eq!(history[0].previous_peer, Some(peer1));
+    assert_eq!(history[1].prefix, Prefix::V4(prefix1));
+    assert_eq!(history[1].peer, Some(peer2));
+    assert_eq!(history[1].previous_peer, Some(peer1));
 
     drop(tx);
     handle.await.unwrap();
