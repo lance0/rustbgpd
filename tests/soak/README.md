@@ -318,9 +318,19 @@ occupancy bracketed by `[POOL_MIN, POOL_MAX]` around
 brackets are crossed so the soak doesn't drift into an empty or
 saturated state.
 
-DF flips continue concurrently — the harness's `docker stop` of
-PE2 clears PE2's pool state file so the in-memory pool tracking
-matches the kernel reality after restart.
+DF flips continue concurrently. The flip mechanism is **process
+restart** (`pkill -TERM rustbgpd` inside the container, then re-
+launch via `start-rustbgpd-soak-gate8b.sh`), not container
+restart. Container restart via `docker stop` / `docker start`
+tears down the clab-managed `eth1` veth pair on both sides,
+which destroys the 10.0.0.x point-to-point and makes post-flip
+BGP re-establishment impossible — process restart preserves the
+netns, the veth, the bridge, the VXLAN port, and the kernel FDB
+rows. The harness verifies the eth1 + 10.0.0.x address is present
+on both PEs before every flip (`verify_topology_link`) and fails
+loud (`exit 4`) if it's gone. Set `KILL_MODE=kill` to send
+`SIGKILL` instead — a crash-style flip useful for catching paths
+the orderly-drain path masks.
 
 ## What gets sampled
 

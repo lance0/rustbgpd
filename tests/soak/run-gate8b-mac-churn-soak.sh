@@ -78,6 +78,20 @@ PE1_NAME="${PE1_NAME:-clab-gate8b-soak-pe1}"
 PE2_NAME="${PE2_NAME:-clab-gate8b-soak-pe2}"
 CLEANUP="${CLEANUP:-0}"                           # 1 = destroy topology on EXIT
 
+# Flip mechanism. The previous `docker stop` / `docker start` approach
+# tears down the clab-managed veth pair between PE1 and PE2 (the
+# netns is destroyed when the container stops, taking eth1 with it
+# on both sides), which breaks BGP peering on 10.0.0.x. The
+# process-restart path SIGTERMs the daemon inside the container and
+# then re-launches it via the same startup script — the kernel
+# netns, eth1, the 10.0.0.x address, the bridge, and the kernel
+# FDB rows all persist across the restart. This is the right
+# semantic test for the soak: BGP tears down, peer routes are
+# withdrawn, DF election re-runs, and re-establishment exercises
+# the OPEN-collision FSM under load.
+KILL_MODE="${KILL_MODE:-term}"                    # term | kill (crash-style)
+FLIP_PE="${FLIP_PE:-pe2}"                         # which PE to flip
+
 # MAC churn (new)
 CHURN_INTERVAL_SEC="${CHURN_INTERVAL_SEC:-5}"     # seconds between churn batches
 CHURN_BATCH_SIZE="${CHURN_BATCH_SIZE:-16}"        # FDB ops per batch
@@ -312,6 +326,70 @@ dump_session_state_on_failure() {
             log "  $line"
         done
     done
+}
+
+# Verify the clab-managed eth1 + 10.0.0.x point-to-point survives.
+# The previous `docker stop`/`docker start` flip would silently tear
+# down this veth on both sides — fail loud here so a future
+# regression to the container-restart pattern is impossible to
+# misdiagnose as a daemon-side wedge.
+verify_topology_link() {
+    local pe ok=0
+    for pe in "$PE1_NAME" "$PE2_NAME"; do
+        if ! docker exec "$pe" ip -br addr show dev eth1 2>/dev/null \
+            | grep -q '10\.0\.0\.'; then
+            log "ERROR: $pe eth1 is missing the clab-managed 10.0.0.x address"
+            ok=1
+        fi
+    done
+    return "$ok"
+}
+
+# Wait for a single PE's `bgp_session_established_total` to strictly
+# increase past the captured baseline. Used after a flip to confirm
+# the daemon re-established before we resume crediting sample rows
+# to nominal steady-state behavior.
+wait_established_increment() {
+    local pe="$1" baseline="$2"
+    local timeout_sec="$BGP_ESTABLISHED_TIMEOUT_SEC"
+    local deadline=$(($(date +%s) + timeout_sec))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        local cur
+        cur="$(pe_established_total "$pe")"
+        if [ "${cur:-0}" -gt "$baseline" ]; then
+            log "post-flip re-established: $pe established_total $baseline -> $cur"
+            return 0
+        fi
+        sleep 5
+    done
+    log "WARN: post-flip $pe did not re-establish within ${timeout_sec}s (baseline=$baseline)"
+    return 1
+}
+
+# Send the flip signal to the in-container daemon. Default SIGTERM
+# exercises the coordinated drain; KILL_MODE=kill is a crash-mode
+# flip for catching paths the orderly-exit path masks.
+flip_stop_daemon() {
+    local container="$1"
+    case "$KILL_MODE" in
+        kill) docker exec "$container" pkill -KILL rustbgpd 2>/dev/null || true ;;
+        *)    docker exec "$container" pkill -TERM rustbgpd 2>/dev/null || true ;;
+    esac
+    local i
+    for i in $(seq 1 30); do
+        if ! docker exec "$container" pgrep rustbgpd >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    log "WARN: $container rustbgpd did not exit within 30s of ${KILL_MODE} signal"
+    return 1
+}
+
+flip_start_daemon() {
+    local container="$1" local_ip="$2" remote_ip="$3"
+    docker exec "$container" /usr/local/bin/start-rustbgpd-soak-gate8b.sh \
+        "$local_ip" "$remote_ip" "$VNI" || true
 }
 
 # ---------------------------------------------------------------------------
@@ -655,6 +733,15 @@ log "  git_rev=$GIT_REV dirty=$GIT_DIRTY kernel=$KERNEL"
 log "warmup: waiting ${WARMUP_SEC}s for initial dataplane discovery"
 sleep "$WARMUP_SEC"
 
+# Pre-churn topology guard: confirm the clab-managed eth1 + 10.0.0.x
+# is present on both PEs. The flip mechanism depends on this
+# surviving every cycle; if it isn't there at startup, the rest of
+# the soak's interpretation is suspect.
+if ! verify_topology_link; then
+    log "FATAL: pre-churn topology check failed — clab veth missing"
+    exit 5
+fi
+
 # Pre-churn gate: refuse to start the validation run unless both
 # PEs have actually reached Established. Without this the harness
 # can produce a "clean" smoke while the receive path
@@ -744,27 +831,35 @@ while [ "$(date +%s)" -lt "$END_UNIX" ]; do
 
     # Flip PE2 if it's time.
     if [ "$NOW" -ge "$NEXT_FLIP_UNIX" ]; then
+        # Hard pre-flip guard: the clab-managed eth1 must still be
+        # in place. If it isn't, we're already off the rails and a
+        # flip would only deepen the confusion in the postmortem.
+        if ! verify_topology_link; then
+            log "FATAL: topology link lost before flip; aborting soak"
+            exit 4
+        fi
         if [ "$PE2_RUNNING" = "1" ]; then
-            flip_log "stopping PE2"
-            log "flip: stopping PE2"
-            docker stop -t 5 "$PE2_NAME" >/dev/null
+            flip_log "stopping PE2 daemon (mode=${KILL_MODE})"
+            log "flip: stopping PE2 daemon (mode=${KILL_MODE})"
+            # Capture PE2's pre-flip established_total so we can wait
+            # for a real increment on the next start (just observing
+            # `>= 1` is meaningless — the counter is cumulative).
+            PE2_ESTAB_PRE_FLIP="$(pe_established_total "$PE2_NAME")"
+            flip_stop_daemon "$PE2_NAME" || true
             PE2_RUNNING=0
         else
-            flip_log "starting PE2"
-            log "flip: starting PE2"
-            docker start "$PE2_NAME" >/dev/null
-            docker exec "$PE2_NAME" /usr/local/bin/start-rustbgpd-soak-gate8b.sh \
-                10.0.0.2 10.0.0.1 "$VNI" || true
-            # Re-attach the docker logs tail — the prior stream is
-            # invalidated by `docker start`.
-            kill "$PE2_TAIL_PID" 2>/dev/null || true
-            docker logs -f "$PE2_NAME" >>"$PE2_LOG" 2>&1 &
-            PE2_TAIL_PID=$!
-            # PE2 came back fresh: its bridge / VXLAN exist again
-            # but its FDB pool is empty. Clear our state file for
-            # PE2 — the daemon will resync via the BGP path, but
-            # the churn pool needs to match observed reality.
-            : >"$PE2_POOL"
+            flip_log "starting PE2 daemon"
+            log "flip: starting PE2 daemon"
+            flip_start_daemon "$PE2_NAME" 10.0.0.2 10.0.0.1
+            # Wait for re-establishment so the next sample isn't
+            # credited as a nominal steady-state row when the
+            # session has actually failed to come back.
+            wait_established_increment "$PE2_NAME" "${PE2_ESTAB_PRE_FLIP:-0}" || true
+            # Kernel netns survives a process restart, so the
+            # bridge / VXLAN / CE veth / FDB rows are still in
+            # place — the churn pool tracking remains accurate.
+            # (The old `: >$PE2_POOL` reset was only needed when
+            # the container itself was destroyed by `docker stop`.)
             PE2_RUNNING=1
         fi
         NEXT_FLIP_UNIX="$((NOW + FLIP_INTERVAL_SEC))"
