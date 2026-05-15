@@ -326,11 +326,22 @@ tears down the clab-managed `eth1` veth pair on both sides,
 which destroys the 10.0.0.x point-to-point and makes post-flip
 BGP re-establishment impossible — process restart preserves the
 netns, the veth, the bridge, the VXLAN port, and the kernel FDB
-rows. The harness verifies the eth1 + 10.0.0.x address is present
-on both PEs before every flip (`verify_topology_link`) and fails
-loud (`exit 4`) if it's gone. Set `KILL_MODE=kill` to send
-`SIGKILL` instead — a crash-style flip useful for catching paths
-the orderly-drain path masks.
+rows. The harness's `verify_topology_link` helper asserts the
+eth1 + 10.0.0.x address is present on both PEs **before AND
+after every flip**, and fails loud with `exit 4` if it's gone
+(also runs once at warmup as a fresh-deploy sanity check).
+Set `KILL_MODE=kill` to send `SIGKILL` instead — a crash-style
+flip useful for catching paths the orderly-drain path masks.
+
+> ⚠️ **Do not regress to `docker stop` / `docker start` as the
+> flip mechanism.** The clab veth lives in both containers' netns;
+> destroying one side's netns destroys the veth on both sides, the
+> clab `exec:` block does NOT re-run on `docker start`, and BGP
+> can never re-establish on the same 10.0.0.x point-to-point. This
+> showed up in the first 1h soak attempt as a daemon-side
+> `idle → connect → SYN-SENT` wedge — actually a topology-lost
+> false positive. The `verify_topology_link` post-flip guard is
+> the regression tripwire for this exact failure mode.
 
 ## What gets sampled
 

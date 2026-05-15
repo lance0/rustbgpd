@@ -878,6 +878,17 @@ while [ "$(date +%s)" -lt "$END_UNIX" ]; do
             # the container itself was destroyed by `docker stop`.)
             PE2_RUNNING=1
         fi
+        # Post-flip guard: assert the clab veth + 10.0.0.x is
+        # still intact. With process-restart this is defense in
+        # depth — the netns is untouched, so the topology must
+        # survive — but it's the cheap insurance that turns a
+        # future regression (anyone accidentally putting docker
+        # stop/start back into the flip path) into an immediate
+        # loud failure instead of another false daemon bug.
+        if ! verify_topology_link; then
+            log "FATAL: topology link lost after flip; aborting soak"
+            exit 4
+        fi
         NEXT_FLIP_UNIX="$((NOW + FLIP_INTERVAL_SEC))"
     fi
 

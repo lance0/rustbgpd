@@ -243,15 +243,25 @@ landing, tracked here for visibility)
      PE1 RSS plateaued at 13.9453 MB after a one-time 3h 32m settle
      and stayed there for the remaining 20.5h (steady-state slope
      0.000 MB/h); all 142 flip events kept the BUM-port flag
-     triplet on the expected side of every DF transition. What's
-     still ahead is the **MAC-churn variant** (FDB programming
-     concurrent with flag flips) so the combined enforcement +
-     origination paths get the same sustained-churn confidence
-     under realistic timing. The MAC-churn variant reuses
-     `tests/soak/run-gate8b-soak.sh` with an additional ~10 Hz
-     `bridge fdb add / del` loop on the per-cycle hook. This is
-     the gate to flip the `apply_bum_enforcement` default to
-     `true`.
+     triplet on the expected side of every DF transition. The
+     **MAC-churn variant** (FDB programming concurrent with flag
+     flips) is what gates the combined enforcement + origination
+     paths under realistic timing.
+     - [x] Harness built: `tests/soak/run-gate8b-mac-churn-soak.sh`.
+       Sibling to the BUM-state runner with a bounded rotating
+       MAC pool (default 512, target 256) driving sustained
+       `bridge fdb add / del / move` ops on each PE's CE bridge
+       port; pre-churn `wait_established` gate refuses to start
+       the validation if BGP never converges; `verify_topology_link`
+       asserts the clab veth before AND after every flip;
+       process-restart flip path (`pkill -TERM rustbgpd`) preserves
+       the clab `eth1`/`10.0.0.x` so post-flip BGP can actually
+       re-establish. README and template postmortem
+       ([`docs/soak-gate8b-mac-churn-1h.md`](soak-gate8b-mac-churn-1h.md))
+       in place.
+     - [ ] 1 h dry-run soak (running / pending result).
+     - [ ] 24 h soak. **This is the gate to flip the
+       `apply_bum_enforcement` default to `true`.**
   2. Optional import-side ES-Import RT filtering on the daemon's
      own RIB import path (we already *originate* the RT in Gate 8b
      prep; this would also *import* by it).
