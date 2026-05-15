@@ -308,9 +308,9 @@ per tick (`CHURN_INTERVAL_SEC`, default 5s):
 - **Delete**: remove `CHURN_BATCH_SIZE` MACs from a PE via
   `bridge fdb del`. Daemon withdraws the Type 2.
 - **Mobility**: pick MACs on one PE, delete from src and add on
-  dst. Triggers RFC 7432 §15.1 mobility sequencing on the peer
-  PE and exercises ADR-0059 FDB-NHG construction when the same
-  MAC briefly appears on both PEs under one shared ESI.
+  dst using the same MAC address. Triggers RFC 7432 §15.1 mobility
+  sequencing on the peer PE while ADR-0059 FDB-NHG construction is
+  also under sustained shared-ESI churn.
 
 Pool size is bounded (`MAC_POOL_SIZE`, default 512). Per-PE
 occupancy bracketed by `[POOL_MIN, POOL_MAX]` around

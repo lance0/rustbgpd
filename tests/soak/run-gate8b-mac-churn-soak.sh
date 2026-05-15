@@ -15,9 +15,9 @@
 #
 # The bounded rotating set keeps the test deterministic — pool
 # size, batch size, and cadence are env-tunable. Mobility (MAC
-# moves between PEs) is included to exercise both the dup-MAC
-# detector and the aliasing-ECMP path (the same MAC briefly
-# advertised by both PEs under one shared ESI).
+# moves between PEs) is included to exercise RFC 7432 §15.1 mobility
+# sequencing while the shared-ESI aliasing-ECMP path is also under
+# sustained churn.
 #
 # MAC injection is **direct kernel FDB mutation**:
 #     docker exec <pe> bridge fdb add <mac> dev ce100a master static
@@ -242,13 +242,13 @@ nh_count() {
 # MAC pool helpers
 # ---------------------------------------------------------------------------
 
-# MAC scheme: 02:aa:0<PE>:HH:HH:HH where PE is 1 or 2 and HH:HH:HH is
-# the rotating index (24 bits, supports up to 16M MACs). The PE-bit
-# in the OUI keeps PE1 / PE2 origin lineages distinguishable in tcpdump
-# / log scraping. Mobility ops change the PE bit when a MAC moves.
+# MAC scheme: 02:aa:00:HH:HH:HH where HH:HH:HH is the rotating index
+# (24 bits, supports up to 16M MACs). The MAC is intentionally stable
+# across PE moves; otherwise a "mobility" batch would delete one MAC
+# and add a different MAC, bypassing RFC 7432 §15.1 mobility handling.
 mac_for() {
-    local pe="$1" idx="$2"
-    printf '02:aa:0%d:%02x:%02x:%02x' "$pe" "$(( (idx >> 16) & 0xff ))" "$(( (idx >> 8) & 0xff ))" "$(( idx & 0xff ))"
+    local idx="$1"
+    printf '02:aa:00:%02x:%02x:%02x' "$(( (idx >> 16) & 0xff ))" "$(( (idx >> 8) & 0xff ))" "$(( idx & 0xff ))"
 }
 
 pool_file_for() {
@@ -264,17 +264,18 @@ pool_size() {
 }
 
 # Pick `count` random integers in [0, MAC_POOL_SIZE) that are NOT
-# present in the given PE's pool file. Returns one index per line.
+# present in either PE's pool file. Returns one index per line.
 pool_pick_free() {
     # Generate `count` random integers in [0, MAC_POOL_SIZE) that
-    # are NOT in the given PE's pool file. Capped at ceiling*4
+    # are NOT in either PE's pool file. Capped at ceiling*4
     # tries so a near-saturated pool can't spin forever.
-    local pe="$1" count="$2" pool_file
-    pool_file="$(pool_file_for "$pe")"
-    awk -v want="$count" -v ceiling="$MAC_POOL_SIZE" -v pool="$pool_file" '
+    local _pe="$1" count="$2"
+    awk -v want="$count" -v ceiling="$MAC_POOL_SIZE" -v pool1="$PE1_POOL" -v pool2="$PE2_POOL" '
         BEGIN {
-            while ((getline line < pool) > 0) taken[line] = 1
-            close(pool)
+            while ((getline line < pool1) > 0) taken[line] = 1
+            close(pool1)
+            while ((getline line < pool2) > 0) taken[line] = 1
+            close(pool2)
             srand()
             picked = 0; tries = 0; max_tries = ceiling * 4
             while (picked < want && tries < max_tries) {
@@ -322,8 +323,11 @@ fdb_add_pe() {
     local pe="$1" mac="$2" container
     container="$(container_for_pe "$pe")"
     if container_is_running "$container"; then
-        docker exec "$container" bridge fdb add "$mac" dev "$CE_PORT" master static 2>/dev/null || true
-        return 0
+        if docker exec "$container" bridge fdb add "$mac" dev "$CE_PORT" master static 2>/dev/null; then
+            return 0
+        fi
+        churn_log "ADD failed pe=$pe mac=$mac"
+        return 1
     fi
     return 1
 }
@@ -332,8 +336,11 @@ fdb_del_pe() {
     local pe="$1" mac="$2" container
     container="$(container_for_pe "$pe")"
     if container_is_running "$container"; then
-        docker exec "$container" bridge fdb del "$mac" dev "$CE_PORT" master 2>/dev/null || true
-        return 0
+        if docker exec "$container" bridge fdb del "$mac" dev "$CE_PORT" master 2>/dev/null; then
+            return 0
+        fi
+        churn_log "DEL failed pe=$pe mac=$mac"
+        return 1
     fi
     return 1
 }
@@ -363,7 +370,7 @@ churn_batch_add() {
     local pe="$1" count="$2" idx mac added=0
     while IFS= read -r idx; do
         [ -z "$idx" ] && continue
-        mac="$(mac_for "$pe" "$idx")"
+        mac="$(mac_for "$idx")"
         if fdb_add_pe "$pe" "$mac"; then
             pool_record_add "$pe" "$idx"
             added=$((added + 1))
@@ -377,7 +384,7 @@ churn_batch_del() {
     local pe="$1" count="$2" idx mac removed=0
     while IFS= read -r idx; do
         [ -z "$idx" ] && continue
-        mac="$(mac_for "$pe" "$idx")"
+        mac="$(mac_for "$idx")"
         if fdb_del_pe "$pe" "$mac"; then
             pool_record_del "$pe" "$idx"
             removed=$((removed + 1))
@@ -391,7 +398,7 @@ churn_batch_mobility() {
     # Move `count` MACs between PEs. Picks the source PE with the
     # larger pool so we don't drain one side. Skip silently if
     # either PE is down — mobility requires both ends present.
-    local count="$1" src dst idx mac_src mac_dst moved=0
+    local count="$1" src dst idx mac moved=0
     if ! container_is_running "$PE1_NAME" || ! container_is_running "$PE2_NAME"; then
         churn_log "MOVE skipped (one PE down)"
         return 0
@@ -403,9 +410,15 @@ churn_batch_mobility() {
     fi
     while IFS= read -r idx; do
         [ -z "$idx" ] && continue
-        mac_src="$(mac_for "$src" "$idx")"
-        mac_dst="$(mac_for "$dst" "$idx")"
-        if fdb_del_pe "$src" "$mac_src" && fdb_add_pe "$dst" "$mac_dst"; then
+        mac="$(mac_for "$idx")"
+        if fdb_del_pe "$src" "$mac"; then
+            if ! fdb_add_pe "$dst" "$mac"; then
+                # Preserve pool/kernel consistency if the second half
+                # of the move fails after the source delete succeeded.
+                fdb_add_pe "$src" "$mac" || true
+                churn_log "MOVE rollback src=$src dst=$dst idx=$idx"
+                continue
+            fi
             pool_record_del "$src" "$idx"
             pool_record_add "$dst" "$idx"
             moved=$((moved + 1))
@@ -525,7 +538,9 @@ CHURN_PID=""
 cleanup() {
     set +e
     log "soak loop exiting; cleaning up background tasks"
-    [ -n "$CHURN_PID" ] && kill "$CHURN_PID" 2>/dev/null || true
+    if [ -n "$CHURN_PID" ]; then
+        kill "$CHURN_PID" 2>/dev/null || true
+    fi
     kill "$PE1_TAIL_PID" "$PE2_TAIL_PID" 2>/dev/null || true
     wait "$CHURN_PID" "$PE1_TAIL_PID" "$PE2_TAIL_PID" 2>/dev/null || true
     if [ "$CLEANUP" = "1" ]; then
