@@ -493,8 +493,9 @@ is a `FibRouteState` enum (`FIB_ROUTE_STATE_INSTALLED`,
 `FIB_ROUTE_STATE_REJECTED`, or `FIB_ROUTE_STATE_FAILED`); `reason`
 carries values such as `owned`, `foreign_route_exists`,
 `next_hop_family_unsupported`, `peer_not_allowed`,
-`route_limit_exceeded`, `dump_failed:DETAIL`, `rib_query_failed:DETAIL`,
-or a kernel apply error such as `install_failed:DETAIL`.
+`route_limit_exceeded`, `owned_route_drifted`, `dump_failed:DETAIL`,
+`rib_query_failed:DETAIL`, or a kernel apply error such as
+`install_failed:DETAIL`.
 
 `table_id`, `metric`, `prefix`, `prefix_length`, and `next_hop` describe
 the route identity and forwarding value. The CLI human table renders
@@ -503,7 +504,9 @@ uses `table_name`, `table_id`, `metric`, `prefix`, `next_hop`,
 `peer_address`, `state`, and `reason`. A pre-existing kernel row in a
 configured table is reported as `foreign_route_exists`; `RTPROT_BGP` is not
 ownership proof by itself because another daemon can use the same protocol
-marker.
+marker. A row rustbgpd previously owned but later finds changed by another
+writer is reported as `owned_route_drifted`; the daemon releases ownership and
+does not delete that replacement on a later withdraw.
 
 ---
 

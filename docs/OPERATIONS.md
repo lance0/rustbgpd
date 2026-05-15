@@ -275,6 +275,7 @@ FIB runtime. The actor is still default-off; configure at least one
 | `bgp_fib_routes_installed_total` | Configured-table routes successfully installed or replaced in the Linux kernel |
 | `bgp_fib_routes_withdrawn_total` | Daemon-owned configured-table routes successfully removed from the kernel |
 | `bgp_fib_routes_rejected_total{reason="foreign_route_exists"}` | Desired route suppressed because a kernel row already exists at the same table / metric / prefix and is not daemon-owned |
+| `bgp_fib_routes_rejected_total{reason="owned_route_drifted"}` | A row rustbgpd previously owned was externally changed; rustbgpd released ownership and preserved the live kernel row |
 | `bgp_fib_routes_rejected_total{reason="next_hop_family_unsupported"}` | Desired route suppressed because the table family and BGP next-hop family do not match |
 | `bgp_fib_routes_rejected_total{reason="peer_not_allowed"}` | Desired route suppressed by a `[[fib_tables]]` peer / peer-group allow-list |
 | `bgp_fib_routes_rejected_total{reason="route_limit_exceeded"}` | Desired route suppressed because the table exceeded its `max_routes` hard cap; existing owned rows are frozen in place |
@@ -286,14 +287,17 @@ FIB runtime. The actor is still default-off; configure at least one
 | `bgp_fib_kernel_failures_total{action="unsupported_platform"}` | Config requested FIB programming on a non-Linux build |
 
 Use `rustbgpctl rib fib --json` as the per-route companion to these counters.
-The most important state to investigate is `foreign_route_exists`: rustbgpd
-will not overwrite or delete pre-existing `RTPROT_BGP` rows because protocol
-alone is not ownership proof. After an ungraceful restart, rustbgpd only
-recovers rows that also appear in `<runtime_state_dir>/fib-owned.json`, match
-the unchanged `[[fib_tables]]` declaration, and still have the exact kernel
-next-hop value the previous instance owned. If the persisted file has an
-unsupported version or stale table signature, rustbgpd renames it to
-`fib-owned.json.stale` and starts with empty owned-state.
+The most important states to investigate are `foreign_route_exists` and
+`owned_route_drifted`. `foreign_route_exists` means rustbgpd never proved
+ownership of the live row; `owned_route_drifted` means rustbgpd previously
+owned the key but another writer changed the live kernel row. In both cases,
+rustbgpd preserves the row instead of overwriting or deleting it. After an
+ungraceful restart, rustbgpd only recovers rows that also appear in
+`<runtime_state_dir>/fib-owned.json`, match the unchanged `[[fib_tables]]`
+declaration, and still have the exact kernel next-hop value the previous
+instance owned. If the persisted file has an unsupported version or stale table
+signature, rustbgpd renames it to `fib-owned.json.stale` and starts with empty
+owned-state.
 
 ### Graceful Restart
 
@@ -483,8 +487,12 @@ Loc-RIB. Rows are `installed`, `rejected`, or `failed`.
   same table / metric / prefix but is not owned by this daemon instance.
   This includes pre-existing `RTPROT_BGP` rows that are absent from
   `<runtime_state_dir>/fib-owned.json`, have a mismatched `[[fib_tables]]`
-  declaration, or drifted away from the persisted next-hop; rustbgpd
-  preserves them rather than taking ownership by protocol alone.
+  declaration, or drifted away from the persisted next-hop before startup;
+  rustbgpd preserves them rather than taking ownership by protocol alone.
+- `rejected` / `owned_route_drifted`: rustbgpd had owned state for the row,
+  but a live reconcile found that the kernel row no longer matched the recorded
+  next-hop or `RTPROT_BGP` protocol. rustbgpd releases ownership and leaves the
+  row in place; a later BGP withdraw will not delete the replacement.
 - `rejected` / `next_hop_family_unsupported`: the configured table family and
   BGP next-hop family do not match.
 - `rejected` / `peer_not_allowed`: the route's source peer did not match the

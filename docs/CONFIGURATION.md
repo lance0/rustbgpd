@@ -1360,6 +1360,9 @@ declaration, and an exact live-kernel value match; if any of those checks
 fail, the row stays foreign. Unsupported or config-stale state files are
 quarantined as `fib-owned.json.stale`. This conservative rule avoids
 replacing or deleting FRR/BIRD routes in the same table and metric.
+If another writer changes a row while rustbgpd owns it, the next reconcile
+reports `owned_route_drifted`, releases ownership, and preserves the live
+kernel row.
 
 ### Fields
 

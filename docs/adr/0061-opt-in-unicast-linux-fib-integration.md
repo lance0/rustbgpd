@@ -146,10 +146,11 @@ versions or stale signatures are quarantined to `fib-owned.json.stale`
 and ignored. Even then, the runtime still verifies the current kernel row before acting:
 replace/remove decisions require the live row to be `RTPROT_BGP` and to
 carry the exact next-hop value recorded by the previous rustbgpd
-instance. If the row is absent, non-BGP, or drifted, normal diff rules
-apply and the row is either repaired from current intent or preserved as
-foreign. This deliberately avoids protocol-only adoption while allowing
-crash/SIGKILL/OOM recovery for rows rustbgpd can prove it owned.
+instance. If the row is absent, it is repaired from current intent. If the
+row is non-BGP or drifted, rustbgpd reports `owned_route_drifted`, releases
+ownership, and preserves the live row. This deliberately avoids protocol-only
+adoption while allowing crash/SIGKILL/OOM recovery for rows rustbgpd can prove
+it owned.
 
 The EVPN L3 owned-state model is the template: track route *values*, not
 only route keys, so next-hop/metric/table drift emits a correction and
@@ -206,6 +207,10 @@ Neutral:
   daemon-owned runtime state plus the full configured
   table/metric/protocol/route value, persisted to `fib-owned.json` for
   crash-restart recovery only when the startup config still matches.
+- Runtime drift is fail-safe: when a live kernel row no longer matches the
+  value rustbgpd recorded as owned, rustbgpd forgets ownership and preserves
+  the row instead of correcting it. The next pass reports the row as ordinary
+  foreign state if the route remains desired.
 - Graceful Restart `forwarding_preserved=true` remains out of scope.
   Programming a FIB is not enough; preserved forwarding needs crash and
   restart semantics.
