@@ -203,7 +203,8 @@ pub(crate) enum FibOp {
     /// still correct. `RTPROT_BGP` alone is not ownership proof, so this is
     /// deliberately not used to adopt pre-existing kernel rows after restart.
     Adopt(FibRoute),
-    /// Replace an owned route whose kernel forwarding value drifted.
+    /// Replace an owned route when the kernel still matches the previously
+    /// owned value but the desired forwarding value changed.
     Replace {
         /// Previously-owned route identity / metadata.
         previous: FibRoute,
