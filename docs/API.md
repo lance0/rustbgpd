@@ -422,6 +422,10 @@ by address family.
 Event types: `ROUTE_EVENT_TYPE_ADDED`, `ROUTE_EVENT_TYPE_WITHDRAWN`,
 `ROUTE_EVENT_TYPE_BEST_CHANGED`.
 
+`WatchRoutes` does not backfill recent events for new subscribers. Clients that
+need both context and a live tail should call `ListRouteEvents` first, then
+open `WatchRoutes` for subsequent deltas.
+
 ### List recent route events
 
 ```bash
