@@ -487,8 +487,8 @@ Loc-RIB. Rows are `installed`, `rejected`, or `failed`.
   same table / metric / prefix but is not owned by this daemon instance.
   This includes pre-existing `RTPROT_BGP` rows that are absent from
   `<runtime_state_dir>/fib-owned.json`, have a mismatched `[[fib_tables]]`
-  declaration, or drifted away from the persisted next-hop before startup;
-  rustbgpd preserves them rather than taking ownership by protocol alone.
+  declaration, or otherwise cannot be tied to persisted owned-state; rustbgpd
+  preserves them rather than taking ownership by protocol alone.
 - `rejected` / `owned_route_drifted`: rustbgpd had owned state for the row,
   but a live reconcile found that the kernel row no longer matched the recorded
   next-hop or `RTPROT_BGP` protocol. rustbgpd releases ownership and leaves the

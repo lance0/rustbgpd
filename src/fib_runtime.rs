@@ -435,7 +435,7 @@ where
                 table_id = route.key.table_id,
                 metric = route.key.metric,
                 prefix = %route.key.prefix,
-                next_hop = %route.target.next_hop,
+                owned_next_hop = %route.target.next_hop,
                 "released general FIB route ownership after kernel drift"
             );
             continue;
