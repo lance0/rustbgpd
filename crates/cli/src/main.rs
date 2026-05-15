@@ -142,6 +142,21 @@ enum Command {
         family: Option<String>,
     },
 
+    /// Show recent route update events
+    Events {
+        /// Neighbor address filter
+        #[arg(long)]
+        address: Option<String>,
+
+        /// Address family filter
+        #[arg(short = 'a', long)]
+        family: Option<String>,
+
+        /// Maximum recent events to return
+        #[arg(short, long, default_value_t = 100)]
+        limit: u32,
+    },
+
     /// Check daemon health
     Health,
 
@@ -890,6 +905,15 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             commands::watch::run(connection, address, family_val, json).await
         }
 
+        Command::Events {
+            address,
+            family,
+            limit,
+        } => {
+            let family_val = resolve_family(&family)?;
+            commands::watch::history(connection, address, family_val, limit, json).await
+        }
+
         Command::Evpn {
             action,
             route_type,
@@ -1405,6 +1429,12 @@ mod tests {
     fn test_parse_watch() {
         let cli = Cli::try_parse_from(["rustbgpctl", "watch"]).unwrap();
         assert!(matches!(cli.command, Command::Watch { .. }));
+    }
+
+    #[test]
+    fn test_parse_events() {
+        let cli = Cli::try_parse_from(["rustbgpctl", "events", "--limit", "25"]).unwrap();
+        assert!(matches!(cli.command, Command::Events { limit: 25, .. }));
     }
 
     #[test]

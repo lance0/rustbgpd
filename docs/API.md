@@ -317,6 +317,7 @@ Query the routing information base and subscribe to real-time route changes.
 | `ListEvpnRoutes` | EVPN routes (RFC 7432) in Loc-RIB view, filterable by route type / peer / RD |
 | `ListBlackholeDiscards` | RFC 7999 BLACKHOLE kernel-discard install status when `[global] honor_blackhole = true` and `[global] install_blackhole_discard = true` |
 | `ListFibRoutes` | ADR-0061 general unicast Linux FIB route status for configured `[[fib_tables]]` |
+| `ListRouteEvents` | Recent unicast best-path event history from the bounded in-memory RIB ring |
 | `WatchRoutes` | Server-streaming: real-time route add/withdraw/best-change events |
 
 ### List received routes (Adj-RIB-In)
@@ -420,6 +421,30 @@ by address family.
 
 Event types: `ROUTE_EVENT_TYPE_ADDED`, `ROUTE_EVENT_TYPE_WITHDRAWN`,
 `ROUTE_EVENT_TYPE_BEST_CHANGED`.
+
+`WatchRoutes` does not backfill recent events for new subscribers. Clients that
+need both context and a live tail should call `ListRouteEvents` first, then
+open `WatchRoutes` for subsequent deltas.
+
+### List recent route events
+
+```bash
+# Return the recent route-event timeline (oldest-to-newest within the window)
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"limit": 100}' \
+  localhost:50051 rustbgpd.v1.RibService/ListRouteEvents
+
+# Filter by peer and IPv4 unicast
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"neighbor_address": "10.0.0.2", "afi_safi": "IPV4_UNICAST", "limit": 50}' \
+  localhost:50051 rustbgpd.v1.RibService/ListRouteEvents
+```
+
+`ListRouteEvents` reads the same unicast best-path events that feed
+`WatchRoutes`, but from a bounded 4096-event in-memory ring. Peer filters
+match both `peer_address` and `previous_peer_address`, so a peer-scoped query
+includes withdraws and best-path moves away from that peer. The history is
+process-local and resets on daemon restart.
 
 ### List FlowSpec routes
 

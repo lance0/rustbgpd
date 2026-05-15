@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Bounded route-event history.** `RibService.ListRouteEvents`
+  returns recent unicast best-path events from the RIB manager's
+  in-memory 4096-event ring, filtered by peer and IPv4/IPv6 unicast
+  family. `rustbgpctl events` exposes the same timeline for operators
+  who need after-the-fact route add / withdraw / best-change context
+  without leaving a live `WatchRoutes` stream running.
+
 - **Self-hosted kernel dataplane CI gate.** New
   `.github/workflows/kernel-dataplane.yml` runs the privileged Linux
   dataplane checks that hosted runners cannot reliably exercise:

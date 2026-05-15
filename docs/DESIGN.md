@@ -107,6 +107,7 @@ service RibService {
   rpc ListAdvertisedRoutes(ListRoutesRequest) returns (ListRoutesResponse);
   rpc ExplainAdvertisedRoute(ExplainAdvertisedRouteRequest) returns (ExplainAdvertisedRouteResponse);
   rpc ExplainBestPath(ExplainBestPathRequest) returns (ExplainBestPathResponse);
+  rpc ListRouteEvents(ListRouteEventsRequest) returns (ListRouteEventsResponse);
   rpc WatchRoutes(WatchRoutesRequest)         returns (stream RouteEvent);
   rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);
 }
@@ -154,6 +155,11 @@ message ListRoutesResponse {
 ```
 
 **Streaming watch (opt-in).** `WatchRoutes` returns a live stream of `RouteEvent` messages (add, withdraw, best-path change). Backpressure via bounded server-side channel — if the consumer falls behind, the stream is terminated with a `RESOURCE_EXHAUSTED` status and the client must reconnect. This prevents a slow consumer from becoming a DoS vector.
+
+**Recent event history.** `ListRouteEvents` exposes the same unicast
+best-path event shape from a bounded in-memory RIB ring for after-the-fact
+debugging. It is a diagnostic timeline, not durable audit storage: the ring is
+process-local, fixed-size, and resets on daemon restart.
 
 **Watch stream semantics:**
 - **Delivery guarantee:** Best effort. Events may be dropped if the consumer is slow. This is not an "at least once" stream — it is a live feed with finite buffer.

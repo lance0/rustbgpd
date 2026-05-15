@@ -298,6 +298,8 @@ pub struct JsonRouteEvent {
     pub event_type: String,
     pub prefix: String,
     pub peer_address: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub previous_peer_address: String,
     pub afi_safi: String,
     pub timestamp: String,
     #[serde(skip_serializing_if = "is_zero")]

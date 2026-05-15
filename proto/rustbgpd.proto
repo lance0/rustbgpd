@@ -521,6 +521,7 @@ service RibService {
   rpc ExplainBestPath(ExplainBestPathRequest) returns (ExplainBestPathResponse);
   rpc ListBlackholeDiscards(ListBlackholeDiscardsRequest) returns (ListBlackholeDiscardsResponse);
   rpc ListFibRoutes(ListFibRoutesRequest) returns (ListFibRoutesResponse);
+  rpc ListRouteEvents(ListRouteEventsRequest) returns (ListRouteEventsResponse);
   rpc WatchRoutes(WatchRoutesRequest) returns (stream RouteEvent);
   rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);
   rpc ListEvpnRoutes(ListEvpnRequest) returns (ListEvpnResponse);
@@ -730,6 +731,22 @@ message FibRouteStatus {
 
 message ListFibRoutesResponse {
   repeated FibRouteStatus routes = 1;
+}
+
+message ListRouteEventsRequest {
+  // Optional neighbor address filter. Empty = all peers. Matches both
+  // current and previous peer, so a peer-scoped query includes
+  // BestChanged/Withdrawn events where the route moved away.
+  string neighbor_address = 1;
+  AddressFamily afi_safi = 2;
+  // Maximum events to return from the bounded in-memory history. 0
+  // uses the daemon default. Responses are ordered oldest-to-newest
+  // within the selected recent window.
+  uint32 limit = 3;
+}
+
+message ListRouteEventsResponse {
+  repeated RouteEvent events = 1;
 }
 
 message Route {
