@@ -52,6 +52,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bgp_fib_routes_rejected_total{reason="owned_route_drifted"}`, release
   daemon ownership, and are preserved on later withdraws.
 
+### Changed
+
+- `RibService` prefix-length validation now rejects out-of-range values
+  (`> 32` for IPv4, `> 128` for IPv6) on `ExplainAdvertisedRoute`,
+  `ExplainBestPath`, and `ListRouteEvents` instead of silently clamping to
+  the family maximum. Clients sending malformed `prefix_length` values now
+  receive `InvalidArgument`.
+
 ## [0.21.0] — 2026-05-14
 
 ### Added
