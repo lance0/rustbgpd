@@ -428,6 +428,16 @@ where
             );
             continue;
         }
+        if let FibOp::Forget(key) = op {
+            record_fib_success(owned, op);
+            info!(
+                table_id = key.table_id,
+                metric = key.metric,
+                prefix = %key.prefix,
+                "released general FIB route ownership after kernel drift"
+            );
+            continue;
+        }
         let result = tokio::select! {
             biased;
             () = shutdown.cancelled() => break,
@@ -448,6 +458,7 @@ where
                         );
                     }
                     FibOp::Adopt(_) => unreachable!("adopt handled before kernel apply"),
+                    FibOp::Forget(_) => unreachable!("forget handled before kernel apply"),
                     FibOp::Replace { desired, .. } => {
                         metrics.record_fib_route_installed();
                         info!(
@@ -819,12 +830,14 @@ fn op_action(op: &FibOp) -> &'static str {
         FibOp::Adopt(_) => "adopt",
         FibOp::Replace { .. } => "replace",
         FibOp::Remove(_) => "remove",
+        FibOp::Forget(_) => "forget",
     }
 }
 
 fn op_route(op: &FibOp) -> &FibRoute {
     match op {
         FibOp::Add(route) | FibOp::Adopt(route) | FibOp::Remove(route) => route,
+        FibOp::Forget(_) => unreachable!("forget handled before kernel apply"),
         FibOp::Replace { desired, .. } => desired,
     }
 }
@@ -833,6 +846,7 @@ fn drop_reason(drop: &FibDrop) -> &'static str {
     match drop {
         FibDrop::NextHopFamilyUnsupported { .. } => "next_hop_family_unsupported",
         FibDrop::ForeignRouteExists { .. } => "foreign_route_exists",
+        FibDrop::OwnedRouteDrifted { .. } => "owned_route_drifted",
         FibDrop::PeerNotAllowed { .. } => "peer_not_allowed",
         FibDrop::RouteLimitExceeded { .. } => "route_limit_exceeded",
     }
@@ -851,6 +865,7 @@ fn build_statuses(
         .iter()
         .filter_map(|drop| match drop {
             FibDrop::ForeignRouteExists { key } => Some(*key),
+            FibDrop::OwnedRouteDrifted { route } => Some(route.key),
             FibDrop::NextHopFamilyUnsupported { .. }
             | FibDrop::PeerNotAllowed { .. }
             | FibDrop::RouteLimitExceeded { .. } => None,
@@ -919,6 +934,10 @@ fn status_for_drop(
                 }
             }
         }
+        FibDrop::OwnedRouteDrifted { route } => FibRuntimeStatus {
+            reason: "owned_route_drifted".to_string(),
+            ..status_for_route(route, FibRuntimeState::Rejected, String::new())
+        },
         FibDrop::PeerNotAllowed {
             table_name,
             prefix,
@@ -1081,7 +1100,7 @@ async fn apply_linux_op(handle: &rtnetlink::Handle, op: &FibOp) -> Result<(), St
                 .await
                 .map_err(|e| format!("kernel route add: {e}"))
         }
-        FibOp::Adopt(_) => Ok(()),
+        FibOp::Adopt(_) | FibOp::Forget(_) => Ok(()),
         FibOp::Replace { desired: route, .. } => {
             let msg = build_route_message(route)?;
             handle
@@ -1425,6 +1444,7 @@ mod tests {
                     FibOp::Remove(route) => {
                         self.kernel.routes.remove(&route.key);
                     }
+                    FibOp::Forget(_) => {}
                 }
                 Ok(())
             })
@@ -1710,6 +1730,27 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn replace_static_route(table_id: u32, prefix: &str, next_hop: &str) {
+        let table = table_id.to_string();
+        run(
+            "ip",
+            &[
+                "route", "replace", "table", &table, prefix, "via", next_hop, "metric", "200",
+                "proto", "static",
+            ],
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn delete_route_any(table_id: u32, prefix: &str) {
+        let table = table_id.to_string();
+        try_run(
+            "ip",
+            &["route", "del", "table", &table, prefix, "metric", "200"],
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     fn delete_route(table_id: u32, prefix: &str) {
         let table = table_id.to_string();
         try_run(
@@ -1884,10 +1925,10 @@ mod tests {
 
         let plan = compute_fib_diff(&intent, &owned, &kernel);
 
-        assert!(plan.ops.is_empty());
+        assert_eq!(plan.ops, vec![FibOp::Forget(previous.key)]);
         assert_eq!(
             plan.drops,
-            vec![FibDrop::ForeignRouteExists { key: previous.key }]
+            vec![FibDrop::OwnedRouteDrifted { route: previous }]
         );
     }
 
@@ -2097,7 +2138,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn foreign_replacement_of_owned_route_does_not_emit_duplicate_installed_status() {
+    async fn drifted_owned_route_does_not_emit_duplicate_installed_status() {
         let prefix = v4(24);
         let owned_route = FibRoute {
             table_name: "edge".to_string(),
@@ -2128,7 +2169,8 @@ mod tests {
 
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Rejected);
-        assert_eq!(statuses[0].reason, "foreign_route_exists");
+        assert_eq!(statuses[0].reason, "owned_route_drifted");
+        assert!(owned.routes.is_empty());
     }
 
     #[tokio::test]
@@ -2164,7 +2206,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drifted_owned_route_missing_from_desired_is_preserved_as_foreign() {
+    async fn drifted_owned_route_missing_from_desired_is_preserved_and_forgotten() {
         let prefix = v4(24);
         let route = FibRoute {
             table_name: "edge".to_string(),
@@ -2193,10 +2235,10 @@ mod tests {
         let statuses = reconcile_for_test(Vec::new(), &mut fib, &mut owned).await;
 
         assert!(fib.applied.is_empty());
-        assert_eq!(owned.routes.len(), 1);
+        assert!(owned.routes.is_empty());
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Rejected);
-        assert_eq!(statuses[0].reason, "foreign_route_exists");
+        assert_eq!(statuses[0].reason, "owned_route_drifted");
     }
 
     #[tokio::test]
@@ -2628,6 +2670,62 @@ mod tests {
         )
         .await;
         assert!(owned.routes.is_empty());
+
+        // External replacement of an owned row releases rustbgpd ownership
+        // without deleting the replacement, and a later BGP withdraw must
+        // leave that foreign route untouched.
+        reconcile_once(
+            &config(),
+            &rib_with_routes(vec![route(prefix, ip("192.0.2.1"))]),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+            &CancellationToken::new(),
+        )
+        .await;
+        replace_static_route(1000, prefix_text, "192.0.2.99");
+        reconcile_once(
+            &config(),
+            &rib_with_routes(vec![route(prefix, ip("192.0.2.1"))]),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(owned.routes.is_empty());
+        let drifted = route_show(1000, prefix_text);
+        assert!(
+            drifted.contains("via 192.0.2.99") && drifted.contains("proto static"),
+            "drifted route was not preserved: {drifted}"
+        );
+        let statuses = status_rx.borrow().clone();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].state, FibRuntimeState::Rejected);
+        assert_eq!(statuses[0].reason, "owned_route_drifted");
+        reconcile_once(
+            &config(),
+            &rib_with_routes(Vec::new()),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+            &CancellationToken::new(),
+        )
+        .await;
+        let drifted_after_withdraw = route_show(1000, prefix_text);
+        assert!(
+            drifted_after_withdraw.contains("via 192.0.2.99")
+                && drifted_after_withdraw.contains("proto static"),
+            "withdraw deleted drifted foreign route: {drifted_after_withdraw}"
+        );
+        delete_route_any(1000, prefix_text);
+        assert!(
+            route_show(1000, prefix_text).trim().is_empty(),
+            "drift cleanup route remained installed"
+        );
 
         // Shutdown drain removes daemon-owned routes and clears status.
         reconcile_once(

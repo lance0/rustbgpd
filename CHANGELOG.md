@@ -38,6 +38,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before replacing or removing it. Rows that fail those checks remain
   foreign, so recovery no longer depends on protocol-only adoption.
 
+- **ADR-0061 FIB drift hardening.** Live reconciles now distinguish rows
+  rustbgpd previously owned but another writer changed. These rows surface as
+  `owned_route_drifted`, increment
+  `bgp_fib_routes_rejected_total{reason="owned_route_drifted"}`, release
+  daemon ownership, and are preserved on later withdraws.
+
 ## [0.21.0] — 2026-05-14
 
 ### Added
