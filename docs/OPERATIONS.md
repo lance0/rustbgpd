@@ -722,7 +722,7 @@ session machinery:
 > FIB programming through a transactional `L3OwnedState` model,
 > `RTNLGRP_IPV4/IPV6_ROUTE` multicast for sub-second withdraw,
 > `ListIpVrfs`/`GetIpVrf` gRPC + `rustbgpctl evpn vrfs` CLI,
-> M39 manual containerlab smoke. **ADR-0059** (v0.19.0)
+> M39 protected self-hosted kernel-dataplane CI. **ADR-0059** (v0.19.0)
 > adds receive-path aliasing-ECMP via FDB nexthop groups
 > (slices 1-4, M40 FRR-validated); **slice 3.5 hardening**
 > (PRs #91 / #92 / #93) added the `apply_aliasing_ecmp`
@@ -845,8 +845,8 @@ operator checklist, see
   contain the slave ifindex; the supervisor's periodic dump should
   populate it within 5 s); (d) the BGP session reached Established
   before the originator emitted the Inject — pre-Established
-  Injects do reach the AdjRibOut and ride the initial dump, but a
-  collision-replace dance can occasionally lose the window.
+  Injects do reach the AdjRibOut and ride the initial dump after the
+  session reaches Established.
 - **Type 3 IMET not visible on a peer.** IMET is emitted at startup
   for every configured `EvpnInstance` regardless of dataplane
   Ready/NotReady. If FRR's `show bgp l2vpn evpn route type

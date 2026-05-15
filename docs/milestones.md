@@ -499,11 +499,15 @@ Security, resilience, operational safety, and core protocol compliance
 3. **TCP collision detection** (RFC 4271 §6.8)
    - Wire: Cease subcode 7 (`CONNECTION_COLLISION_RESOLUTION`).
    - Transport: `SessionNotification` enum (`OpenReceived`, `BackToIdle`),
-     `CollisionDump` command, `remote_router_id` in `PeerSessionState`,
-     session notification channel threaded to all spawn sites.
-   - PeerManager: `pending_inbound` per peer, `session_notify_rx` in
-     `select!` loop, `resolve_collision()` compares BGP Identifiers,
-     `replace_with_inbound()` helper. 4 new tests.
+     session ids / roles, `CollisionDump` command, `remote_router_id` in
+     `PeerSessionState`, session notification channel threaded to all spawn
+     sites.
+   - PeerManager: live `pending_inbound` candidate per peer,
+     `session_notify_rx` in `select!` loop, session-id stale notification
+     filtering, `resolve_collision()` compares BGP Identifiers,
+     promote/drop helpers for the survivor. Branch coverage covers
+     remote-wins, local-wins, equal-router-id, primary-idle promotion,
+     stale notifications, and disable/shutdown drains.
 
 4. **gRPC server supervision** (`src/main.rs`)
    - gRPC `JoinHandle` added to shutdown `select!`. Unexpected gRPC exit
@@ -714,7 +718,7 @@ for the architectural record.
 - **Symmetric Interface-less IRB** (RFC 9136 §4.4.2) — shipped
   end-to-end in v0.18.0 (Gate 9 slice 6 PR A #77 origination +
   PR B #78 import/install + PR #79 sub-second route-event
-  refresh + M39 manual smoke). `label2` and Router MAC are now
+  refresh + M39 protected self-hosted smoke). `label2` and Router MAC are now
   interpreted: Router MAC is operator-supplied via
   `[[evpn_ip_vrfs]].router_mac`, `label2` carries the L3VNI on
   origination, and remote Type 5 import maps `(L3VXLAN ifindex,
@@ -722,8 +726,8 @@ for the architectural record.
   with conflict detection. Full RFC 9135 overlay-index IRB
   remains deferred.
 - **ADR-0059 EVPN aliasing dataplane via FDB nexthop groups** —
-  shipped on `main` v0.19.0 across slices 1-4 + M40 manual
-  smoke (PRs #84/#86/#87/#88/#89). Multi-homed Type 2 routes
+  shipped on `main` v0.19.0 across slices 1-4 + M40 protected
+  self-hosted smoke (PRs #84/#86/#87/#88/#89). Multi-homed Type 2 routes
   program FDB nexthop groups via `NDA_NH_ID` / `NHA_FDB` on the
   receive path; FRR-validated against EVPN-MH 10.3.1.
   Slice 3.5 hardening follow-ups shipped in v0.20.0 — PRs
@@ -752,6 +756,6 @@ runners can't sustain:
 | **M37** | Gate 7b+1 upward path — rustbgpd-as-originator, FRR-as-consumer. Validates Type 2 + IMET origination per ADR-0055. | Manual; needs `CAP_NET_ADMIN`. |
 | **M37+IP** | Gate 7b+2 — MAC+IP Type 2 origination via ARP/ND suppression under the FRR-style replace model. | Manual; needs `CAP_NET_ADMIN`. Script: `test-m37-evpn-mac-ip-origination.sh`. |
 | **M38** | Gate 8 — observable DF election with two rustbgpd-as-VTEPs sharing an ESI. Validates Type 1/4 origination + the Prometheus `evpn_df_role` surface. | Manual; needs `CAP_NET_ADMIN`. Script: `test-m38-evpn-df-election.sh`. |
-| **M39** | Gate 9 slice 6 — bidirectional EVPN Type 5 / symmetric Interface-less IRB (RFC 9136 §4.4.2) between rustbgpd PE1 and FRR PE2. Validates origination + import + kernel route/neighbor/L3VXLAN FDB programming + ping over the L3VNI VXLAN tunnel + the withdraw leg. | Manual; needs `CAP_NET_ADMIN`. Same hosted-runner gap as M30b (Azure kernel lacks `vrf` module). Script: `test-m39-evpn-type5-symmetric-irb.sh`. |
-| **M40** | ADR-0059 aliasing dataplane ECMP via FDB nexthop groups against FRR EVPN-MH. Validates FDB rows with `nhid`, nexthop groups, alias member collapse, and cleanup. | Manual; needs `CAP_NET_ADMIN` and Linux FDB-NHG support. Script: `test-m40-evpn-aliasing-ecmp-frr.sh`. |
-| **M42** | ADR-0061 opt-in general unicast Linux FIB runtime. Validates configured-table install shape, foreign-route preservation, withdraw, and SIGTERM drain against FRR. | Manual/local containerlab product-path smoke. Script: `test-m42-fib-runtime-frr.sh`. |
+| **M39** | Gate 9 slice 6 — bidirectional EVPN Type 5 / symmetric Interface-less IRB (RFC 9136 §4.4.2) between rustbgpd PE1 and FRR PE2. Validates origination + import + kernel route/neighbor/L3VXLAN FDB programming + ping over the L3VNI VXLAN tunnel + the withdraw leg. | Protected self-hosted `kernel-dataplane` CI; hosted runners still lack reliable `vrf` support. Script: `test-m39-evpn-type5-symmetric-irb.sh`. |
+| **M40** | ADR-0059 aliasing dataplane ECMP via FDB nexthop groups against FRR EVPN-MH. Validates FDB rows with `nhid`, nexthop groups, alias member collapse, and cleanup. | Protected self-hosted `kernel-dataplane` CI; needs `CAP_NET_ADMIN` and Linux FDB-NHG support. Script: `test-m40-evpn-aliasing-ecmp-frr.sh`. |
+| **M42** | ADR-0061 opt-in general unicast Linux FIB runtime. Validates configured-table install shape, foreign-route preservation, withdraw, SIGTERM drain, and key-only delete semantics against FRR. | Protected self-hosted `kernel-dataplane` CI. Script: `test-m42-fib-runtime-frr.sh`. |

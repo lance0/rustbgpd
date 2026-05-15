@@ -99,7 +99,7 @@ The Gate 8 surface is:
   multi-destination programming subsequently shipped under
   [ADR-0059](0059-evpn-aliasing-fdb-nexthop-groups.md) (FDB
   nexthop groups via `NDA_NH_ID` / `NHA_FDB`, slices 1-4,
-  M40 manual smoke against FRR EVPN-MH 10.3.1).
+  M40 protected self-hosted smoke against FRR EVPN-MH 10.3.1).
 - **Mass withdraw — receive-side filter closed in Gate 8b.** The
   dataplane supervisor snapshots EAD-per-ES reachability and drops
   non-zero-ESI Type 2 routes whose `(origin VTEP next-hop, ESI)` is

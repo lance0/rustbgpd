@@ -7,7 +7,7 @@ raw-netlink primitive, PR #86), slice 3a (state types + apply
 primitive + CVE-2025-39851 guard, PR #87), slice 3b
 (operational-behavior-change wiring through the reconcile actor
 + diff Pass 1b + startup NHID adoption + actor-level FDB-NHG
-test coverage, PR #88), slice 4 (M40 manual containerlab smoke
+test coverage, PR #88), slice 4 (M40 protected self-hosted kernel-dataplane smoke
 against FRR EVPN-MH 10.3.1, 16/16 PASS, PR #89), and slice 3.5
 (operator `apply_aliasing_ecmp` off-switch, PR #91; periodic
 `RTM_GETNEXTHOP` drift recovery, PR #92; IPv6 alias members,
@@ -486,7 +486,7 @@ through. Each slice ships independently green.
   - Withdraw cycle removes FDB row, then the group, then the
     members. Foreign nexthop groups (operator-installed
     out-of-band) survive the cycle.
-- M40 manual containerlab smoke: three rustbgpd PEs, two of them
+- M40 protected self-hosted kernel-dataplane smoke: three rustbgpd PEs, two of them
   sharing a non-zero ESI for VNI 100, one acting as the consumer.
   Assert the consumer's `bridge fdb show dev vxlan100` carries
   an `nhid`, that `ip nexthop show fdb` shows the group with

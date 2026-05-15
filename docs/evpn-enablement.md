@@ -49,7 +49,8 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   sub-second withdraw, `ListIpVrfs`/`GetIpVrf` gRPC +
   `rustbgpctl evpn vrfs` CLI. ADR-0059 (v0.19.0) adds
   receive-path aliasing-ECMP via FDB nexthop groups, validated
-  against FRR EVPN-MH by the M40 manual smoke. Remaining big
+  against FRR EVPN-MH by the protected self-hosted M40 smoke.
+  Remaining big
   investments (overlay-index IRB / RFC 9135, production-default
   multi-homing enforcement) are gated by operator demand and
   the MAC-churn variant of the Gate 8b soak.
@@ -522,7 +523,7 @@ Shipped pieces:
    Type 2 entries program an FDB nexthop group via `NDA_NH_ID` /
    `NHA_FDB`, with members keyed by per-VTEP IP and the group
    keyed by `(VNI, ESI, EthernetTag)`. Receive-path ECMP fans out
-   across every observed alias VTEP. M40 manual containerlab smoke
+   across every observed alias VTEP. M40 protected self-hosted smoke
    validates the end-to-end path against FRR EVPN-MH 10.3.1.
 6. **Mass-withdraw receive-side filter** — every supervisor pass
    snapshots EAD-per-ES routes and drops non-zero-ESI Type 2 routes
@@ -536,7 +537,10 @@ Concrete remaining slices:
    flips with concurrent FDB programming before flipping
    `apply_bum_enforcement` default to `true`. The baseline
    BUM-state soak completed clean (see
-   `docs/soak-gate8b-24h-bum-state.md`).
+   `docs/soak-gate8b-24h-bum-state.md`), and the sibling
+   `tests/soak/run-gate8b-mac-churn-soak.sh` harness now exists
+   with process-restart flips. The remaining gate is the 1 h dry run
+   result followed by the full 24 h run.
 2. **Optional import-side ES-Import RT filtering** — apply the
    ES-Import RT origination from Gate 8b prep on the daemon's own
    RIB import path so unrelated segments are filtered before they

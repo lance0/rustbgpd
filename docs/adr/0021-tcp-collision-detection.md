@@ -24,9 +24,10 @@ Options considered:
    outbound session and the new inbound connection.
 
 2. **Resolve in PeerManager** — the PeerManager already owns the peer
-   lifecycle and receives inbound connections. It can hold a pending inbound,
-   wait for the existing session to reach OpenConfirm (where the remote
-   router-id is known), then compare identifiers and decide which to keep.
+   lifecycle and receives inbound connections. It can run an inbound
+   collision candidate alongside the current session, wait until either
+   side reaches OpenConfirm (where the remote router-id is known), then
+   compare identifiers and decide which session to keep.
 
 3. **Resolve in FSM** — add collision-aware events to the pure FSM. Rejected:
    the FSM is pure `(State, Event) → (State, Actions)` with no I/O concerns.
@@ -46,10 +47,10 @@ Cease subcode 7 (`CONNECTION_COLLISION_RESOLUTION`) added to
 ### Transport
 
 `SessionNotification` enum sent from peer sessions to PeerManager:
-- `OpenReceived { peer_addr, remote_router_id }` — session entered
-  OpenConfirm, remote router-id now available.
-- `BackToIdle { peer_addr }` — session fell back to Idle (connection
-  failed or was torn down).
+- `OpenReceived { peer_addr, session_id, role, remote_router_id }` —
+  session entered OpenConfirm, remote router-id now available.
+- `BackToIdle { peer_addr, session_id, role }` — session fell back to
+  Idle (connection failed or was torn down).
 
 `CollisionDump` command added to `PeerCommand` — sends Cease/7
 NOTIFICATION, cleans up RIB if Established, closes TCP.
@@ -58,11 +59,17 @@ NOTIFICATION, cleans up RIB if Established, closes TCP.
 queries during OpenConfirm state.
 
 Both `PeerHandle::spawn()` and `PeerHandle::spawn_inbound()` accept an
-optional `mpsc::Sender<SessionNotification>` parameter.
+optional `mpsc::Sender<SessionNotification>` parameter plus a
+monotonically allocated session id and role (`Primary` or
+`PendingInbound`).
 
 ### PeerManager
 
-`pending_inbound: Option<TcpStream>` added to `ManagedPeer`.
+`pending_inbound: Option<PendingInbound>` added to `ManagedPeer`.
+`PendingInbound` holds a live inbound `PeerHandle` plus its session id.
+This supersedes the original parked-`TcpStream` sketch: holding an
+unstarted stream can deadlock simultaneous active-open because the
+candidate never progresses far enough to reveal the remote BGP Identifier.
 
 `session_notify_tx/rx` channel (capacity 64) created in `PeerManager::new()`.
 
@@ -72,19 +79,27 @@ notification channel.
 Inbound connection handling by existing session state:
 - **Idle** → accept immediately (no collision).
 - **Established** → drop inbound (no collision possible).
-- **Connect/Active/OpenSent** → store as `pending_inbound`, wait for
-  `OpenReceived` notification.
+- **Connect/Active/OpenSent** → spawn a live `pending_inbound`
+  candidate session, wait for an `OpenReceived` notification from either
+  the current primary or the candidate.
 - **OpenConfirm** → resolve immediately (router-id available from
-  `query_state()`).
+  the current primary's state, or once the candidate reports its
+  OpenConfirm).
 
 `resolve_collision()` compares `u32::from(local_router_id)` vs
 `u32::from(remote_router_id)`:
-- Local > remote → drop inbound (keep existing).
-- Local < remote → send `CollisionDump` to existing, replace with inbound.
+- Local > remote → send `CollisionDump` to the inbound candidate (keep
+  the current primary).
+- Local < remote → send `CollisionDump` to the current primary, promote
+  the inbound candidate atomically.
 - Equal → drop inbound (degenerate case).
 
-`BackToIdle` notification with pending inbound → accept the pending
-connection (existing session failed).
+`BackToIdle` notification from the current primary with a pending inbound
+candidate → promote the pending candidate. `BackToIdle` or `OpenReceived`
+from stale session ids is ignored. The session-id discriminator is
+load-bearing: after a collision dump, the losing session may still emit a
+late notification, and it must not mutate the peer that already promoted
+or survived.
 
 ### FSM
 
@@ -99,10 +114,13 @@ No changes. Collision detection is a transport/PeerManager concern.
 - FSM stays pure — no collision-aware logic added.
 - Session notification channel is generic — reusable for future coordination
   needs (e.g., graceful restart).
+- Simultaneous active-open no longer depends on a held TCP stream making
+  progress out of band; both candidate sessions can process OPENs until
+  PeerManager chooses the survivor.
 
 **Negative:**
 - PeerManager `run()` now has two select branches — slightly more complex.
-- `pending_inbound` stream held in memory until resolution — bounded by
-  the number of configured peers.
+- `pending_inbound` live session held until resolution — bounded by the
+  number of configured peers and drained on peer disable / shutdown.
 - Notification channel adds a small per-session overhead (one try_send per
   state change to OpenConfirm or Idle).

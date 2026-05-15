@@ -129,11 +129,12 @@ MAC-churn variant also clears. The two unblocking conditions from
   is unblocked by **this soak plus the MAC-churn variant**. We
   hold the flag at default-off until the MAC-churn run also
   completes — concurrent FDB churn was not exercised here.
-- The MAC-churn variant uses the same `tests/soak/run-gate8b-soak.sh`
-  driver with an additional `bridge fdb add/del` loop at ~10 Hz
-  against the same 2-PE topology. That driver still needs to be
-  written; the harness has a clean extension point at the per-cycle
-  hook.
+- The MAC-churn variant is now a sibling harness:
+  `tests/soak/run-gate8b-mac-churn-soak.sh`. It reuses the same
+  2-PE topology but adds the `bridge fdb add/del/move` churn loop,
+  extra FDB / FDB-NHG CSV columns, and process-restart flips instead
+  of `docker stop` / `docker start` so the containerlab point-to-point
+  veth survives each restart.
 
 ## Raw data
 

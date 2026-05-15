@@ -814,12 +814,13 @@ implemented per ADR-0040.
   verdict to subscribers; `rustbgpctl evpn vrfs [NAME]` +
   `EvpnService.ListIpVrfs` / `EvpnService.GetIpVrf` gRPC
   surfaces let operators read it without scraping logs.
-  **M39 manual containerlab smoke** validates the bidirectional
-  Type 5 path against FRR 10.3.1.
+  **M39 protected self-hosted kernel-dataplane CI** validates the
+  bidirectional Type 5 path against FRR 10.3.1.
 - **Still ahead after Gate 9:** full RFC 9135
   overlay-index IRB (Gate 9 ships the Interface-less variant
   only), auto-derived Route Targets (RFC 8365 §5.1.2.1),
-  privileged-runner CI gate for the M39 + M40 smokes.
+  protected self-hosted kernel-dataplane CI now gates the M39 + M40
+  smokes.
 
 ---
 
@@ -867,7 +868,7 @@ implemented per ADR-0040.
   ordering, Router MAC conflict detection, sub-second withdraw
   via `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` multicast,
   `rustbgpctl evpn vrfs` CLI + `ListIpVrfs`/`GetIpVrf` gRPC,
-  M39 manual smoke against FRR 10.3.1.
+  M39 protected self-hosted smoke against FRR 10.3.1.
 - **Still ahead:** full RFC 9135 overlay-index
   IRB, auto-derived Route Targets (RFC 8365 §5.1.2.1).
 

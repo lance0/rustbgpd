@@ -3,8 +3,8 @@
 **Status:** Accepted; fully shipped. Slices 1-7 (config schema +
 pure-logic helpers + readiness probe + gRPC/CLI surface) landed
 in v0.17.0 (PRs #66, #67, #72, #73, #74, #75, #76); slice 8
-(origination + remote import + L3 FIB programming + M39 manual
-smoke) landed in v0.18.0 (PRs #77, #78, #79). Sub-second
+(origination + remote import + L3 FIB programming + M39 protected
+self-hosted smoke) landed in v0.18.0 (PRs #77, #78, #79). Sub-second
 `RTNLGRP_IPV4/IPV6_ROUTE` multicast refresh shipped as the
 v0.18.0 follow-up.
 **Date:** 2026-05-10
@@ -380,7 +380,7 @@ shape as actually merged:
 8. **End-to-end wiring + M39 interop smoke.** Supervisor consumes
    `DataplaneReport.ip_vrf_status`, drives Type 5 RIB
    inject/withdraw on local IP-route changes, installs remote
-   Type 5 into the kernel VRF. M39 manual containerlab harness
+   Type 5 into the kernel VRF. M39 protected self-hosted containerlab harness
    validates FRR ↔ rustbgpd bidirectional Type 5 against a small
    symmetric IRB topology.
 

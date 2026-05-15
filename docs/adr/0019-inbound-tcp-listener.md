@@ -32,7 +32,9 @@ Use option 2: `BgpListener` in the transport crate.
 - `PeerManager` looks up the peer by address:
   - **Known + idle** → shut down old (idle) session, spawn inbound session
     via `PeerHandle::spawn_inbound()`, send `ManualStart`.
-  - **Known + connected** → log and drop (collision detection deferred).
+  - **Known + connected** → hand off to ADR-0021 collision resolution when
+    the connection is a simultaneous-open candidate; otherwise drop the
+    extra inbound.
   - **Unknown** → log and drop.
 - `PeerSession::new_inbound()` sets `stream = Some(tcp_stream)` at construction.
   When the FSM emits `InitiateTcpConnection`, `attempt_connect()` detects the
@@ -41,9 +43,12 @@ Use option 2: `BgpListener` in the transport crate.
 ### Collision detection
 
 RFC 4271 §6.8 defines TCP connection collision detection (compare router IDs,
-close the connection from the higher ID). This is deferred to post-M5. For now,
-if a peer is already connected (non-idle), inbound connections are dropped.
-This is safe: the existing session continues unaffected.
+close the connection from the higher ID). This was deferred in the original
+M5 listener slice and is now implemented by ADR-0021. PeerManager runs a live
+pending inbound candidate alongside the current session, compares BGP
+Identifiers once a candidate reaches OpenConfirm, sends Cease/7
+(`CONNECTION_COLLISION_RESOLUTION`) to the loser, and uses session ids to
+ignore stale notifications from drained candidates.
 
 ## Consequences
 
@@ -55,7 +60,5 @@ This is safe: the existing session continues unaffected.
 - Inbound session reuses 100% of existing `PeerSession` code.
 
 **Negative:**
-- No collision detection yet — simultaneous inbound+outbound from the same
-  peer will result in the inbound being dropped. Acceptable for M5.
 - Single listener socket — no per-peer bind address support. Sufficient for
   the common case (all peers on the same port).

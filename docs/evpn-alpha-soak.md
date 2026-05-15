@@ -195,7 +195,7 @@ landing, tracked here for visibility)
   both Type 2 and EAD-per-EVI through from the RIB.
   [ADR-0059](adr/0059-evpn-aliasing-fdb-nexthop-groups.md) is
   fully shipped in v0.19.0 across four implementation slices
-  (PRs #84 / #86 / #87 / #88) plus the M40 manual containerlab
+  (PRs #84 / #86 / #87 / #88) plus the M40 protected self-hosted
   smoke (PR #89): slice 1 added `RemoteMacEntry::alias_group_key`
   + same-AF projection invariant; slice 2 added the
   `nexthop_raw` raw-netlink primitive (rtnetlink 0.21 has no
@@ -344,7 +344,7 @@ landing, tracked here for visibility)
     within the expected window.
     `IpVrfState.installed_routes_count` + install-error counters
     expose the surface to operators.
-  - **M39 manual containerlab smoke** at
+  - **M39 protected self-hosted kernel-dataplane smoke** at
     `tests/interop/m39-evpn-type5-symmetric-irb.clab.yml`
     validates the bidirectional Type 5 path against FRR 10.3.1:
     BGP Established, Type 5 origination both directions, PE1
