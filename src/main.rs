@@ -27,6 +27,7 @@ mod evpn_originator;
 mod evpn_segment;
 mod evpn_svi;
 mod fib;
+mod fib_common;
 mod fib_runtime;
 mod looking_glass;
 mod metrics_server;

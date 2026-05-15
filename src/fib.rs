@@ -19,6 +19,7 @@ use rustbgpd_rib::{Route, RouteOrigin};
 use rustbgpd_wire::Prefix;
 
 use crate::config::FibTableConfig;
+use crate::fib_common::{prefix_and_nexthop_same_family, table_allows_prefix};
 
 const MAX_ROUTE_LIMIT_EXCEEDED_DROPS_PER_TABLE: usize = 128;
 
@@ -487,14 +488,6 @@ pub(crate) fn record_fib_success(owned: &mut FibOwnedState, op: &FibOp) {
     }
 }
 
-fn table_allows_prefix(table: &FibTableConfig, prefix: Prefix) -> bool {
-    let wanted = match prefix {
-        Prefix::V4(_) => "ipv4_unicast",
-        Prefix::V6(_) => "ipv6_unicast",
-    };
-    table.families.iter().any(|family| family == wanted)
-}
-
 fn table_allows_peer(
     table: &FibTableConfig,
     allowed_neighbors: &[IpAddr],
@@ -511,13 +504,6 @@ fn table_allows_peer(
                 .iter()
                 .any(|allowed| allowed == group)
         })
-}
-
-fn prefix_and_nexthop_same_family(prefix: Prefix, next_hop: IpAddr) -> bool {
-    matches!(
-        (prefix, next_hop),
-        (Prefix::V4(_), IpAddr::V4(_)) | (Prefix::V6(_), IpAddr::V6(_))
-    )
 }
 
 fn cmp_prefix(left: Prefix, right: Prefix) -> Ordering {

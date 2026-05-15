@@ -27,6 +27,7 @@ use crate::fib::{
     FibPlan, FibRoute, FibRouteKey, FibRouteTarget, FibTableKey, compute_fib_diff,
     project_fib_intent_with_peer_groups, record_fib_success,
 };
+use crate::fib_common::{prefix_and_nexthop_same_family, table_allows_prefix};
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 const ROUTE_EVENT_DEBOUNCE: Duration = Duration::from_millis(200);
@@ -1323,21 +1324,6 @@ fn ip_to_route_address(ip: IpAddr) -> netlink_packet_route::route::RouteAddress 
         IpAddr::V4(a) => RouteAddress::Inet(a),
         IpAddr::V6(a) => RouteAddress::Inet6(a),
     }
-}
-
-fn table_allows_prefix(table: &FibTableConfig, prefix: Prefix) -> bool {
-    let wanted = match prefix {
-        Prefix::V4(_) => "ipv4_unicast",
-        Prefix::V6(_) => "ipv6_unicast",
-    };
-    table.families.iter().any(|family| family == wanted)
-}
-
-fn prefix_and_nexthop_same_family(prefix: Prefix, next_hop: IpAddr) -> bool {
-    matches!(
-        (prefix, next_hop),
-        (Prefix::V4(_), IpAddr::V4(_)) | (Prefix::V6(_), IpAddr::V6(_))
-    )
 }
 
 fn prefix_addr(prefix: Prefix) -> IpAddr {
