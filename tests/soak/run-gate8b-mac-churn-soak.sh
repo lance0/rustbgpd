@@ -70,6 +70,10 @@ SOAK_HOURS="${SOAK_HOURS:-24}"
 SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-60}"          # seconds between CSV rows
 FLIP_INTERVAL_SEC="${FLIP_INTERVAL_SEC:-600}"     # 10-minute DF flips
 WARMUP_SEC="${WARMUP_SEC:-120}"                   # discard first 2 min for slope
+BGP_ESTABLISHED_TIMEOUT_SEC="${BGP_ESTABLISHED_TIMEOUT_SEC:-300}"
+                                                  # gate before churn — refuse
+                                                  # to start the validation if
+                                                  # BGP never establishes
 PE1_NAME="${PE1_NAME:-clab-gate8b-soak-pe1}"
 PE2_NAME="${PE2_NAME:-clab-gate8b-soak-pe2}"
 CLEANUP="${CLEANUP:-0}"                           # 1 = destroy topology on EXIT
@@ -236,6 +240,67 @@ nh_count() {
     # ip nexthop entries (ADR-0059 aliasing-ECMP FDB-NHGs land here).
     local container="$1"
     docker exec "$container" sh -c 'ip nexthop show 2>/dev/null | wc -l' 2>/dev/null || echo ""
+}
+
+# Sum every `bgp_session_established_total{...}` row this PE exports.
+# Each successful entry into the Established FSM state increments
+# the counter by 1 (see `rustbgpd_telemetry::metrics`), so > 0 means
+# the BGP session has been up at least once. Returns 0 if the scrape
+# is empty or the metric is absent.
+pe_established_total() {
+    local container="$1" prom
+    prom="$(prom_scrape "$container")"
+    [ -z "$prom" ] && { echo 0; return; }
+    printf '%s' "$prom" | awk '
+        $0 ~ /^bgp_session_established_total\{/ { sum += $NF }
+        END { print sum + 0 }
+    '
+}
+
+# Refuse to start churn until both PEs have reached Established at
+# least once. The OPEN-collision-race recovery time on simultaneous
+# clab deploy can exceed the fixed warmup window; gating here keeps
+# the validation honest — without it the soak can pass with
+# `extern_learn = 0` and miss the entire remote-Type-2 receive path.
+wait_established() {
+    local timeout_sec="$BGP_ESTABLISHED_TIMEOUT_SEC"
+    local deadline=$(($(date +%s) + timeout_sec))
+    log "waiting up to ${timeout_sec}s for both PEs to reach BGP Established"
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        local p1 p2
+        p1="$(pe_established_total "$PE1_NAME")"
+        p2="$(pe_established_total "$PE2_NAME")"
+        if [ "${p1:-0}" -ge 1 ] && [ "${p2:-0}" -ge 1 ]; then
+            log "BGP Established gate passed (pe1_established_total=${p1} pe2_established_total=${p2})"
+            return 0
+        fi
+        sleep 5
+    done
+    log "ERROR: BGP Established gate timed out after ${timeout_sec}s"
+    dump_session_state_on_failure
+    return 1
+}
+
+# Operator-facing diag when wait_established trips. Dumps both PEs'
+# session-state metric rows plus the last 50 docker-log lines per
+# container so a postmortem doesn't require re-running anything.
+dump_session_state_on_failure() {
+    for pe in "$PE1_NAME" "$PE2_NAME"; do
+        log "=== session-state metrics: $pe ==="
+        local prom
+        prom="$(prom_scrape "$pe")"
+        printf '%s\n' "$prom" \
+            | grep -E '^bgp_session_(established|state_transitions|flaps)_total\{' \
+            | sort \
+            | head -40 \
+            | while IFS= read -r line; do log "  $line"; done
+    done
+    for pe in "$PE1_NAME" "$PE2_NAME"; do
+        log "=== docker logs --tail 50: $pe ==="
+        docker logs --tail 50 "$pe" 2>&1 | tail -50 | while IFS= read -r line; do
+            log "  $line"
+        done
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -555,7 +620,7 @@ trap cleanup EXIT INT TERM
 # ---------------------------------------------------------------------------
 
 cat >"$SAMPLES_CSV" <<'EOF'
-ts_unix,elapsed_sec,pe1_rss_mb,pe2_rss_mb,pe1_df_role,pe2_df_role,pe1_df_changes,pe2_df_changes,pe1_bum_flags,pe2_bum_flags,pe2_running,pe1_pool_size,pe2_pool_size,pe1_fdb_total,pe2_fdb_total,pe1_fdb_extern_learn,pe2_fdb_extern_learn,pe1_nh_count,pe2_nh_count,pe1_local_origs,pe2_local_origs,pe1_local_orig_errors,pe2_local_orig_errors,pe1_local_obs_drops,pe2_local_obs_drops,pe1_dup_mac_moves,pe2_dup_mac_moves,pe1_drift_members_repaired,pe2_drift_members_repaired,pe1_drift_groups_replaced,pe2_drift_groups_replaced,pe1_drift_orphans_cleaned,pe2_drift_orphans_cleaned,pe1_drift_disabled,pe2_drift_disabled,churn_adds_total,churn_dels_total,churn_moves_total
+ts_unix,elapsed_sec,pe1_rss_mb,pe2_rss_mb,pe1_df_role,pe2_df_role,pe1_df_changes,pe2_df_changes,pe1_bum_flags,pe2_bum_flags,pe2_running,pe1_established_seen,pe2_established_seen,pe1_pool_size,pe2_pool_size,pe1_fdb_total,pe2_fdb_total,pe1_fdb_extern_learn,pe2_fdb_extern_learn,pe1_nh_count,pe2_nh_count,pe1_local_origs,pe2_local_origs,pe1_local_orig_errors,pe2_local_orig_errors,pe1_local_obs_drops,pe2_local_obs_drops,pe1_dup_mac_moves,pe2_dup_mac_moves,pe1_drift_members_repaired,pe2_drift_members_repaired,pe1_drift_groups_replaced,pe2_drift_groups_replaced,pe1_drift_orphans_cleaned,pe2_drift_orphans_cleaned,pe1_drift_disabled,pe2_drift_disabled,churn_adds_total,churn_dels_total,churn_moves_total
 EOF
 
 # ---------------------------------------------------------------------------
@@ -578,6 +643,15 @@ log "  git_rev=$GIT_REV dirty=$GIT_DIRTY kernel=$KERNEL"
 # dataplane discovery settle so churn ops aren't racing instance Ready.
 log "warmup: waiting ${WARMUP_SEC}s for initial dataplane discovery"
 sleep "$WARMUP_SEC"
+
+# Pre-churn gate: refuse to start the validation run unless both
+# PEs have actually reached Established. Without this the harness
+# can produce a "clean" smoke while the receive path
+# (remote Type 2 / extern_learn / FDB-NHG) never runs.
+if ! wait_established; then
+    log "FATAL: not starting churn — BGP did not establish within ${BGP_ESTABLISHED_TIMEOUT_SEC}s"
+    exit 3
+fi
 
 # Kick off the churn loop now that the dataplane is warm.
 churn_loop "$END_UNIX" &
@@ -602,6 +676,9 @@ while [ "$(date +%s)" -lt "$END_UNIX" ]; do
 
     PE1_FLAGS="$(bridge_flag_state "$PE1_NAME")"
     PE2_FLAGS="$(bridge_flag_state "$PE2_NAME" 2>/dev/null || echo unreachable)"
+
+    PE1_ESTAB="$(pe_established_total "$PE1_NAME")"
+    PE2_ESTAB="$(pe_established_total "$PE2_NAME")"
 
     PE1_POOL_N="$(pool_size 1)"
     PE2_POOL_N="$(pool_size 2)"
@@ -631,13 +708,14 @@ while [ "$(date +%s)" -lt "$END_UNIX" ]; do
     PE1_DDISABLED="$(prom_extract "$PE1_PROM" evpn_fdb_nhg_drift_disabled_total)"
     PE2_DDISABLED="$(prom_extract "$PE2_PROM" evpn_fdb_nhg_drift_disabled_total)"
 
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "$NOW" "$ELAPSED" \
         "${PE1_RSS:-NaN}" "${PE2_RSS:-NaN}" \
         "${PE1_DF:-NaN}" "${PE2_DF:-NaN}" \
         "${PE1_DF_CHANGES:-NaN}" "${PE2_DF_CHANGES:-NaN}" \
         "${PE1_FLAGS:-unknown}" "${PE2_FLAGS:-unknown}" \
         "$PE2_RUNNING" \
+        "${PE1_ESTAB:-NaN}" "${PE2_ESTAB:-NaN}" \
         "$PE1_POOL_N" "$PE2_POOL_N" \
         "${PE1_FDB_TOTAL:-NaN}" "${PE2_FDB_TOTAL:-NaN}" \
         "${PE1_FDB_EXT:-NaN}" "${PE2_FDB_EXT:-NaN}" \
