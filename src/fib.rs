@@ -215,7 +215,7 @@ pub(crate) enum FibOp {
     Remove(FibRoute),
     /// Release ownership without touching the kernel because the live row no
     /// longer matches what this daemon installed.
-    Forget(FibRoute),
+    Forget(FibRouteKey),
 }
 
 /// Project configured FIB tables and Loc-RIB best routes into desired state.
@@ -466,7 +466,7 @@ fn push_owned_route_drifted(plan: &mut FibPlan, route: &FibRoute) {
     plan.drops.push(FibDrop::OwnedRouteDrifted {
         route: route.clone(),
     });
-    plan.ops.push(FibOp::Forget(route.clone()));
+    plan.ops.push(FibOp::Forget(route.key));
 }
 
 /// Update owned state after a successful future apply operation.
@@ -478,8 +478,11 @@ pub(crate) fn record_fib_success(owned: &mut FibOwnedState, op: &FibOp) {
         FibOp::Replace { desired, .. } => {
             owned.routes.insert(desired.key, desired.clone());
         }
-        FibOp::Remove(route) | FibOp::Forget(route) => {
+        FibOp::Remove(route) => {
             owned.routes.remove(&route.key);
+        }
+        FibOp::Forget(key) => {
+            owned.routes.remove(key);
         }
     }
 }
@@ -970,7 +973,7 @@ mod tests {
 
         let plan = compute_fib_diff(&intent, &owned, &kernel);
 
-        assert_eq!(plan.ops, vec![FibOp::Forget(existing.clone())]);
+        assert_eq!(plan.ops, vec![FibOp::Forget(existing.key)]);
         assert!(plan.drops.iter().any(
             |drop| matches!(drop, FibDrop::OwnedRouteDrifted { route } if route.key == existing.key)
         ));
@@ -1129,7 +1132,7 @@ mod tests {
 
         let plan = compute_fib_diff(&intent, &owned, &kernel);
 
-        assert_eq!(plan.ops, vec![FibOp::Forget(previous.clone())]);
+        assert_eq!(plan.ops, vec![FibOp::Forget(previous.key)]);
         assert_eq!(
             plan.drops,
             vec![FibDrop::OwnedRouteDrifted { route: previous }]
@@ -1159,7 +1162,7 @@ mod tests {
 
         let plan = compute_fib_diff(&intent, &owned, &kernel);
 
-        assert_eq!(plan.ops, vec![FibOp::Forget(previous.clone())]);
+        assert_eq!(plan.ops, vec![FibOp::Forget(previous.key)]);
         assert_eq!(
             plan.drops,
             vec![FibDrop::OwnedRouteDrifted { route: previous }]
@@ -1194,7 +1197,7 @@ mod tests {
 
         let plan = compute_fib_diff(&FibIntent::default(), &owned, &kernel);
 
-        assert_eq!(plan.ops, vec![FibOp::Forget(route.clone())]);
+        assert_eq!(plan.ops, vec![FibOp::Forget(route.key)]);
         assert_eq!(plan.drops, vec![FibDrop::OwnedRouteDrifted { route }]);
     }
 
@@ -1215,7 +1218,7 @@ mod tests {
 
         let plan = compute_fib_diff(&intent, &owned, &kernel);
 
-        assert_eq!(plan.ops, vec![FibOp::Forget(route.clone())]);
+        assert_eq!(plan.ops, vec![FibOp::Forget(route.key)]);
         assert_eq!(plan.drops, vec![FibDrop::OwnedRouteDrifted { route }]);
     }
 
@@ -1341,7 +1344,7 @@ mod tests {
 
         record_fib_success(&mut owned, &FibOp::Add(route.clone()));
         assert_eq!(owned.routes.get(&route.key), Some(&route));
-        record_fib_success(&mut owned, &FibOp::Forget(route.clone()));
+        record_fib_success(&mut owned, &FibOp::Forget(route.key));
         assert!(owned.routes.is_empty());
     }
 }

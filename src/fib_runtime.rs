@@ -428,14 +428,12 @@ where
             );
             continue;
         }
-        if let FibOp::Forget(route) = op {
+        if let FibOp::Forget(key) = op {
             record_fib_success(owned, op);
             info!(
-                table = %route.table_name,
-                table_id = route.key.table_id,
-                metric = route.key.metric,
-                prefix = %route.key.prefix,
-                owned_next_hop = %route.target.next_hop,
+                table_id = key.table_id,
+                metric = key.metric,
+                prefix = %key.prefix,
                 "released general FIB route ownership after kernel drift"
             );
             continue;
@@ -838,9 +836,8 @@ fn op_action(op: &FibOp) -> &'static str {
 
 fn op_route(op: &FibOp) -> &FibRoute {
     match op {
-        FibOp::Add(route) | FibOp::Adopt(route) | FibOp::Remove(route) | FibOp::Forget(route) => {
-            route
-        }
+        FibOp::Add(route) | FibOp::Adopt(route) | FibOp::Remove(route) => route,
+        FibOp::Forget(_) => unreachable!("forget handled before kernel apply"),
         FibOp::Replace { desired, .. } => desired,
     }
 }
@@ -1928,7 +1925,7 @@ mod tests {
 
         let plan = compute_fib_diff(&intent, &owned, &kernel);
 
-        assert_eq!(plan.ops, vec![FibOp::Forget(previous.clone())]);
+        assert_eq!(plan.ops, vec![FibOp::Forget(previous.key)]);
         assert_eq!(
             plan.drops,
             vec![FibDrop::OwnedRouteDrifted { route: previous }]
