@@ -9,12 +9,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
-use rustbgpd_rib::{RibUpdate, Route};
+use rustbgpd_rib::{RibUpdate, Route, RouteOrigin};
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::Prefix;
+use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, Prefix};
+use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -22,7 +24,7 @@ use tracing::{debug, info, warn};
 use crate::config::FibTableConfig;
 use crate::fib::{
     FibDrop, FibIntent, FibKernelProtocol, FibKernelRoute, FibKernelSnapshot, FibOp, FibOwnedState,
-    FibPlan, FibRoute, FibRouteKey, FibRouteTarget, compute_fib_diff,
+    FibPlan, FibRoute, FibRouteKey, FibRouteTarget, FibTableKey, compute_fib_diff,
     project_fib_intent_with_peer_groups, record_fib_success,
 };
 
@@ -36,6 +38,9 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct FibRuntimeConfig {
     /// Explicit tables the daemon may write.
     pub tables: Vec<FibTableConfig>,
+    /// Optional persisted owned-state file used to recover exact route
+    /// ownership after an ungraceful process restart.
+    pub owned_state_path: Option<PathBuf>,
 }
 
 impl FibRuntimeConfig {
@@ -176,7 +181,7 @@ async fn run_loop<F>(
 ) where
     F: UnicastFib,
 {
-    let mut owned = FibOwnedState::default();
+    let mut owned = load_owned_state(&config);
     let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     interval.tick().await;
@@ -385,7 +390,11 @@ async fn reconcile_once<F>(
     for drop in &plan.drops {
         metrics.record_fib_route_rejected(drop_reason(drop));
     }
+    let before_owned = owned.clone();
     let (failures, failed_keys) = apply_plan(fib, metrics, owned, &plan, shutdown).await;
+    if *owned != before_owned {
+        persist_owned_state(config, owned);
+    }
     let mut statuses = build_statuses(config, &intent, owned, &plan, &failed_keys);
     statuses.extend(failures);
     status_tx.send_replace(statuses);
@@ -488,6 +497,7 @@ async fn drain_owned<F>(
 ) where
     F: UnicastFib,
 {
+    let before_owned = owned.clone();
     let snapshot = match fib.dump(&config.tables).await {
         Ok(snapshot) => snapshot,
         Err(e) => {
@@ -540,7 +550,267 @@ async fn drain_owned<F>(
             }
         }
     }
+    if *owned != before_owned {
+        persist_owned_state(config, owned);
+    }
     status_tx.send_replace(Vec::new());
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedFibOwnedState {
+    version: u32,
+    tables: Vec<PersistedFibTableSignature>,
+    routes: Vec<PersistedFibRoute>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedFibTableSignature {
+    name: String,
+    table_id: u32,
+    metric: u32,
+    families: Vec<String>,
+    allowed_peer_groups: Vec<String>,
+    allowed_neighbors: Vec<String>,
+    max_routes: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedFibRoute {
+    table_name: String,
+    table_id: u32,
+    metric: u32,
+    prefix_addr: IpAddr,
+    prefix_len: u8,
+    next_hop: IpAddr,
+    peer: IpAddr,
+    origin_type: PersistedRouteOrigin,
+    path_id: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PersistedRouteOrigin {
+    Ebgp,
+    Ibgp,
+    Local,
+}
+
+impl From<RouteOrigin> for PersistedRouteOrigin {
+    fn from(origin: RouteOrigin) -> Self {
+        match origin {
+            RouteOrigin::Ebgp => Self::Ebgp,
+            RouteOrigin::Ibgp => Self::Ibgp,
+            RouteOrigin::Local => Self::Local,
+        }
+    }
+}
+
+impl From<PersistedRouteOrigin> for RouteOrigin {
+    fn from(origin: PersistedRouteOrigin) -> Self {
+        match origin {
+            PersistedRouteOrigin::Ebgp => Self::Ebgp,
+            PersistedRouteOrigin::Ibgp => Self::Ibgp,
+            PersistedRouteOrigin::Local => Self::Local,
+        }
+    }
+}
+
+impl From<&FibRoute> for PersistedFibRoute {
+    fn from(route: &FibRoute) -> Self {
+        Self {
+            table_name: route.table_name.clone(),
+            table_id: route.key.table_id,
+            metric: route.key.metric,
+            prefix_addr: prefix_addr(route.key.prefix),
+            prefix_len: route.key.prefix.prefix_len(),
+            next_hop: route.target.next_hop,
+            peer: route.peer,
+            origin_type: route.origin_type.into(),
+            path_id: route.path_id,
+        }
+    }
+}
+
+impl From<&FibTableConfig> for PersistedFibTableSignature {
+    fn from(table: &FibTableConfig) -> Self {
+        Self {
+            name: table.name.clone(),
+            table_id: table.table_id,
+            metric: table.metric,
+            families: table.families.clone(),
+            allowed_peer_groups: table.allowed_peer_groups.clone(),
+            allowed_neighbors: table.allowed_neighbors.clone(),
+            max_routes: table.max_routes,
+        }
+    }
+}
+
+impl PersistedFibRoute {
+    fn into_route(self) -> Option<FibRoute> {
+        let prefix = prefix_from_addr_len(self.prefix_addr, self.prefix_len)?;
+        if !prefix_and_nexthop_same_family(prefix, self.next_hop) {
+            return None;
+        }
+        let key = FibRouteKey {
+            table_id: self.table_id,
+            metric: self.metric,
+            prefix,
+        };
+        Some(FibRoute {
+            table_name: self.table_name,
+            key,
+            target: FibRouteTarget {
+                next_hop: self.next_hop,
+            },
+            peer: self.peer,
+            origin_type: self.origin_type.into(),
+            path_id: self.path_id,
+        })
+    }
+}
+
+fn load_owned_state(config: &FibRuntimeConfig) -> FibOwnedState {
+    let Some(path) = &config.owned_state_path else {
+        return FibOwnedState::default();
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return FibOwnedState::default(),
+        Err(e) => {
+            warn!(path = %path.display(), error = %e, "failed to read general FIB owned-state file");
+            return FibOwnedState::default();
+        }
+    };
+    let persisted = match serde_json::from_slice::<PersistedFibOwnedState>(&bytes) {
+        Ok(persisted) => persisted,
+        Err(e) => {
+            warn!(path = %path.display(), error = %e, "failed to parse general FIB owned-state file");
+            return FibOwnedState::default();
+        }
+    };
+    if persisted.version != 1 {
+        warn!(
+            path = %path.display(),
+            version = persisted.version,
+            "ignoring unsupported general FIB owned-state version"
+        );
+        quarantine_owned_state_file(config, "unsupported_version");
+        return FibOwnedState::default();
+    }
+    if persisted.tables != table_signatures(&config.tables) {
+        warn!(
+            path = %path.display(),
+            "ignoring general FIB owned-state because [[fib_tables]] changed"
+        );
+        quarantine_owned_state_file(config, "config_mismatch");
+        return FibOwnedState::default();
+    }
+
+    let allowed_tables = config
+        .tables
+        .iter()
+        .map(|table| FibTableKey {
+            table_id: table.table_id,
+            metric: table.metric,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut owned = FibOwnedState::default();
+    for route in persisted.routes {
+        let Some(route) = route.into_route() else {
+            warn!(
+                path = %path.display(),
+                "skipping invalid general FIB owned-state route"
+            );
+            continue;
+        };
+        if !allowed_tables.contains(&route.key.table_key()) {
+            warn!(
+                path = %path.display(),
+                table_id = route.key.table_id,
+                metric = route.key.metric,
+                "skipping general FIB owned-state route outside configured table set"
+            );
+            continue;
+        }
+        owned.routes.insert(route.key, route);
+    }
+    if !owned.routes.is_empty() {
+        info!(
+            path = %path.display(),
+            routes = owned.routes.len(),
+            "loaded persisted general FIB owned-state"
+        );
+    }
+    owned
+}
+
+fn persist_owned_state(config: &FibRuntimeConfig, owned: &FibOwnedState) {
+    let Some(path) = &config.owned_state_path else {
+        return;
+    };
+    if let Err(e) = write_owned_state(path, &config.tables, owned) {
+        warn!(
+            path = %path.display(),
+            error = %e,
+            "failed to persist general FIB owned-state"
+        );
+    }
+}
+
+fn quarantine_owned_state_file(config: &FibRuntimeConfig, reason: &'static str) {
+    let Some(path) = &config.owned_state_path else {
+        return;
+    };
+    let stale_path = stale_owned_state_path(path);
+    let _ = std::fs::remove_file(&stale_path);
+    if let Err(e) = std::fs::rename(path, &stale_path) {
+        warn!(
+            path = %path.display(),
+            stale_path = %stale_path.display(),
+            reason,
+            error = %e,
+            "failed to quarantine stale general FIB owned-state"
+        );
+    } else {
+        warn!(
+            path = %path.display(),
+            stale_path = %stale_path.display(),
+            reason,
+            "quarantined stale general FIB owned-state"
+        );
+    }
+}
+
+fn stale_owned_state_path(path: &Path) -> PathBuf {
+    path.with_extension("json.stale")
+}
+
+fn write_owned_state(
+    path: &Path,
+    tables: &[FibTableConfig],
+    owned: &FibOwnedState,
+) -> Result<(), String> {
+    let persisted = PersistedFibOwnedState {
+        version: 1,
+        tables: table_signatures(tables),
+        routes: owned.routes.values().map(PersistedFibRoute::from).collect(),
+    };
+    let bytes =
+        serde_json::to_vec_pretty(&persisted).map_err(|e| format!("serialize owned-state: {e}"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create state dir: {e}"))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write temp state file: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename temp state file: {e}"))?;
+    Ok(())
+}
+
+fn table_signatures(tables: &[FibTableConfig]) -> Vec<PersistedFibTableSignature> {
+    tables
+        .iter()
+        .map(PersistedFibTableSignature::from)
+        .collect()
 }
 
 fn op_action(op: &FibOp) -> &'static str {
@@ -1051,6 +1321,21 @@ fn prefix_and_nexthop_same_family(prefix: Prefix, next_hop: IpAddr) -> bool {
     )
 }
 
+fn prefix_addr(prefix: Prefix) -> IpAddr {
+    match prefix {
+        Prefix::V4(prefix) => IpAddr::V4(prefix.addr),
+        Prefix::V6(prefix) => IpAddr::V6(prefix.addr),
+    }
+}
+
+fn prefix_from_addr_len(addr: IpAddr, len: u8) -> Option<Prefix> {
+    match addr {
+        IpAddr::V4(addr) if len <= 32 => Some(Prefix::V4(Ipv4Prefix::new(addr, len))),
+        IpAddr::V6(addr) if len <= 128 => Some(Prefix::V6(Ipv6Prefix::new(addr, len))),
+        IpAddr::V4(_) | IpAddr::V6(_) => None,
+    }
+}
+
 fn unspecified_for_prefix(prefix: Prefix) -> IpAddr {
     match prefix {
         Prefix::V4(_) => IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
@@ -1161,6 +1446,7 @@ mod tests {
     fn config() -> FibRuntimeConfig {
         FibRuntimeConfig {
             tables: vec![table("edge", 1000, 200, &["ipv4_unicast", "ipv6_unicast"])],
+            owned_state_path: None,
         }
     }
 
@@ -1205,6 +1491,17 @@ mod tests {
             table_id: 1000,
             metric: 200,
             prefix,
+        }
+    }
+
+    fn fib_route(prefix: Prefix, next_hop: IpAddr) -> FibRoute {
+        FibRoute {
+            table_name: "edge".to_string(),
+            key: key(prefix),
+            target: FibRouteTarget { next_hop },
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
         }
     }
 
@@ -1473,7 +1770,13 @@ mod tests {
 
     #[test]
     fn default_off_config_is_disabled() {
-        assert!(!FibRuntimeConfig { tables: vec![] }.enabled());
+        assert!(
+            !FibRuntimeConfig {
+                tables: vec![],
+                owned_state_path: None
+            }
+            .enabled()
+        );
     }
 
     #[test]
@@ -1482,7 +1785,10 @@ mod tests {
         let (rib_query_tx, _query_rx) = mpsc::channel(1);
         let (status_tx, _status_rx) = watch::channel(Vec::new());
         let handle = spawn(
-            FibRuntimeConfig { tables: vec![] },
+            FibRuntimeConfig {
+                tables: vec![],
+                owned_state_path: None,
+            },
             rib_tx,
             rib_query_tx,
             metrics(),
@@ -1505,6 +1811,100 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Installed);
         assert_eq!(statuses[0].reason, "owned");
+    }
+
+    #[test]
+    fn owned_state_persistence_round_trips_and_ignores_config_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let mut config = config();
+        config.owned_state_path = Some(path.clone());
+        let route = fib_route(v4(24), ip("192.0.2.1"));
+        let mut owned = FibOwnedState::default();
+        owned.routes.insert(route.key, route.clone());
+
+        write_owned_state(&path, &config.tables, &owned).unwrap();
+        assert_eq!(load_owned_state(&config), owned);
+
+        let mut changed = config.clone();
+        changed.tables[0].metric = 201;
+        assert!(load_owned_state(&changed).routes.is_empty());
+        assert!(!path.exists());
+        assert!(stale_owned_state_path(&path).exists());
+        assert!(load_owned_state(&config).routes.is_empty());
+    }
+
+    #[test]
+    fn loaded_owned_state_allows_crash_restart_replace_when_kernel_still_matches() {
+        let previous = fib_route(v4(24), ip("192.0.2.1"));
+        let desired = fib_route(v4(24), ip("192.0.2.2"));
+        let mut owned = FibOwnedState::default();
+        owned.routes.insert(previous.key, previous.clone());
+        let intent = FibIntent {
+            routes: BTreeMap::from([(desired.key, desired.clone())]),
+            ..FibIntent::default()
+        };
+        let kernel = FibKernelSnapshot {
+            routes: BTreeMap::from([(
+                previous.key,
+                FibKernelRoute {
+                    target: previous.target,
+                    protocol: FibKernelProtocol::Bgp,
+                },
+            )]),
+        };
+
+        let plan = compute_fib_diff(&intent, &owned, &kernel);
+
+        assert_eq!(plan.ops, vec![FibOp::Replace { previous, desired }]);
+        assert!(plan.drops.is_empty());
+    }
+
+    #[test]
+    fn loaded_owned_state_still_preserves_kernel_drift_after_restart() {
+        let previous = fib_route(v4(24), ip("192.0.2.1"));
+        let desired = fib_route(v4(24), ip("192.0.2.2"));
+        let mut owned = FibOwnedState::default();
+        owned.routes.insert(previous.key, previous.clone());
+        let intent = FibIntent {
+            routes: BTreeMap::from([(desired.key, desired)]),
+            ..FibIntent::default()
+        };
+        let kernel = FibKernelSnapshot {
+            routes: BTreeMap::from([(
+                previous.key,
+                FibKernelRoute {
+                    target: FibRouteTarget {
+                        next_hop: ip("192.0.2.99"),
+                    },
+                    protocol: FibKernelProtocol::Bgp,
+                },
+            )]),
+        };
+
+        let plan = compute_fib_diff(&intent, &owned, &kernel);
+
+        assert!(plan.ops.is_empty());
+        assert_eq!(
+            plan.drops,
+            vec![FibDrop::ForeignRouteExists { key: previous.key }]
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_persists_owned_state_after_successful_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config();
+        config.owned_state_path = Some(dir.path().join("fib-owned.json"));
+        let mut fib = FakeFib::default();
+        let mut owned = FibOwnedState::default();
+        let rib_tx = rib_with_routes(vec![route(v4(24), ip("192.0.2.1"))]);
+
+        let statuses =
+            reconcile_config_for_test(config.clone(), rib_tx, &mut fib, &mut owned).await;
+
+        assert_eq!(statuses[0].state, FibRuntimeState::Installed);
+        assert_eq!(load_owned_state(&config), owned);
     }
 
     #[tokio::test]
@@ -1935,6 +2335,7 @@ mod tests {
         table.allowed_peer_groups = vec!["transit".to_string()];
         let config = FibRuntimeConfig {
             tables: vec![table],
+            owned_state_path: None,
         };
         let rib_tx = rib_with_routes_and_peer_groups(
             vec![route(v4(24), ip("192.0.2.1"))],
@@ -1958,6 +2359,7 @@ mod tests {
         table.max_routes = Some(1);
         let config = FibRuntimeConfig {
             tables: vec![table],
+            owned_state_path: None,
         };
         let rib_tx = rib_with_routes(vec![
             route(v4(24), ip("192.0.2.1")),
@@ -1985,6 +2387,7 @@ mod tests {
         table.max_routes = Some(1);
         let config = FibRuntimeConfig {
             tables: vec![table],
+            owned_state_path: None,
         };
         let existing = FibRoute {
             table_name: "edge".to_string(),
@@ -2092,7 +2495,10 @@ mod tests {
         // Empty [[fib_tables]] means no kernel install even when the
         // RIB has a best route.
         reconcile_once(
-            &FibRuntimeConfig { tables: vec![] },
+            &FibRuntimeConfig {
+                tables: vec![],
+                owned_state_path: None,
+            },
             &rib_with_routes(vec![route(prefix, ip("192.0.2.1"))]),
             &mut fib,
             &metrics,

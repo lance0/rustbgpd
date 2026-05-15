@@ -29,6 +29,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bgp_fib_routes_rejected_total` as `peer_not_allowed` or
   `route_limit_exceeded`.
 
+- **ADR-0061 FIB crash-restart owned-state.** The general unicast FIB
+  runtime now persists its owned route map to
+  `<runtime_state_dir>/fib-owned.json` after successful apply/drain
+  operations. On startup it reloads the file only when the recorded
+  `[[fib_tables]]` declaration still matches, then still requires the
+  live kernel row to be `RTPROT_BGP` with the exact persisted next-hop
+  before replacing or removing it. Rows that fail those checks remain
+  foreign, so recovery no longer depends on protocol-only adoption.
+
 ## [0.21.0] — 2026-05-14
 
 ### Added
@@ -120,14 +129,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   signature or struct changes.
 
 - **ADR-0061 FIB ownership is conservative.** Pre-existing kernel
-  routes in configured `[[fib_tables]]` are now treated as foreign
-  unless the current daemon instance already has matching owned state.
-  `RTPROT_BGP` is still the protocol marker rustbgpd writes, but it is
-  not ownership proof by itself because FRR/BIRD can use the same marker
-  in the same table and metric. This avoids replacing or draining other
-  daemons' BGP routes after an ungraceful restart; crash-restart
-  adoption is deferred until rustbgpd has a distinct ownership marker or
-  persisted owned-state.
+  routes in configured `[[fib_tables]]` are treated as foreign unless
+  rustbgpd has matching owned state in memory or in
+  `<runtime_state_dir>/fib-owned.json`. `RTPROT_BGP` is still the
+  protocol marker rustbgpd writes, but it is not ownership proof by
+  itself because FRR/BIRD can use the same marker in the same table and
+  metric. This avoids replacing or draining other daemons' BGP routes
+  after an ungraceful restart while allowing exact-match recovery of rows
+  this daemon previously installed.
 
 - **ADR-0061 FIB runtime hardening and documentation sweep.** The
   runtime now uses the RIB manager's priority query channel for
