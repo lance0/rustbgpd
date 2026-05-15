@@ -11,7 +11,9 @@ use rustbgpd_fsm::{PeerConfig, SessionState};
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_transport::{PeerHandle, PeerSessionState, SessionNotification, TransportConfig};
+use rustbgpd_transport::{
+    PeerHandle, PeerSessionState, SessionIdentity, SessionNotification, TransportConfig,
+};
 use rustbgpd_wire::{Afi, Safi};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -53,6 +55,7 @@ pub(crate) enum InternalCommand {
 #[allow(clippy::struct_excessive_bools)]
 struct ManagedPeer {
     handle: PeerHandle,
+    session_id: u64,
     remote_asn: u32,
     description: String,
     peer_group: Option<String>,
@@ -62,8 +65,8 @@ struct ManagedPeer {
     transport_config: TransportConfig,
     import_policy: Option<PolicyChain>,
     export_policy: Option<PolicyChain>,
-    /// Pending inbound TCP stream waiting for collision resolution.
-    pending_inbound: Option<TcpStream>,
+    /// Live inbound session waiting for collision resolution.
+    pending_inbound: Option<PendingInbound>,
     /// True for peers auto-created from a `[[dynamic_neighbors]]` range.
     /// Dynamic peers are ephemeral: removed when session falls to Idle.
     is_dynamic: bool,
@@ -112,6 +115,11 @@ struct ManagedPeer {
     /// would come up advertising untagged routes during the very
     /// maintenance window the toggle was supposed to cover.
     advertise_graceful_shutdown: bool,
+}
+
+struct PendingInbound {
+    handle: PeerHandle,
+    session_id: u64,
 }
 
 /// Resolved dynamic neighbor range used for prefix matching at connection time.
@@ -176,6 +184,7 @@ pub struct PeerManager {
     /// pathological churn pattern can't grow it without bound; an over-
     /// cap insert evicts an arbitrary existing entry with a `warn!`.
     dead_lettered_pending: HashMap<IpAddr, DeadLetteredPending>,
+    next_session_id: u64,
 }
 
 /// Build a `PeerInfo` snapshot from config + an optional fresh
@@ -346,8 +355,15 @@ impl PeerManager {
             dynamic_peer_count: 0,
             dynamic_neighbor_limit: current_config.global.dynamic_neighbor_limit.unwrap_or(100),
             dead_lettered_pending: HashMap::new(),
+            next_session_id: 1,
             current_config,
         }
+    }
+
+    fn allocate_session_id(&mut self) -> u64 {
+        let id = self.next_session_id;
+        self.next_session_id = self.next_session_id.wrapping_add(1).max(1);
+        id
     }
 
     fn parse_dynamic_ranges(config: &Config) -> Vec<DynamicRange> {
@@ -735,7 +751,8 @@ impl PeerManager {
         let hold_time = Some(transport.peer.hold_time);
         let max_prefixes = transport.max_prefixes;
 
-        let handle = PeerHandle::spawn(
+        let session_id = self.allocate_session_id();
+        let handle = PeerHandle::spawn_with_identity(
             transport.clone(),
             self.metrics.clone(),
             self.rib_tx.clone(),
@@ -745,6 +762,7 @@ impl PeerManager {
             self.bmp_tx.clone(),
             self.validation_rx.clone(),
             false,
+            SessionIdentity::primary(session_id),
         );
 
         if let Err(e) = handle.start().await {
@@ -757,6 +775,7 @@ impl PeerManager {
             address,
             ManagedPeer {
                 handle,
+                session_id,
                 remote_asn,
                 description,
                 peer_group,
@@ -852,12 +871,21 @@ impl PeerManager {
         address: IpAddr,
         reason: Option<bytes::Bytes>,
     ) -> Result<(), String> {
+        let pending = {
+            let managed = self
+                .peers
+                .get_mut(&address)
+                .ok_or_else(|| format!("peer {address} not found"))?;
+            managed.enabled = false;
+            managed.pending_inbound.take()
+        };
+        if let Some(pending) = pending {
+            let _ = pending.handle.shutdown().await;
+        }
         let managed = self
             .peers
             .get_mut(&address)
             .ok_or_else(|| format!("peer {address} not found"))?;
-        managed.enabled = false;
-        managed.pending_inbound = None;
         managed
             .handle
             .stop(reason)
@@ -1384,6 +1412,57 @@ impl PeerManager {
         })
     }
 
+    async fn spawn_pending_inbound(&mut self, peer_addr: IpAddr, stream: TcpStream) -> bool {
+        if self
+            .peers
+            .get(&peer_addr)
+            .is_some_and(|m| m.pending_inbound.is_some())
+        {
+            info!(%peer_addr, "dropping extra inbound connection while collision candidate is pending");
+            return false;
+        }
+
+        let Some(managed) = self.peers.get(&peer_addr) else {
+            return false;
+        };
+        let transport_config = managed.transport_config.clone();
+        let import_policy = managed.import_policy.clone();
+        let export_policy = managed.export_policy.clone();
+        let advertise_graceful_shutdown = managed.advertise_graceful_shutdown;
+        let session_id = self.allocate_session_id();
+        let handle = PeerHandle::spawn_inbound_with_identity(
+            transport_config,
+            self.metrics.clone(),
+            self.rib_tx.clone(),
+            import_policy,
+            export_policy,
+            stream,
+            Some(self.session_notify_tx.clone()),
+            self.bmp_tx.clone(),
+            self.validation_rx.clone(),
+            advertise_graceful_shutdown,
+            SessionIdentity::inbound_candidate(session_id),
+        );
+
+        if let Err(e) = handle.start().await {
+            warn!(%peer_addr, error = %e, "failed to start inbound collision candidate");
+            let _ = handle.shutdown().await;
+            return false;
+        }
+
+        let Some(managed) = self.peers.get_mut(&peer_addr) else {
+            let _ = handle.shutdown().await;
+            return false;
+        };
+        if managed.pending_inbound.is_some() {
+            info!(%peer_addr, "collision candidate appeared while starting another, dropping newer inbound");
+            let _ = handle.shutdown().await;
+            return false;
+        }
+        managed.pending_inbound = Some(PendingInbound { handle, session_id });
+        true
+    }
+
     #[expect(clippy::too_many_lines)]
     async fn handle_inbound(&mut self, stream: TcpStream, peer_addr: IpAddr) {
         // If peer is not statically configured, try dynamic range matching.
@@ -1444,7 +1523,8 @@ impl PeerManager {
                     .get(&peer_addr)
                     .is_some_and(|pending| pending.graceful_shutdown);
 
-                let handle = PeerHandle::spawn_inbound(
+                let session_id = self.allocate_session_id();
+                let handle = PeerHandle::spawn_inbound_with_identity(
                     transport.clone(),
                     self.metrics.clone(),
                     self.rib_tx.clone(),
@@ -1455,6 +1535,7 @@ impl PeerManager {
                     self.bmp_tx.clone(),
                     self.validation_rx.clone(),
                     advertise_graceful_shutdown,
+                    SessionIdentity::primary(session_id),
                 );
 
                 if let Err(e) = handle.start().await {
@@ -1464,6 +1545,7 @@ impl PeerManager {
 
                 let managed = ManagedPeer {
                     handle,
+                    session_id,
                     remote_asn,
                     description,
                     peer_group: Some(peer_group_name),
@@ -1537,21 +1619,25 @@ impl PeerManager {
                 info!(%peer_addr, "inbound connection for established peer, dropping");
             }
             SessionState::Connect | SessionState::Active | SessionState::OpenSent => {
-                // Store pending inbound, wait for OpenReceived notification
-                info!(%peer_addr, state = fsm_state.as_str(), "storing pending inbound for collision resolution");
-                if let Some(managed) = self.peers.get_mut(&peer_addr) {
-                    managed.pending_inbound = Some(stream);
-                }
+                // Start a live inbound candidate. Parking the raw socket here
+                // deadlocks simultaneous active-open: both outbound sessions
+                // wait for OPEN while both accepted inbound sockets sit inert.
+                info!(%peer_addr, state = fsm_state.as_str(), "starting inbound collision candidate");
+                self.spawn_pending_inbound(peer_addr, stream).await;
             }
             SessionState::OpenConfirm => {
-                // We already have router-id from negotiation — resolve now
+                // We already have router-id from negotiation; start a live
+                // inbound candidate and resolve immediately.
                 let remote_router_id = current_state.and_then(|s| s.remote_router_id);
+                let started = self.spawn_pending_inbound(peer_addr, stream).await;
                 if let Some(rid) = remote_router_id {
-                    self.resolve_collision(peer_addr, rid, stream).await;
+                    if started {
+                        self.resolve_collision(peer_addr, rid).await;
+                    }
                 } else {
-                    // Shouldn't happen, but accept inbound as fallback
-                    warn!(%peer_addr, "OpenConfirm but no remote_router_id, accepting inbound");
-                    self.replace_with_inbound(peer_addr, stream).await;
+                    // Shouldn't happen; the live candidate can still notify
+                    // us once it receives the peer OPEN.
+                    warn!(%peer_addr, "OpenConfirm but no remote_router_id, waiting for inbound candidate notification");
                 }
             }
         }
@@ -1620,19 +1706,58 @@ impl PeerManager {
     async fn handle_session_notification(&mut self, notification: SessionNotification) {
         match notification {
             SessionNotification::OpenReceived {
+                session_id,
+                role,
                 peer_addr,
                 remote_router_id,
             } => {
-                let pending = self
+                let matches_current = self.peers.get(&peer_addr).is_some_and(|m| {
+                    m.session_id == session_id
+                        || m.pending_inbound
+                            .as_ref()
+                            .is_some_and(|p| p.session_id == session_id)
+                });
+                if !matches_current {
+                    debug!(%peer_addr, session_id, ?role, "ignoring stale OpenReceived notification");
+                    return;
+                }
+                if self
                     .peers
-                    .get_mut(&peer_addr)
-                    .and_then(|m| m.pending_inbound.take());
-                if let Some(stream) = pending {
-                    self.resolve_collision(peer_addr, remote_router_id, stream)
-                        .await;
+                    .get(&peer_addr)
+                    .is_some_and(|m| m.pending_inbound.is_some())
+                {
+                    self.resolve_collision(peer_addr, remote_router_id).await;
                 }
             }
-            SessionNotification::BackToIdle { peer_addr } => {
+            SessionNotification::BackToIdle {
+                session_id,
+                role,
+                peer_addr,
+            } => {
+                let pending = self.peers.get_mut(&peer_addr).and_then(|m| {
+                    if m.pending_inbound
+                        .as_ref()
+                        .is_some_and(|p| p.session_id == session_id)
+                    {
+                        m.pending_inbound.take()
+                    } else {
+                        None
+                    }
+                });
+                if let Some(pending) = pending {
+                    debug!(%peer_addr, session_id, ?role, "inbound collision candidate went idle, dropping");
+                    let _ = pending.handle.shutdown().await;
+                    return;
+                }
+
+                let current_primary = self
+                    .peers
+                    .get(&peer_addr)
+                    .is_some_and(|m| m.session_id == session_id);
+                if !current_primary {
+                    debug!(%peer_addr, session_id, ?role, "ignoring stale BackToIdle notification");
+                    return;
+                }
                 // Auto-remove dynamic peers when they go idle (no reconnect).
                 if self
                     .peers
@@ -1653,31 +1778,26 @@ impl PeerManager {
                     self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
                     // Skip pending inbound logic for removed dynamic peers
                 } else {
-                    let pending = self.peers.get_mut(&peer_addr).and_then(|m| {
-                        if m.enabled {
-                            m.pending_inbound.take()
-                        } else {
-                            // Peer is disabled — drop pending inbound
-                            m.pending_inbound = None;
-                            None
+                    let enabled = self.peers.get(&peer_addr).is_some_and(|m| m.enabled);
+                    if enabled {
+                        // Existing primary failed — promote the already-running
+                        // inbound candidate if one exists.
+                        if self.promote_pending_inbound(peer_addr).await {
+                            info!(%peer_addr, "existing session went idle, promoting inbound collision candidate");
                         }
-                    });
-                    if let Some(stream) = pending {
-                        // Existing session failed — accept pending inbound
-                        info!(%peer_addr, "existing session went idle, accepting pending inbound");
-                        self.replace_with_inbound(peer_addr, stream).await;
+                    } else if let Some(pending) = self
+                        .peers
+                        .get_mut(&peer_addr)
+                        .and_then(|m| m.pending_inbound.take())
+                    {
+                        let _ = pending.handle.shutdown().await;
                     }
                 }
             }
         }
     }
 
-    async fn resolve_collision(
-        &mut self,
-        peer_addr: IpAddr,
-        remote_router_id: Ipv4Addr,
-        inbound_stream: TcpStream,
-    ) {
+    async fn resolve_collision(&mut self, peer_addr: IpAddr, remote_router_id: Ipv4Addr) {
         let local_id = u32::from(self.router_id);
         let remote_id = u32::from(remote_router_id);
 
@@ -1690,7 +1810,13 @@ impl PeerManager {
                     remote_id = %remote_router_id,
                     "collision: local wins, dropping inbound"
                 );
-                drop(inbound_stream);
+                if let Some(pending) = self
+                    .peers
+                    .get_mut(&peer_addr)
+                    .and_then(|m| m.pending_inbound.take())
+                {
+                    let _ = pending.handle.collision_dump().await;
+                }
             }
             std::cmp::Ordering::Less => {
                 // Remote wins — dump existing, accept inbound
@@ -1700,10 +1826,9 @@ impl PeerManager {
                     remote_id = %remote_router_id,
                     "collision: remote wins, replacing with inbound"
                 );
-                if let Some(managed) = self.peers.get(&peer_addr) {
-                    let _ = managed.handle.collision_dump().await;
+                if let Some(old_handle) = self.promote_pending_inbound_handle(peer_addr) {
+                    let _ = old_handle.collision_dump().await;
                 }
-                self.replace_with_inbound(peer_addr, inbound_stream).await;
             }
             std::cmp::Ordering::Equal => {
                 // Equal router-ids — should not happen; drop inbound
@@ -1712,12 +1837,35 @@ impl PeerManager {
                     router_id = %self.router_id,
                     "collision: equal router-ids, dropping inbound"
                 );
-                drop(inbound_stream);
+                if let Some(pending) = self
+                    .peers
+                    .get_mut(&peer_addr)
+                    .and_then(|m| m.pending_inbound.take())
+                {
+                    let _ = pending.handle.collision_dump().await;
+                }
             }
         }
     }
 
+    fn promote_pending_inbound_handle(&mut self, peer_addr: IpAddr) -> Option<PeerHandle> {
+        let managed = self.peers.get_mut(&peer_addr)?;
+        let pending = managed.pending_inbound.take()?;
+        let old_handle = std::mem::replace(&mut managed.handle, pending.handle);
+        managed.session_id = pending.session_id;
+        Some(old_handle)
+    }
+
+    async fn promote_pending_inbound(&mut self, peer_addr: IpAddr) -> bool {
+        let Some(old_handle) = self.promote_pending_inbound_handle(peer_addr) else {
+            return false;
+        };
+        let _ = old_handle.shutdown().await;
+        true
+    }
+
     async fn replace_with_inbound(&mut self, peer_addr: IpAddr, stream: TcpStream) {
+        let session_id = self.allocate_session_id();
         let Some(managed) = self.peers.get_mut(&peer_addr) else {
             return;
         };
@@ -1728,7 +1876,7 @@ impl PeerManager {
         let advertise_graceful_shutdown = managed.advertise_graceful_shutdown;
         let old_handle = std::mem::replace(
             &mut managed.handle,
-            PeerHandle::spawn_inbound(
+            PeerHandle::spawn_inbound_with_identity(
                 managed.transport_config.clone(),
                 self.metrics.clone(),
                 self.rib_tx.clone(),
@@ -1739,8 +1887,10 @@ impl PeerManager {
                 self.bmp_tx.clone(),
                 self.validation_rx.clone(),
                 advertise_graceful_shutdown,
+                SessionIdentity::primary(session_id),
             ),
         );
+        managed.session_id = session_id;
 
         // Shut down the old session
         let _ = old_handle.shutdown().await;
@@ -2133,11 +2283,14 @@ impl PeerManager {
                             }).collect();
                             let _ = reply.send(ranges);
                         }
-                        PeerManagerCommand::Shutdown => {
-                            info!("peer manager shutting down {} peers", self.peers.len());
-                            for (addr, managed) in self.peers.drain() {
-                                debug!(%addr, "shutting down peer");
-                                match managed.handle.shutdown().await {
+                            PeerManagerCommand::Shutdown => {
+                                info!("peer manager shutting down {} peers", self.peers.len());
+                                for (addr, mut managed) in self.peers.drain() {
+                                    debug!(%addr, "shutting down peer");
+                                    if let Some(pending) = managed.pending_inbound.take() {
+                                        let _ = pending.handle.shutdown().await;
+                                    }
+                                    match managed.handle.shutdown().await {
                                     Ok(Ok(())) => debug!(%addr, "peer shut down"),
                                     Ok(Err(e)) => warn!(%addr, error = %e, "peer shutdown error"),
                                     Err(e) => error!(%addr, error = %e, "peer task join error"),
@@ -2174,7 +2327,12 @@ impl PeerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BytesMut;
+    use rustbgpd_wire::{
+        Capability, Message, OpenMessage, decode_message, encode_message, peek_message_length,
+    };
     use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
 
@@ -2204,6 +2362,44 @@ mod tests {
             import_policy: None,
             export_policy: None,
         }
+    }
+
+    fn mock_open(router_id: Ipv4Addr) -> OpenMessage {
+        OpenMessage {
+            version: 4,
+            my_as: 65002,
+            hold_time: 90,
+            bgp_identifier: router_id,
+            capabilities: vec![
+                Capability::MultiProtocol {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                },
+                Capability::FourOctetAs { asn: 65002 },
+            ],
+        }
+    }
+
+    async fn read_bgp_message(stream: &mut TcpStream, buf: &mut BytesMut) -> Message {
+        loop {
+            if let Ok(Some(len)) = peek_message_length(buf, rustbgpd_wire::MAX_MESSAGE_LEN) {
+                let len = usize::from(len);
+                if buf.len() >= len {
+                    let frame = buf.split_to(len);
+                    let mut bytes = frame.freeze();
+                    return decode_message(&mut bytes, rustbgpd_wire::MAX_MESSAGE_LEN)
+                        .expect("valid BGP message");
+                }
+            }
+            let n = stream.read_buf(buf).await.expect("TCP read");
+            assert!(n > 0, "unexpected EOF from peer");
+        }
+    }
+
+    async fn send_bgp_message(stream: &mut TcpStream, msg: &Message) {
+        let encoded = encode_message(msg).expect("encode BGP message");
+        stream.write_all(&encoded).await.expect("TCP write");
+        stream.flush().await.expect("TCP flush");
     }
 
     fn make_dynamic_manager_config() -> Config {
@@ -2289,6 +2485,7 @@ mod tests {
             addr,
             ManagedPeer {
                 handle,
+                session_id: 1,
                 remote_asn,
                 description: "test".to_string(),
                 peer_group: None,
@@ -2813,6 +3010,7 @@ mod tests {
             addr,
             ManagedPeer {
                 handle,
+                session_id: 1,
                 remote_asn: 65002,
                 description: "test".to_string(),
                 peer_group: None,
@@ -3355,6 +3553,7 @@ mod tests {
             task_addr,
             ManagedPeer {
                 handle,
+                session_id: 1,
                 remote_asn: 65002,
                 description: "test".to_string(),
                 peer_group: None,
@@ -3512,6 +3711,7 @@ mod tests {
             task_addr,
             ManagedPeer {
                 handle,
+                session_id: 1,
                 remote_asn: 65002,
                 description: "test".to_string(),
                 peer_group: None,
@@ -3679,6 +3879,7 @@ mod tests {
             task_addr,
             ManagedPeer {
                 handle,
+                session_id: 1,
                 remote_asn: 65002,
                 description: "test".to_string(),
                 peer_group: None,
@@ -3865,6 +4066,7 @@ mod tests {
             task_addr,
             ManagedPeer {
                 handle,
+                session_id: 1,
                 remote_asn: 65002,
                 description: "test".to_string(),
                 peer_group: None,
@@ -4076,6 +4278,7 @@ mod tests {
             task_addr,
             ManagedPeer {
                 handle,
+                session_id: 1,
                 remote_asn: 65002,
                 description: "test".to_string(),
                 peer_group: None,
@@ -4230,6 +4433,7 @@ mod tests {
             task_addr,
             ManagedPeer {
                 handle,
+                session_id: 1,
                 remote_asn: 65002,
                 description: "test".to_string(),
                 peer_group: None,
@@ -4306,6 +4510,156 @@ mod tests {
         let local_id = u32::from(Ipv4Addr::new(10, 0, 0, 1));
         let remote_id = u32::from(Ipv4Addr::new(10, 0, 0, 10));
         assert!(local_id < remote_id, "remote should win collision");
+    }
+
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test]
+    async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
+        use rustbgpd_transport::PeerCommand;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+        );
+
+        let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let collision_dumps = Arc::new(AtomicU32::new(0));
+        let dumps = collision_dumps.clone();
+        let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+        let fake_primary = tokio::spawn(async move {
+            while let Some(cmd) = session_rx.recv().await {
+                match cmd {
+                    PeerCommand::QueryState { reply } => {
+                        let _ = reply.send(PeerSessionState {
+                            fsm_state: SessionState::OpenSent,
+                            peer_ip: peer_addr,
+                            prefix_count: 0,
+                            negotiated_hold_time: None,
+                            four_octet_as: None,
+                            remote_router_id: None,
+                            updates_received: 0,
+                            updates_sent: 0,
+                            notifications_received: 0,
+                            notifications_sent: 0,
+                            flap_count: 0,
+                            uptime_secs: 0,
+                            last_error: String::new(),
+                        });
+                    }
+                    PeerCommand::CollisionDump => {
+                        dumps.fetch_add(1, Ordering::SeqCst);
+                        break;
+                    }
+                    PeerCommand::Shutdown => break,
+                    _ => {}
+                }
+            }
+            Ok(())
+        });
+        insert_test_managed_peer_with_asn(
+            &mut mgr,
+            peer_addr,
+            65002,
+            PeerHandle::from_parts(session_tx, fake_primary),
+            false,
+        );
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+        let (server_stream, remote_addr) = listener.accept().await.unwrap();
+        let mut client_stream = client.await.unwrap();
+
+        mgr.handle_inbound(server_stream, remote_addr.ip()).await;
+        assert!(
+            mgr.peers
+                .get(&peer_addr)
+                .is_some_and(|m| m.pending_inbound.is_some()),
+            "inbound socket should become a live collision candidate"
+        );
+
+        let mut buf = BytesMut::with_capacity(4096);
+        let msg = tokio::time::timeout(
+            Duration::from_secs(2),
+            read_bgp_message(&mut client_stream, &mut buf),
+        )
+        .await
+        .expect("candidate must send OPEN before primary goes idle");
+        assert!(matches!(msg, Message::Open(_)));
+
+        send_bgp_message(
+            &mut client_stream,
+            &Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2))),
+        )
+        .await;
+
+        let notification =
+            tokio::time::timeout(Duration::from_secs(2), mgr.session_notify_rx.recv())
+                .await
+                .expect("candidate should notify OpenReceived")
+                .expect("notification channel should stay open");
+        match &notification {
+            SessionNotification::OpenReceived {
+                role,
+                remote_router_id,
+                ..
+            } => {
+                assert_eq!(*role, rustbgpd_transport::SessionRole::InboundCandidate);
+                assert_eq!(*remote_router_id, Ipv4Addr::new(10, 0, 0, 2));
+            }
+            other @ SessionNotification::BackToIdle { .. } => {
+                panic!("expected OpenReceived from candidate, got {other:?}");
+            }
+        }
+        mgr.handle_session_notification(notification).await;
+
+        for _ in 0..20 {
+            if collision_dumps.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            collision_dumps.load(Ordering::SeqCst),
+            1,
+            "remote-higher router-id must dump the local-initiated primary"
+        );
+        assert!(
+            mgr.peers
+                .get(&peer_addr)
+                .is_some_and(|m| m.pending_inbound.is_none()),
+            "candidate should be promoted, not left pending"
+        );
+
+        let msg = tokio::time::timeout(
+            Duration::from_secs(2),
+            read_bgp_message(&mut client_stream, &mut buf),
+        )
+        .await
+        .expect("candidate should send KEEPALIVE after OPEN");
+        assert!(matches!(msg, Message::Keepalive));
+        send_bgp_message(&mut client_stream, &Message::Keepalive).await;
+
+        let managed = mgr.peers.get(&peer_addr).expect("promoted peer");
+        for _ in 0..20 {
+            let state = managed.handle.query_state().await.expect("query state");
+            if state.fsm_state == SessionState::Established {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("promoted inbound candidate did not reach Established");
     }
 
     #[tokio::test]
@@ -4492,8 +4846,13 @@ mod tests {
         assert_eq!(peers.len(), 1);
         assert!(peers[0].is_dynamic);
 
-        mgr.handle_session_notification(SessionNotification::BackToIdle { peer_addr })
-            .await;
+        let session_id = mgr.peers.get(&peer_addr).unwrap().session_id;
+        mgr.handle_session_notification(SessionNotification::BackToIdle {
+            session_id,
+            role: rustbgpd_transport::SessionRole::Primary,
+            peer_addr,
+        })
+        .await;
 
         assert_eq!(
             mgr.dynamic_peer_count, 0,
@@ -4549,8 +4908,13 @@ mod tests {
 
         // Tear down — peer auto-removes, flags should land in the
         // dead-letter side table rather than evaporating.
-        mgr.handle_session_notification(SessionNotification::BackToIdle { peer_addr })
-            .await;
+        let session_id = mgr.peers.get(&peer_addr).unwrap().session_id;
+        mgr.handle_session_notification(SessionNotification::BackToIdle {
+            session_id,
+            role: rustbgpd_transport::SessionRole::Primary,
+            peer_addr,
+        })
+        .await;
         assert_eq!(mgr.dynamic_peer_count, 0);
         assert!(mgr.peers.is_empty());
         let dead = mgr
@@ -4632,8 +4996,13 @@ mod tests {
             .expect("dynamic peer present")
             .advertise_graceful_shutdown = true;
 
-        mgr.handle_session_notification(SessionNotification::BackToIdle { peer_addr })
-            .await;
+        let session_id = mgr.peers.get(&peer_addr).unwrap().session_id;
+        mgr.handle_session_notification(SessionNotification::BackToIdle {
+            session_id,
+            role: rustbgpd_transport::SessionRole::Primary,
+            peer_addr,
+        })
+        .await;
         assert!(mgr.peers.is_empty());
         let dead = mgr
             .dead_lettered_pending

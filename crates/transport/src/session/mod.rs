@@ -34,7 +34,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::{RemovePrivateAs, TransportConfig};
 use crate::error::TransportError;
 use crate::framing::ReadBuffer;
-use crate::handle::{PeerCommand, PeerSessionState, SessionNotification};
+use crate::handle::{PeerCommand, PeerSessionState, SessionIdentity, SessionNotification};
 use crate::timer::{Timers, poll_timer};
 
 use self::io::read_tcp;
@@ -138,6 +138,7 @@ pub(crate) struct PeerSession {
     /// Unbounded so notifications are never dropped and never block (avoids
     /// deadlock with `QueryState`). Rate is naturally bounded by FSM transitions.
     session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+    session_identity: SessionIdentity,
     /// Optional BMP event sender (None when BMP not configured).
     bmp_tx: Option<mpsc::Sender<BmpEvent>>,
     /// RPKI/ASPA validation snapshot for import policy evaluation.
@@ -234,6 +235,7 @@ impl PeerSession {
         unicast.len() + self.known_flowspec.len() + self.known_evpn.len()
     }
 
+    #[cfg(test)]
     #[expect(clippy::too_many_arguments)]
     pub(crate) fn new(
         config: TransportConfig,
@@ -246,6 +248,35 @@ impl PeerSession {
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
         advertise_graceful_shutdown: bool,
+    ) -> Self {
+        Self::new_with_identity(
+            config,
+            metrics,
+            commands,
+            rib_tx,
+            import_policy,
+            export_policy,
+            session_notify_tx,
+            bmp_tx,
+            validation_rx,
+            advertise_graceful_shutdown,
+            SessionIdentity::default(),
+        )
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    pub(crate) fn new_with_identity(
+        config: TransportConfig,
+        metrics: BgpMetrics,
+        commands: mpsc::Receiver<PeerCommand>,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
+        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+        validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
+        advertise_graceful_shutdown: bool,
+        session_identity: SessionIdentity,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
@@ -276,6 +307,7 @@ impl PeerSession {
             export_policy,
             advertise_graceful_shutdown,
             session_notify_tx,
+            session_identity,
             bmp_tx,
             validation_rx,
             local_open_pdu: None,
@@ -297,9 +329,8 @@ impl PeerSession {
         }
     }
 
-    /// Create a session for an inbound (already-connected) TCP stream.
     #[expect(clippy::too_many_arguments)]
-    pub(crate) fn new_inbound(
+    pub(crate) fn new_inbound_with_identity(
         config: TransportConfig,
         metrics: BgpMetrics,
         commands: mpsc::Receiver<PeerCommand>,
@@ -311,6 +342,7 @@ impl PeerSession {
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
         advertise_graceful_shutdown: bool,
+        session_identity: SessionIdentity,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
@@ -347,6 +379,7 @@ impl PeerSession {
             export_policy,
             advertise_graceful_shutdown,
             session_notify_tx,
+            session_identity,
             bmp_tx,
             validation_rx,
             local_open_pdu: None,

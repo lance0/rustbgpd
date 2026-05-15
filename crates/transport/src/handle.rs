@@ -20,12 +20,62 @@ use crate::config::TransportConfig;
 use crate::error::TransportError;
 use crate::session::PeerSession;
 
+/// Role of a session relative to the `PeerManager` entry that owns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionRole {
+    /// The current primary peer session.
+    Primary,
+    /// A temporary inbound collision candidate.
+    InboundCandidate,
+}
+
+/// Identity attached to `PeerManager` notifications so stale transitions from
+/// a superseded collision candidate cannot mutate the current peer entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionIdentity {
+    /// Peer-manager scoped session generation.
+    pub id: u64,
+    /// Session role when the handle was spawned.
+    pub role: SessionRole,
+}
+
+impl SessionIdentity {
+    /// Default identity for sessions whose caller does not need collision
+    /// generation tracking.
+    #[must_use]
+    pub const fn primary(id: u64) -> Self {
+        Self {
+            id,
+            role: SessionRole::Primary,
+        }
+    }
+
+    /// Identity for a live inbound collision candidate.
+    #[must_use]
+    pub const fn inbound_candidate(id: u64) -> Self {
+        Self {
+            id,
+            role: SessionRole::InboundCandidate,
+        }
+    }
+}
+
+impl Default for SessionIdentity {
+    fn default() -> Self {
+        Self::primary(0)
+    }
+}
+
 /// Notifications sent from a peer session to the `PeerManager` for
 /// collision detection coordination.
 #[derive(Debug)]
 pub enum SessionNotification {
     /// Session received a valid OPEN and transitioned to `OpenConfirm`.
     OpenReceived {
+        /// Peer-manager scoped session generation.
+        session_id: u64,
+        /// Role the session had when spawned.
+        role: SessionRole,
         /// IP address of the remote peer.
         peer_addr: IpAddr,
         /// Router ID from the peer's OPEN message.
@@ -33,6 +83,10 @@ pub enum SessionNotification {
     },
     /// Session fell back to Idle.
     BackToIdle {
+        /// Peer-manager scoped session generation.
+        session_id: u64,
+        /// Role the session had when spawned.
+        role: SessionRole,
         /// IP address of the remote peer.
         peer_addr: IpAddr,
     },
@@ -170,6 +224,35 @@ impl PeerHandle {
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
         advertise_graceful_shutdown: bool,
     ) -> Self {
+        Self::spawn_with_identity(
+            config,
+            metrics,
+            rib_tx,
+            import_policy,
+            export_policy,
+            session_notify_tx,
+            bmp_tx,
+            validation_rx,
+            advertise_graceful_shutdown,
+            SessionIdentity::default(),
+        )
+    }
+
+    /// Spawn a new primary peer session with an explicit notification identity.
+    #[must_use]
+    #[expect(clippy::too_many_arguments)]
+    pub fn spawn_with_identity(
+        config: TransportConfig,
+        metrics: BgpMetrics,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
+        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+        validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
+        advertise_graceful_shutdown: bool,
+        session_identity: SessionIdentity,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let peer_addr = config.remote_addr.ip();
         let remote_asn = config.peer.remote_asn;
@@ -177,7 +260,7 @@ impl PeerHandle {
         let span = tracing::info_span!("peer", %peer_addr, remote_asn, %peer_group);
         let task = tokio::spawn(
             async move {
-                let mut session = PeerSession::new(
+                let mut session = PeerSession::new_with_identity(
                     config,
                     metrics,
                     rx,
@@ -188,6 +271,7 @@ impl PeerHandle {
                     bmp_tx,
                     validation_rx,
                     advertise_graceful_shutdown,
+                    session_identity,
                 );
                 session.run().await
             }
@@ -214,6 +298,37 @@ impl PeerHandle {
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
         advertise_graceful_shutdown: bool,
     ) -> Self {
+        Self::spawn_inbound_with_identity(
+            config,
+            metrics,
+            rib_tx,
+            import_policy,
+            export_policy,
+            stream,
+            session_notify_tx,
+            bmp_tx,
+            validation_rx,
+            advertise_graceful_shutdown,
+            SessionIdentity::default(),
+        )
+    }
+
+    /// Spawn a new inbound peer session with an explicit notification identity.
+    #[must_use]
+    #[expect(clippy::too_many_arguments)]
+    pub fn spawn_inbound_with_identity(
+        config: TransportConfig,
+        metrics: BgpMetrics,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
+        stream: TcpStream,
+        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+        validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
+        advertise_graceful_shutdown: bool,
+        session_identity: SessionIdentity,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let peer_addr = config.remote_addr.ip();
         let remote_asn = config.peer.remote_asn;
@@ -221,7 +336,7 @@ impl PeerHandle {
         let span = tracing::info_span!("peer", %peer_addr, remote_asn, %peer_group);
         let task = tokio::spawn(
             async move {
-                let mut session = PeerSession::new_inbound(
+                let mut session = PeerSession::new_inbound_with_identity(
                     config,
                     metrics,
                     rx,
@@ -233,6 +348,7 @@ impl PeerHandle {
                     bmp_tx,
                     validation_rx,
                     advertise_graceful_shutdown,
+                    session_identity,
                 );
                 session.run().await
             }

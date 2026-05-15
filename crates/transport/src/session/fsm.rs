@@ -142,6 +142,8 @@ impl PeerSession {
                         if new == SessionState::OpenConfirm
                             && let Some(neg) = self.fsm.negotiated()
                             && let Err(e) = notify_tx.send(SessionNotification::OpenReceived {
+                                session_id: self.session_identity.id,
+                                role: self.session_identity.role,
                                 peer_addr: self.peer_ip,
                                 remote_router_id: neg.peer_router_id,
                             })
@@ -153,6 +155,8 @@ impl PeerSession {
                             );
                         } else if new == SessionState::Idle
                             && let Err(e) = notify_tx.send(SessionNotification::BackToIdle {
+                                session_id: self.session_identity.id,
+                                role: self.session_identity.role,
                                 peer_addr: self.peer_ip,
                             })
                         {
