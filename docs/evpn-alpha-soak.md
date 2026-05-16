@@ -256,12 +256,18 @@ landing, tracked here for visibility)
        asserts the clab veth before AND after every flip;
        process-restart flip path (`pkill -TERM rustbgpd`) preserves
        the clab `eth1`/`10.0.0.x` so post-flip BGP can actually
-       re-establish. README and template postmortem
-       ([`docs/soak-gate8b-mac-churn-1h.md`](soak-gate8b-mac-churn-1h.md))
-       in place.
-     - [ ] 1 h dry-run soak (running / pending result).
-     - [ ] 24 h soak. **This is the gate to flip the
-       `apply_bum_enforcement` default to `true`.**
+       re-establish.
+     - [x] 1 h dry-run soak — **PASSED** 2026-05-15
+       ([`docs/soak-gate8b-mac-churn-1h.md`](soak-gate8b-mac-churn-1h.md)).
+     - [x] 24 h soak — **PASSED** 2026-05-16
+       ([`docs/soak-gate8b-mac-churn-24h.md`](soak-gate8b-mac-churn-24h.md)).
+       0 FATAL / WARN / topology-loss across 24 h 0 m 14 s, 69
+       complete DF-flip cycles, ~478 K FDB ops, PE1 RSS settled
+       to a 17.23–18.93 MB plateau (peak 18.93 MB ≪ 100 MB gate;
+       slope envelope 0.08 MB/h ≪ 1 MB/h gate), 0 ADR-0059 drift
+       events. **This unblocks the production-default flip of
+       `apply_bum_enforcement` and `apply_aliasing_ecmp` to
+       `true`.**
   2. Optional import-side ES-Import RT filtering on the daemon's
      own RIB import path (we already *originate* the RT in Gate 8b
      prep; this would also *import* by it).
