@@ -553,13 +553,12 @@ async fn legacy_identity_constructor_preserves_state_changed_notifications() {
 }
 
 #[tokio::test]
-async fn terminal_idle_state_changed_precedes_back_to_idle() {
+async fn lifecycle_only_channel_receives_collision_adjacent_state_changes() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let metrics = BgpMetrics::new();
 
-    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<SessionNotification>();
-    let (lifecycle_tx, _lifecycle_rx) = mpsc::channel::<SessionLifecycleNotification>(8);
+    let (lifecycle_tx, mut lifecycle_rx) = mpsc::channel::<SessionLifecycleNotification>(8);
     let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
     let handle = PeerHandle::spawn_with_identity_and_lifecycle(
         transport_config(addr),
@@ -567,7 +566,7 @@ async fn terminal_idle_state_changed_precedes_back_to_idle() {
         rib_tx,
         None,
         None,
-        Some(notify_tx),
+        None,
         Some(lifecycle_tx),
         None,
         None,
@@ -586,31 +585,34 @@ async fn terminal_idle_state_changed_precedes_back_to_idle() {
     let notif = NotificationMessage::new(NotificationCode::Cease, 0, Bytes::new());
     send_bgp_message(&mut peer_stream, &Message::Notification(notif)).await;
 
-    let mut saw_idle_state_changed = false;
+    let mut saw_open_confirm = false;
     loop {
-        let notification = tokio::time::timeout(Duration::from_secs(5), notify_rx.recv())
+        let notification = tokio::time::timeout(Duration::from_secs(5), lifecycle_rx.recv())
             .await
-            .expect("terminal notifications should arrive")
-            .expect("notification channel should stay open");
+            .expect("lifecycle notifications should arrive")
+            .expect("lifecycle channel should stay open");
         match notification {
-            SessionNotification::StateChanged {
+            SessionLifecycleNotification::StateChanged {
+                session_id,
+                new: SessionState::OpenConfirm,
+                ..
+            } => {
+                assert_eq!(session_id, 9);
+                saw_open_confirm = true;
+            }
+            SessionLifecycleNotification::StateChanged {
                 session_id,
                 new: SessionState::Idle,
                 ..
             } => {
                 assert_eq!(session_id, 9);
-                saw_idle_state_changed = true;
-            }
-            SessionNotification::BackToIdle { session_id, .. } => {
-                assert_eq!(session_id, 9);
                 assert!(
-                    saw_idle_state_changed,
-                    "BackToIdle must not overtake terminal StateChanged"
+                    saw_open_confirm,
+                    "OpenConfirm should arrive before the terminal Idle transition"
                 );
                 break;
             }
-            SessionNotification::OpenReceived { .. } | SessionNotification::StateChanged { .. } => {
-            }
+            SessionLifecycleNotification::StateChanged { .. } => {}
         }
     }
 

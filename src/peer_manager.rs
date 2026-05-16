@@ -1935,6 +1935,12 @@ impl PeerManager {
         }
     }
 
+    fn drain_ready_session_lifecycle_notifications(&mut self) {
+        while let Ok(notification) = self.session_lifecycle_rx.try_recv() {
+            self.handle_session_lifecycle_notification(&notification);
+        }
+    }
+
     fn handle_state_changed_notification(
         &mut self,
         session_id: u64,
@@ -2470,6 +2476,7 @@ impl PeerManager {
                 }
                 notification = self.session_notify_rx.recv() => {
                     if let Some(notification) = notification {
+                        self.drain_ready_session_lifecycle_notifications();
                         self.handle_session_notification(notification).await;
                     }
                 }
@@ -2885,6 +2892,68 @@ mod tests {
         assert_eq!(event.session_role.as_deref(), Some("primary"));
         assert!(event.old_state.is_some());
         assert!(event.new_state.is_some());
+
+        tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn collision_notifications_flush_ready_lifecycle_events_first() {
+        let (tx, rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mut mgr = PeerManager::new(
+            rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+        );
+
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let (session_tx, mut session_rx) = mpsc::channel(8);
+        let task = tokio::spawn(async move {
+            while session_rx.recv().await.is_some() {}
+            Ok(())
+        });
+        insert_test_managed_peer(
+            &mut mgr,
+            addr,
+            PeerHandle::from_parts(session_tx, task),
+            false,
+        );
+        mgr.peers.get_mut(&addr).unwrap().is_dynamic = true;
+
+        let lifecycle_tx = mgr.session_lifecycle_tx.clone();
+        let notify_tx = mgr.session_notify_tx.clone();
+        let mut events = mgr.session_events_tx.subscribe();
+        let handle = tokio::spawn(mgr.run());
+
+        lifecycle_tx
+            .send(SessionLifecycleNotification::StateChanged {
+                session_id: 1,
+                role: rustbgpd_transport::SessionRole::Primary,
+                peer_addr: addr,
+                old: SessionState::Established,
+                new: SessionState::Idle,
+            })
+            .await
+            .unwrap();
+        notify_tx
+            .send(SessionNotification::BackToIdle {
+                session_id: 1,
+                role: rustbgpd_transport::SessionRole::Primary,
+                peer_addr: addr,
+            })
+            .unwrap();
+
+        let event = wait_for_session_event(&mut events, SessionLifecycleEventType::Lost).await;
+        assert_eq!(event.peer, addr);
+        assert_eq!(event.old_state, Some(SessionState::Established));
+        assert_eq!(event.new_state, Some(SessionState::Idle));
 
         tx.send(PeerManagerCommand::Shutdown).await.unwrap();
         handle.await.unwrap();

@@ -466,11 +466,11 @@ live stream carries route add / withdraw / best-change events plus structured
 session lifecycle events (`state_changed`, `established`, `lost`,
 `peer_enabled`, `peer_disabled`). Prefix and family filters are route-only;
 use `--category session` with peer and type filters when watching session
-events. Ordinary non-collision session state-change events use a bounded
-observability channel separate from the lossless TCP collision-coordination
-path, so a saturated watch stream can miss lifecycle events without blocking
-BGP collision handling. Policy, dataplane, EVPN, and notification events remain
-follow-up work. For recent route history instead of a live tail, use
+events. Session state-change events use a bounded observability channel
+separate from the lossless TCP collision-coordination path, so a saturated
+watch stream can miss lifecycle events without blocking BGP collision handling.
+Policy, dataplane, EVPN, and notification events remain follow-up work. For
+recent route history instead of a live tail, use
 `rustbgpctl events --prefix <PREFIX>`.
 
 ### Check health

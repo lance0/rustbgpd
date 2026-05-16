@@ -134,20 +134,15 @@ impl PeerSession {
                         new.as_str(),
                     );
 
-                    // Publish ordinary operator-facing lifecycle state changes
-                    // over the bounded lifecycle channel. Transitions paired
-                    // with collision-control notifications stay on the
-                    // lossless path below so PeerManager observes
-                    // StateChanged before OpenReceived / BackToIdle for the
-                    // same session. Existing callers that do not opt into the
-                    // lifecycle channel keep the legacy StateChanged
-                    // notification behavior.
-                    let ordered_collision_transition =
-                        matches!(new, SessionState::OpenConfirm | SessionState::Idle);
-                    if ordered_collision_transition || self.session_lifecycle_tx.is_none() {
-                        self.send_lossless_state_changed(old, new);
-                    } else {
+                    // Publish operator-facing lifecycle state changes over
+                    // one channel per session so PeerManager can preserve
+                    // per-session order. Existing callers that do not opt
+                    // into the lifecycle channel keep the legacy StateChanged
+                    // notification behavior on the lossless path.
+                    if self.session_lifecycle_tx.is_some() {
                         self.try_send_lifecycle_state_changed(old, new);
+                    } else {
+                        self.send_lossless_state_changed(old, new);
                     }
 
                     // Notify PeerManager for lossless collision detection.
