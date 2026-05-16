@@ -19,7 +19,7 @@ prometheus_addr = "127.0.0.1:9179"
 log_format = "json"
 
 # Local-only gRPC is still the safest default for an edge host. Use a
-# read-only TCP listener or mTLS proxy only when remote monitoring needs it.
+# read-only mTLS TCP listener or mTLS proxy only when remote monitoring needs it.
 [global.telemetry.grpc_uds]
 path = "/var/lib/rustbgpd/grpc.sock"
 mode = 0o600
