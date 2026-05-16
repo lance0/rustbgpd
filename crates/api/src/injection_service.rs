@@ -1053,7 +1053,7 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("exceeds maximum"));
+        assert!(err.message().contains("FlowSpec NLRI rule length"));
         assert!(matches!(
             rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
@@ -1072,7 +1072,7 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("exceeds maximum"));
+        assert!(err.message().contains("FlowSpec NLRI rule length"));
         assert!(matches!(
             rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
@@ -1189,7 +1189,7 @@ mod tests {
         let err =
             validate_flowspec_rule_encoded_len(&oversized_flowspec_rule(), Afi::Ipv4).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("exceeds maximum"));
+        assert!(err.message().contains("FlowSpec NLRI rule length"));
     }
 
     #[test]

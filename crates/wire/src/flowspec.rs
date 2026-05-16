@@ -11,7 +11,7 @@ use std::fmt;
 use std::net::Ipv4Addr;
 
 use crate::capability::Afi;
-use crate::error::DecodeError;
+use crate::error::{DecodeError, EncodeError};
 use crate::nlri::{Ipv4Prefix, Ipv6Prefix};
 
 /// Maximum encoded byte length of one `FlowSpec` rule NLRI.
@@ -201,15 +201,13 @@ impl FlowSpecRule {
     ///
     /// # Errors
     ///
-    /// Returns `DecodeError` if the encoded rule exceeds 4095 bytes.
-    pub fn validate_encoded_len(&self, afi: Afi) -> Result<(), DecodeError> {
+    /// Returns `EncodeError` if the encoded rule exceeds 4095 bytes.
+    pub fn validate_encoded_len(&self, afi: Afi) -> Result<(), EncodeError> {
         let len = self.encoded_len(afi);
         if len > MAX_FLOWSPEC_NLRI_RULE_LEN {
-            return Err(DecodeError::MalformedField {
-                message_type: "UPDATE",
-                detail: format!(
-                    "FlowSpec NLRI rule length {len} exceeds maximum {MAX_FLOWSPEC_NLRI_RULE_LEN}"
-                ),
+            return Err(EncodeError::ValueOutOfRange {
+                field: "FlowSpec NLRI rule length",
+                value: len.to_string(),
             });
         }
         Ok(())
@@ -1009,6 +1007,24 @@ mod tests {
         }
     }
 
+    fn exact_max_len_rule() -> FlowSpecRule {
+        // 1 byte component type + 2047 two-byte numeric operators = 4095 bytes.
+        let mut ops: Vec<NumericMatch> = (0..2047)
+            .map(|i| NumericMatch {
+                end_of_list: false,
+                and_bit: i != 0,
+                lt: false,
+                gt: false,
+                eq: true,
+                value: 1,
+            })
+            .collect();
+        ops.last_mut().expect("non-empty test rule").end_of_list = true;
+        FlowSpecRule {
+            components: vec![FlowSpecComponent::Port(ops)],
+        }
+    }
+
     #[test]
     fn numeric_ops_roundtrip() {
         let ops = vec![
@@ -1193,10 +1209,18 @@ mod tests {
         assert!(rule.encoded_len(Afi::Ipv4) > MAX_FLOWSPEC_NLRI_RULE_LEN);
 
         let err = rule.validate_encoded_len(Afi::Ipv4).unwrap_err();
-        let DecodeError::MalformedField { detail, .. } = err else {
-            panic!("expected MalformedField");
+        let EncodeError::ValueOutOfRange { field, value } = err else {
+            panic!("expected ValueOutOfRange");
         };
-        assert!(detail.contains("exceeds maximum"));
+        assert_eq!(field, "FlowSpec NLRI rule length");
+        assert_eq!(value, rule.encoded_len(Afi::Ipv4).to_string());
+    }
+
+    #[test]
+    fn encoded_len_accepts_exact_4095_byte_rule() {
+        let rule = exact_max_len_rule();
+        assert_eq!(rule.encoded_len(Afi::Ipv4), MAX_FLOWSPEC_NLRI_RULE_LEN);
+        rule.validate_encoded_len(Afi::Ipv4).unwrap();
     }
 
     #[test]
