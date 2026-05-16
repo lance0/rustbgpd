@@ -11,8 +11,15 @@ use std::fmt;
 use std::net::Ipv4Addr;
 
 use crate::capability::Afi;
-use crate::error::DecodeError;
+use crate::error::{DecodeError, EncodeError};
 use crate::nlri::{Ipv4Prefix, Ipv6Prefix};
+
+/// Maximum encoded byte length of one `FlowSpec` rule NLRI.
+///
+/// RFC 8955 uses a 12-bit extended length form for a single `FlowSpec`
+/// rule, so values above 4095 cannot be represented without corrupting
+/// the length field.
+pub const MAX_FLOWSPEC_NLRI_RULE_LEN: usize = 0x0FFF;
 
 // ---------------------------------------------------------------------------
 // Numeric operator — RFC 8955 §3.1 Figure 2
@@ -176,6 +183,32 @@ impl FlowSpecRule {
                     ),
                 });
             }
+        }
+        Ok(())
+    }
+
+    /// Return this rule's encoded `FlowSpec` NLRI payload length, excluding
+    /// the one- or two-byte `FlowSpec` rule length prefix.
+    #[must_use]
+    pub fn encoded_len(&self, afi: Afi) -> usize {
+        let mut rule_bytes = Vec::new();
+        encode_flowspec_rule(self, &mut rule_bytes, afi);
+        rule_bytes.len()
+    }
+
+    /// Validate that this rule can be represented by `FlowSpec`'s 12-bit rule
+    /// length field.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EncodeError` if the encoded rule exceeds 4095 bytes.
+    pub fn validate_encoded_len(&self, afi: Afi) -> Result<(), EncodeError> {
+        let len = self.encoded_len(afi);
+        if len > MAX_FLOWSPEC_NLRI_RULE_LEN {
+            return Err(EncodeError::ValueOutOfRange {
+                field: "FlowSpec NLRI rule length",
+                value: len.to_string(),
+            });
         }
         Ok(())
     }
@@ -420,13 +453,42 @@ pub fn decode_flowspec_nlri(mut buf: &[u8], afi: Afi) -> Result<Vec<FlowSpecRule
 }
 
 /// Encode `FlowSpec` NLRI rules to wire bytes.
-pub fn encode_flowspec_nlri(rules: &[FlowSpecRule], buf: &mut Vec<u8>, afi: Afi) {
+///
+/// # Errors
+///
+/// Returns [`EncodeError`] if any rule exceeds the 4095-byte `FlowSpec` NLRI
+/// rule payload limit. On error, `buf` is restored to its original length.
+pub fn try_encode_flowspec_nlri(
+    rules: &[FlowSpecRule],
+    buf: &mut Vec<u8>,
+    afi: Afi,
+) -> Result<(), EncodeError> {
+    let start_len = buf.len();
     for rule in rules {
         let mut rule_bytes = Vec::new();
         encode_flowspec_rule(rule, &mut rule_bytes, afi);
+        if rule_bytes.len() > MAX_FLOWSPEC_NLRI_RULE_LEN {
+            buf.truncate(start_len);
+            return Err(EncodeError::ValueOutOfRange {
+                field: "FlowSpec NLRI rule length",
+                value: rule_bytes.len().to_string(),
+            });
+        }
         encode_flowspec_length(rule_bytes.len(), buf);
         buf.extend_from_slice(&rule_bytes);
     }
+    Ok(())
+}
+
+/// Encode `FlowSpec` NLRI rules to wire bytes.
+///
+/// Locally constructed rules must be checked with
+/// [`FlowSpecRule::validate_encoded_len`] before they reach this encoder.
+/// Rules decoded from a peer are already bounded by the on-wire 12-bit
+/// `FlowSpec` length prefix.
+pub(crate) fn encode_flowspec_nlri(rules: &[FlowSpecRule], buf: &mut Vec<u8>, afi: Afi) {
+    try_encode_flowspec_nlri(rules, buf, afi)
+        .expect("FlowSpec NLRI encoder received an oversized rule");
 }
 
 /// Decode `FlowSpec` NLRI length prefix.
@@ -952,6 +1014,41 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
 
+    fn oversized_rule() -> FlowSpecRule {
+        let mut ops: Vec<NumericMatch> = (0..2_200)
+            .map(|i| NumericMatch {
+                end_of_list: false,
+                and_bit: i != 0,
+                lt: false,
+                gt: false,
+                eq: true,
+                value: i,
+            })
+            .collect();
+        ops.last_mut().expect("non-empty test rule").end_of_list = true;
+        FlowSpecRule {
+            components: vec![FlowSpecComponent::Port(ops)],
+        }
+    }
+
+    fn exact_max_len_rule() -> FlowSpecRule {
+        // 1 byte component type + 2047 two-byte numeric operators = 4095 bytes.
+        let mut ops: Vec<NumericMatch> = (0..2047)
+            .map(|i| NumericMatch {
+                end_of_list: false,
+                and_bit: i != 0,
+                lt: false,
+                gt: false,
+                eq: true,
+                value: 1,
+            })
+            .collect();
+        ops.last_mut().expect("non-empty test rule").end_of_list = true;
+        FlowSpecRule {
+            components: vec![FlowSpecComponent::Port(ops)],
+        }
+    }
+
     #[test]
     fn numeric_ops_roundtrip() {
         let ops = vec![
@@ -1128,6 +1225,42 @@ mod tests {
         let (decoded_len, consumed) = decode_flowspec_length(&buf).unwrap();
         assert_eq!(decoded_len, len);
         assert_eq!(consumed, 2);
+    }
+
+    #[test]
+    fn encoded_len_rejects_over_4095_byte_rule() {
+        let rule = oversized_rule();
+        assert!(rule.encoded_len(Afi::Ipv4) > MAX_FLOWSPEC_NLRI_RULE_LEN);
+
+        let err = rule.validate_encoded_len(Afi::Ipv4).unwrap_err();
+        let EncodeError::ValueOutOfRange { field, value } = err else {
+            panic!("expected ValueOutOfRange");
+        };
+        assert_eq!(field, "FlowSpec NLRI rule length");
+        assert_eq!(value, rule.encoded_len(Afi::Ipv4).to_string());
+    }
+
+    #[test]
+    fn encoded_len_accepts_exact_4095_byte_rule() {
+        let rule = exact_max_len_rule();
+        assert_eq!(rule.encoded_len(Afi::Ipv4), MAX_FLOWSPEC_NLRI_RULE_LEN);
+        rule.validate_encoded_len(Afi::Ipv4).unwrap();
+    }
+
+    #[test]
+    fn try_encode_flowspec_nlri_rejects_oversized_rule_without_mutating_buffer() {
+        let mut buf = vec![0xaa, 0xbb];
+        let rule = oversized_rule();
+
+        let err =
+            try_encode_flowspec_nlri(std::slice::from_ref(&rule), &mut buf, Afi::Ipv4).unwrap_err();
+
+        let EncodeError::ValueOutOfRange { field, value } = err else {
+            panic!("expected ValueOutOfRange");
+        };
+        assert_eq!(field, "FlowSpec NLRI rule length");
+        assert_eq!(value, rule.encoded_len(Afi::Ipv4).to_string());
+        assert_eq!(buf, vec![0xaa, 0xbb]);
     }
 
     #[test]

@@ -749,6 +749,11 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.InjectionService/DeleteFlowSpec
 ```
 
+FlowSpec component lists must be non-empty, in ascending type-code order,
+and limited to the supported RFC 8955 / RFC 8956 unicast component set.
+Each injected or withdrawn rule must also encode to at most 4095 NLRI
+payload bytes; larger rules are rejected with `InvalidArgument`.
+
 ### Inject an EVPN Type 2 (MAC/IP) route
 
 ```bash

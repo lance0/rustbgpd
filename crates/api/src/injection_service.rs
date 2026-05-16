@@ -279,6 +279,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         let rule = FlowSpecRule { components };
         rule.validate()
             .map_err(|e| Status::invalid_argument(format!("invalid FlowSpec rule: {e}")))?;
+        validate_flowspec_rule_encoded_len(&rule, afi)?;
 
         let mut attributes: Vec<PathAttribute> = vec![
             PathAttribute::Origin(Origin::Igp),
@@ -347,6 +348,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         let rule = FlowSpecRule { components };
         rule.validate()
             .map_err(|e| Status::invalid_argument(format!("invalid FlowSpec rule: {e}")))?;
+        validate_flowspec_rule_encoded_len(&rule, afi)?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
@@ -541,6 +543,11 @@ fn parse_flowspec_components(
         result.push(comp);
     }
     Ok(result)
+}
+
+fn validate_flowspec_rule_encoded_len(rule: &FlowSpecRule, afi: Afi) -> Result<(), Status> {
+    rule.validate_encoded_len(afi)
+        .map_err(|e| Status::invalid_argument(format!("invalid FlowSpec rule: {e}")))
 }
 
 /// Parse a prefix string (e.g., "10.0.0.0/24") into a `FlowSpecPrefix`.
@@ -975,6 +982,41 @@ mod tests {
         InjectionService::new(tx, AccessMode::ReadWrite)
     }
 
+    fn make_service_with_rx() -> (InjectionService, mpsc::Receiver<RibUpdate>) {
+        let (tx, rx) = mpsc::channel(16);
+        (InjectionService::new(tx, AccessMode::ReadWrite), rx)
+    }
+
+    fn oversized_flowspec_component() -> proto::FlowSpecComponent {
+        let value = (0..2_200)
+            .map(|i| format!("={i}"))
+            .collect::<Vec<_>>()
+            .join(" & ");
+        proto::FlowSpecComponent {
+            r#type: 4,
+            prefix: String::new(),
+            value,
+            offset: 0,
+        }
+    }
+
+    fn oversized_flowspec_rule() -> FlowSpecRule {
+        let mut ops: Vec<NumericMatch> = (0..2_200)
+            .map(|i| NumericMatch {
+                end_of_list: false,
+                and_bit: i != 0,
+                lt: false,
+                gt: false,
+                eq: true,
+                value: i,
+            })
+            .collect();
+        ops.last_mut().expect("non-empty test rule").end_of_list = true;
+        FlowSpecRule {
+            components: vec![FlowSpecComponent::Port(ops)],
+        }
+    }
+
     #[tokio::test]
     async fn add_path_rejects_zero_next_hop() {
         let svc = make_service();
@@ -994,6 +1036,47 @@ mod tests {
         let err = svc.add_path(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("0.0.0.0"));
+    }
+
+    #[tokio::test]
+    async fn add_flow_spec_rejects_oversized_rule_before_rib_update() {
+        let (svc, mut rx) = make_service_with_rx();
+        let err = svc
+            .add_flow_spec(Request::new(proto::AddFlowSpecRequest {
+                afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                components: vec![oversized_flowspec_component()],
+                actions: vec![],
+                communities: vec![],
+                extended_communities: vec![],
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("FlowSpec NLRI rule length"));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_flow_spec_rejects_oversized_rule_before_rib_update() {
+        let (svc, mut rx) = make_service_with_rx();
+        let err = svc
+            .delete_flow_spec(Request::new(proto::DeleteFlowSpecRequest {
+                afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                components: vec![oversized_flowspec_component()],
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("FlowSpec NLRI rule length"));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]
@@ -1099,6 +1182,14 @@ mod tests {
             parse_flowspec_prefix("192.0.2.0/24", Afi::Ipv4, "destination prefix", 4).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("IPv6 FlowSpec"));
+    }
+
+    #[test]
+    fn validate_flowspec_rule_encoded_len_rejects_oversized_rule() {
+        let err =
+            validate_flowspec_rule_encoded_len(&oversized_flowspec_rule(), Afi::Ipv4).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("FlowSpec NLRI rule length"));
     }
 
     #[test]
