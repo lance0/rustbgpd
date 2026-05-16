@@ -1,12 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, DynamicNeighborInfo, PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig,
-    PolicyEvent, ReconcileFailure, ReconcileFailureKind, ReconcileResult, SessionEvent,
-    SessionLifecycleEvent, SessionLifecycleEventType, SessionNotificationEvent,
-    SessionNotificationEventType, SetGshutError,
+    PolicyEvent, ReconcileFailure, ReconcileFailureKind, ReconcileResult,
+    SESSION_EVENT_HISTORY_CAPACITY, SessionEvent, SessionLifecycleEvent, SessionLifecycleEventType,
+    SessionNotificationEvent, SessionNotificationEventType, SetGshutError,
 };
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::{PeerConfig, SessionState};
@@ -180,6 +180,7 @@ pub struct PeerManager {
     session_notification_event_tx: mpsc::Sender<TransportNotificationEvent>,
     session_notification_event_rx: mpsc::Receiver<TransportNotificationEvent>,
     session_events_tx: broadcast::Sender<SessionEvent>,
+    session_event_history: VecDeque<SessionLifecycleEvent>,
     policy_events_tx: broadcast::Sender<PolicyEvent>,
     current_config: Config,
     /// Resolved dynamic neighbor ranges for prefix-based auto-accept.
@@ -370,6 +371,7 @@ impl PeerManager {
             session_notification_event_tx,
             session_notification_event_rx,
             session_events_tx,
+            session_event_history: VecDeque::with_capacity(SESSION_EVENT_HISTORY_CAPACITY),
             policy_events_tx,
             dynamic_ranges: Self::parse_dynamic_ranges(&current_config),
             dynamic_peer_count: 0,
@@ -898,11 +900,17 @@ impl PeerManager {
         }
     }
 
-    fn publish_session_event(&self, event: SessionEvent) {
+    fn publish_session_event(&mut self, event: SessionEvent) {
+        if let SessionEvent::Lifecycle(lifecycle) = &event {
+            if self.session_event_history.len() >= SESSION_EVENT_HISTORY_CAPACITY {
+                self.session_event_history.pop_front();
+            }
+            self.session_event_history.push_back(lifecycle.clone());
+        }
         let _ = self.session_events_tx.send(event);
     }
 
-    fn publish_lifecycle_event(&self, event: SessionLifecycleEvent) {
+    fn publish_lifecycle_event(&mut self, event: SessionLifecycleEvent) {
         self.publish_session_event(SessionEvent::Lifecycle(event));
     }
 
@@ -994,7 +1002,7 @@ impl PeerManager {
     }
 
     fn publish_peer_lifecycle_event(
-        &self,
+        &mut self,
         address: IpAddr,
         event_type: SessionLifecycleEventType,
         reason: String,
@@ -1011,7 +1019,7 @@ impl PeerManager {
     }
 
     fn publish_state_lifecycle_event(
-        &self,
+        &mut self,
         peer_addr: IpAddr,
         role: rustbgpd_transport::SessionRole,
         old: SessionState,
@@ -1051,7 +1059,7 @@ impl PeerManager {
         });
     }
 
-    fn publish_notification_event(&self, event: TransportNotificationEvent) {
+    fn publish_notification_event(&mut self, event: TransportNotificationEvent) {
         let event_type = match event.direction {
             TransportNotificationDirection::Sent => SessionNotificationEventType::Sent,
             TransportNotificationDirection::Received => SessionNotificationEventType::Received,
@@ -1075,6 +1083,35 @@ impl PeerManager {
             shutdown_reason: event.shutdown_reason,
             reason,
         }));
+    }
+
+    fn handle_query_session_event_history(
+        &self,
+        peer: Option<IpAddr>,
+        event_types: &BTreeSet<SessionLifecycleEventType>,
+        limit: usize,
+        reply: oneshot::Sender<Vec<SessionLifecycleEvent>>,
+    ) {
+        let limit = if limit == 0 {
+            SESSION_EVENT_HISTORY_CAPACITY
+        } else {
+            limit.min(SESSION_EVENT_HISTORY_CAPACITY)
+        };
+
+        let mut events: Vec<SessionLifecycleEvent> = self
+            .session_event_history
+            .iter()
+            .rev()
+            .filter(|event| match peer {
+                Some(peer) => event.peer == peer,
+                None => true,
+            })
+            .filter(|event| event_types.is_empty() || event_types.contains(&event.event_type))
+            .take(limit)
+            .cloned()
+            .collect();
+        events.reverse();
+        let _ = reply.send(events);
     }
 
     async fn enable_peer(&mut self, address: IpAddr) -> Result<(), String> {
@@ -2404,6 +2441,19 @@ impl PeerManager {
                         PeerManagerCommand::SubscribePolicyEvents { reply } => {
                             let _ = reply.send(self.policy_events_tx.subscribe());
                         }
+                        PeerManagerCommand::QuerySessionEventHistory {
+                            peer,
+                            event_types,
+                            limit,
+                            reply,
+                        } => {
+                            self.handle_query_session_event_history(
+                                peer,
+                                &event_types,
+                                limit,
+                                reply,
+                            );
+                        }
                         PeerManagerCommand::GetPeerState { address, reply } => {
                             let info = self.get_peer_info(address).await;
                             let _ = reply.send(info);
@@ -2724,6 +2774,32 @@ mod tests {
             }
         }
         panic!("session event {event_type:?} did not arrive");
+    }
+
+    fn test_peer_manager() -> PeerManager {
+        let (_tx, rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        PeerManager::new(
+            rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        )
+    }
+
+    async fn query_session_event_history(
+        mgr: &PeerManager,
+        peer: Option<IpAddr>,
+        event_types: BTreeSet<SessionLifecycleEventType>,
+        limit: usize,
+    ) -> Vec<SessionLifecycleEvent> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        mgr.handle_query_session_event_history(peer, &event_types, limit, reply_tx);
+        reply_rx.await.unwrap()
     }
 
     fn mock_open(router_id: Ipv4Addr) -> OpenMessage {
@@ -3172,6 +3248,91 @@ mod tests {
 
         tx.send(PeerManagerCommand::Shutdown).await.unwrap();
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_event_history_records_events_without_subscriber() {
+        let mut mgr = test_peer_manager();
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        mgr.publish_peer_lifecycle_event(
+            addr,
+            SessionLifecycleEventType::PeerEnabled,
+            "peer enabled".to_string(),
+        );
+
+        let events = query_session_event_history(&mgr, None, BTreeSet::new(), 0).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].peer, addr);
+        assert_eq!(events[0].event_type, SessionLifecycleEventType::PeerEnabled);
+    }
+
+    #[tokio::test]
+    async fn session_event_history_filters_peer_type_and_limit_in_order() {
+        let mut mgr = test_peer_manager();
+        let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        mgr.publish_peer_lifecycle_event(
+            peer1,
+            SessionLifecycleEventType::PeerEnabled,
+            "old match".to_string(),
+        );
+        mgr.publish_peer_lifecycle_event(
+            peer2,
+            SessionLifecycleEventType::PeerEnabled,
+            "wrong peer".to_string(),
+        );
+        mgr.publish_peer_lifecycle_event(
+            peer1,
+            SessionLifecycleEventType::PeerDisabled,
+            "wrong type".to_string(),
+        );
+        mgr.publish_peer_lifecycle_event(
+            peer1,
+            SessionLifecycleEventType::PeerEnabled,
+            "middle match".to_string(),
+        );
+        mgr.publish_peer_lifecycle_event(
+            peer1,
+            SessionLifecycleEventType::PeerEnabled,
+            "newest match".to_string(),
+        );
+
+        let events = query_session_event_history(
+            &mgr,
+            Some(peer1),
+            [SessionLifecycleEventType::PeerEnabled]
+                .into_iter()
+                .collect(),
+            2,
+        )
+        .await;
+        let reasons: Vec<_> = events.iter().map(|event| event.reason.as_str()).collect();
+        assert_eq!(reasons, vec!["middle match", "newest match"]);
+    }
+
+    #[tokio::test]
+    async fn session_event_history_capacity_evicts_oldest() {
+        let mut mgr = test_peer_manager();
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        for idx in 0..=SESSION_EVENT_HISTORY_CAPACITY {
+            mgr.publish_peer_lifecycle_event(
+                addr,
+                SessionLifecycleEventType::StateChanged,
+                format!("event-{idx}"),
+            );
+        }
+
+        let events = query_session_event_history(&mgr, None, BTreeSet::new(), 0).await;
+        assert_eq!(events.len(), SESSION_EVENT_HISTORY_CAPACITY);
+        assert_eq!(events[0].reason, "event-1");
+        let expected_last = format!("event-{SESSION_EVENT_HISTORY_CAPACITY}");
+        assert_eq!(
+            events.last().map(|event| event.reason.as_str()),
+            Some(expected_last.as_str())
+        );
     }
 
     #[tokio::test]

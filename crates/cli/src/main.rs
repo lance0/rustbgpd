@@ -159,9 +159,9 @@ enum Command {
         #[arg(long)]
         prefix: Option<String>,
 
-        /// Maximum recent events to return
-        #[arg(short, long, default_value_t = 100)]
-        limit: u32,
+        /// Maximum recent route events to return (default 100; route history only)
+        #[arg(short, long)]
+        limit: Option<u32>,
     },
 
     /// Check daemon health
@@ -509,6 +509,21 @@ enum EventsAction {
         #[arg(long, default_value_t = 0)]
         backfill: u32,
     },
+    /// Show recent session lifecycle events
+    Sessions {
+        /// Neighbor address filter
+        #[arg(long)]
+        address: Option<String>,
+
+        /// Session event type filter: state_changed, established, lost,
+        /// peer_enabled, peer_disabled
+        #[arg(long = "type", value_delimiter = ',')]
+        event_types: Vec<String>,
+
+        /// Maximum recent session events to return (default 100; explicit 0 requests the daemon's full bounded window)
+        #[arg(short, long)]
+        limit: Option<u32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -641,6 +656,21 @@ fn reject_rib_status_filters(
     {
         return Err(CliError::Argument(format!(
             "rib {command} does not support route filters; use `rustbgpctl rib {command}`"
+        )));
+    }
+    Ok(())
+}
+
+fn reject_events_parent_filters_for_subcommand(
+    subcommand: &str,
+    address: &Option<String>,
+    family: &Option<String>,
+    prefix: &Option<String>,
+    limit: Option<u32>,
+) -> Result<(), CliError> {
+    if address.is_some() || family.is_some() || prefix.is_some() || limit.is_some() {
+        return Err(CliError::Argument(format!(
+            "`events` route-history filters must be used without a subcommand; put live/history filters after `{subcommand}` instead"
         )));
     }
     Ok(())
@@ -954,20 +984,27 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         } => match action {
             Some(EventsAction::Watch {
                 categories,
-                address,
-                family,
-                prefix,
+                address: watch_address,
+                family: watch_family,
+                prefix: watch_prefix,
                 event_types,
                 backfill,
             }) => {
-                let family_val = resolve_family(&family)?;
+                reject_events_parent_filters_for_subcommand(
+                    "events watch",
+                    &address,
+                    &family,
+                    &prefix,
+                    limit,
+                )?;
+                let family_val = resolve_family(&watch_family)?;
                 commands::watch::events_watch(
                     connection,
                     commands::watch::EventsWatchOptions {
                         categories,
-                        neighbor: address,
+                        neighbor: watch_address,
                         family: family_val,
-                        prefix,
+                        prefix: watch_prefix,
                         event_types,
                         backfill,
                         json,
@@ -975,8 +1012,31 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 )
                 .await
             }
+            Some(EventsAction::Sessions {
+                address: session_address,
+                event_types,
+                limit: session_limit,
+            }) => {
+                reject_events_parent_filters_for_subcommand(
+                    "events sessions",
+                    &address,
+                    &family,
+                    &prefix,
+                    limit,
+                )?;
+                let limit = session_limit.unwrap_or(100);
+                commands::watch::session_history(
+                    connection,
+                    session_address,
+                    event_types,
+                    limit,
+                    json,
+                )
+                .await
+            }
             None => {
                 let family_val = resolve_family(&family)?;
+                let limit = limit.unwrap_or(100);
                 commands::watch::history(connection, address, family_val, prefix, limit, json).await
             }
         },
@@ -1514,7 +1574,7 @@ mod tests {
             Command::Events {
                 action: None,
                 prefix: Some(ref prefix),
-                limit: 25,
+                limit: Some(25),
                 ..
             } if prefix == "203.0.113.0/24"
         ));
@@ -1595,6 +1655,75 @@ mod tests {
                 }),
                 ..
             } if categories == &vec!["policy".to_string()] && event_types == &vec!["policy_changed".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_parse_events_sessions() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "events",
+            "sessions",
+            "--address",
+            "10.0.0.2",
+            "--type",
+            "established,lost",
+            "--limit",
+            "5",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Events {
+                action: Some(EventsAction::Sessions {
+                    address: Some(ref address),
+                    ref event_types,
+                    limit: Some(5),
+                }),
+                ..
+            } if address == "10.0.0.2" && event_types.len() == 2
+        ));
+    }
+
+    #[test]
+    fn events_parent_filters_are_rejected_for_subcommands() {
+        let err = reject_events_parent_filters_for_subcommand(
+            "events sessions",
+            &Some("10.0.0.2".to_string()),
+            &None,
+            &None,
+            Some(5),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("route-history filters"),
+            "unexpected error: {err}"
+        );
+
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "events",
+            "--address",
+            "10.0.0.2",
+            "--limit",
+            "5",
+            "sessions",
+            "--type",
+            "lost",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Events {
+                action: Some(EventsAction::Sessions {
+                    address: None,
+                    ref event_types,
+                    limit: None,
+                }),
+                address: Some(ref address),
+                limit: Some(5),
+                ..
+            } if address == "10.0.0.2" && event_types == &vec!["lost".to_string()]
         ));
     }
 

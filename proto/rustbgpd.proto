@@ -533,6 +533,7 @@ service RibService {
 
 service EventService {
   rpc WatchEvents(WatchEventsRequest) returns (stream BgpEvent);
+  rpc ListSessionEvents(ListSessionEventsRequest) returns (ListSessionEventsResponse);
 }
 
 message ListRoutesRequest {
@@ -872,6 +873,23 @@ message WatchEventsRequest {
   // session events do not match a prefix-filtered request.
   string prefix = 5;
   uint32 prefix_length = 6;
+}
+
+message ListSessionEventsRequest {
+  // Optional neighbor address filter. Empty = all peers.
+  string neighbor_address = 1;
+  // Empty = all session event types.
+  repeated BgpEventType event_types = 2;
+  // Maximum events to return from the bounded 4096-event in-memory
+  // history. 0 uses the daemon default/full bounded window. Larger
+  // values are clamped to the same 4096-event ceiling. Responses
+  // contain the most recent matching events, ordered oldest-to-newest
+  // within that selected recent window.
+  uint32 limit = 3;
+}
+
+message ListSessionEventsResponse {
+  repeated BgpEvent events = 1;
 }
 
 message SessionEvent {
