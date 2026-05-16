@@ -34,7 +34,10 @@ use tracing::{debug, error, info, warn};
 use crate::config::{RemovePrivateAs, TransportConfig};
 use crate::error::TransportError;
 use crate::framing::ReadBuffer;
-use crate::handle::{PeerCommand, PeerSessionState, SessionIdentity, SessionNotification};
+use crate::handle::{
+    PeerCommand, PeerSessionState, SessionIdentity, SessionLifecycleNotification,
+    SessionNotification,
+};
 use crate::timer::{Timers, poll_timer};
 
 use self::io::read_tcp;
@@ -134,10 +137,16 @@ pub(crate) struct PeerSession {
     /// (`KNOWN_ISSUES.md`): operators re-issue `rustbgpctl gshut` after
     /// daemon restart if the maintenance window is still active.
     advertise_graceful_shutdown: bool,
-    /// Channel to notify `PeerManager` of session state changes (collision detection).
+    /// Channel to notify `PeerManager` of lossless collision-coordination events.
     /// Unbounded so notifications are never dropped and never block (avoids
-    /// deadlock with `QueryState`). Rate is naturally bounded by FSM transitions.
+    /// deadlock with `QueryState`).
     session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+    /// Bounded operator-facing lifecycle event channel.
+    ///
+    /// This carries ordinary FSM `StateChanged` observations used by
+    /// `EventService.WatchEvents`. It is intentionally lossy under sustained
+    /// churn so observability cannot grow the collision-coordination channel.
+    session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
     session_identity: SessionIdentity,
     /// Optional BMP event sender (None when BMP not configured).
     bmp_tx: Option<mpsc::Sender<BmpEvent>>,
@@ -249,7 +258,7 @@ impl PeerSession {
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
         advertise_graceful_shutdown: bool,
     ) -> Self {
-        Self::new_with_identity(
+        Self::new_with_identity_and_lifecycle(
             config,
             metrics,
             commands,
@@ -257,6 +266,7 @@ impl PeerSession {
             import_policy,
             export_policy,
             session_notify_tx,
+            None,
             bmp_tx,
             validation_rx,
             advertise_graceful_shutdown,
@@ -265,7 +275,7 @@ impl PeerSession {
     }
 
     #[expect(clippy::too_many_arguments)]
-    pub(crate) fn new_with_identity(
+    pub(crate) fn new_with_identity_and_lifecycle(
         config: TransportConfig,
         metrics: BgpMetrics,
         commands: mpsc::Receiver<PeerCommand>,
@@ -273,6 +283,7 @@ impl PeerSession {
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
         advertise_graceful_shutdown: bool,
@@ -307,6 +318,7 @@ impl PeerSession {
             export_policy,
             advertise_graceful_shutdown,
             session_notify_tx,
+            session_lifecycle_tx,
             session_identity,
             bmp_tx,
             validation_rx,
@@ -330,7 +342,7 @@ impl PeerSession {
     }
 
     #[expect(clippy::too_many_arguments)]
-    pub(crate) fn new_inbound_with_identity(
+    pub(crate) fn new_inbound_with_identity_and_lifecycle(
         config: TransportConfig,
         metrics: BgpMetrics,
         commands: mpsc::Receiver<PeerCommand>,
@@ -339,6 +351,7 @@ impl PeerSession {
         export_policy: Option<PolicyChain>,
         stream: TcpStream,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
         advertise_graceful_shutdown: bool,
@@ -379,6 +392,7 @@ impl PeerSession {
             export_policy,
             advertise_graceful_shutdown,
             session_notify_tx,
+            session_lifecycle_tx,
             session_identity,
             bmp_tx,
             validation_rx,

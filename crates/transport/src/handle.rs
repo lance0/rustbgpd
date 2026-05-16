@@ -66,11 +66,19 @@ impl Default for SessionIdentity {
     }
 }
 
-/// Notifications sent from a peer session to the `PeerManager` for
-/// collision coordination and lifecycle event publication.
+/// Lossless notifications sent from a peer session to the `PeerManager` for
+/// TCP collision coordination.
+///
+/// This path is intentionally unbounded so collision decisions never block or
+/// drop. High-volume operator lifecycle events use
+/// [`SessionLifecycleNotification`] instead.
 #[derive(Debug)]
 pub enum SessionNotification {
     /// BGP FSM state changed.
+    ///
+    /// Kept for compatibility with tests and external users of the transport
+    /// crate. New peer sessions publish state changes over the bounded
+    /// [`SessionLifecycleNotification`] channel when one is configured.
     StateChanged {
         /// Peer-manager scoped session generation.
         session_id: u64,
@@ -102,6 +110,28 @@ pub enum SessionNotification {
         role: SessionRole,
         /// IP address of the remote peer.
         peer_addr: IpAddr,
+    },
+}
+
+/// Bounded lifecycle notification sent from a peer session to `PeerManager`.
+///
+/// These events back operator-facing streams such as
+/// `EventService.WatchEvents`. They may be dropped under sustained churn rather
+/// than allowing observability traffic to grow the lossless collision channel.
+#[derive(Debug)]
+pub enum SessionLifecycleNotification {
+    /// BGP FSM state changed.
+    StateChanged {
+        /// Peer-manager scoped session generation.
+        session_id: u64,
+        /// Role the session had when spawned.
+        role: SessionRole,
+        /// IP address of the remote peer.
+        peer_addr: IpAddr,
+        /// Previous FSM state.
+        old: SessionState,
+        /// New FSM state.
+        new: SessionState,
     },
 }
 
@@ -266,6 +296,38 @@ impl PeerHandle {
         advertise_graceful_shutdown: bool,
         session_identity: SessionIdentity,
     ) -> Self {
+        Self::spawn_with_identity_and_lifecycle(
+            config,
+            metrics,
+            rib_tx,
+            import_policy,
+            export_policy,
+            session_notify_tx,
+            None,
+            bmp_tx,
+            validation_rx,
+            advertise_graceful_shutdown,
+            session_identity,
+        )
+    }
+
+    /// Spawn a new primary peer session with explicit notification identity and
+    /// bounded lifecycle event channel.
+    #[must_use]
+    #[expect(clippy::too_many_arguments)]
+    pub fn spawn_with_identity_and_lifecycle(
+        config: TransportConfig,
+        metrics: BgpMetrics,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
+        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
+        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+        validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
+        advertise_graceful_shutdown: bool,
+        session_identity: SessionIdentity,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let peer_addr = config.remote_addr.ip();
         let remote_asn = config.peer.remote_asn;
@@ -273,7 +335,7 @@ impl PeerHandle {
         let span = tracing::info_span!("peer", %peer_addr, remote_asn, %peer_group);
         let task = tokio::spawn(
             async move {
-                let mut session = PeerSession::new_with_identity(
+                let mut session = PeerSession::new_with_identity_and_lifecycle(
                     config,
                     metrics,
                     rx,
@@ -281,6 +343,7 @@ impl PeerHandle {
                     import_policy,
                     export_policy,
                     session_notify_tx,
+                    session_lifecycle_tx,
                     bmp_tx,
                     validation_rx,
                     advertise_graceful_shutdown,
@@ -342,6 +405,40 @@ impl PeerHandle {
         advertise_graceful_shutdown: bool,
         session_identity: SessionIdentity,
     ) -> Self {
+        Self::spawn_inbound_with_identity_and_lifecycle(
+            config,
+            metrics,
+            rib_tx,
+            import_policy,
+            export_policy,
+            stream,
+            session_notify_tx,
+            None,
+            bmp_tx,
+            validation_rx,
+            advertise_graceful_shutdown,
+            session_identity,
+        )
+    }
+
+    /// Spawn a new inbound peer session with explicit notification identity and
+    /// bounded lifecycle event channel.
+    #[must_use]
+    #[expect(clippy::too_many_arguments)]
+    pub fn spawn_inbound_with_identity_and_lifecycle(
+        config: TransportConfig,
+        metrics: BgpMetrics,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
+        stream: TcpStream,
+        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
+        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+        validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
+        advertise_graceful_shutdown: bool,
+        session_identity: SessionIdentity,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let peer_addr = config.remote_addr.ip();
         let remote_asn = config.peer.remote_asn;
@@ -349,7 +446,7 @@ impl PeerHandle {
         let span = tracing::info_span!("peer", %peer_addr, remote_asn, %peer_group);
         let task = tokio::spawn(
             async move {
-                let mut session = PeerSession::new_inbound_with_identity(
+                let mut session = PeerSession::new_inbound_with_identity_and_lifecycle(
                     config,
                     metrics,
                     rx,
@@ -358,6 +455,7 @@ impl PeerHandle {
                     export_policy,
                     stream,
                     session_notify_tx,
+                    session_lifecycle_tx,
                     bmp_tx,
                     validation_rx,
                     advertise_graceful_shutdown,

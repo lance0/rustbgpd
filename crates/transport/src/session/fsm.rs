@@ -1,7 +1,8 @@
 use super::{
     Action, AddPathMode, Afi, BmpEvent, Bytes, Duration, Event, Instant, IpAddr, Ipv4Addr, Message,
     NotificationCode, OUTBOUND_BUFFER, PeerDownReason, PeerSession, RibUpdate, Safi,
-    SessionNotification, SessionState, cease_subcode, debug, info, mpsc, warn,
+    SessionLifecycleNotification, SessionNotification, SessionState, cease_subcode, debug, info,
+    mpsc, warn,
 };
 
 impl PeerSession {
@@ -133,28 +134,23 @@ impl PeerSession {
                         new.as_str(),
                     );
 
-                    // Notify PeerManager for collision detection and lifecycle events.
-                    // StateChanged currently shares this lossless coordination path;
-                    // ROADMAP tracks a bounded lifecycle-only split if transition
-                    // volume becomes material.
+                    // Publish operator-facing lifecycle state changes over
+                    // one channel per session so PeerManager can preserve
+                    // per-session order. Existing callers that do not opt
+                    // into the lifecycle channel keep the legacy StateChanged
+                    // notification behavior on the lossless path.
+                    if self.session_lifecycle_tx.is_some() {
+                        self.try_send_lifecycle_state_changed(old, new);
+                    } else {
+                        self.send_lossless_state_changed(old, new);
+                    }
+
+                    // Notify PeerManager for lossless collision detection.
                     // Read from the FSM's negotiated (set at OpenConfirm),
                     // not self.negotiated (set later at SessionEstablished).
                     // Uses unbounded channel so notifications are never dropped
                     // and never block (avoids deadlock with QueryState).
                     if let Some(ref notify_tx) = self.session_notify_tx {
-                        if let Err(e) = notify_tx.send(SessionNotification::StateChanged {
-                            session_id: self.session_identity.id,
-                            role: self.session_identity.role,
-                            peer_addr: self.peer_ip,
-                            old,
-                            new,
-                        }) {
-                            warn!(
-                                peer = %self.peer_label,
-                                error = %e,
-                                "failed to send StateChanged notification"
-                            );
-                        }
                         if new == SessionState::OpenConfirm
                             && let Some(neg) = self.fsm.negotiated()
                             && let Err(e) = notify_tx.send(SessionNotification::OpenReceived {
@@ -426,6 +422,50 @@ impl PeerSession {
         }
 
         follow_up
+    }
+
+    fn send_lossless_state_changed(&self, old: SessionState, new: SessionState) {
+        if let Some(ref notify_tx) = self.session_notify_tx
+            && let Err(e) = notify_tx.send(SessionNotification::StateChanged {
+                session_id: self.session_identity.id,
+                role: self.session_identity.role,
+                peer_addr: self.peer_ip,
+                old,
+                new,
+            })
+        {
+            warn!(
+                peer = %self.peer_label,
+                error = %e,
+                "failed to send StateChanged notification"
+            );
+        }
+    }
+
+    fn try_send_lifecycle_state_changed(&self, old: SessionState, new: SessionState) {
+        if let Some(ref lifecycle_tx) = self.session_lifecycle_tx {
+            match lifecycle_tx.try_send(SessionLifecycleNotification::StateChanged {
+                session_id: self.session_identity.id,
+                role: self.session_identity.role,
+                peer_addr: self.peer_ip,
+                old,
+                new,
+            }) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    debug!(
+                        peer = %self.peer_label,
+                        "dropped StateChanged lifecycle event because channel is full"
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    debug!(
+                        peer = %self.peer_label,
+                        "dropped StateChanged lifecycle event because channel is closed"
+                    );
+                }
+            }
+        }
     }
 }
 
