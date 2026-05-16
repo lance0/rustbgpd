@@ -1,5 +1,8 @@
 use super::*;
-use std::fs;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use rustbgpd_policy::RouteType;
 use rustbgpd_wire::{Afi, Safi};
@@ -40,27 +43,41 @@ fn valid_config_parses() {
 
 #[test]
 fn config_examples_parse() {
-    let root = env!("CARGO_MANIFEST_DIR");
-    let examples = [
-        "examples/ddos-mitigation/config.toml",
-        "examples/evpn-vtep-leaf/config.toml",
-        "examples/hosting-provider/config.toml",
-        "examples/linux-edge-fib/config.toml",
-        "examples/minimal/config.toml",
-        "examples/route-collector/config.toml",
-        "examples/route-server/config.toml",
-        "examples/rr-evpn-fabric/config.toml",
-        "examples/docker-compose/rustbgpd.toml",
-    ];
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut examples = Vec::new();
+    collect_example_toml_files(&root.join("examples"), &mut examples);
+    examples.sort();
 
-    for example in examples {
-        let path = format!("{root}/{example}");
+    assert!(
+        examples
+            .iter()
+            .any(|path| path.ends_with("linux-edge-fib/config.toml")),
+        "new Linux edge FIB example must be covered"
+    );
+
+    for path in examples {
+        let label = path.strip_prefix(root).unwrap_or(&path).display();
         let source = fs::read_to_string(&path).unwrap_or_else(|err| {
-            panic!("failed to read example config {example}: {err}");
+            panic!("failed to read example config {label}: {err}");
         });
         parse(&source).unwrap_or_else(|err| {
-            panic!("example config {example} failed validation: {err}");
+            panic!("example config {label} failed validation: {err}");
         });
+    }
+}
+
+fn collect_example_toml_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).unwrap_or_else(|err| {
+        panic!("failed to read example directory {}: {err}", dir.display());
+    }) {
+        let path = entry
+            .unwrap_or_else(|err| panic!("failed to read example directory entry: {err}"))
+            .path();
+        if path.is_dir() {
+            collect_example_toml_files(&path, out);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("toml") {
+            out.push(path);
+        }
     }
 }
 
