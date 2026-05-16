@@ -683,6 +683,7 @@ impl RibManager {
                     (None, Some(best)) => {
                         debug!(%prefix, peer = %best.peer, "best path added");
                         self.publish_route_event(RouteEvent {
+                            event_id: 0,
                             event_type: RouteEventType::Added,
                             prefix: *prefix,
                             peer: Some(best.peer),
@@ -694,6 +695,7 @@ impl RibManager {
                     (Some((old_peer, old_path_id)), None) => {
                         debug!(%prefix, "best path removed");
                         self.publish_route_event(RouteEvent {
+                            event_id: 0,
                             event_type: RouteEventType::Withdrawn,
                             prefix: *prefix,
                             peer: None,
@@ -705,6 +707,7 @@ impl RibManager {
                     (Some((old_peer, _old_path_id)), Some(best)) => {
                         debug!(%prefix, peer = %best.peer, "best path changed");
                         self.publish_route_event(RouteEvent {
+                            event_id: 0,
                             event_type: RouteEventType::BestChanged,
                             prefix: *prefix,
                             peer: Some(best.peer),

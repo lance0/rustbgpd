@@ -2787,6 +2787,7 @@ async fn route_event_added_on_new_best() {
     .unwrap();
 
     let event = events_rx.recv().await.unwrap();
+    assert_eq!(event.event_id, 1);
     assert_eq!(event.event_type, crate::event::RouteEventType::Added);
     assert_eq!(event.prefix, Prefix::V4(prefix));
     assert_eq!(event.peer, Some(peer));
@@ -2817,6 +2818,7 @@ async fn route_event_history_records_events_without_subscriber() {
 
     let history = query_route_event_history(&tx, None, Some(Afi::Ipv4), None, 100).await;
     assert_eq!(history.len(), 1);
+    assert_eq!(history[0].event_id, 1);
     assert_eq!(history[0].event_type, crate::event::RouteEventType::Added);
     assert_eq!(history[0].prefix, Prefix::V4(prefix));
     assert_eq!(history[0].peer, Some(peer));
@@ -2922,6 +2924,7 @@ async fn route_event_history_filters_previous_peer_and_limit() {
 
     let history = query_route_event_history(&tx, Some(peer1), Some(Afi::Ipv4), None, 2).await;
     assert_eq!(history.len(), 2);
+    assert_eq!(history[0].event_id, 2);
     assert_eq!(history[0].event_type, crate::event::RouteEventType::Added);
     assert!(matches!(history[0].prefix, Prefix::V4(_)));
     assert_eq!(history[0].peer, Some(peer1));
@@ -2929,6 +2932,7 @@ async fn route_event_history_filters_previous_peer_and_limit() {
         history[1].event_type,
         crate::event::RouteEventType::BestChanged
     );
+    assert_eq!(history[1].event_id, 3);
     assert_eq!(history[1].prefix, Prefix::V4(prefix1));
     assert_eq!(history[1].peer, Some(peer2));
     assert_eq!(history[1].previous_peer, Some(peer1));
@@ -3227,9 +3231,14 @@ async fn route_event_history_capacity_evicts_oldest_event() {
 
     let history = query_route_event_history(&tx, None, Some(Afi::Ipv4), None, 0).await;
     assert_eq!(history.len(), ROUTE_EVENT_HISTORY_CAPACITY);
+    assert_eq!(history[0].event_id, 2);
     assert_eq!(
         history[0].prefix,
         make_indexed_route(1, Ipv4Addr::new(10, 0, 0, 1)).prefix
+    );
+    assert_eq!(
+        history[ROUTE_EVENT_HISTORY_CAPACITY - 1].event_id,
+        u64::try_from(ROUTE_EVENT_HISTORY_CAPACITY + 1).unwrap()
     );
     assert_eq!(
         history[ROUTE_EVENT_HISTORY_CAPACITY - 1].prefix,

@@ -114,6 +114,9 @@ pub struct RibManager {
     /// Bounded recent route-event history for after-the-fact operator
     /// timeline queries. Live streaming still uses `route_events_tx`.
     route_event_history: VecDeque<RouteEvent>,
+    /// Monotonic process-local id assigned before route events are recorded in
+    /// history and broadcast to live subscribers.
+    next_route_event_id: u64,
     /// EVPN best-path change broadcast. Separate from
     /// `route_events_tx` because `RouteEvent` is keyed by `Prefix`
     /// (unicast-only) and EVPN consumers (the daemon's local-MAC
@@ -345,6 +348,7 @@ impl RibManager {
             aspa_table: None,
             route_events_tx,
             route_event_history: VecDeque::with_capacity(ROUTE_EVENT_HISTORY_CAPACITY),
+            next_route_event_id: 1,
             evpn_events_tx,
             metrics,
             rx,
@@ -878,7 +882,12 @@ impl RibManager {
         let _ = reply.send(rx);
     }
 
-    fn publish_route_event(&mut self, event: RouteEvent) {
+    fn publish_route_event(&mut self, mut event: RouteEvent) {
+        event.event_id = self.next_route_event_id;
+        self.next_route_event_id = self
+            .next_route_event_id
+            .checked_add(1)
+            .expect("route event id space exhausted");
         if self.route_event_history.len() == ROUTE_EVENT_HISTORY_CAPACITY {
             self.route_event_history.pop_front();
         }

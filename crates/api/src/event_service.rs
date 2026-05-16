@@ -526,6 +526,7 @@ mod tests {
 
     fn route_event(prefix: Prefix, peer: IpAddr) -> RouteEvent {
         RouteEvent {
+            event_id: 1,
             event_type: RouteEventType::Added,
             prefix,
             peer: Some(peer),
@@ -618,10 +619,10 @@ mod tests {
         assert_eq!(event.severity, proto::EventSeverity::Info as i32);
         assert_eq!(event.prefix, "203.0.113.0");
         assert_eq!(event.prefix_length, 24);
-        assert!(matches!(
-            event.payload,
-            Some(proto::bgp_event::Payload::Route(_))
-        ));
+        let Some(proto::bgp_event::Payload::Route(route)) = event.payload else {
+            panic!("expected route payload");
+        };
+        assert_eq!(route.event_id, 1);
     }
 
     #[tokio::test]

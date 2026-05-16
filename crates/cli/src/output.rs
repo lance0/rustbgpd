@@ -308,6 +308,8 @@ pub struct JsonHealth {
 
 #[derive(Serialize)]
 pub struct JsonRouteEvent {
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub event_id: u64,
     pub event_type: String,
     pub prefix: String,
     pub peer_address: String,
@@ -317,6 +319,10 @@ pub struct JsonRouteEvent {
     pub timestamp: String,
     #[serde(skip_serializing_if = "is_zero")]
     pub path_id: u32,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
 }
 
 /// Compute extra bytes added by ANSI escape codes in a colored string.

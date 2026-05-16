@@ -1585,6 +1585,7 @@ mod tests {
 
     fn route_event(prefix: Prefix) -> RouteEvent {
         RouteEvent {
+            event_id: 0,
             event_type: RouteEventType::BestChanged,
             prefix,
             peer: Some(ip("198.51.100.1")),

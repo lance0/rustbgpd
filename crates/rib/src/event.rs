@@ -19,6 +19,8 @@ pub enum RouteEventType {
 /// A route change event published via broadcast channel.
 #[derive(Debug, Clone)]
 pub struct RouteEvent {
+    /// Monotonic process-local route event identifier.
+    pub event_id: u64,
     /// The kind of route change.
     pub event_type: RouteEventType,
     /// The affected prefix.
