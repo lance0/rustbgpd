@@ -15,7 +15,7 @@ use tonic::{Request, Status};
 use tracing::{error, info, warn};
 
 use crate::control_service::{ControlService, MrtTriggerTx};
-use crate::event_service::EventService;
+use crate::event_service::{DataplaneEventBroadcaster, EventService, dataplane_event_broadcaster};
 use crate::evpn_service::{EvpnService, OriginatedLocalMacCountFn};
 use crate::global_service::GlobalService;
 use crate::injection_service::InjectionService;
@@ -199,12 +199,14 @@ pub async fn serve(
 ) {
     let (listener_shutdown_tx, listener_shutdown_rx) = watch::channel(false);
     let mut listener_tasks = JoinSet::new();
+    let dataplane_events = dataplane_event_broadcaster();
 
     for listener in listeners {
         let rib_tx = rib_tx.clone();
         let rib_query_tx = rib_query_tx.clone();
         let peer_mgr_tx = peer_mgr_tx.clone();
         let config = config.clone();
+        let dataplane_events = dataplane_events.clone();
         let rpc_shutdown_tx = rpc_shutdown_tx.clone();
         let config_tx = config_tx.clone();
         let shutdown_rx = listener_shutdown_rx.clone();
@@ -215,6 +217,7 @@ pub async fn serve(
                 rib_query_tx,
                 peer_mgr_tx,
                 config,
+                dataplane_events,
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
@@ -255,6 +258,7 @@ async fn run_listener(
     rib_query_tx: mpsc::Sender<RibUpdate>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     config: ServeConfig,
+    dataplane_events: DataplaneEventBroadcaster,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -300,6 +304,7 @@ async fn run_listener(
                 evpn_fdb_nexthop_snapshot,
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
+                dataplane_events,
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
@@ -330,6 +335,7 @@ async fn run_listener(
                 evpn_fdb_nexthop_snapshot,
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
+                dataplane_events,
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
@@ -363,6 +369,7 @@ async fn run_tcp_listener(
     evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
+    dataplane_events: DataplaneEventBroadcaster,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -396,11 +403,12 @@ async fn run_tcp_listener(
             interceptor.clone(),
         ))
         .add_service(EventServiceServer::with_interceptor(
-            EventService::with_dataplane_snapshots(
+            EventService::with_dataplane_snapshots_and_broadcaster(
                 rib_tx.clone(),
                 peer_mgr_tx.clone(),
                 blackhole_discard_snapshot.clone(),
                 fib_route_snapshot.clone(),
+                dataplane_events,
             ),
             interceptor.clone(),
         ))
@@ -483,6 +491,7 @@ async fn run_uds_listener(
     evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
+    dataplane_events: DataplaneEventBroadcaster,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -506,11 +515,12 @@ async fn run_uds_listener(
             interceptor.clone(),
         ))
         .add_service(EventServiceServer::with_interceptor(
-            EventService::with_dataplane_snapshots(
+            EventService::with_dataplane_snapshots_and_broadcaster(
                 rib_tx.clone(),
                 peer_mgr_tx.clone(),
                 blackhole_discard_snapshot.clone(),
                 fib_route_snapshot.clone(),
+                dataplane_events,
             ),
             interceptor.clone(),
         ))

@@ -27,6 +27,13 @@ const DATAPLANE_EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::
 #[cfg(test)]
 const DATAPLANE_EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
+pub(crate) type DataplaneEventBroadcaster = Arc<Mutex<Option<broadcast::Sender<proto::BgpEvent>>>>;
+
+#[must_use]
+pub(crate) fn dataplane_event_broadcaster() -> DataplaneEventBroadcaster {
+    Arc::new(Mutex::new(None))
+}
+
 /// gRPC service exposing a unified live daemon event stream.
 #[derive(Clone)]
 pub struct EventService {
@@ -34,7 +41,7 @@ pub struct EventService {
     peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
     blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
     fib_route_snapshot: FibRouteSnapshotFn,
-    dataplane_events: Arc<Mutex<Option<broadcast::Sender<proto::BgpEvent>>>>,
+    dataplane_events: DataplaneEventBroadcaster,
 }
 
 impl EventService {
@@ -59,12 +66,29 @@ impl EventService {
         blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
         fib_route_snapshot: FibRouteSnapshotFn,
     ) -> Self {
+        Self::with_dataplane_snapshots_and_broadcaster(
+            rib_tx,
+            peer_mgr_tx,
+            blackhole_discard_snapshot,
+            fib_route_snapshot,
+            dataplane_event_broadcaster(),
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn with_dataplane_snapshots_and_broadcaster(
+        rib_tx: tokio::sync::mpsc::Sender<RibUpdate>,
+        peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
+        blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
+        fib_route_snapshot: FibRouteSnapshotFn,
+        dataplane_events: DataplaneEventBroadcaster,
+    ) -> Self {
         Self {
             rib_tx,
             peer_mgr_tx,
             blackhole_discard_snapshot,
             fib_route_snapshot,
-            dataplane_events: Arc::new(Mutex::new(None)),
+            dataplane_events,
         }
     }
 
@@ -407,7 +431,7 @@ fn dataplane_summary_to_bgp_event(summary: DataplaneSummary) -> proto::BgpEvent 
 
 fn spawn_dataplane_poller(
     tx: broadcast::Sender<proto::BgpEvent>,
-    shared_tx: Arc<Mutex<Option<broadcast::Sender<proto::BgpEvent>>>>,
+    shared_tx: DataplaneEventBroadcaster,
     blackhole_snapshot: BlackholeDiscardSnapshotFn,
     fib_snapshot: FibRouteSnapshotFn,
 ) {
@@ -804,6 +828,55 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dataplane_broadcaster_can_be_shared_across_services() {
+        let shared = dataplane_event_broadcaster();
+        let (rib_tx_a, _) = spawn_fake_rib();
+        let (peer_tx_a, _) = spawn_fake_peer_manager();
+        let service_a = EventService::with_dataplane_snapshots_and_broadcaster(
+            rib_tx_a,
+            peer_tx_a,
+            Arc::new(Vec::new),
+            Arc::new(Vec::new),
+            shared.clone(),
+        );
+        let (rib_tx_b, _) = spawn_fake_rib();
+        let (peer_tx_b, _) = spawn_fake_peer_manager();
+        let service_b = EventService::with_dataplane_snapshots_and_broadcaster(
+            rib_tx_b,
+            peer_tx_b,
+            Arc::new(Vec::new),
+            Arc::new(Vec::new),
+            shared.clone(),
+        );
+
+        let response_a = service_a
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Dataplane as i32],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let response_b = service_b
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Dataplane as i32],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+
+        {
+            let guard = shared.lock().unwrap();
+            let tx = guard
+                .as_ref()
+                .expect("shared dataplane poller should exist");
+            assert_eq!(tx.receiver_count(), 2);
+        }
+
+        drop(response_a);
+        drop(response_b);
     }
 
     #[tokio::test]
