@@ -860,6 +860,10 @@ message WatchEventsRequest {
 message BgpEvent {
   // Unix epoch seconds, matching existing RouteEvent timestamp shape.
   string timestamp = 1;
+  // Common fields are duplicated from the category-specific payload on purpose:
+  // category-agnostic consumers can filter/render without unpacking the oneof,
+  // while payloads preserve the full source event shape for category-specific
+  // clients.
   EventCategory category = 2;
   BgpEventType event_type = 3;
   EventSeverity severity = 4;

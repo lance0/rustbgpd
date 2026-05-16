@@ -160,13 +160,8 @@ fn parse_watch_events_filter(req: &proto::WatchEventsRequest) -> Result<WatchEve
 }
 
 fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto::BgpEvent {
+    let event_type = route_event_type_to_bgp_event_type(event.event_type);
     let route = route_event_to_proto(event);
-    let event_type = match proto::RouteEventType::try_from(route.event_type) {
-        Ok(proto::RouteEventType::Added) => proto::BgpEventType::RouteAdded,
-        Ok(proto::RouteEventType::Withdrawn) => proto::BgpEventType::RouteWithdrawn,
-        Ok(proto::RouteEventType::BestChanged) => proto::BgpEventType::RouteBestChanged,
-        _ => proto::BgpEventType::Unspecified,
-    };
     let summary = format!(
         "route {} {}/{}",
         match event_type {

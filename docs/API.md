@@ -572,7 +572,10 @@ category and type filters are OR-matched within their own dimension. This
 foundation slice emits `EVENT_CATEGORY_ROUTE` events sourced from the same
 structured RIB broadcast as `WatchRoutes`; session, policy, and dataplane
 events are intentionally deferred until those subsystems expose equally
-structured event sources.
+structured event sources. `BgpEvent` repeats common fields such as peer,
+prefix, type, and severity at the top level even when the payload also carries
+them so category-agnostic clients can render or filter events without unpacking
+the `oneof`.
 
 ---
 
