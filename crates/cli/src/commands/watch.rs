@@ -73,6 +73,24 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
     }
 }
 
+fn bgp_event_type_json_label(event_type: i32) -> &'static str {
+    match BgpEventType::try_from(event_type) {
+        Ok(BgpEventType::RouteAdded) => "route_added",
+        Ok(BgpEventType::RouteWithdrawn) => "route_withdrawn",
+        Ok(BgpEventType::RouteBestChanged) => "route_best_changed",
+        _ => "unknown",
+    }
+}
+
+fn bgp_event_type_display_label(event_type: i32) -> &'static str {
+    match BgpEventType::try_from(event_type) {
+        Ok(BgpEventType::RouteAdded) => "added",
+        Ok(BgpEventType::RouteWithdrawn) => "withdrawn",
+        Ok(BgpEventType::RouteBestChanged) => "best_changed",
+        _ => "unknown",
+    }
+}
+
 fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
     serde_json::json!({
         "timestamp": event.timestamp,
@@ -83,12 +101,7 @@ fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
             Ok(EventCategory::Dataplane) => "dataplane",
             _ => "unknown",
         },
-        "event_type": match BgpEventType::try_from(event.event_type) {
-            Ok(BgpEventType::RouteAdded) => "route_added",
-            Ok(BgpEventType::RouteWithdrawn) => "route_withdrawn",
-            Ok(BgpEventType::RouteBestChanged) => "route_best_changed",
-            _ => "unknown",
-        },
+        "event_type": bgp_event_type_json_label(event.event_type),
         "severity": output::format_severity(event.severity),
         "peer_address": event.peer_address,
         "previous_peer_address": event.previous_peer_address,
@@ -115,12 +128,7 @@ fn print_bgp_event(event: &BgpEvent, json: bool) {
     println!(
         "[{}] {} {}",
         event.timestamp,
-        output::colored_event_type(match BgpEventType::try_from(event.event_type) {
-            Ok(BgpEventType::RouteAdded) => "route_added",
-            Ok(BgpEventType::RouteWithdrawn) => "route_withdrawn",
-            Ok(BgpEventType::RouteBestChanged) => "route_best_changed",
-            _ => "unknown",
-        }),
+        output::colored_event_type(bgp_event_type_display_label(event.event_type)),
         event.summary
     );
 }
@@ -233,4 +241,25 @@ pub async fn history(
         print_event(&event, json);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bgp_event_display_labels_match_route_event_coloring_labels() {
+        assert_eq!(
+            bgp_event_type_display_label(BgpEventType::RouteAdded as i32),
+            "added"
+        );
+        assert_eq!(
+            bgp_event_type_display_label(BgpEventType::RouteWithdrawn as i32),
+            "withdrawn"
+        );
+        assert_eq!(
+            bgp_event_type_display_label(BgpEventType::RouteBestChanged as i32),
+            "best_changed"
+        );
+    }
 }
