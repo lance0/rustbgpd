@@ -1,8 +1,8 @@
 # gRPC API Reference
 
 rustbgpd exposes nine gRPC services (Global, Neighbor, Policy, PeerGroup, Rib,
-Event, Injection, Control, Evpn) over one or more configured listeners. The default
-listener is a local Unix domain socket at `/var/lib/rustbgpd/grpc.sock`.
+Event, Injection, Control, Evpn) over one or more configured listeners. The
+default listener is a local Unix domain socket at `/var/lib/rustbgpd/grpc.sock`.
 
 For same-host administration, prefer UDS:
 
@@ -68,6 +68,21 @@ Each configured listener can independently set `access_mode = "read_write"` or
 `"read_only"`. Read-only listeners allow query and watch RPCs but reject all
 mutating RPCs with `PERMISSION_DENIED`.
 
+## Error Taxonomy
+
+The API uses gRPC status codes consistently across services:
+
+| Code | Meaning |
+|------|---------|
+| `UNAUTHENTICATED` | Listener authentication failed: missing bearer token, non-ASCII authorization metadata, or a token mismatch |
+| `PERMISSION_DENIED` | The request reached a read-only listener but called a mutating RPC |
+| `INVALID_ARGUMENT` | Client-supplied request data is malformed, missing, out of range, uses an unsupported enum value, or combines incompatible filters |
+| `NOT_FOUND` | A named or targeted resource does not exist: peer, policy, neighbor set, peer group, IP-VRF, route-event target, or injected route |
+| `ALREADY_EXISTS` | A create request targets an existing resource, currently duplicate neighbor creation |
+| `FAILED_PRECONDITION` | The request is valid but the daemon is not in a state where it can complete it, such as MRT export being disabled or a policy object still being referenced |
+| `UNIMPLEMENTED` | The RPC is reserved in the protobuf but runtime support has not shipped yet |
+| `INTERNAL` | An internal daemon actor, persistence queue, metrics encoder, or RIB boundary failed unexpectedly |
+
 ---
 
 ## GlobalService
@@ -77,7 +92,7 @@ Daemon identity and configuration.
 | RPC | Description |
 |-----|-------------|
 | `GetGlobal` | Returns ASN, router ID, and listen port |
-| `SetGlobal` | Updates daemon configuration (currently a no-op placeholder) |
+| `SetGlobal` | Reserved mutating RPC for future runtime global config changes; read-only listeners reject it with `PERMISSION_DENIED`, read-write listeners return `UNIMPLEMENTED` until the feature ships |
 
 ```bash
 # Get daemon identity
@@ -378,11 +393,12 @@ policy/statement attribution are deferred.
 
 Route-listing RPCs that return RIB routes (`ListReceivedRoutes`,
 `ListBestRoutes`, `ListAdvertisedRoutes`, and `WatchRoutes`) accept an
-`afi_safi` field to filter by address family. Supported values:
-`IPV4_UNICAST` (1), `IPV6_UNICAST` (2), `IPV4_FLOWSPEC` (3),
-`IPV6_FLOWSPEC` (4), `L2VPN_EVPN` (5), or unspecified (0, returns all
-families). `WatchRoutes` events include the address family of each route
-change.
+`afi_safi` field to filter by address family. Supported values are
+`IPV4_UNICAST` (1), `IPV6_UNICAST` (2), or unspecified (0, returns both
+unicast families). `WatchRoutes` events include the address family of each
+route change. FlowSpec routes use `ListFlowSpecRoutes` with
+`IPV4_FLOWSPEC` (3), `IPV6_FLOWSPEC` (4), or unspecified (0). EVPN routes
+use `ListEvpnRoutes` and its EVPN-specific filters.
 
 ### Pagination
 

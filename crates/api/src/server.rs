@@ -422,7 +422,7 @@ async fn run_tcp_listener(
             interceptor.clone(),
         ))
         .add_service(GlobalServiceServer::with_interceptor(
-            GlobalService::new(asn, router_id, listen_port),
+            GlobalService::new(access_mode, asn, router_id, listen_port),
             interceptor.clone(),
         ))
         .add_service(EvpnServiceServer::with_interceptor(
@@ -527,7 +527,7 @@ async fn run_uds_listener(
             interceptor.clone(),
         ))
         .add_service(GlobalServiceServer::with_interceptor(
-            GlobalService::new(asn, router_id, listen_port),
+            GlobalService::new(access_mode, asn, router_id, listen_port),
             interceptor.clone(),
         ))
         .add_service(EvpnServiceServer::with_interceptor(
