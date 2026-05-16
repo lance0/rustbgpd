@@ -801,6 +801,137 @@ mod tests {
     }
 
     #[test]
+    fn parse_bgp_event_type_accepts_aliases_and_rejects_unknown() {
+        assert_eq!(
+            parse_bgp_event_type("added").unwrap(),
+            BgpEventType::RouteAdded as i32
+        );
+        assert_eq!(
+            parse_bgp_event_type("route_added").unwrap(),
+            BgpEventType::RouteAdded as i32
+        );
+        assert_eq!(
+            parse_bgp_event_type("session_established").unwrap(),
+            BgpEventType::SessionEstablished as i32
+        );
+        assert_eq!(
+            parse_bgp_event_type("dataplane_changed").unwrap(),
+            BgpEventType::DataplaneStatusChanged as i32
+        );
+        assert!(parse_bgp_event_type("policy_filtered").is_err());
+    }
+
+    #[test]
+    fn parse_event_category_accepts_supported_categories_only() {
+        assert_eq!(
+            parse_event_category("route").unwrap(),
+            EventCategory::Route as i32
+        );
+        assert_eq!(
+            parse_event_category("session").unwrap(),
+            EventCategory::Session as i32
+        );
+        assert_eq!(
+            parse_event_category("policy").unwrap(),
+            EventCategory::Policy as i32
+        );
+        assert_eq!(
+            parse_event_category("dataplane").unwrap(),
+            EventCategory::Dataplane as i32
+        );
+        assert!(parse_event_category("evpn").is_err());
+    }
+
+    #[test]
+    fn parse_optional_prefix_filter_validates_family_and_splits_prefix() {
+        let (prefix, length) = parse_optional_prefix_filter(
+            Some("203.0.113.0/24".to_string()),
+            Some(AddressFamily::Ipv4Unicast as i32),
+        )
+        .unwrap();
+        assert_eq!(prefix, "203.0.113.0");
+        assert_eq!(length, 24);
+
+        let err = parse_optional_prefix_filter(
+            Some("2001:db8::/64".to_string()),
+            Some(AddressFamily::Ipv4Unicast as i32),
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("--prefix family"));
+    }
+
+    #[test]
+    fn json_route_event_omits_empty_optional_fields() {
+        let event = RouteEvent {
+            event_id: 0,
+            event_type: crate::proto::RouteEventType::Added as i32,
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+            peer_address: "192.0.2.1".to_string(),
+            afi_safi: AddressFamily::Ipv4Unicast as i32,
+            timestamp: "123".to_string(),
+            previous_peer_address: String::new(),
+            path_id: 0,
+        };
+
+        let value = serde_json::to_value(json_event(&event)).unwrap();
+        assert_eq!(value["event_type"], "added");
+        assert_eq!(value["prefix"], "203.0.113.0/24");
+        assert_eq!(value["peer_address"], "192.0.2.1");
+        assert_eq!(value["afi_safi"], "ipv4_unicast");
+        assert!(value.get("previous_peer_address").is_none());
+        assert!(value.get("path_id").is_none());
+    }
+
+    #[test]
+    fn json_route_event_includes_previous_peer_and_path_id() {
+        let event = RouteEvent {
+            event_id: 0,
+            event_type: crate::proto::RouteEventType::BestChanged as i32,
+            prefix: "2001:db8::".to_string(),
+            prefix_length: 64,
+            peer_address: "2001:db8::1".to_string(),
+            afi_safi: AddressFamily::Ipv6Unicast as i32,
+            timestamp: "123".to_string(),
+            previous_peer_address: "2001:db8::2".to_string(),
+            path_id: 17,
+        };
+
+        let value = serde_json::to_value(json_event(&event)).unwrap();
+        assert_eq!(value["event_type"], "best_changed");
+        assert_eq!(value["prefix"], "2001:db8::/64");
+        assert_eq!(value["previous_peer_address"], "2001:db8::2");
+        assert_eq!(value["path_id"], 17);
+    }
+
+    #[test]
+    fn json_bgp_event_route_includes_common_route_fields() {
+        let event = BgpEvent {
+            timestamp: "1".to_string(),
+            category: EventCategory::Route as i32,
+            event_type: BgpEventType::RouteBestChanged as i32,
+            severity: 1,
+            peer_address: "192.0.2.1".to_string(),
+            previous_peer_address: "192.0.2.2".to_string(),
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+            afi_safi: AddressFamily::Ipv4Unicast as i32,
+            summary: "route best changed 203.0.113.0/24".to_string(),
+            ..Default::default()
+        };
+
+        let value = json_bgp_event(&event);
+        assert_eq!(value["category"], "route");
+        assert_eq!(value["event_type"], "route_best_changed");
+        assert_eq!(value["severity"], "info");
+        assert_eq!(value["peer_address"], "192.0.2.1");
+        assert_eq!(value["previous_peer_address"], "192.0.2.2");
+        assert_eq!(value["prefix"], "203.0.113.0/24");
+        assert_eq!(value["afi_safi"], "ipv4_unicast");
+        assert_eq!(value["summary"], "route best changed 203.0.113.0/24");
+    }
+
+    #[test]
     fn json_bgp_event_session_uses_null_family() {
         let event = BgpEvent {
             timestamp: "1".to_string(),

@@ -306,6 +306,10 @@ impl RibManager {
         metrics: BgpMetrics,
     ) -> Self {
         let (route_events_tx, _) = broadcast::channel(4096);
+        metrics.set_route_event_history_capacity(
+            i64::try_from(ROUTE_EVENT_HISTORY_CAPACITY).unwrap_or(i64::MAX),
+        );
+        metrics.set_route_event_history_depth(0);
         // EVPN broadcast — same capacity as the unicast channel.
         // Slow EVPN subscribers receive `Lagged(_)`; the daemon's
         // originator falls back to `repoll_rib` per ADR-0054 §6's
@@ -892,6 +896,9 @@ impl RibManager {
             self.route_event_history.pop_front();
         }
         self.route_event_history.push_back(event.clone());
+        self.metrics.set_route_event_history_depth(
+            i64::try_from(self.route_event_history.len()).unwrap_or(i64::MAX),
+        );
         let _ = self.route_events_tx.send(event);
     }
 

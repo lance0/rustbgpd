@@ -4,6 +4,7 @@ use std::net::IpAddr;
 use std::pin::Pin;
 
 use tokio::sync::{mpsc, oneshot};
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::{Stream, StreamExt, wrappers::BroadcastStream};
 use tonic::{Request, Response, Status};
 use tracing::debug;
@@ -13,6 +14,7 @@ use rustbgpd_rib::{
     EvpnRibRoute, ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision, FlowSpecRoute,
     RibUpdate, Route, RouteEventType,
 };
+use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Afi, AsPath, AsPathSegment, EvpnRoute, PathAttribute, Prefix};
 
 /// Live snapshot provider for daemon-owned BLACKHOLE discard status.
@@ -28,6 +30,7 @@ pub struct RibService {
     rib_tx: mpsc::Sender<RibUpdate>,
     blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
     fib_route_snapshot: FibRouteSnapshotFn,
+    metrics: BgpMetrics,
 }
 
 impl RibService {
@@ -38,19 +41,38 @@ impl RibService {
             rib_tx,
             blackhole_discard_snapshot: std::sync::Arc::new(Vec::new),
             fib_route_snapshot: std::sync::Arc::new(Vec::new),
+            metrics: BgpMetrics::new(),
         }
     }
 
     /// Create a RIB service with live kernel route status snapshots.
+    #[allow(dead_code)]
     pub fn with_status_snapshots(
         rib_tx: mpsc::Sender<RibUpdate>,
         blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
         fib_route_snapshot: FibRouteSnapshotFn,
     ) -> Self {
+        Self::with_status_snapshots_and_metrics(
+            rib_tx,
+            blackhole_discard_snapshot,
+            fib_route_snapshot,
+            BgpMetrics::new(),
+        )
+    }
+
+    /// Create a RIB service with live kernel route status snapshots and
+    /// shared metrics.
+    pub fn with_status_snapshots_and_metrics(
+        rib_tx: mpsc::Sender<RibUpdate>,
+        blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
+        fib_route_snapshot: FibRouteSnapshotFn,
+        metrics: BgpMetrics,
+    ) -> Self {
         Self {
             rib_tx,
             blackhole_discard_snapshot,
             fib_route_snapshot,
+            metrics,
         }
     }
 
@@ -842,8 +864,11 @@ impl proto::rib_service_server::RibService for RibService {
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?;
 
+        let metrics = self.metrics.clone();
+        let subscriber_guard = metrics.event_stream_subscriber_guard("watch_routes", "route");
         let stream = BroadcastStream::new(broadcast_rx).filter_map(move |result| match result {
             Ok(event) => {
+                let _subscriber_guard = &subscriber_guard;
                 // Filter by AFI/SAFI if requested
                 if afi_safi_filter != 0 {
                     let is_v4 = matches!(event.prefix, Prefix::V4(_));
@@ -866,8 +891,13 @@ impl proto::rib_service_server::RibService for RibService {
 
                 Some(Ok(route_event_to_proto(event)))
             }
-            Err(_lagged) => {
-                debug!("WatchRoutes subscriber lagged, skipping missed events");
+            Err(BroadcastStreamRecvError::Lagged(missed)) => {
+                let _subscriber_guard = &subscriber_guard;
+                metrics.record_event_stream_lagged("watch_routes", "route", missed);
+                debug!(
+                    missed,
+                    "WatchRoutes subscriber lagged, skipping missed events"
+                );
                 None
             }
         });
@@ -1335,10 +1365,22 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::sync::Arc;
 
+    use prometheus::Encoder;
+    use tokio::sync::broadcast;
+    use tokio_stream::StreamExt;
+
     use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix};
 
     use super::*;
     use proto::rib_service_server::RibService as _;
+
+    fn gather_text(metrics: &BgpMetrics) -> String {
+        let encoder = prometheus::TextEncoder::new();
+        let families = metrics.registry().gather();
+        let mut out = Vec::new();
+        encoder.encode(&families, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
 
     fn make_service() -> RibService {
         let (tx, _rx) = mpsc::channel(16);
@@ -1358,6 +1400,163 @@ mod tests {
             community_filter: vec![],
             large_community_filter: vec![],
         }
+    }
+
+    fn route_event(prefix: Prefix, peer: IpAddr) -> rustbgpd_rib::RouteEvent {
+        rustbgpd_rib::RouteEvent {
+            event_id: 0,
+            event_type: RouteEventType::Added,
+            prefix,
+            peer: Some(peer),
+            previous_peer: None,
+            timestamp: "123".to_string(),
+            path_id: 0,
+        }
+    }
+
+    fn make_watch_routes_service(
+        metrics: BgpMetrics,
+    ) -> (RibService, broadcast::Sender<rustbgpd_rib::RouteEvent>) {
+        let (tx, mut rx) = mpsc::channel(16);
+        let (events_tx, _) = broadcast::channel(16);
+        let events_tx_for_task = events_tx.clone();
+        tokio::spawn(async move {
+            while let Some(update) = rx.recv().await {
+                if let RibUpdate::SubscribeRouteEvents { reply } = update {
+                    let _ = reply.send(events_tx_for_task.subscribe());
+                }
+            }
+        });
+        (
+            RibService::with_status_snapshots_and_metrics(
+                tx,
+                Arc::new(Vec::new),
+                Arc::new(Vec::new),
+                metrics,
+            ),
+            events_tx,
+        )
+    }
+
+    #[tokio::test]
+    async fn watch_routes_subscriber_gauge_tracks_stream_lifecycle() {
+        let metrics = BgpMetrics::new();
+        let (svc, _events_tx) = make_watch_routes_service(metrics.clone());
+
+        let response = svc
+            .watch_routes(Request::new(proto::WatchRoutesRequest::default()))
+            .await
+            .unwrap();
+
+        let text = gather_text(&metrics);
+        assert!(
+            text.contains(
+                "bgp_event_stream_subscribers{service=\"watch_routes\",source=\"route\"} 1"
+            )
+        );
+
+        drop(response);
+        tokio::task::yield_now().await;
+
+        let text = gather_text(&metrics);
+        assert!(
+            text.contains(
+                "bgp_event_stream_subscribers{service=\"watch_routes\",source=\"route\"} 0"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_routes_lagged_subscriber_increments_metric() {
+        let metrics = BgpMetrics::new();
+        let (svc, events_tx) = make_watch_routes_service(metrics.clone());
+
+        let response = svc
+            .watch_routes(Request::new(proto::WatchRoutesRequest::default()))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        for index in 0..20 {
+            events_tx
+                .send(route_event(
+                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, index), 32)),
+                    IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+                ))
+                .unwrap();
+        }
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.event_type, proto::RouteEventType::Added as i32);
+
+        let text = gather_text(&metrics);
+        assert!(text.contains(
+            "bgp_event_stream_lagged_total{service=\"watch_routes\",source=\"route\"} 4"
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_route_events_forwards_filters_and_maps_response() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let svc = RibService::new(tx);
+        let req = Request::new(proto::ListRouteEventsRequest {
+            neighbor_address: "192.0.2.1".to_string(),
+            afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
+            limit: 7,
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+        });
+
+        let call = tokio::spawn(async move { svc.list_route_events(req).await });
+        let update = rx.recv().await.unwrap();
+        let reply = match update {
+            RibUpdate::QueryRouteEventHistory {
+                peer,
+                afi,
+                prefix,
+                limit,
+                reply,
+            } => {
+                assert_eq!(peer, Some("192.0.2.1".parse::<IpAddr>().unwrap()));
+                assert_eq!(afi, Some(Afi::Ipv4));
+                assert_eq!(
+                    prefix,
+                    Some(Prefix::V4(Ipv4Prefix::new(
+                        "203.0.113.0".parse().unwrap(),
+                        24
+                    )))
+                );
+                assert_eq!(limit, 7);
+                reply
+            }
+            _ => panic!("unexpected update variant"),
+        };
+
+        reply
+            .send(vec![rustbgpd_rib::RouteEvent {
+                event_id: 0,
+                event_type: RouteEventType::BestChanged,
+                prefix: Prefix::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24)),
+                peer: Some("192.0.2.1".parse().unwrap()),
+                previous_peer: Some("192.0.2.2".parse().unwrap()),
+                timestamp: "123".to_string(),
+                path_id: 99,
+            }])
+            .unwrap();
+
+        let response = call.await.unwrap().unwrap().into_inner();
+        assert_eq!(response.events.len(), 1);
+        let event = &response.events[0];
+        assert_eq!(event.event_type, proto::RouteEventType::BestChanged as i32);
+        assert_eq!(event.prefix, "203.0.113.0");
+        assert_eq!(event.prefix_length, 24);
+        assert_eq!(event.peer_address, "192.0.2.1");
+        assert_eq!(event.previous_peer_address, "192.0.2.2");
+        assert_eq!(event.path_id, 99);
     }
 
     #[test]
