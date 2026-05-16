@@ -14,15 +14,23 @@ rustbgpd --check examples/linux-edge-fib/config.toml
 ## Kernel Setup
 
 Create any `ip rule` entries and forwarding policy outside rustbgpd. For
-example, to send selected traffic through table `1000`:
+example, to send all non-local lookups through table `1000`:
 
 ```bash
 sudo ip rule add priority 1000 lookup 1000
 ```
 
+That rule is intentionally catch-all. For selected traffic, add a selector such
+as `fwmark`, `from`, `to`, or `iif` before `lookup 1000`.
+
 The daemon writes routes with `RTPROT_BGP` and metric `200` into table `1000`
 only. Existing rows at the same prefix / table / metric that rustbgpd cannot
 prove it owns are preserved and reported as `foreign_route_exists`.
+
+At runtime this example needs enough privilege for the configured surfaces:
+binding TCP/179 requires root or `CAP_NET_BIND_SERVICE`, and programming
+`[[fib_tables]]` routes requires `CAP_NET_ADMIN`. `rustbgpd --check` validates
+the TOML shape but does not prove those runtime capabilities are present.
 
 ## Inspect
 
