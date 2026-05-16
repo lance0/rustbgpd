@@ -79,13 +79,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rustbgpctl events sessions` exposes the same after-the-fact session
   flap context while `WatchEvents` remains a live-only stream.
 
-- **EventService aggregate dataplane status events.** `WatchEvents` now
+- **EventService dataplane status-row summary events.** `WatchEvents` now
   accepts `EVENT_CATEGORY_DATAPLANE` and emits
-  `BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED` when the aggregate FIB or
-  BLACKHOLE discard status counts change. `rustbgpctl events watch
+  `BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED` when the surfaced FIB or
+  BLACKHOLE discard status-row counts change. `rustbgpctl events watch
   --category dataplane --type dataplane_status_changed` tails the same
-  summary stream. This is intentionally not a per-route, per-MAC, or EVPN
-  reconcile-report stream; richer dataplane/EVPN event categories remain
+  summary stream. The FIB rejected count follows `ListFibRoutes` status rows,
+  including sampled `route_limit_exceeded` rows, so it is not a global
+  suppressed-route total. This is intentionally not a per-route, per-MAC, or
+  EVPN reconcile-report stream; richer dataplane/EVPN event categories remain
   deferred.
 
 - **Self-hosted kernel dataplane CI gate.** New
