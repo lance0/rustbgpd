@@ -686,7 +686,60 @@ _arguments "${_arguments_options[@]}" : \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
+":: :_rustbgpctl__subcmd__events_commands" \
+"*::: :->events" \
 && ret=0
+
+    case $state in
+    (events)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-events-command-$line[1]:"
+        case $line[1] in
+            (watch)
+_arguments "${_arguments_options[@]}" : \
+'--address=[Neighbor address filter]:ADDRESS:_default' \
+'-a+[Address family filter]:FAMILY:_default' \
+'--family=[Address family filter]:FAMILY:_default' \
+'--prefix=[Exact prefix filter, e.g. 203.0.113.0/24]:PREFIX:_default' \
+'*--type=[Event type filter\: added, withdrawn, best_changed]:EVENT_TYPES:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__events__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-events-help-command-$line[1]:"
+        case $line[1] in
+            (watch)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
 ;;
 (health)
 _arguments "${_arguments_options[@]}" : \
@@ -1490,7 +1543,23 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (events)
 _arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__help__subcmd__events_commands" \
+"*::: :->events" \
 && ret=0
+
+    case $state in
+    (events)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-help-events-command-$line[1]:"
+        case $line[1] in
+            (watch)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
 ;;
 (health)
 _arguments "${_arguments_options[@]}" : \
@@ -1704,8 +1773,34 @@ _rustbgpctl__subcmd__completions_commands() {
 }
 (( $+functions[_rustbgpctl__subcmd__events_commands] )) ||
 _rustbgpctl__subcmd__events_commands() {
-    local commands; commands=()
+    local commands; commands=(
+'watch:Watch the unified live event stream' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
     _describe -t commands 'rustbgpctl events commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__events__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__events__subcmd__help_commands() {
+    local commands; commands=(
+'watch:Watch the unified live event stream' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl events help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__events__subcmd__help__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__events__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl events help help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__events__subcmd__help__subcmd__watch_commands] )) ||
+_rustbgpctl__subcmd__events__subcmd__help__subcmd__watch_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl events help watch commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__events__subcmd__watch_commands] )) ||
+_rustbgpctl__subcmd__events__subcmd__watch_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl events watch commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__evpn_commands] )) ||
 _rustbgpctl__subcmd__evpn_commands() {
@@ -1923,8 +2018,15 @@ _rustbgpctl__subcmd__help__subcmd__completions_commands() {
 }
 (( $+functions[_rustbgpctl__subcmd__help__subcmd__events_commands] )) ||
 _rustbgpctl__subcmd__help__subcmd__events_commands() {
-    local commands; commands=()
+    local commands; commands=(
+'watch:Watch the unified live event stream' \
+    )
     _describe -t commands 'rustbgpctl help events commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__events__subcmd__watch_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__events__subcmd__watch_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help events watch commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn_commands] )) ||
 _rustbgpctl__subcmd__help__subcmd__evpn_commands() {

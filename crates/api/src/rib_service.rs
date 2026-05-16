@@ -332,26 +332,30 @@ fn parse_prefix_request(prefix: &str, prefix_length: u32) -> Result<Prefix, Stat
     let addr: IpAddr = prefix
         .parse()
         .map_err(|e| Status::invalid_argument(format!("invalid prefix address: {e}")))?;
-    let len = u8::try_from(prefix_length)
-        .map_err(|_| Status::invalid_argument("prefix_length must be 0-128"))?;
     Ok(match addr {
-        IpAddr::V4(_) if len > 32 => {
+        IpAddr::V4(_) if prefix_length > 32 => {
             return Err(Status::invalid_argument(
                 "prefix_length must be 0-32 for IPv4",
             ));
         }
-        IpAddr::V6(_) if len > 128 => {
+        IpAddr::V6(_) if prefix_length > 128 => {
             return Err(Status::invalid_argument(
                 "prefix_length must be 0-128 for IPv6",
             ));
         }
-        IpAddr::V4(v4) => Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(v4, len)),
-        IpAddr::V6(v6) => Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(v6, len)),
+        IpAddr::V4(v4) => Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+            v4,
+            u8::try_from(prefix_length).expect("validated IPv4 prefix_length fits in u8"),
+        )),
+        IpAddr::V6(v6) => Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+            v6,
+            u8::try_from(prefix_length).expect("validated IPv6 prefix_length fits in u8"),
+        )),
     })
 }
 
 #[allow(clippy::result_large_err)]
-fn parse_route_event_prefix_filter(
+pub(crate) fn parse_route_event_prefix_filter(
     prefix: &str,
     prefix_length: u32,
     afi: Option<Afi>,
@@ -542,7 +546,7 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
     }
 }
 
-fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::RouteEvent {
+pub(crate) fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::RouteEvent {
     let event_type = match event.event_type {
         RouteEventType::Added => proto::RouteEventType::Added,
         RouteEventType::Withdrawn => proto::RouteEventType::Withdrawn,
@@ -569,7 +573,7 @@ fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::RouteEvent {
     }
 }
 
-fn route_event_afi_filter(afi_safi: i32) -> Result<Option<Afi>, Status> {
+pub(crate) fn route_event_afi_filter(afi_safi: i32) -> Result<Option<Afi>, Status> {
     match afi_safi {
         0 => Ok(None),
         x if x == proto::AddressFamily::Ipv4Unicast as i32 => Ok(Some(Afi::Ipv4)),

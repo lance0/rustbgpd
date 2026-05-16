@@ -450,7 +450,9 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 match both `peer_address` and `previous_peer_address`, so a peer-scoped query
 includes withdraws and best-path moves away from that peer. Prefix filters are
 exact-match only and can be combined with peer, family, and limit filters. The
-history is process-local and resets on daemon restart.
+filter does not do containment or longest-prefix matching, so a query for
+`203.0.113.0/16` will not return an event recorded for `203.0.113.0/24`.
+The history is process-local and resets on daemon restart.
 
 ### List FlowSpec routes
 
@@ -538,6 +540,42 @@ ownership proof by itself because another daemon can use the same protocol
 marker. A row rustbgpd previously owned but later finds changed by another
 writer is reported as `owned_route_drifted`; the daemon releases ownership and
 does not delete that replacement on a later withdraw.
+
+---
+
+## EventService
+
+Unified typed live event stream. The foundation slice carries route events;
+session, policy, and dataplane categories are reserved for follow-up slices.
+
+| RPC | Description |
+|-----|-------------|
+| `WatchEvents` | Server-streaming: unified typed event stream sourced from structured daemon events |
+
+### Watch unified events
+
+```bash
+# Watch all live route events through the unified event stream
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.EventService/WatchEvents
+
+# Watch only route adds for one exact prefix
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"categories": ["EVENT_CATEGORY_ROUTE"], "event_types": ["BGP_EVENT_TYPE_ROUTE_ADDED"], "prefix": "203.0.113.0", "prefix_length": 24}' \
+  localhost:50051 rustbgpd.v1.EventService/WatchEvents
+```
+
+`WatchEvents` is a live stream only: it does not replay the bounded
+`ListRouteEvents` history and it does not persist events. Filters compose
+AND-wise across category, type, peer, family, and exact prefix. Repeated
+category and type filters are OR-matched within their own dimension. This
+foundation slice emits `EVENT_CATEGORY_ROUTE` events sourced from the same
+structured RIB broadcast as `WatchRoutes`; session, policy, and dataplane
+events are intentionally deferred until those subsystems expose equally
+structured event sources. `BgpEvent` repeats common fields such as peer,
+prefix, type, and severity at the top level even when the payload also carries
+them so category-agnostic clients can render or filter events without unpacking
+the `oneof`.
 
 ---
 

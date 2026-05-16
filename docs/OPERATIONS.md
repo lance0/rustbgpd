@@ -453,6 +453,18 @@ rustbgpctl top -i 5     # 5s poll interval
 Shows sessions, prefix counts, message rates, RPKI VRP counts, and
 streaming route events in a terminal UI. Press `h` for keybindings.
 
+### Watch live events
+
+```bash
+rustbgpctl events watch
+rustbgpctl events watch --prefix 203.0.113.0/24 --type added,best_changed
+```
+
+`events watch` tails the unified `EventService.WatchEvents` stream. The
+foundation slice carries route add / withdraw / best-change events; session,
+policy, and dataplane event categories remain follow-up work. For recent
+history instead of a live tail, use `rustbgpctl events --prefix <PREFIX>`.
+
 ### Check health
 
 ```bash

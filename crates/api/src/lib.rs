@@ -2,13 +2,15 @@
 //!
 //! Tonic bindings for the rustbgpd services:
 //! `GlobalService`, `NeighborService`, `PolicyService`, `PeerGroupService`,
-//! `RibService`, `InjectionService`, `ControlService`, `EvpnService`.
+//! `RibService`, `EventService`, `InjectionService`, `ControlService`,
+//! `EvpnService`.
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
 mod control_service;
+mod event_service;
 pub mod evpn_service;
 mod global_service;
 mod injection_service;

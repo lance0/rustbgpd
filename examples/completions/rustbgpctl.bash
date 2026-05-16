@@ -70,6 +70,18 @@ _rustbgpctl() {
             rustbgpctl,watch)
                 cmd="rustbgpctl__subcmd__watch"
                 ;;
+            rustbgpctl__subcmd__events,help)
+                cmd="rustbgpctl__subcmd__events__subcmd__help"
+                ;;
+            rustbgpctl__subcmd__events,watch)
+                cmd="rustbgpctl__subcmd__events__subcmd__watch"
+                ;;
+            rustbgpctl__subcmd__events__subcmd__help,help)
+                cmd="rustbgpctl__subcmd__events__subcmd__help__subcmd__help"
+                ;;
+            rustbgpctl__subcmd__events__subcmd__help,watch)
+                cmd="rustbgpctl__subcmd__events__subcmd__help__subcmd__watch"
+                ;;
             rustbgpctl__subcmd__evpn,add-imet)
                 cmd="rustbgpctl__subcmd__evpn__subcmd__add__subcmd__imet"
                 ;;
@@ -201,6 +213,9 @@ _rustbgpctl() {
                 ;;
             rustbgpctl__subcmd__help,watch)
                 cmd="rustbgpctl__subcmd__help__subcmd__watch"
+                ;;
+            rustbgpctl__subcmd__help__subcmd__events,watch)
+                cmd="rustbgpctl__subcmd__help__subcmd__events__subcmd__watch"
                 ;;
             rustbgpctl__subcmd__help__subcmd__evpn,add-imet)
                 cmd="rustbgpctl__subcmd__help__subcmd__evpn__subcmd__add__subcmd__imet"
@@ -624,7 +639,7 @@ _rustbgpctl() {
             return 0
             ;;
         rustbgpctl__subcmd__events)
-            opts="-a -l -s -j -h --address --family --prefix --limit --addr --token-file --json --no-color --help"
+            opts="-a -l -s -j -h --address --family --prefix --limit --addr --token-file --json --no-color --help watch help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -651,6 +666,94 @@ _rustbgpctl() {
                     return 0
                     ;;
                 -l)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__events__subcmd__help)
+            opts="watch help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__events__subcmd__help__subcmd__help)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__events__subcmd__help__subcmd__watch)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__events__subcmd__watch)
+            opts="-a -s -j -h --address --family --prefix --type --addr --token-file --json --no-color --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --address)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --family)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -a)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --prefix)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --type)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1472,8 +1575,22 @@ _rustbgpctl() {
             return 0
             ;;
         rustbgpctl__subcmd__help__subcmd__events)
-            opts=""
+            opts="watch"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rustbgpctl__subcmd__help__subcmd__events__subcmd__watch)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi

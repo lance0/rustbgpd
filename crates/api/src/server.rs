@@ -15,6 +15,7 @@ use tonic::{Request, Status};
 use tracing::{error, info, warn};
 
 use crate::control_service::{ControlService, MrtTriggerTx};
+use crate::event_service::EventService;
 use crate::evpn_service::{EvpnService, OriginatedLocalMacCountFn};
 use crate::global_service::GlobalService;
 use crate::injection_service::InjectionService;
@@ -23,6 +24,7 @@ use crate::peer_group_service::PeerGroupService;
 use crate::peer_types::{ConfigEvent, PeerManagerCommand};
 use crate::policy_service::PolicyService;
 use crate::proto::control_service_server::ControlServiceServer;
+use crate::proto::event_service_server::EventServiceServer;
 use crate::proto::evpn_service_server::EvpnServiceServer;
 use crate::proto::global_service_server::GlobalServiceServer;
 use crate::proto::injection_service_server::InjectionServiceServer;
@@ -393,6 +395,10 @@ async fn run_tcp_listener(
             ),
             interceptor.clone(),
         ))
+        .add_service(EventServiceServer::with_interceptor(
+            EventService::new(rib_tx.clone()),
+            interceptor.clone(),
+        ))
         .add_service(InjectionServiceServer::with_interceptor(
             InjectionService::new(rib_tx, access_mode),
             interceptor.clone(),
@@ -492,6 +498,10 @@ async fn run_uds_listener(
                 blackhole_discard_snapshot.clone(),
                 fib_route_snapshot.clone(),
             ),
+            interceptor.clone(),
+        ))
+        .add_service(EventServiceServer::with_interceptor(
+            EventService::new(rib_tx.clone()),
             interceptor.clone(),
         ))
         .add_service(InjectionServiceServer::with_interceptor(
