@@ -355,7 +355,7 @@ fn parse_prefix_request(prefix: &str, prefix_length: u32) -> Result<Prefix, Stat
 }
 
 #[allow(clippy::result_large_err)]
-fn parse_route_event_prefix_filter(
+pub(crate) fn parse_route_event_prefix_filter(
     prefix: &str,
     prefix_length: u32,
     afi: Option<Afi>,
@@ -546,7 +546,7 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
     }
 }
 
-fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::RouteEvent {
+pub(crate) fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::RouteEvent {
     let event_type = match event.event_type {
         RouteEventType::Added => proto::RouteEventType::Added,
         RouteEventType::Withdrawn => proto::RouteEventType::Withdrawn,
@@ -573,7 +573,7 @@ fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::RouteEvent {
     }
 }
 
-fn route_event_afi_filter(afi_safi: i32) -> Result<Option<Afi>, Status> {
+pub(crate) fn route_event_afi_filter(afi_safi: i32) -> Result<Option<Afi>, Status> {
     match afi_safi {
         0 => Ok(None),
         x if x == proto::AddressFamily::Ipv4Unicast as i32 => Ok(Some(Afi::Ipv4)),

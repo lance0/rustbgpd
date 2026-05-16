@@ -306,15 +306,28 @@ complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand watch" -l token-fi
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand watch" -s j -l json -d 'Output in JSON format'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand watch" -l no-color -d 'Disable colored output'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand watch" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events" -l address -d 'Neighbor address filter' -r
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events" -s a -l family -d 'Address family filter' -r
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events" -l prefix -d 'Exact prefix filter, e.g. 203.0.113.0/24' -r
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events" -s l -l limit -d 'Maximum recent events to return' -r
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events" -s j -l json -d 'Output in JSON format'
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events" -l no-color -d 'Disable colored output'
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and not __fish_seen_subcommand_from watch help" -l address -d 'Neighbor address filter' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and not __fish_seen_subcommand_from watch help" -s a -l family -d 'Address family filter' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and not __fish_seen_subcommand_from watch help" -l prefix -d 'Exact prefix filter, e.g. 203.0.113.0/24' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and not __fish_seen_subcommand_from watch help" -s l -l limit -d 'Maximum recent events to return' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and not __fish_seen_subcommand_from watch help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and not __fish_seen_subcommand_from watch help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and not __fish_seen_subcommand_from watch help" -s j -l json -d 'Output in JSON format'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and not __fish_seen_subcommand_from watch help" -l no-color -d 'Disable colored output'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and not __fish_seen_subcommand_from watch help" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and not __fish_seen_subcommand_from watch help" -f -a "watch" -d 'Watch the unified live event stream'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and not __fish_seen_subcommand_from watch help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and __fish_seen_subcommand_from watch" -l address -d 'Neighbor address filter' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and __fish_seen_subcommand_from watch" -s a -l family -d 'Address family filter' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and __fish_seen_subcommand_from watch" -l prefix -d 'Exact prefix filter, e.g. 203.0.113.0/24' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and __fish_seen_subcommand_from watch" -l type -d 'Event type filter: added, withdrawn, best_changed' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and __fish_seen_subcommand_from watch" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and __fish_seen_subcommand_from watch" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and __fish_seen_subcommand_from watch" -s j -l json -d 'Output in JSON format'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and __fish_seen_subcommand_from watch" -l no-color -d 'Disable colored output'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and __fish_seen_subcommand_from watch" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and __fish_seen_subcommand_from help" -f -a "watch" -d 'Watch the unified live event stream'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand events; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand health" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand health" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand health" -s j -l json -d 'Output in JSON format'
@@ -530,6 +543,7 @@ complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand help; and __fish_s
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand help; and __fish_seen_subcommand_from evpn" -f -a "nexthops" -d 'List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand help; and __fish_seen_subcommand_from evpn" -f -a "vrfs" -d 'List configured IP-VRFs (Gate 9, ADR-0058) and their readiness verdict from the most recent reconcile pass'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand help; and __fish_seen_subcommand_from evpn" -f -a "diagnose" -d 'Summarize EVPN VTEP alpha state and key metrics'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand help; and __fish_seen_subcommand_from events" -f -a "watch" -d 'Watch the unified live event stream'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand help; and __fish_seen_subcommand_from policy" -f -a "list" -d 'List configured policies (names + statement counts)'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand help; and __fish_seen_subcommand_from policy" -f -a "get" -d 'Show one policy by name'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand help; and __fish_seen_subcommand_from policy" -f -a "set" -d 'Set (create or replace) a policy from a JSON file'

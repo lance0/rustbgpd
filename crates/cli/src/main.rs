@@ -144,6 +144,9 @@ enum Command {
 
     /// Show recent route update events
     Events {
+        #[command(subcommand)]
+        action: Option<EventsAction>,
+
         /// Neighbor address filter
         #[arg(long)]
         address: Option<String>,
@@ -472,6 +475,28 @@ enum FlowspecAction {
         /// Match components identifying the rule
         #[arg(long = "match", value_delimiter = ' ')]
         components: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum EventsAction {
+    /// Watch the unified live event stream
+    Watch {
+        /// Neighbor address filter
+        #[arg(long)]
+        address: Option<String>,
+
+        /// Address family filter
+        #[arg(short = 'a', long)]
+        family: Option<String>,
+
+        /// Exact prefix filter, e.g. 203.0.113.0/24
+        #[arg(long)]
+        prefix: Option<String>,
+
+        /// Event type filter: added, withdrawn, best_changed
+        #[arg(long = "type", value_delimiter = ',')]
+        event_types: Vec<String>,
     },
 }
 
@@ -910,14 +935,34 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         }
 
         Command::Events {
+            action,
             address,
             family,
             prefix,
             limit,
-        } => {
-            let family_val = resolve_family(&family)?;
-            commands::watch::history(connection, address, family_val, prefix, limit, json).await
-        }
+        } => match action {
+            Some(EventsAction::Watch {
+                address,
+                family,
+                prefix,
+                event_types,
+            }) => {
+                let family_val = resolve_family(&family)?;
+                commands::watch::events_watch(
+                    connection,
+                    address,
+                    family_val,
+                    prefix,
+                    event_types,
+                    json,
+                )
+                .await
+            }
+            None => {
+                let family_val = resolve_family(&family)?;
+                commands::watch::history(connection, address, family_val, prefix, limit, json).await
+            }
+        },
 
         Command::Evpn {
             action,
@@ -1450,10 +1495,36 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Events {
+                action: None,
                 prefix: Some(ref prefix),
                 limit: 25,
                 ..
             } if prefix == "203.0.113.0/24"
+        ));
+    }
+
+    #[test]
+    fn test_parse_events_watch() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "events",
+            "watch",
+            "--prefix",
+            "203.0.113.0/24",
+            "--type",
+            "added,best_changed",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Events {
+                action: Some(EventsAction::Watch {
+                    prefix: Some(ref prefix),
+                    ref event_types,
+                    ..
+                }),
+                ..
+            } if prefix == "203.0.113.0/24" && event_types.len() == 2
         ));
     }
 

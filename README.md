@@ -29,7 +29,7 @@ manual gates for runtime or kernel reasons.
 
 ## Why rustbgpd
 
-- **API-first control plane** -- full gRPC control surface across 8 services plus a thin CLI (`rustbgpctl`) with colored tables, dynamic column alignment, and human-readable uptimes. Dynamic peer management, route injection, policy CRUD, peer groups, EVPN instance queries, streaming events, and daemon control without restarts.
+- **API-first control plane** -- full gRPC control surface across 9 services plus a thin CLI (`rustbgpctl`) with colored tables, dynamic column alignment, and human-readable uptimes. Dynamic peer management, route injection, policy CRUD, peer groups, EVPN instance queries, streaming events, and daemon control without restarts.
 - **Explicit architecture** -- pure FSM with no I/O, single-owner RIB with no locks, bounded channels between tasks. No `Arc<RwLock>` on routing state. See [ARCHITECTURE.md](ARCHITECTURE.md).
 - **Dual-stack and modern protocol support** -- MP-BGP, Add-Path, Extended Next Hop, Extended Messages, GR/LLGR/Notification GR, Route Refresh/Enhanced Route Refresh, FlowSpec, Route Reflector, large and extended communities.
 - **Operational visibility** -- Prometheus metrics, BMP export to collectors, MRT TABLE_DUMP_V2 snapshots, birdwatcher-compatible looking glass REST API, structured JSON logging, per-peer counters, best-path explain.
@@ -211,7 +211,7 @@ Or use systemd with [`examples/systemd/rustbgpd.service`](examples/systemd/rustb
 
 ## gRPC API
 
-Eight services cover the full operational surface:
+Nine services cover the full operational surface:
 
 | Service | RPCs | Purpose |
 |---------|------|---------|
@@ -220,6 +220,7 @@ Eight services cover the full operational surface:
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `List/Get/Set/DeleteNeighborSet`, `Get*Chain`, `Set*Chain`, `Clear*Chain` | Named policy CRUD, neighbor sets, and global/per-neighbor chain attachment |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
 | `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListBlackholeDiscards`, `ListRouteEvents`, `WatchRoutes` | RIB queries (incl. EVPN), BLACKHOLE discard status, explain, recent route-event history with per-prefix drilldown, and streaming |
+| `EventService` | `WatchEvents` | Unified live event stream foundation (route events in this slice; session/policy/dataplane categories reserved) |
 | `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection |
 | `ControlService` | `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
 | `EvpnService` | `ListEvpnInstances` | Local EVPN VTEP instance state (read-only Phase-2 foundation; ADR-0052) |

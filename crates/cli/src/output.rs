@@ -161,6 +161,16 @@ pub fn format_family(afi: i32) -> &'static str {
     }
 }
 
+/// Format event severity enum value to string.
+pub fn format_severity(severity: i32) -> &'static str {
+    match severity {
+        1 => "info",
+        2 => "warning",
+        3 => "error",
+        _ => "unknown",
+    }
+}
+
 // -- JSON output structs --
 
 #[derive(Serialize)]

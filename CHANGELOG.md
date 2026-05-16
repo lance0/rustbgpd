@@ -19,6 +19,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   route add / withdraw / best-change context without leaving a live
   `WatchRoutes` stream running.
 
+- **Unified live event stream foundation.** New
+  `EventService.WatchEvents` streams typed `BgpEvent` envelopes, starting
+  with the existing unicast best-path route events. `rustbgpctl events
+  watch` exposes the same live stream with peer, family, exact-prefix, and
+  route-event-type filters while leaving `WatchRoutes` and
+  `ListRouteEvents` unchanged.
+
 - **Self-hosted kernel dataplane CI gate.** New
   `.github/workflows/kernel-dataplane.yml` runs the privileged Linux
   dataplane checks that hosted runners cannot reliably exercise:

@@ -527,6 +527,14 @@ service RibService {
   rpc ListEvpnRoutes(ListEvpnRequest) returns (ListEvpnResponse);
 }
 
+// ---------------------------------------------------------------------------
+// EventService — unified live event stream
+// ---------------------------------------------------------------------------
+
+service EventService {
+  rpc WatchEvents(WatchEventsRequest) returns (stream BgpEvent);
+}
+
 message ListRoutesRequest {
   string neighbor_address = 1;
   AddressFamily afi_safi = 2;
@@ -805,6 +813,66 @@ message RouteEvent {
   string previous_peer_address = 7;
   // Add-Path path identifier (RFC 7911). 0 = no Add-Path.
   uint32 path_id = 8;
+}
+
+enum EventCategory {
+  EVENT_CATEGORY_UNSPECIFIED = 0;
+  EVENT_CATEGORY_ROUTE = 1;
+  EVENT_CATEGORY_SESSION = 2;
+  EVENT_CATEGORY_POLICY = 3;
+  EVENT_CATEGORY_DATAPLANE = 4;
+}
+
+enum BgpEventType {
+  BGP_EVENT_TYPE_UNSPECIFIED = 0;
+  BGP_EVENT_TYPE_ROUTE_ADDED = 1;
+  BGP_EVENT_TYPE_ROUTE_WITHDRAWN = 2;
+  BGP_EVENT_TYPE_ROUTE_BEST_CHANGED = 3;
+}
+
+enum EventSeverity {
+  EVENT_SEVERITY_UNSPECIFIED = 0;
+  EVENT_SEVERITY_INFO = 1;
+  EVENT_SEVERITY_WARNING = 2;
+  EVENT_SEVERITY_ERROR = 3;
+}
+
+message WatchEventsRequest {
+  // Empty = all categories. This foundation slice supports only
+  // EVENT_CATEGORY_ROUTE; other categories are reserved for later
+  // policy/session/dataplane event sources.
+  repeated EventCategory categories = 1;
+  // Empty = all event types. This foundation slice supports route
+  // added / withdrawn / best-changed events only.
+  repeated BgpEventType event_types = 2;
+  // Optional neighbor address filter. Empty = all peers. Route
+  // events match both current and previous peer, same as WatchRoutes
+  // and ListRouteEvents.
+  string neighbor_address = 3;
+  // Optional family filter. Only IPv4/IPv6 unicast are supported in
+  // this foundation slice.
+  AddressFamily afi_safi = 4;
+  // Optional exact prefix filter. Empty = no prefix filter.
+  string prefix = 5;
+  uint32 prefix_length = 6;
+}
+
+message BgpEvent {
+  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
+  string timestamp = 1;
+  EventCategory category = 2;
+  BgpEventType event_type = 3;
+  EventSeverity severity = 4;
+  string peer_address = 5;
+  string previous_peer_address = 6;
+  string prefix = 7;
+  uint32 prefix_length = 8;
+  AddressFamily afi_safi = 9;
+  string summary = 10;
+
+  oneof payload {
+    RouteEvent route = 11;
+  }
 }
 
 // ---------------------------------------------------------------------------
