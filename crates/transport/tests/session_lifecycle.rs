@@ -7,7 +7,9 @@ use bytes::{Bytes, BytesMut};
 use rustbgpd_fsm::PeerConfig;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_transport::{PeerHandle, SessionNotification, TransportConfig};
+use rustbgpd_transport::{
+    PeerHandle, SessionIdentity, SessionLifecycleNotification, SessionNotification, TransportConfig,
+};
 use rustbgpd_wire::{
     Afi, Capability, Message, NotificationMessage, OpenMessage, Safi, decode_message,
     encode_message, notification::NotificationCode, peek_message_length,
@@ -461,6 +463,57 @@ async fn connect_failure_retries() {
 }
 
 #[tokio::test]
+async fn state_changed_uses_bounded_lifecycle_channel() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let metrics = BgpMetrics::new();
+
+    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<SessionNotification>();
+    let (lifecycle_tx, mut lifecycle_rx) = mpsc::channel::<SessionLifecycleNotification>(8);
+
+    let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let handle = PeerHandle::spawn_with_identity_and_lifecycle(
+        transport_config(addr),
+        metrics.clone(),
+        rib_tx,
+        None,
+        None,
+        Some(notify_tx),
+        Some(lifecycle_tx),
+        None,
+        None,
+        false,
+        SessionIdentity::primary(42),
+    );
+    handle.start().await.unwrap();
+
+    let (_peer_stream, _) = listener.accept().await.unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(5), lifecycle_rx.recv())
+        .await
+        .expect("should receive lifecycle event within timeout")
+        .expect("lifecycle channel should be open");
+
+    match event {
+        SessionLifecycleNotification::StateChanged {
+            session_id,
+            peer_addr,
+            ..
+        } => {
+            assert_eq!(session_id, 42);
+            assert_eq!(peer_addr, addr.ip());
+        }
+    }
+
+    assert!(
+        notify_rx.try_recv().is_err(),
+        "ordinary StateChanged events should not use the lossless collision channel"
+    );
+
+    handle.shutdown().await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn open_confirm_sends_session_notification() {
     // Verify that reaching OpenConfirm sends SessionNotification::OpenReceived
     // with the correct remote_router_id. This exercises the fix for the bug
@@ -499,7 +552,8 @@ async fn open_confirm_sends_session_notification() {
     send_bgp_message(&mut peer_stream, &Message::Open(mock_open())).await;
 
     // The OpenReceived notification should arrive before Established (no
-    // KEEPALIVE sent yet). StateChanged notifications may arrive first.
+    // KEEPALIVE sent yet). Ordinary StateChanged events use the bounded
+    // lifecycle channel rather than this lossless collision channel.
     let notification = loop {
         let notification = tokio::time::timeout(Duration::from_secs(5), notify_rx.recv())
             .await
@@ -566,7 +620,8 @@ async fn query_state_returns_router_id_at_open_confirm() {
     send_bgp_message(&mut peer_stream, &Message::Open(mock_open())).await;
 
     // Wait for the OpenReceived notification to confirm we're in OpenConfirm.
-    // StateChanged notifications may arrive first.
+    // Ordinary StateChanged events use the bounded lifecycle channel rather
+    // than this lossless collision channel.
     let notification = loop {
         let notification = tokio::time::timeout(Duration::from_secs(5), notify_rx.recv())
             .await

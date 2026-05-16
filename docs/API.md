@@ -578,7 +578,10 @@ AND-wise across category, type, peer, family, and exact prefix. Repeated
 category and type filters are OR-matched within their own dimension. Route
 events are sourced from the same structured RIB broadcast as `WatchRoutes`;
 session events are sourced from the peer manager's session lifecycle
-broadcast. Prefix and family filters are route-only: session events do not
+broadcast. Transport sessions send ordinary state-change lifecycle events over
+a bounded channel that is separate from the lossless TCP collision-coordination
+path, so high churn can drop observability events without risking collision
+handling. Prefix and family filters are route-only: session events do not
 match requests that set `prefix` or `afi_safi`. `BgpEvent` repeats common
 fields such as peer, prefix, type, and severity at the top level even when the
 payload also carries them so category-agnostic clients can render or filter

@@ -13,7 +13,8 @@ use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::{RibUpdate, event::unix_timestamp_now};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{
-    PeerHandle, PeerSessionState, SessionIdentity, SessionNotification, TransportConfig,
+    PeerHandle, PeerSessionState, SessionIdentity, SessionLifecycleNotification,
+    SessionNotification, TransportConfig,
 };
 use rustbgpd_wire::{Afi, Safi};
 use tokio::net::TcpStream;
@@ -172,6 +173,8 @@ pub struct PeerManager {
     validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
     session_notify_tx: mpsc::UnboundedSender<SessionNotification>,
     session_notify_rx: mpsc::UnboundedReceiver<SessionNotification>,
+    session_lifecycle_tx: mpsc::Sender<SessionLifecycleNotification>,
+    session_lifecycle_rx: mpsc::Receiver<SessionLifecycleNotification>,
     session_events_tx: broadcast::Sender<SessionLifecycleEvent>,
     current_config: Config,
     /// Resolved dynamic neighbor ranges for prefix-based auto-accept.
@@ -339,6 +342,7 @@ impl PeerManager {
         current_config: Config,
     ) -> Self {
         let (session_notify_tx, session_notify_rx) = mpsc::unbounded_channel();
+        let (session_lifecycle_tx, session_lifecycle_rx) = mpsc::channel(4096);
         let (session_events_tx, _) = broadcast::channel(4096);
         Self {
             peers: HashMap::new(),
@@ -354,6 +358,8 @@ impl PeerManager {
             validation_rx,
             session_notify_tx,
             session_notify_rx,
+            session_lifecycle_tx,
+            session_lifecycle_rx,
             session_events_tx,
             dynamic_ranges: Self::parse_dynamic_ranges(&current_config),
             dynamic_peer_count: 0,
@@ -760,13 +766,14 @@ impl PeerManager {
         let max_prefixes = transport.max_prefixes;
 
         let session_id = self.allocate_session_id();
-        let handle = PeerHandle::spawn_with_identity(
+        let handle = PeerHandle::spawn_with_identity_and_lifecycle(
             transport.clone(),
             self.metrics.clone(),
             self.rib_tx.clone(),
             import_policy.clone(),
             export_policy.clone(),
             Some(self.session_notify_tx.clone()),
+            Some(self.session_lifecycle_tx.clone()),
             self.bmp_tx.clone(),
             self.validation_rx.clone(),
             false,
@@ -1531,7 +1538,7 @@ impl PeerManager {
         let export_policy = managed.export_policy.clone();
         let advertise_graceful_shutdown = managed.advertise_graceful_shutdown;
         let session_id = self.allocate_session_id();
-        let handle = PeerHandle::spawn_inbound_with_identity(
+        let handle = PeerHandle::spawn_inbound_with_identity_and_lifecycle(
             transport_config,
             self.metrics.clone(),
             self.rib_tx.clone(),
@@ -1539,6 +1546,7 @@ impl PeerManager {
             export_policy,
             stream,
             Some(self.session_notify_tx.clone()),
+            Some(self.session_lifecycle_tx.clone()),
             self.bmp_tx.clone(),
             self.validation_rx.clone(),
             advertise_graceful_shutdown,
@@ -1629,7 +1637,7 @@ impl PeerManager {
                     .is_some_and(|pending| pending.graceful_shutdown);
 
                 let session_id = self.allocate_session_id();
-                let handle = PeerHandle::spawn_inbound_with_identity(
+                let handle = PeerHandle::spawn_inbound_with_identity_and_lifecycle(
                     transport.clone(),
                     self.metrics.clone(),
                     self.rib_tx.clone(),
@@ -1637,6 +1645,7 @@ impl PeerManager {
                     export_policy.clone(),
                     stream,
                     Some(self.session_notify_tx.clone()),
+                    Some(self.session_lifecycle_tx.clone()),
                     self.bmp_tx.clone(),
                     self.validation_rx.clone(),
                     advertise_graceful_shutdown,
@@ -1817,17 +1826,7 @@ impl PeerManager {
                 old,
                 new,
             } => {
-                let matches_current = self.peers.get(&peer_addr).is_some_and(|m| {
-                    m.session_id == session_id
-                        || m.pending_inbound
-                            .as_ref()
-                            .is_some_and(|p| p.session_id == session_id)
-                });
-                if !matches_current {
-                    debug!(%peer_addr, session_id, ?role, "ignoring stale StateChanged notification");
-                    return;
-                }
-                self.publish_state_lifecycle_event(peer_addr, role, old, new);
+                self.handle_state_changed_notification(session_id, role, peer_addr, old, new);
             }
             SessionNotification::OpenReceived {
                 session_id,
@@ -1921,6 +1920,42 @@ impl PeerManager {
         }
     }
 
+    fn handle_session_lifecycle_notification(
+        &mut self,
+        notification: &SessionLifecycleNotification,
+    ) {
+        match notification {
+            SessionLifecycleNotification::StateChanged {
+                session_id,
+                role,
+                peer_addr,
+                old,
+                new,
+            } => self.handle_state_changed_notification(*session_id, *role, *peer_addr, *old, *new),
+        }
+    }
+
+    fn handle_state_changed_notification(
+        &mut self,
+        session_id: u64,
+        role: rustbgpd_transport::SessionRole,
+        peer_addr: IpAddr,
+        old: SessionState,
+        new: SessionState,
+    ) {
+        let matches_current = self.peers.get(&peer_addr).is_some_and(|m| {
+            m.session_id == session_id
+                || m.pending_inbound
+                    .as_ref()
+                    .is_some_and(|p| p.session_id == session_id)
+        });
+        if !matches_current {
+            debug!(%peer_addr, session_id, ?role, "ignoring stale StateChanged lifecycle notification");
+            return;
+        }
+        self.publish_state_lifecycle_event(peer_addr, role, old, new);
+    }
+
     async fn resolve_collision(&mut self, peer_addr: IpAddr, remote_router_id: Ipv4Addr) {
         let local_id = u32::from(self.router_id);
         let remote_id = u32::from(remote_router_id);
@@ -2000,7 +2035,7 @@ impl PeerManager {
         let advertise_graceful_shutdown = managed.advertise_graceful_shutdown;
         let old_handle = std::mem::replace(
             &mut managed.handle,
-            PeerHandle::spawn_inbound_with_identity(
+            PeerHandle::spawn_inbound_with_identity_and_lifecycle(
                 managed.transport_config.clone(),
                 self.metrics.clone(),
                 self.rib_tx.clone(),
@@ -2008,6 +2043,7 @@ impl PeerManager {
                 managed.export_policy.clone(),
                 stream,
                 Some(self.session_notify_tx.clone()),
+                Some(self.session_lifecycle_tx.clone()),
                 self.bmp_tx.clone(),
                 self.validation_rx.clone(),
                 advertise_graceful_shutdown,
@@ -2435,6 +2471,11 @@ impl PeerManager {
                 notification = self.session_notify_rx.recv() => {
                     if let Some(notification) = notification {
                         self.handle_session_notification(notification).await;
+                    }
+                }
+                lifecycle = self.session_lifecycle_rx.recv() => {
+                    if let Some(notification) = lifecycle {
+                        self.handle_session_lifecycle_notification(&notification);
                     }
                 }
                 () = async {

@@ -31,6 +31,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `session_state_changed`, `session_established`, `session_lost`,
   `peer_enabled`, and `peer_disabled`. `rustbgpctl events watch
   --category session` tails those events with peer and type filters.
+  Ordinary FSM state-change lifecycle delivery uses a bounded transport
+  channel that is separate from the lossless TCP collision-coordination path,
+  so session-event observability cannot grow the collision queue under churn.
   Notification sent/received, policy, dataplane, and EVPN event
   categories remain deferred until their sources expose one complete
   structured event path.
