@@ -22,13 +22,15 @@ log_format = "json"
 # read-only TCP listener or mTLS proxy only when remote monitoring needs it.
 [global.telemetry.grpc_uds]
 path = "/var/lib/rustbgpd/grpc.sock"
-mode = 384
+mode = 0o600
 
 # Shared transport / policy defaults for transit peers. The FIB table below
 # also uses this name as an allow-list, so only best routes learned from this
-# peer group are eligible for kernel install.
+# peer group are eligible for kernel install. Keep a peer import cap alongside
+# the FIB max_routes guardrail so route leaks are bounded before kernel export.
 [peer_groups.transit]
 hold_time = 90
+max_prefixes = 100000
 
 [[neighbors]]
 address = "198.51.100.1"
