@@ -368,16 +368,17 @@ fn mac_from_macip_key(key: &EvpnRouteKey) -> Option<MacAddress> {
 /// On shutdown, withdraw every still-advertised SVI MAC so peer state
 /// converges before the daemon exits.
 async fn drain_to_withdraws(originated: &mut OriginatedSet, runtime: &SviRuntime) {
-    for (vni, (key, mac)) in std::mem::take(originated) {
+    for (vni, (key, _mac)) in std::mem::take(originated) {
         let Some(inst) = runtime.instances.get(vni) else {
             continue;
         };
         // Direct send + ack — apply_actions logging surface is reused
-        // through withdraw_svi_mac.
+        // through withdraw_svi_mac, which owns the per-VNI counter
+        // decrement on every successful withdraw (see the comment at
+        // its call site). Calling `record_withdraw` again here would
+        // double-decrement the per-instance count, same pattern that
+        // bit `apply_report` pre-v0.18.0.
         withdraw_svi_mac(inst, key, runtime).await;
-        runtime
-            .originated_local_mac_counts
-            .record_withdraw(vni, mac, key);
     }
 }
 
