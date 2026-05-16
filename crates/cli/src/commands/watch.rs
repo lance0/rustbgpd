@@ -9,6 +9,16 @@ use crate::proto::{
 };
 use std::net::IpAddr;
 
+pub struct EventsWatchOptions {
+    pub categories: Vec<String>,
+    pub neighbor: Option<String>,
+    pub family: Option<i32>,
+    pub prefix: Option<String>,
+    pub event_types: Vec<String>,
+    pub backfill: u32,
+    pub json: bool,
+}
+
 fn format_event_type(t: i32) -> &'static str {
     match t {
         1 => "added",
@@ -20,6 +30,7 @@ fn format_event_type(t: i32) -> &'static str {
 
 fn json_event(event: &RouteEvent) -> JsonRouteEvent {
     JsonRouteEvent {
+        event_id: event.event_id,
         event_type: format_event_type(event.event_type).to_string(),
         prefix: format!("{}/{}", event.prefix, event.prefix_length),
         peer_address: event.peer_address.clone(),
@@ -46,19 +57,25 @@ fn print_event(event: &RouteEvent, json: bool) {
     } else {
         String::new()
     };
+    let event_id_str = if event.event_id > 0 {
+        format!(" id={}", event.event_id)
+    } else {
+        String::new()
+    };
     let previous_peer = if event.previous_peer_address.is_empty() {
         String::new()
     } else {
         format!(" previous={}", event.previous_peer_address)
     };
     println!(
-        "[{}] {} {} from {}{}{}",
+        "[{}] {} {} from {}{}{}{}",
         event.timestamp,
         output::colored_event_type(format_event_type(event.event_type)),
         prefix,
         event.peer_address,
         previous_peer,
         path_id_str,
+        event_id_str,
     );
 }
 
@@ -151,6 +168,15 @@ fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
         },
         "summary": event.summary,
     });
+    if let Some(crate::proto::bgp_event::Payload::Route(route)) = event.payload.as_ref()
+        && let Some(object) = value.as_object_mut()
+        && route.event_id > 0
+    {
+        object.insert(
+            "event_id".to_string(),
+            serde_json::Value::Number(route.event_id.into()),
+        );
+    }
     if let Some(crate::proto::bgp_event::Payload::Session(session)) = event.payload.as_ref()
         && let Some(object) = value.as_object_mut()
     {
@@ -232,6 +258,13 @@ fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
     value
 }
 
+fn route_event_id(event: &BgpEvent) -> Option<u64> {
+    match event.payload.as_ref() {
+        Some(crate::proto::bgp_event::Payload::Route(route)) => Some(route.event_id),
+        _ => None,
+    }
+}
+
 fn print_bgp_event(event: &BgpEvent, json: bool) {
     if json {
         println!(
@@ -248,6 +281,34 @@ fn print_bgp_event(event: &BgpEvent, json: bool) {
         output::colored_event_type(bgp_event_type_display_label(event.event_type)),
         event.summary
     );
+}
+
+fn is_route_event_type(event_type: i32) -> bool {
+    matches!(
+        BgpEventType::try_from(event_type),
+        Ok(BgpEventType::RouteAdded)
+            | Ok(BgpEventType::RouteWithdrawn)
+            | Ok(BgpEventType::RouteBestChanged)
+    )
+}
+
+fn route_event_type_to_bgp_event_type(event_type: i32) -> i32 {
+    match event_type {
+        1 => BgpEventType::RouteAdded as i32,
+        2 => BgpEventType::RouteWithdrawn as i32,
+        3 => BgpEventType::RouteBestChanged as i32,
+        _ => BgpEventType::Unspecified as i32,
+    }
+}
+
+fn wants_route_events(categories: &[i32], event_types: &[i32]) -> bool {
+    (categories.is_empty() || categories.contains(&(EventCategory::Route as i32)))
+        && (event_types.is_empty() || event_types.iter().copied().any(is_route_event_type))
+}
+
+fn route_history_event_matches_types(event: &RouteEvent, event_types: &[i32]) -> bool {
+    event_types.is_empty()
+        || event_types.contains(&route_event_type_to_bgp_event_type(event.event_type))
 }
 
 fn parse_optional_prefix_filter(
@@ -298,13 +359,18 @@ pub async fn run(
 
 pub async fn events_watch(
     connection: Connection,
-    categories: Vec<String>,
-    neighbor: Option<String>,
-    family: Option<i32>,
-    prefix: Option<String>,
-    event_types: Vec<String>,
-    json: bool,
+    options: EventsWatchOptions,
 ) -> Result<(), CliError> {
+    let EventsWatchOptions {
+        categories,
+        neighbor,
+        family,
+        prefix,
+        event_types,
+        backfill,
+        json,
+    } = options;
+
     let categories = categories
         .iter()
         .map(String::as_str)
@@ -324,21 +390,62 @@ pub async fn events_watch(
         .map(String::as_str)
         .map(parse_bgp_event_type)
         .collect::<Result<Vec<_>, _>>()?;
+    let route_events_requested = wants_route_events(&categories, &event_types);
+    if backfill > 0 && !route_events_requested {
+        return Err(CliError::Argument(
+            "--backfill requires a route-capable event stream".into(),
+        ));
+    }
     let mut client =
         EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let mut stream = client
         .watch_events(WatchEventsRequest {
             categories,
-            event_types,
-            neighbor_address: neighbor.unwrap_or_default(),
+            event_types: event_types.clone(),
+            neighbor_address: neighbor.clone().unwrap_or_default(),
             afi_safi: family.unwrap_or(0),
-            prefix,
+            prefix: prefix.clone(),
             prefix_length,
         })
         .await?
         .into_inner();
 
+    let mut last_backfilled_route_event_id = 0;
+    if backfill > 0 {
+        let mut rib_client =
+            RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+        let response = rib_client
+            .list_route_events(ListRouteEventsRequest {
+                neighbor_address: neighbor.unwrap_or_default(),
+                afi_safi: family.unwrap_or(0),
+                // Ask for the full bounded ring so local type filtering does
+                // not shrink the operator-requested backfill window.
+                limit: 0,
+                prefix,
+                prefix_length,
+            })
+            .await?
+            .into_inner();
+        let mut events = response
+            .events
+            .into_iter()
+            .filter(|event| route_history_event_matches_types(event, &event_types))
+            .collect::<Vec<_>>();
+        if events.len() > backfill as usize {
+            events.drain(0..events.len() - backfill as usize);
+        }
+        for event in events {
+            last_backfilled_route_event_id = last_backfilled_route_event_id.max(event.event_id);
+            print_event(&event, json);
+        }
+    }
+
     while let Some(event) = stream.message().await? {
+        if last_backfilled_route_event_id > 0
+            && route_event_id(&event).is_some_and(|id| id <= last_backfilled_route_event_id)
+        {
+            continue;
+        }
         print_bgp_event(&event, json);
     }
     Ok(())
@@ -376,6 +483,65 @@ pub async fn history(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_route_event_includes_event_id() {
+        let event = RouteEvent {
+            event_type: 1,
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+            peer_address: "10.0.0.1".to_string(),
+            afi_safi: AddressFamily::Ipv4Unicast as i32,
+            timestamp: "1".to_string(),
+            previous_peer_address: String::new(),
+            path_id: 0,
+            event_id: 42,
+        };
+
+        let value = serde_json::to_value(json_event(&event)).unwrap();
+        assert_eq!(value["event_id"], 42);
+    }
+
+    #[test]
+    fn backfill_route_detection_requires_route_capable_filter() {
+        assert!(wants_route_events(&[], &[]));
+        assert!(wants_route_events(
+            &[EventCategory::Route as i32],
+            &[BgpEventType::RouteAdded as i32]
+        ));
+        assert!(!wants_route_events(
+            &[EventCategory::Session as i32],
+            &[BgpEventType::SessionEstablished as i32]
+        ));
+        assert!(!wants_route_events(
+            &[],
+            &[BgpEventType::SessionEstablished as i32]
+        ));
+    }
+
+    #[test]
+    fn route_history_event_type_filter_matches_route_aliases() {
+        let event = RouteEvent {
+            event_type: 3,
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+            peer_address: "10.0.0.1".to_string(),
+            afi_safi: AddressFamily::Ipv4Unicast as i32,
+            timestamp: "1".to_string(),
+            previous_peer_address: "10.0.0.2".to_string(),
+            path_id: 0,
+            event_id: 7,
+        };
+
+        assert!(route_history_event_matches_types(
+            &event,
+            &[BgpEventType::RouteBestChanged as i32]
+        ));
+        assert!(!route_history_event_matches_types(
+            &event,
+            &[BgpEventType::RouteAdded as i32]
+        ));
+    }
 
     #[test]
     fn bgp_event_display_labels_match_route_event_coloring_labels() {

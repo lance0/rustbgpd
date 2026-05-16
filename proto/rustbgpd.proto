@@ -813,6 +813,8 @@ message RouteEvent {
   string previous_peer_address = 7;
   // Add-Path path identifier (RFC 7911). 0 = no Add-Path.
   uint32 path_id = 8;
+  // Monotonic process-local route event identifier. Resets on daemon restart.
+  uint64 event_id = 9;
 }
 
 enum EventCategory {

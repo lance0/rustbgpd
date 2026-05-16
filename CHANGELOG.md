@@ -26,6 +26,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   route-event-type filters while leaving `WatchRoutes` and
   `ListRouteEvents` unchanged.
 
+- **Route-event cursors and CLI backfill.** Unicast route events now carry a
+  monotonic process-local `event_id` through `WatchRoutes`,
+  `ListRouteEvents`, and `WatchEvents` route payloads. `rustbgpctl events
+  watch --backfill N` opens the live stream first, prints recent matching
+  route history, then suppresses already-printed live route events by cursor.
+
 - **EventService session lifecycle events.** `EventService.WatchEvents`
   now also carries structured session events from the peer manager:
   `session_state_changed`, `session_established`, `session_lost`,

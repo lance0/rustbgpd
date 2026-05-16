@@ -503,6 +503,11 @@ enum EventsAction {
         /// notification_sent, notification_received
         #[arg(long = "type", value_delimiter = ',')]
         event_types: Vec<String>,
+
+        /// Print recent route history before tailing the live stream.
+        /// Applies only to route-capable event streams.
+        #[arg(long, default_value_t = 0)]
+        backfill: u32,
     },
 }
 
@@ -953,16 +958,20 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 family,
                 prefix,
                 event_types,
+                backfill,
             }) => {
                 let family_val = resolve_family(&family)?;
                 commands::watch::events_watch(
                     connection,
-                    categories,
-                    address,
-                    family_val,
-                    prefix,
-                    event_types,
-                    json,
+                    commands::watch::EventsWatchOptions {
+                        categories,
+                        neighbor: address,
+                        family: family_val,
+                        prefix,
+                        event_types,
+                        backfill,
+                        json,
+                    },
                 )
                 .await
             }
@@ -1521,6 +1530,8 @@ mod tests {
             "203.0.113.0/24",
             "--type",
             "added,best_changed",
+            "--backfill",
+            "25",
         ])
         .unwrap();
         assert!(matches!(
@@ -1529,6 +1540,7 @@ mod tests {
                 action: Some(EventsAction::Watch {
                     prefix: Some(ref prefix),
                     ref event_types,
+                    backfill: 25,
                     ..
                 }),
                 ..

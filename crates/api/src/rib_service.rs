@@ -570,6 +570,7 @@ pub(crate) fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::Ro
             .previous_peer
             .map_or_else(String::new, |p: IpAddr| p.to_string()),
         path_id: event.path_id,
+        event_id: event.event_id,
     }
 }
 

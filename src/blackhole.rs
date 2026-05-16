@@ -976,6 +976,7 @@ mod tests {
 
     fn route_event(prefix: Prefix) -> RouteEvent {
         RouteEvent {
+            event_id: 0,
             event_type: RouteEventType::BestChanged,
             prefix,
             peer: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),

@@ -457,6 +457,7 @@ streaming route events in a terminal UI. Press `h` for keybindings.
 
 ```bash
 rustbgpctl events watch
+rustbgpctl events watch --backfill 50
 rustbgpctl events watch --prefix 203.0.113.0/24 --type added,best_changed
 rustbgpctl events watch --category session --type established,lost
 rustbgpctl events watch --category session --type notification_sent,notification_received
@@ -474,9 +475,10 @@ coordination path, so a saturated watch stream can miss lifecycle events
 without blocking BGP collision handling. If the client falls behind a bounded
 route or session source stream, `events watch` prints a `stream_lagged`
 warning with the missed count; treat subsequent output as a live tail after a
-gap. Policy, dataplane, and EVPN events remain follow-up work. For recent
-route history instead of a live tail, use `rustbgpctl events --prefix
-<PREFIX>`.
+gap. Use `--backfill N` to print recent matching route history before the live
+tail starts. Backfill is route-history only; session events remain live only.
+Policy, dataplane, and EVPN events remain follow-up work. For recent route
+history without a live tail, use `rustbgpctl events --prefix <PREFIX>`.
 
 ### Check health
 
