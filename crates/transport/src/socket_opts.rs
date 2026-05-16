@@ -116,6 +116,7 @@ impl TcpAoAlgorithm {
 #[allow(dead_code)]
 pub(crate) struct TcpAoKey<'a> {
     pub(crate) peer: IpAddr,
+    pub(crate) scope_id: u32,
     pub(crate) prefix_len: u8,
     pub(crate) send_id: u8,
     pub(crate) recv_id: u8,
@@ -217,12 +218,20 @@ pub(crate) fn set_tcp_ao_key(socket: &Socket, key: &TcpAoKey<'_>) -> io::Result<
 pub(crate) fn probe_tcp_ao_support() -> TcpAoSupport {
     use socket2::{Domain, Protocol, Type};
 
-    let socket = match Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)) {
-        Ok(socket) => socket,
-        Err(err) => return TcpAoSupport::ProbeFailed(err.to_string()),
+    let (socket, peer) = match Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)) {
+        Ok(socket) => (socket, IpAddr::from([0, 0, 0, 0])),
+        Err(ipv4_err) => match Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP)) {
+            Ok(socket) => (socket, IpAddr::from([0u16; 8])),
+            Err(ipv6_err) => {
+                return TcpAoSupport::ProbeFailed(format!(
+                    "IPv4 probe socket failed: {ipv4_err}; IPv6 probe socket failed: {ipv6_err}"
+                ));
+            }
+        },
     };
     let key = TcpAoKey {
-        peer: IpAddr::from([0, 0, 0, 0]),
+        peer,
+        scope_id: 0,
         prefix_len: 0,
         send_id: 100,
         recv_id: 100,
@@ -266,7 +275,7 @@ fn build_tcp_ao_add(key: &TcpAoKey<'_>) -> io::Result<TcpAoAdd> {
     }
 
     let mut add: TcpAoAdd = unsafe { std::mem::zeroed() };
-    write_sockaddr(&mut add.addr, key.peer);
+    write_sockaddr(&mut add.addr, key.peer, key.scope_id);
     write_alg_name(&mut add.alg_name, key.algorithm.linux_name())?;
     if key.set_current {
         add.flags |= TCP_AO_ADD_SET_CURRENT;
@@ -298,7 +307,7 @@ fn write_alg_name(dst: &mut [u8; 64], name: &str) -> io::Result<()> {
 
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
-fn write_sockaddr(storage: &mut libc::sockaddr_storage, peer: IpAddr) {
+fn write_sockaddr(storage: &mut libc::sockaddr_storage, peer: IpAddr, scope_id: u32) {
     match peer {
         IpAddr::V4(addr) => {
             let sin = unsafe { &mut *(std::ptr::from_mut(storage).cast::<libc::sockaddr_in>()) };
@@ -315,6 +324,7 @@ fn write_sockaddr(storage: &mut libc::sockaddr_storage, peer: IpAddr) {
             sin6.sin6_addr = libc::in6_addr {
                 s6_addr: addr.octets(),
             };
+            sin6.sin6_scope_id = scope_id;
         }
     }
 }
@@ -374,6 +384,7 @@ mod tests {
     fn base_key() -> TcpAoKey<'static> {
         TcpAoKey {
             peer: IpAddr::from([192, 0, 2, 1]),
+            scope_id: 0,
             prefix_len: 32,
             send_id: 7,
             recv_id: 9,
@@ -453,6 +464,7 @@ mod tests {
     fn tcp_ao_add_encodes_ipv6_peer() {
         let key = TcpAoKey {
             peer: "2001:db8::1".parse().unwrap(),
+            scope_id: 42,
             prefix_len: 128,
             algorithm: TcpAoAlgorithm::CmacAes128,
             ..base_key()
@@ -464,6 +476,7 @@ mod tests {
             libc::sa_family_t::try_from(libc::AF_INET6).unwrap()
         );
         assert_eq!(sin6.sin6_port, 0);
+        assert_eq!(sin6.sin6_scope_id, 42);
         assert_eq!(
             sin6.sin6_addr.s6_addr,
             "2001:db8::1"
