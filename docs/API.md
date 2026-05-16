@@ -1,7 +1,7 @@
 # gRPC API Reference
 
-rustbgpd exposes eight gRPC services (Global, Neighbor, Policy, PeerGroup, Rib,
-Injection, Control, Evpn) over one or more configured listeners. The default
+rustbgpd exposes nine gRPC services (Global, Neighbor, Policy, PeerGroup, Rib,
+Event, Injection, Control, Evpn) over one or more configured listeners. The default
 listener is a local Unix domain socket at `/var/lib/rustbgpd/grpc.sock`.
 
 For same-host administration, prefer UDS:

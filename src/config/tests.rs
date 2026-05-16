@@ -1,4 +1,9 @@
 use super::*;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
 use rustbgpd_policy::RouteType;
 use rustbgpd_wire::{Afi, Safi};
 use tempfile::NamedTempFile;
@@ -34,6 +39,46 @@ fn valid_config_parses() {
     assert_eq!(config.global.asn, 65001);
     assert_eq!(config.neighbors.len(), 1);
     assert_eq!(config.neighbors[0].remote_asn, 65002);
+}
+
+#[test]
+fn config_examples_parse() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut examples = Vec::new();
+    collect_example_toml_files(&root.join("examples"), &mut examples);
+    examples.sort();
+
+    assert!(
+        examples
+            .iter()
+            .any(|path| path.ends_with("linux-edge-fib/config.toml")),
+        "new Linux edge FIB example must be covered"
+    );
+
+    for path in examples {
+        let label = path.strip_prefix(root).unwrap_or(&path).display();
+        let source = fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!("failed to read example config {label}: {err}");
+        });
+        parse(&source).unwrap_or_else(|err| {
+            panic!("example config {label} failed validation: {err}");
+        });
+    }
+}
+
+fn collect_example_toml_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).unwrap_or_else(|err| {
+        panic!("failed to read example directory {}: {err}", dir.display());
+    }) {
+        let path = entry
+            .unwrap_or_else(|err| panic!("failed to read example directory entry: {err}"))
+            .path();
+        if path.is_dir() {
+            collect_example_toml_files(&path, out);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("toml") {
+            out.push(path);
+        }
+    }
 }
 
 #[test]

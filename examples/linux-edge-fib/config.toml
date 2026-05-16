@@ -1,0 +1,59 @@
+# Linux edge FIB example
+#
+# rustbgpd as a BGP control plane on a Linux edge box. Unlike the
+# route-injector examples, this config opts into ADR-0061 general unicast
+# FIB programming: selected Loc-RIB best routes are installed into an
+# explicit non-reserved Linux route table. The main table is never written.
+#
+# The operator is still responsible for policy, forwarding setup, and any
+# `ip rule` entries that point traffic at table 1000.
+
+[global]
+asn = 65010
+router_id = "192.0.2.10"
+listen_port = 179
+runtime_state_dir = "/var/lib/rustbgpd"
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+# Local-only gRPC is still the safest default for an edge host. Use a
+# read-only mTLS TCP listener or mTLS proxy only when remote monitoring needs it.
+[global.telemetry.grpc_uds]
+path = "/var/lib/rustbgpd/grpc.sock"
+mode = 0o600
+
+# Shared transport / policy defaults for transit peers. The FIB table below
+# also uses this name as an allow-list, so only best routes learned from this
+# peer group are eligible for kernel install. Keep a peer import cap alongside
+# the FIB max_routes guardrail so route leaks are bounded before kernel export.
+[peer_groups.transit]
+hold_time = 90
+max_prefixes = 100000
+
+[[neighbors]]
+address = "198.51.100.1"
+remote_asn = 64501
+description = "transit-a"
+peer_group = "transit"
+families = ["ipv4_unicast"]
+
+[[neighbors]]
+address = "2001:db8:100::1"
+remote_asn = 64502
+description = "transit-b"
+peer_group = "transit"
+families = ["ipv6_unicast"]
+
+# Explicit opt-in for ordinary unicast FIB programming. The actor writes only
+# this table_id + metric pair, marks routes RTPROT_BGP, preserves foreign
+# rows, drains daemon-owned rows on coordinated shutdown, and persists
+# owned-state receipts under runtime_state_dir for crash recovery.
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+families = ["ipv4_unicast", "ipv6_unicast"]
+allowed_peer_groups = ["transit"]
+max_routes = 100000
