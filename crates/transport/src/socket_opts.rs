@@ -7,7 +7,7 @@
 //! there is no safe Rust API for `TCP_MD5SIG` or `IP_MINTTL`.
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use socket2::Socket;
 
@@ -87,6 +87,231 @@ pub fn set_tcp_md5sig(_socket: &Socket, _peer: SocketAddr, _password: &str) -> i
     ))
 }
 
+/// TCP-AO MAC/KDF algorithm names accepted by Linux's TCP-AO UAPI.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum TcpAoAlgorithm {
+    HmacSha1,
+    HmacSha256,
+    CmacAes128,
+}
+
+#[cfg(target_os = "linux")]
+impl TcpAoAlgorithm {
+    const fn linux_name(self) -> &'static str {
+        match self {
+            Self::HmacSha1 => "hmac(sha1)",
+            Self::HmacSha256 => "hmac(sha256)",
+            Self::CmacAes128 => "cmac(aes128)",
+        }
+    }
+}
+
+/// A single Linux TCP-AO Master Key Tuple for a peer address.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) struct TcpAoKey<'a> {
+    pub(crate) peer: IpAddr,
+    pub(crate) prefix_len: u8,
+    pub(crate) send_id: u8,
+    pub(crate) recv_id: u8,
+    pub(crate) algorithm: TcpAoAlgorithm,
+    pub(crate) mac_len: u8,
+    pub(crate) key: &'a [u8],
+    pub(crate) set_current: bool,
+    pub(crate) set_rnext: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C, align(8))]
+struct TcpAoAdd {
+    addr: libc::sockaddr_storage,
+    alg_name: [u8; 64],
+    ifindex: libc::c_int,
+    flags: u32,
+    reserved2: u16,
+    prefix: u8,
+    sndid: u8,
+    rcvid: u8,
+    maclen: u8,
+    keyflags: u8,
+    keylen: u8,
+    key: [u8; 80],
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C, align(8))]
+#[allow(dead_code)]
+struct TcpAoInfoOpt {
+    flags: u32,
+    reserved2: u16,
+    current_key: u8,
+    rnext: u8,
+    pkt_good: u64,
+    pkt_bad: u64,
+    pkt_key_not_found: u64,
+    pkt_ao_required: u64,
+    pkt_dropped_icmp: u64,
+}
+
+/// Result of probing whether the running Linux kernel supports TCP-AO.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum TcpAoSupport {
+    Supported,
+    Unsupported,
+    ProbeFailed(String),
+}
+
+#[cfg(target_os = "linux")]
+const TCP_AO_ADD_KEY: libc::c_int = 38;
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+const TCP_AO_INFO: libc::c_int = 40;
+#[cfg(target_os = "linux")]
+const TCP_AO_MAXKEYLEN: usize = 80;
+#[cfg(target_os = "linux")]
+const TCP_AO_ADD_SET_CURRENT: u32 = 1 << 0;
+#[cfg(target_os = "linux")]
+const TCP_AO_ADD_SET_RNEXT: u32 = 1 << 1;
+
+/// Add a TCP-AO key to a socket.
+///
+/// This is an internal foundation primitive. Runtime session wiring is
+/// intentionally deferred until the listener/passive-open path can install
+/// keys before the kernel accepts inbound TCP handshakes.
+#[cfg(target_os = "linux")]
+#[allow(dead_code, unsafe_code, clippy::cast_possible_truncation)]
+pub(crate) fn set_tcp_ao_key(socket: &Socket, key: &TcpAoKey<'_>) -> io::Result<()> {
+    let add = build_tcp_ao_add(key)?;
+    let fd = {
+        use std::os::unix::io::AsRawFd;
+        socket.as_raw_fd()
+    };
+
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            TCP_AO_ADD_KEY,
+            (&raw const add).cast(),
+            std::mem::size_of::<TcpAoAdd>() as libc::socklen_t,
+        )
+    };
+
+    if ret < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Probe TCP-AO support without relying on distro package metadata.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+pub(crate) fn probe_tcp_ao_support() -> TcpAoSupport {
+    use socket2::{Domain, Protocol, Type};
+
+    let socket = match Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)) {
+        Ok(socket) => socket,
+        Err(err) => return TcpAoSupport::ProbeFailed(err.to_string()),
+    };
+    let key = TcpAoKey {
+        peer: IpAddr::from([0, 0, 0, 0]),
+        prefix_len: 0,
+        send_id: 100,
+        recv_id: 100,
+        algorithm: TcpAoAlgorithm::HmacSha1,
+        mac_len: 0,
+        key: b"rustbgpd-tcp-ao-probe",
+        set_current: false,
+        set_rnext: false,
+    };
+
+    match set_tcp_ao_key(&socket, &key) {
+        Ok(()) => TcpAoSupport::Supported,
+        Err(err) if err.raw_os_error() == Some(libc::ENOPROTOOPT) => TcpAoSupport::Unsupported,
+        Err(err) => TcpAoSupport::ProbeFailed(err.to_string()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn build_tcp_ao_add(key: &TcpAoKey<'_>) -> io::Result<TcpAoAdd> {
+    let max_prefix = match key.peer {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    };
+    if key.prefix_len > max_prefix {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("TCP-AO prefix length exceeds {max_prefix}"),
+        ));
+    }
+    if key.key.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "TCP-AO key must not be empty",
+        ));
+    }
+    if key.key.len() > TCP_AO_MAXKEYLEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "TCP-AO key exceeds 80 bytes",
+        ));
+    }
+
+    let mut add: TcpAoAdd = unsafe { std::mem::zeroed() };
+    write_sockaddr(&mut add.addr, key.peer);
+    write_alg_name(&mut add.alg_name, key.algorithm.linux_name());
+    if key.set_current {
+        add.flags |= TCP_AO_ADD_SET_CURRENT;
+    }
+    if key.set_rnext {
+        add.flags |= TCP_AO_ADD_SET_RNEXT;
+    }
+    add.prefix = key.prefix_len;
+    add.sndid = key.send_id;
+    add.rcvid = key.recv_id;
+    add.maclen = key.mac_len;
+    add.keylen = u8::try_from(key.key.len()).expect("TCP-AO key length was validated");
+    add.key[..key.key.len()].copy_from_slice(key.key);
+
+    Ok(add)
+}
+
+#[cfg(target_os = "linux")]
+fn write_alg_name(dst: &mut [u8; 64], name: &str) {
+    for (idx, byte) in name.bytes().enumerate() {
+        dst[idx] = byte;
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn write_sockaddr(storage: &mut libc::sockaddr_storage, peer: IpAddr) {
+    match peer {
+        IpAddr::V4(addr) => {
+            let sin = unsafe { &mut *(std::ptr::from_mut(storage).cast::<libc::sockaddr_in>()) };
+            sin.sin_family =
+                libc::sa_family_t::try_from(libc::AF_INET).expect("AF_INET fits sa_family_t");
+            sin.sin_addr = libc::in_addr {
+                s_addr: u32::from(addr).to_be(),
+            };
+        }
+        IpAddr::V6(addr) => {
+            let sin6 = unsafe { &mut *(std::ptr::from_mut(storage).cast::<libc::sockaddr_in6>()) };
+            sin6.sin6_family =
+                libc::sa_family_t::try_from(libc::AF_INET6).expect("AF_INET6 fits sa_family_t");
+            sin6.sin6_addr = libc::in6_addr {
+                s6_addr: addr.octets(),
+            };
+        }
+    }
+}
+
 /// Enable GTSM (Generalized TTL Security Mechanism, RFC 5082) on a socket.
 ///
 /// Sets `IP_MINTTL` to 254 (accept only TTL >= 254, i.e., directly connected)
@@ -132,4 +357,136 @@ pub fn set_gtsm(_socket: &Socket) -> io::Result<()> {
         io::ErrorKind::Unsupported,
         "GTSM / TTL security is only supported on Linux",
     ))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::mem;
+
+    fn base_key() -> TcpAoKey<'static> {
+        TcpAoKey {
+            peer: IpAddr::from([192, 0, 2, 1]),
+            prefix_len: 32,
+            send_id: 7,
+            recv_id: 9,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            mac_len: 12,
+            key: b"0123456789abcdef",
+            set_current: true,
+            set_rnext: true,
+        }
+    }
+
+    #[test]
+    fn tcp_ao_uapi_layout_matches_linux_header() {
+        assert_eq!(mem::size_of::<TcpAoAdd>(), 288);
+        assert_eq!(mem::align_of::<TcpAoAdd>(), 8);
+        assert_eq!(mem::offset_of!(TcpAoAdd, addr), 0);
+        assert_eq!(mem::offset_of!(TcpAoAdd, alg_name), 128);
+        assert_eq!(mem::offset_of!(TcpAoAdd, ifindex), 192);
+        assert_eq!(mem::offset_of!(TcpAoAdd, flags), 196);
+        assert_eq!(mem::offset_of!(TcpAoAdd, prefix), 202);
+        assert_eq!(mem::offset_of!(TcpAoAdd, sndid), 203);
+        assert_eq!(mem::offset_of!(TcpAoAdd, rcvid), 204);
+        assert_eq!(mem::offset_of!(TcpAoAdd, maclen), 205);
+        assert_eq!(mem::offset_of!(TcpAoAdd, keyflags), 206);
+        assert_eq!(mem::offset_of!(TcpAoAdd, keylen), 207);
+        assert_eq!(mem::offset_of!(TcpAoAdd, key), 208);
+
+        assert_eq!(mem::size_of::<TcpAoInfoOpt>(), 48);
+        assert_eq!(mem::align_of::<TcpAoInfoOpt>(), 8);
+        assert_eq!(mem::offset_of!(TcpAoInfoOpt, current_key), 6);
+        assert_eq!(mem::offset_of!(TcpAoInfoOpt, rnext), 7);
+        assert_eq!(mem::offset_of!(TcpAoInfoOpt, pkt_good), 8);
+    }
+
+    #[test]
+    fn tcp_ao_constants_match_linux_header() {
+        assert_eq!(TCP_AO_ADD_KEY, 38);
+        assert_eq!(TCP_AO_INFO, 40);
+        assert_eq!(TCP_AO_MAXKEYLEN, 80);
+        assert_eq!(TCP_AO_ADD_SET_CURRENT, 1);
+        assert_eq!(TCP_AO_ADD_SET_RNEXT, 2);
+    }
+
+    #[test]
+    fn tcp_ao_add_encodes_peer_key_and_algorithm() {
+        let add = build_tcp_ao_add(&base_key()).unwrap();
+
+        assert_eq!(add.prefix, 32);
+        assert_eq!(add.sndid, 7);
+        assert_eq!(add.rcvid, 9);
+        assert_eq!(add.maclen, 12);
+        assert_eq!(add.keylen, 16);
+        assert_eq!(add.flags, TCP_AO_ADD_SET_CURRENT | TCP_AO_ADD_SET_RNEXT);
+        assert_eq!(&add.key[..16], b"0123456789abcdef");
+
+        let alg = add
+            .alg_name
+            .iter()
+            .take_while(|&&c| c != 0)
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(alg, b"hmac(sha256)");
+
+        let sin = unsafe { &*(std::ptr::from_ref(&add.addr).cast::<libc::sockaddr_in>()) };
+        assert_eq!(
+            sin.sin_family,
+            libc::sa_family_t::try_from(libc::AF_INET).unwrap()
+        );
+        assert_eq!(sin.sin_port, 0);
+        assert_eq!(
+            sin.sin_addr.s_addr,
+            u32::from(std::net::Ipv4Addr::new(192, 0, 2, 1)).to_be()
+        );
+    }
+
+    #[test]
+    fn tcp_ao_add_encodes_ipv6_peer() {
+        let key = TcpAoKey {
+            peer: "2001:db8::1".parse().unwrap(),
+            prefix_len: 128,
+            algorithm: TcpAoAlgorithm::CmacAes128,
+            ..base_key()
+        };
+        let add = build_tcp_ao_add(&key).unwrap();
+        let sin6 = unsafe { &*(std::ptr::from_ref(&add.addr).cast::<libc::sockaddr_in6>()) };
+        assert_eq!(
+            sin6.sin6_family,
+            libc::sa_family_t::try_from(libc::AF_INET6).unwrap()
+        );
+        assert_eq!(sin6.sin6_port, 0);
+        assert_eq!(
+            sin6.sin6_addr.s6_addr,
+            "2001:db8::1"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+                .octets()
+        );
+    }
+
+    #[test]
+    fn tcp_ao_rejects_invalid_prefix_and_key_lengths() {
+        let mut key = base_key();
+        key.prefix_len = 33;
+        assert!(build_tcp_ao_add(&key).is_err());
+
+        let mut key = base_key();
+        key.key = b"";
+        assert!(build_tcp_ao_add(&key).is_err());
+
+        let too_long = [0u8; TCP_AO_MAXKEYLEN + 1];
+        let mut key = base_key();
+        key.key = &too_long;
+        assert!(build_tcp_ao_add(&key).is_err());
+    }
+
+    #[test]
+    fn tcp_ao_probe_classifies_kernel_response() {
+        let support = probe_tcp_ao_support();
+        if let TcpAoSupport::ProbeFailed(err) = support {
+            assert!(!err.is_empty());
+        }
+    }
 }

@@ -18,6 +18,8 @@ events.
   outbound connections; passive mode supported
 - **TCP MD5 signatures** (RFC 2385) and **GTSM** (RFC 5082) via raw
   socket options
+- **TCP-AO foundation** (RFC 5925) — internal Linux socket primitive and
+  capability probe; runtime config/session wiring is still deferred
 - **Import/export policy** — policy chains evaluated inline during
   UPDATE processing
 - **Private AS removal** — strip/replace private ASNs before eBGP export

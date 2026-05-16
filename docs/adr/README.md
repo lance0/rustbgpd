@@ -69,6 +69,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0059](0059-evpn-aliasing-fdb-nexthop-groups.md) | EVPN aliasing dataplane via FDB nexthop groups | Accepted | 2026-05-12 |
 | [0060](0060-rfc-7999-blackhole.md) | RFC 7999 BLACKHOLE receiver scoping and opt-in FIB discard | Accepted | 2026-05-13 |
 | [0061](0061-opt-in-unicast-linux-fib-integration.md) | Opt-in unicast Linux FIB integration | Accepted | 2026-05-14 |
+| [0062](0062-tcp-ao-foundation.md) | TCP-AO foundation | Accepted | 2026-05-16 |
 
 ## Template
 

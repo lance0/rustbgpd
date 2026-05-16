@@ -106,6 +106,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bgp_fib_routes_rejected_total{reason="owned_route_drifted"}`, release
   daemon ownership, and are preserved on later withdraws.
 
+- **ADR-0062 TCP-AO foundation.** The transport crate now has an internal
+  Linux TCP-AO socket primitive and capability probe around
+  `TCP_AO_ADD_KEY` / `TCP_AO_INFO`, with UAPI layout and encoding tests.
+  Runtime operator configuration and BGP session wiring remain deferred until
+  the inbound listener and outbound connect paths can install keys before TCP
+  OPEN.
+
 ### Changed
 
 - Locally injected and withdrawn FlowSpec rules whose encoded NLRI
