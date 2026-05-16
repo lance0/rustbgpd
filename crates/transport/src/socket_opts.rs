@@ -7,7 +7,9 @@
 //! there is no safe Rust API for `TCP_MD5SIG` or `IP_MINTTL`.
 
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+#[cfg(target_os = "linux")]
+use std::net::IpAddr;
+use std::net::SocketAddr;
 
 use socket2::Socket;
 
@@ -265,7 +267,7 @@ fn build_tcp_ao_add(key: &TcpAoKey<'_>) -> io::Result<TcpAoAdd> {
 
     let mut add: TcpAoAdd = unsafe { std::mem::zeroed() };
     write_sockaddr(&mut add.addr, key.peer);
-    write_alg_name(&mut add.alg_name, key.algorithm.linux_name());
+    write_alg_name(&mut add.alg_name, key.algorithm.linux_name())?;
     if key.set_current {
         add.flags |= TCP_AO_ADD_SET_CURRENT;
     }
@@ -283,10 +285,15 @@ fn build_tcp_ao_add(key: &TcpAoKey<'_>) -> io::Result<TcpAoAdd> {
 }
 
 #[cfg(target_os = "linux")]
-fn write_alg_name(dst: &mut [u8; 64], name: &str) {
-    for (idx, byte) in name.bytes().enumerate() {
-        dst[idx] = byte;
+fn write_alg_name(dst: &mut [u8; 64], name: &str) -> io::Result<()> {
+    if name.len() >= dst.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "TCP-AO algorithm name exceeds Linux UAPI buffer",
+        ));
     }
+    dst[..name.len()].copy_from_slice(name.as_bytes());
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -480,6 +487,12 @@ mod tests {
         let mut key = base_key();
         key.key = &too_long;
         assert!(build_tcp_ao_add(&key).is_err());
+    }
+
+    #[test]
+    fn tcp_ao_rejects_algorithm_names_without_nul_room() {
+        let mut alg_name = [0u8; 64];
+        assert!(write_alg_name(&mut alg_name, &"x".repeat(64)).is_err());
     }
 
     #[test]
