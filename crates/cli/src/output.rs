@@ -476,8 +476,8 @@ pub fn print_result(json: bool, action: &str, target: &str, message: &str) {
     }
 }
 
-/// Parse "prefix/length" or "prefix" (for host routes) into (prefix, length).
-pub fn parse_prefix(s: &str) -> Result<(String, u32), String> {
+/// Parse "prefix/length" or "prefix" (for host routes) into (IP, length).
+pub fn parse_prefix_addr(s: &str) -> Result<(IpAddr, u32), String> {
     if let Some((addr, len)) = s.split_once('/') {
         let length: u32 = len
             .parse()
@@ -494,17 +494,22 @@ pub fn parse_prefix(s: &str) -> Result<(String, u32), String> {
             }
             _ => {}
         }
-        Ok((addr.to_string(), length))
+        Ok((ip, length))
     } else {
         // Host route
         let ip: IpAddr = s
             .parse()
             .map_err(|_| format!("invalid IP address in prefix: {s}"))?;
         match ip {
-            IpAddr::V4(_) => Ok((s.to_string(), 32)),
-            IpAddr::V6(_) => Ok((s.to_string(), 128)),
+            IpAddr::V4(_) => Ok((ip, 32)),
+            IpAddr::V6(_) => Ok((ip, 128)),
         }
     }
+}
+
+/// Parse "prefix/length" or "prefix" (for host routes) into (prefix, length).
+pub fn parse_prefix(s: &str) -> Result<(String, u32), String> {
+    parse_prefix_addr(s).map(|(addr, length)| (addr.to_string(), length))
 }
 
 #[cfg(test)]

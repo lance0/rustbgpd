@@ -89,11 +89,7 @@ pub async fn history(
     json: bool,
 ) -> Result<(), CliError> {
     let (prefix, prefix_length) = if let Some(prefix) = prefix {
-        let parsed = output::parse_prefix(&prefix).map_err(CliError::Argument)?;
-        let addr: IpAddr = parsed
-            .0
-            .parse()
-            .map_err(|_| CliError::Argument(format!("invalid IP address in prefix: {prefix}")))?;
+        let (addr, length) = output::parse_prefix_addr(&prefix).map_err(CliError::Argument)?;
         match (family, addr) {
             (Some(f), IpAddr::V4(_)) if f == AddressFamily::Ipv6Unicast as i32 => {
                 return Err(CliError::Argument(
@@ -107,7 +103,7 @@ pub async fn history(
             }
             _ => {}
         }
-        parsed
+        (addr.to_string(), length)
     } else {
         (String::new(), 0)
     };
