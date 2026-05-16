@@ -5,7 +5,7 @@ use crate::proto::event_service_client::EventServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddressFamily, BgpEvent, BgpEventType, EventCategory, ListRouteEventsRequest, RouteEvent,
-    WatchEventsRequest, WatchRoutesRequest,
+    RouteEventType, WatchEventsRequest, WatchRoutesRequest,
 };
 use std::net::IpAddr;
 
@@ -20,10 +20,10 @@ pub struct EventsWatchOptions {
 }
 
 fn format_event_type(t: i32) -> &'static str {
-    match t {
-        1 => "added",
-        2 => "withdrawn",
-        3 => "best_changed",
+    match RouteEventType::try_from(t) {
+        Ok(RouteEventType::Added) => "added",
+        Ok(RouteEventType::Withdrawn) => "withdrawn",
+        Ok(RouteEventType::BestChanged) => "best_changed",
         _ => "unknown",
     }
 }
@@ -265,6 +265,19 @@ fn route_event_id(event: &BgpEvent) -> Option<u64> {
     }
 }
 
+fn format_bgp_event_line(event: &BgpEvent) -> String {
+    let event_id = route_event_id(event)
+        .filter(|id| *id > 0)
+        .map_or_else(String::new, |id| format!(" id={id}"));
+    format!(
+        "[{}] {} {}{}",
+        event.timestamp,
+        output::colored_event_type(bgp_event_type_display_label(event.event_type)),
+        event.summary,
+        event_id
+    )
+}
+
 fn print_bgp_event(event: &BgpEvent, json: bool) {
     if json {
         println!(
@@ -275,12 +288,7 @@ fn print_bgp_event(event: &BgpEvent, json: bool) {
         return;
     }
 
-    println!(
-        "[{}] {} {}",
-        event.timestamp,
-        output::colored_event_type(bgp_event_type_display_label(event.event_type)),
-        event.summary
-    );
+    println!("{}", format_bgp_event_line(event));
 }
 
 fn is_route_event_type(event_type: i32) -> bool {
@@ -293,10 +301,10 @@ fn is_route_event_type(event_type: i32) -> bool {
 }
 
 fn route_event_type_to_bgp_event_type(event_type: i32) -> i32 {
-    match event_type {
-        1 => BgpEventType::RouteAdded as i32,
-        2 => BgpEventType::RouteWithdrawn as i32,
-        3 => BgpEventType::RouteBestChanged as i32,
+    match RouteEventType::try_from(event_type) {
+        Ok(RouteEventType::Added) => BgpEventType::RouteAdded as i32,
+        Ok(RouteEventType::Withdrawn) => BgpEventType::RouteWithdrawn as i32,
+        Ok(RouteEventType::BestChanged) => BgpEventType::RouteBestChanged as i32,
         _ => BgpEventType::Unspecified as i32,
     }
 }
@@ -309,6 +317,10 @@ fn wants_route_events(categories: &[i32], event_types: &[i32]) -> bool {
 fn route_history_event_matches_types(event: &RouteEvent, event_types: &[i32]) -> bool {
     event_types.is_empty()
         || event_types.contains(&route_event_type_to_bgp_event_type(event.event_type))
+}
+
+fn route_history_request_limit(backfill: u32, event_types: &[i32]) -> u32 {
+    if event_types.is_empty() { backfill } else { 0 }
 }
 
 fn route_event_to_bgp_event(event: RouteEvent) -> BgpEvent {
@@ -446,9 +458,9 @@ pub async fn events_watch(
             .list_route_events(ListRouteEventsRequest {
                 neighbor_address: neighbor.unwrap_or_default(),
                 afi_safi: family.unwrap_or(0),
-                // Ask for the full bounded ring so local type filtering does
-                // not shrink the operator-requested backfill window.
-                limit: 0,
+                // Ask for the full bounded ring only when local type
+                // filtering could otherwise shrink the requested window.
+                limit: route_history_request_limit(backfill, &event_types),
                 prefix,
                 prefix_length,
             })
@@ -592,6 +604,32 @@ mod tests {
         assert_eq!(value["event_type"], "route_added");
         assert_eq!(value["summary"], "route added 203.0.113.0/24");
         assert_eq!(value["event_id"], 42);
+    }
+
+    #[test]
+    fn bgp_event_text_route_events_include_event_id() {
+        let event = route_event_to_bgp_event(RouteEvent {
+            event_type: RouteEventType::Added as i32,
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+            peer_address: "10.0.0.1".to_string(),
+            afi_safi: AddressFamily::Ipv4Unicast as i32,
+            timestamp: "1".to_string(),
+            previous_peer_address: String::new(),
+            path_id: 0,
+            event_id: 42,
+        });
+
+        assert!(format_bgp_event_line(&event).ends_with(" id=42"));
+    }
+
+    #[test]
+    fn route_history_request_limit_only_expands_when_type_filtering() {
+        assert_eq!(route_history_request_limit(5, &[]), 5);
+        assert_eq!(
+            route_history_request_limit(5, &[BgpEventType::RouteAdded as i32]),
+            0
+        );
     }
 
     #[test]
