@@ -113,6 +113,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fail request validation with `InvalidArgument` instead of reaching
   outbound encode and silently wrapping the 12-bit length field.
 
+- Runtime observability docs now include an operator-facing surface map
+  distinguishing live streams, bounded route-event history, status
+  snapshots, and Prometheus metrics. CLI JSON rendering for route events,
+  unified BGP events, BLACKHOLE discard status, general FIB status, EVPN
+  FDB nexthop groups, and IP-VRF status now has focused contract coverage.
+
 - `RibService` prefix-length validation now rejects out-of-range values
   (`> 32` for IPv4, `> 128` for IPv6) on `ExplainAdvertisedRoute`,
   `ExplainBestPath`, and `ListRouteEvents` instead of silently clamping to

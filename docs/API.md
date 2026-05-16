@@ -320,6 +320,26 @@ Query the routing information base and subscribe to real-time route changes.
 | `ListRouteEvents` | Recent unicast best-path event history from the bounded in-memory RIB ring |
 | `WatchRoutes` | Server-streaming: real-time route add/withdraw/best-change events |
 
+### Runtime observability surfaces
+
+Runtime visibility is intentionally split by access pattern rather than forced
+through one RPC shape.
+
+| Need | Surface | Shape | Retention / loss behavior |
+|------|---------|-------|---------------------------|
+| Live unicast route deltas | `WatchRoutes` or `EventService.WatchEvents` with `EVENT_CATEGORY_ROUTE` | Streaming event feed | Live-only; slow subscribers can lag and miss events |
+| Recent unicast route timeline | `ListRouteEvents` / `rustbgpctl events` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
+| Live session lifecycle | `EventService.WatchEvents` with `EVENT_CATEGORY_SESSION` | Streaming event feed | Live-only; no replay after reconnect |
+| RFC 7999 discard programming | `ListBlackholeDiscards` / `rustbgpctl rib blackholes` | Snapshot | Current reconcile snapshot only |
+| ADR-0061 general Linux FIB programming | `ListFibRoutes` / `rustbgpctl rib fib` | Snapshot | Current reconcile snapshot plus persisted owned-state semantics |
+| EVPN L2/L3 dataplane readiness | `EvpnService` (`ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`) / `rustbgpctl evpn ...` | Snapshot | Latest daemon or dataplane report snapshot |
+| Alerting / counters | Prometheus `/metrics` | Cumulative counters and gauges | Process lifetime, scrape-dependent |
+
+Use a live stream when you need a tail, `ListRouteEvents` when you need recent
+route context after the fact, and status RPCs for current ownership/readiness
+state. `WatchEvents` does not replay `ListRouteEvents`; clients that need both
+context and a live tail should query history first, then subscribe.
+
 ### List received routes (Adj-RIB-In)
 
 ```bash
