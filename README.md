@@ -220,7 +220,7 @@ Nine services cover the full operational surface:
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `List/Get/Set/DeleteNeighborSet`, `Get*Chain`, `Set*Chain`, `Clear*Chain` | Named policy CRUD, neighbor sets, and global/per-neighbor chain attachment |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
 | `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListBlackholeDiscards`, `ListRouteEvents`, `WatchRoutes` | RIB queries (incl. EVPN), BLACKHOLE discard status, explain, recent route-event history with per-prefix drilldown, and streaming |
-| `EventService` | `WatchEvents` | Unified live event stream foundation (route events in this slice; session/policy/dataplane categories reserved) |
+| `EventService` | `WatchEvents` | Unified live stream for route events, session lifecycle events, and FIB / BLACKHOLE dataplane status summaries; policy, EVPN, and BGP NOTIFICATION categories remain reserved |
 | `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection |
 | `ControlService` | `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
 | `EvpnService` | `ListEvpnInstances` | Local EVPN VTEP instance state (read-only Phase-2 foundation; ADR-0052) |
@@ -256,6 +256,7 @@ and more explicit internal architecture.
 | [`examples/route-server/`](examples/route-server/) | IXP route server with RPKI, Add-Path, policy chains |
 | [`examples/ddos-mitigation/`](examples/ddos-mitigation/) | FlowSpec + RTBH for automated DDoS mitigation |
 | [`examples/hosting-provider/`](examples/hosting-provider/) | iBGP route injector for customer prefix management |
+| [`examples/linux-edge-fib/`](examples/linux-edge-fib/) | Linux edge host with explicit ADR-0061 `[[fib_tables]]` unicast FIB programming |
 | [`examples/route-collector/`](examples/route-collector/) | Passive collector with MRT dumps and BMP export |
 | [`examples/rr-evpn-fabric/`](examples/rr-evpn-fabric/) | EVPN Route Reflector for a VXLAN-EVPN DC fabric (RFC 7432, RR role) |
 | [`examples/evpn-vtep-leaf/`](examples/evpn-vtep-leaf/) | Leaf VTEP with local `[[evpn_instances]]` declarations (Gate 7a foundation) |

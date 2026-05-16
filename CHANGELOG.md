@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Linux edge FIB operator example.** New
+  `examples/linux-edge-fib/` config demonstrates a concrete ADR-0061
+  `[[fib_tables]]` deployment with peer-group allow-list and route-count
+  guardrail, plus a config test that parses every in-tree example TOML so
+  future schema changes cannot silently break operator-facing examples.
+
 - **Bounded route-event history.** `RibService.ListRouteEvents`
   returns recent unicast best-path events from the RIB manager's
   in-memory 4096-event ring, filtered by peer, IPv4/IPv6 unicast

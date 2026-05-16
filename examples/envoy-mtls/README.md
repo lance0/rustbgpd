@@ -1,11 +1,17 @@
 # Envoy mTLS Frontend for rustbgpd
 
-This example shows the recommended remote-management posture for rustbgpd:
+This example shows an Envoy-fronted remote-management posture for rustbgpd:
 
 - keep rustbgpd itself on loopback (or a local Unix domain socket when your
   deployment exposes one)
 - terminate mutual TLS in Envoy
 - expose only Envoy's frontend port to remote operators
+
+rustbgpd also supports native gRPC mTLS on its TCP listener
+(`tls_cert_file`, `tls_key_file`, and `tls_client_ca_file`). Use that direct
+path when one daemon can own certificate validation itself. Keep this Envoy
+pattern when you want a shared proxy layer, central certificate rotation,
+extra HTTP/2 controls, or one frontend policy for multiple local daemons.
 
 The included [`envoy.yaml`](envoy.yaml) proxies gRPC over HTTP/2 from
 `0.0.0.0:50052` to a local rustbgpd backend on `/var/lib/rustbgpd/grpc.sock`.
@@ -68,4 +74,4 @@ grpcurl \
 - Prefer a dedicated management VLAN/interface instead of `0.0.0.0` where
   possible.
 - This example intentionally leaves TLS termination outside rustbgpd itself.
-  Native in-daemon mTLS remains a deferred hardening item.
+  Native in-daemon mTLS is available for deployments that do not need a proxy.

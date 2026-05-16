@@ -1,4 +1,6 @@
 use super::*;
+use std::fs;
+
 use rustbgpd_policy::RouteType;
 use rustbgpd_wire::{Afi, Safi};
 use tempfile::NamedTempFile;
@@ -34,6 +36,32 @@ fn valid_config_parses() {
     assert_eq!(config.global.asn, 65001);
     assert_eq!(config.neighbors.len(), 1);
     assert_eq!(config.neighbors[0].remote_asn, 65002);
+}
+
+#[test]
+fn config_examples_parse() {
+    let root = env!("CARGO_MANIFEST_DIR");
+    let examples = [
+        "examples/ddos-mitigation/config.toml",
+        "examples/evpn-vtep-leaf/config.toml",
+        "examples/hosting-provider/config.toml",
+        "examples/linux-edge-fib/config.toml",
+        "examples/minimal/config.toml",
+        "examples/route-collector/config.toml",
+        "examples/route-server/config.toml",
+        "examples/rr-evpn-fabric/config.toml",
+        "examples/docker-compose/rustbgpd.toml",
+    ];
+
+    for example in examples {
+        let path = format!("{root}/{example}");
+        let source = fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!("failed to read example config {example}: {err}");
+        });
+        parse(&source).unwrap_or_else(|err| {
+            panic!("example config {example} failed validation: {err}");
+        });
+    }
 }
 
 #[test]
