@@ -395,20 +395,22 @@ async fn run_tcp_listener(
     }
     builder
         .add_service(RibServiceServer::with_interceptor(
-            RibService::with_status_snapshots(
+            RibService::with_status_snapshots_and_metrics(
                 rib_query_tx.clone(),
                 blackhole_discard_snapshot.clone(),
                 fib_route_snapshot.clone(),
+                metrics.clone(),
             ),
             interceptor.clone(),
         ))
         .add_service(EventServiceServer::with_interceptor(
-            EventService::with_dataplane_snapshots_and_broadcaster(
+            EventService::with_dataplane_snapshots_broadcaster_and_metrics(
                 rib_tx.clone(),
                 peer_mgr_tx.clone(),
                 blackhole_discard_snapshot.clone(),
                 fib_route_snapshot.clone(),
                 dataplane_events,
+                metrics.clone(),
             ),
             interceptor.clone(),
         ))
@@ -507,20 +509,22 @@ async fn run_uds_listener(
     let interceptor = AuthInterceptor::new(auth_token);
     let result = Server::builder()
         .add_service(RibServiceServer::with_interceptor(
-            RibService::with_status_snapshots(
+            RibService::with_status_snapshots_and_metrics(
                 rib_query_tx.clone(),
                 blackhole_discard_snapshot.clone(),
                 fib_route_snapshot.clone(),
+                metrics.clone(),
             ),
             interceptor.clone(),
         ))
         .add_service(EventServiceServer::with_interceptor(
-            EventService::with_dataplane_snapshots_and_broadcaster(
+            EventService::with_dataplane_snapshots_broadcaster_and_metrics(
                 rib_tx.clone(),
                 peer_mgr_tx.clone(),
                 blackhole_discard_snapshot.clone(),
                 fib_route_snapshot.clone(),
                 dataplane_events,
+                metrics.clone(),
             ),
             interceptor.clone(),
         ))

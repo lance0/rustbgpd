@@ -595,6 +595,14 @@ repeats common fields such as peer, prefix, type, and severity at the top level
 even when the payload also carries them so category-agnostic clients can render
 or filter events without unpacking the `oneof`.
 
+Slow live-stream consumers do not block the daemon. If a `WatchEvents` or
+`WatchRoutes` subscriber falls behind the bounded broadcast channel, missed
+events are skipped and `bgp_event_stream_lagged_total{service,source}` records
+the missed count. Use `bgp_event_stream_subscribers{service,source}` to see
+active stream readers and `bgp_route_event_history_depth` /
+`bgp_route_event_history_capacity` to understand how much recent unicast route
+history is available through `ListRouteEvents`.
+
 Unified event types:
 
 | Type | Meaning |

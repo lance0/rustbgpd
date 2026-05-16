@@ -10,6 +10,7 @@ use tokio::sync::{broadcast, oneshot};
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
@@ -20,6 +21,7 @@ use crate::rib_service::{
     route_event_afi_filter, route_event_to_proto,
 };
 use rustbgpd_rib::{RibUpdate, RouteEventType};
+use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Afi, Prefix};
 
 #[cfg(not(test))]
@@ -42,6 +44,7 @@ pub struct EventService {
     blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
     fib_route_snapshot: FibRouteSnapshotFn,
     dataplane_events: DataplaneEventBroadcaster,
+    metrics: BgpMetrics,
 }
 
 impl EventService {
@@ -83,12 +86,32 @@ impl EventService {
         fib_route_snapshot: FibRouteSnapshotFn,
         dataplane_events: DataplaneEventBroadcaster,
     ) -> Self {
+        Self::with_dataplane_snapshots_broadcaster_and_metrics(
+            rib_tx,
+            peer_mgr_tx,
+            blackhole_discard_snapshot,
+            fib_route_snapshot,
+            dataplane_events,
+            BgpMetrics::new(),
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn with_dataplane_snapshots_broadcaster_and_metrics(
+        rib_tx: tokio::sync::mpsc::Sender<RibUpdate>,
+        peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
+        blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
+        fib_route_snapshot: FibRouteSnapshotFn,
+        dataplane_events: DataplaneEventBroadcaster,
+        metrics: BgpMetrics,
+    ) -> Self {
         Self {
             rib_tx,
             peer_mgr_tx,
             blackhole_discard_snapshot,
             fib_route_snapshot,
             dataplane_events,
+            metrics,
         }
     }
 
@@ -568,6 +591,10 @@ impl proto::event_service_server::EventService for EventService {
     type WatchEventsStream =
         Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send + 'static>>;
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "WatchEvents assembles route, session, and dataplane source streams with per-source filters and metrics"
+    )]
     async fn watch_events(
         &self,
         request: Request<proto::WatchEventsRequest>,
@@ -586,18 +613,31 @@ impl proto::event_service_server::EventService for EventService {
                     .await
                     .map_err(|_| Status::internal("RIB manager dropped reply"))?;
                 let route_filter = filter.clone();
+                let route_metrics = self.metrics.clone();
+                let route_subscriber_guard =
+                    route_metrics.event_stream_subscriber_guard("watch_events", "route");
                 Box::pin(BroadcastStream::new(broadcast_rx).filter_map(
                     move |result| match result {
+                        Err(BroadcastStreamRecvError::Lagged(missed)) => {
+                            let _subscriber_guard = &route_subscriber_guard;
+                            route_metrics.record_event_stream_lagged(
+                                "watch_events",
+                                "route",
+                                missed,
+                            );
+                            debug!(
+                                missed,
+                                "WatchEvents route subscriber lagged, skipping missed events"
+                            );
+                            None
+                        }
                         Ok(event) => {
+                            let _subscriber_guard = &route_subscriber_guard;
                             if route_filter.matches_route_event(&event) {
                                 Some(Ok(route_event_to_bgp_event(event)))
                             } else {
                                 None
                             }
-                        }
-                        Err(_lagged) => {
-                            debug!("WatchEvents route subscriber lagged, skipping missed events");
-                            None
                         }
                     },
                 ))
@@ -616,18 +656,31 @@ impl proto::event_service_server::EventService for EventService {
                     .await
                     .map_err(|_| Status::internal("peer manager dropped reply"))?;
                 let session_filter = filter.clone();
+                let session_metrics = self.metrics.clone();
+                let session_subscriber_guard =
+                    session_metrics.event_stream_subscriber_guard("watch_events", "session");
                 Box::pin(BroadcastStream::new(broadcast_rx).filter_map(
                     move |result| match result {
+                        Err(BroadcastStreamRecvError::Lagged(missed)) => {
+                            let _subscriber_guard = &session_subscriber_guard;
+                            session_metrics.record_event_stream_lagged(
+                                "watch_events",
+                                "session",
+                                missed,
+                            );
+                            debug!(
+                                missed,
+                                "WatchEvents session subscriber lagged, skipping missed events"
+                            );
+                            None
+                        }
                         Ok(event) => {
+                            let _subscriber_guard = &session_subscriber_guard;
                             if session_filter.matches_session_event(&event) {
                                 Some(Ok(session_event_to_bgp_event(event)))
                             } else {
                                 None
                             }
-                        }
-                        Err(_lagged) => {
-                            debug!("WatchEvents session subscriber lagged, skipping missed events");
-                            None
                         }
                     },
                 ))
@@ -638,14 +691,27 @@ impl proto::event_service_server::EventService for EventService {
         let dataplane_stream: Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send>> =
             if filter.wants_dataplane_events() {
                 let broadcast_rx = self.subscribe_dataplane_events();
+                let dataplane_metrics = self.metrics.clone();
+                let dataplane_subscriber_guard =
+                    dataplane_metrics.event_stream_subscriber_guard("watch_events", "dataplane");
                 Box::pin(BroadcastStream::new(broadcast_rx).filter_map(
                     move |result| match result {
-                        Ok(event) => Some(Ok(event)),
-                        Err(_lagged) => {
+                        Err(BroadcastStreamRecvError::Lagged(missed)) => {
+                            let _subscriber_guard = &dataplane_subscriber_guard;
+                            dataplane_metrics.record_event_stream_lagged(
+                                "watch_events",
+                                "dataplane",
+                                missed,
+                            );
                             debug!(
+                                missed,
                                 "WatchEvents dataplane subscriber lagged, skipping missed events"
                             );
                             None
+                        }
+                        Ok(event) => {
+                            let _subscriber_guard = &dataplane_subscriber_guard;
+                            Some(Ok(event))
                         }
                     },
                 ))
@@ -663,6 +729,7 @@ impl proto::event_service_server::EventService for EventService {
 mod tests {
     use super::*;
     use crate::proto::event_service_server::EventService as EventServiceTrait;
+    use prometheus::Encoder;
     use rustbgpd_fsm::SessionState;
     use rustbgpd_rib::RouteEvent;
     use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix};
@@ -670,6 +737,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::sync::{broadcast, mpsc};
     use tokio_stream::StreamExt;
+
+    fn gather_text(metrics: &BgpMetrics) -> String {
+        let encoder = prometheus::TextEncoder::new();
+        let families = metrics.registry().gather();
+        let mut out = Vec::new();
+        encoder.encode(&families, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
 
     fn route_event(prefix: Prefix, peer: IpAddr) -> RouteEvent {
         RouteEvent {
@@ -1141,6 +1216,89 @@ mod tests {
         drop(response);
         tokio::task::yield_now().await;
         assert_eq!(events_tx.receiver_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn watch_events_subscriber_gauge_tracks_route_stream_lifecycle() {
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, _) = spawn_fake_peer_manager();
+        let metrics = BgpMetrics::new();
+        let service = EventService::with_dataplane_snapshots_broadcaster_and_metrics(
+            rib_tx,
+            peer_tx,
+            Arc::new(Vec::new),
+            Arc::new(Vec::new),
+            dataplane_event_broadcaster(),
+            metrics.clone(),
+        );
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Route as i32],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+
+        let text = gather_text(&metrics);
+        assert!(
+            text.contains(
+                "bgp_event_stream_subscribers{service=\"watch_events\",source=\"route\"} 1"
+            )
+        );
+
+        drop(response);
+        tokio::task::yield_now().await;
+
+        let text = gather_text(&metrics);
+        assert!(
+            text.contains(
+                "bgp_event_stream_subscribers{service=\"watch_events\",source=\"route\"} 0"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_events_lagged_route_subscriber_increments_metric() {
+        let (rib_tx, events_tx) = spawn_fake_rib();
+        let (peer_tx, _) = spawn_fake_peer_manager();
+        let metrics = BgpMetrics::new();
+        let service = EventService::with_dataplane_snapshots_broadcaster_and_metrics(
+            rib_tx,
+            peer_tx,
+            Arc::new(Vec::new),
+            Arc::new(Vec::new),
+            dataplane_event_broadcaster(),
+            metrics.clone(),
+        );
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Route as i32],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        for index in 0..20 {
+            events_tx
+                .send(route_event(
+                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, index), 32)),
+                    IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+                ))
+                .unwrap();
+        }
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.category, proto::EventCategory::Route as i32);
+
+        let text = gather_text(&metrics);
+        assert!(text.contains(
+            "bgp_event_stream_lagged_total{service=\"watch_events\",source=\"route\"} 4"
+        ));
     }
 
     #[test]

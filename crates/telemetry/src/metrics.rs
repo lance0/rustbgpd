@@ -35,6 +35,12 @@ pub struct BgpMetrics {
     rib_prefixes: IntGaugeVec,
     rib_adj_out_prefixes: IntGaugeVec,
     rib_loc_prefixes: IntGaugeVec,
+    route_event_history_depth: IntGauge,
+    route_event_history_capacity: IntGauge,
+
+    // ── Event streams ───────────────────────────────────────────
+    event_stream_lagged: IntCounterVec,
+    event_stream_subscribers: IntGaugeVec,
 
     // ── Policy ──────────────────────────────────────────────────
     max_prefix_exceeded: IntCounterVec,
@@ -203,6 +209,36 @@ impl BgpMetrics {
                 "Number of prefixes in the Loc-RIB per AFI/SAFI",
             ),
             &["afi_safi"],
+        )
+        .expect("valid metric definition");
+
+        let route_event_history_depth = IntGauge::new(
+            "bgp_route_event_history_depth",
+            "Current number of unicast route events retained in the bounded in-memory route-event history ring.",
+        )
+        .expect("valid metric definition");
+
+        let route_event_history_capacity = IntGauge::new(
+            "bgp_route_event_history_capacity",
+            "Configured capacity of the bounded in-memory unicast route-event history ring.",
+        )
+        .expect("valid metric definition");
+
+        let event_stream_lagged = IntCounterVec::new(
+            Opts::new(
+                "bgp_event_stream_lagged_total",
+                "Events missed by slow live event-stream subscribers by service and source.",
+            ),
+            &["service", "source"],
+        )
+        .expect("valid metric definition");
+
+        let event_stream_subscribers = IntGaugeVec::new(
+            Opts::new(
+                "bgp_event_stream_subscribers",
+                "Current live event-stream subscriber count by service and source.",
+            ),
+            &["service", "source"],
         )
         .expect("valid metric definition");
 
@@ -560,6 +596,18 @@ impl BgpMetrics {
             .register(Box::new(rib_loc_prefixes.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(route_event_history_depth.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(route_event_history_capacity.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(event_stream_lagged.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(event_stream_subscribers.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(max_prefix_exceeded.clone()))
             .expect("metric not already registered");
         registry
@@ -684,6 +732,10 @@ impl BgpMetrics {
             rib_prefixes,
             rib_adj_out_prefixes,
             rib_loc_prefixes,
+            route_event_history_depth,
+            route_event_history_capacity,
+            event_stream_lagged,
+            event_stream_subscribers,
             max_prefix_exceeded,
             outbound_route_drops,
             blackhole_discard_installed,
@@ -806,6 +858,58 @@ impl BgpMetrics {
         self.rib_loc_prefixes
             .with_label_values(&[afi_safi])
             .set(count);
+    }
+
+    /// Set the number of retained events in the bounded route-event
+    /// history ring.
+    pub fn set_route_event_history_depth(&self, count: i64) {
+        self.route_event_history_depth.set(count);
+    }
+
+    /// Set the configured capacity of the bounded route-event history
+    /// ring.
+    pub fn set_route_event_history_capacity(&self, count: i64) {
+        self.route_event_history_capacity.set(count);
+    }
+
+    /// Record events missed by a slow live event-stream subscriber.
+    pub fn record_event_stream_lagged(&self, service: &str, source: &str, missed: u64) {
+        if missed == 0 {
+            return;
+        }
+        self.event_stream_lagged
+            .with_label_values(&[service, source])
+            .inc_by(missed);
+    }
+
+    /// Increment the current live event-stream subscriber gauge.
+    pub fn inc_event_stream_subscriber(&self, service: &str, source: &str) {
+        self.event_stream_subscribers
+            .with_label_values(&[service, source])
+            .inc();
+    }
+
+    /// Decrement the current live event-stream subscriber gauge.
+    pub fn dec_event_stream_subscriber(&self, service: &str, source: &str) {
+        self.event_stream_subscribers
+            .with_label_values(&[service, source])
+            .dec();
+    }
+
+    /// Create a guard that increments the live event-stream subscriber
+    /// gauge and decrements it when the stream is dropped.
+    #[must_use]
+    pub fn event_stream_subscriber_guard(
+        &self,
+        service: &'static str,
+        source: &'static str,
+    ) -> EventStreamSubscriberGuard {
+        self.inc_event_stream_subscriber(service, source);
+        EventStreamSubscriberGuard {
+            metrics: self.clone(),
+            service,
+            source,
+        }
     }
 
     /// Record a max-prefix-exceeded event for a peer.
@@ -1109,6 +1213,21 @@ impl Default for BgpMetrics {
     }
 }
 
+/// RAII subscriber-count guard for live event streams.
+#[derive(Debug)]
+pub struct EventStreamSubscriberGuard {
+    metrics: BgpMetrics,
+    service: &'static str,
+    source: &'static str,
+}
+
+impl Drop for EventStreamSubscriberGuard {
+    fn drop(&mut self) {
+        self.metrics
+            .dec_event_stream_subscriber(self.service, self.source);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use prometheus::Encoder;
@@ -1194,6 +1313,61 @@ mod tests {
         );
         assert_eq!(m.fib_kernel_failures.with_label_values(&["setup"]).get(), 1);
         assert_eq!(m.fib_kernel_failures.with_label_values(&["dump"]).get(), 1);
+    }
+
+    #[test]
+    fn event_stream_lagged_counter_accumulates_missed_events() {
+        let m = BgpMetrics::new();
+
+        m.record_event_stream_lagged("watch_events", "route", 3);
+        m.record_event_stream_lagged("watch_events", "route", 2);
+        m.record_event_stream_lagged("watch_events", "session", 0);
+
+        assert_eq!(
+            m.event_stream_lagged
+                .with_label_values(&["watch_events", "route"])
+                .get(),
+            5
+        );
+        assert_eq!(
+            m.event_stream_lagged
+                .with_label_values(&["watch_events", "session"])
+                .get(),
+            0
+        );
+    }
+
+    #[test]
+    fn event_stream_subscriber_guard_tracks_lifecycle() {
+        let m = BgpMetrics::new();
+
+        {
+            let _guard = m.event_stream_subscriber_guard("watch_routes", "route");
+            assert_eq!(
+                m.event_stream_subscribers
+                    .with_label_values(&["watch_routes", "route"])
+                    .get(),
+                1
+            );
+        }
+
+        assert_eq!(
+            m.event_stream_subscribers
+                .with_label_values(&["watch_routes", "route"])
+                .get(),
+            0
+        );
+    }
+
+    #[test]
+    fn route_event_history_gauges_set_depth_and_capacity() {
+        let m = BgpMetrics::new();
+
+        m.set_route_event_history_capacity(4096);
+        m.set_route_event_history_depth(17);
+
+        assert_eq!(m.route_event_history_capacity.get(), 4096);
+        assert_eq!(m.route_event_history_depth.get(), 17);
     }
 
     #[test]

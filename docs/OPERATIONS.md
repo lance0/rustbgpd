@@ -264,6 +264,20 @@ via gRPC `GetMetrics` and `GetHealth` RPCs.
 | `bgp_updates_received_total` | Inbound UPDATE count |
 | `bgp_updates_sent_total` | Outbound UPDATE count |
 
+### Event Streams
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `bgp_event_stream_lagged_total{service,source}` | Events skipped because a live stream subscriber fell behind the bounded broadcast channel. `service` is `watch_events` or `watch_routes`; `source` is `route`, `session`, or `dataplane` where applicable |
+| `bgp_event_stream_subscribers{service,source}` | Current live stream subscriber count by service/source |
+| `bgp_route_event_history_depth` | Current number of unicast route events retained for `ListRouteEvents` / `rustbgpctl events` history queries |
+| `bgp_route_event_history_capacity` | Fixed capacity of the bounded unicast route-event history ring |
+
+`WatchEvents` / `WatchRoutes` are live tails, not durable queues. Non-zero
+`bgp_event_stream_lagged_total` means at least one client missed events and
+should combine a fresh snapshot or `ListRouteEvents` query with a new live
+watch.
+
 ### General Unicast FIB
 
 These metrics are present when the daemon is built with the ADR-0061 general
