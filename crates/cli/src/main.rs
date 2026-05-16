@@ -482,7 +482,7 @@ enum FlowspecAction {
 enum EventsAction {
     /// Watch the unified live event stream
     Watch {
-        /// Event category filter: route, session, policy
+        /// Event category filter: route, session, policy, dataplane
         #[arg(long = "category", value_delimiter = ',')]
         categories: Vec<String>,
 
@@ -500,7 +500,8 @@ enum EventsAction {
 
         /// Event type filter: added, withdrawn, best_changed,
         /// state_changed, established, lost, peer_enabled, peer_disabled,
-        /// notification_sent, notification_received, policy_changed
+        /// notification_sent, notification_received, policy_changed,
+        /// dataplane_status_changed
         #[arg(long = "type", value_delimiter = ',')]
         event_types: Vec<String>,
 
@@ -1724,6 +1725,31 @@ mod tests {
                 limit: Some(5),
                 ..
             } if address == "10.0.0.2" && event_types == &vec!["lost".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_parse_events_watch_dataplane_category() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "events",
+            "watch",
+            "--category",
+            "dataplane",
+            "--type",
+            "dataplane_status_changed",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Events {
+                action: Some(EventsAction::Watch {
+                    ref categories,
+                    ref event_types,
+                    ..
+                }),
+                ..
+            } if categories == &vec!["dataplane".to_string()] && event_types.len() == 1
         ));
     }
 

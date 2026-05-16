@@ -396,7 +396,12 @@ async fn run_tcp_listener(
             interceptor.clone(),
         ))
         .add_service(EventServiceServer::with_interceptor(
-            EventService::new(rib_tx.clone(), peer_mgr_tx.clone()),
+            EventService::with_dataplane_snapshots(
+                rib_tx.clone(),
+                peer_mgr_tx.clone(),
+                blackhole_discard_snapshot.clone(),
+                fib_route_snapshot.clone(),
+            ),
             interceptor.clone(),
         ))
         .add_service(InjectionServiceServer::with_interceptor(
@@ -501,7 +506,12 @@ async fn run_uds_listener(
             interceptor.clone(),
         ))
         .add_service(EventServiceServer::with_interceptor(
-            EventService::new(rib_tx.clone(), peer_mgr_tx.clone()),
+            EventService::with_dataplane_snapshots(
+                rib_tx.clone(),
+                peer_mgr_tx.clone(),
+                blackhole_discard_snapshot.clone(),
+                fib_route_snapshot.clone(),
+            ),
             interceptor.clone(),
         ))
         .add_service(InjectionServiceServer::with_interceptor(

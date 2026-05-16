@@ -92,9 +92,12 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
         "notification_sent" => Ok(BgpEventType::NotificationSent as i32),
         "notification_received" => Ok(BgpEventType::NotificationReceived as i32),
         "policy_changed" => Ok(BgpEventType::PolicyChanged as i32),
+        "dataplane_status_changed" | "dataplane_changed" => {
+            Ok(BgpEventType::DataplaneStatusChanged as i32)
+        }
         "stream_lagged" | "lagged" => Ok(BgpEventType::StreamLagged as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported event type {other:?}; expected added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, or stream_lagged"
+            "unsupported event type {other:?}; expected added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, dataplane_status_changed, or stream_lagged"
         ))),
     }
 }
@@ -118,8 +121,9 @@ fn parse_event_category(s: &str) -> Result<i32, CliError> {
         "route" => Ok(EventCategory::Route as i32),
         "session" => Ok(EventCategory::Session as i32),
         "policy" => Ok(EventCategory::Policy as i32),
+        "dataplane" => Ok(EventCategory::Dataplane as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported event category {other:?}; expected route, session, or policy"
+            "unsupported event category {other:?}; expected route, session, policy, or dataplane"
         ))),
     }
 }
@@ -165,6 +169,7 @@ fn bgp_event_type_json_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::NotificationSent) => "notification_sent",
         Ok(BgpEventType::NotificationReceived) => "notification_received",
         Ok(BgpEventType::PolicyChanged) => "policy_changed",
+        Ok(BgpEventType::DataplaneStatusChanged) => "dataplane_status_changed",
         Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
@@ -183,6 +188,7 @@ fn bgp_event_type_display_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::NotificationSent) => "notification_sent",
         Ok(BgpEventType::NotificationReceived) => "notification_received",
         Ok(BgpEventType::PolicyChanged) => "policy_changed",
+        Ok(BgpEventType::DataplaneStatusChanged) => "dataplane_status_changed",
         Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
@@ -298,6 +304,26 @@ fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
         object.insert(
             "reason".to_string(),
             serde_json::Value::String(policy.reason.clone()),
+        );
+    }
+    if let Some(crate::proto::bgp_event::Payload::Dataplane(dataplane)) = event.payload.as_ref()
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert(
+            "source".to_string(),
+            serde_json::Value::String(dataplane.source.clone()),
+        );
+        object.insert(
+            "installed".to_string(),
+            serde_json::Value::from(dataplane.installed),
+        );
+        object.insert(
+            "rejected".to_string(),
+            serde_json::Value::from(dataplane.rejected),
+        );
+        object.insert(
+            "failed".to_string(),
+            serde_json::Value::from(dataplane.failed),
         );
     }
     if let Some(crate::proto::bgp_event::Payload::StreamLag(lag)) = event.payload.as_ref()
@@ -486,6 +512,13 @@ pub async fn events_watch(
         .map(String::as_str)
         .map(parse_event_category)
         .collect::<Result<Vec<_>, _>>()?;
+    let dataplane_only = categories.len() == 1 && categories[0] == EventCategory::Dataplane as i32;
+    if dataplane_only && (neighbor.is_some() || family.is_some() || prefix.is_some()) {
+        return Err(CliError::Argument(
+            "--address, --family, and --prefix are route/session filters and cannot be used with --category dataplane"
+                .into(),
+        ));
+    }
 
     let event_types = event_types
         .iter()
@@ -866,6 +899,36 @@ mod tests {
         assert_eq!(value["target_type"], "policy");
         assert_eq!(value["target"], "audit-policy");
         assert_eq!(value["affected_peer_count"], 2);
+    }
+
+    #[test]
+    fn json_bgp_event_dataplane_includes_summary_counts() {
+        let event = BgpEvent {
+            timestamp: "1".to_string(),
+            category: EventCategory::Dataplane as i32,
+            event_type: BgpEventType::DataplaneStatusChanged as i32,
+            severity: 2,
+            afi_safi: AddressFamily::Unspecified as i32,
+            summary: "dataplane fib status changed".to_string(),
+            payload: Some(crate::proto::bgp_event::Payload::Dataplane(
+                crate::proto::DataplaneEvent {
+                    source: "fib".to_string(),
+                    installed: 2,
+                    rejected: 1,
+                    failed: 1,
+                },
+            )),
+            ..Default::default()
+        };
+
+        let value = json_bgp_event(&event);
+        assert_eq!(value["category"], "dataplane");
+        assert_eq!(value["event_type"], "dataplane_status_changed");
+        assert_eq!(value["source"], "fib");
+        assert_eq!(value["installed"], 2);
+        assert_eq!(value["rejected"], 1);
+        assert_eq!(value["failed"], 1);
+        assert!(value["afi_safi"].is_null());
     }
 
     #[test]

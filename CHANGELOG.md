@@ -47,8 +47,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Ordinary FSM state-change lifecycle delivery uses a bounded transport
   channel that is separate from the lossless TCP collision-coordination path,
   so session-event observability cannot grow the collision queue under churn.
-  Dataplane and EVPN event categories remain deferred until their sources
-  expose one complete structured event path.
+  EVPN event categories remain deferred until their sources expose one
+  complete structured event path.
 
 - **EventService BGP NOTIFICATION events.** `EventService.WatchEvents`
   now surfaces metadata-only sent/received BGP NOTIFICATION events under
@@ -78,6 +78,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   4096-event ring, filtered by peer, session event type, and limit.
   `rustbgpctl events sessions` exposes the same after-the-fact session
   flap context while `WatchEvents` remains a live-only stream.
+
+- **EventService aggregate dataplane status events.** `WatchEvents` now
+  accepts `EVENT_CATEGORY_DATAPLANE` and emits
+  `BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED` when the aggregate FIB or
+  BLACKHOLE discard status counts change. `rustbgpctl events watch
+  --category dataplane --type dataplane_status_changed` tails the same
+  summary stream. This is intentionally not a per-route, per-MAC, or EVPN
+  reconcile-report stream; richer dataplane/EVPN event categories remain
+  deferred.
 
 - **Self-hosted kernel dataplane CI gate.** New
   `.github/workflows/kernel-dataplane.yml` runs the privileged Linux

@@ -462,6 +462,7 @@ rustbgpctl events watch --prefix 203.0.113.0/24 --type added,best_changed
 rustbgpctl events watch --category session --type established,lost
 rustbgpctl events watch --category session --type notification_sent,notification_received
 rustbgpctl events watch --category policy --type policy_changed
+rustbgpctl events watch --category dataplane --type dataplane_status_changed
 rustbgpctl events sessions --address 10.0.0.2 --type established,lost --limit 20
 ```
 
@@ -469,23 +470,27 @@ rustbgpctl events sessions --address 10.0.0.2 --type established,lost --limit 20
 live stream carries route add / withdraw / best-change events plus structured
 session lifecycle events (`state_changed`, `established`, `lost`,
 `peer_enabled`, `peer_disabled`), metadata-only BGP NOTIFICATION
-sent/received events (`notification_sent`, `notification_received`), and opt-in
-policy mutation summaries (`policy_changed`). Prefix and family filters are
-route-only; use `--category session` with peer and type filters when watching
-session events, or `--category policy` to watch policy / neighbor-set /
-peer-group / chain mutations accepted by the runtime. Policy events describe
-runtime apply success; config-file persistence is separate. Session state-change
-events use a bounded observability channel separate from the lossless TCP
-collision-coordination path, so a saturated watch stream can miss lifecycle
-events without blocking BGP collision handling. If the client falls behind a
-bounded route or session source stream, `events watch` prints a `stream_lagged`
-warning with the missed count; treat subsequent output as a live tail after a
-gap. Use `--backfill N` to print recent matching route history before the live
-tail starts. Backfill is route-history only; session and policy events remain
-live only. Backfilled route events use the same output shape as live route
-events, but the command still prints a history block followed by the live tail
-rather than merging the two by wall-clock timestamp. Dataplane and EVPN events
-remain follow-up work. For recent route history without a live tail, use
+sent/received events (`notification_sent`, `notification_received`), opt-in
+policy mutation summaries (`policy_changed`), and aggregate dataplane
+status-change events for the FIB / BLACKHOLE discard reconcilers
+(`dataplane_status_changed`). Prefix and family filters are route-only; use
+`--category session` with peer and type filters when watching session events,
+or `--category policy` to watch policy / neighbor-set / peer-group / chain
+mutations accepted by the runtime. Dataplane summary events are peerless and
+do not match `--address`, `--family`, or `--prefix`. Policy events describe
+runtime apply success; config-file persistence is separate. Session
+state-change events use a bounded observability channel separate from the
+lossless TCP collision-coordination path, so a saturated watch stream can miss
+lifecycle events without blocking BGP collision handling. If the client falls
+behind a bounded route or session source stream, `events watch` prints a
+`stream_lagged` warning with the missed count; treat subsequent output as a
+live tail after a gap. Use `--backfill N` to print recent matching route
+history before the live tail starts. Backfill is route-history only; session,
+policy, and dataplane events remain live only. Backfilled route events use the
+same output shape as live route events, but the command still prints a history
+block followed by the live tail rather than merging the two by wall-clock
+timestamp. EVPN events remain follow-up work. For recent route history without
+a live tail, use
 `rustbgpctl events --prefix <PREFIX>`. For recent session lifecycle history,
 use `rustbgpctl events sessions`; it reads the peer manager's bounded
 process-local history and resets on daemon restart. The CLI returns 100

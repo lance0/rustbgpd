@@ -3,11 +3,12 @@
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::pin::Pin;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
-use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
+use tokio_stream::wrappers::{BroadcastStream, ReceiverStream, errors::BroadcastStreamRecvError};
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
@@ -17,27 +18,53 @@ use crate::peer_types::{
 };
 use crate::proto;
 use crate::rib_service::{
-    parse_route_event_prefix_filter, route_event_afi_filter, route_event_to_proto,
+    BlackholeDiscardSnapshotFn, FibRouteSnapshotFn, parse_route_event_prefix_filter,
+    route_event_afi_filter, route_event_to_proto,
 };
 use rustbgpd_rib::{RibUpdate, RouteEventType};
 use rustbgpd_wire::{Afi, Prefix};
+
+#[cfg(not(test))]
+const DATAPLANE_EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+#[cfg(test)]
+const DATAPLANE_EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// gRPC service exposing a unified live daemon event stream.
 #[derive(Clone)]
 pub struct EventService {
     rib_tx: tokio::sync::mpsc::Sender<RibUpdate>,
     peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
+    blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
+    fib_route_snapshot: FibRouteSnapshotFn,
 }
 
 impl EventService {
+    #[allow(dead_code)]
     #[must_use]
     pub fn new(
         rib_tx: tokio::sync::mpsc::Sender<RibUpdate>,
         peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
     ) -> Self {
+        Self::with_dataplane_snapshots(
+            rib_tx,
+            peer_mgr_tx,
+            std::sync::Arc::new(Vec::new),
+            std::sync::Arc::new(Vec::new),
+        )
+    }
+
+    #[must_use]
+    pub fn with_dataplane_snapshots(
+        rib_tx: tokio::sync::mpsc::Sender<RibUpdate>,
+        peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
+        blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
+        fib_route_snapshot: FibRouteSnapshotFn,
+    ) -> Self {
         Self {
             rib_tx,
             peer_mgr_tx,
+            blackhole_discard_snapshot,
+            fib_route_snapshot,
         }
     }
 }
@@ -112,6 +139,22 @@ impl WatchEventsFilter {
         let policy_selected = policy_category_requested
             || (self.categories.is_empty() && !self.event_types.is_empty() && policy_type_allowed);
         policy_selected && self.afi.is_none() && self.prefix.is_none() && policy_type_allowed
+    }
+
+    fn wants_dataplane_events(&self) -> bool {
+        let dataplane_category_requested = self
+            .categories
+            .contains(&(proto::EventCategory::Dataplane as i32));
+        let dataplane_type_allowed = self.event_types_match_dataplane_category();
+        let dataplane_selected = dataplane_category_requested
+            || (self.categories.is_empty()
+                && !self.event_types.is_empty()
+                && dataplane_type_allowed);
+        dataplane_selected
+            && self.peer.is_none()
+            && self.afi.is_none()
+            && self.prefix.is_none()
+            && dataplane_type_allowed
     }
 
     fn matches_session_event(&self, event: &SessionEvent) -> bool {
@@ -203,6 +246,16 @@ impl WatchEventsFilter {
                 )
             })
     }
+
+    fn event_types_match_dataplane_category(&self) -> bool {
+        self.event_types.is_empty()
+            || self.event_types.iter().any(|event_type| {
+                matches!(
+                    proto::BgpEventType::try_from(*event_type),
+                    Ok(proto::BgpEventType::DataplaneStatusChanged)
+                )
+            })
+    }
 }
 
 struct SessionEventHistoryFilter {
@@ -235,6 +288,7 @@ fn bgp_event_type_to_session_event_type(
         | proto::BgpEventType::NotificationSent
         | proto::BgpEventType::NotificationReceived
         | proto::BgpEventType::PolicyChanged
+        | proto::BgpEventType::DataplaneStatusChanged
         | proto::BgpEventType::StreamLagged => None,
     }
 }
@@ -247,17 +301,13 @@ fn parse_category_filter(categories: &[i32]) -> Result<BTreeSet<i32>, Status> {
         match category {
             proto::EventCategory::Route
             | proto::EventCategory::Session
-            | proto::EventCategory::Policy => {
+            | proto::EventCategory::Policy
+            | proto::EventCategory::Dataplane => {
                 parsed.insert(category as i32);
             }
             proto::EventCategory::Unspecified => {
                 return Err(Status::invalid_argument(
                     "EVENT_CATEGORY_UNSPECIFIED is not a valid filter",
-                ));
-            }
-            proto::EventCategory::Dataplane => {
-                return Err(Status::invalid_argument(
-                    "only EVENT_CATEGORY_ROUTE, EVENT_CATEGORY_SESSION, and EVENT_CATEGORY_POLICY are supported by WatchEvents in this release",
                 ));
             }
         }
@@ -282,6 +332,7 @@ fn parse_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<i32>, Status>
             | proto::BgpEventType::NotificationSent
             | proto::BgpEventType::NotificationReceived
             | proto::BgpEventType::PolicyChanged
+            | proto::BgpEventType::DataplaneStatusChanged
             | proto::BgpEventType::StreamLagged => {
                 parsed.insert(event_type as i32);
             }
@@ -335,6 +386,118 @@ fn session_notification_event_type_to_bgp_event_type(
     match event_type {
         SessionNotificationEventType::Sent => proto::BgpEventType::NotificationSent,
         SessionNotificationEventType::Received => proto::BgpEventType::NotificationReceived,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DataplaneSummary {
+    source: &'static str,
+    installed: u64,
+    rejected: u64,
+    failed: u64,
+}
+
+impl DataplaneSummary {
+    fn changed_from(self, previous: Self) -> bool {
+        self.installed != previous.installed
+            || self.rejected != previous.rejected
+            || self.failed != previous.failed
+    }
+}
+
+fn count_blackhole_statuses(rows: &[proto::BlackholeDiscard]) -> DataplaneSummary {
+    let mut summary = DataplaneSummary {
+        source: "blackhole",
+        installed: 0,
+        rejected: 0,
+        failed: 0,
+    };
+    for row in rows {
+        match proto::BlackholeDiscardState::try_from(row.state) {
+            Ok(proto::BlackholeDiscardState::Installed) => summary.installed += 1,
+            Ok(proto::BlackholeDiscardState::Rejected) => summary.rejected += 1,
+            Ok(proto::BlackholeDiscardState::Failed) => summary.failed += 1,
+            Ok(proto::BlackholeDiscardState::Unspecified) | Err(_) => {}
+        }
+    }
+    summary
+}
+
+fn count_fib_statuses(rows: &[proto::FibRouteStatus]) -> DataplaneSummary {
+    let mut summary = DataplaneSummary {
+        source: "fib",
+        installed: 0,
+        rejected: 0,
+        failed: 0,
+    };
+    for row in rows {
+        match proto::FibRouteState::try_from(row.state) {
+            Ok(proto::FibRouteState::Installed) => summary.installed += 1,
+            Ok(proto::FibRouteState::Rejected) => summary.rejected += 1,
+            Ok(proto::FibRouteState::Failed) => summary.failed += 1,
+            Ok(proto::FibRouteState::Unspecified) | Err(_) => {}
+        }
+    }
+    summary
+}
+
+fn dataplane_summaries(
+    blackholes: &[proto::BlackholeDiscard],
+    fib_routes: &[proto::FibRouteStatus],
+) -> Vec<DataplaneSummary> {
+    vec![
+        count_blackhole_statuses(blackholes),
+        count_fib_statuses(fib_routes),
+    ]
+}
+
+fn changed_dataplane_summaries(
+    previous: &[DataplaneSummary],
+    current: &[DataplaneSummary],
+) -> Vec<DataplaneSummary> {
+    current
+        .iter()
+        .copied()
+        .filter(|summary| {
+            previous
+                .iter()
+                .find(|candidate| candidate.source == summary.source)
+                .is_none_or(|previous| summary.changed_from(*previous))
+        })
+        .collect()
+}
+
+fn dataplane_summary_to_bgp_event(summary: DataplaneSummary) -> proto::BgpEvent {
+    let severity = if summary.failed > 0 {
+        proto::EventSeverity::Warning
+    } else {
+        proto::EventSeverity::Info
+    };
+    let payload = proto::DataplaneEvent {
+        source: summary.source.to_string(),
+        installed: summary.installed,
+        rejected: summary.rejected,
+        failed: summary.failed,
+    };
+    proto::BgpEvent {
+        timestamp: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .to_string(),
+        category: proto::EventCategory::Dataplane as i32,
+        event_type: proto::BgpEventType::DataplaneStatusChanged as i32,
+        severity: severity as i32,
+        peer_address: String::new(),
+        previous_peer_address: String::new(),
+        prefix: String::new(),
+        prefix_length: 0,
+        afi_safi: proto::AddressFamily::Unspecified as i32,
+        summary: format!(
+            "dataplane {} status changed: installed={} rejected={} failed={}",
+            summary.source, summary.installed, summary.rejected, summary.failed
+        ),
+        payload: Some(proto::bgp_event::Payload::Dataplane(payload)),
     }
 }
 
@@ -401,6 +564,7 @@ fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto::BgpEvent 
             | proto::BgpEventType::NotificationSent
             | proto::BgpEventType::NotificationReceived
             | proto::BgpEventType::PolicyChanged
+            | proto::BgpEventType::DataplaneStatusChanged
             | proto::BgpEventType::StreamLagged => "changed",
         },
         route.prefix,
@@ -692,8 +856,40 @@ impl proto::event_service_server::EventService for EventService {
                 Box::pin(tokio_stream::empty())
             };
 
+        let dataplane_stream: Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send>> =
+            if filter.wants_dataplane_events() {
+                let blackhole_snapshot = self.blackhole_discard_snapshot.clone();
+                let fib_snapshot = self.fib_route_snapshot.clone();
+                let (tx, rx) = mpsc::channel(16);
+                tokio::spawn(async move {
+                    let mut previous = dataplane_summaries(&blackhole_snapshot(), &fib_snapshot());
+                    let mut interval = tokio::time::interval(DATAPLANE_EVENT_POLL_INTERVAL);
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        interval.tick().await;
+                        let current = dataplane_summaries(&blackhole_snapshot(), &fib_snapshot());
+                        for summary in changed_dataplane_summaries(&previous, &current) {
+                            if tx
+                                .send(Ok(dataplane_summary_to_bgp_event(summary)))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        previous = current;
+                    }
+                });
+                Box::pin(ReceiverStream::new(rx))
+            } else {
+                Box::pin(tokio_stream::empty())
+            };
+
         Ok(Response::new(Box::pin(
-            route_stream.merge(session_stream).merge(policy_stream),
+            route_stream
+                .merge(session_stream)
+                .merge(policy_stream)
+                .merge(dataplane_stream),
         )))
     }
 
@@ -733,7 +929,7 @@ mod tests {
     use rustbgpd_rib::RouteEvent;
     use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix};
     use std::net::{Ipv4Addr, Ipv6Addr};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use tokio::sync::{broadcast, mpsc};
     use tokio_stream::StreamExt;
 
@@ -882,6 +1078,30 @@ mod tests {
         }
     }
 
+    fn fib_status(state: proto::FibRouteState) -> proto::FibRouteStatus {
+        proto::FibRouteStatus {
+            table_name: "blue".to_string(),
+            table_id: 100,
+            metric: 20,
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+            next_hop: "192.0.2.1".to_string(),
+            peer_address: "10.0.0.1".to_string(),
+            state: state as i32,
+            reason: "test".to_string(),
+        }
+    }
+
+    fn blackhole_status(state: proto::BlackholeDiscardState) -> proto::BlackholeDiscard {
+        proto::BlackholeDiscard {
+            prefix: "198.51.100.1".to_string(),
+            prefix_length: 32,
+            peer_address: "10.0.0.2".to_string(),
+            state: state as i32,
+            reason: "test".to_string(),
+        }
+    }
+
     #[tokio::test]
     async fn route_event_bridge_emits_bgp_event() {
         let (rib_tx, events_tx) = spawn_fake_rib();
@@ -910,6 +1130,110 @@ mod tests {
             panic!("expected route payload");
         };
         assert_eq!(route.event_id, 1);
+    }
+
+    #[tokio::test]
+    async fn dataplane_category_filter_does_not_subscribe_route_or_session_events() {
+        let (rib_tx, route_events_tx) = spawn_fake_rib();
+        let (peer_tx, session_events_tx, _policy_events_tx) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Dataplane as i32],
+                event_types: vec![proto::BgpEventType::DataplaneStatusChanged as i32],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(route_events_tx.receiver_count(), 0);
+        assert_eq!(session_events_tx.receiver_count(), 0);
+        drop(response);
+    }
+
+    #[tokio::test]
+    async fn dataplane_summary_event_emits_on_aggregate_change() {
+        let blackholes = Arc::new(Mutex::new(Vec::<proto::BlackholeDiscard>::new()));
+        let fib_routes = Arc::new(Mutex::new(Vec::<proto::FibRouteStatus>::new()));
+        let blackholes_for_service = blackholes.clone();
+        let fib_routes_for_service = fib_routes.clone();
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
+        let service = EventService::with_dataplane_snapshots(
+            rib_tx,
+            peer_tx,
+            Arc::new(move || blackholes_for_service.lock().unwrap().clone()),
+            Arc::new(move || fib_routes_for_service.lock().unwrap().clone()),
+        );
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Dataplane as i32],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        tokio::time::sleep(DATAPLANE_EVENT_POLL_INTERVAL * 2).await;
+        *fib_routes.lock().unwrap() = vec![
+            fib_status(proto::FibRouteState::Installed),
+            fib_status(proto::FibRouteState::Failed),
+        ];
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.category, proto::EventCategory::Dataplane as i32);
+        assert_eq!(
+            event.event_type,
+            proto::BgpEventType::DataplaneStatusChanged as i32
+        );
+        assert_eq!(event.severity, proto::EventSeverity::Warning as i32);
+        assert_eq!(
+            event.summary,
+            "dataplane fib status changed: installed=1 rejected=0 failed=1"
+        );
+        let Some(proto::bgp_event::Payload::Dataplane(payload)) = event.payload else {
+            panic!("expected dataplane payload");
+        };
+        assert_eq!(payload.source, "fib");
+        assert_eq!(payload.installed, 1);
+        assert_eq!(payload.failed, 1);
+    }
+
+    #[test]
+    fn dataplane_summaries_count_blackhole_and_fib_states() {
+        let summaries = dataplane_summaries(
+            &[
+                blackhole_status(proto::BlackholeDiscardState::Installed),
+                blackhole_status(proto::BlackholeDiscardState::Rejected),
+            ],
+            &[
+                fib_status(proto::FibRouteState::Installed),
+                fib_status(proto::FibRouteState::Installed),
+                fib_status(proto::FibRouteState::Failed),
+            ],
+        );
+
+        assert_eq!(
+            summaries,
+            vec![
+                DataplaneSummary {
+                    source: "blackhole",
+                    installed: 1,
+                    rejected: 1,
+                    failed: 0,
+                },
+                DataplaneSummary {
+                    source: "fib",
+                    installed: 2,
+                    rejected: 0,
+                    failed: 1,
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1251,7 +1575,7 @@ mod tests {
         let service = EventService::new(rib_tx, peer_tx);
         let Err(err) = service
             .watch_events(Request::new(proto::WatchEventsRequest {
-                categories: vec![proto::EventCategory::Dataplane as i32],
+                categories: vec![proto::EventCategory::Unspecified as i32],
                 ..Default::default()
             }))
             .await

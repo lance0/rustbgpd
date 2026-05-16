@@ -593,8 +593,9 @@ does not delete that replacement on a later withdraw.
 ## EventService
 
 Unified typed live event stream. Current categories are route events, session
-events (peer lifecycle plus BGP NOTIFICATION sent/received metadata), and
-policy mutation summary events. Dataplane and EVPN events are reserved for
+events (peer lifecycle plus BGP NOTIFICATION sent/received metadata), policy
+mutation summary events, and aggregate dataplane status-change events for the
+daemon-owned FIB / BLACKHOLE discard reconcilers. EVPN events are reserved for
 follow-up slices until their subsystems expose one complete structured event
 source.
 
@@ -606,7 +607,7 @@ source.
 ### Watch unified events
 
 ```bash
-# Watch all live route + session events through the unified event stream
+# Watch all live route + session + dataplane-summary events
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.EventService/WatchEvents
 
@@ -634,6 +635,11 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"event_types": ["BGP_EVENT_TYPE_SESSION_ESTABLISHED", "BGP_EVENT_TYPE_SESSION_LOST"], "neighbor_address": "10.0.0.2", "limit": 20}' \
   localhost:50051 rustbgpd.v1.EventService/ListSessionEvents
+
+# Watch aggregate FIB / BLACKHOLE dataplane status changes
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"categories": ["EVENT_CATEGORY_DATAPLANE"], "event_types": ["BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED"]}' \
+  localhost:50051 rustbgpd.v1.EventService/WatchEvents
 ```
 
 `WatchEvents` is a live stream only: it does not replay the bounded
@@ -651,22 +657,26 @@ events are sourced from the same structured RIB broadcast as `WatchRoutes`;
 session events are sourced from the peer manager's session broadcast and cover
 both lifecycle transitions and metadata-only BGP NOTIFICATION sent/received
 events; policy events are sourced from the peer manager after a runtime policy
-/ neighbor-set / peer-group / chain mutation is accepted. Empty category and
-type filters subscribe to the default route + session live stream. A non-empty
-type filter narrows the stream; `BGP_EVENT_TYPE_POLICY_CHANGED` with empty
-categories selects policy events, and `EVENT_CATEGORY_POLICY` selects policy
-explicitly. Transport sessions send ordinary state-change lifecycle events over
-a bounded channel that is separate from the lossless TCP collision-coordination
-path, so high churn can drop observability events without risking collision
-handling. If a subscriber falls behind either bounded broadcast, the stream
-emits a `stream_lagged` warning event with the source category and missed
-count; lag warnings are delivered for subscribed source categories even when
-the request's event-type filter is otherwise restrictive. Prefix and family
-filters are route-only: session and policy events do not match requests that
-set `prefix` or `afi_safi`. `BgpEvent` repeats common fields such as peer,
-prefix, type, and severity at the top level even when the payload also carries
-them so category-agnostic clients can render or filter events without unpacking
-the `oneof`.
+/ neighbor-set / peer-group / chain mutation is accepted; dataplane events are
+aggregate count changes from the existing `ListFibRoutes` /
+`ListBlackholeDiscards` status snapshots, not per-route or per-MAC dataplane
+streams. Empty category and type filters subscribe to the default route +
+session live stream. A non-empty type filter narrows the stream;
+`BGP_EVENT_TYPE_POLICY_CHANGED` or `BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED`
+with empty categories selects those streams, and `EVENT_CATEGORY_POLICY` or
+`EVENT_CATEGORY_DATAPLANE` selects them explicitly. Transport sessions send
+ordinary state-change lifecycle events over a bounded channel that is separate
+from the lossless TCP collision-coordination path, so high churn can drop
+observability events without risking collision handling. If a subscriber falls
+behind either bounded broadcast, the stream emits a `stream_lagged` warning
+event with the source category and missed count; lag warnings are delivered
+for subscribed source categories even when the request's event-type filter is
+otherwise restrictive. Prefix and family filters are route-only: session,
+policy, and dataplane events do not match requests that set `prefix` or
+`afi_safi`. Peer filters do not match peerless dataplane summary events.
+`BgpEvent` repeats common fields such as peer, prefix, type, and severity at
+the top level even when the payload also carries them so category-agnostic
+clients can render or filter events without unpacking the `oneof`.
 
 `ListSessionEvents` accepts `neighbor_address`, session-only `event_types`, and
 `limit` filters. Empty `event_types` means all session event types. The history
@@ -676,7 +686,7 @@ the most recent matching events, ordered oldest-to-newest within that selected
 recent window. Route event types are rejected for this RPC; use
 `RibService.ListRouteEvents` for route history.
 
-Session event types:
+Unified event types:
 
 | Type | Meaning |
 |------|---------|
@@ -702,6 +712,12 @@ Policy event types:
 | Type | Meaning |
 |------|---------|
 | `BGP_EVENT_TYPE_POLICY_CHANGED` | Runtime policy, neighbor-set, peer-group, or chain mutation accepted by the peer manager. Payload carries operation, target type, target, optional peer address, and affected peer count. This is a runtime-applied audit signal; config-file persistence is a separate path. |
+
+Dataplane event types:
+
+| Type | Meaning |
+|------|---------|
+| `BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED` | Aggregate FIB / BLACKHOLE installed, rejected, or failed count changed |
 
 ---
 
