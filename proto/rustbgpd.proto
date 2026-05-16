@@ -837,6 +837,7 @@ enum BgpEventType {
   BGP_EVENT_TYPE_PEER_DISABLED = 14;
   BGP_EVENT_TYPE_NOTIFICATION_SENT = 20;
   BGP_EVENT_TYPE_NOTIFICATION_RECEIVED = 21;
+  BGP_EVENT_TYPE_POLICY_CHANGED = 22;
   // A WatchEvents subscriber fell behind a bounded source stream and
   // missed one or more events. The payload identifies the source
   // category and missed count.
@@ -851,14 +852,18 @@ enum EventSeverity {
 }
 
 message WatchEventsRequest {
-  // Empty = all supported categories (route + session). Policy and
-  // dataplane categories are reserved for later event sources.
+  // Empty categories with empty event_types = default live categories
+  // (route + session). A non-empty event_types filter narrows the
+  // result; BGP_EVENT_TYPE_POLICY_CHANGED with empty categories selects
+  // policy events. Dataplane categories are reserved for later event
+  // sources.
   repeated EventCategory categories = 1;
   // Empty = all event types for the selected categories.
   repeated BgpEventType event_types = 2;
   // Optional neighbor address filter. Empty = all peers. Route events
   // match both current and previous peer, same as WatchRoutes and
-  // ListRouteEvents. Session events match their peer address.
+  // ListRouteEvents. Session events match their peer address. Policy
+  // events match only when tied to one peer.
   string neighbor_address = 3;
   // Optional family filter. Applies only to route events; session
   // events do not match a family-filtered request.
@@ -922,6 +927,26 @@ message NotificationEvent {
   string reason = 10;
 }
 
+message PolicyEvent {
+  BgpEventType event_type = 1;
+  // Operation label such as `set`, `delete`, or `clear`.
+  string operation = 2;
+  // Target class such as `policy`, `neighbor_set`, `peer_group`,
+  // `global_import_chain`, or `neighbor_export_chain`.
+  string target_type = 3;
+  // Target name or address-scoped target string.
+  string target = 4;
+  // Peer address when this mutation is scoped to one peer. Empty for
+  // global policy / peer-group / neighbor-set mutations.
+  string peer_address = 5;
+  // Number of currently managed peers the runtime mutation touched.
+  uint32 affected_peer_count = 6;
+  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
+  string timestamp = 7;
+  // Stable operator-facing reason/summary string for this event.
+  string reason = 8;
+}
+
 message BgpEvent {
   // Unix epoch seconds, matching existing RouteEvent timestamp shape.
   string timestamp = 1;
@@ -944,6 +969,7 @@ message BgpEvent {
     SessionEvent session = 12;
     StreamLagEvent stream_lag = 13;
     NotificationEvent notification = 14;
+    PolicyEvent policy = 15;
   }
 }
 
