@@ -450,6 +450,8 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 match both `peer_address` and `previous_peer_address`, so a peer-scoped query
 includes withdraws and best-path moves away from that peer. Prefix filters are
 exact-match only and can be combined with peer, family, and limit filters. The
+filter does not do containment or longest-prefix matching, so a query for
+`203.0.113.0/16` will not return an event recorded for `203.0.113.0/24`.
 history is process-local and resets on daemon restart.
 
 ### List FlowSpec routes
