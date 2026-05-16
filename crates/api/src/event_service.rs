@@ -3,12 +3,13 @@
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, oneshot};
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
-use tokio_stream::wrappers::{BroadcastStream, ReceiverStream, errors::BroadcastStreamRecvError};
+use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
@@ -36,6 +37,7 @@ pub struct EventService {
     peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
     blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
     fib_route_snapshot: FibRouteSnapshotFn,
+    dataplane_events: Arc<Mutex<Option<broadcast::Sender<proto::BgpEvent>>>>,
 }
 
 impl EventService {
@@ -65,7 +67,30 @@ impl EventService {
             peer_mgr_tx,
             blackhole_discard_snapshot,
             fib_route_snapshot,
+            dataplane_events: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn subscribe_dataplane_events(&self) -> broadcast::Receiver<proto::BgpEvent> {
+        let mut guard = self
+            .dataplane_events
+            .lock()
+            .expect("dataplane event broadcaster mutex poisoned");
+        if let Some(tx) = guard.as_ref() {
+            return tx.subscribe();
+        }
+
+        let (tx, rx) = broadcast::channel(16);
+        *guard = Some(tx.clone());
+        drop(guard);
+
+        spawn_dataplane_poller(
+            tx,
+            self.dataplane_events.clone(),
+            self.blackhole_discard_snapshot.clone(),
+            self.fib_route_snapshot.clone(),
+        );
+        rx
     }
 }
 
@@ -501,6 +526,37 @@ fn dataplane_summary_to_bgp_event(summary: DataplaneSummary) -> proto::BgpEvent 
     }
 }
 
+fn spawn_dataplane_poller(
+    tx: broadcast::Sender<proto::BgpEvent>,
+    shared_tx: Arc<Mutex<Option<broadcast::Sender<proto::BgpEvent>>>>,
+    blackhole_snapshot: BlackholeDiscardSnapshotFn,
+    fib_snapshot: FibRouteSnapshotFn,
+) {
+    tokio::spawn(async move {
+        let mut previous = dataplane_summaries(&blackhole_snapshot(), &fib_snapshot());
+        let mut interval = tokio::time::interval(DATAPLANE_EVENT_POLL_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if tx.receiver_count() == 0 {
+                let mut guard = shared_tx
+                    .lock()
+                    .expect("dataplane event broadcaster mutex poisoned");
+                if tx.receiver_count() == 0 {
+                    *guard = None;
+                    return;
+                }
+            }
+
+            let current = dataplane_summaries(&blackhole_snapshot(), &fib_snapshot());
+            for summary in changed_dataplane_summaries(&previous, &current) {
+                let _ = tx.send(dataplane_summary_to_bgp_event(summary));
+            }
+            previous = current;
+        }
+    });
+}
+
 fn parse_watch_events_filter(req: &proto::WatchEventsRequest) -> Result<WatchEventsFilter, Status> {
     let categories = parse_category_filter(&req.categories)?;
     let event_types = parse_event_type_filter(&req.event_types)?;
@@ -858,29 +914,18 @@ impl proto::event_service_server::EventService for EventService {
 
         let dataplane_stream: Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send>> =
             if filter.wants_dataplane_events() {
-                let blackhole_snapshot = self.blackhole_discard_snapshot.clone();
-                let fib_snapshot = self.fib_route_snapshot.clone();
-                let (tx, rx) = mpsc::channel(16);
-                tokio::spawn(async move {
-                    let mut previous = dataplane_summaries(&blackhole_snapshot(), &fib_snapshot());
-                    let mut interval = tokio::time::interval(DATAPLANE_EVENT_POLL_INTERVAL);
-                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                    loop {
-                        interval.tick().await;
-                        let current = dataplane_summaries(&blackhole_snapshot(), &fib_snapshot());
-                        for summary in changed_dataplane_summaries(&previous, &current) {
-                            if tx
-                                .send(Ok(dataplane_summary_to_bgp_event(summary)))
-                                .await
-                                .is_err()
-                            {
-                                return;
-                            }
+                let broadcast_rx = self.subscribe_dataplane_events();
+                Box::pin(BroadcastStream::new(broadcast_rx).filter_map(
+                    move |result| match result {
+                        Ok(event) => Some(Ok(event)),
+                        Err(_lagged) => {
+                            debug!(
+                                "WatchEvents dataplane subscriber lagged, skipping missed events"
+                            );
+                            None
                         }
-                        previous = current;
-                    }
-                });
-                Box::pin(ReceiverStream::new(rx))
+                    },
+                ))
             } else {
                 Box::pin(tokio_stream::empty())
             };
@@ -1149,6 +1194,38 @@ mod tests {
         assert_eq!(route_events_tx.receiver_count(), 0);
         assert_eq!(session_events_tx.receiver_count(), 0);
         drop(response);
+    }
+
+    #[tokio::test]
+    async fn dataplane_subscriber_drop_stops_shared_poller() {
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Dataplane as i32],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+
+        {
+            let guard = service.dataplane_events.lock().unwrap();
+            let tx = guard.as_ref().expect("dataplane poller should be active");
+            assert_eq!(tx.receiver_count(), 1);
+        }
+
+        drop(response);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if service.dataplane_events.lock().unwrap().is_none() {
+                    break;
+                }
+                tokio::time::sleep(DATAPLANE_EVENT_POLL_INTERVAL).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
