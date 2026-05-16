@@ -8,7 +8,7 @@ use rustbgpd_policy::PolicyChain;
 use rustbgpd_transport::RemovePrivateAs;
 use rustbgpd_wire::{Afi, Safi};
 use tokio::net::TcpStream;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 
 /// Kind of reconciliation failure returned to config reload callers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +47,41 @@ impl ReconcileResult {
     pub fn is_success(&self) -> bool {
         self.failures.is_empty()
     }
+}
+
+/// Session lifecycle event type published by `PeerManager`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionLifecycleEventType {
+    /// BGP FSM state changed.
+    StateChanged,
+    /// Session reached Established.
+    Established,
+    /// Session left Established.
+    Lost,
+    /// Operator enabled a configured peer.
+    PeerEnabled,
+    /// Operator disabled a configured peer.
+    PeerDisabled,
+}
+
+/// Structured session event broadcast by `PeerManager` and bridged by
+/// `EventService.WatchEvents`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionLifecycleEvent {
+    /// Event type.
+    pub event_type: SessionLifecycleEventType,
+    /// Peer address associated with the event.
+    pub peer: IpAddr,
+    /// Unix epoch seconds, string-shaped to match `RouteEvent`.
+    pub timestamp: String,
+    /// Previous BGP FSM state, when this is a session transition.
+    pub old_state: Option<SessionState>,
+    /// New BGP FSM state, when this is a session transition.
+    pub new_state: Option<SessionState>,
+    /// Session role (`primary` / `inbound_candidate`) for FSM events.
+    pub session_role: Option<String>,
+    /// Operator-facing reason/summary.
+    pub reason: String,
 }
 
 /// Commands sent to the `PeerManager` task.
@@ -100,6 +135,11 @@ pub enum PeerManagerCommand {
     ListPeers {
         /// Reply channel returning all peer snapshots.
         reply: oneshot::Sender<Vec<PeerInfo>>,
+    },
+    /// Subscribe to live session lifecycle events.
+    SubscribeSessionEvents {
+        /// Reply channel returning a fresh broadcast receiver.
+        reply: oneshot::Sender<broadcast::Receiver<SessionLifecycleEvent>>,
     },
     /// Query a single peer's state by address.
     GetPeerState {

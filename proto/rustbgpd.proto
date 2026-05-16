@@ -828,6 +828,11 @@ enum BgpEventType {
   BGP_EVENT_TYPE_ROUTE_ADDED = 1;
   BGP_EVENT_TYPE_ROUTE_WITHDRAWN = 2;
   BGP_EVENT_TYPE_ROUTE_BEST_CHANGED = 3;
+  BGP_EVENT_TYPE_SESSION_STATE_CHANGED = 10;
+  BGP_EVENT_TYPE_SESSION_ESTABLISHED = 11;
+  BGP_EVENT_TYPE_SESSION_LOST = 12;
+  BGP_EVENT_TYPE_PEER_ENABLED = 13;
+  BGP_EVENT_TYPE_PEER_DISABLED = 14;
 }
 
 enum EventSeverity {
@@ -838,23 +843,41 @@ enum EventSeverity {
 }
 
 message WatchEventsRequest {
-  // Empty = all categories. This foundation slice supports only
-  // EVENT_CATEGORY_ROUTE; other categories are reserved for later
-  // policy/session/dataplane event sources.
+  // Empty = all supported categories (route + session). Policy and
+  // dataplane categories are reserved for later event sources.
   repeated EventCategory categories = 1;
-  // Empty = all event types. This foundation slice supports route
-  // added / withdrawn / best-changed events only.
+  // Empty = all event types for the selected categories.
   repeated BgpEventType event_types = 2;
-  // Optional neighbor address filter. Empty = all peers. Route
-  // events match both current and previous peer, same as WatchRoutes
-  // and ListRouteEvents.
+  // Optional neighbor address filter. Empty = all peers. Route events
+  // match both current and previous peer, same as WatchRoutes and
+  // ListRouteEvents. Session events match their peer address.
   string neighbor_address = 3;
-  // Optional family filter. Only IPv4/IPv6 unicast are supported in
-  // this foundation slice.
+  // Optional family filter. Applies only to route events; session
+  // events do not match a family-filtered request.
   AddressFamily afi_safi = 4;
-  // Optional exact prefix filter. Empty = no prefix filter.
+  // Optional exact prefix filter. Applies only to route events;
+  // session events do not match a prefix-filtered request.
   string prefix = 5;
   uint32 prefix_length = 6;
+}
+
+message SessionEvent {
+  BgpEventType event_type = 1;
+  string peer_address = 2;
+  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
+  string timestamp = 3;
+  // BGP FSM state names from the transport layer (`Idle`, `Connect`,
+  // `Active`, `OpenSent`, `OpenConfirm`, `Established`). Empty for
+  // peer enable/disable events that are not tied to a specific FSM
+  // transition.
+  string old_state = 4;
+  string new_state = 5;
+  // `primary` for the managed peer session, `inbound_candidate` for a
+  // collision-resolution candidate, empty for peer enable/disable
+  // events.
+  string session_role = 6;
+  // Stable operator-facing reason/summary string for this event.
+  string reason = 7;
 }
 
 message BgpEvent {
@@ -876,6 +899,7 @@ message BgpEvent {
 
   oneof payload {
     RouteEvent route = 11;
+    SessionEvent session = 12;
   }
 }
 

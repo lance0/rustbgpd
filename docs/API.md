@@ -545,8 +545,10 @@ does not delete that replacement on a later withdraw.
 
 ## EventService
 
-Unified typed live event stream. The foundation slice carries route events;
-session, policy, and dataplane categories are reserved for follow-up slices.
+Unified typed live event stream. Current categories are route events and
+session lifecycle events. Policy, dataplane, EVPN, and notification events are
+reserved for follow-up slices until their subsystems expose one complete
+structured event source.
 
 | RPC | Description |
 |-----|-------------|
@@ -555,7 +557,7 @@ session, policy, and dataplane categories are reserved for follow-up slices.
 ### Watch unified events
 
 ```bash
-# Watch all live route events through the unified event stream
+# Watch all live route + session events through the unified event stream
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.EventService/WatchEvents
 
@@ -563,19 +565,34 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"categories": ["EVENT_CATEGORY_ROUTE"], "event_types": ["BGP_EVENT_TYPE_ROUTE_ADDED"], "prefix": "203.0.113.0", "prefix_length": 24}' \
   localhost:50051 rustbgpd.v1.EventService/WatchEvents
+
+# Watch session establishment/loss for one peer
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"categories": ["EVENT_CATEGORY_SESSION"], "event_types": ["BGP_EVENT_TYPE_SESSION_ESTABLISHED", "BGP_EVENT_TYPE_SESSION_LOST"], "neighbor_address": "10.0.0.2"}' \
+  localhost:50051 rustbgpd.v1.EventService/WatchEvents
 ```
 
 `WatchEvents` is a live stream only: it does not replay the bounded
 `ListRouteEvents` history and it does not persist events. Filters compose
 AND-wise across category, type, peer, family, and exact prefix. Repeated
-category and type filters are OR-matched within their own dimension. This
-foundation slice emits `EVENT_CATEGORY_ROUTE` events sourced from the same
-structured RIB broadcast as `WatchRoutes`; session, policy, and dataplane
-events are intentionally deferred until those subsystems expose equally
-structured event sources. `BgpEvent` repeats common fields such as peer,
-prefix, type, and severity at the top level even when the payload also carries
-them so category-agnostic clients can render or filter events without unpacking
-the `oneof`.
+category and type filters are OR-matched within their own dimension. Route
+events are sourced from the same structured RIB broadcast as `WatchRoutes`;
+session events are sourced from the peer manager's session lifecycle
+broadcast. Prefix and family filters are route-only: session events do not
+match requests that set `prefix` or `afi_safi`. `BgpEvent` repeats common
+fields such as peer, prefix, type, and severity at the top level even when the
+payload also carries them so category-agnostic clients can render or filter
+events without unpacking the `oneof`.
+
+Session event types:
+
+| Type | Meaning |
+|------|---------|
+| `BGP_EVENT_TYPE_SESSION_STATE_CHANGED` | BGP FSM state changed; payload carries old/new state and session role |
+| `BGP_EVENT_TYPE_SESSION_ESTABLISHED` | FSM reached `Established` |
+| `BGP_EVENT_TYPE_SESSION_LOST` | FSM left `Established`; severity is `WARNING` |
+| `BGP_EVENT_TYPE_PEER_ENABLED` | Operator enabled a configured peer |
+| `BGP_EVENT_TYPE_PEER_DISABLED` | Operator disabled a configured peer |
 
 ---
 

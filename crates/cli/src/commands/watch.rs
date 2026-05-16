@@ -67,8 +67,23 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
         "added" | "route_added" => Ok(BgpEventType::RouteAdded as i32),
         "withdrawn" | "route_withdrawn" => Ok(BgpEventType::RouteWithdrawn as i32),
         "best_changed" | "route_best_changed" => Ok(BgpEventType::RouteBestChanged as i32),
+        "state_changed" | "session_state_changed" => Ok(BgpEventType::SessionStateChanged as i32),
+        "established" | "session_established" => Ok(BgpEventType::SessionEstablished as i32),
+        "lost" | "session_lost" => Ok(BgpEventType::SessionLost as i32),
+        "peer_enabled" => Ok(BgpEventType::PeerEnabled as i32),
+        "peer_disabled" => Ok(BgpEventType::PeerDisabled as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported event type {other:?}; expected added, withdrawn, or best_changed"
+            "unsupported event type {other:?}; expected added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, or peer_disabled"
+        ))),
+    }
+}
+
+fn parse_event_category(s: &str) -> Result<i32, CliError> {
+    match s {
+        "route" => Ok(EventCategory::Route as i32),
+        "session" => Ok(EventCategory::Session as i32),
+        other => Err(CliError::Argument(format!(
+            "unsupported event category {other:?}; expected route or session"
         ))),
     }
 }
@@ -78,6 +93,11 @@ fn bgp_event_type_json_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::RouteAdded) => "route_added",
         Ok(BgpEventType::RouteWithdrawn) => "route_withdrawn",
         Ok(BgpEventType::RouteBestChanged) => "route_best_changed",
+        Ok(BgpEventType::SessionStateChanged) => "session_state_changed",
+        Ok(BgpEventType::SessionEstablished) => "session_established",
+        Ok(BgpEventType::SessionLost) => "session_lost",
+        Ok(BgpEventType::PeerEnabled) => "peer_enabled",
+        Ok(BgpEventType::PeerDisabled) => "peer_disabled",
         _ => "unknown",
     }
 }
@@ -87,12 +107,17 @@ fn bgp_event_type_display_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::RouteAdded) => "added",
         Ok(BgpEventType::RouteWithdrawn) => "withdrawn",
         Ok(BgpEventType::RouteBestChanged) => "best_changed",
+        Ok(BgpEventType::SessionStateChanged) => "state_changed",
+        Ok(BgpEventType::SessionEstablished) => "established",
+        Ok(BgpEventType::SessionLost) => "lost",
+        Ok(BgpEventType::PeerEnabled) => "peer_enabled",
+        Ok(BgpEventType::PeerDisabled) => "peer_disabled",
         _ => "unknown",
     }
 }
 
 fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "timestamp": event.timestamp,
         "category": match EventCategory::try_from(event.category) {
             Ok(EventCategory::Route) => "route",
@@ -110,9 +135,34 @@ fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
         } else {
             format!("{}/{}", event.prefix, event.prefix_length)
         },
-        "afi_safi": output::format_family(event.afi_safi),
+        "afi_safi": if event.afi_safi == AddressFamily::Unspecified as i32 {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(output::format_family(event.afi_safi).to_string())
+        },
         "summary": event.summary,
-    })
+    });
+    if let Some(crate::proto::bgp_event::Payload::Session(session)) = event.payload.as_ref()
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert(
+            "old_state".to_string(),
+            serde_json::Value::String(session.old_state.clone()),
+        );
+        object.insert(
+            "new_state".to_string(),
+            serde_json::Value::String(session.new_state.clone()),
+        );
+        object.insert(
+            "session_role".to_string(),
+            serde_json::Value::String(session.session_role.clone()),
+        );
+        object.insert(
+            "reason".to_string(),
+            serde_json::Value::String(session.reason.clone()),
+        );
+    }
+    value
 }
 
 fn print_bgp_event(event: &BgpEvent, json: bool) {
@@ -181,12 +231,25 @@ pub async fn run(
 
 pub async fn events_watch(
     connection: Connection,
+    categories: Vec<String>,
     neighbor: Option<String>,
     family: Option<i32>,
     prefix: Option<String>,
     event_types: Vec<String>,
     json: bool,
 ) -> Result<(), CliError> {
+    let categories = categories
+        .iter()
+        .map(String::as_str)
+        .map(parse_event_category)
+        .collect::<Result<Vec<_>, _>>()?;
+    let session_only = categories.len() == 1 && categories[0] == EventCategory::Session as i32;
+    if session_only && (family.is_some() || prefix.is_some()) {
+        return Err(CliError::Argument(
+            "--family and --prefix are route-only filters and cannot be used with --category session"
+                .into(),
+        ));
+    }
     let (prefix, prefix_length) = parse_optional_prefix_filter(prefix, family)?;
 
     let event_types = event_types
@@ -198,7 +261,7 @@ pub async fn events_watch(
         EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let mut stream = client
         .watch_events(WatchEventsRequest {
-            categories: vec![EventCategory::Route as i32],
+            categories,
             event_types,
             neighbor_address: neighbor.unwrap_or_default(),
             afi_safi: family.unwrap_or(0),
@@ -261,5 +324,33 @@ mod tests {
             bgp_event_type_display_label(BgpEventType::RouteBestChanged as i32),
             "best_changed"
         );
+    }
+
+    #[test]
+    fn json_bgp_event_session_uses_null_family() {
+        let event = BgpEvent {
+            timestamp: "1".to_string(),
+            category: EventCategory::Session as i32,
+            event_type: BgpEventType::SessionEstablished as i32,
+            severity: 1,
+            peer_address: "10.0.0.1".to_string(),
+            afi_safi: AddressFamily::Unspecified as i32,
+            summary: "session established".to_string(),
+            payload: Some(crate::proto::bgp_event::Payload::Session(
+                crate::proto::SessionEvent {
+                    event_type: BgpEventType::SessionEstablished as i32,
+                    peer_address: "10.0.0.1".to_string(),
+                    timestamp: "1".to_string(),
+                    old_state: "OpenConfirm".to_string(),
+                    new_state: "Established".to_string(),
+                    session_role: "primary".to_string(),
+                    reason: "session established".to_string(),
+                },
+            )),
+            ..Default::default()
+        };
+
+        let value = json_bgp_event(&event);
+        assert!(value["afi_safi"].is_null());
     }
 }

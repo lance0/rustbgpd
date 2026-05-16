@@ -482,6 +482,10 @@ enum FlowspecAction {
 enum EventsAction {
     /// Watch the unified live event stream
     Watch {
+        /// Event category filter: route, session
+        #[arg(long = "category", value_delimiter = ',')]
+        categories: Vec<String>,
+
         /// Neighbor address filter
         #[arg(long)]
         address: Option<String>,
@@ -494,7 +498,8 @@ enum EventsAction {
         #[arg(long)]
         prefix: Option<String>,
 
-        /// Event type filter: added, withdrawn, best_changed
+        /// Event type filter: added, withdrawn, best_changed,
+        /// state_changed, established, lost, peer_enabled, peer_disabled
         #[arg(long = "type", value_delimiter = ',')]
         event_types: Vec<String>,
     },
@@ -942,6 +947,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             limit,
         } => match action {
             Some(EventsAction::Watch {
+                categories,
                 address,
                 family,
                 prefix,
@@ -950,6 +956,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 let family_val = resolve_family(&family)?;
                 commands::watch::events_watch(
                     connection,
+                    categories,
                     address,
                     family_val,
                     prefix,
@@ -1525,6 +1532,31 @@ mod tests {
                 }),
                 ..
             } if prefix == "203.0.113.0/24" && event_types.len() == 2
+        ));
+    }
+
+    #[test]
+    fn test_parse_events_watch_category() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "events",
+            "watch",
+            "--category",
+            "session",
+            "--type",
+            "established,lost",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Events {
+                action: Some(EventsAction::Watch {
+                    ref categories,
+                    ref event_types,
+                    ..
+                }),
+                ..
+            } if categories == &vec!["session".to_string()] && event_types.len() == 2
         ));
     }
 

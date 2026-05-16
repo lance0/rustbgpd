@@ -133,12 +133,28 @@ impl PeerSession {
                         new.as_str(),
                     );
 
-                    // Notify PeerManager for collision detection.
+                    // Notify PeerManager for collision detection and lifecycle events.
+                    // StateChanged currently shares this lossless coordination path;
+                    // ROADMAP tracks a bounded lifecycle-only split if transition
+                    // volume becomes material.
                     // Read from the FSM's negotiated (set at OpenConfirm),
                     // not self.negotiated (set later at SessionEstablished).
                     // Uses unbounded channel so notifications are never dropped
                     // and never block (avoids deadlock with QueryState).
                     if let Some(ref notify_tx) = self.session_notify_tx {
+                        if let Err(e) = notify_tx.send(SessionNotification::StateChanged {
+                            session_id: self.session_identity.id,
+                            role: self.session_identity.role,
+                            peer_addr: self.peer_ip,
+                            old,
+                            new,
+                        }) {
+                            warn!(
+                                peer = %self.peer_label,
+                                error = %e,
+                                "failed to send StateChanged notification"
+                            );
+                        }
                         if new == SessionState::OpenConfirm
                             && let Some(neg) = self.fsm.negotiated()
                             && let Err(e) = notify_tx.send(SessionNotification::OpenReceived {

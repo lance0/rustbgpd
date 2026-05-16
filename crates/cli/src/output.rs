@@ -131,10 +131,13 @@ pub fn colored_health(healthy: bool) -> String {
 /// Return colored event type string.
 pub fn colored_event_type(event_type: &str) -> String {
     match event_type {
-        "added" | "best_changed" => {
+        "added" | "best_changed" | "established" | "peer_enabled" => {
             format!("{}", event_type.if_supports_color(Stdout, |s| s.green()))
         }
-        "withdrawn" => format!("{}", event_type.if_supports_color(Stdout, |s| s.red())),
+        "withdrawn" | "lost" | "peer_disabled" => {
+            format!("{}", event_type.if_supports_color(Stdout, |s| s.red()))
+        }
+        "state_changed" => format!("{}", event_type.if_supports_color(Stdout, |s| s.yellow())),
         _ => event_type.to_string(),
     }
 }
