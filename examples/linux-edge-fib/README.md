@@ -18,6 +18,7 @@ example, to send all non-local lookups through table `1000`:
 
 ```bash
 sudo ip rule add priority 1000 lookup 1000
+sudo ip -6 rule add priority 1000 lookup 1000
 ```
 
 That rule is intentionally catch-all. For selected traffic, add a selector such
@@ -29,8 +30,11 @@ prove it owns are preserved and reported as `foreign_route_exists`.
 
 At runtime this example needs enough privilege for the configured surfaces:
 binding TCP/179 requires root or `CAP_NET_BIND_SERVICE`, and programming
-`[[fib_tables]]` routes requires `CAP_NET_ADMIN`. `rustbgpd --check` validates
-the TOML shape but does not prove those runtime capabilities are present.
+`[[fib_tables]]` routes requires `CAP_NET_ADMIN`. The daemon user must also be
+able to write `runtime_state_dir` and the UDS parent directory so the socket and
+FIB ownership receipts can be created. `rustbgpd --check` validates the TOML
+shape but does not prove those runtime capabilities or filesystem permissions
+are present.
 
 ## Inspect
 

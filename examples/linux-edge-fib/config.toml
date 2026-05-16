@@ -37,14 +37,14 @@ address = "198.51.100.1"
 remote_asn = 64501
 description = "transit-a"
 peer_group = "transit"
-families = ["ipv4_unicast", "ipv6_unicast"]
+families = ["ipv4_unicast"]
 
 [[neighbors]]
 address = "2001:db8:100::1"
 remote_asn = 64502
 description = "transit-b"
 peer_group = "transit"
-families = ["ipv4_unicast", "ipv6_unicast"]
+families = ["ipv6_unicast"]
 
 # Explicit opt-in for ordinary unicast FIB programming. The actor writes only
 # this table_id + metric pair, marks routes RTPROT_BGP, preserves foreign
