@@ -455,6 +455,11 @@ pub fn decode_flowspec_nlri(mut buf: &[u8], afi: Afi) -> Result<Vec<FlowSpecRule
 }
 
 /// Encode `FlowSpec` NLRI rules to wire bytes.
+///
+/// Locally constructed rules should be checked with
+/// [`FlowSpecRule::validate_encoded_len`] before they reach this encoder.
+/// Rules decoded from a peer are already bounded by the on-wire 12-bit
+/// `FlowSpec` length prefix.
 pub fn encode_flowspec_nlri(rules: &[FlowSpecRule], buf: &mut Vec<u8>, afi: Afi) {
     for rule in rules {
         let mut rule_bytes = Vec::new();
@@ -490,10 +495,6 @@ fn decode_flowspec_length(buf: &[u8]) -> Result<(usize, usize), DecodeError> {
 
 /// Encode `FlowSpec` NLRI length prefix.
 fn encode_flowspec_length(len: usize, buf: &mut Vec<u8>) {
-    assert!(
-        len <= MAX_FLOWSPEC_NLRI_RULE_LEN,
-        "FlowSpec NLRI rule length {len} exceeds maximum {MAX_FLOWSPEC_NLRI_RULE_LEN}"
-    );
     if len < 0xF0 {
         #[expect(clippy::cast_possible_truncation)]
         buf.push(len as u8);
@@ -1196,14 +1197,6 @@ mod tests {
             panic!("expected MalformedField");
         };
         assert!(detail.contains("exceeds maximum"));
-    }
-
-    #[test]
-    #[should_panic(expected = "FlowSpec NLRI rule length")]
-    fn encode_panics_instead_of_truncating_over_4095_byte_rule() {
-        let rule = oversized_rule();
-        let mut buf = Vec::new();
-        encode_flowspec_nlri(&[rule], &mut buf, Afi::Ipv4);
     }
 
     #[test]

@@ -982,6 +982,24 @@ mod tests {
         InjectionService::new(tx, AccessMode::ReadWrite)
     }
 
+    fn make_service_with_rx() -> (InjectionService, mpsc::Receiver<RibUpdate>) {
+        let (tx, rx) = mpsc::channel(16);
+        (InjectionService::new(tx, AccessMode::ReadWrite), rx)
+    }
+
+    fn oversized_flowspec_component() -> proto::FlowSpecComponent {
+        let value = (0..2_200)
+            .map(|i| format!("={i}"))
+            .collect::<Vec<_>>()
+            .join(" & ");
+        proto::FlowSpecComponent {
+            r#type: 4,
+            prefix: String::new(),
+            value,
+            offset: 0,
+        }
+    }
+
     fn oversized_flowspec_rule() -> FlowSpecRule {
         let mut ops: Vec<NumericMatch> = (0..2_200)
             .map(|i| NumericMatch {
@@ -1018,6 +1036,47 @@ mod tests {
         let err = svc.add_path(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("0.0.0.0"));
+    }
+
+    #[tokio::test]
+    async fn add_flow_spec_rejects_oversized_rule_before_rib_update() {
+        let (svc, mut rx) = make_service_with_rx();
+        let err = svc
+            .add_flow_spec(Request::new(proto::AddFlowSpecRequest {
+                afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                components: vec![oversized_flowspec_component()],
+                actions: vec![],
+                communities: vec![],
+                extended_communities: vec![],
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("exceeds maximum"));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_flow_spec_rejects_oversized_rule_before_rib_update() {
+        let (svc, mut rx) = make_service_with_rx();
+        let err = svc
+            .delete_flow_spec(Request::new(proto::DeleteFlowSpecRequest {
+                afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                components: vec![oversized_flowspec_component()],
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("exceeds maximum"));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]
