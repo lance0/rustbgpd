@@ -90,6 +90,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   EVPN reconcile-report stream; richer dataplane/EVPN event categories remain
   deferred.
 
+- **Event stream loss observability.** New Prometheus metrics expose slow
+  live-event consumers and route-history retention:
+  `bgp_event_stream_lagged_total{service,source}` counts events missed by
+  lagging `WatchEvents` / `WatchRoutes` subscribers,
+  `bgp_event_stream_subscribers{service,source}` tracks active stream
+  subscribers, and `bgp_route_event_history_depth` /
+  `bgp_route_event_history_capacity` expose the bounded unicast route-event
+  ring.
+
 - **Self-hosted kernel dataplane CI gate.** New
   `.github/workflows/kernel-dataplane.yml` runs the privileged Linux
   dataplane checks that hosted runners cannot reliably exercise:

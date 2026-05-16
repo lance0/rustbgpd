@@ -689,6 +689,14 @@ the most recent matching events, ordered oldest-to-newest within that selected
 recent window. Route event types are rejected for this RPC; use
 `RibService.ListRouteEvents` for route history.
 
+Slow live-stream consumers do not block the daemon. If a `WatchEvents` or
+`WatchRoutes` subscriber falls behind the bounded broadcast channel, missed
+events are skipped and `bgp_event_stream_lagged_total{service,source}` records
+the missed count. Use `bgp_event_stream_subscribers{service,source}` to see
+active stream readers and `bgp_route_event_history_depth` /
+`bgp_route_event_history_capacity` to understand how much recent unicast route
+history is available through `ListRouteEvents`.
+
 Unified event types:
 
 | Type | Meaning |

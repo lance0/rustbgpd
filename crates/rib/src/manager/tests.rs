@@ -3254,6 +3254,60 @@ async fn route_event_history_capacity_evicts_oldest_event() {
 }
 
 #[tokio::test]
+#[expect(clippy::cast_possible_truncation)]
+async fn route_event_history_gauges_track_depth_and_capacity() {
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let capacity = metrics
+        .registry()
+        .gather()
+        .iter()
+        .find(|family| family.name() == "bgp_route_event_history_capacity")
+        .expect("capacity gauge registered")
+        .metric[0]
+        .gauge
+        .value();
+    assert_eq!(
+        capacity as i64,
+        i64::try_from(ROUTE_EVENT_HISTORY_CAPACITY).unwrap()
+    );
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    for index in 0..3 {
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![make_indexed_route(index, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    let _ = query_route_event_history(&tx, None, Some(Afi::Ipv4), None, 0).await;
+
+    let depth = metrics
+        .registry()
+        .gather()
+        .iter()
+        .find(|family| family.name() == "bgp_route_event_history_depth")
+        .expect("depth gauge registered")
+        .metric[0]
+        .gauge
+        .value();
+    assert_eq!(depth as i64, 3);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn route_event_withdrawn_on_last_removed() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
