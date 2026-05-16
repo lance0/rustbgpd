@@ -424,7 +424,8 @@ Event types: `ROUTE_EVENT_TYPE_ADDED`, `ROUTE_EVENT_TYPE_WITHDRAWN`,
 
 Each `RouteEvent` carries an `event_id`, a monotonic process-local cursor that
 is assigned before the event is written to history and broadcast to live
-subscribers. The cursor resets on daemon restart.
+subscribers. The cursor resets on daemon restart and is not reused within one
+process.
 
 `WatchRoutes` does not backfill recent events for new subscribers. Clients that
 need both context and a live tail should call `ListRouteEvents` first, then
@@ -460,8 +461,9 @@ exact-match only and can be combined with peer, family, and limit filters. The
 filter does not do containment or longest-prefix matching, so a query for
 `203.0.113.0/16` will not return an event recorded for `203.0.113.0/24`.
 `event_id` values are monotonic within the running daemon and can be used by
-clients to de-duplicate a history window against a live stream. The history is
-process-local and resets on daemon restart.
+clients to de-duplicate a history window against a live stream. They are not
+persisted or reused within one process. The history is process-local and
+resets on daemon restart.
 
 ### List FlowSpec routes
 
@@ -590,8 +592,11 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 `WatchEvents` is a live stream only: it does not replay the bounded
 `ListRouteEvents` history and it does not persist events. The `rustbgpctl
 events watch --backfill N` command composes both RPCs client-side for route
-events by subscribing live first, printing recent `ListRouteEvents` results,
-and suppressing live route events whose `event_id` was already printed.
+events by subscribing live first, printing recent `ListRouteEvents` results
+through the same `BgpEvent` renderer used by the live stream, and suppressing
+live route events whose `event_id` was already printed. The command prints a
+history block followed by the live tail; it does not server-side merge the two
+streams by wall-clock timestamp.
 Filters compose
 AND-wise across category, type, peer, family, and exact prefix. Repeated
 category and type filters are OR-matched within their own dimension. Route

@@ -311,6 +311,34 @@ fn route_history_event_matches_types(event: &RouteEvent, event_types: &[i32]) ->
         || event_types.contains(&route_event_type_to_bgp_event_type(event.event_type))
 }
 
+fn route_event_to_bgp_event(event: RouteEvent) -> BgpEvent {
+    let event_type = route_event_type_to_bgp_event_type(event.event_type);
+    let event_label = match BgpEventType::try_from(event_type) {
+        Ok(BgpEventType::RouteAdded) => "added",
+        Ok(BgpEventType::RouteWithdrawn) => "withdrawn",
+        Ok(BgpEventType::RouteBestChanged) => "best changed",
+        _ => "changed",
+    };
+    let summary = format!(
+        "route {event_label} {}/{}",
+        event.prefix, event.prefix_length
+    );
+
+    BgpEvent {
+        timestamp: event.timestamp.clone(),
+        category: EventCategory::Route as i32,
+        event_type,
+        severity: crate::proto::EventSeverity::Info as i32,
+        peer_address: event.peer_address.clone(),
+        previous_peer_address: event.previous_peer_address.clone(),
+        prefix: event.prefix.clone(),
+        prefix_length: event.prefix_length,
+        afi_safi: event.afi_safi,
+        summary,
+        payload: Some(crate::proto::bgp_event::Payload::Route(event)),
+    }
+}
+
 fn parse_optional_prefix_filter(
     prefix: Option<String>,
     family: Option<i32>,
@@ -436,7 +464,8 @@ pub async fn events_watch(
         }
         for event in events {
             last_backfilled_route_event_id = last_backfilled_route_event_id.max(event.event_id);
-            print_event(&event, json);
+            let event = route_event_to_bgp_event(event);
+            print_bgp_event(&event, json);
         }
     }
 
@@ -541,6 +570,28 @@ mod tests {
             &event,
             &[BgpEventType::RouteAdded as i32]
         ));
+    }
+
+    #[test]
+    fn route_history_event_converts_to_bgp_event_shape() {
+        let event = RouteEvent {
+            event_type: 1,
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+            peer_address: "10.0.0.1".to_string(),
+            afi_safi: AddressFamily::Ipv4Unicast as i32,
+            timestamp: "1".to_string(),
+            previous_peer_address: String::new(),
+            path_id: 0,
+            event_id: 42,
+        };
+
+        let event = route_event_to_bgp_event(event);
+        let value = json_bgp_event(&event);
+        assert_eq!(value["category"], "route");
+        assert_eq!(value["event_type"], "route_added");
+        assert_eq!(value["summary"], "route added 203.0.113.0/24");
+        assert_eq!(value["event_id"], 42);
     }
 
     #[test]

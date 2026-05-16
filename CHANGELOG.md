@@ -30,7 +30,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   monotonic process-local `event_id` through `WatchRoutes`,
   `ListRouteEvents`, and `WatchEvents` route payloads. `rustbgpctl events
   watch --backfill N` opens the live stream first, prints recent matching
-  route history, then suppresses already-printed live route events by cursor.
+  route history through the same `BgpEvent` output shape used by the live
+  tail, then suppresses already-printed live route events by cursor.
 
 - **EventService session lifecycle events.** `EventService.WatchEvents`
   now also carries structured session events from the peer manager:

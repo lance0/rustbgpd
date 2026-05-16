@@ -884,7 +884,10 @@ impl RibManager {
 
     fn publish_route_event(&mut self, mut event: RouteEvent) {
         event.event_id = self.next_route_event_id;
-        self.next_route_event_id = self.next_route_event_id.wrapping_add(1).max(1);
+        self.next_route_event_id = self
+            .next_route_event_id
+            .checked_add(1)
+            .expect("route event id space exhausted");
         if self.route_event_history.len() == ROUTE_EVENT_HISTORY_CAPACITY {
             self.route_event_history.pop_front();
         }

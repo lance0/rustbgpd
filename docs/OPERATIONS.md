@@ -477,8 +477,11 @@ route or session source stream, `events watch` prints a `stream_lagged`
 warning with the missed count; treat subsequent output as a live tail after a
 gap. Use `--backfill N` to print recent matching route history before the live
 tail starts. Backfill is route-history only; session events remain live only.
-Policy, dataplane, and EVPN events remain follow-up work. For recent route
-history without a live tail, use `rustbgpctl events --prefix <PREFIX>`.
+Backfilled route events use the same output shape as live route events, but
+the command still prints a history block followed by the live tail rather than
+merging the two by wall-clock timestamp. Policy, dataplane, and EVPN events
+remain follow-up work. For recent route history without a live tail, use
+`rustbgpctl events --prefix <PREFIX>`.
 
 ### Check health
 
