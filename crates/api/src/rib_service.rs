@@ -1448,6 +1448,65 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn list_route_events_forwards_filters_and_maps_response() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let svc = RibService::new(tx);
+        let req = Request::new(proto::ListRouteEventsRequest {
+            neighbor_address: "192.0.2.1".to_string(),
+            afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
+            limit: 7,
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+        });
+
+        let call = tokio::spawn(async move { svc.list_route_events(req).await });
+        let update = rx.recv().await.unwrap();
+        let reply = match update {
+            RibUpdate::QueryRouteEventHistory {
+                peer,
+                afi,
+                prefix,
+                limit,
+                reply,
+            } => {
+                assert_eq!(peer, Some("192.0.2.1".parse::<IpAddr>().unwrap()));
+                assert_eq!(afi, Some(Afi::Ipv4));
+                assert_eq!(
+                    prefix,
+                    Some(Prefix::V4(Ipv4Prefix::new(
+                        "203.0.113.0".parse().unwrap(),
+                        24
+                    )))
+                );
+                assert_eq!(limit, 7);
+                reply
+            }
+            _ => panic!("unexpected update variant"),
+        };
+
+        reply
+            .send(vec![rustbgpd_rib::RouteEvent {
+                event_type: RouteEventType::BestChanged,
+                prefix: Prefix::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24)),
+                peer: Some("192.0.2.1".parse().unwrap()),
+                previous_peer: Some("192.0.2.2".parse().unwrap()),
+                timestamp: "123".to_string(),
+                path_id: 99,
+            }])
+            .unwrap();
+
+        let response = call.await.unwrap().unwrap().into_inner();
+        assert_eq!(response.events.len(), 1);
+        let event = &response.events[0];
+        assert_eq!(event.event_type, proto::RouteEventType::BestChanged as i32);
+        assert_eq!(event.prefix, "203.0.113.0");
+        assert_eq!(event.prefix_length, 24);
+        assert_eq!(event.peer_address, "192.0.2.1");
+        assert_eq!(event.previous_peer_address, "192.0.2.2");
+        assert_eq!(event.path_id, 99);
+    }
+
     #[test]
     fn filter_routes_unspecified_returns_all() {
         let v4 = Route {
