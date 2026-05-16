@@ -549,7 +549,8 @@ does not delete that replacement on a later withdraw.
 ## EventService
 
 Unified typed live event stream. Current categories are route events and
-session lifecycle events. Policy, dataplane, EVPN, and notification events are
+session events. The session category includes peer lifecycle and BGP
+NOTIFICATION sent/received metadata. Policy, dataplane, and EVPN events are
 reserved for follow-up slices until their subsystems expose one complete
 structured event source.
 
@@ -573,6 +574,11 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"categories": ["EVENT_CATEGORY_SESSION"], "event_types": ["BGP_EVENT_TYPE_SESSION_ESTABLISHED", "BGP_EVENT_TYPE_SESSION_LOST"], "neighbor_address": "10.0.0.2"}' \
   localhost:50051 rustbgpd.v1.EventService/WatchEvents
+
+# Watch BGP NOTIFICATIONs for one peer
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"categories": ["EVENT_CATEGORY_SESSION"], "event_types": ["BGP_EVENT_TYPE_NOTIFICATION_SENT", "BGP_EVENT_TYPE_NOTIFICATION_RECEIVED"], "neighbor_address": "10.0.0.2"}' \
+  localhost:50051 rustbgpd.v1.EventService/WatchEvents
 ```
 
 `WatchEvents` is a live stream only: it does not replay the bounded
@@ -580,9 +586,10 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 AND-wise across category, type, peer, family, and exact prefix. Repeated
 category and type filters are OR-matched within their own dimension. Route
 events are sourced from the same structured RIB broadcast as `WatchRoutes`;
-session events are sourced from the peer manager's session lifecycle
-broadcast. Transport sessions send ordinary state-change lifecycle events over
-a bounded channel that is separate from the lossless TCP collision-coordination
+session events are sourced from the peer manager's session broadcast and cover
+both lifecycle transitions and metadata-only BGP NOTIFICATION sent/received
+events. Transport sessions send ordinary state-change lifecycle events over a
+bounded channel that is separate from the lossless TCP collision-coordination
 path, so high churn can drop observability events without risking collision
 handling. If a subscriber falls behind either bounded broadcast, the stream
 emits a `stream_lagged` warning event with the source category and missed
@@ -603,6 +610,11 @@ Session event types:
 | `BGP_EVENT_TYPE_SESSION_LOST` | FSM left `Established`; severity is `WARNING` |
 | `BGP_EVENT_TYPE_PEER_ENABLED` | Operator enabled a configured peer |
 | `BGP_EVENT_TYPE_PEER_DISABLED` | Operator disabled a configured peer |
+| `BGP_EVENT_TYPE_NOTIFICATION_SENT` | rustbgpd sent a BGP NOTIFICATION; payload carries direction, code, subcode, description, session role, and optional RFC 8203 shutdown reason |
+| `BGP_EVENT_TYPE_NOTIFICATION_RECEIVED` | rustbgpd received a BGP NOTIFICATION from the peer; payload carries the same metadata |
+
+NOTIFICATION events are metadata-only. Raw NOTIFICATION packet data remains
+limited to BMP peer-down handling; `WatchEvents` does not retain or replay it.
 
 Stream health event types:
 

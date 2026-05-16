@@ -11,7 +11,10 @@ use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
-use crate::peer_types::{PeerManagerCommand, SessionLifecycleEvent, SessionLifecycleEventType};
+use crate::peer_types::{
+    PeerManagerCommand, SessionEvent, SessionLifecycleEvent, SessionLifecycleEventType,
+    SessionNotificationEvent, SessionNotificationEventType,
+};
 use crate::proto;
 use crate::rib_service::{
     parse_route_event_prefix_filter, route_event_afi_filter, route_event_to_proto,
@@ -101,18 +104,27 @@ impl WatchEventsFilter {
             && self.event_types_match_session_category()
     }
 
-    fn matches_session_event(&self, event: &SessionLifecycleEvent) -> bool {
+    fn matches_session_event(&self, event: &SessionEvent) -> bool {
         if !self.wants_session_events() {
             return false;
         }
 
-        let event_type = session_event_type_to_bgp_event_type(event.event_type);
+        let (event_type, event_peer) = match event {
+            SessionEvent::Lifecycle(event) => (
+                session_lifecycle_event_type_to_bgp_event_type(event.event_type),
+                event.peer,
+            ),
+            SessionEvent::Notification(event) => (
+                session_notification_event_type_to_bgp_event_type(event.event_type),
+                event.peer,
+            ),
+        };
         if !self.event_types.is_empty() && !self.event_types.contains(&(event_type as i32)) {
             return false;
         }
 
         if let Some(peer) = self.peer
-            && event.peer != peer
+            && event_peer != peer
         {
             return false;
         }
@@ -143,6 +155,8 @@ impl WatchEventsFilter {
                         | proto::BgpEventType::SessionLost
                         | proto::BgpEventType::PeerEnabled
                         | proto::BgpEventType::PeerDisabled
+                        | proto::BgpEventType::NotificationSent
+                        | proto::BgpEventType::NotificationReceived
                         | proto::BgpEventType::StreamLagged)
                 )
             })
@@ -195,6 +209,8 @@ fn parse_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<i32>, Status>
             | proto::BgpEventType::SessionLost
             | proto::BgpEventType::PeerEnabled
             | proto::BgpEventType::PeerDisabled
+            | proto::BgpEventType::NotificationSent
+            | proto::BgpEventType::NotificationReceived
             | proto::BgpEventType::StreamLagged => {
                 parsed.insert(event_type as i32);
             }
@@ -208,7 +224,7 @@ fn parse_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<i32>, Status>
     Ok(parsed)
 }
 
-fn session_event_type_to_bgp_event_type(
+fn session_lifecycle_event_type_to_bgp_event_type(
     event_type: SessionLifecycleEventType,
 ) -> proto::BgpEventType {
     match event_type {
@@ -217,6 +233,15 @@ fn session_event_type_to_bgp_event_type(
         SessionLifecycleEventType::Lost => proto::BgpEventType::SessionLost,
         SessionLifecycleEventType::PeerEnabled => proto::BgpEventType::PeerEnabled,
         SessionLifecycleEventType::PeerDisabled => proto::BgpEventType::PeerDisabled,
+    }
+}
+
+fn session_notification_event_type_to_bgp_event_type(
+    event_type: SessionNotificationEventType,
+) -> proto::BgpEventType {
+    match event_type {
+        SessionNotificationEventType::Sent => proto::BgpEventType::NotificationSent,
+        SessionNotificationEventType::Received => proto::BgpEventType::NotificationReceived,
     }
 }
 
@@ -259,6 +284,8 @@ fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto::BgpEvent 
             | proto::BgpEventType::SessionLost
             | proto::BgpEventType::PeerEnabled
             | proto::BgpEventType::PeerDisabled
+            | proto::BgpEventType::NotificationSent
+            | proto::BgpEventType::NotificationReceived
             | proto::BgpEventType::StreamLagged => "changed",
         },
         route.prefix,
@@ -280,8 +307,15 @@ fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto::BgpEvent 
     }
 }
 
-fn session_event_to_bgp_event(event: SessionLifecycleEvent) -> proto::BgpEvent {
-    let event_type = session_event_type_to_bgp_event_type(event.event_type);
+fn session_event_to_bgp_event(event: SessionEvent) -> proto::BgpEvent {
+    match event {
+        SessionEvent::Lifecycle(event) => session_lifecycle_event_to_bgp_event(event),
+        SessionEvent::Notification(event) => session_notification_event_to_bgp_event(event),
+    }
+}
+
+fn session_lifecycle_event_to_bgp_event(event: SessionLifecycleEvent) -> proto::BgpEvent {
+    let event_type = session_lifecycle_event_type_to_bgp_event_type(event.event_type);
     let peer_address = event.peer.to_string();
     let old_state = event
         .old_state
@@ -320,6 +354,41 @@ fn session_event_to_bgp_event(event: SessionLifecycleEvent) -> proto::BgpEvent {
         afi_safi: proto::AddressFamily::Unspecified as i32,
         summary: event.reason,
         payload: Some(proto::bgp_event::Payload::Session(session)),
+    }
+}
+
+fn session_notification_event_to_bgp_event(event: SessionNotificationEvent) -> proto::BgpEvent {
+    let event_type = session_notification_event_type_to_bgp_event_type(event.event_type);
+    let peer_address = event.peer.to_string();
+    let direction = match event.event_type {
+        SessionNotificationEventType::Sent => "sent",
+        SessionNotificationEventType::Received => "received",
+    };
+    let notification = proto::NotificationEvent {
+        event_type: event_type as i32,
+        peer_address: peer_address.clone(),
+        timestamp: event.timestamp.clone(),
+        direction: direction.to_string(),
+        code: u32::from(event.code),
+        subcode: u32::from(event.subcode),
+        description: event.description.clone(),
+        session_role: event.session_role.unwrap_or_default(),
+        shutdown_reason: event.shutdown_reason.unwrap_or_default(),
+        reason: event.reason.clone(),
+    };
+
+    proto::BgpEvent {
+        timestamp: event.timestamp,
+        category: proto::EventCategory::Session as i32,
+        event_type: event_type as i32,
+        severity: proto::EventSeverity::Warning as i32,
+        peer_address,
+        previous_peer_address: String::new(),
+        prefix: String::new(),
+        prefix_length: 0,
+        afi_safi: proto::AddressFamily::Unspecified as i32,
+        summary: event.reason,
+        payload: Some(proto::bgp_event::Payload::Notification(notification)),
     }
 }
 
@@ -482,7 +551,7 @@ mod tests {
 
     fn spawn_fake_peer_manager() -> (
         mpsc::Sender<PeerManagerCommand>,
-        broadcast::Sender<SessionLifecycleEvent>,
+        broadcast::Sender<SessionEvent>,
     ) {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (events_tx, _) = broadcast::channel(16);
@@ -497,8 +566,8 @@ mod tests {
         (peer_tx, events_tx)
     }
 
-    fn session_event(peer: IpAddr, event_type: SessionLifecycleEventType) -> SessionLifecycleEvent {
-        SessionLifecycleEvent {
+    fn session_event(peer: IpAddr, event_type: SessionLifecycleEventType) -> SessionEvent {
+        SessionEvent::Lifecycle(SessionLifecycleEvent {
             event_type,
             peer,
             timestamp: "456".to_string(),
@@ -506,7 +575,23 @@ mod tests {
             new_state: Some(SessionState::Established),
             session_role: Some("primary".to_string()),
             reason: format!("session event for peer {peer}"),
-        }
+        })
+    }
+
+    fn notification_event(peer: IpAddr, event_type: SessionNotificationEventType) -> SessionEvent {
+        SessionEvent::Notification(SessionNotificationEvent {
+            event_type,
+            peer,
+            timestamp: "789".to_string(),
+            code: 6,
+            subcode: 7,
+            description: "Connection Collision Resolution".to_string(),
+            session_role: Some("primary".to_string()),
+            shutdown_reason: None,
+            reason: format!(
+                "BGP NOTIFICATION sent for peer {peer}: 6/7 (Connection Collision Resolution)"
+            ),
+        })
     }
 
     #[tokio::test]
@@ -621,6 +706,52 @@ mod tests {
             event.payload,
             Some(proto::bgp_event::Payload::Session(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn notification_event_bridge_emits_bgp_event() {
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, session_events_tx) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Session as i32],
+                event_types: vec![proto::BgpEventType::NotificationSent as i32],
+                neighbor_address: "10.0.0.1".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        session_events_tx
+            .send(notification_event(
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                SessionNotificationEventType::Sent,
+            ))
+            .unwrap();
+        session_events_tx
+            .send(notification_event(
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                SessionNotificationEventType::Sent,
+            ))
+            .unwrap();
+
+        let event = stream.next().await.unwrap().unwrap();
+        assert_eq!(event.category, proto::EventCategory::Session as i32);
+        assert_eq!(
+            event.event_type,
+            proto::BgpEventType::NotificationSent as i32
+        );
+        assert_eq!(event.severity, proto::EventSeverity::Warning as i32);
+        assert_eq!(event.peer_address, "10.0.0.1");
+        let Some(proto::bgp_event::Payload::Notification(notification)) = event.payload else {
+            panic!("expected notification payload");
+        };
+        assert_eq!(notification.direction, "sent");
+        assert_eq!(notification.code, 6);
+        assert_eq!(notification.subcode, 7);
+        assert_eq!(notification.description, "Connection Collision Resolution");
     }
 
     #[tokio::test]

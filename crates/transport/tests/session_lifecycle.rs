@@ -8,7 +8,8 @@ use rustbgpd_fsm::{PeerConfig, SessionState};
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{
-    PeerHandle, SessionIdentity, SessionLifecycleNotification, SessionNotification, TransportConfig,
+    PeerHandle, SessionIdentity, SessionLifecycleNotification, SessionNotification,
+    SessionNotificationDirection, TransportConfig,
 };
 use rustbgpd_wire::{
     Afi, Capability, Message, NotificationMessage, OpenMessage, Safi, decode_message,
@@ -267,16 +268,19 @@ async fn notification_from_peer_tears_down() {
     let metrics = BgpMetrics::new();
 
     let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
-    let handle = PeerHandle::spawn(
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let handle = PeerHandle::spawn_with_identity(
         transport_config(addr),
         metrics.clone(),
         rib_tx,
         None,
         None,
         None,
+        Some(event_tx),
         None,
         None,
         false,
+        SessionIdentity::primary(1),
     );
     handle.start().await.unwrap();
 
@@ -307,6 +311,13 @@ async fn notification_from_peer_tears_down() {
         .iter()
         .find(|f| f.name() == "bgp_notifications_received_total");
     assert!(notif_metric.is_some(), "notification metric should exist");
+    let event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+        .await
+        .expect("notification event timeout")
+        .expect("notification event channel closed");
+    assert_eq!(event.direction, SessionNotificationDirection::Received);
+    assert_eq!(event.code, NotificationCode::Cease.as_u8());
+    assert_eq!(event.peer_addr, addr.ip());
 
     handle.shutdown().await.unwrap().unwrap();
 }
@@ -373,16 +384,19 @@ async fn stop_command_sends_cease() {
     let metrics = BgpMetrics::new();
 
     let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
-    let handle = PeerHandle::spawn(
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let handle = PeerHandle::spawn_with_identity(
         transport_config(addr),
         metrics.clone(),
         rib_tx,
         None,
         None,
         None,
+        Some(event_tx),
         None,
         None,
         false,
+        SessionIdentity::primary(1),
     );
     handle.start().await.unwrap();
 
@@ -418,6 +432,13 @@ async fn stop_command_sends_cease() {
         }
         other => panic!("expected NOTIFICATION, got {other:?}"),
     }
+    let event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+        .await
+        .expect("notification event timeout")
+        .expect("notification event channel closed");
+    assert_eq!(event.direction, SessionNotificationDirection::Sent);
+    assert_eq!(event.code, NotificationCode::Cease.as_u8());
+    assert_eq!(event.peer_addr, addr.ip());
 
     handle.shutdown().await.unwrap().unwrap();
 }
@@ -479,6 +500,7 @@ async fn state_changed_uses_bounded_lifecycle_channel() {
         None,
         None,
         Some(notify_tx),
+        None,
         Some(lifecycle_tx),
         None,
         None,
@@ -530,6 +552,7 @@ async fn legacy_identity_constructor_preserves_state_changed_notifications() {
         Some(notify_tx),
         None,
         None,
+        None,
         false,
         SessionIdentity::primary(7),
     );
@@ -564,6 +587,7 @@ async fn lifecycle_only_channel_receives_collision_adjacent_state_changes() {
         transport_config(addr),
         metrics,
         rib_tx,
+        None,
         None,
         None,
         None,

@@ -39,6 +39,37 @@ pub struct SessionIdentity {
     pub role: SessionRole,
 }
 
+/// Direction of a BGP NOTIFICATION observed by a peer session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionNotificationDirection {
+    /// rustbgpd sent the NOTIFICATION to the peer.
+    Sent,
+    /// The peer sent the NOTIFICATION to rustbgpd.
+    Received,
+}
+
+/// Metadata-only BGP NOTIFICATION event emitted by a peer session for
+/// operator-facing observability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionNotificationEvent {
+    /// Peer-manager scoped session generation.
+    pub session_id: u64,
+    /// Role the session had when spawned.
+    pub role: SessionRole,
+    /// IP address of the remote peer.
+    pub peer_addr: IpAddr,
+    /// Whether the NOTIFICATION was sent or received.
+    pub direction: SessionNotificationDirection,
+    /// BGP NOTIFICATION error code.
+    pub code: u8,
+    /// BGP NOTIFICATION error subcode.
+    pub subcode: u8,
+    /// Human-readable code/subcode description.
+    pub description: String,
+    /// RFC 8203 shutdown communication reason, when present.
+    pub shutdown_reason: Option<String>,
+}
+
 impl SessionIdentity {
     /// Default identity for sessions whose caller does not need collision
     /// generation tracking.
@@ -274,6 +305,7 @@ impl PeerHandle {
             import_policy,
             export_policy,
             session_notify_tx,
+            None,
             bmp_tx,
             validation_rx,
             advertise_graceful_shutdown,
@@ -291,6 +323,7 @@ impl PeerHandle {
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
         advertise_graceful_shutdown: bool,
@@ -303,6 +336,7 @@ impl PeerHandle {
             import_policy,
             export_policy,
             session_notify_tx,
+            session_event_tx,
             None,
             bmp_tx,
             validation_rx,
@@ -322,6 +356,7 @@ impl PeerHandle {
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
         session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
@@ -343,6 +378,7 @@ impl PeerHandle {
                     import_policy,
                     export_policy,
                     session_notify_tx,
+                    session_event_tx,
                     session_lifecycle_tx,
                     bmp_tx,
                     validation_rx,
@@ -382,6 +418,7 @@ impl PeerHandle {
             export_policy,
             stream,
             session_notify_tx,
+            None,
             bmp_tx,
             validation_rx,
             advertise_graceful_shutdown,
@@ -400,6 +437,7 @@ impl PeerHandle {
         export_policy: Option<PolicyChain>,
         stream: TcpStream,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
         advertise_graceful_shutdown: bool,
@@ -413,6 +451,7 @@ impl PeerHandle {
             export_policy,
             stream,
             session_notify_tx,
+            session_event_tx,
             None,
             bmp_tx,
             validation_rx,
@@ -433,6 +472,7 @@ impl PeerHandle {
         export_policy: Option<PolicyChain>,
         stream: TcpStream,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
         session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
@@ -455,6 +495,7 @@ impl PeerHandle {
                     export_policy,
                     stream,
                     session_notify_tx,
+                    session_event_tx,
                     session_lifecycle_tx,
                     bmp_tx,
                     validation_rx,

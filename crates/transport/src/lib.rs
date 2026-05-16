@@ -23,6 +23,6 @@ pub use config::{RemovePrivateAs, TransportConfig};
 pub use error::TransportError;
 pub use handle::{
     PeerCommand, PeerHandle, PeerSessionState, SessionIdentity, SessionLifecycleNotification,
-    SessionNotification, SessionRole,
+    SessionNotification, SessionNotificationDirection, SessionNotificationEvent, SessionRole,
 };
 pub use listener::{AcceptedConnection, BgpListener};

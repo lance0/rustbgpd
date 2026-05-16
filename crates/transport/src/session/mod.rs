@@ -36,7 +36,7 @@ use crate::error::TransportError;
 use crate::framing::ReadBuffer;
 use crate::handle::{
     PeerCommand, PeerSessionState, SessionIdentity, SessionLifecycleNotification,
-    SessionNotification,
+    SessionNotification, SessionNotificationDirection, SessionNotificationEvent,
 };
 use crate::timer::{Timers, poll_timer};
 
@@ -147,6 +147,10 @@ pub(crate) struct PeerSession {
     /// `EventService.WatchEvents`. It is intentionally lossy under sustained
     /// churn so observability cannot grow the collision-coordination channel.
     session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
+    /// Bounded metadata channel for operator-facing NOTIFICATION events.
+    /// Dropping from this path is acceptable; protocol counters and teardown
+    /// behavior remain authoritative.
+    session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
     session_identity: SessionIdentity,
     /// Optional BMP event sender (None when BMP not configured).
     bmp_tx: Option<mpsc::Sender<BmpEvent>>,
@@ -267,6 +271,7 @@ impl PeerSession {
             export_policy,
             session_notify_tx,
             None,
+            None,
             bmp_tx,
             validation_rx,
             advertise_graceful_shutdown,
@@ -283,6 +288,7 @@ impl PeerSession {
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
         session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
@@ -319,6 +325,7 @@ impl PeerSession {
             advertise_graceful_shutdown,
             session_notify_tx,
             session_lifecycle_tx,
+            session_event_tx,
             session_identity,
             bmp_tx,
             validation_rx,
@@ -351,6 +358,7 @@ impl PeerSession {
         export_policy: Option<PolicyChain>,
         stream: TcpStream,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
         session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
@@ -393,6 +401,7 @@ impl PeerSession {
             advertise_graceful_shutdown,
             session_notify_tx,
             session_lifecycle_tx,
+            session_event_tx,
             session_identity,
             bmp_tx,
             validation_rx,
@@ -444,6 +453,44 @@ impl PeerSession {
             self.metrics
                 .record_bmp_source_drop(&self.peer_label, reason);
             debug!(peer = %self.peer_label, reason, "BMP event channel full or closed");
+        }
+    }
+
+    pub(super) fn emit_notification_event(
+        &self,
+        direction: SessionNotificationDirection,
+        notification: &NotificationMessage,
+        shutdown_reason: Option<String>,
+    ) {
+        let Some(ref tx) = self.session_event_tx else {
+            return;
+        };
+
+        let event = SessionNotificationEvent {
+            session_id: self.session_identity.id,
+            role: self.session_identity.role,
+            peer_addr: self.peer_ip,
+            direction,
+            code: notification.code.as_u8(),
+            subcode: notification.subcode,
+            description: rustbgpd_wire::notification::description(
+                notification.code,
+                notification.subcode,
+            )
+            .to_string(),
+            shutdown_reason,
+        };
+
+        if let Err(e) = tx.try_send(event) {
+            let reason = match e {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => "channel_full",
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => "channel_closed",
+            };
+            debug!(
+                peer = %self.peer_label,
+                reason,
+                "session notification-event channel full or closed"
+            );
         }
     }
 

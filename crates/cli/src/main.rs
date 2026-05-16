@@ -499,7 +499,8 @@ enum EventsAction {
         prefix: Option<String>,
 
         /// Event type filter: added, withdrawn, best_changed,
-        /// state_changed, established, lost, peer_enabled, peer_disabled
+        /// state_changed, established, lost, peer_enabled, peer_disabled,
+        /// notification_sent, notification_received
         #[arg(long = "type", value_delimiter = ',')]
         event_types: Vec<String>,
     },

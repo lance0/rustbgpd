@@ -1,6 +1,7 @@
 use super::{
     ControlFlow, Event, Message, NotificationCode, PeerCommand, PeerSession, PeerSessionState,
-    RibUpdate, RouteRefreshMessage, SessionState, cease_subcode, info,
+    RibUpdate, RouteRefreshMessage, SessionNotificationDirection, SessionState, cease_subcode,
+    info,
 };
 
 impl PeerSession {
@@ -122,6 +123,7 @@ impl PeerSession {
                     cease_subcode::CONNECTION_COLLISION_RESOLUTION,
                     bytes::Bytes::new(),
                 );
+                self.emit_notification_event(SessionNotificationDirection::Sent, &notif, None);
                 let _ = self.enqueue_priority(&Message::Notification(notif));
                 self.notifications_sent += 1;
                 // Clean up RIB if Established

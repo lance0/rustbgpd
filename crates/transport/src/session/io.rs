@@ -1,7 +1,7 @@
 use super::{
     BmpEvent, Bytes, Event, Message, NotificationCode, OwnedReadHalf, PeerDownReason, PeerSession,
-    RibUpdate, RouteRefreshSubtype, TcpStream, TransportError, cease_subcode, debug, error, info,
-    warn,
+    RibUpdate, RouteRefreshSubtype, SessionNotificationDirection, TcpStream, TransportError,
+    cease_subcode, debug, error, info, warn,
 };
 use crate::config::TransportConfig;
 use tokio::sync::mpsc;
@@ -117,6 +117,7 @@ impl PeerSession {
         // Best-effort: the writer's priority channel is unbounded, so
         // this only fails if we already dropped the writer (e.g. a
         // double-trigger race). Either way, proceed with teardown.
+        self.emit_notification_event(SessionNotificationDirection::Sent, &notif, None);
         let _ = self.enqueue_priority(&Message::Notification(notif));
         self.notifications_sent += 1;
         self.metrics.record_notification_sent(
@@ -198,6 +199,16 @@ impl PeerSession {
                             Event::KeepaliveReceived
                         }
                         Message::Notification(notif) => {
+                            let shutdown_reason = if notif.code == NotificationCode::Cease
+                                && (notif.subcode == cease_subcode::ADMINISTRATIVE_SHUTDOWN
+                                    || notif.subcode == cease_subcode::ADMINISTRATIVE_RESET)
+                            {
+                                rustbgpd_wire::notification::decode_shutdown_communication(
+                                    &notif.data,
+                                )
+                            } else {
+                                None
+                            };
                             // Cache raw NOTIFICATION PDU for BMP Peer Down (reason 3: remote sent NOTIFICATION)
                             if self.bmp_tx.is_some() {
                                 self.last_down_reason =
@@ -212,6 +223,11 @@ impl PeerSession {
                             );
                             self.metrics
                                 .record_message_received(&self.peer_label, "notification");
+                            self.emit_notification_event(
+                                SessionNotificationDirection::Received,
+                                &notif,
+                                shutdown_reason.clone(),
+                            );
                             // RFC 8538: detect Cease/Hard Reset to bypass GR
                             if notif.code == NotificationCode::Cease
                                 && notif.subcode == cease_subcode::HARD_RESET
@@ -223,14 +239,7 @@ impl PeerSession {
                                 self.received_hard_reset = true;
                             }
                             // Log shutdown communication reason (RFC 8203)
-                            if notif.code == NotificationCode::Cease
-                                && (notif.subcode == cease_subcode::ADMINISTRATIVE_SHUTDOWN
-                                    || notif.subcode == cease_subcode::ADMINISTRATIVE_RESET)
-                                && let Some(reason) =
-                                    rustbgpd_wire::notification::decode_shutdown_communication(
-                                        &notif.data,
-                                    )
-                            {
+                            if let Some(reason) = shutdown_reason {
                                 info!(
                                     peer = %self.peer_label,
                                     reason = %reason,

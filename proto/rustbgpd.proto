@@ -833,6 +833,8 @@ enum BgpEventType {
   BGP_EVENT_TYPE_SESSION_LOST = 12;
   BGP_EVENT_TYPE_PEER_ENABLED = 13;
   BGP_EVENT_TYPE_PEER_DISABLED = 14;
+  BGP_EVENT_TYPE_NOTIFICATION_SENT = 20;
+  BGP_EVENT_TYPE_NOTIFICATION_RECEIVED = 21;
   // A WatchEvents subscriber fell behind a bounded source stream and
   // missed one or more events. The payload identifies the source
   // category and missed count.
@@ -897,6 +899,27 @@ message StreamLagEvent {
   string reason = 3;
 }
 
+message NotificationEvent {
+  BgpEventType event_type = 1;
+  string peer_address = 2;
+  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
+  string timestamp = 3;
+  // "sent" or "received".
+  string direction = 4;
+  // BGP NOTIFICATION error code and subcode (RFC 4271 section 4.5).
+  uint32 code = 5;
+  uint32 subcode = 6;
+  // Human-readable code/subcode description.
+  string description = 7;
+  // `primary` for the managed peer session, `inbound_candidate` for a
+  // collision-resolution candidate.
+  string session_role = 8;
+  // RFC 8203 shutdown communication reason, when present.
+  string shutdown_reason = 9;
+  // Stable operator-facing reason/summary string for this event.
+  string reason = 10;
+}
+
 message BgpEvent {
   // Unix epoch seconds, matching existing RouteEvent timestamp shape.
   string timestamp = 1;
@@ -918,6 +941,7 @@ message BgpEvent {
     RouteEvent route = 11;
     SessionEvent session = 12;
     StreamLagEvent stream_lag = 13;
+    NotificationEvent notification = 14;
   }
 }
 

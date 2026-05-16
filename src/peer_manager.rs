@@ -4,8 +4,9 @@ use std::time::{Duration, Instant};
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, DynamicNeighborInfo, PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig,
-    ReconcileFailure, ReconcileFailureKind, ReconcileResult, SessionLifecycleEvent,
-    SessionLifecycleEventType, SetGshutError,
+    ReconcileFailure, ReconcileFailureKind, ReconcileResult, SessionEvent, SessionLifecycleEvent,
+    SessionLifecycleEventType, SessionNotificationEvent, SessionNotificationEventType,
+    SetGshutError,
 };
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::{PeerConfig, SessionState};
@@ -14,7 +15,8 @@ use rustbgpd_rib::{RibUpdate, event::unix_timestamp_now};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{
     PeerHandle, PeerSessionState, SessionIdentity, SessionLifecycleNotification,
-    SessionNotification, TransportConfig,
+    SessionNotification, SessionNotificationDirection as TransportNotificationDirection,
+    SessionNotificationEvent as TransportNotificationEvent, TransportConfig,
 };
 use rustbgpd_wire::{Afi, Safi};
 use tokio::net::TcpStream;
@@ -175,7 +177,9 @@ pub struct PeerManager {
     session_notify_rx: mpsc::UnboundedReceiver<SessionNotification>,
     session_lifecycle_tx: mpsc::Sender<SessionLifecycleNotification>,
     session_lifecycle_rx: mpsc::Receiver<SessionLifecycleNotification>,
-    session_events_tx: broadcast::Sender<SessionLifecycleEvent>,
+    session_notification_event_tx: mpsc::Sender<TransportNotificationEvent>,
+    session_notification_event_rx: mpsc::Receiver<TransportNotificationEvent>,
+    session_events_tx: broadcast::Sender<SessionEvent>,
     current_config: Config,
     /// Resolved dynamic neighbor ranges for prefix-based auto-accept.
     dynamic_ranges: Vec<DynamicRange>,
@@ -343,6 +347,7 @@ impl PeerManager {
     ) -> Self {
         let (session_notify_tx, session_notify_rx) = mpsc::unbounded_channel();
         let (session_lifecycle_tx, session_lifecycle_rx) = mpsc::channel(4096);
+        let (session_notification_event_tx, session_notification_event_rx) = mpsc::channel(4096);
         let (session_events_tx, _) = broadcast::channel(4096);
         Self {
             peers: HashMap::new(),
@@ -360,6 +365,8 @@ impl PeerManager {
             session_notify_rx,
             session_lifecycle_tx,
             session_lifecycle_rx,
+            session_notification_event_tx,
+            session_notification_event_rx,
             session_events_tx,
             dynamic_ranges: Self::parse_dynamic_ranges(&current_config),
             dynamic_peer_count: 0,
@@ -773,6 +780,7 @@ impl PeerManager {
             import_policy.clone(),
             export_policy.clone(),
             Some(self.session_notify_tx.clone()),
+            Some(self.session_notification_event_tx.clone()),
             Some(self.session_lifecycle_tx.clone()),
             self.bmp_tx.clone(),
             self.validation_rx.clone(),
@@ -887,8 +895,12 @@ impl PeerManager {
         }
     }
 
-    fn publish_session_event(&self, event: SessionLifecycleEvent) {
+    fn publish_session_event(&self, event: SessionEvent) {
         let _ = self.session_events_tx.send(event);
+    }
+
+    fn publish_lifecycle_event(&self, event: SessionLifecycleEvent) {
+        self.publish_session_event(SessionEvent::Lifecycle(event));
     }
 
     fn publish_peer_lifecycle_event(
@@ -897,7 +909,7 @@ impl PeerManager {
         event_type: SessionLifecycleEventType,
         reason: String,
     ) {
-        self.publish_session_event(SessionLifecycleEvent {
+        self.publish_lifecycle_event(SessionLifecycleEvent {
             event_type,
             peer: address,
             timestamp: Self::session_event_timestamp(),
@@ -938,7 +950,7 @@ impl PeerManager {
                 unreachable!("peer lifecycle events are emitted by publish_peer_lifecycle_event")
             }
         };
-        self.publish_session_event(SessionLifecycleEvent {
+        self.publish_lifecycle_event(SessionLifecycleEvent {
             event_type,
             peer: peer_addr,
             timestamp: Self::session_event_timestamp(),
@@ -947,6 +959,32 @@ impl PeerManager {
             session_role: Some(Self::session_role_label(role).to_string()),
             reason,
         });
+    }
+
+    fn publish_notification_event(&self, event: TransportNotificationEvent) {
+        let event_type = match event.direction {
+            TransportNotificationDirection::Sent => SessionNotificationEventType::Sent,
+            TransportNotificationDirection::Received => SessionNotificationEventType::Received,
+        };
+        let direction = match event.direction {
+            TransportNotificationDirection::Sent => "sent",
+            TransportNotificationDirection::Received => "received",
+        };
+        let reason = format!(
+            "BGP NOTIFICATION {direction} for peer {}: {}/{} ({})",
+            event.peer_addr, event.code, event.subcode, event.description
+        );
+        self.publish_session_event(SessionEvent::Notification(SessionNotificationEvent {
+            event_type,
+            peer: event.peer_addr,
+            timestamp: Self::session_event_timestamp(),
+            code: event.code,
+            subcode: event.subcode,
+            description: event.description,
+            session_role: Some(Self::session_role_label(event.role).to_string()),
+            shutdown_reason: event.shutdown_reason,
+            reason,
+        }));
     }
 
     async fn enable_peer(&mut self, address: IpAddr) -> Result<(), String> {
@@ -1546,6 +1584,7 @@ impl PeerManager {
             export_policy,
             stream,
             Some(self.session_notify_tx.clone()),
+            Some(self.session_notification_event_tx.clone()),
             Some(self.session_lifecycle_tx.clone()),
             self.bmp_tx.clone(),
             self.validation_rx.clone(),
@@ -1645,6 +1684,7 @@ impl PeerManager {
                     export_policy.clone(),
                     stream,
                     Some(self.session_notify_tx.clone()),
+                    Some(self.session_notification_event_tx.clone()),
                     Some(self.session_lifecycle_tx.clone()),
                     self.bmp_tx.clone(),
                     self.validation_rx.clone(),
@@ -2049,6 +2089,7 @@ impl PeerManager {
                 managed.export_policy.clone(),
                 stream,
                 Some(self.session_notify_tx.clone()),
+                Some(self.session_notification_event_tx.clone()),
                 Some(self.session_lifecycle_tx.clone()),
                 self.bmp_tx.clone(),
                 self.validation_rx.clone(),
@@ -2485,6 +2526,11 @@ impl PeerManager {
                         self.handle_session_lifecycle_notification(&notification);
                     }
                 }
+                event = self.session_notification_event_rx.recv() => {
+                    if let Some(event) = event {
+                        self.publish_notification_event(event);
+                    }
+                }
                 () = async {
                     if let Some(interval) = bmp_stats_interval.as_mut() {
                         interval.tick().await;
@@ -2545,7 +2591,7 @@ mod tests {
 
     async fn subscribe_session_events(
         tx: &mpsc::Sender<PeerManagerCommand>,
-    ) -> broadcast::Receiver<SessionLifecycleEvent> {
+    ) -> broadcast::Receiver<SessionEvent> {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(PeerManagerCommand::SubscribeSessionEvents { reply: reply_tx })
             .await
@@ -2554,7 +2600,7 @@ mod tests {
     }
 
     async fn wait_for_session_event(
-        rx: &mut broadcast::Receiver<SessionLifecycleEvent>,
+        rx: &mut broadcast::Receiver<SessionEvent>,
         event_type: SessionLifecycleEventType,
     ) -> SessionLifecycleEvent {
         for _ in 0..20 {
@@ -2562,7 +2608,9 @@ mod tests {
                 .await
                 .expect("session event timeout")
                 .expect("session event channel closed");
-            if event.event_type == event_type {
+            if let SessionEvent::Lifecycle(event) = event
+                && event.event_type == event_type
+            {
                 return event;
             }
         }
