@@ -468,10 +468,12 @@ session lifecycle events (`state_changed`, `established`, `lost`,
 use `--category session` with peer and type filters when watching session
 events. Session state-change events use a bounded observability channel
 separate from the lossless TCP collision-coordination path, so a saturated
-watch stream can miss lifecycle events without blocking BGP collision handling.
-Policy, dataplane, EVPN, and notification events remain follow-up work. For
-recent route history instead of a live tail, use
-`rustbgpctl events --prefix <PREFIX>`.
+watch stream can miss lifecycle events without blocking BGP collision
+handling. If the client falls behind a bounded route or session source stream,
+`events watch` prints a `stream_lagged` warning with the missed count; treat
+subsequent output as a live tail after a gap. Policy, dataplane, EVPN, and
+notification events remain follow-up work. For recent route history instead
+of a live tail, use `rustbgpctl events --prefix <PREFIX>`.
 
 ### Check health
 

@@ -833,6 +833,10 @@ enum BgpEventType {
   BGP_EVENT_TYPE_SESSION_LOST = 12;
   BGP_EVENT_TYPE_PEER_ENABLED = 13;
   BGP_EVENT_TYPE_PEER_DISABLED = 14;
+  // A WatchEvents subscriber fell behind a bounded source stream and
+  // missed one or more events. The payload identifies the source
+  // category and missed count.
+  BGP_EVENT_TYPE_STREAM_LAGGED = 100;
 }
 
 enum EventSeverity {
@@ -880,6 +884,19 @@ message SessionEvent {
   string reason = 7;
 }
 
+message StreamLagEvent {
+  // Source stream that lagged. This is the same value copied into the
+  // top-level BgpEvent.category field so category-agnostic clients can
+  // filter without unpacking the payload.
+  EventCategory source_category = 1;
+  // Count reported by tokio broadcast lag detection. It is the number
+  // of source events skipped by this subscriber, before any
+  // WatchEvents filters could be applied.
+  uint64 missed_count = 2;
+  // Stable operator-facing reason/summary string for this event.
+  string reason = 3;
+}
+
 message BgpEvent {
   // Unix epoch seconds, matching existing RouteEvent timestamp shape.
   string timestamp = 1;
@@ -900,6 +917,7 @@ message BgpEvent {
   oneof payload {
     RouteEvent route = 11;
     SessionEvent session = 12;
+    StreamLagEvent stream_lag = 13;
   }
 }
 

@@ -7,7 +7,7 @@ use std::pin::Pin;
 use tokio::sync::oneshot;
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
-use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
@@ -127,7 +127,8 @@ impl WatchEventsFilter {
                     proto::BgpEventType::try_from(*event_type),
                     Ok(proto::BgpEventType::RouteAdded
                         | proto::BgpEventType::RouteWithdrawn
-                        | proto::BgpEventType::RouteBestChanged)
+                        | proto::BgpEventType::RouteBestChanged
+                        | proto::BgpEventType::StreamLagged)
                 )
             })
     }
@@ -141,7 +142,8 @@ impl WatchEventsFilter {
                         | proto::BgpEventType::SessionEstablished
                         | proto::BgpEventType::SessionLost
                         | proto::BgpEventType::PeerEnabled
-                        | proto::BgpEventType::PeerDisabled)
+                        | proto::BgpEventType::PeerDisabled
+                        | proto::BgpEventType::StreamLagged)
                 )
             })
     }
@@ -192,7 +194,8 @@ fn parse_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<i32>, Status>
             | proto::BgpEventType::SessionEstablished
             | proto::BgpEventType::SessionLost
             | proto::BgpEventType::PeerEnabled
-            | proto::BgpEventType::PeerDisabled => {
+            | proto::BgpEventType::PeerDisabled
+            | proto::BgpEventType::StreamLagged => {
                 parsed.insert(event_type as i32);
             }
             proto::BgpEventType::Unspecified => {
@@ -255,7 +258,8 @@ fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto::BgpEvent 
             | proto::BgpEventType::SessionEstablished
             | proto::BgpEventType::SessionLost
             | proto::BgpEventType::PeerEnabled
-            | proto::BgpEventType::PeerDisabled => "changed",
+            | proto::BgpEventType::PeerDisabled
+            | proto::BgpEventType::StreamLagged => "changed",
         },
         route.prefix,
         route.prefix_length
@@ -319,6 +323,39 @@ fn session_event_to_bgp_event(event: SessionLifecycleEvent) -> proto::BgpEvent {
     }
 }
 
+fn stream_lag_bgp_event(
+    source_category: proto::EventCategory,
+    missed_count: u64,
+) -> proto::BgpEvent {
+    let source = match source_category {
+        proto::EventCategory::Route => "route",
+        proto::EventCategory::Session => "session",
+        proto::EventCategory::Policy
+        | proto::EventCategory::Dataplane
+        | proto::EventCategory::Unspecified => "unknown",
+    };
+    let summary = format!("{source} event stream lagged; missed {missed_count} event(s)");
+    proto::BgpEvent {
+        timestamp: rustbgpd_rib::event::unix_timestamp_now(),
+        category: source_category as i32,
+        event_type: proto::BgpEventType::StreamLagged as i32,
+        severity: proto::EventSeverity::Warning as i32,
+        peer_address: String::new(),
+        previous_peer_address: String::new(),
+        prefix: String::new(),
+        prefix_length: 0,
+        afi_safi: proto::AddressFamily::Unspecified as i32,
+        summary: summary.clone(),
+        payload: Some(proto::bgp_event::Payload::StreamLag(
+            proto::StreamLagEvent {
+                source_category: source_category as i32,
+                missed_count,
+                reason: summary,
+            },
+        )),
+    }
+}
+
 #[tonic::async_trait]
 impl proto::event_service_server::EventService for EventService {
     type WatchEventsStream =
@@ -351,9 +388,15 @@ impl proto::event_service_server::EventService for EventService {
                                 None
                             }
                         }
-                        Err(_lagged) => {
-                            debug!("WatchEvents route subscriber lagged, skipping missed events");
-                            None
+                        Err(BroadcastStreamRecvError::Lagged(missed)) => {
+                            debug!(
+                                missed,
+                                "WatchEvents route subscriber lagged, emitting missed-event signal"
+                            );
+                            Some(Ok(stream_lag_bgp_event(
+                                proto::EventCategory::Route,
+                                missed,
+                            )))
                         }
                     },
                 ))
@@ -381,9 +424,15 @@ impl proto::event_service_server::EventService for EventService {
                                 None
                             }
                         }
-                        Err(_lagged) => {
-                            debug!("WatchEvents session subscriber lagged, skipping missed events");
-                            None
+                        Err(BroadcastStreamRecvError::Lagged(missed)) => {
+                            debug!(
+                                missed,
+                                "WatchEvents session subscriber lagged, emitting missed-event signal"
+                            );
+                            Some(Ok(stream_lag_bgp_event(
+                                proto::EventCategory::Session,
+                                missed,
+                            )))
                         }
                     },
                 ))
@@ -667,6 +716,76 @@ mod tests {
         drop(response);
         tokio::task::yield_now().await;
         assert_eq!(events_tx.receiver_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn route_lag_emits_missed_event_signal() {
+        let (rib_tx, events_tx) = spawn_fake_rib();
+        let (peer_tx, _) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Route as i32],
+                event_types: vec![proto::BgpEventType::RouteAdded as i32],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        for i in 0..32 {
+            events_tx
+                .send(route_event(
+                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, i), 32)),
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                ))
+                .unwrap();
+        }
+
+        let event = stream.next().await.unwrap().unwrap();
+        assert_eq!(event.category, proto::EventCategory::Route as i32);
+        assert_eq!(event.event_type, proto::BgpEventType::StreamLagged as i32);
+        assert_eq!(event.severity, proto::EventSeverity::Warning as i32);
+        let Some(proto::bgp_event::Payload::StreamLag(lag)) = event.payload else {
+            panic!("expected stream lag payload");
+        };
+        assert_eq!(lag.source_category, proto::EventCategory::Route as i32);
+        assert!(lag.missed_count > 0);
+    }
+
+    #[tokio::test]
+    async fn session_lag_emits_missed_event_signal() {
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, session_events_tx) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Session as i32],
+                event_types: vec![proto::BgpEventType::SessionEstablished as i32],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        for _ in 0..32 {
+            session_events_tx
+                .send(session_event(
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                    SessionLifecycleEventType::Established,
+                ))
+                .unwrap();
+        }
+
+        let event = stream.next().await.unwrap().unwrap();
+        assert_eq!(event.category, proto::EventCategory::Session as i32);
+        assert_eq!(event.event_type, proto::BgpEventType::StreamLagged as i32);
+        assert_eq!(event.severity, proto::EventSeverity::Warning as i32);
+        let Some(proto::bgp_event::Payload::StreamLag(lag)) = event.payload else {
+            panic!("expected stream lag payload");
+        };
+        assert_eq!(lag.source_category, proto::EventCategory::Session as i32);
+        assert!(lag.missed_count > 0);
     }
 
     #[test]
