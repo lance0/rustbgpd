@@ -1,8 +1,8 @@
 use super::{
     Action, AddPathMode, Afi, BmpEvent, Bytes, Duration, Event, Instant, IpAddr, Ipv4Addr, Message,
     NotificationCode, OUTBOUND_BUFFER, PeerDownReason, PeerSession, RibUpdate, Safi,
-    SessionLifecycleNotification, SessionNotification, SessionState, cease_subcode, debug, info,
-    mpsc, warn,
+    SessionLifecycleNotification, SessionNotification, SessionNotificationDirection, SessionState,
+    cease_subcode, debug, info, mpsc, warn,
 };
 
 impl PeerSession {
@@ -88,6 +88,14 @@ impl PeerSession {
                         warn!(peer = %self.peer_label, error = %e, "failed to send NOTIFICATION");
                         // Continue — we're tearing down anyway
                     }
+                    self.emit_notification_event(
+                        SessionNotificationDirection::Sent,
+                        match &msg {
+                            Message::Notification(notif) => notif,
+                            _ => unreachable!("constructed as notification"),
+                        },
+                        None,
+                    );
                     self.notifications_sent += 1;
                     self.metrics.record_notification_sent(
                         &self.peer_label,

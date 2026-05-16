@@ -34,9 +34,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Ordinary FSM state-change lifecycle delivery uses a bounded transport
   channel that is separate from the lossless TCP collision-coordination path,
   so session-event observability cannot grow the collision queue under churn.
-  Notification sent/received, policy, dataplane, and EVPN event
-  categories remain deferred until their sources expose one complete
-  structured event path.
+  Policy, dataplane, and EVPN event categories remain deferred until their
+  sources expose one complete structured event path.
+
+- **EventService BGP NOTIFICATION events.** `EventService.WatchEvents`
+  now surfaces metadata-only sent/received BGP NOTIFICATION events under
+  the existing session category. Events include peer, direction, code,
+  subcode, RFC code/subcode description, session role, and RFC 8203
+  shutdown communication text when present. `rustbgpctl events watch
+  --category session --type notification_sent` tails the same
+  stream without exposing raw NOTIFICATION packet data.
 
 - **EventService missed-event signaling.** `WatchEvents` now emits
   `stream_lagged` warning events when a slow subscriber falls behind the

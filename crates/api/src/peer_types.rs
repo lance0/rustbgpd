@@ -84,6 +84,48 @@ pub struct SessionLifecycleEvent {
     pub reason: String,
 }
 
+/// Direction for a BGP NOTIFICATION event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionNotificationEventType {
+    /// rustbgpd sent the NOTIFICATION to the peer.
+    Sent,
+    /// rustbgpd received the NOTIFICATION from the peer.
+    Received,
+}
+
+/// BGP NOTIFICATION metadata broadcast by `PeerManager` and bridged by
+/// `EventService.WatchEvents`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionNotificationEvent {
+    /// Event type / direction.
+    pub event_type: SessionNotificationEventType,
+    /// Peer address associated with the event.
+    pub peer: IpAddr,
+    /// Unix epoch seconds, string-shaped to match `RouteEvent`.
+    pub timestamp: String,
+    /// BGP NOTIFICATION error code.
+    pub code: u8,
+    /// BGP NOTIFICATION error subcode.
+    pub subcode: u8,
+    /// Human-readable code/subcode description.
+    pub description: String,
+    /// Session role (`primary` / `inbound_candidate`) for this event.
+    pub session_role: Option<String>,
+    /// RFC 8203 shutdown communication reason, when present.
+    pub shutdown_reason: Option<String>,
+    /// Operator-facing reason/summary.
+    pub reason: String,
+}
+
+/// Session-scoped event broadcast by `PeerManager`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionEvent {
+    /// BGP FSM or peer enable/disable lifecycle event.
+    Lifecycle(SessionLifecycleEvent),
+    /// BGP NOTIFICATION sent/received event.
+    Notification(SessionNotificationEvent),
+}
+
 /// Commands sent to the `PeerManager` task.
 /// Failure modes for `SetGracefulShutdown`. Surfaced through the
 /// `oneshot` reply on the command so the gRPC handler can map to the
@@ -139,7 +181,7 @@ pub enum PeerManagerCommand {
     /// Subscribe to live session lifecycle events.
     SubscribeSessionEvents {
         /// Reply channel returning a fresh broadcast receiver.
-        reply: oneshot::Sender<broadcast::Receiver<SessionLifecycleEvent>>,
+        reply: oneshot::Sender<broadcast::Receiver<SessionEvent>>,
     },
     /// Query a single peer's state by address.
     GetPeerState {

@@ -459,21 +459,24 @@ streaming route events in a terminal UI. Press `h` for keybindings.
 rustbgpctl events watch
 rustbgpctl events watch --prefix 203.0.113.0/24 --type added,best_changed
 rustbgpctl events watch --category session --type established,lost
+rustbgpctl events watch --category session --type notification_sent,notification_received
 ```
 
 `events watch` tails the unified `EventService.WatchEvents` stream. The
 live stream carries route add / withdraw / best-change events plus structured
 session lifecycle events (`state_changed`, `established`, `lost`,
-`peer_enabled`, `peer_disabled`). Prefix and family filters are route-only;
-use `--category session` with peer and type filters when watching session
-events. Session state-change events use a bounded observability channel
-separate from the lossless TCP collision-coordination path, so a saturated
-watch stream can miss lifecycle events without blocking BGP collision
-handling. If the client falls behind a bounded route or session source stream,
-`events watch` prints a `stream_lagged` warning with the missed count; treat
-subsequent output as a live tail after a gap. Policy, dataplane, EVPN, and
-notification events remain follow-up work. For recent route history instead
-of a live tail, use `rustbgpctl events --prefix <PREFIX>`.
+`peer_enabled`, `peer_disabled`) and metadata-only BGP NOTIFICATION
+sent/received events (`notification_sent`, `notification_received`). Prefix
+and family filters are route-only; use `--category session` with peer and type
+filters when watching session events. Session state-change events use a
+bounded observability channel separate from the lossless TCP collision-
+coordination path, so a saturated watch stream can miss lifecycle events
+without blocking BGP collision handling. If the client falls behind a bounded
+route or session source stream, `events watch` prints a `stream_lagged`
+warning with the missed count; treat subsequent output as a live tail after a
+gap. Policy, dataplane, and EVPN events remain follow-up work. For recent
+route history instead of a live tail, use `rustbgpctl events --prefix
+<PREFIX>`.
 
 ### Check health
 

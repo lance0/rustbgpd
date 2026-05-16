@@ -72,9 +72,11 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
         "lost" | "session_lost" => Ok(BgpEventType::SessionLost as i32),
         "peer_enabled" => Ok(BgpEventType::PeerEnabled as i32),
         "peer_disabled" => Ok(BgpEventType::PeerDisabled as i32),
+        "notification_sent" => Ok(BgpEventType::NotificationSent as i32),
+        "notification_received" => Ok(BgpEventType::NotificationReceived as i32),
         "stream_lagged" | "lagged" => Ok(BgpEventType::StreamLagged as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported event type {other:?}; expected added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, or stream_lagged"
+            "unsupported event type {other:?}; expected added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, or stream_lagged"
         ))),
     }
 }
@@ -99,6 +101,8 @@ fn bgp_event_type_json_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::SessionLost) => "session_lost",
         Ok(BgpEventType::PeerEnabled) => "peer_enabled",
         Ok(BgpEventType::PeerDisabled) => "peer_disabled",
+        Ok(BgpEventType::NotificationSent) => "notification_sent",
+        Ok(BgpEventType::NotificationReceived) => "notification_received",
         Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
@@ -114,6 +118,8 @@ fn bgp_event_type_display_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::SessionLost) => "lost",
         Ok(BgpEventType::PeerEnabled) => "peer_enabled",
         Ok(BgpEventType::PeerDisabled) => "peer_disabled",
+        Ok(BgpEventType::NotificationSent) => "notification_sent",
+        Ok(BgpEventType::NotificationReceived) => "notification_received",
         Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
@@ -163,6 +169,39 @@ fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
         object.insert(
             "reason".to_string(),
             serde_json::Value::String(session.reason.clone()),
+        );
+    }
+    if let Some(crate::proto::bgp_event::Payload::Notification(notification)) =
+        event.payload.as_ref()
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert(
+            "direction".to_string(),
+            serde_json::Value::String(notification.direction.clone()),
+        );
+        object.insert(
+            "code".to_string(),
+            serde_json::Value::Number(notification.code.into()),
+        );
+        object.insert(
+            "subcode".to_string(),
+            serde_json::Value::Number(notification.subcode.into()),
+        );
+        object.insert(
+            "description".to_string(),
+            serde_json::Value::String(notification.description.clone()),
+        );
+        object.insert(
+            "session_role".to_string(),
+            serde_json::Value::String(notification.session_role.clone()),
+        );
+        object.insert(
+            "shutdown_reason".to_string(),
+            serde_json::Value::String(notification.shutdown_reason.clone()),
+        );
+        object.insert(
+            "reason".to_string(),
+            serde_json::Value::String(notification.reason.clone()),
         );
     }
     if let Some(crate::proto::bgp_event::Payload::StreamLag(lag)) = event.payload.as_ref()
@@ -406,6 +445,42 @@ mod tests {
         assert_eq!(value["severity"], "warning");
         assert_eq!(value["source_category"], "route");
         assert_eq!(value["missed_count"], 7);
+        assert!(value["afi_safi"].is_null());
+    }
+
+    #[test]
+    fn json_bgp_event_notification_includes_code_and_direction() {
+        let event = BgpEvent {
+            timestamp: "2".to_string(),
+            category: EventCategory::Session as i32,
+            event_type: BgpEventType::NotificationSent as i32,
+            severity: 2,
+            peer_address: "10.0.0.1".to_string(),
+            afi_safi: AddressFamily::Unspecified as i32,
+            summary: "BGP NOTIFICATION sent for peer 10.0.0.1: 6/7 (Connection Collision Resolution)".to_string(),
+            payload: Some(crate::proto::bgp_event::Payload::Notification(
+                crate::proto::NotificationEvent {
+                    event_type: BgpEventType::NotificationSent as i32,
+                    peer_address: "10.0.0.1".to_string(),
+                    timestamp: "2".to_string(),
+                    direction: "sent".to_string(),
+                    code: 6,
+                    subcode: 7,
+                    description: "Connection Collision Resolution".to_string(),
+                    session_role: "primary".to_string(),
+                    shutdown_reason: String::new(),
+                    reason: "BGP NOTIFICATION sent for peer 10.0.0.1: 6/7 (Connection Collision Resolution)".to_string(),
+                },
+            )),
+            ..Default::default()
+        };
+
+        let value = json_bgp_event(&event);
+        assert_eq!(value["event_type"], "notification_sent");
+        assert_eq!(value["direction"], "sent");
+        assert_eq!(value["code"], 6);
+        assert_eq!(value["subcode"], 7);
+        assert_eq!(value["description"], "Connection Collision Resolution");
         assert!(value["afi_safi"].is_null());
     }
 }
