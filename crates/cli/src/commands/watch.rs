@@ -72,8 +72,11 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
         "lost" | "session_lost" => Ok(BgpEventType::SessionLost as i32),
         "peer_enabled" => Ok(BgpEventType::PeerEnabled as i32),
         "peer_disabled" => Ok(BgpEventType::PeerDisabled as i32),
+        "dataplane_status_changed" | "dataplane_changed" => {
+            Ok(BgpEventType::DataplaneStatusChanged as i32)
+        }
         other => Err(CliError::Argument(format!(
-            "unsupported event type {other:?}; expected added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, or peer_disabled"
+            "unsupported event type {other:?}; expected added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, or dataplane_status_changed"
         ))),
     }
 }
@@ -82,8 +85,9 @@ fn parse_event_category(s: &str) -> Result<i32, CliError> {
     match s {
         "route" => Ok(EventCategory::Route as i32),
         "session" => Ok(EventCategory::Session as i32),
+        "dataplane" => Ok(EventCategory::Dataplane as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported event category {other:?}; expected route or session"
+            "unsupported event category {other:?}; expected route, session, or dataplane"
         ))),
     }
 }
@@ -98,6 +102,7 @@ fn bgp_event_type_json_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::SessionLost) => "session_lost",
         Ok(BgpEventType::PeerEnabled) => "peer_enabled",
         Ok(BgpEventType::PeerDisabled) => "peer_disabled",
+        Ok(BgpEventType::DataplaneStatusChanged) => "dataplane_status_changed",
         _ => "unknown",
     }
 }
@@ -112,6 +117,7 @@ fn bgp_event_type_display_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::SessionLost) => "lost",
         Ok(BgpEventType::PeerEnabled) => "peer_enabled",
         Ok(BgpEventType::PeerDisabled) => "peer_disabled",
+        Ok(BgpEventType::DataplaneStatusChanged) => "dataplane_status_changed",
         _ => "unknown",
     }
 }
@@ -160,6 +166,26 @@ fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
         object.insert(
             "reason".to_string(),
             serde_json::Value::String(session.reason.clone()),
+        );
+    }
+    if let Some(crate::proto::bgp_event::Payload::Dataplane(dataplane)) = event.payload.as_ref()
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert(
+            "source".to_string(),
+            serde_json::Value::String(dataplane.source.clone()),
+        );
+        object.insert(
+            "installed".to_string(),
+            serde_json::Value::from(dataplane.installed),
+        );
+        object.insert(
+            "rejected".to_string(),
+            serde_json::Value::from(dataplane.rejected),
+        );
+        object.insert(
+            "failed".to_string(),
+            serde_json::Value::from(dataplane.failed),
         );
     }
     value
@@ -244,9 +270,16 @@ pub async fn events_watch(
         .map(parse_event_category)
         .collect::<Result<Vec<_>, _>>()?;
     let session_only = categories.len() == 1 && categories[0] == EventCategory::Session as i32;
+    let dataplane_only = categories.len() == 1 && categories[0] == EventCategory::Dataplane as i32;
     if session_only && (family.is_some() || prefix.is_some()) {
         return Err(CliError::Argument(
             "--family and --prefix are route-only filters and cannot be used with --category session"
+                .into(),
+        ));
+    }
+    if dataplane_only && (neighbor.is_some() || family.is_some() || prefix.is_some()) {
+        return Err(CliError::Argument(
+            "--address, --family, and --prefix are route/session filters and cannot be used with --category dataplane"
                 .into(),
         ));
     }
@@ -351,6 +384,36 @@ mod tests {
         };
 
         let value = json_bgp_event(&event);
+        assert!(value["afi_safi"].is_null());
+    }
+
+    #[test]
+    fn json_bgp_event_dataplane_includes_summary_counts() {
+        let event = BgpEvent {
+            timestamp: "1".to_string(),
+            category: EventCategory::Dataplane as i32,
+            event_type: BgpEventType::DataplaneStatusChanged as i32,
+            severity: 2,
+            afi_safi: AddressFamily::Unspecified as i32,
+            summary: "dataplane fib status changed".to_string(),
+            payload: Some(crate::proto::bgp_event::Payload::Dataplane(
+                crate::proto::DataplaneEvent {
+                    source: "fib".to_string(),
+                    installed: 2,
+                    rejected: 1,
+                    failed: 1,
+                },
+            )),
+            ..Default::default()
+        };
+
+        let value = json_bgp_event(&event);
+        assert_eq!(value["category"], "dataplane");
+        assert_eq!(value["event_type"], "dataplane_status_changed");
+        assert_eq!(value["source"], "fib");
+        assert_eq!(value["installed"], 2);
+        assert_eq!(value["rejected"], 1);
+        assert_eq!(value["failed"], 1);
         assert!(value["afi_safi"].is_null());
     }
 }

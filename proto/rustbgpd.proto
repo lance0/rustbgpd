@@ -833,6 +833,7 @@ enum BgpEventType {
   BGP_EVENT_TYPE_SESSION_LOST = 12;
   BGP_EVENT_TYPE_PEER_ENABLED = 13;
   BGP_EVENT_TYPE_PEER_DISABLED = 14;
+  BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED = 30;
 }
 
 enum EventSeverity {
@@ -843,20 +844,21 @@ enum EventSeverity {
 }
 
 message WatchEventsRequest {
-  // Empty = all supported categories (route + session). Policy and
-  // dataplane categories are reserved for later event sources.
+  // Empty = all supported categories (route + session + dataplane). Policy
+  // category is reserved for later event sources.
   repeated EventCategory categories = 1;
   // Empty = all event types for the selected categories.
   repeated BgpEventType event_types = 2;
   // Optional neighbor address filter. Empty = all peers. Route events
   // match both current and previous peer, same as WatchRoutes and
-  // ListRouteEvents. Session events match their peer address.
+  // ListRouteEvents. Session events match their peer address. Dataplane
+  // summary events are peerless and do not match this filter.
   string neighbor_address = 3;
-  // Optional family filter. Applies only to route events; session
-  // events do not match a family-filtered request.
+  // Optional family filter. Applies only to route events; session and
+  // dataplane events do not match a family-filtered request.
   AddressFamily afi_safi = 4;
-  // Optional exact prefix filter. Applies only to route events;
-  // session events do not match a prefix-filtered request.
+  // Optional exact prefix filter. Applies only to route events; session
+  // and dataplane events do not match a prefix-filtered request.
   string prefix = 5;
   uint32 prefix_length = 6;
 }
@@ -880,6 +882,17 @@ message SessionEvent {
   string reason = 7;
 }
 
+message DataplaneEvent {
+  // Summary source. Current values: "fib" and "blackhole".
+  string source = 1;
+  // Count of currently installed rows for this source.
+  uint64 installed = 2;
+  // Count of currently rejected rows for this source.
+  uint64 rejected = 3;
+  // Count of currently failed rows for this source.
+  uint64 failed = 4;
+}
+
 message BgpEvent {
   // Unix epoch seconds, matching existing RouteEvent timestamp shape.
   string timestamp = 1;
@@ -900,6 +913,7 @@ message BgpEvent {
   oneof payload {
     RouteEvent route = 11;
     SessionEvent session = 12;
+    DataplaneEvent dataplane = 13;
   }
 }
 

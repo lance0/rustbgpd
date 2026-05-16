@@ -31,9 +31,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `session_state_changed`, `session_established`, `session_lost`,
   `peer_enabled`, and `peer_disabled`. `rustbgpctl events watch
   --category session` tails those events with peer and type filters.
-  Notification sent/received, policy, dataplane, and EVPN event
-  categories remain deferred until their sources expose one complete
-  structured event path.
+  Notification sent/received, policy, and EVPN event categories remain
+  deferred until their sources expose one complete structured event path.
+
+- **EventService aggregate dataplane status events.** `WatchEvents` now
+  accepts `EVENT_CATEGORY_DATAPLANE` and emits
+  `BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED` when the aggregate FIB or
+  BLACKHOLE discard status counts change. `rustbgpctl events watch
+  --category dataplane --type dataplane_status_changed` tails the same
+  summary stream. This is intentionally not a per-route, per-MAC, or EVPN
+  reconcile-report stream; richer dataplane/EVPN event categories remain
+  deferred.
 
 - **Self-hosted kernel dataplane CI gate.** New
   `.github/workflows/kernel-dataplane.yml` runs the privileged Linux

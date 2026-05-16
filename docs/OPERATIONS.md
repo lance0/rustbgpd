@@ -459,15 +459,19 @@ streaming route events in a terminal UI. Press `h` for keybindings.
 rustbgpctl events watch
 rustbgpctl events watch --prefix 203.0.113.0/24 --type added,best_changed
 rustbgpctl events watch --category session --type established,lost
+rustbgpctl events watch --category dataplane --type dataplane_status_changed
 ```
 
 `events watch` tails the unified `EventService.WatchEvents` stream. The
 live stream carries route add / withdraw / best-change events plus structured
 session lifecycle events (`state_changed`, `established`, `lost`,
-`peer_enabled`, `peer_disabled`). Prefix and family filters are route-only;
-use `--category session` with peer and type filters when watching session
-events. Policy, dataplane, EVPN, and notification events remain follow-up
-work. For recent route history instead of a live tail, use
+`peer_enabled`, `peer_disabled`) and aggregate dataplane status-change events
+for the FIB / BLACKHOLE discard reconcilers (`dataplane_status_changed`).
+Prefix and family filters are route-only; use `--category session` with peer
+and type filters when watching session events. Dataplane summary events are
+peerless and do not match `--address`, `--family`, or `--prefix`. Policy,
+EVPN, and notification events remain follow-up work. For recent route history
+instead of a live tail, use
 `rustbgpctl events --prefix <PREFIX>`.
 
 ### Check health
