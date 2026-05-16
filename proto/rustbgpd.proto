@@ -885,11 +885,12 @@ message SessionEvent {
 message DataplaneEvent {
   // Summary source. Current values: "fib" and "blackhole".
   string source = 1;
-  // Count of currently installed rows for this source.
+  // Count of currently surfaced installed status rows for this source.
   uint64 installed = 2;
-  // Count of currently rejected rows for this source.
+  // Count of currently surfaced rejected status rows for this source. Some
+  // sources may sample high-cardinality rejection reasons.
   uint64 rejected = 3;
-  // Count of currently failed rows for this source.
+  // Count of currently surfaced failed status rows for this source.
   uint64 failed = 4;
 }
 

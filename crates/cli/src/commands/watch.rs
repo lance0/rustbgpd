@@ -233,6 +233,34 @@ fn parse_optional_prefix_filter(
     Ok((addr.to_string(), length))
 }
 
+fn validate_event_filter_categories(
+    categories: &[i32],
+    neighbor: &Option<String>,
+    family: Option<i32>,
+    prefix: &Option<String>,
+) -> Result<(), CliError> {
+    if categories.is_empty() {
+        return Ok(());
+    }
+
+    let wants_route = categories.contains(&(EventCategory::Route as i32));
+    let wants_session = categories.contains(&(EventCategory::Session as i32));
+    if !wants_route && (family.is_some() || prefix.is_some()) {
+        return Err(CliError::Argument(
+            "--family and --prefix require --category route because they are route-only filters"
+                .into(),
+        ));
+    }
+    if !wants_route && !wants_session && neighbor.is_some() {
+        return Err(CliError::Argument(
+            "--address requires --category route or --category session because dataplane events are peerless"
+                .into(),
+        ));
+    }
+
+    Ok(())
+}
+
 pub async fn run(
     connection: Connection,
     neighbor: Option<String>,
@@ -269,20 +297,7 @@ pub async fn events_watch(
         .map(String::as_str)
         .map(parse_event_category)
         .collect::<Result<Vec<_>, _>>()?;
-    let session_only = categories.len() == 1 && categories[0] == EventCategory::Session as i32;
-    let dataplane_only = categories.len() == 1 && categories[0] == EventCategory::Dataplane as i32;
-    if session_only && (family.is_some() || prefix.is_some()) {
-        return Err(CliError::Argument(
-            "--family and --prefix are route-only filters and cannot be used with --category session"
-                .into(),
-        ));
-    }
-    if dataplane_only && (neighbor.is_some() || family.is_some() || prefix.is_some()) {
-        return Err(CliError::Argument(
-            "--address, --family, and --prefix are route/session filters and cannot be used with --category dataplane"
-                .into(),
-        ));
-    }
+    validate_event_filter_categories(&categories, &neighbor, family, &prefix)?;
     let (prefix, prefix_length) = parse_optional_prefix_filter(prefix, family)?;
 
     let event_types = event_types
@@ -385,6 +400,54 @@ mod tests {
 
         let value = json_bgp_event(&event);
         assert!(value["afi_safi"].is_null());
+    }
+
+    #[test]
+    fn event_filter_rejects_route_only_filters_without_route_category() {
+        let categories = vec![
+            EventCategory::Session as i32,
+            EventCategory::Dataplane as i32,
+        ];
+        let err = validate_event_filter_categories(
+            &categories,
+            &None,
+            Some(AddressFamily::Ipv4Unicast as i32),
+            &None,
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("--category route"));
+
+        let err = validate_event_filter_categories(
+            &categories,
+            &None,
+            None,
+            &Some("203.0.113.0/24".to_string()),
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("--category route"));
+    }
+
+    #[test]
+    fn event_filter_allows_peer_for_session_dataplane_category() {
+        let categories = vec![
+            EventCategory::Session as i32,
+            EventCategory::Dataplane as i32,
+        ];
+        validate_event_filter_categories(&categories, &Some("10.0.0.1".to_string()), None, &None)
+            .unwrap();
+    }
+
+    #[test]
+    fn event_filter_rejects_peer_for_dataplane_only_category() {
+        let categories = vec![EventCategory::Dataplane as i32];
+        let err = validate_event_filter_categories(
+            &categories,
+            &Some("10.0.0.1".to_string()),
+            None,
+            &None,
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("peerless"));
     }
 
     #[test]

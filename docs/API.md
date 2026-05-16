@@ -546,8 +546,8 @@ does not delete that replacement on a later withdraw.
 ## EventService
 
 Unified typed live event stream. Current categories are route events, session
-lifecycle events, and aggregate dataplane status-change events for the
-daemon-owned FIB / BLACKHOLE discard reconcilers. Policy, EVPN, and BGP
+lifecycle events, and dataplane status-row summary changes for the daemon-owned
+FIB / BLACKHOLE discard reconcilers. Policy, EVPN, and BGP
 NOTIFICATION events are reserved for follow-up slices until their subsystems
 expose one complete structured event source.
 
@@ -572,7 +572,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"categories": ["EVENT_CATEGORY_SESSION"], "event_types": ["BGP_EVENT_TYPE_SESSION_ESTABLISHED", "BGP_EVENT_TYPE_SESSION_LOST"], "neighbor_address": "10.0.0.2"}' \
   localhost:50051 rustbgpd.v1.EventService/WatchEvents
 
-# Watch aggregate FIB / BLACKHOLE dataplane status changes
+# Watch FIB / BLACKHOLE dataplane status-row summary changes
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"categories": ["EVENT_CATEGORY_DATAPLANE"], "event_types": ["BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED"]}' \
   localhost:50051 rustbgpd.v1.EventService/WatchEvents
@@ -584,9 +584,11 @@ AND-wise across category, type, peer, family, and exact prefix. Repeated
 category and type filters are OR-matched within their own dimension. Route
 events are sourced from the same structured RIB broadcast as `WatchRoutes`;
 session events are sourced from the peer manager's session lifecycle broadcast;
-dataplane events are aggregate count changes from the existing
-`ListFibRoutes` / `ListBlackholeDiscards` status snapshots, not per-route or
-per-MAC dataplane streams. Prefix and family filters are route-only: session
+dataplane events are status-row count changes from the existing `ListFibRoutes`
+and `ListBlackholeDiscards` snapshots, not per-route or per-MAC dataplane
+streams. The FIB `rejected` count reflects surfaced status rows; high-cardinality
+`route_limit_exceeded` rows are sampled in `ListFibRoutes`, so this is not a
+global suppressed-route total. Prefix and family filters are route-only: session
 and dataplane events do not match requests that set `prefix` or `afi_safi`.
 Peer filters do not match peerless dataplane summary events. `BgpEvent`
 repeats common fields such as peer, prefix, type, and severity at the top level
@@ -597,12 +599,15 @@ Unified event types:
 
 | Type | Meaning |
 |------|---------|
+| `BGP_EVENT_TYPE_ROUTE_ADDED` | Best path for a prefix was added |
+| `BGP_EVENT_TYPE_ROUTE_WITHDRAWN` | Best path for a prefix was withdrawn |
+| `BGP_EVENT_TYPE_ROUTE_BEST_CHANGED` | Best path for a prefix changed |
 | `BGP_EVENT_TYPE_SESSION_STATE_CHANGED` | BGP FSM state changed; payload carries old/new state and session role |
 | `BGP_EVENT_TYPE_SESSION_ESTABLISHED` | FSM reached `Established` |
 | `BGP_EVENT_TYPE_SESSION_LOST` | FSM left `Established`; severity is `WARNING` |
 | `BGP_EVENT_TYPE_PEER_ENABLED` | Operator enabled a configured peer |
 | `BGP_EVENT_TYPE_PEER_DISABLED` | Operator disabled a configured peer |
-| `BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED` | Aggregate FIB / BLACKHOLE installed, rejected, or failed count changed |
+| `BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED` | FIB / BLACKHOLE installed, rejected, or failed status-row count changed |
 
 ---
 
