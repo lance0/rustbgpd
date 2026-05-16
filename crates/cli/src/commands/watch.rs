@@ -72,8 +72,9 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
         "lost" | "session_lost" => Ok(BgpEventType::SessionLost as i32),
         "peer_enabled" => Ok(BgpEventType::PeerEnabled as i32),
         "peer_disabled" => Ok(BgpEventType::PeerDisabled as i32),
+        "stream_lagged" | "lagged" => Ok(BgpEventType::StreamLagged as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported event type {other:?}; expected added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, or peer_disabled"
+            "unsupported event type {other:?}; expected added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, or stream_lagged"
         ))),
     }
 }
@@ -98,6 +99,7 @@ fn bgp_event_type_json_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::SessionLost) => "session_lost",
         Ok(BgpEventType::PeerEnabled) => "peer_enabled",
         Ok(BgpEventType::PeerDisabled) => "peer_disabled",
+        Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
 }
@@ -112,6 +114,7 @@ fn bgp_event_type_display_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::SessionLost) => "lost",
         Ok(BgpEventType::PeerEnabled) => "peer_enabled",
         Ok(BgpEventType::PeerDisabled) => "peer_disabled",
+        Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
 }
@@ -160,6 +163,31 @@ fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
         object.insert(
             "reason".to_string(),
             serde_json::Value::String(session.reason.clone()),
+        );
+    }
+    if let Some(crate::proto::bgp_event::Payload::StreamLag(lag)) = event.payload.as_ref()
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert(
+            "source_category".to_string(),
+            serde_json::Value::String(
+                match EventCategory::try_from(lag.source_category) {
+                    Ok(EventCategory::Route) => "route",
+                    Ok(EventCategory::Session) => "session",
+                    Ok(EventCategory::Policy) => "policy",
+                    Ok(EventCategory::Dataplane) => "dataplane",
+                    _ => "unknown",
+                }
+                .to_string(),
+            ),
+        );
+        object.insert(
+            "missed_count".to_string(),
+            serde_json::Value::Number(lag.missed_count.into()),
+        );
+        object.insert(
+            "reason".to_string(),
+            serde_json::Value::String(lag.reason.clone()),
         );
     }
     value
@@ -351,6 +379,33 @@ mod tests {
         };
 
         let value = json_bgp_event(&event);
+        assert!(value["afi_safi"].is_null());
+    }
+
+    #[test]
+    fn json_bgp_event_stream_lag_includes_missed_count() {
+        let event = BgpEvent {
+            timestamp: "2".to_string(),
+            category: EventCategory::Route as i32,
+            event_type: BgpEventType::StreamLagged as i32,
+            severity: 2,
+            afi_safi: AddressFamily::Unspecified as i32,
+            summary: "route event stream lagged; missed 7 event(s)".to_string(),
+            payload: Some(crate::proto::bgp_event::Payload::StreamLag(
+                crate::proto::StreamLagEvent {
+                    source_category: EventCategory::Route as i32,
+                    missed_count: 7,
+                    reason: "route event stream lagged; missed 7 event(s)".to_string(),
+                },
+            )),
+            ..Default::default()
+        };
+
+        let value = json_bgp_event(&event);
+        assert_eq!(value["event_type"], "stream_lagged");
+        assert_eq!(value["severity"], "warning");
+        assert_eq!(value["source_category"], "route");
+        assert_eq!(value["missed_count"], 7);
         assert!(value["afi_safi"].is_null());
     }
 }

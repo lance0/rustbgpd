@@ -38,6 +38,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   categories remain deferred until their sources expose one complete
   structured event path.
 
+- **EventService missed-event signaling.** `WatchEvents` now emits
+  `stream_lagged` warning events when a slow subscriber falls behind the
+  bounded route or session event broadcast. The event includes the source
+  category and missed count so operators can distinguish a complete live
+  tail from a lossy one.
+
 - **Self-hosted kernel dataplane CI gate.** New
   `.github/workflows/kernel-dataplane.yml` runs the privileged Linux
   dataplane checks that hosted runners cannot reliably exercise:

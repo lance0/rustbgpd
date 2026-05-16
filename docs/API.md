@@ -424,7 +424,10 @@ Event types: `ROUTE_EVENT_TYPE_ADDED`, `ROUTE_EVENT_TYPE_WITHDRAWN`,
 
 `WatchRoutes` does not backfill recent events for new subscribers. Clients that
 need both context and a live tail should call `ListRouteEvents` first, then
-open `WatchRoutes` for subsequent deltas.
+open `WatchRoutes` for subsequent deltas. `WatchRoutes` also preserves its
+legacy bare `RouteEvent` response shape and does not emit explicit lag
+warnings; clients that need a live missed-event signal should use
+`EventService.WatchEvents`.
 
 ### List recent route events
 
@@ -581,11 +584,15 @@ session events are sourced from the peer manager's session lifecycle
 broadcast. Transport sessions send ordinary state-change lifecycle events over
 a bounded channel that is separate from the lossless TCP collision-coordination
 path, so high churn can drop observability events without risking collision
-handling. Prefix and family filters are route-only: session events do not
-match requests that set `prefix` or `afi_safi`. `BgpEvent` repeats common
-fields such as peer, prefix, type, and severity at the top level even when the
-payload also carries them so category-agnostic clients can render or filter
-events without unpacking the `oneof`.
+handling. If a subscriber falls behind either bounded broadcast, the stream
+emits a `stream_lagged` warning event with the source category and missed
+count; lag warnings are delivered for subscribed source categories even when
+the request's event-type filter is otherwise restrictive. Prefix and family
+filters are route-only: session events do not match requests that set `prefix`
+or `afi_safi`. `BgpEvent` repeats common fields such as peer, prefix, type,
+and severity at the top level even when the payload also carries them so
+category-agnostic clients can render or filter events without unpacking the
+`oneof`.
 
 Session event types:
 
@@ -596,6 +603,12 @@ Session event types:
 | `BGP_EVENT_TYPE_SESSION_LOST` | FSM left `Established`; severity is `WARNING` |
 | `BGP_EVENT_TYPE_PEER_ENABLED` | Operator enabled a configured peer |
 | `BGP_EVENT_TYPE_PEER_DISABLED` | Operator disabled a configured peer |
+
+Stream health event types:
+
+| Type | Meaning |
+|------|---------|
+| `BGP_EVENT_TYPE_STREAM_LAGGED` | This subscriber missed one or more route or session events from a bounded source stream. See `StreamLagEvent.source_category` and `missed_count`. |
 
 ---
 
