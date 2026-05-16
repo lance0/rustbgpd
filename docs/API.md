@@ -556,11 +556,11 @@ does not delete that replacement on a later withdraw.
 
 ## EventService
 
-Unified typed live event stream. Current categories are route events and
-session events. The session category includes peer lifecycle and BGP
-NOTIFICATION sent/received metadata. Policy, dataplane, and EVPN events are
-reserved for follow-up slices until their subsystems expose one complete
-structured event source.
+Unified typed live event stream. Current categories are route events, session
+events (peer lifecycle plus BGP NOTIFICATION sent/received metadata), and
+policy mutation summary events. Dataplane and EVPN events are reserved for
+follow-up slices until their subsystems expose one complete structured event
+source.
 
 | RPC | Description |
 |-----|-------------|
@@ -587,6 +587,11 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"categories": ["EVENT_CATEGORY_SESSION"], "event_types": ["BGP_EVENT_TYPE_NOTIFICATION_SENT", "BGP_EVENT_TYPE_NOTIFICATION_RECEIVED"], "neighbor_address": "10.0.0.2"}' \
   localhost:50051 rustbgpd.v1.EventService/WatchEvents
+
+# Watch policy / peer-group / chain mutation summaries
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"categories": ["EVENT_CATEGORY_POLICY"], "event_types": ["BGP_EVENT_TYPE_POLICY_CHANGED"]}' \
+  localhost:50051 rustbgpd.v1.EventService/WatchEvents
 ```
 
 `WatchEvents` is a live stream only: it does not replay the bounded
@@ -603,18 +608,23 @@ category and type filters are OR-matched within their own dimension. Route
 events are sourced from the same structured RIB broadcast as `WatchRoutes`;
 session events are sourced from the peer manager's session broadcast and cover
 both lifecycle transitions and metadata-only BGP NOTIFICATION sent/received
-events. Transport sessions send ordinary state-change lifecycle events over a
-bounded channel that is separate from the lossless TCP collision-coordination
+events; policy events are sourced from the peer manager after a runtime policy
+/ neighbor-set / peer-group / chain mutation is accepted. Empty category and
+type filters subscribe to the default route + session live stream. A non-empty
+type filter narrows the stream; `BGP_EVENT_TYPE_POLICY_CHANGED` with empty
+categories selects policy events, and `EVENT_CATEGORY_POLICY` selects policy
+explicitly. Transport sessions send ordinary state-change lifecycle events over
+a bounded channel that is separate from the lossless TCP collision-coordination
 path, so high churn can drop observability events without risking collision
 handling. If a subscriber falls behind either bounded broadcast, the stream
 emits a `stream_lagged` warning event with the source category and missed
 count; lag warnings are delivered for subscribed source categories even when
 the request's event-type filter is otherwise restrictive. Prefix and family
-filters are route-only: session events do not match requests that set `prefix`
-or `afi_safi`. `BgpEvent` repeats common fields such as peer, prefix, type,
-and severity at the top level even when the payload also carries them so
-category-agnostic clients can render or filter events without unpacking the
-`oneof`.
+filters are route-only: session and policy events do not match requests that
+set `prefix` or `afi_safi`. `BgpEvent` repeats common fields such as peer,
+prefix, type, and severity at the top level even when the payload also carries
+them so category-agnostic clients can render or filter events without unpacking
+the `oneof`.
 
 Session event types:
 
@@ -636,6 +646,12 @@ Stream health event types:
 | Type | Meaning |
 |------|---------|
 | `BGP_EVENT_TYPE_STREAM_LAGGED` | This subscriber missed one or more route or session events from a bounded source stream. See `StreamLagEvent.source_category` and `missed_count`. |
+
+Policy event types:
+
+| Type | Meaning |
+|------|---------|
+| `BGP_EVENT_TYPE_POLICY_CHANGED` | Runtime policy, neighbor-set, peer-group, or chain mutation accepted by the peer manager. Payload carries operation, target type, target, optional peer address, and affected peer count. This is a runtime-applied audit signal; config-file persistence is a separate path. |
 
 ---
 

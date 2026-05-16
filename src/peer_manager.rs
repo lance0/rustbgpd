@@ -4,9 +4,9 @@ use std::time::{Duration, Instant};
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, DynamicNeighborInfo, PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig,
-    ReconcileFailure, ReconcileFailureKind, ReconcileResult, SessionEvent, SessionLifecycleEvent,
-    SessionLifecycleEventType, SessionNotificationEvent, SessionNotificationEventType,
-    SetGshutError,
+    PolicyEvent, ReconcileFailure, ReconcileFailureKind, ReconcileResult, SessionEvent,
+    SessionLifecycleEvent, SessionLifecycleEventType, SessionNotificationEvent,
+    SessionNotificationEventType, SetGshutError,
 };
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::{PeerConfig, SessionState};
@@ -180,6 +180,7 @@ pub struct PeerManager {
     session_notification_event_tx: mpsc::Sender<TransportNotificationEvent>,
     session_notification_event_rx: mpsc::Receiver<TransportNotificationEvent>,
     session_events_tx: broadcast::Sender<SessionEvent>,
+    policy_events_tx: broadcast::Sender<PolicyEvent>,
     current_config: Config,
     /// Resolved dynamic neighbor ranges for prefix-based auto-accept.
     dynamic_ranges: Vec<DynamicRange>,
@@ -349,6 +350,7 @@ impl PeerManager {
         let (session_lifecycle_tx, session_lifecycle_rx) = mpsc::channel(4096);
         let (session_notification_event_tx, session_notification_event_rx) = mpsc::channel(4096);
         let (session_events_tx, _) = broadcast::channel(4096);
+        let (policy_events_tx, _) = broadcast::channel(4096);
         Self {
             peers: HashMap::new(),
             rx,
@@ -368,6 +370,7 @@ impl PeerManager {
             session_notification_event_tx,
             session_notification_event_rx,
             session_events_tx,
+            policy_events_tx,
             dynamic_ranges: Self::parse_dynamic_ranges(&current_config),
             dynamic_peer_count: 0,
             dynamic_neighbor_limit: current_config.global.dynamic_neighbor_limit.unwrap_or(100),
@@ -903,6 +906,93 @@ impl PeerManager {
         self.publish_session_event(SessionEvent::Lifecycle(event));
     }
 
+    fn publish_policy_event(&self, event: PolicyEvent) {
+        let _ = self.policy_events_tx.send(event);
+    }
+
+    fn policy_event_details(
+        event: &ConfigEvent,
+    ) -> (&'static str, &'static str, String, Option<IpAddr>) {
+        match event {
+            ConfigEvent::SetPolicy { name, .. } => ("set", "policy", name.clone(), None),
+            ConfigEvent::DeletePolicy { name } => ("delete", "policy", name.clone(), None),
+            ConfigEvent::SetNeighborSet { name, .. } => ("set", "neighbor_set", name.clone(), None),
+            ConfigEvent::DeleteNeighborSet { name } => {
+                ("delete", "neighbor_set", name.clone(), None)
+            }
+            ConfigEvent::SetGlobalImportChain { .. } => {
+                ("set", "global_import_chain", "global".to_string(), None)
+            }
+            ConfigEvent::SetGlobalExportChain { .. } => {
+                ("set", "global_export_chain", "global".to_string(), None)
+            }
+            ConfigEvent::ClearGlobalImportChain => {
+                ("clear", "global_import_chain", "global".to_string(), None)
+            }
+            ConfigEvent::ClearGlobalExportChain => {
+                ("clear", "global_export_chain", "global".to_string(), None)
+            }
+            ConfigEvent::SetNeighborImportChain { address, .. } => (
+                "set",
+                "neighbor_import_chain",
+                address.to_string(),
+                Some(*address),
+            ),
+            ConfigEvent::SetNeighborExportChain { address, .. } => (
+                "set",
+                "neighbor_export_chain",
+                address.to_string(),
+                Some(*address),
+            ),
+            ConfigEvent::ClearNeighborImportChain { address } => (
+                "clear",
+                "neighbor_import_chain",
+                address.to_string(),
+                Some(*address),
+            ),
+            ConfigEvent::ClearNeighborExportChain { address } => (
+                "clear",
+                "neighbor_export_chain",
+                address.to_string(),
+                Some(*address),
+            ),
+            ConfigEvent::SetPeerGroup { name, .. } => ("set", "peer_group", name.clone(), None),
+            ConfigEvent::DeletePeerGroup { name } => ("delete", "peer_group", name.clone(), None),
+            ConfigEvent::SetNeighborPeerGroup { address, .. } => (
+                "set",
+                "neighbor_peer_group",
+                address.to_string(),
+                Some(*address),
+            ),
+            ConfigEvent::ClearNeighborPeerGroup { address } => (
+                "clear",
+                "neighbor_peer_group",
+                address.to_string(),
+                Some(*address),
+            ),
+            ConfigEvent::NeighborAdded(_) | ConfigEvent::NeighborDeleted(_) => {
+                ("change", "neighbor", String::new(), None)
+            }
+        }
+    }
+
+    fn publish_policy_config_event(&self, event: &ConfigEvent, affected_peer_count: usize) {
+        let (operation, target_type, target, peer) = Self::policy_event_details(event);
+        if target_type == "neighbor" {
+            return;
+        }
+        let reason = format!("policy {operation} {target_type} {target}");
+        self.publish_policy_event(PolicyEvent {
+            operation,
+            target_type,
+            target,
+            peer,
+            affected_peer_count,
+            timestamp: Self::session_event_timestamp(),
+            reason,
+        });
+    }
+
     fn publish_peer_lifecycle_event(
         &self,
         address: IpAddr,
@@ -1227,6 +1317,7 @@ impl PeerManager {
 
         let peers: Vec<IpAddr> =
             affected_peers.unwrap_or_else(|| self.peers.keys().copied().collect());
+        let mut affected_peer_count = 0usize;
         for address in peers {
             if !self.peers.contains_key(&address) {
                 continue;
@@ -1238,6 +1329,7 @@ impl PeerManager {
             else {
                 continue;
             };
+            affected_peer_count += 1;
             let (import_policy, export_policy) = next_config
                 .effective_policy_chains_for_neighbor(neighbor)
                 .map_err(|e| e.to_string())?;
@@ -1246,6 +1338,7 @@ impl PeerManager {
         }
 
         self.current_config = next_config;
+        self.publish_policy_config_event(&event, affected_peer_count);
         Ok(())
     }
 
@@ -1498,6 +1591,7 @@ impl PeerManager {
         let mut next_config = self.current_config.clone();
         apply_config_event(&mut next_config, &event).map_err(|e| e.to_string())?;
 
+        let mut affected_peer_count = 0usize;
         for address in affected_peers {
             let was_enabled = self
                 .peers
@@ -1517,6 +1611,7 @@ impl PeerManager {
                     .map_err(|e| e.to_string())?;
                 let cfg = Self::peer_manager_config_from_resolved(resolved, false);
                 self.add_peer(cfg, false).await?;
+                affected_peer_count += 1;
                 if !was_enabled {
                     self.disable_peer(address, None).await?;
                 }
@@ -1524,6 +1619,7 @@ impl PeerManager {
         }
 
         self.current_config = next_config;
+        self.publish_policy_config_event(&event, affected_peer_count);
         Ok(())
     }
 
@@ -2305,6 +2401,9 @@ impl PeerManager {
                         PeerManagerCommand::SubscribeSessionEvents { reply } => {
                             let _ = reply.send(self.session_events_tx.subscribe());
                         }
+                        PeerManagerCommand::SubscribePolicyEvents { reply } => {
+                            let _ = reply.send(self.policy_events_tx.subscribe());
+                        }
                         PeerManagerCommand::GetPeerState { address, reply } => {
                             let info = self.get_peer_info(address).await;
                             let _ = reply.send(info);
@@ -2594,6 +2693,16 @@ mod tests {
     ) -> broadcast::Receiver<SessionEvent> {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(PeerManagerCommand::SubscribeSessionEvents { reply: reply_tx })
+            .await
+            .unwrap();
+        reply_rx.await.unwrap()
+    }
+
+    async fn subscribe_policy_events(
+        tx: &mpsc::Sender<PeerManagerCommand>,
+    ) -> broadcast::Receiver<PolicyEvent> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::SubscribePolicyEvents { reply: reply_tx })
             .await
             .unwrap();
         reply_rx.await.unwrap()
@@ -3343,6 +3452,54 @@ mod tests {
 
         let transport = mgr.build_transport_config(&config);
         assert!(transport.route_server_client);
+    }
+
+    #[tokio::test]
+    async fn policy_events_publish_successful_policy_mutations() {
+        use rustbgpd_api::peer_types::{NamedPolicyDefinition, PolicyStatementDefinition};
+
+        let (tx, rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mgr = PeerManager::new(
+            rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+        );
+        let handle = tokio::spawn(mgr.run());
+        let mut events = subscribe_policy_events(&tx).await;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::SetPolicy {
+            name: "audit-policy".to_string(),
+            definition: NamedPolicyDefinition {
+                default_action: "permit".to_string(),
+                statements: Vec::<PolicyStatementDefinition>::new(),
+            },
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        reply_rx.await.unwrap().unwrap();
+
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("policy event timeout")
+            .expect("policy event channel closed");
+        assert_eq!(event.operation, "set");
+        assert_eq!(event.target_type, "policy");
+        assert_eq!(event.target, "audit-policy");
+        assert_eq!(event.peer, None);
+        assert_eq!(event.affected_peer_count, 0);
+        assert_eq!(event.reason, "policy set policy audit-policy");
+
+        tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+        handle.await.unwrap();
     }
 
     /// Regression: when a policy mutation actually changes the

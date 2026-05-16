@@ -12,8 +12,8 @@ use tonic::{Request, Response, Status};
 use tracing::debug;
 
 use crate::peer_types::{
-    PeerManagerCommand, SessionEvent, SessionLifecycleEvent, SessionLifecycleEventType,
-    SessionNotificationEvent, SessionNotificationEventType,
+    PeerManagerCommand, PolicyEvent, SessionEvent, SessionLifecycleEvent,
+    SessionLifecycleEventType, SessionNotificationEvent, SessionNotificationEventType,
 };
 use crate::proto;
 use crate::rib_service::{
@@ -104,6 +104,16 @@ impl WatchEventsFilter {
             && self.event_types_match_session_category()
     }
 
+    fn wants_policy_events(&self) -> bool {
+        let policy_category_requested = self
+            .categories
+            .contains(&(proto::EventCategory::Policy as i32));
+        let policy_type_allowed = self.event_types_match_policy_category();
+        let policy_selected = policy_category_requested
+            || (self.categories.is_empty() && !self.event_types.is_empty() && policy_type_allowed);
+        policy_selected && self.afi.is_none() && self.prefix.is_none() && policy_type_allowed
+    }
+
     fn matches_session_event(&self, event: &SessionEvent) -> bool {
         if !self.wants_session_events() {
             return false;
@@ -125,6 +135,28 @@ impl WatchEventsFilter {
 
         if let Some(peer) = self.peer
             && event_peer != peer
+        {
+            return false;
+        }
+
+        true
+    }
+
+    fn matches_policy_event(&self, event: &PolicyEvent) -> bool {
+        if !self.wants_policy_events() {
+            return false;
+        }
+
+        if !self.event_types.is_empty()
+            && !self
+                .event_types
+                .contains(&(proto::BgpEventType::PolicyChanged as i32))
+        {
+            return false;
+        }
+
+        if let Some(peer) = self.peer
+            && event.peer != Some(peer)
         {
             return false;
         }
@@ -161,6 +193,16 @@ impl WatchEventsFilter {
                 )
             })
     }
+
+    fn event_types_match_policy_category(&self) -> bool {
+        self.event_types.is_empty()
+            || self.event_types.iter().any(|event_type| {
+                matches!(
+                    proto::BgpEventType::try_from(*event_type),
+                    Ok(proto::BgpEventType::PolicyChanged)
+                )
+            })
+    }
 }
 
 fn route_event_type_to_bgp_event_type(event_type: RouteEventType) -> proto::BgpEventType {
@@ -177,7 +219,9 @@ fn parse_category_filter(categories: &[i32]) -> Result<BTreeSet<i32>, Status> {
         let category = proto::EventCategory::try_from(*category)
             .map_err(|_| Status::invalid_argument("unknown event category"))?;
         match category {
-            proto::EventCategory::Route | proto::EventCategory::Session => {
+            proto::EventCategory::Route
+            | proto::EventCategory::Session
+            | proto::EventCategory::Policy => {
                 parsed.insert(category as i32);
             }
             proto::EventCategory::Unspecified => {
@@ -185,9 +229,9 @@ fn parse_category_filter(categories: &[i32]) -> Result<BTreeSet<i32>, Status> {
                     "EVENT_CATEGORY_UNSPECIFIED is not a valid filter",
                 ));
             }
-            proto::EventCategory::Policy | proto::EventCategory::Dataplane => {
+            proto::EventCategory::Dataplane => {
                 return Err(Status::invalid_argument(
-                    "only EVENT_CATEGORY_ROUTE and EVENT_CATEGORY_SESSION are supported by WatchEvents in this release",
+                    "only EVENT_CATEGORY_ROUTE, EVENT_CATEGORY_SESSION, and EVENT_CATEGORY_POLICY are supported by WatchEvents in this release",
                 ));
             }
         }
@@ -211,6 +255,7 @@ fn parse_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<i32>, Status>
             | proto::BgpEventType::PeerDisabled
             | proto::BgpEventType::NotificationSent
             | proto::BgpEventType::NotificationReceived
+            | proto::BgpEventType::PolicyChanged
             | proto::BgpEventType::StreamLagged => {
                 parsed.insert(event_type as i32);
             }
@@ -286,6 +331,7 @@ fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto::BgpEvent 
             | proto::BgpEventType::PeerDisabled
             | proto::BgpEventType::NotificationSent
             | proto::BgpEventType::NotificationReceived
+            | proto::BgpEventType::PolicyChanged
             | proto::BgpEventType::StreamLagged => "changed",
         },
         route.prefix,
@@ -392,6 +438,43 @@ fn session_notification_event_to_bgp_event(event: SessionNotificationEvent) -> p
     }
 }
 
+fn policy_event_to_bgp_event(event: PolicyEvent) -> proto::BgpEvent {
+    let PolicyEvent {
+        operation,
+        target_type,
+        target,
+        peer,
+        affected_peer_count,
+        timestamp,
+        reason,
+    } = event;
+    let peer_address = peer.map_or_else(String::new, |peer| peer.to_string());
+    let policy = proto::PolicyEvent {
+        event_type: proto::BgpEventType::PolicyChanged as i32,
+        operation: operation.to_string(),
+        target_type: target_type.to_string(),
+        target,
+        peer_address: peer_address.clone(),
+        affected_peer_count: u32::try_from(affected_peer_count).unwrap_or(u32::MAX),
+        timestamp: timestamp.clone(),
+        reason: reason.clone(),
+    };
+
+    proto::BgpEvent {
+        timestamp,
+        category: proto::EventCategory::Policy as i32,
+        event_type: proto::BgpEventType::PolicyChanged as i32,
+        severity: proto::EventSeverity::Info as i32,
+        peer_address,
+        previous_peer_address: String::new(),
+        prefix: String::new(),
+        prefix_length: 0,
+        afi_safi: proto::AddressFamily::Unspecified as i32,
+        summary: reason,
+        payload: Some(proto::bgp_event::Payload::Policy(policy)),
+    }
+}
+
 fn stream_lag_bgp_event(
     source_category: proto::EventCategory,
     missed_count: u64,
@@ -430,6 +513,7 @@ impl proto::event_service_server::EventService for EventService {
     type WatchEventsStream =
         Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send + 'static>>;
 
+    #[allow(clippy::too_many_lines)]
     async fn watch_events(
         &self,
         request: Request<proto::WatchEventsRequest>,
@@ -509,7 +593,39 @@ impl proto::event_service_server::EventService for EventService {
                 Box::pin(tokio_stream::empty())
             };
 
-        Ok(Response::new(Box::pin(route_stream.merge(session_stream))))
+        let policy_stream: Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send>> =
+            if filter.wants_policy_events() {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                self.peer_mgr_tx
+                    .send(PeerManagerCommand::SubscribePolicyEvents { reply: reply_tx })
+                    .await
+                    .map_err(|_| Status::internal("peer manager unavailable"))?;
+                let broadcast_rx = reply_rx
+                    .await
+                    .map_err(|_| Status::internal("peer manager dropped reply"))?;
+                let policy_filter = filter.clone();
+                Box::pin(BroadcastStream::new(broadcast_rx).filter_map(
+                    move |result| match result {
+                        Ok(event) => {
+                            if policy_filter.matches_policy_event(&event) {
+                                Some(Ok(policy_event_to_bgp_event(event)))
+                            } else {
+                                None
+                            }
+                        }
+                        Err(_lagged) => {
+                            debug!("WatchEvents policy subscriber lagged, skipping missed events");
+                            None
+                        }
+                    },
+                ))
+            } else {
+                Box::pin(tokio_stream::empty())
+            };
+
+        Ok(Response::new(Box::pin(
+            route_stream.merge(session_stream).merge(policy_stream),
+        )))
     }
 }
 
@@ -553,18 +669,27 @@ mod tests {
     fn spawn_fake_peer_manager() -> (
         mpsc::Sender<PeerManagerCommand>,
         broadcast::Sender<SessionEvent>,
+        broadcast::Sender<PolicyEvent>,
     ) {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
-        let (events_tx, _) = broadcast::channel(16);
-        let events_tx_for_task = events_tx.clone();
+        let (session_events_tx, _) = broadcast::channel(16);
+        let (policy_events_tx, _) = broadcast::channel(16);
+        let session_events_tx_for_task = session_events_tx.clone();
+        let policy_events_tx_for_task = policy_events_tx.clone();
         tokio::spawn(async move {
             while let Some(command) = peer_rx.recv().await {
-                if let PeerManagerCommand::SubscribeSessionEvents { reply } = command {
-                    let _ = reply.send(events_tx_for_task.subscribe());
+                match command {
+                    PeerManagerCommand::SubscribeSessionEvents { reply } => {
+                        let _ = reply.send(session_events_tx_for_task.subscribe());
+                    }
+                    PeerManagerCommand::SubscribePolicyEvents { reply } => {
+                        let _ = reply.send(policy_events_tx_for_task.subscribe());
+                    }
+                    _ => {}
                 }
             }
         });
-        (peer_tx, events_tx)
+        (peer_tx, session_events_tx, policy_events_tx)
     }
 
     fn session_event(peer: IpAddr, event_type: SessionLifecycleEventType) -> SessionEvent {
@@ -595,10 +720,22 @@ mod tests {
         })
     }
 
+    fn policy_event(peer: Option<IpAddr>) -> PolicyEvent {
+        PolicyEvent {
+            operation: "set",
+            target_type: "policy",
+            target: "audit-policy".to_string(),
+            peer,
+            affected_peer_count: 2,
+            timestamp: "789".to_string(),
+            reason: "policy set policy audit-policy".to_string(),
+        }
+    }
+
     #[tokio::test]
     async fn route_event_bridge_emits_bgp_event() {
         let (rib_tx, events_tx) = spawn_fake_rib();
-        let (peer_tx, _) = spawn_fake_peer_manager();
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
         let service = EventService::new(rib_tx, peer_tx);
         let response = service
             .watch_events(Request::new(proto::WatchEventsRequest::default()))
@@ -628,7 +765,7 @@ mod tests {
     #[tokio::test]
     async fn filters_compose_for_route_events() {
         let (rib_tx, events_tx) = spawn_fake_rib();
-        let (peer_tx, _) = spawn_fake_peer_manager();
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
         let service = EventService::new(rib_tx, peer_tx);
         let response = service
             .watch_events(Request::new(proto::WatchEventsRequest {
@@ -670,7 +807,7 @@ mod tests {
     #[tokio::test]
     async fn route_and_session_category_filters_do_not_cross_match() {
         let (rib_tx, _) = spawn_fake_rib();
-        let (peer_tx, session_events_tx) = spawn_fake_peer_manager();
+        let (peer_tx, session_events_tx, _) = spawn_fake_peer_manager();
         let service = EventService::new(rib_tx, peer_tx);
         let response = service
             .watch_events(Request::new(proto::WatchEventsRequest {
@@ -712,7 +849,7 @@ mod tests {
     #[tokio::test]
     async fn notification_event_bridge_emits_bgp_event() {
         let (rib_tx, _) = spawn_fake_rib();
-        let (peer_tx, session_events_tx) = spawn_fake_peer_manager();
+        let (peer_tx, session_events_tx, _) = spawn_fake_peer_manager();
         let service = EventService::new(rib_tx, peer_tx);
         let response = service
             .watch_events(Request::new(proto::WatchEventsRequest {
@@ -758,7 +895,7 @@ mod tests {
     #[tokio::test]
     async fn prefix_filter_does_not_match_session_events() {
         let (rib_tx, _) = spawn_fake_rib();
-        let (peer_tx, session_events_tx) = spawn_fake_peer_manager();
+        let (peer_tx, session_events_tx, _) = spawn_fake_peer_manager();
         let service = EventService::new(rib_tx, peer_tx);
         let response = service
             .watch_events(Request::new(proto::WatchEventsRequest {
@@ -785,7 +922,7 @@ mod tests {
     #[tokio::test]
     async fn route_event_type_filter_does_not_subscribe_session_events() {
         let (rib_tx, events_tx) = spawn_fake_rib();
-        let (peer_tx, session_events_tx) = spawn_fake_peer_manager();
+        let (peer_tx, session_events_tx, _) = spawn_fake_peer_manager();
         let service = EventService::new(rib_tx, peer_tx);
         let response = service
             .watch_events(Request::new(proto::WatchEventsRequest {
@@ -803,7 +940,7 @@ mod tests {
     #[tokio::test]
     async fn session_event_type_filter_does_not_subscribe_route_events() {
         let (rib_tx, events_tx) = spawn_fake_rib();
-        let (peer_tx, session_events_tx) = spawn_fake_peer_manager();
+        let (peer_tx, session_events_tx, _) = spawn_fake_peer_manager();
         let service = EventService::new(rib_tx, peer_tx);
         let response = service
             .watch_events(Request::new(proto::WatchEventsRequest {
@@ -819,13 +956,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn policy_event_bridge_emits_bgp_event() {
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, _, policy_events_tx) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Policy as i32],
+                event_types: vec![proto::BgpEventType::PolicyChanged as i32],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        policy_events_tx.send(policy_event(None)).unwrap();
+        let event = stream.next().await.unwrap().unwrap();
+        assert_eq!(event.category, proto::EventCategory::Policy as i32);
+        assert_eq!(event.event_type, proto::BgpEventType::PolicyChanged as i32);
+        assert_eq!(event.severity, proto::EventSeverity::Info as i32);
+        assert_eq!(event.summary, "policy set policy audit-policy");
+        assert!(matches!(
+            event.payload,
+            Some(proto::bgp_event::Payload::Policy(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn policy_event_type_filter_subscribes_without_policy_category() {
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, _, policy_events_tx) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                event_types: vec![proto::BgpEventType::PolicyChanged as i32],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        policy_events_tx.send(policy_event(None)).unwrap();
+        let event = stream.next().await.unwrap().unwrap();
+        assert_eq!(event.category, proto::EventCategory::Policy as i32);
+        assert_eq!(event.event_type, proto::BgpEventType::PolicyChanged as i32);
+    }
+
+    #[tokio::test]
+    async fn peer_filter_matches_only_peer_scoped_policy_events() {
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, _, policy_events_tx) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Policy as i32],
+                neighbor_address: "10.0.0.1".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        policy_events_tx.send(policy_event(None)).unwrap();
+        policy_events_tx
+            .send(policy_event(Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))))
+            .unwrap();
+        policy_events_tx
+            .send(policy_event(Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))))
+            .unwrap();
+
+        let event = stream.next().await.unwrap().unwrap();
+        assert_eq!(event.peer_address, "10.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn default_watch_does_not_subscribe_policy_events() {
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, _, policy_events_tx) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest::default()))
+            .await
+            .unwrap();
+
+        assert_eq!(policy_events_tx.receiver_count(), 0);
+        drop(response);
+    }
+
+    #[tokio::test]
     async fn rejects_unsupported_category_filter() {
         let (rib_tx, _) = spawn_fake_rib();
-        let (peer_tx, _) = spawn_fake_peer_manager();
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
         let service = EventService::new(rib_tx, peer_tx);
         let Err(err) = service
             .watch_events(Request::new(proto::WatchEventsRequest {
-                categories: vec![proto::EventCategory::Policy as i32],
+                categories: vec![proto::EventCategory::Dataplane as i32],
                 ..Default::default()
             }))
             .await
@@ -838,7 +1063,7 @@ mod tests {
     #[tokio::test]
     async fn subscriber_drop_releases_broadcast_receiver() {
         let (rib_tx, events_tx) = spawn_fake_rib();
-        let (peer_tx, _) = spawn_fake_peer_manager();
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
         let service = EventService::new(rib_tx, peer_tx);
         let response = service
             .watch_events(Request::new(proto::WatchEventsRequest::default()))
@@ -853,7 +1078,7 @@ mod tests {
     #[tokio::test]
     async fn route_lag_emits_missed_event_signal() {
         let (rib_tx, events_tx) = spawn_fake_rib();
-        let (peer_tx, _) = spawn_fake_peer_manager();
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
         let service = EventService::new(rib_tx, peer_tx);
         let response = service
             .watch_events(Request::new(proto::WatchEventsRequest {
@@ -888,7 +1113,7 @@ mod tests {
     #[tokio::test]
     async fn session_lag_emits_missed_event_signal() {
         let (rib_tx, _) = spawn_fake_rib();
-        let (peer_tx, session_events_tx) = spawn_fake_peer_manager();
+        let (peer_tx, session_events_tx, _) = spawn_fake_peer_manager();
         let service = EventService::new(rib_tx, peer_tx);
         let response = service
             .watch_events(Request::new(proto::WatchEventsRequest {

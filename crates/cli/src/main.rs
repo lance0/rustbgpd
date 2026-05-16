@@ -482,7 +482,7 @@ enum FlowspecAction {
 enum EventsAction {
     /// Watch the unified live event stream
     Watch {
-        /// Event category filter: route, session
+        /// Event category filter: route, session, policy
         #[arg(long = "category", value_delimiter = ',')]
         categories: Vec<String>,
 
@@ -500,7 +500,7 @@ enum EventsAction {
 
         /// Event type filter: added, withdrawn, best_changed,
         /// state_changed, established, lost, peer_enabled, peer_disabled,
-        /// notification_sent, notification_received
+        /// notification_sent, notification_received, policy_changed
         #[arg(long = "type", value_delimiter = ',')]
         event_types: Vec<String>,
 
@@ -1570,6 +1570,31 @@ mod tests {
                 }),
                 ..
             } if categories == &vec!["session".to_string()] && event_types.len() == 2
+        ));
+    }
+
+    #[test]
+    fn test_parse_events_watch_policy_category() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "events",
+            "watch",
+            "--category",
+            "policy",
+            "--type",
+            "policy_changed",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Events {
+                action: Some(EventsAction::Watch {
+                    ref categories,
+                    ref event_types,
+                    ..
+                }),
+                ..
+            } if categories == &vec!["policy".to_string()] && event_types == &vec!["policy_changed".to_string()]
         ));
     }
 

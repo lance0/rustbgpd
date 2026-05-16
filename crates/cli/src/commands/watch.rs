@@ -91,9 +91,10 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
         "peer_disabled" => Ok(BgpEventType::PeerDisabled as i32),
         "notification_sent" => Ok(BgpEventType::NotificationSent as i32),
         "notification_received" => Ok(BgpEventType::NotificationReceived as i32),
+        "policy_changed" => Ok(BgpEventType::PolicyChanged as i32),
         "stream_lagged" | "lagged" => Ok(BgpEventType::StreamLagged as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported event type {other:?}; expected added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, or stream_lagged"
+            "unsupported event type {other:?}; expected added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, or stream_lagged"
         ))),
     }
 }
@@ -102,10 +103,39 @@ fn parse_event_category(s: &str) -> Result<i32, CliError> {
     match s {
         "route" => Ok(EventCategory::Route as i32),
         "session" => Ok(EventCategory::Session as i32),
+        "policy" => Ok(EventCategory::Policy as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported event category {other:?}; expected route or session"
+            "unsupported event category {other:?}; expected route, session, or policy"
         ))),
     }
+}
+
+fn bgp_event_type_is_route(event_type: i32) -> bool {
+    matches!(
+        BgpEventType::try_from(event_type),
+        Ok(BgpEventType::RouteAdded
+            | BgpEventType::RouteWithdrawn
+            | BgpEventType::RouteBestChanged)
+    )
+}
+
+fn validate_route_only_filters(
+    categories: &[i32],
+    event_types: &[i32],
+    family: Option<i32>,
+    prefix: Option<&str>,
+) -> Result<(), CliError> {
+    let route_category_selected =
+        categories.is_empty() || categories.contains(&(EventCategory::Route as i32));
+    let route_type_selected =
+        event_types.is_empty() || event_types.iter().copied().any(bgp_event_type_is_route);
+    if !(route_category_selected && route_type_selected) && (family.is_some() || prefix.is_some()) {
+        return Err(CliError::Argument(
+            "--family and --prefix are route-only filters; remove them or select a route category/type"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 fn bgp_event_type_json_label(event_type: i32) -> &'static str {
@@ -120,6 +150,7 @@ fn bgp_event_type_json_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::PeerDisabled) => "peer_disabled",
         Ok(BgpEventType::NotificationSent) => "notification_sent",
         Ok(BgpEventType::NotificationReceived) => "notification_received",
+        Ok(BgpEventType::PolicyChanged) => "policy_changed",
         Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
@@ -137,6 +168,7 @@ fn bgp_event_type_display_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::PeerDisabled) => "peer_disabled",
         Ok(BgpEventType::NotificationSent) => "notification_sent",
         Ok(BgpEventType::NotificationReceived) => "notification_received",
+        Ok(BgpEventType::PolicyChanged) => "policy_changed",
         Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
@@ -228,6 +260,30 @@ fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
         object.insert(
             "reason".to_string(),
             serde_json::Value::String(notification.reason.clone()),
+        );
+    }
+    if let Some(crate::proto::bgp_event::Payload::Policy(policy)) = event.payload.as_ref()
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert(
+            "operation".to_string(),
+            serde_json::Value::String(policy.operation.clone()),
+        );
+        object.insert(
+            "target_type".to_string(),
+            serde_json::Value::String(policy.target_type.clone()),
+        );
+        object.insert(
+            "target".to_string(),
+            serde_json::Value::String(policy.target.clone()),
+        );
+        object.insert(
+            "affected_peer_count".to_string(),
+            serde_json::Value::Number(policy.affected_peer_count.into()),
+        );
+        object.insert(
+            "reason".to_string(),
+            serde_json::Value::String(policy.reason.clone()),
         );
     }
     if let Some(crate::proto::bgp_event::Payload::StreamLag(lag)) = event.payload.as_ref()
@@ -416,14 +472,6 @@ pub async fn events_watch(
         .map(String::as_str)
         .map(parse_event_category)
         .collect::<Result<Vec<_>, _>>()?;
-    let session_only = categories.len() == 1 && categories[0] == EventCategory::Session as i32;
-    if session_only && (family.is_some() || prefix.is_some()) {
-        return Err(CliError::Argument(
-            "--family and --prefix are route-only filters and cannot be used with --category session"
-                .into(),
-        ));
-    }
-    let (prefix, prefix_length) = parse_optional_prefix_filter(prefix, family)?;
 
     let event_types = event_types
         .iter()
@@ -436,6 +484,8 @@ pub async fn events_watch(
             "--backfill requires a route-capable event stream".into(),
         ));
     }
+    validate_route_only_filters(&categories, &event_types, family, prefix.as_deref())?;
+    let (prefix, prefix_length) = parse_optional_prefix_filter(prefix, family)?;
     let mut client =
         EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let mut stream = client
@@ -646,6 +696,10 @@ mod tests {
             bgp_event_type_display_label(BgpEventType::RouteBestChanged as i32),
             "best_changed"
         );
+        assert_eq!(
+            bgp_event_type_display_label(BgpEventType::PolicyChanged as i32),
+            "policy_changed"
+        );
     }
 
     #[test]
@@ -737,5 +791,68 @@ mod tests {
         assert_eq!(value["subcode"], 7);
         assert_eq!(value["description"], "Connection Collision Resolution");
         assert!(value["afi_safi"].is_null());
+    }
+
+    #[test]
+    fn json_bgp_event_policy_includes_mutation_fields() {
+        let event = BgpEvent {
+            timestamp: "1".to_string(),
+            category: EventCategory::Policy as i32,
+            event_type: BgpEventType::PolicyChanged as i32,
+            severity: 1,
+            summary: "policy set policy audit-policy".to_string(),
+            payload: Some(crate::proto::bgp_event::Payload::Policy(
+                crate::proto::PolicyEvent {
+                    event_type: BgpEventType::PolicyChanged as i32,
+                    operation: "set".to_string(),
+                    target_type: "policy".to_string(),
+                    target: "audit-policy".to_string(),
+                    affected_peer_count: 2,
+                    timestamp: "1".to_string(),
+                    reason: "policy set policy audit-policy".to_string(),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+
+        let value = json_bgp_event(&event);
+        assert_eq!(value["category"], "policy");
+        assert_eq!(value["event_type"], "policy_changed");
+        assert_eq!(value["operation"], "set");
+        assert_eq!(value["target_type"], "policy");
+        assert_eq!(value["target"], "audit-policy");
+        assert_eq!(value["affected_peer_count"], 2);
+    }
+
+    #[test]
+    fn route_only_filters_reject_policy_only_category() {
+        let categories = vec![EventCategory::Policy as i32];
+        let err = validate_route_only_filters(&categories, &[], None, Some("203.0.113.0/24"))
+            .unwrap_err();
+        assert!(err.to_string().contains("route-only filters"));
+    }
+
+    #[test]
+    fn route_only_filters_allow_mixed_route_policy_category() {
+        let categories = vec![EventCategory::Route as i32, EventCategory::Policy as i32];
+        validate_route_only_filters(&categories, &[], None, Some("203.0.113.0/24")).unwrap();
+    }
+
+    #[test]
+    fn route_only_filters_reject_policy_type_without_route_type() {
+        let event_types = vec![BgpEventType::PolicyChanged as i32];
+        let err = validate_route_only_filters(&[], &event_types, None, Some("203.0.113.0/24"))
+            .unwrap_err();
+        assert!(err.to_string().contains("route-only filters"));
+    }
+
+    #[test]
+    fn route_only_filters_allow_mixed_route_policy_types() {
+        let event_types = vec![
+            BgpEventType::RouteAdded as i32,
+            BgpEventType::PolicyChanged as i32,
+        ];
+        validate_route_only_filters(&[], &event_types, None, Some("203.0.113.0/24")).unwrap();
     }
 }

@@ -41,8 +41,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Ordinary FSM state-change lifecycle delivery uses a bounded transport
   channel that is separate from the lossless TCP collision-coordination path,
   so session-event observability cannot grow the collision queue under churn.
-  Policy, dataplane, and EVPN event categories remain deferred until their
-  sources expose one complete structured event path.
+  Dataplane and EVPN event categories remain deferred until their sources
+  expose one complete structured event path.
 
 - **EventService BGP NOTIFICATION events.** `EventService.WatchEvents`
   now surfaces metadata-only sent/received BGP NOTIFICATION events under
@@ -57,6 +57,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bounded route or session event broadcast. The event includes the source
   category and missed count so operators can distinguish a complete live
   tail from a lossy one.
+
+- **EventService policy mutation events.** `EventService.WatchEvents`
+  now supports the opt-in `EVENT_CATEGORY_POLICY` /
+  `BGP_EVENT_TYPE_POLICY_CHANGED` stream. The peer manager emits one
+  `PolicyEvent` after each successful runtime policy, neighbor-set,
+  peer-group, or chain mutation, and `rustbgpctl events watch --category
+  policy --type policy_changed` renders the same live audit trail. This is a
+  live-only runtime-apply signal (not retained/backfilled, and lagging
+  subscribers may miss events), not per-route policy evaluation logging.
 
 - **Self-hosted kernel dataplane CI gate.** New
   `.github/workflows/kernel-dataplane.yml` runs the privileged Linux

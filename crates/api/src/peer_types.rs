@@ -117,6 +117,26 @@ pub struct SessionNotificationEvent {
     pub reason: String,
 }
 
+/// Structured policy/config mutation event broadcast by `PeerManager` and
+/// bridged by `EventService.WatchEvents`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyEvent {
+    /// Operation label such as `set`, `delete`, or `clear`.
+    pub operation: &'static str,
+    /// Target class such as `policy`, `neighbor_set`, or `peer_group`.
+    pub target_type: &'static str,
+    /// Target name or address-scoped target string.
+    pub target: String,
+    /// Peer address when this mutation is scoped to one peer.
+    pub peer: Option<IpAddr>,
+    /// Number of currently managed peers the runtime mutation touched.
+    pub affected_peer_count: usize,
+    /// Unix epoch seconds, string-shaped to match `RouteEvent`.
+    pub timestamp: String,
+    /// Operator-facing reason/summary.
+    pub reason: String,
+}
+
 /// Session-scoped event broadcast by `PeerManager`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEvent {
@@ -182,6 +202,11 @@ pub enum PeerManagerCommand {
     SubscribeSessionEvents {
         /// Reply channel returning a fresh broadcast receiver.
         reply: oneshot::Sender<broadcast::Receiver<SessionEvent>>,
+    },
+    /// Subscribe to live policy mutation events.
+    SubscribePolicyEvents {
+        /// Reply channel returning a fresh broadcast receiver.
+        reply: oneshot::Sender<broadcast::Receiver<PolicyEvent>>,
     },
     /// Query a single peer's state by address.
     GetPeerState {
