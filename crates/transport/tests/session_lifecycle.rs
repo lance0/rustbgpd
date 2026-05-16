@@ -498,11 +498,18 @@ async fn open_confirm_sends_session_notification() {
     // and send a SessionNotification::OpenReceived
     send_bgp_message(&mut peer_stream, &Message::Open(mock_open())).await;
 
-    // The notification should arrive before Established (no KEEPALIVE sent yet)
-    let notification = tokio::time::timeout(Duration::from_secs(5), notify_rx.recv())
-        .await
-        .expect("should receive notification within timeout")
-        .expect("channel should not be closed");
+    // The OpenReceived notification should arrive before Established (no
+    // KEEPALIVE sent yet). StateChanged notifications may arrive first.
+    let notification = loop {
+        let notification = tokio::time::timeout(Duration::from_secs(5), notify_rx.recv())
+            .await
+            .expect("should receive notification within timeout")
+            .expect("channel should not be closed");
+        if matches!(notification, SessionNotification::StateChanged { .. }) {
+            continue;
+        }
+        break notification;
+    };
 
     match notification {
         SessionNotification::OpenReceived {
@@ -558,11 +565,18 @@ async fn query_state_returns_router_id_at_open_confirm() {
     // Send our OPEN — rustbgpd transitions to OpenConfirm
     send_bgp_message(&mut peer_stream, &Message::Open(mock_open())).await;
 
-    // Wait for the OpenReceived notification to confirm we're in OpenConfirm
-    let notification = tokio::time::timeout(Duration::from_secs(5), notify_rx.recv())
-        .await
-        .expect("should receive notification within timeout")
-        .expect("channel should not be closed");
+    // Wait for the OpenReceived notification to confirm we're in OpenConfirm.
+    // StateChanged notifications may arrive first.
+    let notification = loop {
+        let notification = tokio::time::timeout(Duration::from_secs(5), notify_rx.recv())
+            .await
+            .expect("should receive notification within timeout")
+            .expect("channel should not be closed");
+        if matches!(notification, SessionNotification::StateChanged { .. }) {
+            continue;
+        }
+        break notification;
+    };
     assert!(matches!(
         notification,
         SessionNotification::OpenReceived { .. }

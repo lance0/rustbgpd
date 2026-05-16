@@ -4,19 +4,20 @@ use std::time::{Duration, Instant};
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, DynamicNeighborInfo, PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig,
-    ReconcileFailure, ReconcileFailureKind, ReconcileResult, SetGshutError,
+    ReconcileFailure, ReconcileFailureKind, ReconcileResult, SessionLifecycleEvent,
+    SessionLifecycleEventType, SetGshutError,
 };
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::{PeerConfig, SessionState};
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_rib::RibUpdate;
+use rustbgpd_rib::{RibUpdate, event::unix_timestamp_now};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{
     PeerHandle, PeerSessionState, SessionIdentity, SessionNotification, TransportConfig,
 };
 use rustbgpd_wire::{Afi, Safi};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
@@ -171,6 +172,7 @@ pub struct PeerManager {
     validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
     session_notify_tx: mpsc::UnboundedSender<SessionNotification>,
     session_notify_rx: mpsc::UnboundedReceiver<SessionNotification>,
+    session_events_tx: broadcast::Sender<SessionLifecycleEvent>,
     current_config: Config,
     /// Resolved dynamic neighbor ranges for prefix-based auto-accept.
     dynamic_ranges: Vec<DynamicRange>,
@@ -337,6 +339,7 @@ impl PeerManager {
         current_config: Config,
     ) -> Self {
         let (session_notify_tx, session_notify_rx) = mpsc::unbounded_channel();
+        let (session_events_tx, _) = broadcast::channel(4096);
         Self {
             peers: HashMap::new(),
             rx,
@@ -351,6 +354,7 @@ impl PeerManager {
             validation_rx,
             session_notify_tx,
             session_notify_rx,
+            session_events_tx,
             dynamic_ranges: Self::parse_dynamic_ranges(&current_config),
             dynamic_peer_count: 0,
             dynamic_neighbor_limit: current_config.global.dynamic_neighbor_limit.unwrap_or(100),
@@ -855,6 +859,89 @@ impl PeerManager {
         infos
     }
 
+    fn session_event_timestamp() -> String {
+        unix_timestamp_now()
+    }
+
+    fn session_role_label(role: rustbgpd_transport::SessionRole) -> &'static str {
+        match role {
+            rustbgpd_transport::SessionRole::Primary => "primary",
+            rustbgpd_transport::SessionRole::InboundCandidate => "inbound_candidate",
+        }
+    }
+
+    fn classify_state_event(old: SessionState, new: SessionState) -> SessionLifecycleEventType {
+        if new == SessionState::Established {
+            SessionLifecycleEventType::Established
+        } else if old == SessionState::Established {
+            SessionLifecycleEventType::Lost
+        } else {
+            SessionLifecycleEventType::StateChanged
+        }
+    }
+
+    fn publish_session_event(&self, event: SessionLifecycleEvent) {
+        let _ = self.session_events_tx.send(event);
+    }
+
+    fn publish_peer_lifecycle_event(
+        &self,
+        address: IpAddr,
+        event_type: SessionLifecycleEventType,
+        reason: String,
+    ) {
+        self.publish_session_event(SessionLifecycleEvent {
+            event_type,
+            peer: address,
+            timestamp: Self::session_event_timestamp(),
+            old_state: None,
+            new_state: None,
+            session_role: None,
+            reason,
+        });
+    }
+
+    fn publish_state_lifecycle_event(
+        &self,
+        peer_addr: IpAddr,
+        role: rustbgpd_transport::SessionRole,
+        old: SessionState,
+        new: SessionState,
+    ) {
+        let event_type = Self::classify_state_event(old, new);
+        let reason = match event_type {
+            SessionLifecycleEventType::Established => {
+                format!("session established for peer {peer_addr}")
+            }
+            SessionLifecycleEventType::Lost => {
+                format!(
+                    "session lost for peer {peer_addr}: {} -> {}",
+                    old.as_str(),
+                    new.as_str()
+                )
+            }
+            SessionLifecycleEventType::StateChanged => {
+                format!(
+                    "session state changed for peer {peer_addr}: {} -> {}",
+                    old.as_str(),
+                    new.as_str()
+                )
+            }
+            SessionLifecycleEventType::PeerEnabled | SessionLifecycleEventType::PeerDisabled => {
+                unreachable!("peer lifecycle events are emitted by publish_peer_lifecycle_event")
+            }
+        };
+        self.publish_session_event(SessionLifecycleEvent {
+            event_type,
+            peer: peer_addr,
+            timestamp: Self::session_event_timestamp(),
+            old_state: Some(old),
+            new_state: Some(new),
+            session_role: Some(Self::session_role_label(role).to_string()),
+            reason,
+        });
+    }
+
     async fn enable_peer(&mut self, address: IpAddr) -> Result<(), String> {
         let managed = self
             .peers
@@ -866,6 +953,11 @@ impl PeerManager {
             .start()
             .await
             .map_err(|e| format!("failed to start peer: {e}"))?;
+        self.publish_peer_lifecycle_event(
+            address,
+            SessionLifecycleEventType::PeerEnabled,
+            format!("peer {address} enabled"),
+        );
         info!(%address, "peer enabled");
         Ok(())
     }
@@ -895,6 +987,11 @@ impl PeerManager {
             .stop(reason)
             .await
             .map_err(|e| format!("failed to stop peer: {e}"))?;
+        self.publish_peer_lifecycle_event(
+            address,
+            SessionLifecycleEventType::PeerDisabled,
+            format!("peer {address} disabled"),
+        );
         info!(%address, "peer disabled");
         Ok(())
     }
@@ -1713,6 +1810,25 @@ impl PeerManager {
 
     async fn handle_session_notification(&mut self, notification: SessionNotification) {
         match notification {
+            SessionNotification::StateChanged {
+                session_id,
+                role,
+                peer_addr,
+                old,
+                new,
+            } => {
+                let matches_current = self.peers.get(&peer_addr).is_some_and(|m| {
+                    m.session_id == session_id
+                        || m.pending_inbound
+                            .as_ref()
+                            .is_some_and(|p| p.session_id == session_id)
+                });
+                if !matches_current {
+                    debug!(%peer_addr, session_id, ?role, "ignoring stale StateChanged notification");
+                    return;
+                }
+                self.publish_state_lifecycle_event(peer_addr, role, old, new);
+            }
             SessionNotification::OpenReceived {
                 session_id,
                 role,
@@ -2103,6 +2219,9 @@ impl PeerManager {
                             let infos = self.list_peers().await;
                             let _ = reply.send(infos);
                         }
+                        PeerManagerCommand::SubscribeSessionEvents { reply } => {
+                            let _ = reply.send(self.session_events_tx.subscribe());
+                        }
                         PeerManagerCommand::GetPeerState { address, reply } => {
                             let info = self.get_peer_info(address).await;
                             let _ = reply.send(info);
@@ -2346,7 +2465,7 @@ mod tests {
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-    use tokio::sync::oneshot;
+    use tokio::sync::{broadcast, oneshot};
 
     fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
         PeerManagerNeighborConfig {
@@ -2374,6 +2493,32 @@ mod tests {
             import_policy: None,
             export_policy: None,
         }
+    }
+
+    async fn subscribe_session_events(
+        tx: &mpsc::Sender<PeerManagerCommand>,
+    ) -> broadcast::Receiver<SessionLifecycleEvent> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::SubscribeSessionEvents { reply: reply_tx })
+            .await
+            .unwrap();
+        reply_rx.await.unwrap()
+    }
+
+    async fn wait_for_session_event(
+        rx: &mut broadcast::Receiver<SessionLifecycleEvent>,
+        event_type: SessionLifecycleEventType,
+    ) -> SessionLifecycleEvent {
+        for _ in 0..20 {
+            let event = tokio::time::timeout(Duration::from_millis(250), rx.recv())
+                .await
+                .expect("session event timeout")
+                .expect("session event channel closed");
+            if event.event_type == event_type {
+                return event;
+            }
+        }
+        panic!("session event {event_type:?} did not arrive");
     }
 
     fn mock_open(router_id: Ipv4Addr) -> OpenMessage {
@@ -2659,6 +2804,104 @@ mod tests {
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].address, addr);
         assert_eq!(peers[0].remote_asn, 65002);
+
+        tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_events_publish_state_changes() {
+        let (tx, rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mgr = PeerManager::new(
+            rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+        );
+        let handle = tokio::spawn(mgr.run());
+        let mut events = subscribe_session_events(&tx).await;
+
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::AddPeer {
+            config: make_config(addr, 65002),
+            sync_config_snapshot: false,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        assert!(reply_rx.await.unwrap().is_ok());
+
+        let event =
+            wait_for_session_event(&mut events, SessionLifecycleEventType::StateChanged).await;
+        assert_eq!(event.peer, addr);
+        assert_eq!(event.session_role.as_deref(), Some("primary"));
+        assert!(event.old_state.is_some());
+        assert!(event.new_state.is_some());
+
+        tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_events_publish_peer_enable_disable() {
+        let (tx, rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mgr = PeerManager::new(
+            rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+        );
+        let handle = tokio::spawn(mgr.run());
+
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::AddPeer {
+            config: make_config(addr, 65002),
+            sync_config_snapshot: false,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        assert!(reply_rx.await.unwrap().is_ok());
+
+        let mut events = subscribe_session_events(&tx).await;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::DisablePeer {
+            address: addr,
+            reason: None,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        assert!(reply_rx.await.unwrap().is_ok());
+        let event =
+            wait_for_session_event(&mut events, SessionLifecycleEventType::PeerDisabled).await;
+        assert_eq!(event.peer, addr);
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::EnablePeer {
+            address: addr,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        assert!(reply_rx.await.unwrap().is_ok());
+        let event =
+            wait_for_session_event(&mut events, SessionLifecycleEventType::PeerEnabled).await;
+        assert_eq!(event.peer, addr);
 
         tx.send(PeerManagerCommand::Shutdown).await.unwrap();
         handle.await.unwrap();
@@ -4692,11 +4935,18 @@ mod tests {
         )
         .await;
 
-        let notification =
-            tokio::time::timeout(Duration::from_secs(2), mgr.session_notify_rx.recv())
-                .await
-                .expect("candidate should notify OpenReceived")
-                .expect("notification channel should stay open");
+        let notification = loop {
+            let notification =
+                tokio::time::timeout(Duration::from_secs(2), mgr.session_notify_rx.recv())
+                    .await
+                    .expect("candidate should notify OpenReceived")
+                    .expect("notification channel should stay open");
+            if matches!(notification, SessionNotification::StateChanged { .. }) {
+                mgr.handle_session_notification(notification).await;
+                continue;
+            }
+            break notification;
+        };
         match &notification {
             SessionNotification::OpenReceived {
                 role,
@@ -4706,7 +4956,8 @@ mod tests {
                 assert_eq!(*role, rustbgpd_transport::SessionRole::InboundCandidate);
                 assert_eq!(*remote_router_id, Ipv4Addr::new(10, 0, 0, 2));
             }
-            other @ SessionNotification::BackToIdle { .. } => {
+            other @ (SessionNotification::BackToIdle { .. }
+            | SessionNotification::StateChanged { .. }) => {
                 panic!("expected OpenReceived from candidate, got {other:?}");
             }
         }

@@ -67,9 +67,22 @@ impl Default for SessionIdentity {
 }
 
 /// Notifications sent from a peer session to the `PeerManager` for
-/// collision detection coordination.
+/// collision coordination and lifecycle event publication.
 #[derive(Debug)]
 pub enum SessionNotification {
+    /// BGP FSM state changed.
+    StateChanged {
+        /// Peer-manager scoped session generation.
+        session_id: u64,
+        /// Role the session had when spawned.
+        role: SessionRole,
+        /// IP address of the remote peer.
+        peer_addr: IpAddr,
+        /// Previous FSM state.
+        old: SessionState,
+        /// New FSM state.
+        new: SessionState,
+    },
     /// Session received a valid OPEN and transitioned to `OpenConfirm`.
     OpenReceived {
         /// Peer-manager scoped session generation.

@@ -26,6 +26,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   route-event-type filters while leaving `WatchRoutes` and
   `ListRouteEvents` unchanged.
 
+- **EventService session lifecycle events.** `EventService.WatchEvents`
+  now also carries structured session events from the peer manager:
+  `session_state_changed`, `session_established`, `session_lost`,
+  `peer_enabled`, and `peer_disabled`. `rustbgpctl events watch
+  --category session` tails those events with peer and type filters.
+  Notification sent/received, policy, dataplane, and EVPN event
+  categories remain deferred until their sources expose one complete
+  structured event path.
+
 - **Self-hosted kernel dataplane CI gate.** New
   `.github/workflows/kernel-dataplane.yml` runs the privileged Linux
   dataplane checks that hosted runners cannot reliably exercise:
