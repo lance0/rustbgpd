@@ -73,6 +73,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   live-only runtime-apply signal (not retained/backfilled, and lagging
   subscribers may miss events), not per-route policy evaluation logging.
 
+- **Bounded session-event history.** `EventService.ListSessionEvents`
+  returns recent peer lifecycle events from the peer manager's in-memory
+  4096-event ring, filtered by peer, session event type, and limit.
+  `rustbgpctl events sessions` exposes the same after-the-fact session
+  flap context while `WatchEvents` remains a live-only stream.
+
 - **Self-hosted kernel dataplane CI gate.** New
   `.github/workflows/kernel-dataplane.yml` runs the privileged Linux
   dataplane checks that hosted runners cannot reliably exercise:

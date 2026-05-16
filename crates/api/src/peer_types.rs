@@ -1,5 +1,6 @@
 //! Shared types for peer management across the API and `PeerManager`.
 
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv6Addr};
 
 use bytes::Bytes;
@@ -9,6 +10,9 @@ use rustbgpd_transport::RemovePrivateAs;
 use rustbgpd_wire::{Afi, Safi};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, oneshot};
+
+/// Maximum number of recent session lifecycle events retained in memory.
+pub const SESSION_EVENT_HISTORY_CAPACITY: usize = 4096;
 
 /// Kind of reconciliation failure returned to config reload callers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +54,7 @@ impl ReconcileResult {
 }
 
 /// Session lifecycle event type published by `PeerManager`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SessionLifecycleEventType {
     /// BGP FSM state changed.
     StateChanged,
@@ -207,6 +211,17 @@ pub enum PeerManagerCommand {
     SubscribePolicyEvents {
         /// Reply channel returning a fresh broadcast receiver.
         reply: oneshot::Sender<broadcast::Receiver<PolicyEvent>>,
+    },
+    /// Query recent session lifecycle events from the bounded in-memory history.
+    QuerySessionEventHistory {
+        /// Optional peer filter.
+        peer: Option<IpAddr>,
+        /// Optional event-type filter.
+        event_types: BTreeSet<SessionLifecycleEventType>,
+        /// Maximum events to return. 0 uses [`SESSION_EVENT_HISTORY_CAPACITY`].
+        limit: usize,
+        /// Reply channel returning matching events.
+        reply: oneshot::Sender<Vec<SessionLifecycleEvent>>,
     },
     /// Query a single peer's state by address.
     GetPeerState {

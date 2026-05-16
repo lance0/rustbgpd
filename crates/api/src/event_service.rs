@@ -205,11 +205,37 @@ impl WatchEventsFilter {
     }
 }
 
+struct SessionEventHistoryFilter {
+    peer: Option<IpAddr>,
+    event_types: BTreeSet<SessionLifecycleEventType>,
+    limit: usize,
+}
+
 fn route_event_type_to_bgp_event_type(event_type: RouteEventType) -> proto::BgpEventType {
     match event_type {
         RouteEventType::Added => proto::BgpEventType::RouteAdded,
         RouteEventType::Withdrawn => proto::BgpEventType::RouteWithdrawn,
         RouteEventType::BestChanged => proto::BgpEventType::RouteBestChanged,
+    }
+}
+
+fn bgp_event_type_to_session_event_type(
+    event_type: proto::BgpEventType,
+) -> Option<SessionLifecycleEventType> {
+    match event_type {
+        proto::BgpEventType::SessionStateChanged => Some(SessionLifecycleEventType::StateChanged),
+        proto::BgpEventType::SessionEstablished => Some(SessionLifecycleEventType::Established),
+        proto::BgpEventType::SessionLost => Some(SessionLifecycleEventType::Lost),
+        proto::BgpEventType::PeerEnabled => Some(SessionLifecycleEventType::PeerEnabled),
+        proto::BgpEventType::PeerDisabled => Some(SessionLifecycleEventType::PeerDisabled),
+        proto::BgpEventType::Unspecified
+        | proto::BgpEventType::RouteAdded
+        | proto::BgpEventType::RouteWithdrawn
+        | proto::BgpEventType::RouteBestChanged
+        | proto::BgpEventType::NotificationSent
+        | proto::BgpEventType::NotificationReceived
+        | proto::BgpEventType::PolicyChanged
+        | proto::BgpEventType::StreamLagged => None,
     }
 }
 
@@ -269,6 +295,28 @@ fn parse_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<i32>, Status>
     Ok(parsed)
 }
 
+fn parse_session_event_type_filter(
+    event_types: &[i32],
+) -> Result<BTreeSet<SessionLifecycleEventType>, Status> {
+    let mut parsed = BTreeSet::new();
+    for event_type in event_types {
+        let event_type = proto::BgpEventType::try_from(*event_type)
+            .map_err(|_| Status::invalid_argument("unknown event type"))?;
+        if event_type == proto::BgpEventType::Unspecified {
+            return Err(Status::invalid_argument(
+                "BGP_EVENT_TYPE_UNSPECIFIED is not a valid filter",
+            ));
+        }
+        let Some(session_type) = bgp_event_type_to_session_event_type(event_type) else {
+            return Err(Status::invalid_argument(
+                "ListSessionEvents only supports session event types",
+            ));
+        };
+        parsed.insert(session_type);
+    }
+    Ok(parsed)
+}
+
 fn session_lifecycle_event_type_to_bgp_event_type(
     event_type: SessionLifecycleEventType,
 ) -> proto::BgpEventType {
@@ -311,6 +359,27 @@ fn parse_watch_events_filter(req: &proto::WatchEventsRequest) -> Result<WatchEve
         peer,
         afi,
         prefix,
+    })
+}
+
+fn parse_list_session_events_filter(
+    req: &proto::ListSessionEventsRequest,
+) -> Result<SessionEventHistoryFilter, Status> {
+    let event_types = parse_session_event_type_filter(&req.event_types)?;
+    let peer = if req.neighbor_address.is_empty() {
+        None
+    } else {
+        Some(
+            req.neighbor_address
+                .parse::<IpAddr>()
+                .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?,
+        )
+    };
+
+    Ok(SessionEventHistoryFilter {
+        peer,
+        event_types,
+        limit: req.limit as usize,
     })
 }
 
@@ -627,16 +696,44 @@ impl proto::event_service_server::EventService for EventService {
             route_stream.merge(session_stream).merge(policy_stream),
         )))
     }
+
+    async fn list_session_events(
+        &self,
+        request: Request<proto::ListSessionEventsRequest>,
+    ) -> Result<Response<proto::ListSessionEventsResponse>, Status> {
+        let filter = parse_list_session_events_filter(&request.into_inner())?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::QuerySessionEventHistory {
+                peer: filter.peer,
+                event_types: filter.event_types,
+                limit: filter.limit,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("peer manager unavailable"))?;
+        let events = reply_rx
+            .await
+            .map_err(|_| Status::internal("peer manager dropped reply"))?;
+        Ok(Response::new(proto::ListSessionEventsResponse {
+            events: events
+                .into_iter()
+                .map(|event| session_event_to_bgp_event(SessionEvent::Lifecycle(event)))
+                .collect(),
+        }))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peer_types::SESSION_EVENT_HISTORY_CAPACITY;
     use crate::proto::event_service_server::EventService as EventServiceTrait;
     use rustbgpd_fsm::SessionState;
     use rustbgpd_rib::RouteEvent;
     use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix};
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::sync::Arc;
     use tokio::sync::{broadcast, mpsc};
     use tokio_stream::StreamExt;
 
@@ -692,8 +789,61 @@ mod tests {
         (peer_tx, session_events_tx, policy_events_tx)
     }
 
+    fn spawn_fake_peer_manager_with_history(
+        history: Vec<SessionLifecycleEvent>,
+    ) -> mpsc::Sender<PeerManagerCommand> {
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (events_tx, _) = broadcast::channel(16);
+        let history = Arc::new(history);
+        tokio::spawn(async move {
+            while let Some(command) = peer_rx.recv().await {
+                match command {
+                    PeerManagerCommand::SubscribeSessionEvents { reply } => {
+                        let _ = reply.send(events_tx.subscribe());
+                    }
+                    PeerManagerCommand::QuerySessionEventHistory {
+                        peer,
+                        event_types,
+                        limit,
+                        reply,
+                    } => {
+                        let limit = if limit == 0 {
+                            SESSION_EVENT_HISTORY_CAPACITY
+                        } else {
+                            limit.min(SESSION_EVENT_HISTORY_CAPACITY)
+                        };
+                        let mut events: Vec<_> = history
+                            .iter()
+                            .rev()
+                            .filter(|event| match peer {
+                                Some(peer) => event.peer == peer,
+                                None => true,
+                            })
+                            .filter(|event| {
+                                event_types.is_empty() || event_types.contains(&event.event_type)
+                            })
+                            .take(limit)
+                            .cloned()
+                            .collect();
+                        events.reverse();
+                        let _ = reply.send(events);
+                    }
+                    _ => {}
+                }
+            }
+        });
+        peer_tx
+    }
+
     fn session_event(peer: IpAddr, event_type: SessionLifecycleEventType) -> SessionEvent {
-        SessionEvent::Lifecycle(SessionLifecycleEvent {
+        SessionEvent::Lifecycle(lifecycle_event(peer, event_type))
+    }
+
+    fn lifecycle_event(
+        peer: IpAddr,
+        event_type: SessionLifecycleEventType,
+    ) -> SessionLifecycleEvent {
+        SessionLifecycleEvent {
             event_type,
             peer,
             timestamp: "456".to_string(),
@@ -701,7 +851,7 @@ mod tests {
             new_state: Some(SessionState::Established),
             session_role: Some("primary".to_string()),
             reason: format!("session event for peer {peer}"),
-        })
+        }
     }
 
     fn notification_event(peer: IpAddr, event_type: SessionNotificationEventType) -> SessionEvent {
@@ -890,6 +1040,57 @@ mod tests {
         assert_eq!(notification.code, 6);
         assert_eq!(notification.subcode, 7);
         assert_eq!(notification.description, "Connection Collision Resolution");
+    }
+
+    #[tokio::test]
+    async fn list_session_events_returns_bgp_event_history() {
+        let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let peer_tx = spawn_fake_peer_manager_with_history(vec![
+            lifecycle_event(peer1, SessionLifecycleEventType::PeerEnabled),
+            lifecycle_event(peer2, SessionLifecycleEventType::PeerDisabled),
+            lifecycle_event(peer1, SessionLifecycleEventType::PeerDisabled),
+        ]);
+        let (rib_tx, _) = spawn_fake_rib();
+        let service = EventService::new(rib_tx, peer_tx);
+
+        let response = service
+            .list_session_events(Request::new(proto::ListSessionEventsRequest {
+                neighbor_address: peer1.to_string(),
+                event_types: vec![proto::BgpEventType::PeerDisabled as i32],
+                limit: 10,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.events.len(), 1);
+        let event = &response.events[0];
+        assert_eq!(event.category, proto::EventCategory::Session as i32);
+        assert_eq!(event.event_type, proto::BgpEventType::PeerDisabled as i32);
+        assert_eq!(event.peer_address, peer1.to_string());
+        assert!(matches!(
+            event.payload,
+            Some(proto::bgp_event::Payload::Session(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_session_events_rejects_route_event_type_filter() {
+        let (rib_tx, _) = spawn_fake_rib();
+        let peer_tx = spawn_fake_peer_manager_with_history(Vec::new());
+        let service = EventService::new(rib_tx, peer_tx);
+
+        let Err(err) = service
+            .list_session_events(Request::new(proto::ListSessionEventsRequest {
+                event_types: vec![proto::BgpEventType::RouteAdded as i32],
+                ..Default::default()
+            }))
+            .await
+        else {
+            panic!("route event type should be rejected for session history");
+        };
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 
     #[tokio::test]

@@ -601,6 +601,7 @@ source.
 | RPC | Description |
 |-----|-------------|
 | `WatchEvents` | Server-streaming: unified typed event stream sourced from structured daemon events |
+| `ListSessionEvents` | Unary: recent session lifecycle events from the peer manager's bounded in-memory history |
 
 ### Watch unified events
 
@@ -628,6 +629,11 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"categories": ["EVENT_CATEGORY_POLICY"], "event_types": ["BGP_EVENT_TYPE_POLICY_CHANGED"]}' \
   localhost:50051 rustbgpd.v1.EventService/WatchEvents
+
+# Query recent session establishment/loss history for one peer
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"event_types": ["BGP_EVENT_TYPE_SESSION_ESTABLISHED", "BGP_EVENT_TYPE_SESSION_LOST"], "neighbor_address": "10.0.0.2", "limit": 20}' \
+  localhost:50051 rustbgpd.v1.EventService/ListSessionEvents
 ```
 
 `WatchEvents` is a live stream only: it does not replay the bounded
@@ -661,6 +667,14 @@ set `prefix` or `afi_safi`. `BgpEvent` repeats common fields such as peer,
 prefix, type, and severity at the top level even when the payload also carries
 them so category-agnostic clients can render or filter events without unpacking
 the `oneof`.
+
+`ListSessionEvents` accepts `neighbor_address`, session-only `event_types`, and
+`limit` filters. Empty `event_types` means all session event types. The history
+ring holds at most 4096 events; `limit = 0` requests that full bounded daemon
+window, and larger values are clamped to the same ceiling. Responses contain
+the most recent matching events, ordered oldest-to-newest within that selected
+recent window. Route event types are rejected for this RPC; use
+`RibService.ListRouteEvents` for route history.
 
 Session event types:
 

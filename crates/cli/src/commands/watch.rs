@@ -4,8 +4,8 @@ use crate::output::{self, JsonRouteEvent};
 use crate::proto::event_service_client::EventServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
-    AddressFamily, BgpEvent, BgpEventType, EventCategory, ListRouteEventsRequest, RouteEvent,
-    RouteEventType, WatchEventsRequest, WatchRoutesRequest,
+    AddressFamily, BgpEvent, BgpEventType, EventCategory, ListRouteEventsRequest,
+    ListSessionEventsRequest, RouteEvent, RouteEventType, WatchEventsRequest, WatchRoutesRequest,
 };
 use std::net::IpAddr;
 
@@ -95,6 +95,20 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
         "stream_lagged" | "lagged" => Ok(BgpEventType::StreamLagged as i32),
         other => Err(CliError::Argument(format!(
             "unsupported event type {other:?}; expected added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, or stream_lagged"
+        ))),
+    }
+}
+
+fn parse_session_bgp_event_type(s: &str) -> Result<i32, CliError> {
+    let event_type = parse_bgp_event_type(s)?;
+    match BgpEventType::try_from(event_type) {
+        Ok(BgpEventType::SessionStateChanged)
+        | Ok(BgpEventType::SessionEstablished)
+        | Ok(BgpEventType::SessionLost)
+        | Ok(BgpEventType::PeerEnabled)
+        | Ok(BgpEventType::PeerDisabled) => Ok(event_type),
+        _ => Err(CliError::Argument(format!(
+            "unsupported session event type {s:?}; expected state_changed, established, lost, peer_enabled, or peer_disabled"
         ))),
     }
 }
@@ -571,6 +585,35 @@ pub async fn history(
     Ok(())
 }
 
+pub async fn session_history(
+    connection: Connection,
+    neighbor: Option<String>,
+    event_types: Vec<String>,
+    limit: u32,
+    json: bool,
+) -> Result<(), CliError> {
+    let event_types = event_types
+        .iter()
+        .map(String::as_str)
+        .map(parse_session_bgp_event_type)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut client =
+        EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let response = client
+        .list_session_events(ListSessionEventsRequest {
+            neighbor_address: neighbor.unwrap_or_default(),
+            event_types,
+            limit,
+        })
+        .await?
+        .into_inner();
+
+    for event in response.events {
+        print_bgp_event(&event, json);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -905,5 +948,14 @@ mod tests {
         assert_eq!(value["prefix"], "203.0.113.0/24");
         assert_eq!(value["afi_safi"], "ipv4_unicast");
         assert_eq!(value["summary"], "route withdrawn 203.0.113.0/24");
+    }
+
+    #[test]
+    fn session_history_type_parser_rejects_route_types() {
+        assert_eq!(
+            parse_session_bgp_event_type("established").unwrap(),
+            BgpEventType::SessionEstablished as i32
+        );
+        assert!(parse_session_bgp_event_type("added").is_err());
     }
 }

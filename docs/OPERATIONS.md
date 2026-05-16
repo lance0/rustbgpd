@@ -462,6 +462,7 @@ rustbgpctl events watch --prefix 203.0.113.0/24 --type added,best_changed
 rustbgpctl events watch --category session --type established,lost
 rustbgpctl events watch --category session --type notification_sent,notification_received
 rustbgpctl events watch --category policy --type policy_changed
+rustbgpctl events sessions --address 10.0.0.2 --type established,lost --limit 20
 ```
 
 `events watch` tails the unified `EventService.WatchEvents` stream. The
@@ -485,7 +486,12 @@ live only. Backfilled route events use the same output shape as live route
 events, but the command still prints a history block followed by the live tail
 rather than merging the two by wall-clock timestamp. Dataplane and EVPN events
 remain follow-up work. For recent route history without a live tail, use
-`rustbgpctl events --prefix <PREFIX>`.
+`rustbgpctl events --prefix <PREFIX>`. For recent session lifecycle history,
+use `rustbgpctl events sessions`; it reads the peer manager's bounded
+process-local history and resets on daemon restart. The CLI returns 100
+history entries by default. The session-history API uses `limit = 0` as a
+daemon-default sentinel, so `rustbgpctl events sessions --limit 0` requests
+the full bounded in-memory window rather than zero rows.
 
 ### Pick the right observability surface
 
