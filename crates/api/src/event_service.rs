@@ -854,6 +854,41 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn route_bgp_event_contract_duplicates_common_fields() {
+        let event = RouteEvent {
+            event_type: RouteEventType::BestChanged,
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+            peer: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+            previous_peer: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
+            timestamp: "123".to_string(),
+            path_id: 42,
+        };
+
+        let bgp_event = route_event_to_bgp_event(event);
+
+        assert_eq!(bgp_event.timestamp, "123");
+        assert_eq!(bgp_event.category, proto::EventCategory::Route as i32);
+        assert_eq!(
+            bgp_event.event_type,
+            proto::BgpEventType::RouteBestChanged as i32
+        );
+        assert_eq!(bgp_event.severity, proto::EventSeverity::Info as i32);
+        assert_eq!(bgp_event.peer_address, "10.0.0.1");
+        assert_eq!(bgp_event.previous_peer_address, "10.0.0.2");
+        assert_eq!(bgp_event.prefix, "203.0.113.0");
+        assert_eq!(bgp_event.prefix_length, 24);
+        assert_eq!(bgp_event.afi_safi, proto::AddressFamily::Ipv4Unicast as i32);
+        assert_eq!(bgp_event.summary, "route best changed 203.0.113.0/24");
+
+        let Some(proto::bgp_event::Payload::Route(route)) = bgp_event.payload else {
+            panic!("expected route payload");
+        };
+        assert_eq!(route.peer_address, bgp_event.peer_address);
+        assert_eq!(route.previous_peer_address, bgp_event.previous_peer_address);
+        assert_eq!(route.path_id, 42);
+    }
+
     #[tokio::test]
     async fn dataplane_category_filter_does_not_subscribe_route_or_session_events() {
         let (rib_tx, route_events_tx) = spawn_fake_rib();
@@ -1201,6 +1236,37 @@ mod tests {
             panic!("unsupported category filter should fail");
         };
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn rejects_unspecified_category_and_event_type_filters() {
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, _) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+
+        let Err(err) = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Unspecified as i32],
+                ..Default::default()
+            }))
+            .await
+        else {
+            panic!("unspecified category filter should fail");
+        };
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("EVENT_CATEGORY_UNSPECIFIED"));
+
+        let Err(err) = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                event_types: vec![proto::BgpEventType::Unspecified as i32],
+                ..Default::default()
+            }))
+            .await
+        else {
+            panic!("unspecified event-type filter should fail");
+        };
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("BGP_EVENT_TYPE_UNSPECIFIED"));
     }
 
     #[tokio::test]

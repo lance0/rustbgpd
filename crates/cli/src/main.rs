@@ -1587,6 +1587,36 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_events_watch_comma_filters() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "events",
+            "watch",
+            "--category",
+            "route,session",
+            "--type",
+            "added,established",
+            "--address",
+            "192.0.2.1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Events {
+                action: Some(EventsAction::Watch {
+                    ref categories,
+                    ref event_types,
+                    address: Some(ref address),
+                    ..
+                }),
+                ..
+            } if categories == &vec!["route".to_string(), "session".to_string()]
+                && event_types == &vec!["added".to_string(), "established".to_string()]
+                && address == "192.0.2.1"
+        ));
+    }
+
+    #[test]
     fn test_parse_community_str() {
         assert_eq!(
             parse_community_str("65001:100").unwrap(),
