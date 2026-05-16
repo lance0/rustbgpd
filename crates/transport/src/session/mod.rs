@@ -139,11 +139,13 @@ pub(crate) struct PeerSession {
     advertise_graceful_shutdown: bool,
     /// Channel to notify `PeerManager` of lossless collision-coordination events.
     /// Unbounded so notifications are never dropped and never block (avoids
-    /// deadlock with `QueryState`).
+    /// deadlock with `QueryState`). `OpenConfirm` and `Idle` state-change
+    /// notifications also use this ordered path when paired with
+    /// `OpenReceived` / `BackToIdle`.
     session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
     /// Bounded operator-facing lifecycle event channel.
     ///
-    /// This carries ordinary FSM `StateChanged` observations used by
+    /// This carries ordinary non-collision FSM `StateChanged` observations used by
     /// `EventService.WatchEvents`. It is intentionally lossy under sustained
     /// churn so observability cannot grow the collision-coordination channel.
     session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,

@@ -67,7 +67,7 @@ impl Default for SessionIdentity {
 }
 
 /// Lossless notifications sent from a peer session to the `PeerManager` for
-/// TCP collision coordination.
+/// TCP collision coordination and ordered collision-adjacent lifecycle edges.
 ///
 /// This path is intentionally unbounded so collision decisions never block or
 /// drop. High-volume operator lifecycle events use
@@ -77,8 +77,10 @@ pub enum SessionNotification {
     /// BGP FSM state changed.
     ///
     /// Kept for compatibility with tests and external users of the transport
-    /// crate. New peer sessions publish normal state changes over the bounded
-    /// [`SessionLifecycleNotification`] channel.
+    /// crate. New peer sessions publish ordinary non-collision state changes
+    /// over the bounded [`SessionLifecycleNotification`] channel, while
+    /// `OpenConfirm` / `Idle` remain on this ordered path when paired with
+    /// `OpenReceived` / `BackToIdle`.
     StateChanged {
         /// Peer-manager scoped session generation.
         session_id: u64,

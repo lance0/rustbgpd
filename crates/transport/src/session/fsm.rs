@@ -134,32 +134,20 @@ impl PeerSession {
                         new.as_str(),
                     );
 
-                    // Publish operator-facing lifecycle state changes over the
-                    // bounded lifecycle channel. These events are allowed to
-                    // drop under sustained churn; collision coordination below
-                    // stays on the lossless notification path.
-                    if let Some(ref lifecycle_tx) = self.session_lifecycle_tx {
-                        match lifecycle_tx.try_send(SessionLifecycleNotification::StateChanged {
-                            session_id: self.session_identity.id,
-                            role: self.session_identity.role,
-                            peer_addr: self.peer_ip,
-                            old,
-                            new,
-                        }) {
-                            Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                debug!(
-                                    peer = %self.peer_label,
-                                    "dropped StateChanged lifecycle event because channel is full"
-                                );
-                            }
-                            Err(mpsc::error::TrySendError::Closed(_)) => {
-                                debug!(
-                                    peer = %self.peer_label,
-                                    "dropped StateChanged lifecycle event because channel is closed"
-                                );
-                            }
-                        }
+                    // Publish ordinary operator-facing lifecycle state changes
+                    // over the bounded lifecycle channel. Transitions paired
+                    // with collision-control notifications stay on the
+                    // lossless path below so PeerManager observes
+                    // StateChanged before OpenReceived / BackToIdle for the
+                    // same session. Existing callers that do not opt into the
+                    // lifecycle channel keep the legacy StateChanged
+                    // notification behavior.
+                    let ordered_collision_transition =
+                        matches!(new, SessionState::OpenConfirm | SessionState::Idle);
+                    if ordered_collision_transition || self.session_lifecycle_tx.is_none() {
+                        self.send_lossless_state_changed(old, new);
+                    } else {
+                        self.try_send_lifecycle_state_changed(old, new);
                     }
 
                     // Notify PeerManager for lossless collision detection.
@@ -439,6 +427,50 @@ impl PeerSession {
         }
 
         follow_up
+    }
+
+    fn send_lossless_state_changed(&self, old: SessionState, new: SessionState) {
+        if let Some(ref notify_tx) = self.session_notify_tx
+            && let Err(e) = notify_tx.send(SessionNotification::StateChanged {
+                session_id: self.session_identity.id,
+                role: self.session_identity.role,
+                peer_addr: self.peer_ip,
+                old,
+                new,
+            })
+        {
+            warn!(
+                peer = %self.peer_label,
+                error = %e,
+                "failed to send StateChanged notification"
+            );
+        }
+    }
+
+    fn try_send_lifecycle_state_changed(&self, old: SessionState, new: SessionState) {
+        if let Some(ref lifecycle_tx) = self.session_lifecycle_tx {
+            match lifecycle_tx.try_send(SessionLifecycleNotification::StateChanged {
+                session_id: self.session_identity.id,
+                role: self.session_identity.role,
+                peer_addr: self.peer_ip,
+                old,
+                new,
+            }) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    debug!(
+                        peer = %self.peer_label,
+                        "dropped StateChanged lifecycle event because channel is full"
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    debug!(
+                        peer = %self.peer_label,
+                        "dropped StateChanged lifecycle event because channel is closed"
+                    );
+                }
+            }
+        }
     }
 }
 

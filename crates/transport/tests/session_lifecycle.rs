@@ -4,7 +4,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
-use rustbgpd_fsm::PeerConfig;
+use rustbgpd_fsm::{PeerConfig, SessionState};
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{
@@ -509,6 +509,110 @@ async fn state_changed_uses_bounded_lifecycle_channel() {
         notify_rx.try_recv().is_err(),
         "ordinary StateChanged events should not use the lossless collision channel"
     );
+
+    handle.shutdown().await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn legacy_identity_constructor_preserves_state_changed_notifications() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let metrics = BgpMetrics::new();
+
+    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<SessionNotification>();
+    let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let handle = PeerHandle::spawn_with_identity(
+        transport_config(addr),
+        metrics,
+        rib_tx,
+        None,
+        None,
+        Some(notify_tx),
+        None,
+        None,
+        false,
+        SessionIdentity::primary(7),
+    );
+    handle.start().await.unwrap();
+
+    let (_peer_stream, _) = listener.accept().await.unwrap();
+    let notification = tokio::time::timeout(Duration::from_secs(5), notify_rx.recv())
+        .await
+        .expect("legacy StateChanged notification should arrive")
+        .expect("notification channel should stay open");
+
+    assert!(
+        matches!(
+            notification,
+            SessionNotification::StateChanged { session_id: 7, .. }
+        ),
+        "legacy constructor must keep StateChanged on the notification channel"
+    );
+
+    handle.shutdown().await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn terminal_idle_state_changed_precedes_back_to_idle() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let metrics = BgpMetrics::new();
+
+    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<SessionNotification>();
+    let (lifecycle_tx, _lifecycle_rx) = mpsc::channel::<SessionLifecycleNotification>(8);
+    let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let handle = PeerHandle::spawn_with_identity_and_lifecycle(
+        transport_config(addr),
+        metrics,
+        rib_tx,
+        None,
+        None,
+        Some(notify_tx),
+        Some(lifecycle_tx),
+        None,
+        None,
+        false,
+        SessionIdentity::primary(9),
+    );
+    handle.start().await.unwrap();
+
+    let (mut peer_stream, _) = listener.accept().await.unwrap();
+    let mut buf = BytesMut::with_capacity(4096);
+    let msg = read_bgp_message(&mut peer_stream, &mut buf).await;
+    assert!(matches!(msg, Message::Open(_)));
+    send_bgp_message(&mut peer_stream, &Message::Open(mock_open())).await;
+    let msg = read_bgp_message(&mut peer_stream, &mut buf).await;
+    assert!(matches!(msg, Message::Keepalive));
+    let notif = NotificationMessage::new(NotificationCode::Cease, 0, Bytes::new());
+    send_bgp_message(&mut peer_stream, &Message::Notification(notif)).await;
+
+    let mut saw_idle_state_changed = false;
+    loop {
+        let notification = tokio::time::timeout(Duration::from_secs(5), notify_rx.recv())
+            .await
+            .expect("terminal notifications should arrive")
+            .expect("notification channel should stay open");
+        match notification {
+            SessionNotification::StateChanged {
+                session_id,
+                new: SessionState::Idle,
+                ..
+            } => {
+                assert_eq!(session_id, 9);
+                saw_idle_state_changed = true;
+            }
+            SessionNotification::BackToIdle { session_id, .. } => {
+                assert_eq!(session_id, 9);
+                assert!(
+                    saw_idle_state_changed,
+                    "BackToIdle must not overtake terminal StateChanged"
+                );
+                break;
+            }
+            SessionNotification::OpenReceived { .. } | SessionNotification::StateChanged { .. } => {
+            }
+        }
+    }
 
     handle.shutdown().await.unwrap().unwrap();
 }
