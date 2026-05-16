@@ -70,6 +70,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Locally injected and withdrawn FlowSpec rules whose encoded NLRI
+  payload would exceed the 4095-byte RFC 8955 rule-length limit now
+  fail request validation with `InvalidArgument` instead of reaching
+  outbound encode and silently wrapping the 12-bit length field.
+
 - `RibService` prefix-length validation now rejects out-of-range values
   (`> 32` for IPv4, `> 128` for IPv6) on `ExplainAdvertisedRoute`,
   `ExplainBestPath`, and `ListRouteEvents` instead of silently clamping to

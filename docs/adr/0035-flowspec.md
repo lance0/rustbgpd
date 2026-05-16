@@ -87,6 +87,11 @@ the scope of unicast-only operation.
 type-code order per RFC 8955. Rules with out-of-order components are
 rejected on decode and on gRPC injection.
 
+Local gRPC injection also validates the encoded NLRI payload length for
+each rule. RFC 8955's extended FlowSpec rule-length form is 12 bits, so
+rules above 4095 bytes are rejected before they enter the RIB instead of
+being encoded with a wrapped length field.
+
 ### FlowSpec actions via extended communities
 
 FlowSpec traffic actions (rate-limit, redirect, mark DSCP) are encoded
