@@ -118,7 +118,7 @@ crates/
   mrt/                   # MRT dump export (RFC 6396): codec, writer, manager
   evpn/                  # EVPN local VTEP domain model (RFC 7432 / RFC 8365 / RFC 9136): EvpnInstance, IpVrf, RouteTarget, origination + projection state machines (kernel-free)
   evpn-linux/            # Linux kernel dataplane for EVPN VTEP mode (#[cfg(target_os = "linux")]): rtnetlink reconciler, FDB / link / IP-VRF dumps, RTNLGRP_NEIGH classifier, RTNLGRP_IPV4_ROUTE / RTNLGRP_IPV6_ROUTE route observer (Gate 9 slice 6), L3 FIB programming (Gate 9 slice 6 PR B), nexthop_raw raw-netlink FDB-NHG primitive + group_state refcount + nh_id_alloc tag bits (ADR-0059 aliasing-ECMP)
-  api/                   # gRPC server (tonic) — 8 services
+  api/                   # gRPC server (tonic) — 9 services
   telemetry/             # Prometheus metrics + structured tracing
   cli/                   # rustbgpctl — gRPC CLI with human-readable and JSON output
 proto/                   # gRPC proto definitions (rustbgpd.v1)
