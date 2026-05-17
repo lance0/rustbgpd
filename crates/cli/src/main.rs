@@ -53,6 +53,12 @@ enum Command {
     /// Show daemon global configuration
     Global,
 
+    /// Runtime config diagnostics
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+
     /// Manage BGP neighbors
     Neighbor {
         /// Neighbor address (omit to list all)
@@ -226,6 +232,16 @@ enum Command {
     Completions {
         /// Shell to generate completions for
         shell: Shell,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Diff a candidate TOML file against the daemon's live runtime snapshot
+    Diff {
+        /// Candidate TOML file to validate and compare
+        #[arg(long, value_name = "PATH")]
+        from_file: String,
     },
 }
 
@@ -737,6 +753,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
     match cli.command {
         Command::Global => commands::global::run(connection, json).await,
+
+        Command::Config {
+            action: ConfigAction::Diff { from_file },
+        } => commands::config::diff(connection, &from_file, json).await,
 
         Command::Neighbor { address, action } => match (address, action) {
             (None, None) => commands::neighbor::list(connection, json).await,

@@ -1,7 +1,7 @@
 # gRPC API Reference
 
-rustbgpd exposes nine gRPC services (Global, Neighbor, Policy, PeerGroup, Rib,
-Event, Injection, Control, Evpn) over one or more configured listeners. The
+rustbgpd exposes ten gRPC services (Global, Config, Neighbor, Policy,
+PeerGroup, Rib, Event, Injection, Control, Evpn) over one or more configured listeners. The
 default listener is a local Unix domain socket at `/var/lib/rustbgpd/grpc.sock`.
 
 For same-host administration, prefer UDS:
@@ -123,6 +123,40 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 TCP-AO support. It reports whether the host kernel accepts the TCP-AO socket
 primitive; rustbgpd does not yet accept TCP-AO neighbor configuration or apply
 TCP-AO keys to BGP sessions.
+
+---
+
+## ConfigService
+
+Read-only live runtime config diagnostics. This service never exports
+the daemon's full live config snapshot; callers submit candidate TOML
+and receive only the same redacted diff buckets used by
+`rustbgpd --diff`.
+
+| RPC | Description |
+|-----|-------------|
+| `DiffRuntimeConfig` | Validate candidate TOML and compare it against the daemon's live runtime config snapshot |
+
+`DiffRuntimeConfigResponse` contains boolean summary fields, a
+plain-text `human_text` rendering, and `diff_json` using the
+`rustbgpd --diff --json` schema. Secret-bearing fields such as
+neighbor `md5_password` are redacted in both renderings.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d @ localhost:50051 rustbgpd.v1.ConfigService/DiffRuntimeConfig <<'JSON'
+{
+  "candidate_toml": "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n[global.telemetry]\nlog_format = \"json\"\n"
+}
+JSON
+```
+
+CLI equivalent:
+
+```bash
+rustbgpctl config diff --from-file /tmp/new-config.toml
+rustbgpctl --json config diff --from-file /tmp/new-config.toml
+```
 
 ---
 

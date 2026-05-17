@@ -11,6 +11,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Live runtime config diff API/CLI.** New read-only
+  `ConfigService.DiffRuntimeConfig` validates candidate TOML and
+  compares it against the peer manager's live runtime config snapshot,
+  returning only redacted diff text plus the existing
+  `rustbgpd --diff --json` schema. `rustbgpctl config diff --from-file
+  <PATH>` exposes the same surface for operators who need to preview a
+  SIGHUP or restart-required edit against what the daemon is actually
+  running, without exporting secret-bearing config snapshots.
+
 - **Linux edge FIB operator example.** New
   `examples/linux-edge-fib/` config demonstrates a concrete ADR-0061
   `[[fib_tables]]` deployment with peer-group allow-list and route-count
