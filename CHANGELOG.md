@@ -135,6 +135,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **ADR-0062 TCP-AO foundation.** The transport crate now has an internal
   Linux TCP-AO socket primitive and capability probe around
   `TCP_AO_ADD_KEY` / `TCP_AO_INFO`, with UAPI layout and encoding tests.
+  `GlobalService.GetGlobal` and `rustbgpctl global` now surface the host
+  TCP-AO capability probe status so operators can verify kernel readiness
+  before TCP-AO config/session wiring lands. TCP-AO neighbor configuration
+  remains deferred.
   Runtime operator configuration and BGP session wiring remain deferred until
   the inbound listener and outbound connect paths can install keys before TCP
   OPEN.

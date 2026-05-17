@@ -159,11 +159,9 @@ struct TcpAoInfoOpt {
     pkt_dropped_icmp: u64,
 }
 
-/// Result of probing whether the running Linux kernel supports TCP-AO.
-#[cfg(target_os = "linux")]
+/// Result of probing whether the running host supports Linux TCP-AO.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) enum TcpAoSupport {
+pub enum TcpAoSupport {
     Supported,
     Unsupported,
     ProbeFailed(String),
@@ -214,8 +212,8 @@ pub(crate) fn set_tcp_ao_key(socket: &Socket, key: &TcpAoKey<'_>) -> io::Result<
 
 /// Probe TCP-AO support without relying on distro package metadata.
 #[cfg(target_os = "linux")]
-#[allow(dead_code)]
-pub(crate) fn probe_tcp_ao_support() -> TcpAoSupport {
+#[must_use]
+pub fn probe_tcp_ao_support() -> TcpAoSupport {
     use socket2::{Domain, Protocol, Type};
 
     let (socket, peer) = match Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)) {
@@ -247,6 +245,12 @@ pub(crate) fn probe_tcp_ao_support() -> TcpAoSupport {
         Err(err) if err.raw_os_error() == Some(libc::ENOPROTOOPT) => TcpAoSupport::Unsupported,
         Err(err) => TcpAoSupport::ProbeFailed(err.to_string()),
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+#[must_use]
+pub fn probe_tcp_ao_support() -> TcpAoSupport {
+    TcpAoSupport::Unsupported
 }
 
 #[cfg(target_os = "linux")]

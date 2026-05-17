@@ -538,6 +538,18 @@ and EVPN histories remain roadmap items.
 rustbgpctl health
 ```
 
+### Check TCP-AO readiness
+
+```bash
+rustbgpctl global
+```
+
+The `TCP-AO` row reports the local kernel capability probe for future RFC 5925
+TCP-AO support. `supported` means the daemon's internal socket primitive can
+install a probe key on this host. `unsupported` / `probe_failed` means TCP-AO
+session wiring should not be attempted on this host yet. This is status only:
+neighbor TCP-AO configuration and session key installation remain deferred.
+
 ### View received routes from a peer
 
 ```bash

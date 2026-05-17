@@ -68,10 +68,24 @@ service GlobalService {
 
 message GetGlobalRequest {}
 
+enum TcpAoSupport {
+  TCP_AO_SUPPORT_UNSPECIFIED = 0;
+  TCP_AO_SUPPORT_SUPPORTED = 1;
+  TCP_AO_SUPPORT_UNSUPPORTED = 2;
+  TCP_AO_SUPPORT_PROBE_FAILED = 3;
+}
+
 message GlobalState {
   uint32 asn = 1;
   string router_id = 2;
   uint32 listen_port = 3;
+  // Kernel/runtime capability probe for future TCP-AO support (RFC 5925).
+  // This is read-only status only; rustbgpd does not yet accept TCP-AO
+  // neighbor configuration or apply TCP-AO keys to BGP sessions.
+  TcpAoSupport tcp_ao_support = 4;
+  // Human-readable probe detail, populated when tcp_ao_support is
+  // TCP_AO_SUPPORT_UNSUPPORTED or TCP_AO_SUPPORT_PROBE_FAILED.
+  string tcp_ao_detail = 5;
 }
 
 // Reserved for future use. Always returns UNIMPLEMENTED.

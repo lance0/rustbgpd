@@ -110,7 +110,7 @@ Daemon identity and configuration.
 
 | RPC | Description |
 |-----|-------------|
-| `GetGlobal` | Returns ASN, router ID, and listen port |
+| `GetGlobal` | Returns ASN, router ID, listen port, and host TCP-AO capability probe status |
 | `SetGlobal` | Reserved mutating RPC for future runtime global config changes; read-only listeners reject it with `PERMISSION_DENIED`, read-write listeners return `UNIMPLEMENTED` until the feature ships |
 
 ```bash
@@ -118,6 +118,11 @@ Daemon identity and configuration.
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.GlobalService/GetGlobal
 ```
+
+`tcp_ao_support` is a read-only Linux capability probe for future RFC 5925
+TCP-AO support. It reports whether the host kernel accepts the TCP-AO socket
+primitive; rustbgpd does not yet accept TCP-AO neighbor configuration or apply
+TCP-AO keys to BGP sessions.
 
 ---
 

@@ -260,6 +260,8 @@ impl rustbgpd_api::proto::global_service_server::GlobalService for MockGlobalSer
             asn: 65001,
             router_id: "10.0.0.1".to_string(),
             listen_port: 179,
+            tcp_ao_support: server_proto::TcpAoSupport::Supported as i32,
+            tcp_ao_detail: String::new(),
         }))
     }
 
