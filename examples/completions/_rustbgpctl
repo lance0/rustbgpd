@@ -46,6 +46,67 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
+(config)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_rustbgpctl__subcmd__config_commands" \
+"*::: :->config" \
+&& ret=0
+
+    case $state in
+    (config)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-config-command-$line[1]:"
+        case $line[1] in
+            (diff)
+_arguments "${_arguments_options[@]}" : \
+'--from-file=[Candidate TOML file to validate and compare]:PATH:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__config__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-config-help-command-$line[1]:"
+        case $line[1] in
+            (diff)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
 (neighbor)
 _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -676,8 +737,8 @@ _arguments "${_arguments_options[@]}" : \
 '-a+[Address family filter]:FAMILY:_default' \
 '--family=[Address family filter]:FAMILY:_default' \
 '--prefix=[Exact prefix filter, e.g. 203.0.113.0/24]:PREFIX:_default' \
-'-l+[Maximum recent events to return]:LIMIT:_default' \
-'--limit=[Maximum recent events to return]:LIMIT:_default' \
+'-l+[Maximum recent route events to return (default 100; route history only)]:LIMIT:_default' \
+'--limit=[Maximum recent route events to return (default 100; route history only)]:LIMIT:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -698,11 +759,45 @@ _arguments "${_arguments_options[@]}" : \
         case $line[1] in
             (watch)
 _arguments "${_arguments_options[@]}" : \
+'*--category=[Event category filter\: route, session, policy, dataplane]:CATEGORIES:_default' \
 '--address=[Neighbor address filter]:ADDRESS:_default' \
 '-a+[Address family filter]:FAMILY:_default' \
 '--family=[Address family filter]:FAMILY:_default' \
 '--prefix=[Exact prefix filter, e.g. 203.0.113.0/24]:PREFIX:_default' \
-'*--type=[Event type filter\: added, withdrawn, best_changed]:EVENT_TYPES:_default' \
+'*--type=[Event type filter\: added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, dataplane_status_changed]:EVENT_TYPES:_default' \
+'--backfill=[Print recent route history before tailing the live stream. Applies only to route-capable event streams]:BACKFILL:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(sessions)
+_arguments "${_arguments_options[@]}" : \
+'--address=[Neighbor address filter]:ADDRESS:_default' \
+'*--type=[Session event type filter\: state_changed, established, lost, peer_enabled, peer_disabled]:EVENT_TYPES:_default' \
+'-l+[Maximum recent session events to return (default 100; explicit 0 requests the daemon'\''s full bounded window)]:LIMIT:_default' \
+'--limit=[Maximum recent session events to return (default 100; explicit 0 requests the daemon'\''s full bounded window)]:LIMIT:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(policy)
+_arguments "${_arguments_options[@]}" : \
+'--address=[Neighbor address filter. Only peer-scoped policy events match]:ADDRESS:_default' \
+'*--type=[Policy event type filter\: policy_changed]:EVENT_TYPES:_default' \
+'-l+[Maximum recent policy events to return (default 100; explicit 0 requests the daemon'\''s full bounded window)]:LIMIT:_default' \
+'--limit=[Maximum recent policy events to return (default 100; explicit 0 requests the daemon'\''s full bounded window)]:LIMIT:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -726,6 +821,14 @@ _arguments "${_arguments_options[@]}" : \
         curcontext="${curcontext%:*:*}:rustbgpctl-events-help-command-$line[1]:"
         case $line[1] in
             (watch)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(sessions)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(policy)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1385,6 +1488,26 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(config)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__help__subcmd__config_commands" \
+"*::: :->config" \
+&& ret=0
+
+    case $state in
+    (config)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-help-config-command-$line[1]:"
+        case $line[1] in
+            (diff)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
 (neighbor)
 _arguments "${_arguments_options[@]}" : \
 ":: :_rustbgpctl__subcmd__help__subcmd__neighbor_commands" \
@@ -1554,6 +1677,14 @@ _arguments "${_arguments_options[@]}" : \
         curcontext="${curcontext%:*:*}:rustbgpctl-help-events-command-$line[1]:"
         case $line[1] in
             (watch)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(sessions)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(policy)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1746,6 +1877,7 @@ esac
 _rustbgpctl_commands() {
     local commands; commands=(
 'global:Show daemon global configuration' \
+'config:Runtime config diagnostics' \
 'neighbor:Manage BGP neighbors' \
 'rib:Query and manage the RIB' \
 'flowspec:Manage FlowSpec routes' \
@@ -1771,10 +1903,43 @@ _rustbgpctl__subcmd__completions_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl completions commands' commands "$@"
 }
+(( $+functions[_rustbgpctl__subcmd__config_commands] )) ||
+_rustbgpctl__subcmd__config_commands() {
+    local commands; commands=(
+'diff:Diff a candidate TOML file against the daemon'\''s live runtime snapshot' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl config commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__config__subcmd__diff_commands] )) ||
+_rustbgpctl__subcmd__config__subcmd__diff_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl config diff commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__config__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__config__subcmd__help_commands() {
+    local commands; commands=(
+'diff:Diff a candidate TOML file against the daemon'\''s live runtime snapshot' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl config help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__config__subcmd__help__subcmd__diff_commands] )) ||
+_rustbgpctl__subcmd__config__subcmd__help__subcmd__diff_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl config help diff commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__config__subcmd__help__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__config__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl config help help commands' commands "$@"
+}
 (( $+functions[_rustbgpctl__subcmd__events_commands] )) ||
 _rustbgpctl__subcmd__events_commands() {
     local commands; commands=(
 'watch:Watch the unified live event stream' \
+'sessions:Show recent session lifecycle events' \
+'policy:Show recent policy / neighbor-set / peer-group / chain mutation events' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rustbgpctl events commands' commands "$@"
@@ -1783,6 +1948,8 @@ _rustbgpctl__subcmd__events_commands() {
 _rustbgpctl__subcmd__events__subcmd__help_commands() {
     local commands; commands=(
 'watch:Watch the unified live event stream' \
+'sessions:Show recent session lifecycle events' \
+'policy:Show recent policy / neighbor-set / peer-group / chain mutation events' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rustbgpctl events help commands' commands "$@"
@@ -1792,10 +1959,30 @@ _rustbgpctl__subcmd__events__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl events help help commands' commands "$@"
 }
+(( $+functions[_rustbgpctl__subcmd__events__subcmd__help__subcmd__policy_commands] )) ||
+_rustbgpctl__subcmd__events__subcmd__help__subcmd__policy_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl events help policy commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__events__subcmd__help__subcmd__sessions_commands] )) ||
+_rustbgpctl__subcmd__events__subcmd__help__subcmd__sessions_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl events help sessions commands' commands "$@"
+}
 (( $+functions[_rustbgpctl__subcmd__events__subcmd__help__subcmd__watch_commands] )) ||
 _rustbgpctl__subcmd__events__subcmd__help__subcmd__watch_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl events help watch commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__events__subcmd__policy_commands] )) ||
+_rustbgpctl__subcmd__events__subcmd__policy_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl events policy commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__events__subcmd__sessions_commands] )) ||
+_rustbgpctl__subcmd__events__subcmd__sessions_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl events sessions commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__events__subcmd__watch_commands] )) ||
 _rustbgpctl__subcmd__events__subcmd__watch_commands() {
@@ -1991,6 +2178,7 @@ _rustbgpctl__subcmd__health_commands() {
 _rustbgpctl__subcmd__help_commands() {
     local commands; commands=(
 'global:Show daemon global configuration' \
+'config:Runtime config diagnostics' \
 'neighbor:Manage BGP neighbors' \
 'rib:Query and manage the RIB' \
 'flowspec:Manage FlowSpec routes' \
@@ -2016,12 +2204,36 @@ _rustbgpctl__subcmd__help__subcmd__completions_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help completions commands' commands "$@"
 }
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__config_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__config_commands() {
+    local commands; commands=(
+'diff:Diff a candidate TOML file against the daemon'\''s live runtime snapshot' \
+    )
+    _describe -t commands 'rustbgpctl help config commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__config__subcmd__diff_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__config__subcmd__diff_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help config diff commands' commands "$@"
+}
 (( $+functions[_rustbgpctl__subcmd__help__subcmd__events_commands] )) ||
 _rustbgpctl__subcmd__help__subcmd__events_commands() {
     local commands; commands=(
 'watch:Watch the unified live event stream' \
+'sessions:Show recent session lifecycle events' \
+'policy:Show recent policy / neighbor-set / peer-group / chain mutation events' \
     )
     _describe -t commands 'rustbgpctl help events commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__events__subcmd__policy_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__events__subcmd__policy_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help events policy commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__events__subcmd__sessions_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__events__subcmd__sessions_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help events sessions commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__help__subcmd__events__subcmd__watch_commands] )) ||
 _rustbgpctl__subcmd__help__subcmd__events__subcmd__watch_commands() {
