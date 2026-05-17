@@ -61,7 +61,8 @@ impl DuplicateMacConfig {
     ///
     /// # Errors
     /// Returns [`DuplicateMacConfigError`] when a duration or threshold
-    /// is zero.
+    /// is zero, or when the recovery hold time exceeds
+    /// [`MAX_DUPLICATE_MAC_RECOVERY`].
     pub fn new(
         action: DuplicateMacAction,
         window: Duration,
@@ -185,8 +186,9 @@ impl DuplicateMacDetector {
     /// This read-only check intentionally leaves expired suppressions in
     /// place. Callers with side effects should use [`Self::expire`] or
     /// [`Self::expire_key`] so metrics/replay code observes the recovery.
-    pub fn is_quarantined(&mut self, key: DuplicateMacKey, now: Instant) -> bool {
-        let Some(window) = self.windows.get_mut(&key) else {
+    #[must_use]
+    pub fn is_quarantined(&self, key: DuplicateMacKey, now: Instant) -> bool {
+        let Some(window) = self.windows.get(&key) else {
             return false;
         };
         active_until(window, now).is_some()
@@ -221,7 +223,7 @@ impl DuplicateMacDetector {
     }
 }
 
-fn active_until(window: &mut DuplicateMacWindow, now: Instant) -> Option<Instant> {
+fn active_until(window: &DuplicateMacWindow, now: Instant) -> Option<Instant> {
     let until = window.quarantined_until?;
     if now < until { Some(until) } else { None }
 }

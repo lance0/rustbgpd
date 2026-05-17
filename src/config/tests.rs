@@ -4019,7 +4019,7 @@ duplicate_mac_detection = { action = "suppress_local", window_seconds = 30, thre
 }
 
 #[test]
-fn evpn_duplicate_mac_detection_rejects_zero_values() {
+fn evpn_duplicate_mac_detection_rejects_invalid_values() {
     for (field, value) in [
         ("window_seconds", "0"),
         ("threshold", "0"),
