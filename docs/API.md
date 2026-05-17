@@ -68,6 +68,25 @@ Each configured listener can independently set `access_mode = "read_write"` or
 `"read_only"`. Read-only listeners allow query and watch RPCs but reject all
 mutating RPCs with `PERMISSION_DENIED`.
 
+### Listener Access Matrix
+
+`read_only` is a listener-level authorization boundary. It does not create
+per-user roles: every client accepted by that listener gets the same read-only
+surface. Use a separate `read_write` listener for automation that needs to
+mutate daemon state.
+
+| Service | Read-only RPCs | Mutating RPCs rejected on `read_only` |
+|---------|----------------|---------------------------------------|
+| `GlobalService` | `GetGlobal` | `SetGlobal` |
+| `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
+| `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
+| `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
+| `RibService` | All RPCs | None |
+| `EventService` | All RPCs | None |
+| `EvpnService` | All RPCs | None |
+| `InjectionService` | None | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` |
+| `ControlService` | `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
+
 ## Error Taxonomy
 
 The API uses gRPC status codes consistently across services:

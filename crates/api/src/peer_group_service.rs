@@ -463,4 +463,45 @@ mod tests {
         assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
         assert!(matches!(config_rx.try_recv(), Err(TryRecvError::Empty)));
     }
+
+    #[tokio::test]
+    async fn remaining_mutations_rejected_on_read_only_listener() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let svc = PeerGroupService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx));
+
+        let err = PeerGroupServiceRpc::delete_peer_group(
+            &svc,
+            Request::new(proto::DeletePeerGroupRequest {
+                name: "rs-clients".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        let err = PeerGroupServiceRpc::set_neighbor_peer_group(
+            &svc,
+            Request::new(proto::SetNeighborPeerGroupRequest {
+                address: "10.0.0.2".into(),
+                peer_group: "rs-clients".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        let err = PeerGroupServiceRpc::clear_neighbor_peer_group(
+            &svc,
+            Request::new(proto::ClearNeighborPeerGroupRequest {
+                address: "10.0.0.2".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(matches!(config_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
 }
