@@ -34,6 +34,7 @@
 //!   as `NotReady` with a "kernel inventory dump failed" reason.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -44,7 +45,7 @@ use rtnetlink::Handle;
 use rustbgpd_evpn::ip_vrf::{
     IpVrfNotReady, IpVrfRouteDump, IpVrfStatus, IpVrfTable, probe as probe_ip_vrf,
 };
-use rustbgpd_evpn::{EvpnInstanceTable, IpVrfId, LocalMacObservation};
+use rustbgpd_evpn::{EvpnInstanceTable, IpVrfId, LocalMacObservation, MacAddress};
 use tokio::sync::{Mutex, mpsc};
 use tracing::warn;
 
@@ -282,6 +283,8 @@ async fn notify_loop(
     kernel_event_tx: mpsc::Sender<KernelEvent>,
     on_observation_drop: ObservationDropHook,
 ) {
+    let mut ip_neighbour_macs: HashMap<(u32, IpAddr), MacAddress> = HashMap::new();
+
     while let Some((msg, _src)) = messages.next().await {
         let NetlinkPayload::InnerMessage(payload) = msg.payload else {
             continue;
@@ -292,14 +295,31 @@ async fn notify_loop(
                 if let Some(obs) =
                     notify::classify_neigh(notify::NeighEventKind::New, &neigh, &cache)
                 {
+                    if let LocalMacObservation::IpAdded { mac, ip, .. } = obs
+                        && let Some(key) = notify::ip_neighbour_cache_key(&neigh)
+                    {
+                        ip_neighbour_macs.insert(key, mac);
+                        debug_assert_eq!(key.1, ip);
+                    }
                     forward_observation_or_record_drop(&local_mac_tx, obs, &on_observation_drop);
                 }
             }
             RouteNetlinkMessage::DelNeighbour(neigh) => {
                 let cache = link_cache.lock().await.clone();
-                if let Some(obs) =
-                    notify::classify_neigh(notify::NeighEventKind::Del, &neigh, &cache)
-                {
+                let key = notify::ip_neighbour_cache_key(&neigh);
+                let obs = notify::classify_neigh(notify::NeighEventKind::Del, &neigh, &cache)
+                    .or_else(|| {
+                        let cached_mac = key.and_then(|k| ip_neighbour_macs.get(&k).copied())?;
+                        notify::classify_ip_neighbour_delete_with_cached_mac(
+                            &neigh, &cache, cached_mac,
+                        )
+                    });
+                if let Some(obs) = obs {
+                    if matches!(obs, LocalMacObservation::IpRemoved { .. })
+                        && let Some(key) = key
+                    {
+                        ip_neighbour_macs.remove(&key);
+                    }
                     forward_observation_or_record_drop(&local_mac_tx, obs, &on_observation_drop);
                 }
             }

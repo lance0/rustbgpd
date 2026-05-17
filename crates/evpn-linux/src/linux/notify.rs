@@ -228,6 +228,46 @@ fn classify_ip_neighbour(
     msg: &NeighbourMessage,
     cache: &LinkCache,
 ) -> Option<LocalMacObservation> {
+    classify_ip_neighbour_with_cached_mac(kind, msg, cache, None)
+}
+
+/// Classify an `AF_INET` / `AF_INET6` neighbour delete using a MAC
+/// remembered from the matching add edge. Linux delete notifications
+/// for bridge neighbours can omit `NDA_LLADDR` (for example:
+/// `Deleted 192.0.2.10 dev br100 FAILED`), but the originator needs
+/// both `(MAC, IP)` to withdraw the precise Type 2 route.
+pub(crate) fn classify_ip_neighbour_delete_with_cached_mac(
+    msg: &NeighbourMessage,
+    cache: &LinkCache,
+    cached_mac: MacAddress,
+) -> Option<LocalMacObservation> {
+    classify_ip_neighbour_with_cached_mac(NeighEventKind::Del, msg, cache, Some(cached_mac))
+}
+
+/// Return the cache key for an advertisable IP-neighbour message.
+/// The notify loop uses this to remember the MAC from the add edge
+/// so a later delete edge can be classified even when the kernel omits
+/// `NDA_LLADDR`.
+pub(crate) fn ip_neighbour_cache_key(msg: &NeighbourMessage) -> Option<(u32, IpAddr)> {
+    if !matches!(
+        msg.header.family,
+        AddressFamily::Inet | AddressFamily::Inet6
+    ) {
+        return None;
+    }
+    let ip = extract_ip(msg)?;
+    if !is_advertisable_ip(ip) {
+        return None;
+    }
+    Some((msg.header.ifindex, ip))
+}
+
+fn classify_ip_neighbour_with_cached_mac(
+    kind: NeighEventKind,
+    msg: &NeighbourMessage,
+    cache: &LinkCache,
+    cached_mac: Option<MacAddress>,
+) -> Option<LocalMacObservation> {
     // Resolve ifindex → VNI by matching the bridge ifindex against
     // the inventory. AF_INET / AF_INET6 neighbours sit on the bridge
     // itself (the kernel's ARP/ND-suppression table is per-bridge);
@@ -257,7 +297,7 @@ fn classify_ip_neighbour(
         return None;
     }
 
-    let mac = extract_mac(msg)?;
+    let mac = extract_mac(msg).or(cached_mac)?;
     let ip = extract_ip(msg)?;
 
     // Drop addresses that aren't valid EVPN MAC+IP advertisement
@@ -705,6 +745,38 @@ mod tests {
         );
         let obs = classify_neigh(NeighEventKind::Del, &msg, &cache).expect("emit");
         assert!(matches!(obs, LocalMacObservation::IpRemoved { .. }));
+    }
+
+    #[test]
+    fn classify_inet_del_uses_cached_mac_when_kernel_omits_lladdr() {
+        // Linux can emit bridge-neighbour deletes as only
+        // `Deleted 192.0.2.10 dev br100 FAILED`, with no `NDA_LLADDR`.
+        // The notify loop supplies the MAC remembered from IpAdded so
+        // the originator can withdraw the exact `(MAC, IP)` Type 2.
+        let cache = cache_for(100, 11, 22);
+        let v4: IpAddr = "192.0.2.10".parse().unwrap();
+        let msg = ip_neigh_msg(
+            AddressFamily::Inet,
+            99,
+            NeighbourState::Other(NUD_FAILED),
+            NeighbourFlags::empty(),
+            None,
+            Some(v4),
+        );
+        assert!(classify_neigh(NeighEventKind::Del, &msg, &cache).is_none());
+        assert_eq!(ip_neighbour_cache_key(&msg), Some((99, v4)));
+
+        let cached_mac = MacAddress::new([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01]);
+        let obs = classify_ip_neighbour_delete_with_cached_mac(&msg, &cache, cached_mac)
+            .expect("cached delete should classify");
+        assert!(
+            matches!(
+                obs,
+                LocalMacObservation::IpRemoved { vni, mac, ip }
+                    if vni.as_u32() == 100 && mac == cached_mac && ip == v4
+            ),
+            "unexpected observation: {obs:?}"
+        );
     }
 
     #[test]

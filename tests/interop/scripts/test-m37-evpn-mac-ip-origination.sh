@@ -50,14 +50,17 @@ frr_vtysh() {
 }
 
 # Returns 0 if FRR sees a Type 2 for `$mac` with a "no IP" NLRI
-# (MAC-only). vtysh formats macip routes as `[2]:[0]:[0]:[48]:[mac]`
-# for MAC-only and `[2]:[0]:[0]:[48]:[mac]:[32]:[ip]` (or `[128]`
-# for v6) for MAC+IP. The `[48]:` prefix without an IP suffix is
-# the cheap discriminator.
+# (MAC-only). FRR 10.3.1 prints macip routes as
+# `[2]:[EthTag]:[MAClen]:[MAC]` for MAC-only and
+# `[2]:[EthTag]:[MAClen]:[MAC]:[IPlen]:[IP]` for MAC+IP. Older
+# diagnostic comments in this tree used an extra field before
+# `[48]`; keep one optional field in the matcher so this smoke is
+# tolerant of both renderings while still requiring the MAC-only
+# line to end at the MAC.
 frr_has_mac_only() {
     local mac=${1:?}
     frr_vtysh "show bgp l2vpn evpn route type macip" \
-        | grep -qE "\[2\]:\[[^]]*\]:\[[^]]*\]:\[48\]:\[$mac\]\s"
+        | grep -qiE "\[2\]:\[[^]]*\]:(\[[^]]*\]:)?\[48\]:\[$mac\][[:space:]]*$"
 }
 
 # Returns 0 if FRR sees a MAC+IP Type 2 for `$mac` carrying `$ip`.
@@ -65,7 +68,7 @@ frr_has_mac_ip() {
     local mac=${1:?}
     local ip=${2:?}
     frr_vtysh "show bgp l2vpn evpn route type macip" \
-        | grep -qE "\[2\]:\[[^]]*\]:\[[^]]*\]:\[48\]:\[$mac\]:\[(32|128)\]:\[$ip\]"
+        | grep -qiE "\[2\]:\[[^]]*\]:(\[[^]]*\]:)?\[48\]:\[$mac\]:\[(32|128)\]:\[$ip\]"
 }
 
 # Returns 0 once FRR sees rustbgpd's startup Type 3 IMET, which is a
