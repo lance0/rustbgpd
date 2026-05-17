@@ -203,7 +203,7 @@ Each run creates
 | `samples.csv` | One row per sample interval: rustbgpd RSS, local FDB count, FRR Type 2 count, BGP Established bit, churn totals, local-origination counters, observation drops, duplicate-MAC moves |
 | `soak.log` | Mirrored stdout/stderr from the runner |
 | `churn.log` | Per-cycle `add` / `del` log for generated MACs |
-| `rustbgpd.log` | `docker logs -f` capture from the originator |
+| `rustbgpd.log` | `/var/log/rustbgpd.log` stream from the originator container |
 | `consumer.log` | `docker logs -f` capture from the FRR consumer |
 | `run.json` | Run metadata: git SHA, duration, pool size, churn cadence, container names |
 

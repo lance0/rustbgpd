@@ -21,7 +21,7 @@
 #   - samples.csv      one row per sample interval
 #   - soak.log         harness stdout/stderr
 #   - churn.log        per-cycle add/delete log
-#   - rustbgpd.log     docker logs for the rustbgpd container
+#   - rustbgpd.log     rustbgpd daemon log copied from inside the container
 #   - consumer.log     docker logs for the FRR consumer
 #   - run.json         run metadata
 
@@ -205,7 +205,9 @@ write_run_json() {
 }
 
 start_log_streams() {
-    docker logs -f "$RUSTBGPD" >"$RUSTBGPD_LOG" 2>&1 &
+    docker exec "$RUSTBGPD" sh -c \
+        'touch /var/log/rustbgpd.log; tail -n +1 -F /var/log/rustbgpd.log' \
+        >"$RUSTBGPD_LOG" 2>&1 &
     RUST_LOG_PID=$!
     docker logs -f "$CONSUMER" >"$CONSUMER_LOG" 2>&1 &
     CONSUMER_LOG_PID=$!
