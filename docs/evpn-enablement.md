@@ -544,13 +544,12 @@ Concrete remaining slices:
    `apply_aliasing_ecmp` to `true`; the flip itself is deferred
    to a separate release decision so operators can opt in
    explicitly first.
-2. **Optional import-side ES-Import RT filtering** — apply the
-   ES-Import RT origination from Gate 8b prep on the daemon's own
-   RIB import path so unrelated segments are filtered before they
-   reach LocRib. Currently rustbgpd originates the RT but imports via
-   user-configured RTs only. Separable follow-up, not a
-   production-default blocker; tracked in
-   <https://github.com/lance0/rustbgpd/issues/131>.
+2. **Local DF-election ES-Import RT filtering** — rustbgpd applies
+   the ES-Import RT it originates in Gate 8b prep at the local Type 4
+   candidate projection boundary. Remote Type 4 routes with a missing
+   or mismatched ES-Import RT are ignored for DF election, while the
+   EVPN Loc-RIB, `ListEvpnRoutes`, and RR reflection remain complete
+   for observability and route-reflector use cases.
 
 ADR-0059 slice 3.5 hardening (`apply_aliasing_ecmp` off-switch,
 periodic `RTM_GETNEXTHOP` drift recovery, IPv6 alias members)
