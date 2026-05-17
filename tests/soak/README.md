@@ -228,7 +228,9 @@ curated postmortem under `docs/` when the 24h run passes.
 Default churn cadence is 25 deletes + 25 adds every 5 seconds, or roughly
 10 bridge-FDB mutations per second. The pool is intentionally bounded: a
 unique-MAC storm would prove that the retained ratchet map can grow, not
-whether it plateaus under repeated learn/age churn.
+whether it plateaus under repeated learn/age churn. The harness rejects
+configurations where `MAC_POOL_SIZE - LIVE_TARGET_MACS < CHURN_BATCH` so a
+deleted batch cannot be immediately reused in the same churn cycle.
 
 ## Pass Criteria
 

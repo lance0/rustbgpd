@@ -251,6 +251,7 @@ cleanup() {
 trap cleanup EXIT INT TERM HUP
 
 validate_config() {
+    local pool_headroom
     if [ "$MAC_POOL_SIZE" -le "$LIVE_TARGET_MACS" ]; then
         log "ERROR: MAC_POOL_SIZE must be greater than LIVE_TARGET_MACS"
         exit 2
@@ -261,6 +262,11 @@ validate_config() {
     fi
     if [ "$CHURN_BATCH" -gt "$LIVE_TARGET_MACS" ]; then
         log "ERROR: CHURN_BATCH must not exceed LIVE_TARGET_MACS"
+        exit 2
+    fi
+    pool_headroom=$((MAC_POOL_SIZE - LIVE_TARGET_MACS))
+    if [ "$pool_headroom" -lt "$CHURN_BATCH" ]; then
+        log "ERROR: MAC_POOL_SIZE - LIVE_TARGET_MACS must be at least CHURN_BATCH"
         exit 2
     fi
 }
