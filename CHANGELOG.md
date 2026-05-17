@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-05-17
+
 ### Added
 
 - **EVPN duplicate-MAC M/N detector and opt-in local-origin quarantine.**
@@ -180,6 +182,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   OPEN.
 
 ### Changed
+
+- `rustbgpd-wire` bumped 0.9.1 → 0.9.2 (non-breaking, additive). Adds
+  `FlowSpecRule::validate_encoded_len`, `FlowSpecRule::encoded_len`,
+  and the `MAX_FLOWSPEC_NLRI_RULE_LEN` constant (4095 bytes) so callers
+  can reject rules that would overflow RFC 8955's 12-bit rule-length
+  field before they reach outbound encode.
 
 - EVPN Type 4 ES routes now honor ES-Import RT at the local
   DF-election projection boundary. The segment orchestrator ignores
