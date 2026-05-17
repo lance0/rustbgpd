@@ -1,3 +1,4 @@
+pub mod config;
 pub mod control;
 pub mod evpn;
 pub mod flowspec;

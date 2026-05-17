@@ -12,6 +12,7 @@ use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
 use rustbgpd_api::proto as server_proto;
+use rustbgpd_api::proto::config_service_server::ConfigServiceServer;
 use rustbgpd_api::proto::control_service_server::ControlServiceServer;
 use rustbgpd_api::proto::evpn_service_server::EvpnServiceServer;
 use rustbgpd_api::proto::global_service_server::GlobalServiceServer;
@@ -24,6 +25,8 @@ use rustbgpd_api::proto::rib_service_server::RibServiceServer;
 pub(crate) struct MockState {
     pub(crate) health_calls: AtomicUsize,
     pub(crate) global_calls: AtomicUsize,
+    pub(crate) config_diff_calls: AtomicUsize,
+    pub(crate) last_config_diff: Mutex<Option<String>>,
     pub(crate) last_add_neighbor: Mutex<Option<server_proto::NeighborConfig>>,
     pub(crate) last_softreset: Mutex<Option<server_proto::SoftResetInRequest>>,
     pub(crate) last_explain_advertised: Mutex<Option<server_proto::ExplainAdvertisedRouteRequest>>,
@@ -111,6 +114,9 @@ pub(crate) async fn spawn_mock_server(auth_token: Option<&str>) -> MockServerHan
     let global = MockGlobalService {
         state: Arc::clone(&state),
     };
+    let config = MockConfigService {
+        state: Arc::clone(&state),
+    };
     let control = MockControlService {
         state: Arc::clone(&state),
     };
@@ -132,6 +138,10 @@ pub(crate) async fn spawn_mock_server(auth_token: Option<&str>) -> MockServerHan
         Server::builder()
             .add_service(GlobalServiceServer::with_interceptor(
                 global,
+                interceptor.clone(),
+            ))
+            .add_service(ConfigServiceServer::with_interceptor(
+                config,
                 interceptor.clone(),
             ))
             .add_service(ControlServiceServer::with_interceptor(
@@ -186,6 +196,9 @@ pub(crate) async fn spawn_mock_uds_server(
     let global = MockGlobalService {
         state: Arc::clone(&state),
     };
+    let config = MockConfigService {
+        state: Arc::clone(&state),
+    };
     let control = MockControlService {
         state: Arc::clone(&state),
     };
@@ -207,6 +220,10 @@ pub(crate) async fn spawn_mock_uds_server(
         Server::builder()
             .add_service(GlobalServiceServer::with_interceptor(
                 global,
+                interceptor.clone(),
+            ))
+            .add_service(ConfigServiceServer::with_interceptor(
+                config,
                 interceptor.clone(),
             ))
             .add_service(ControlServiceServer::with_interceptor(
@@ -247,6 +264,30 @@ pub(crate) async fn spawn_mock_uds_server(
 
 struct MockGlobalService {
     state: Arc<MockState>,
+}
+
+struct MockConfigService {
+    state: Arc<MockState>,
+}
+
+#[tonic::async_trait]
+impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigService {
+    async fn diff_runtime_config(
+        &self,
+        request: Request<server_proto::DiffRuntimeConfigRequest>,
+    ) -> Result<Response<server_proto::DiffRuntimeConfigResponse>, Status> {
+        self.state.config_diff_calls.fetch_add(1, Ordering::SeqCst);
+        *self.state.last_config_diff.lock().await = Some(request.into_inner().candidate_toml);
+        Ok(Response::new(server_proto::DiffRuntimeConfigResponse {
+            has_actionable_changes: true,
+            has_reload_applied_changes: false,
+            has_restart_required_changes: true,
+            has_informational_changes: false,
+            has_any_changes: true,
+            human_text: "Restart-required changes:\n".to_string(),
+            diff_json: "{\"has_any_changes\":true}".to_string(),
+        }))
+    }
 }
 
 #[tonic::async_trait]

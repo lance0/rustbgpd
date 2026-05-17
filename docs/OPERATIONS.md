@@ -75,6 +75,17 @@ rustbgpd --diff /tmp/new-config.toml /etc/rustbgpd/config.toml
 rustbgpd --diff /tmp/new-config.toml /etc/rustbgpd/config.toml --json
 ```
 
+When the daemon is already running, compare a candidate file against
+the live runtime snapshot instead of the on-disk file:
+
+```bash
+rustbgpctl config diff --from-file /tmp/new-config.toml
+rustbgpctl --json config diff --from-file /tmp/new-config.toml
+```
+
+The live API is diff-only: it returns redacted text / JSON diff
+buckets and never exports the daemon's full config snapshot.
+
 Output is grouped into two actionable sections plus a per-neighbor
 effective-impact view:
 
