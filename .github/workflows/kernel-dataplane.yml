@@ -20,9 +20,9 @@ name: Kernel Dataplane
 # The runner pool is expected to be multiple runner services on the same
 # host, sharing one Docker daemon. The build job creates `rustbgpd:dev`
 # once; M39/M40/M42 and the netns selectors can fan out. M36-M38 are
-# serialized below to preserve the same ordering as the original manual
-# privileged workflow; those early EVPN smokes have short convergence
-# assertions and are more sensitive to shared-host load.
+# ordered below to reduce shared-host load while still reporting each
+# milestone independently after an earlier smoke fails; each job
+# pre-cleans its own topology before deploy.
 
 on:
   push:
