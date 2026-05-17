@@ -181,6 +181,9 @@ pub struct JsonGlobal {
     pub asn: u32,
     pub router_id: String,
     pub listen_port: u32,
+    pub tcp_ao_support: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tcp_ao_detail: String,
 }
 
 #[derive(Serialize)]
