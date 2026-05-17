@@ -1611,13 +1611,14 @@ are automatically persisted back to the config file via atomic write (temp file
 Sending `SIGHUP` to the rustbgpd process triggers a four-bucket config
 reload, applied in dependency order:
 
-1. **Definitions** — neighbor sets, named policies, peer groups, and
-   global import / export chains. Each bucket diffs against the running
-   config and fires a single-shot command at the peer manager that goes
-   through the same `apply_policy_change` /
-   `apply_peer_group_change` paths the gRPC API uses. Hot-applied
-   policy chains land at every affected peer's session task without
-   tearing the BGP session.
+1. **Definitions and hot-applied global flags** — neighbor sets, named
+   policies, peer groups, global import / export chains,
+   `honor_graceful_shutdown`, and control-plane-only
+   `honor_blackhole`. Each bucket diffs against the running config and
+   fires a single-shot command at the peer manager that goes through the
+   same `apply_policy_change` / `apply_peer_group_change` paths the
+   gRPC API uses. Hot-applied policy chains land at every affected
+   peer's session task without tearing the BGP session.
 2. **`[[neighbors]]` reconcile** — adds, deletes, and changes flow
    through `diff_neighbors()` + a single `ReconcilePeers` command with
    add/delete/change deltas.

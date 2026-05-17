@@ -141,6 +141,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `rustbgpd --diff` now itemizes hot-applied `[global]` flags in both
+  human and JSON output. `honor_graceful_shutdown` and
+  control-plane-only `honor_blackhole` edits already made the diff
+  actionable; they now appear under `Reload-applied changes` /
+  `reload_applied` instead of producing an actionable diff with no
+  concrete changed line.
+
 - Locally injected and withdrawn FlowSpec rules whose encoded NLRI
   payload would exceed the 4095-byte RFC 8955 rule-length limit now
   fail request validation with `InvalidArgument` instead of reaching

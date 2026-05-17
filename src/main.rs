@@ -313,6 +313,15 @@ fn print_config_diff(diff: &config::ConfigDiff) {
             }
             println!();
         }
+
+        let hot_applied_global_flags = config_diff_hot_applied_global_flags(diff);
+        if !hot_applied_global_flags.is_empty() {
+            println!("  Global hot-applied flags:");
+            for flag in hot_applied_global_flags {
+                println!("    {} {flag}", "~".yellow());
+            }
+            println!();
+        }
     }
 
     // ── Restart-required changes ──
@@ -371,6 +380,71 @@ fn print_config_diff(diff: &config::ConfigDiff) {
     if !diff.has_any_changes() {
         println!("No changes.");
     }
+}
+
+fn config_diff_hot_applied_global_flags(diff: &config::ConfigDiff) -> Vec<&'static str> {
+    let mut flags = Vec::new();
+    if diff.honor_graceful_shutdown_changed {
+        flags.push("honor_graceful_shutdown");
+    }
+    if diff.honor_blackhole_changed {
+        flags.push("honor_blackhole");
+    }
+    flags
+}
+
+fn config_diff_json_output(diff: &config::ConfigDiff) -> serde_json::Value {
+    // The JSON schema mirrors the human `print_config_diff`
+    // bucketing exactly:
+    //   reload_applied  — neighbors + peer-groups + named
+    //                     policies/sets/chains (everything
+    //                     SIGHUP now applies) + the
+    //                     per-neighbor effective-impact view
+    //   restart_required — `[global]`, `[rpki]`, `[bmp]`,
+    //                      `[mrt]`, EVPN startup-only surfaces,
+    //                      plus inline `policy.import` /
+    //                      `policy.export` (no runtime swap surface yet)
+    //   informational    — empty (kept on the schema as a stable
+    //                      bucket so consumers don't break when the
+    //                      predicate is true again in a future release)
+    // Automation that classifies hot-applied edits by which bucket they
+    // land in stays correct after this release.
+    serde_json::json!({
+        "has_actionable_changes": diff.has_actionable_changes(),
+        "has_informational_changes": diff.has_informational_changes(),
+        "has_any_changes": diff.has_any_changes(),
+        "reload_applied": {
+            "neighbors": &diff.neighbors,
+            "peer_groups": &diff.peer_groups,
+            "peer_group_details": &diff.peer_group_details,
+            "policy_definitions_added": &diff.policy.definitions_added,
+            "policy_definitions_removed": &diff.policy.definitions_removed,
+            "policy_definitions_changed": &diff.policy.definitions_changed,
+            "neighbor_sets_added": &diff.policy.neighbor_sets_added,
+            "neighbor_sets_removed": &diff.policy.neighbor_sets_removed,
+            "neighbor_sets_changed": &diff.policy.neighbor_sets_changed,
+            "import_chain_changed": diff.policy.import_chain_changed,
+            "export_chain_changed": diff.policy.export_chain_changed,
+            "honor_graceful_shutdown_changed": diff.honor_graceful_shutdown_changed,
+            "honor_blackhole_changed": diff.honor_blackhole_changed,
+            "effective_neighbor_impact": &diff.effective_neighbor_impact,
+        },
+        "restart_required": {
+            "global_changed": diff.global_changed,
+            "rpki_changed": diff.rpki_changed,
+            "bmp_changed": diff.bmp_changed,
+            "mrt_changed": diff.mrt_changed,
+            "evpn_instances_changed": diff.evpn_instances_changed,
+            "evpn_ip_vrfs_changed": diff.evpn_ip_vrfs_changed,
+            "ethernet_segments_changed": diff.ethernet_segments_changed,
+            "fib_tables_changed": diff.fib_tables_changed,
+            "apply_bum_enforcement_changed": diff.apply_bum_enforcement_changed,
+            "blackhole_fib_discard_changed": diff.blackhole_fib_discard_changed,
+            "inline_policy_import_changed": diff.policy.import_changed,
+            "inline_policy_export_changed": diff.policy.export_changed,
+        },
+        "informational": serde_json::Value::Object(serde_json::Map::new()),
+    })
 }
 
 fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) {
@@ -569,57 +643,7 @@ fn main() {
         };
         let diff = config::diff_config(&config, &new_config);
         if json_output {
-            // The JSON schema mirrors the human `print_config_diff`
-            // bucketing exactly:
-            //   reload_applied  — neighbors + peer-groups + named
-            //                     policies/sets/chains (everything
-            //                     SIGHUP now applies) + the
-            //                     per-neighbor effective-impact view
-            //   restart_required — `[global]`, `[rpki]`, `[bmp]`,
-            //                      `[mrt]`, EVPN startup-only
-            //                      surfaces, plus inline
-            //                      `policy.import` / `policy.export`
-            //                      (no runtime swap surface yet)
-            //   informational    — empty (kept on the schema as a
-            //                      stable bucket so consumers don't
-            //                      break when the predicate is true
-            //                      again in a future release)
-            // Automation that classifies hot-applied edits by which
-            // bucket they land in stays correct after this release.
-            let output = serde_json::json!({
-                "has_actionable_changes": diff.has_actionable_changes(),
-                "has_informational_changes": diff.has_informational_changes(),
-                "has_any_changes": diff.has_any_changes(),
-                "reload_applied": {
-                    "neighbors": &diff.neighbors,
-                    "peer_groups": &diff.peer_groups,
-                    "peer_group_details": &diff.peer_group_details,
-                    "policy_definitions_added": &diff.policy.definitions_added,
-                    "policy_definitions_removed": &diff.policy.definitions_removed,
-                    "policy_definitions_changed": &diff.policy.definitions_changed,
-                    "neighbor_sets_added": &diff.policy.neighbor_sets_added,
-                    "neighbor_sets_removed": &diff.policy.neighbor_sets_removed,
-                    "neighbor_sets_changed": &diff.policy.neighbor_sets_changed,
-                    "import_chain_changed": diff.policy.import_chain_changed,
-                    "export_chain_changed": diff.policy.export_chain_changed,
-                    "effective_neighbor_impact": &diff.effective_neighbor_impact,
-                },
-                "restart_required": {
-                    "global_changed": diff.global_changed,
-                    "rpki_changed": diff.rpki_changed,
-                    "bmp_changed": diff.bmp_changed,
-                    "mrt_changed": diff.mrt_changed,
-                    "evpn_instances_changed": diff.evpn_instances_changed,
-                    "evpn_ip_vrfs_changed": diff.evpn_ip_vrfs_changed,
-                    "ethernet_segments_changed": diff.ethernet_segments_changed,
-                    "fib_tables_changed": diff.fib_tables_changed,
-                    "apply_bum_enforcement_changed": diff.apply_bum_enforcement_changed,
-                    "blackhole_fib_discard_changed": diff.blackhole_fib_discard_changed,
-                    "inline_policy_import_changed": diff.policy.import_changed,
-                    "inline_policy_export_changed": diff.policy.export_changed,
-                },
-                "informational": serde_json::Value::Object(serde_json::Map::new()),
-            });
+            let output = config_diff_json_output(&diff);
             match serde_json::to_string_pretty(&output) {
                 Ok(json) => println!("{json}"),
                 Err(e) => {
@@ -4026,6 +4050,54 @@ address = "10.0.0.2"
 remote_asn = 65002
 hold_time = 90
 "#
+    }
+
+    fn load_config_from_toml(name: &str, toml: &str) -> Config {
+        let path = unique_temp_path(name);
+        std::fs::write(&path, toml).unwrap();
+        let config = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+        config
+    }
+
+    #[test]
+    fn config_diff_json_includes_hot_applied_global_flags() {
+        let old = load_config_from_toml("diff-json-old", baseline_toml());
+        let new_toml = baseline_toml().replace(
+            "listen_port = 179",
+            "listen_port = 179\nhonor_graceful_shutdown = true\nhonor_blackhole = true",
+        );
+        let new = load_config_from_toml("diff-json-new", &new_toml);
+        let diff = config::diff_config(&old, &new);
+        let value = config_diff_json_output(&diff);
+
+        assert_eq!(
+            value["reload_applied"]["honor_graceful_shutdown_changed"],
+            true
+        );
+        assert_eq!(value["reload_applied"]["honor_blackhole_changed"], true);
+        assert_eq!(value["restart_required"]["global_changed"], false);
+        assert_eq!(value["has_actionable_changes"], true);
+    }
+
+    #[test]
+    fn config_diff_human_bucket_lists_hot_applied_global_flags() {
+        let old = load_config_from_toml("diff-human-old", baseline_toml());
+        let new_toml = baseline_toml().replace(
+            "listen_port = 179",
+            "listen_port = 179\nhonor_graceful_shutdown = true\nhonor_blackhole = true",
+        );
+        let new = load_config_from_toml("diff-human-new", &new_toml);
+        let diff = config::diff_config(&old, &new);
+
+        assert_eq!(
+            config_diff_hot_applied_global_flags(&diff),
+            vec!["honor_graceful_shutdown", "honor_blackhole"]
+        );
+        assert!(
+            diff.has_reload_applied_changes(),
+            "hot-applied global flags must keep the diff in the reload-applied bucket"
+        );
     }
 
     /// Adding a named policy definition on reload must surface as a
