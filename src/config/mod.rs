@@ -31,6 +31,31 @@ use self::schema::{BGP_PORT, DEFAULT_CONNECT_RETRY_SECS, DEFAULT_HOLD_TIME};
 use self::parse::parse_named_policy;
 
 impl Config {
+    fn load_from_toml_source(content: &str, source_name: &str) -> Result<Self, String> {
+        let config: Config = match toml::from_str(content) {
+            Ok(c) => c,
+            Err(e) => {
+                let error = ConfigError::Parse(e);
+                return Err(diagnostic::render_diagnostic(content, source_name, &error)
+                    .unwrap_or_else(|| format!("error: {error}")));
+            }
+        };
+        if let Err(error) = config.validate() {
+            return Err(diagnostic::render_diagnostic(content, source_name, &error)
+                .unwrap_or_else(|| format!("error: {error}")));
+        }
+        Ok(config)
+    }
+
+    /// Load config from TOML text and render diagnostics against `source_name`.
+    ///
+    /// Used by read-only API surfaces that receive candidate config
+    /// content instead of a filesystem path. The returned config does
+    /// not expose a `file_path`.
+    pub fn load_toml_with_diagnostics(content: &str, source_name: &str) -> Result<Self, String> {
+        Self::load_from_toml_source(content, source_name)
+    }
+
     /// Load config and, on failure, render a diagnostic with source context.
     ///
     /// Returns the rendered diagnostic string on error (suitable for direct
@@ -41,19 +66,8 @@ impl Config {
             Ok(c) => c,
             Err(e) => return Err(format!("error: failed to read {path}: {e}")),
         };
-        let mut config: Config = match toml::from_str(&content) {
-            Ok(c) => c,
-            Err(e) => {
-                let error = ConfigError::Parse(e);
-                return Err(diagnostic::render_diagnostic(&content, path, &error)
-                    .unwrap_or_else(|| format!("error: {error}")));
-            }
-        };
+        let mut config = Self::load_from_toml_source(&content, path)?;
         config.file_path = Some(PathBuf::from(path));
-        if let Err(error) = config.validate() {
-            return Err(diagnostic::render_diagnostic(&content, path, &error)
-                .unwrap_or_else(|| format!("error: {error}")));
-        }
         Ok(config)
     }
 
@@ -1236,6 +1250,204 @@ impl ConfigDiff {
     pub fn has_any_changes(&self) -> bool {
         self.has_actionable_changes() || self.has_informational_changes()
     }
+}
+
+/// JSON schema shared by `rustbgpd --diff --json` and the live runtime
+/// config-diff API. The schema mirrors the human diff buckets:
+/// reload-applied, restart-required, and informational.
+pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
+    serde_json::json!({
+        "has_actionable_changes": diff.has_actionable_changes(),
+        "has_informational_changes": diff.has_informational_changes(),
+        "has_any_changes": diff.has_any_changes(),
+        "reload_applied": {
+            "neighbors": &diff.neighbors,
+            "peer_groups": &diff.peer_groups,
+            "peer_group_details": &diff.peer_group_details,
+            "policy_definitions_added": &diff.policy.definitions_added,
+            "policy_definitions_removed": &diff.policy.definitions_removed,
+            "policy_definitions_changed": &diff.policy.definitions_changed,
+            "neighbor_sets_added": &diff.policy.neighbor_sets_added,
+            "neighbor_sets_removed": &diff.policy.neighbor_sets_removed,
+            "neighbor_sets_changed": &diff.policy.neighbor_sets_changed,
+            "import_chain_changed": diff.policy.import_chain_changed,
+            "export_chain_changed": diff.policy.export_chain_changed,
+            "effective_neighbor_impact": &diff.effective_neighbor_impact,
+        },
+        "restart_required": {
+            "global_changed": diff.global_changed,
+            "rpki_changed": diff.rpki_changed,
+            "bmp_changed": diff.bmp_changed,
+            "mrt_changed": diff.mrt_changed,
+            "evpn_instances_changed": diff.evpn_instances_changed,
+            "evpn_ip_vrfs_changed": diff.evpn_ip_vrfs_changed,
+            "ethernet_segments_changed": diff.ethernet_segments_changed,
+            "fib_tables_changed": diff.fib_tables_changed,
+            "apply_bum_enforcement_changed": diff.apply_bum_enforcement_changed,
+            "blackhole_fib_discard_changed": diff.blackhole_fib_discard_changed,
+            "inline_policy_import_changed": diff.policy.import_changed,
+            "inline_policy_export_changed": diff.policy.export_changed,
+        },
+        "informational": serde_json::Value::Object(serde_json::Map::new()),
+    })
+}
+
+/// Plain-text config diff for API/CLI clients that should not receive
+/// terminal color escapes. Secret-bearing values remain redacted by
+/// the underlying `ConfigDiff` change descriptions.
+#[expect(
+    clippy::too_many_lines,
+    reason = "plain renderer intentionally mirrors the human config-diff sections"
+)]
+pub fn format_config_diff(diff: &ConfigDiff) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    let has_pg_changes = !diff.peer_groups.added.is_empty()
+        || !diff.peer_groups.removed.is_empty()
+        || !diff.peer_groups.changed.is_empty();
+    let p = &diff.policy;
+    let has_named_policy_changes = !p.definitions_added.is_empty()
+        || !p.definitions_removed.is_empty()
+        || !p.definitions_changed.is_empty()
+        || !p.neighbor_sets_added.is_empty()
+        || !p.neighbor_sets_removed.is_empty()
+        || !p.neighbor_sets_changed.is_empty()
+        || p.import_chain_changed
+        || p.export_chain_changed;
+
+    if diff.has_reload_applied_changes() {
+        out.push_str("Reload-applied changes:\n\n");
+        let raw_neighbor_changes = !diff.neighbors.added.is_empty()
+            || !diff.neighbors.removed.is_empty()
+            || !diff.neighbors.changed.is_empty();
+        if raw_neighbor_changes {
+            out.push_str("  Neighbors:\n");
+            for n in &diff.neighbors.added {
+                let _ = writeln!(out, "    + {} (AS {})", n.address, n.remote_asn);
+            }
+            for addr in &diff.neighbors.removed {
+                let _ = writeln!(out, "    - {addr}");
+            }
+            for n in &diff.neighbors.changed {
+                let _ = writeln!(out, "    ~ {}:", n.address);
+                for change in &n.changes {
+                    let _ = writeln!(out, "        {change}");
+                }
+            }
+            out.push('\n');
+        }
+
+        if has_pg_changes {
+            out.push_str("  Peer groups:\n");
+            for name in &diff.peer_groups.added {
+                let _ = writeln!(out, "    + {name}");
+            }
+            for name in &diff.peer_groups.removed {
+                let _ = writeln!(out, "    - {name}");
+            }
+            for (name, details) in &diff.peer_group_details {
+                let _ = writeln!(out, "    ~ {name}:");
+                for change in details {
+                    let _ = writeln!(out, "        {change}");
+                }
+            }
+            out.push('\n');
+        }
+
+        if has_named_policy_changes {
+            out.push_str("  Policy:\n");
+            for name in &p.definitions_added {
+                let _ = writeln!(out, "    + definition \"{name}\"");
+            }
+            for name in &p.definitions_removed {
+                let _ = writeln!(out, "    - definition \"{name}\"");
+            }
+            for name in &p.definitions_changed {
+                let _ = writeln!(out, "    ~ definition \"{name}\"");
+            }
+            for name in &p.neighbor_sets_added {
+                let _ = writeln!(out, "    + neighbor_set \"{name}\"");
+            }
+            for name in &p.neighbor_sets_removed {
+                let _ = writeln!(out, "    - neighbor_set \"{name}\"");
+            }
+            for name in &p.neighbor_sets_changed {
+                let _ = writeln!(out, "    ~ neighbor_set \"{name}\"");
+            }
+            if p.import_chain_changed {
+                out.push_str("    ~ import_chain\n");
+            }
+            if p.export_chain_changed {
+                out.push_str("    ~ export_chain\n");
+            }
+            out.push('\n');
+        }
+
+        if !diff.effective_neighbor_impact.is_empty() {
+            out.push_str("  Effectively impacted neighbors (via inheritance):\n");
+            for impact in &diff.effective_neighbor_impact {
+                let _ = writeln!(out, "    ~ {}:", impact.address);
+                for reason in &impact.reasons {
+                    let _ = writeln!(out, "        {reason}");
+                }
+            }
+            out.push('\n');
+        }
+    }
+
+    let mut restart_sections = Vec::new();
+    if diff.global_changed {
+        restart_sections.push("[global]");
+    }
+    if diff.rpki_changed {
+        restart_sections.push("[rpki]");
+    }
+    if diff.bmp_changed {
+        restart_sections.push("[bmp]");
+    }
+    if diff.mrt_changed {
+        restart_sections.push("[mrt]");
+    }
+    if diff.evpn_instances_changed {
+        restart_sections.push("[[evpn_instances]]");
+    }
+    if diff.evpn_ip_vrfs_changed {
+        restart_sections.push("[[evpn_ip_vrfs]]");
+    }
+    if diff.ethernet_segments_changed {
+        restart_sections.push("[[ethernet_segments]]");
+    }
+    if diff.fib_tables_changed {
+        restart_sections.push("[[fib_tables]]");
+    }
+    if diff.apply_bum_enforcement_changed {
+        restart_sections.push("apply_bum_enforcement");
+    }
+    if diff.blackhole_fib_discard_changed {
+        restart_sections.push("BLACKHOLE FIB discard");
+    }
+    if p.import_changed {
+        restart_sections.push("[policy.import] (inline)");
+    }
+    if p.export_changed {
+        restart_sections.push("[policy.export] (inline)");
+    }
+    if !restart_sections.is_empty() {
+        out.push_str("Restart-required changes:\n");
+        for section in &restart_sections {
+            let _ = writeln!(out, "  ! {section} changed");
+        }
+        if p.import_changed || p.export_changed {
+            out.push_str("    (migrate inline policy to named definitions + import_chain/export_chain for hot reload)\n");
+        }
+        out.push('\n');
+    }
+
+    if !diff.has_any_changes() {
+        out.push_str("No changes.\n");
+    }
+    out
 }
 
 /// Compare two full configurations and return a structured diff.

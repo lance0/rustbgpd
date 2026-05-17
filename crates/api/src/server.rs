@@ -14,6 +14,7 @@ use tonic::transport::Server;
 use tonic::{Request, Status};
 use tracing::{error, info, warn};
 
+use crate::config_service::ConfigService;
 use crate::control_service::{ControlService, MrtTriggerTx};
 use crate::event_service::{DataplaneEventBroadcaster, EventService, dataplane_event_broadcaster};
 use crate::evpn_service::{EvpnService, OriginatedLocalMacCountFn};
@@ -23,6 +24,7 @@ use crate::neighbor_service::NeighborService;
 use crate::peer_group_service::PeerGroupService;
 use crate::peer_types::{ConfigEvent, PeerManagerCommand};
 use crate::policy_service::PolicyService;
+use crate::proto::config_service_server::ConfigServiceServer;
 use crate::proto::control_service_server::ControlServiceServer;
 use crate::proto::event_service_server::EventServiceServer;
 use crate::proto::evpn_service_server::EvpnServiceServer;
@@ -440,6 +442,10 @@ async fn run_tcp_listener(
             GlobalService::new(access_mode, asn, router_id, listen_port),
             interceptor.clone(),
         ))
+        .add_service(ConfigServiceServer::with_interceptor(
+            ConfigService::new(peer_mgr_tx.clone()),
+            interceptor.clone(),
+        ))
         .add_service(EvpnServiceServer::with_interceptor(
             EvpnService::with_full_surface(
                 evpn_instances,
@@ -552,6 +558,10 @@ async fn run_uds_listener(
         ))
         .add_service(GlobalServiceServer::with_interceptor(
             GlobalService::new(access_mode, asn, router_id, listen_port),
+            interceptor.clone(),
+        ))
+        .add_service(ConfigServiceServer::with_interceptor(
+            ConfigService::new(peer_mgr_tx.clone()),
             interceptor.clone(),
         ))
         .add_service(EvpnServiceServer::with_interceptor(
