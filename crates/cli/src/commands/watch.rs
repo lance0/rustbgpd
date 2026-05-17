@@ -4,8 +4,9 @@ use crate::output::{self, JsonRouteEvent};
 use crate::proto::event_service_client::EventServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
-    AddressFamily, BgpEvent, BgpEventType, EventCategory, ListRouteEventsRequest,
-    ListSessionEventsRequest, RouteEvent, RouteEventType, WatchEventsRequest, WatchRoutesRequest,
+    AddressFamily, BgpEvent, BgpEventType, EventCategory, ListPolicyEventsRequest,
+    ListRouteEventsRequest, ListSessionEventsRequest, RouteEvent, RouteEventType,
+    WatchEventsRequest, WatchRoutesRequest,
 };
 use std::net::IpAddr;
 
@@ -112,6 +113,16 @@ fn parse_session_bgp_event_type(s: &str) -> Result<i32, CliError> {
         | Ok(BgpEventType::PeerDisabled) => Ok(event_type),
         _ => Err(CliError::Argument(format!(
             "unsupported session event type {s:?}; expected state_changed, established, lost, peer_enabled, or peer_disabled"
+        ))),
+    }
+}
+
+fn parse_policy_bgp_event_type(s: &str) -> Result<i32, CliError> {
+    let event_type = parse_bgp_event_type(s)?;
+    match BgpEventType::try_from(event_type) {
+        Ok(BgpEventType::PolicyChanged) => Ok(event_type),
+        _ => Err(CliError::Argument(format!(
+            "unsupported policy event type {s:?}; expected policy_changed"
         ))),
     }
 }
@@ -669,6 +680,35 @@ pub async fn session_history(
     Ok(())
 }
 
+pub async fn policy_history(
+    connection: Connection,
+    neighbor: Option<String>,
+    event_types: Vec<String>,
+    limit: u32,
+    json: bool,
+) -> Result<(), CliError> {
+    let event_types = event_types
+        .iter()
+        .map(String::as_str)
+        .map(parse_policy_bgp_event_type)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut client =
+        EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let response = client
+        .list_policy_events(ListPolicyEventsRequest {
+            neighbor_address: neighbor.unwrap_or_default(),
+            event_types,
+            limit,
+        })
+        .await?
+        .into_inner();
+
+    for event in response.events {
+        print_bgp_event(&event, json);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -819,6 +859,16 @@ mod tests {
             BgpEventType::DataplaneStatusChanged as i32
         );
         assert!(parse_bgp_event_type("policy_filtered").is_err());
+    }
+
+    #[test]
+    fn parse_policy_bgp_event_type_accepts_only_policy_changed() {
+        assert_eq!(
+            parse_policy_bgp_event_type("policy_changed").unwrap(),
+            BgpEventType::PolicyChanged as i32
+        );
+        assert!(parse_policy_bgp_event_type("established").is_err());
+        assert!(parse_policy_bgp_event_type("dataplane_changed").is_err());
     }
 
     #[test]

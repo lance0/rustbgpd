@@ -79,8 +79,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `PolicyEvent` after each successful runtime policy, neighbor-set,
   peer-group, or chain mutation, and `rustbgpctl events watch --category
   policy --type policy_changed` renders the same live audit trail. This is a
-  live-only runtime-apply signal (not retained/backfilled, and lagging
-  subscribers may miss events), not per-route policy evaluation logging.
+  runtime-apply signal, not per-route policy evaluation logging.
+
+- **Bounded policy-event history.** `EventService.ListPolicyEvents`
+  returns recent runtime policy / neighbor-set / peer-group / chain mutation
+  events from the peer manager's in-memory 4096-event ring, filtered by
+  peer-scoped target and limit. `rustbgpctl events policy` exposes the same
+  after-the-fact audit trail while `WatchEvents` remains a live stream.
 
 - **Bounded session-event history.** `EventService.ListSessionEvents`
   returns recent peer lifecycle events from the peer manager's in-memory

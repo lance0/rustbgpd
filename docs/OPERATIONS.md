@@ -490,6 +490,7 @@ rustbgpctl events watch --category session --type notification_sent,notification
 rustbgpctl events watch --category policy --type policy_changed
 rustbgpctl events watch --category dataplane --type dataplane_status_changed
 rustbgpctl events sessions --address 10.0.0.2 --type established,lost --limit 20
+rustbgpctl events policy --address 10.0.0.2 --type policy_changed --limit 20
 ```
 
 `events watch` tails the unified `EventService.WatchEvents` stream. The
@@ -513,7 +514,8 @@ BGP collision handling. If the client falls behind a bounded route or session
 source stream, `events watch` prints a `stream_lagged` warning with the missed
 count; treat subsequent output as a live tail after a gap. Use `--backfill N`
 to print recent matching route history before the live tail starts. Backfill
-is route-history only; session, policy, and dataplane events remain live only.
+is route-history only; session, policy, and dataplane events are not backfilled
+through the live stream command.
 Backfilled route events use the same output shape as live route events, but
 the command still prints a history block followed by the live tail rather than
 merging the two by wall-clock timestamp. EVPN events remain follow-up work.
@@ -524,6 +526,12 @@ process-local history and resets on daemon restart. The CLI returns 100
 history entries by default. The session-history API uses `limit = 0` as a
 daemon-default sentinel, so `rustbgpctl events sessions --limit 0` requests
 the full bounded in-memory window rather than zero rows.
+For recent runtime policy / neighbor-set / peer-group / chain mutation history,
+use `rustbgpctl events policy`; it reads a separate bounded 4096-event
+process-local history from the peer manager. `--address` matches only
+peer-scoped policy events, so global policy and peer-group changes disappear
+from an address-filtered query. `rustbgpctl events policy --limit 0` requests
+the full bounded in-memory window.
 
 ### Pick the right observability surface
 

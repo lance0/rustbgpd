@@ -14,6 +14,9 @@ use tokio::sync::{broadcast, oneshot};
 /// Maximum number of recent session lifecycle events retained in memory.
 pub const SESSION_EVENT_HISTORY_CAPACITY: usize = 4096;
 
+/// Maximum number of recent policy mutation events retained in memory.
+pub const POLICY_EVENT_HISTORY_CAPACITY: usize = 4096;
+
 /// Kind of reconciliation failure returned to config reload callers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconcileFailureKind {
@@ -226,6 +229,15 @@ pub enum PeerManagerCommand {
     SubscribePolicyEvents {
         /// Reply channel returning a fresh broadcast receiver.
         reply: oneshot::Sender<broadcast::Receiver<PolicyEvent>>,
+    },
+    /// Query recent policy mutation events from the bounded in-memory history.
+    QueryPolicyEventHistory {
+        /// Optional peer filter. Matches only peer-scoped policy events.
+        peer: Option<IpAddr>,
+        /// Maximum events to return. 0 uses [`POLICY_EVENT_HISTORY_CAPACITY`].
+        limit: usize,
+        /// Reply channel returning matching events.
+        reply: oneshot::Sender<Vec<PolicyEvent>>,
     },
     /// Query recent session lifecycle events from the bounded in-memory history.
     QuerySessionEventHistory {

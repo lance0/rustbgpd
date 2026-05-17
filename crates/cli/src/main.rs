@@ -541,6 +541,20 @@ enum EventsAction {
         #[arg(short, long)]
         limit: Option<u32>,
     },
+    /// Show recent policy / peer-group / chain mutation events
+    Policy {
+        /// Neighbor address filter. Only peer-scoped policy events match.
+        #[arg(long)]
+        address: Option<String>,
+
+        /// Policy event type filter: policy_changed
+        #[arg(long = "type", value_delimiter = ',')]
+        event_types: Vec<String>,
+
+        /// Maximum recent policy events to return (default 100; explicit 0 requests the daemon's full bounded window)
+        #[arg(short, long)]
+        limit: Option<u32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1049,6 +1063,28 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 commands::watch::session_history(
                     connection,
                     session_address,
+                    event_types,
+                    limit,
+                    json,
+                )
+                .await
+            }
+            Some(EventsAction::Policy {
+                address: policy_address,
+                event_types,
+                limit: policy_limit,
+            }) => {
+                reject_events_parent_filters_for_subcommand(
+                    "events policy",
+                    &address,
+                    &family,
+                    &prefix,
+                    limit,
+                )?;
+                let limit = policy_limit.unwrap_or(100);
+                commands::watch::policy_history(
+                    connection,
+                    policy_address,
                     event_types,
                     limit,
                     json,
@@ -1703,6 +1739,33 @@ mod tests {
                 }),
                 ..
             } if address == "10.0.0.2" && event_types.len() == 2
+        ));
+    }
+
+    #[test]
+    fn test_parse_events_policy() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "events",
+            "policy",
+            "--address",
+            "10.0.0.2",
+            "--type",
+            "policy_changed",
+            "--limit",
+            "5",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Events {
+                action: Some(EventsAction::Policy {
+                    address: Some(ref address),
+                    ref event_types,
+                    limit: Some(5),
+                }),
+                ..
+            } if address == "10.0.0.2" && event_types == &vec!["policy_changed".to_string()]
         ));
     }
 
