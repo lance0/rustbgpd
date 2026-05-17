@@ -19,8 +19,10 @@ name: Kernel Dataplane
 #
 # The runner pool is expected to be multiple runner services on the same
 # host, sharing one Docker daemon. The build job creates `rustbgpd:dev`
-# once; M36/M37/M37+IP/M38/M39/M40/M42 then fan out and consume that
-# local image.
+# once; M39/M40/M42 and the netns selectors can fan out. M36-M38 are
+# serialized below to preserve the same ordering as the original manual
+# privileged workflow; those early EVPN smokes have short convergence
+# assertions and are more sensitive to shared-host load.
 
 on:
   push:
@@ -111,7 +113,7 @@ jobs:
   m37:
     name: M37 — EVPN local MAC origination (FRR 10.3.1)
     runs-on: [self-hosted, linux, kernel-dataplane]
-    needs: build-image
+    needs: [build-image, m36]
     environment:
       name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
     timeout-minutes: 25
@@ -133,7 +135,7 @@ jobs:
   m37-ip:
     name: M37+IP — EVPN local MAC/IP origination (FRR 10.3.1)
     runs-on: [self-hosted, linux, kernel-dataplane]
-    needs: build-image
+    needs: [build-image, m37]
     environment:
       name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
     timeout-minutes: 25
@@ -155,7 +157,7 @@ jobs:
   m38:
     name: M38 — EVPN DF election + Type 1/4 origination
     runs-on: [self-hosted, linux, kernel-dataplane]
-    needs: build-image
+    needs: [build-image, m37-ip]
     environment:
       name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
     timeout-minutes: 25
