@@ -107,7 +107,7 @@ the active planning surface.
 
 | Priority | Item | Why now | Main proof / exit condition |
 |----------|------|---------|-----------------------------|
-| P0 | **Privileged runner expansion for remaining dataplane gates** | The self-hosted `kernel-dataplane` workflow now covers M39, M40, M42, and the Docker `fib_runtime` / `fdb_nhg` selectors behind protected-environment approval. The remaining high-value local-only dataplane gates are the earlier VTEP / DF-election smokes and the long soak variants. | M36, M37, M37+IP, M38, and any repeatable long-soak gates either run on the protected self-hosted runner or are explicitly kept manual with a documented reason ([#130](https://github.com/lance0/rustbgpd/issues/130)). |
+| P0 | **Privileged runner expansion for remaining dataplane gates** | The self-hosted `kernel-dataplane` workflow now covers M36, M37, M37+IP, M38, M39, M40, M42, and the Docker `fib_runtime` / `fdb_nhg` selectors behind protected-environment approval. The remaining high-value local-only dataplane gates are long soak variants and platform-diversity checks that intentionally do not run on every PR. | Protected CI covers the repeatable EVPN dataplane / DF-election smokes; any future long-soak gate either gets a protected-runner job or a documented reason for staying manual. |
 | P0 | **ADR-0061 FIB hardening** | GoBGP and FRR both expose kernel route programming. rustbgpd now has the minimal configured-table path, peer / peer-group guardrails, route-count caps, exact-match crash-restart recovery via persisted owned-state, and explicit live-drift preservation. | Decide whether operators need a paginated/detail API for over-cap rejected routes beyond the current sampled `route_limit_exceeded` status rows; larger future work is hot-swap `[[fib_tables]]` and ECMP. |
 | P0 | **gRPC security audit + authorization split** | v1.0 is blocked on an external security review. mTLS exists; operator trust still needs method-level read/write boundaries and audit-ready docs. | Security review complete; mutating RPCs can be disabled or isolated from read-only observability endpoints. |
 | P1 | **EVPN production-default decision point** | The Gate 8b MAC-churn 24 h soak passed 2026-05-16 (postmortem at `docs/soak-gate8b-mac-churn-24h.md`) — 69 flip cycles, ~478 K FDB ops, PE1 RSS plateau 17.23–18.93 MB, 0 ADR-0059 drift events — which unblocks flipping `apply_bum_enforcement` and `apply_aliasing_ecmp` defaults to `true`. The defaults still ship as `false` so operators opt in deliberately; the flip is a separate release decision. | Defaults flipped to `true` in `src/config/schema.rs`, with a documented operator note covering the upgrade implications. |
@@ -157,8 +157,8 @@ those priorities exist.
   under the FRR replace model with sub-second mobility convergence,
   plus observable DF election against shared Ethernet Segments and
   observable IP-VRF readiness state. `docs/evpn-alpha-soak.md`
-  tracks the residuals as a checklist: M36 + M37 + M37+IP + M38 on
-  a privileged CI runner ([#130](https://github.com/lance0/rustbgpd/issues/130)),
+  tracks the residuals as a checklist: protected CI for M36 + M37 +
+  M37+IP + M38 now lives in `.github/workflows/kernel-dataplane.yml`,
   the M37 local-origination 24 h MAC-churn soak
   ([#134](https://github.com/lance0/rustbgpd/issues/134)), and
   RFC 7432 §15.1 duplicate-MAC quarantine action (detection
@@ -684,9 +684,9 @@ FRR-as-originator, iBGP/AS65000) — 8/8 PASS locally against Linux
 (rustbgpd-as-originator, FRR-as-consumer) — 4/4 PASS locally against
 the same kernel/FRR pair; M37+IP is the Gate 7b+2 MAC-with-IP
 origination smoke; M38 is the Gate 8 DF-election smoke
-(2-PE rustbgpd shared ESI). M36/M37/M37+IP/M38 are not in CI yet
-because privileged kernel state is required; tracked in
-[#130](https://github.com/lance0/rustbgpd/issues/130). M39 (Gate 9 slice 6
+(2-PE rustbgpd shared ESI). M36/M37/M37+IP/M38 now run in the
+protected self-hosted `kernel-dataplane` workflow because privileged
+kernel state is required. M39 (Gate 9 slice 6
 symmetric Interface-less IRB) is in place — bidirectional Type 5
 between rustbgpd and FRR 10.3.1 with kernel route + L3 neighbor +
 L3VXLAN FDB programming validated end-to-end. M40 (ADR-0059
@@ -700,11 +700,10 @@ the ADR-0061 general unicast FIB runtime against FRR 10.3.1 and a real
 Linux route table: selected EBGP route install into configured table
 1000, foreign-route preservation, FRR withdraw cleanup, and SIGTERM
 drain. Crash-restart adoption is intentionally deferred because
-`RTPROT_BGP` is not rustbgpd-specific ownership proof. M39 / M40 / M42
-and the Docker `fdb_nhg` / `fib_runtime` netns selectors now run in the
-protected self-hosted `kernel-dataplane` workflow; the remaining
-VTEP / DF-election smokes stay manual until they are assigned to that
-runner or explicitly kept as reviewer-run checks.
+`RTPROT_BGP` is not rustbgpd-specific ownership proof. M36 / M37 /
+M37+IP / M38 / M39 / M40 / M42 and the Docker `fdb_nhg` /
+`fib_runtime` netns selectors now run in the protected self-hosted
+`kernel-dataplane` workflow.
 
 **Must-test (high signal, high risk):**
 
