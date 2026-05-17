@@ -2,7 +2,7 @@ use tonic::{Request, Response, Status};
 
 use crate::proto;
 use crate::server::{AccessMode, read_only_rejection};
-use rustbgpd_transport::TcpAoSupport;
+use rustbgpd_transport::TcpAoSupport as TransportTcpAoSupport;
 
 /// Read-only view of daemon global configuration.
 ///
@@ -15,7 +15,7 @@ pub struct GlobalService {
     asn: u32,
     router_id: String,
     listen_port: u32,
-    tcp_ao_support: TcpAoSupport,
+    tcp_ao_support: TransportTcpAoSupport,
 }
 
 impl GlobalService {
@@ -35,7 +35,7 @@ impl GlobalService {
         asn: u32,
         router_id: String,
         listen_port: u32,
-        tcp_ao_support: TcpAoSupport,
+        tcp_ao_support: TransportTcpAoSupport,
     ) -> Self {
         Self {
             access_mode,
@@ -47,14 +47,14 @@ impl GlobalService {
     }
 }
 
-fn tcp_ao_support_to_proto(support: &TcpAoSupport) -> (proto::TcpAoSupport, String) {
+fn tcp_ao_support_to_proto(support: &TransportTcpAoSupport) -> (proto::TcpAoSupport, String) {
     match support {
-        TcpAoSupport::Supported => (proto::TcpAoSupport::Supported, String::new()),
-        TcpAoSupport::Unsupported => (
+        TransportTcpAoSupport::Supported => (proto::TcpAoSupport::Supported, String::new()),
+        TransportTcpAoSupport::Unsupported => (
             proto::TcpAoSupport::Unsupported,
             "TCP-AO is not supported by this platform/kernel".to_string(),
         ),
-        TcpAoSupport::ProbeFailed(err) => (proto::TcpAoSupport::ProbeFailed, err.clone()),
+        TransportTcpAoSupport::ProbeFailed(err) => (proto::TcpAoSupport::ProbeFailed, err.clone()),
     }
 }
 
@@ -99,7 +99,7 @@ mod tests {
             65001,
             "10.0.0.1".into(),
             179,
-            TcpAoSupport::Supported,
+            TransportTcpAoSupport::Supported,
         );
         let resp = svc
             .get_global(Request::new(proto::GetGlobalRequest {}))
@@ -120,7 +120,7 @@ mod tests {
             65001,
             "10.0.0.1".into(),
             179,
-            TcpAoSupport::ProbeFailed("setsockopt failed".into()),
+            TransportTcpAoSupport::ProbeFailed("setsockopt failed".into()),
         );
         let resp = svc
             .get_global(Request::new(proto::GetGlobalRequest {}))
