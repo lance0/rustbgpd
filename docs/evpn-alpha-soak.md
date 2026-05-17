@@ -16,12 +16,11 @@ none of them block the current release on their own.
 
 ## CI / observability
 
-- [ ] **M36 / M37 / M37+IP / M38 on protected privileged CI.**
-  These earlier VTEP and DF-election smokes are still reviewer-run
-  even though M39 / M40 / M42 and the Docker netns selectors run in
-  the protected self-hosted `kernel-dataplane` workflow. Wire these
-  suites into that protected path, or explicitly document why they
-  remain manual gates. Tracked in
+- [x] **M36 / M37 / M37+IP / M38 on protected privileged CI.**
+  The earlier VTEP and DF-election smokes now run in the protected
+  self-hosted `.github/workflows/kernel-dataplane.yml` workflow
+  alongside M39 / M40 / M42 and the Docker netns selectors. This
+  closes the reviewer-run coverage gap tracked in
   <https://github.com/lance0/rustbgpd/issues/130>.
 - [x] **EVPN local-origination Prometheus counters.** The originator
   now records successful RIB-accepted Type 2 actions in

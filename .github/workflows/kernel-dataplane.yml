@@ -3,6 +3,8 @@ name: Kernel Dataplane
 # Privileged Linux kernel dataplane interop suite. Runs on the
 # self-hosted `kernel-dataplane` runner because these tests need kernel
 # features the hosted ubuntu-latest image lacks:
+#   - bridge + VXLAN FDB   — real VTEP receive/origination (M36/M37/M37+IP)
+#   - shared ESI + metrics — DF election and Type 1/4 origination (M38)
 #   - `vrf` module           — L3VNI / symmetric IRB (M39)
 #   - bond ES + FDB-NHG      — aliasing dataplane ECMP (M40)
 #   - FDB nexthop groups     — kernel >= 5.8 (netns fdb_nhg selectors)
@@ -17,7 +19,8 @@ name: Kernel Dataplane
 #
 # The runner pool is expected to be multiple runner services on the same
 # host, sharing one Docker daemon. The build job creates `rustbgpd:dev`
-# once; M39/M40/M42 then fan out and consume that local image.
+# once; M36/M37/M37+IP/M38/M39/M40/M42 then fan out and consume that
+# local image.
 
 on:
   push:
@@ -82,6 +85,94 @@ jobs:
 
       - name: Build rustbgpd:dev
         run: docker build -t rustbgpd:dev .
+
+  m36:
+    name: M36 — EVPN VTEP receive FDB programming (FRR 10.3.1)
+    runs-on: [self-hosted, linux, kernel-dataplane]
+    needs: build-image
+    environment:
+      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Deploy M36 topology
+        run: |
+          sudo containerlab destroy -t tests/interop/m36-evpn-vtep-smoke.clab.yml --cleanup 2>/dev/null || true
+          sudo containerlab deploy -t tests/interop/m36-evpn-vtep-smoke.clab.yml
+
+      - name: Run M36 test
+        run: bash tests/interop/scripts/test-m36-evpn-vtep-smoke.sh
+
+      - name: Destroy topology
+        if: always()
+        run: sudo containerlab destroy -t tests/interop/m36-evpn-vtep-smoke.clab.yml --cleanup || true
+
+  m37:
+    name: M37 — EVPN local MAC origination (FRR 10.3.1)
+    runs-on: [self-hosted, linux, kernel-dataplane]
+    needs: build-image
+    environment:
+      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Deploy M37 topology
+        run: |
+          sudo containerlab destroy -t tests/interop/m37-evpn-local-origination.clab.yml --cleanup 2>/dev/null || true
+          sudo containerlab deploy -t tests/interop/m37-evpn-local-origination.clab.yml
+
+      - name: Run M37 test
+        run: bash tests/interop/scripts/test-m37-evpn-local-origination.sh
+
+      - name: Destroy topology
+        if: always()
+        run: sudo containerlab destroy -t tests/interop/m37-evpn-local-origination.clab.yml --cleanup || true
+
+  m37-ip:
+    name: M37+IP — EVPN local MAC/IP origination (FRR 10.3.1)
+    runs-on: [self-hosted, linux, kernel-dataplane]
+    needs: build-image
+    environment:
+      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Deploy M37+IP topology
+        run: |
+          sudo containerlab destroy -t tests/interop/m37-evpn-mac-ip-origination.clab.yml --cleanup 2>/dev/null || true
+          sudo containerlab deploy -t tests/interop/m37-evpn-mac-ip-origination.clab.yml
+
+      - name: Run M37+IP test
+        run: bash tests/interop/scripts/test-m37-evpn-mac-ip-origination.sh
+
+      - name: Destroy topology
+        if: always()
+        run: sudo containerlab destroy -t tests/interop/m37-evpn-mac-ip-origination.clab.yml --cleanup || true
+
+  m38:
+    name: M38 — EVPN DF election + Type 1/4 origination
+    runs-on: [self-hosted, linux, kernel-dataplane]
+    needs: build-image
+    environment:
+      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Deploy M38 topology
+        run: |
+          sudo containerlab destroy -t tests/interop/m38-evpn-df-election.clab.yml --cleanup 2>/dev/null || true
+          sudo containerlab deploy -t tests/interop/m38-evpn-df-election.clab.yml
+
+      - name: Run M38 test
+        run: bash tests/interop/scripts/test-m38-evpn-df-election.sh
+
+      - name: Destroy topology
+        if: always()
+        run: sudo containerlab destroy -t tests/interop/m38-evpn-df-election.clab.yml --cleanup || true
 
   m39:
     name: M39 — EVPN Type 5 symmetric Interface-less IRB (FRR 10.3.1)

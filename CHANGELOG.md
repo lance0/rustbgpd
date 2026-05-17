@@ -116,11 +116,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Self-hosted kernel dataplane CI gate.** New
   `.github/workflows/kernel-dataplane.yml` runs the privileged Linux
   dataplane checks that hosted runners cannot reliably exercise:
-  M39 symmetric Interface-less IRB, M40 EVPN aliasing ECMP via FDB
-  nexthop groups, M42 configured-table unicast FIB runtime, and the
-  Docker `fdb_nhg` / `fib_runtime` netns selectors. Jobs target the
-  protected `kernel-dataplane` GitHub Environment so PR code waits for
-  maintainer approval before it reaches the self-hosted runner.
+  M36 real-VTEP FDB programming, M37 local-MAC origination, M37+IP
+  MAC/IP origination, M38 DF election + Type 1/4 origination, M39
+  symmetric Interface-less IRB, M40 EVPN aliasing ECMP via FDB nexthop
+  groups, M42 configured-table unicast FIB runtime, and the Docker
+  `fdb_nhg` / `fib_runtime` netns selectors. Jobs target the protected
+  `kernel-dataplane` GitHub Environment so PR code waits for maintainer
+  approval before it reaches the self-hosted runner.
 
 - **ADR-0061 FIB guardrails.** `[[fib_tables]]` now supports
   `allowed_peer_groups`, `allowed_neighbors`, and `max_routes`.
@@ -161,11 +163,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - EVPN planning and operator docs now reflect the post-v0.21 state:
   Gate 7c sub-second mobility is no longer listed as a known issue,
-  Gate 8b MAC-churn is recorded as passed, and remaining EVPN work is
-  tracked through concrete GitHub issues for privileged M36/M37/M37+IP/M38
-  coverage, optional ES-Import RT filtering, duplicate-MAC quarantine,
-  runtime `[[evpn_instances]]` mutation semantics, and the M37
-  local-origination churn soak.
+  Gate 8b MAC-churn is recorded as passed, M36/M37/M37+IP/M38 now run
+  in protected self-hosted CI, and remaining EVPN work is tracked
+  through concrete GitHub issues for optional ES-Import RT filtering,
+  duplicate-MAC quarantine, runtime `[[evpn_instances]]` mutation
+  semantics, and the M37 local-origination churn soak.
 
 - FIB and BLACKHOLE route-event wakeups now use a resettable debounce
   deadline instead of a fixed-grid interval, so the first route event after
