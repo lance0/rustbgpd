@@ -275,8 +275,8 @@ prefill_live_set() {
     : >"$LIVE_SET_FILE"
     log "Prefilling $LIVE_TARGET_MACS local MACs on $VETH_PORT"
     for idx in $(seq 1 "$LIVE_TARGET_MACS"); do
-        rb_fdb_replace "$(format_mac "$idx")"
         printf '%s\n' "$idx" >>"$LIVE_SET_FILE"
+        rb_fdb_replace "$(format_mac "$idx")"
     done
 }
 
@@ -353,8 +353,8 @@ run_churn_cycle() {
 
     for i in $(seq 1 "$CHURN_BATCH"); do
         mac=$(format_mac "$add_idx")
-        rb_fdb_replace "$mac"
         printf '%s\n' "$add_idx" >>"$LIVE_SET_FILE"
+        rb_fdb_replace "$mac"
         churn_log "add $mac"
         add_idx=$(wrap_index $((add_idx + 1)))
     done
