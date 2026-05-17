@@ -176,9 +176,7 @@ async fn run_loop<F>(
     let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     interval.tick().await;
-    let mut event_debounce = tokio::time::interval(ROUTE_EVENT_DEBOUNCE);
-    event_debounce.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    event_debounce.tick().await;
+    let mut event_debounce = Box::pin(tokio::time::sleep(ROUTE_EVENT_DEBOUNCE));
     let mut route_event_dirty = false;
 
     let mut route_events = subscribe_route_events(&rib_tx).await;
@@ -212,7 +210,7 @@ async fn run_loop<F>(
                     &mut rejected,
                 ).await;
             }
-            _ = event_debounce.tick(), if route_event_dirty => {
+            () = &mut event_debounce, if route_event_dirty => {
                 route_event_dirty = false;
                 reconcile_once(
                     config,
@@ -228,6 +226,9 @@ async fn run_loop<F>(
                 match maybe_event {
                     Some(()) => {
                         route_event_dirty = true;
+                        event_debounce
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + ROUTE_EVENT_DEBOUNCE);
                     }
                     None => {
                         route_events = subscribe_route_events(&rib_tx).await;
@@ -1146,7 +1147,7 @@ mod tests {
         });
 
         for _ in 0..20 {
-            if query_count.load(Ordering::SeqCst) == 1 {
+            if events_tx.receiver_count() > 0 && query_count.load(Ordering::SeqCst) == 1 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1158,7 +1159,7 @@ mod tests {
         );
 
         for _ in 0..5 {
-            let _ = events_tx.send(route_event(prefix));
+            events_tx.send(route_event(prefix)).unwrap();
         }
         tokio::task::yield_now().await;
         assert_eq!(
@@ -1174,6 +1175,60 @@ mod tests {
             2,
             "a burst of route events should coalesce into one follow-up RIB query"
         );
+
+        shutdown.cancel();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn route_event_debounce_waits_after_idle() {
+        let prefix = v4(32);
+        let (rib_tx, query_count, events_tx) = rib_with_events(vec![route(
+            prefix,
+            RouteOrigin::Ebgp,
+            vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+        )]);
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let shutdown = CancellationToken::new();
+        let task_shutdown = shutdown.clone();
+        let task = tokio::spawn(async move {
+            run_loop(
+                BlackholeConfig {
+                    enabled: true,
+                    allow_broad_prefixes: false,
+                },
+                rib_tx,
+                FakeFib::default(),
+                metrics,
+                status_tx,
+                task_shutdown,
+            )
+            .await;
+        });
+
+        for _ in 0..20 {
+            if events_tx.receiver_count() > 0 && query_count.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(query_count.load(Ordering::SeqCst), 1);
+
+        tokio::time::sleep(ROUTE_EVENT_DEBOUNCE + Duration::from_millis(50)).await;
+        events_tx.send(route_event(prefix)).unwrap();
+        tokio::time::sleep(ROUTE_EVENT_DEBOUNCE / 2).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            query_count.load(Ordering::SeqCst),
+            1,
+            "first route event after idle should wait for the debounce window"
+        );
+
+        tokio::time::sleep(ROUTE_EVENT_DEBOUNCE).await;
+        tokio::task::yield_now().await;
+        assert_eq!(query_count.load(Ordering::SeqCst), 2);
 
         shutdown.cancel();
         task.await.unwrap();

@@ -167,6 +167,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runtime `[[evpn_instances]]` mutation semantics, and the M37
   local-origination churn soak.
 
+- FIB and BLACKHOLE route-event wakeups now use a resettable debounce
+  deadline instead of a fixed-grid interval, so the first route event after
+  an idle period waits for the full coalescing window and bursts produce one
+  follow-up RIB query after the last event.
+
 - `rustbgpd --diff` now itemizes hot-applied `[global]` flags in both
   human and JSON output. `honor_graceful_shutdown` and
   control-plane-only `honor_blackhole` edits already made the diff
