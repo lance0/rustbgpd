@@ -157,6 +157,98 @@ To confirm the harness's gates actually trip:
 
 ---
 
+# M37 Local-Origination MAC-Churn 24-Hour Soak
+
+Long-running variant of the M37 local-MAC origination smoke. The M37 smoke
+proves one `bridge fdb add` becomes a Type 2 advertisement and one
+`bridge fdb del` becomes a withdraw. The soak keeps that loop running for
+hours with a bounded rotating MAC pool so the originator's retained
+`LocalMacOriginationState` map should grow to the pool size and then plateau.
+
+This is distinct from the Gate 8b MAC-churn soak: M37 is single-homed local
+origination against an FRR consumer; Gate 8b is multi-homing enforcement with
+DF flips and FDB programming in flight.
+
+## Run
+
+```bash
+docker build -t rustbgpd:dev .
+containerlab deploy -t tests/interop/m37-evpn-local-origination.clab.yml
+
+# 10-minute wiring check:
+SOAK_SECONDS=600 bash tests/soak/run-m37-local-origination-churn-soak.sh
+
+# 1-hour smoke:
+SOAK_HOURS=1 bash tests/soak/run-m37-local-origination-churn-soak.sh
+
+# Full 24h run:
+bash tests/soak/run-m37-local-origination-churn-soak.sh
+
+# Destroy the topology on exit:
+CLEANUP=1 bash tests/soak/run-m37-local-origination-churn-soak.sh
+```
+
+If your host requires elevated privileges for containerlab, run the
+`containerlab deploy` / `destroy` commands using your normal local setup.
+The harness itself only uses `docker exec`, `docker logs`, `curl`, and shell
+tools once the topology is deployed.
+
+## Output
+
+Each run creates
+`tests/soak/runs/m37-local-origination-<UTC-timestamp>/` containing:
+
+| File | Content |
+|------|---------|
+| `samples.csv` | One row per sample interval: rustbgpd RSS, local FDB count, FRR Type 2 count, BGP Established bit, churn totals, local-origination counters, observation drops, duplicate-MAC moves |
+| `soak.log` | Mirrored stdout/stderr from the runner |
+| `churn.log` | Per-cycle `add` / `del` log for generated MACs |
+| `rustbgpd.log` | `docker logs -f` capture from the originator |
+| `consumer.log` | `docker logs -f` capture from the FRR consumer |
+| `run.json` | Run metadata: git SHA, duration, pool size, churn cadence, container names |
+
+`tests/soak/runs/` is gitignored — keep the raw run local and publish a
+curated postmortem under `docs/` when the 24h run passes.
+
+## Tunables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `SOAK_HOURS` | `24` | Total soak duration when `SOAK_SECONDS` is unset |
+| `SOAK_SECONDS` | unset | Precise duration override for short wiring checks |
+| `SAMPLE_INTERVAL` | `60` | Seconds between CSV samples |
+| `CHURN_INTERVAL_SEC` | `5` | Seconds between churn batches |
+| `CHURN_BATCH` | `25` | MACs deleted and MACs added per churn cycle |
+| `MAC_POOL_SIZE` | `4096` | Total generated MAC keyspace; originator state should plateau here |
+| `LIVE_TARGET_MACS` | `1024` | Number of MACs kept live after prefill |
+| `WARMUP_SEC` | `300` | Suggested warmup window to ignore in slope analysis |
+| `DRAIN_ON_EXIT` | `1` | Remove live generated MACs before exit |
+| `CLEANUP` | `0` | Set to `1` to `containerlab destroy` on exit |
+
+Default churn cadence is 25 deletes + 25 adds every 5 seconds, or roughly
+10 bridge-FDB mutations per second. The pool is intentionally bounded: a
+unique-MAC storm would prove that the retained ratchet map can grow, not
+whether it plateaus under repeated learn/age churn.
+
+## Pass Criteria
+
+Publish the 24h postmortem only after checking:
+
+- BGP session stays Established outside deliberate startup/shutdown windows.
+- `local_fdb_count` and `frr_type2_count` remain near `LIVE_TARGET_MACS`.
+- `evpn_local_originations_total{action="inject"}` and `{action="withdraw"}`
+  advance with churn.
+- `evpn_local_origination_errors_total` stays flat at zero.
+- `evpn_local_observations_dropped_total` stays flat at zero.
+- `duplicate_mac_moves_total` stays flat unless the test deliberately reuses
+  a MAC before its withdraw converges.
+- Steady-state RSS slope after `WARMUP_SEC` is flat enough to rule out a
+  retained-state leak.
+
+Template: `docs/soak-m37-local-origination-churn-24h.md`.
+
+---
+
 # Gate 8b 24-Hour Soak
 
 Sibling harness covering the Gate 8b multi-homing enforcement

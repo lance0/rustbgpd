@@ -3,8 +3,9 @@
 #
 # Deploy the M37 topology first, then run this script to repeatedly add
 # and delete static bridge FDB entries on rustbgpd's non-VXLAN bridge
-# port. It is intentionally not wired into CI; it needs the privileged
-# containerlab topology and is meant for local soak runs.
+# port. This finite helper is for quick smoke checks. Use
+# `tests/soak/run-m37-local-origination-churn-soak.sh` for the 1h / 24h
+# run that captures RSS, Prometheus counters, logs, and run metadata.
 #
 # Usage:
 #   docker build -t rustbgpd:dev .

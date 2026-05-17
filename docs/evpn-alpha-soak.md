@@ -46,11 +46,16 @@ none of them block the current release on their own.
   `originated_local_macs_count`.
 - [ ] **24 h MAC-churn soak** of M37 with a synthetic MAC churn
   driver (`bridge fdb add` + `bridge fdb del` at ~10 Hz on a few
-  thousand MACs). The local-only driver now lives at
-  `tests/interop/scripts/test-m37-evpn-local-origination-churn.sh`.
-  Use `--smoke` for a one-round, five-MAC pre-release check; the
-  remaining work is to run the full driver long enough to confirm RSS
-  slope stays flat under the originator's
+  thousand MACs). The finite local helper still lives at
+  `tests/interop/scripts/test-m37-evpn-local-origination-churn.sh`
+  for quick smoke checks. The 24 h harness lives at
+  `tests/soak/run-m37-local-origination-churn-soak.sh` and writes
+  `samples.csv`, daemon/consumer logs, `churn.log`, and `run.json`
+  under `tests/soak/runs/m37-local-origination-<UTC>/`. The remaining
+  work is to run the full harness and publish
+  `docs/soak-m37-local-origination-churn-24h.md` with RSS slope,
+  counter, and Type 2 visibility results. The goal is to confirm RSS
+  stays flat under the originator's
   `BTreeMap<MacAddress, LocalMacOriginationState>` retention model
   (entries are kept after Aged so the seq ratchet survives — we want
   to verify that doesn't compound badly under heavy churn). Separate
