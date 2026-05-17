@@ -533,6 +533,9 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         _request: Request<proto::AddDynamicNeighborRequest>,
     ) -> Result<Response<proto::AddDynamicNeighborResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         Err(Status::unimplemented(
             "runtime dynamic neighbor CRUD not yet implemented; configure via TOML [[dynamic_neighbors]]",
         ))
@@ -542,6 +545,9 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         _request: Request<proto::DeleteDynamicNeighborRequest>,
     ) -> Result<Response<proto::DeleteDynamicNeighborResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         Err(Status::unimplemented(
             "runtime dynamic neighbor CRUD not yet implemented; configure via TOML [[dynamic_neighbors]]",
         ))
@@ -667,6 +673,30 @@ mod tests {
             }),
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn dynamic_neighbor_placeholders_rejected_on_read_only_listener() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(65001, AccessMode::ReadOnly, tx, rib_tx, None);
+
+        let err = svc
+            .add_dynamic_neighbor(Request::new(proto::AddDynamicNeighborRequest {
+                range: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        let err = svc
+            .delete_dynamic_neighbor(Request::new(proto::DeleteDynamicNeighborRequest {
+                prefix: "192.0.2.0/24".into(),
+            }))
+            .await
+            .unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
     }

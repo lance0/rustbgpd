@@ -1,12 +1,15 @@
 use tonic::{Request, Response, Status};
 
 use crate::proto;
+use crate::server::{AccessMode, read_only_rejection};
 
 /// Read-only view of daemon global configuration.
 ///
 /// `GetGlobal` returns ASN, router-id, and listen port.
-/// `SetGlobal` is reserved for future use. Always returns UNIMPLEMENTED.
+/// `SetGlobal` is reserved for future use. It is still classified as a
+/// mutating RPC for read-only listener enforcement.
 pub struct GlobalService {
+    access_mode: AccessMode,
     asn: u32,
     router_id: String,
     listen_port: u32,
@@ -14,8 +17,9 @@ pub struct GlobalService {
 
 impl GlobalService {
     /// Create a new `GlobalService` with the daemon's startup configuration.
-    pub fn new(asn: u32, router_id: String, listen_port: u32) -> Self {
+    pub fn new(access_mode: AccessMode, asn: u32, router_id: String, listen_port: u32) -> Self {
         Self {
+            access_mode,
             asn,
             router_id,
             listen_port,
@@ -40,6 +44,9 @@ impl proto::global_service_server::GlobalService for GlobalService {
         &self,
         _request: Request<proto::SetGlobalRequest>,
     ) -> Result<Response<proto::SetGlobalResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         Err(Status::unimplemented(
             "runtime global config mutation is not supported",
         ))
@@ -53,7 +60,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_global_returns_config() {
-        let svc = GlobalService::new(65001, "10.0.0.1".into(), 179);
+        let svc = GlobalService::new(AccessMode::ReadWrite, 65001, "10.0.0.1".into(), 179);
         let resp = svc
             .get_global(Request::new(proto::GetGlobalRequest {}))
             .await
@@ -66,7 +73,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_global_returns_unimplemented() {
-        let svc = GlobalService::new(65001, "10.0.0.1".into(), 179);
+        let svc = GlobalService::new(AccessMode::ReadWrite, 65001, "10.0.0.1".into(), 179);
         let err = svc
             .set_global(Request::new(proto::SetGlobalRequest {
                 asn: 65002,
@@ -76,5 +83,19 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unimplemented);
+    }
+
+    #[tokio::test]
+    async fn set_global_rejected_on_read_only_listener() {
+        let svc = GlobalService::new(AccessMode::ReadOnly, 65001, "10.0.0.1".into(), 179);
+        let err = svc
+            .set_global(Request::new(proto::SetGlobalRequest {
+                asn: 65002,
+                router_id: "10.0.0.2".into(),
+                listen_port: 179,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 }

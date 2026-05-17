@@ -122,17 +122,32 @@ impl RibService {
     }
 }
 
-/// Validate the requested address family.
-/// 0 = UNSPECIFIED (treat as "any"), 1-4 = valid families.
+/// Validate the requested unicast route-listing address family.
+/// 0 = UNSPECIFIED (treat as "any"), 1-2 = valid unicast families.
 #[allow(clippy::result_large_err)]
-fn validate_afi_safi(value: i32) -> Result<(), Status> {
+fn validate_unicast_afi_safi(value: i32) -> Result<(), Status> {
     if value != 0
         && value != proto::AddressFamily::Ipv4Unicast as i32
         && value != proto::AddressFamily::Ipv6Unicast as i32
+    {
+        return Err(Status::invalid_argument(
+            "route listing supports only IPv4/IPv6 unicast address families",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate the requested `FlowSpec` route-listing address family.
+/// 0 = UNSPECIFIED (treat as "any"), 3-4 = valid `FlowSpec` families.
+#[allow(clippy::result_large_err)]
+fn validate_flowspec_afi_safi(value: i32) -> Result<(), Status> {
+    if value != 0
         && value != proto::AddressFamily::Ipv4Flowspec as i32
         && value != proto::AddressFamily::Ipv6Flowspec as i32
     {
-        return Err(Status::invalid_argument("unsupported address family"));
+        return Err(Status::invalid_argument(
+            "FlowSpec route listing supports only IPv4/IPv6 FlowSpec address families",
+        ));
     }
     Ok(())
 }
@@ -171,13 +186,31 @@ impl RouteFilters {
     #[allow(clippy::result_large_err)]
     fn from_request(req: &proto::ListRoutesRequest) -> Result<Self, Status> {
         let prefix = if req.prefix_filter.is_empty() {
+            if req.prefix_filter_length != 0 {
+                return Err(Status::invalid_argument(
+                    "prefix_filter_length requires a non-empty prefix_filter",
+                ));
+            }
             None
         } else {
             let addr: IpAddr = req.prefix_filter.parse().map_err(|e| {
                 Status::invalid_argument(format!("invalid prefix_filter address: {e}"))
             })?;
+            match addr {
+                IpAddr::V4(_) if req.prefix_filter_length > 32 => {
+                    return Err(Status::invalid_argument(
+                        "prefix_filter_length must be 0-32 for IPv4",
+                    ));
+                }
+                IpAddr::V6(_) if req.prefix_filter_length > 128 => {
+                    return Err(Status::invalid_argument(
+                        "prefix_filter_length must be 0-128 for IPv6",
+                    ));
+                }
+                _ => {}
+            }
             let len = u8::try_from(req.prefix_filter_length)
-                .map_err(|_| Status::invalid_argument("prefix_filter_length must be 0-128"))?;
+                .expect("validated prefix_filter_length fits in u8");
             Some(match addr {
                 IpAddr::V4(v4) => Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(v4, len)),
                 IpAddr::V6(v6) => Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(v6, len)),
@@ -595,7 +628,7 @@ impl proto::rib_service_server::RibService for RibService {
         request: Request<proto::ListRoutesRequest>,
     ) -> Result<Response<proto::ListRoutesResponse>, Status> {
         let req = request.into_inner();
-        validate_afi_safi(req.afi_safi)?;
+        validate_unicast_afi_safi(req.afi_safi)?;
 
         let peer = if req.neighbor_address.is_empty() {
             None
@@ -625,7 +658,7 @@ impl proto::rib_service_server::RibService for RibService {
         request: Request<proto::ListRoutesRequest>,
     ) -> Result<Response<proto::ListRoutesResponse>, Status> {
         let req = request.into_inner();
-        validate_afi_safi(req.afi_safi)?;
+        validate_unicast_afi_safi(req.afi_safi)?;
         let filters = RouteFilters::from_request(&req)?;
         let all_routes = self.query_best_routes().await?;
         let all_routes = filter_routes_by_family(all_routes, req.afi_safi);
@@ -644,7 +677,7 @@ impl proto::rib_service_server::RibService for RibService {
         request: Request<proto::ListRoutesRequest>,
     ) -> Result<Response<proto::ListRoutesResponse>, Status> {
         let req = request.into_inner();
-        validate_afi_safi(req.afi_safi)?;
+        validate_unicast_afi_safi(req.afi_safi)?;
 
         if req.neighbor_address.is_empty() {
             return Err(Status::invalid_argument(
@@ -785,7 +818,7 @@ impl proto::rib_service_server::RibService for RibService {
         request: Request<proto::WatchRoutesRequest>,
     ) -> Result<Response<Self::WatchRoutesStream>, Status> {
         let req = request.into_inner();
-        validate_afi_safi(req.afi_safi)?;
+        validate_unicast_afi_safi(req.afi_safi)?;
 
         let afi_safi_filter = req.afi_safi;
         let peer_filter: Option<IpAddr> = if req.neighbor_address.is_empty() {
@@ -847,6 +880,7 @@ impl proto::rib_service_server::RibService for RibService {
         request: Request<proto::ListFlowSpecRequest>,
     ) -> Result<Response<proto::ListFlowSpecResponse>, Status> {
         let req = request.into_inner();
+        validate_flowspec_afi_safi(req.afi_safi)?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
@@ -1311,6 +1345,21 @@ mod tests {
         RibService::new(tx)
     }
 
+    fn list_routes_request() -> proto::ListRoutesRequest {
+        proto::ListRoutesRequest {
+            neighbor_address: String::new(),
+            afi_safi: 0,
+            page_size: 0,
+            page_token: String::new(),
+            prefix_filter: String::new(),
+            prefix_filter_length: 0,
+            longer_prefixes: false,
+            origin_asn: 0,
+            community_filter: vec![],
+            large_community_filter: vec![],
+        }
+    }
+
     #[test]
     fn filter_routes_unspecified_returns_all() {
         let v4 = Route {
@@ -1367,18 +1416,72 @@ mod tests {
     async fn list_received_routes_rejects_unsupported_afi() {
         let svc = make_service();
         let req = Request::new(proto::ListRoutesRequest {
-            neighbor_address: String::new(),
-            afi_safi: 99, // unsupported value
-            page_size: 0,
-            page_token: String::new(),
-            prefix_filter: String::new(),
-            prefix_filter_length: 0,
-            longer_prefixes: false,
-            origin_asn: 0,
-            community_filter: vec![],
-            large_community_filter: vec![],
+            afi_safi: 99,
+            ..list_routes_request()
         });
         let err = svc.list_received_routes(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn list_received_routes_rejects_flowspec_afi() {
+        let svc = make_service();
+        let req = Request::new(proto::ListRoutesRequest {
+            afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+            ..list_routes_request()
+        });
+        let err = svc.list_received_routes(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn route_filters_reject_length_without_prefix() {
+        let req = proto::ListRoutesRequest {
+            prefix_filter_length: 24,
+            ..list_routes_request()
+        };
+        let Err(err) = RouteFilters::from_request(&req) else {
+            panic!("prefix_filter_length without prefix_filter should fail");
+        };
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("prefix_filter"));
+    }
+
+    #[test]
+    fn route_filters_reject_ipv4_length_over_32() {
+        let req = proto::ListRoutesRequest {
+            prefix_filter: "203.0.113.0".into(),
+            prefix_filter_length: 33,
+            ..list_routes_request()
+        };
+        let Err(err) = RouteFilters::from_request(&req) else {
+            panic!("IPv4 prefix_filter_length over 32 should fail");
+        };
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("0-32 for IPv4"));
+    }
+
+    #[test]
+    fn route_filters_reject_ipv6_length_over_128() {
+        let req = proto::ListRoutesRequest {
+            prefix_filter: "2001:db8::".into(),
+            prefix_filter_length: 129,
+            ..list_routes_request()
+        };
+        let Err(err) = RouteFilters::from_request(&req) else {
+            panic!("IPv6 prefix_filter_length over 128 should fail");
+        };
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("0-128 for IPv6"));
+    }
+
+    #[tokio::test]
+    async fn list_flowspec_routes_rejects_unicast_afi() {
+        let svc = make_service();
+        let req = Request::new(proto::ListFlowSpecRequest {
+            afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
+        });
+        let err = svc.list_flow_spec_routes(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 

@@ -125,6 +125,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the family maximum. Clients sending malformed `prefix_length` values now
   receive `InvalidArgument`.
 
+- gRPC request validation and read-only listener handling are stricter:
+  reserved mutating RPC placeholders now return `PermissionDenied` on
+  read-only listeners, unicast RIB list/watch RPCs reject FlowSpec/EVPN
+  address-family filters, `ListFlowSpecRoutes` rejects non-FlowSpec
+  families, and `ListRoutesRequest` prefix filters reject missing or
+  out-of-range prefix lengths instead of silently broadening or clamping.
+
 ## [0.21.0] — 2026-05-14
 
 ### Added
