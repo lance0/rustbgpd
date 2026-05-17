@@ -301,8 +301,8 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `add_path`             | table    | no       | --      | Add-Path (RFC 7911) config table (see below)                         |
 | `log_level`            | string   | no       | --      | Override log level for this peer: `"error"`, `"warn"`, `"info"`, `"debug"`, or `"trace"` |
 
-TCP-AO (RFC 5925) runtime configuration is not accepted yet. `rustbgpctl
-global` / `GlobalService.GetGlobal` expose a host capability probe so
+TCP-AO (RFC 5925) runtime configuration is not accepted yet.
+`rustbgpctl global` / `GlobalService.GetGlobal` expose a host capability probe so
 operators can verify kernel readiness before the later config and session
 wiring slices land; `md5_password` remains the only configured TCP
 authentication option in this release.
