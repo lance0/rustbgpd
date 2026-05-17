@@ -388,7 +388,7 @@ not a tactical feature. Only worth it if there's a specific use case
 |------|----------------|--------|
 | Daemon-level integration test booting with `[[evpn_instances]]` and round-tripping through `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances`. The tripwire that proves config → daemon → gRPC → CLI still works while internals get more dynamic. | `tests/evpn_instances_binary.rs` | landed |
 | Dataplane-boundary ADR — what `crates/evpn-linux` consumes from `crates/evpn`, what it observes from the kernel, what it returns. Diff loop semantics (push / pull / reconcile-on-event). Failure surfacing back to the domain layer. | `docs/adr/0054-evpn-linux-dataplane-boundary.md` | landed |
-| Runtime mutation surface for the startup-pinned `Arc<EvpnInstanceTable>` (`ArcSwap` or `RwLock`) — small refactor, but mutation *semantics* (delete behavior with active learned MACs, instance redefinition during MAC mobility, etc.) is the real work. | `crates/api/src/evpn_service.rs`, daemon wiring | deferred to alpha-soak / post-v0.15 |
+| Runtime mutation surface for the startup-pinned `Arc<EvpnInstanceTable>` (`ArcSwap` or `RwLock`) — small refactor, but mutation *semantics* (delete behavior with active learned MACs, instance redefinition during MAC mobility, etc.) is the real work. | `crates/api/src/evpn_service.rs`, daemon wiring | deferred; tracked in [#133](https://github.com/lance0/rustbgpd/issues/133) |
 
 **FDB reconciler (PR #34):**
 
@@ -424,7 +424,7 @@ flow that Gate 7b's foundation left as a stub.
 
 | Task | File / location |
 |------|----------------|
-| MAC duplication detection (RFC 7432 §15.1 M=180s/N=5 quarantine action) — detection counters shipped; the operator-facing escalation channel and quarantine action are deferred per ADR-0055 §9 | `crates/evpn/src/origination.rs` (extend) |
+| MAC duplication detection (RFC 7432 §15.1 M=180s/N=5 quarantine action) — detection counters shipped; the operator-facing escalation channel and quarantine action are deferred per ADR-0055 §9 and tracked in [#132](https://github.com/lance0/rustbgpd/issues/132) | `crates/evpn/src/origination.rs` (extend) |
 | Type 5 IP Prefix origination per L3VNI | ✅ Gate 9 slice 6 (v0.18.0) — kernel-route observation, `IpVrfStatus`-gated origination via `RibUpdate::InjectEvpn`, remote import + transactional L3 FIB programming (`L3OwnedState`), Router MAC conflict detection, four-phase apply ordering, foreign-state preservation. `RTNLGRP_IPV4/IPV6_ROUTE` multicast added sub-second withdraw on tenant `ip addr del`. |
 | Mutation surface (`AddEvpnInstance` / `DeleteEvpnInstance`) | `crates/api/src/evpn_service.rs` |
 | Kernel VXLAN interface config generator? | ops question — maybe not |
@@ -549,7 +549,8 @@ Concrete remaining slices:
    RIB import path so unrelated segments are filtered before they
    reach LocRib. Currently rustbgpd originates the RT but imports via
    user-configured RTs only. Separable follow-up, not a
-   production-default blocker.
+   production-default blocker; tracked in
+   <https://github.com/lance0/rustbgpd/issues/131>.
 
 ADR-0059 slice 3.5 hardening (`apply_aliasing_ecmp` off-switch,
 periodic `RTM_GETNEXTHOP` drift recovery, IPv6 alias members)
@@ -610,7 +611,8 @@ Still ahead:
   the Interface-less variant only).
 - Extend the protected self-hosted `kernel-dataplane` workflow beyond
   M39 / M40 / M42 to cover the earlier VTEP / DF-election smokes
-  (M36 / M37 / M37+IP / M38) or explicitly keep those reviewer-run.
+  (M36 / M37 / M37+IP / M38) or explicitly keep those reviewer-run
+  (<https://github.com/lance0/rustbgpd/issues/130>).
 
 Further out on this track:
 

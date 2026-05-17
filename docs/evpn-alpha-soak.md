@@ -12,18 +12,17 @@ still need to retire residual alpha-VTEP risk before claiming
 v1.0-grade production readiness.
 
 Items are checkboxed so individual slices can move independently;
-none of them block v0.18.0 release on their own.
+none of them block the current release on their own.
 
 ## CI / observability
 
-- [ ] **M37 on a privileged CI runner.** Today M37 is local-only
-  (`docker build` + `containerlab deploy` + the driver script). The
-  M36 row is in the same boat. Wire a privileged-runner job —
-  ideally the same one that hosts `EVPN_LINUX_NETNS=1` for the
-  in-tree netns test — so a regression in `notify::classify_neigh`,
-  `LinkCache::bridge_port_to_vni`, or the originator's path-
-  attribute construction surfaces on PR-CI rather than in the field.
-  Tracked in `docs/INTEROP.md` "Not in CI" footnote on the M37 row.
+- [ ] **M36 / M37 / M37+IP / M38 on protected privileged CI.**
+  These earlier VTEP and DF-election smokes are still reviewer-run
+  even though M39 / M40 / M42 and the Docker netns selectors run in
+  the protected self-hosted `kernel-dataplane` workflow. Wire these
+  suites into that protected path, or explicitly document why they
+  remain manual gates. Tracked in
+  <https://github.com/lance0/rustbgpd/issues/130>.
 - [x] **EVPN local-origination Prometheus counters.** The originator
   now records successful RIB-accepted Type 2 actions in
   `evpn_local_originations_total{action="inject"}` and
@@ -58,7 +57,8 @@ none of them block v0.18.0 release on their own.
   to verify that doesn't compound badly under heavy churn). Separate
   from the Gate 8b BUM-state 24 h soak under "remaining multi-homing
   enforcement work" below, which exercises DF flips rather than
-  origination churn.
+  origination churn. Tracked in
+  <https://github.com/lance0/rustbgpd/issues/134>.
 
 ## Convergence + correctness slices
 
@@ -96,7 +96,8 @@ none of them block v0.18.0 release on their own.
   `evpn_duplicate_mac_first_move_timestamp_seconds{vni,mac}` gauge
   have landed so operators can see repeated contention for a key and
   when its current observation window began. Still ahead: quarantine
-  action and the operator-facing escalation channel.
+  action and the operator-facing escalation channel. Tracked in
+  <https://github.com/lance0/rustbgpd/issues/132>.
 - [x] **Sticky MAC anti-spoof config schema.** Closed by ADR-0056
   — `[[evpn_instances]].sticky_macs` lists MACs to mark with the
   RFC 7432 §15.4 sticky bit on origination. **Not** a static FDB:
@@ -272,7 +273,8 @@ landing, tracked here for visibility)
        `true`.**
   2. Optional import-side ES-Import RT filtering on the daemon's
      own RIB import path (we already *originate* the RT in Gate 8b
-     prep; this would also *import* by it).
+     prep; this would also *import* by it). Tracked in
+     <https://github.com/lance0/rustbgpd/issues/131>.
   Estimated ~1-2 weeks once started.
 - [x] **Gate 9 — symmetric Interface-less IRB end-to-end (v0.18.0).**
   Per-VRF IP routes via Type 5, MAC-VRF + IP-VRF separation,
