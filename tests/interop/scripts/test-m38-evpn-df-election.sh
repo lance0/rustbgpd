@@ -46,7 +46,10 @@ prom_scrape() {
     local container=${1:?}
     local ip
     ip=$(resolve_ip "$container")
-    [ -z "$ip" ] && return 0
+    if [ -z "$ip" ]; then
+        echo "ERROR: could not resolve management IP for $container" >&2
+        return 1
+    fi
     curl -sfm 5 "http://${ip}:9179/metrics" 2>/dev/null \
         || wget -qO- -T 5 "http://${ip}:9179/metrics" 2>/dev/null \
         || true
