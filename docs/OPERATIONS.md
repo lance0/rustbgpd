@@ -353,8 +353,10 @@ cache itself has stale data.
 | `evpn_local_origination_errors_total{action="withdraw"}` | Failed local Type 2 withdraw attempts: RIB channel closed, RIB rejected the withdraw, or the reply was dropped |
 | `evpn_local_observations_dropped_total{reason="channel_full"}` | Kernel local-MAC observations classified by the netlink notify loop but dropped because the originator channel was full |
 | `evpn_local_observations_dropped_total{reason="channel_closed"}` | Kernel local-MAC observations classified by the netlink notify loop after the originator receiver was gone |
-| `evpn_duplicate_mac_moves_total{vni,mac}` | Cross-VTEP MAC mobility contention events detected by the local originator; detection only, no quarantine action yet |
+| `evpn_duplicate_mac_moves_total{vni,mac}` | Cross-VTEP MAC mobility contention events detected by the local originator |
 | `evpn_duplicate_mac_first_move_timestamp_seconds{vni,mac}` | Unix timestamp of the first observed duplicate-MAC / mobility contention event for that key |
+| `evpn_duplicate_mac_threshold_exceeded_total{vni,mac,action}` | RFC 7432 §15.1 M/N threshold crossings. `action` is `detect` or `suppress_local` from the per-instance config |
+| `evpn_duplicate_mac_quarantine_active{vni,mac}` | `1` while `action = "suppress_local"` is actively suppressing local Type 2 originations for that key; returns to `0` after timed recovery |
 
 During M37 or a synthetic MAC-churn soak, the inject and withdraw counters
 should follow the `bridge fdb add` / `bridge fdb del` cadence. Any non-zero
@@ -363,8 +365,13 @@ not the originator; any non-zero origination-error counter means the
 observation reached the originator but did not complete at the RIB boundary.
 `evpn_duplicate_mac_moves_total` and
 `evpn_duplicate_mac_first_move_timestamp_seconds` are intentionally per
-`(VNI, MAC)`; alert on repeated increments within a short window rather
-than on one-off mobility during planned host moves.
+`(VNI, MAC)`; alert on threshold crossings rather than on one-off
+mobility during planned host moves. Default `duplicate_mac_detection`
+behavior is detect-only. When an instance opts into
+`action = "suppress_local"`, active quarantine withdraws/suppresses only
+locally-originated Type 2 routes for that MAC and automatically retries
+after `recovery_seconds`; remote EVPN route visibility and dataplane
+receive-side processing are not filtered by this first action slice.
 `rustbgpctl evpn instances` also reports `originated-local-macs=N` per
 instance, and `rustbgpctl evpn instances --json` exposes the same value as
 `originated_local_macs_count`.

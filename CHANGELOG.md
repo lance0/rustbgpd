@@ -11,6 +11,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN duplicate-MAC M/N detector and opt-in local-origin quarantine.**
+  Each `[[evpn_instances]]` entry now accepts
+  `duplicate_mac_detection = { action, window_seconds, threshold,
+  recovery_seconds }` with RFC 7432 §15.1 defaults (5 moves in 180 s).
+  Default `action = "detect"` preserves existing behavior while adding
+  threshold observability. Opt-in `action = "suppress_local"` withdraws
+  and suppresses locally-originated Type 2 MAC-only and MAC+IP routes for
+  the offending `(VNI, MAC)` until timed recovery. New metrics:
+  `evpn_duplicate_mac_threshold_exceeded_total{vni,mac,action}` and
+  `evpn_duplicate_mac_quarantine_active{vni,mac}`.
+
 - **Live runtime config diff API/CLI.** New read-only
   `ConfigService.DiffRuntimeConfig` validates candidate TOML and
   compares it against the peer manager's live runtime config snapshot,

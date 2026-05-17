@@ -161,20 +161,24 @@ before peer shutdown.
 
 ## Duplicate-MAC / mobility noise
 
-The alpha path does not quarantine duplicate MACs yet. It does expose
-detection:
+Duplicate-MAC detection runs per `(VNI, MAC)` using the RFC 7432 §15.1
+M/N window configured on the owning `[[evpn_instances]]` entry. Default
+behavior is detect-only; `duplicate_mac_detection.action =
+"suppress_local"` withdraws/suppresses local Type 2 originations for the
+key until `recovery_seconds` elapses.
 
 ```bash
 curl -s http://127.0.0.1:9179/metrics \
-  | grep -E 'evpn_duplicate_mac_(moves_total|first_move_timestamp_seconds)'
+  | grep -E 'evpn_duplicate_mac_(moves_total|first_move_timestamp_seconds|threshold_exceeded_total|quarantine_active)'
 ```
 
 Repeated increments for the same `(vni, mac)` indicate cross-VTEP
 contention and should be investigated as a loop, spoof, or host mobility
-event. The timestamp metric records the first observed contention for
-that key so a later RFC 7432 M/N quarantine window can be implemented
-without changing metric shape. One-off increments can be normal during
-planned host moves.
+event. One-off increments can be normal during planned host moves. If
+`evpn_duplicate_mac_quarantine_active{vni,mac}` is `1`, this daemon is
+not originating local Type 2 routes for that key; remote route
+visibility and receive-side dataplane processing are intentionally not
+filtered by the first action slice.
 
 ## MAC+IP routes not appearing
 
