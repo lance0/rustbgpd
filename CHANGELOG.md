@@ -360,6 +360,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   they describe the shipped Type 5 origination / import and L3 FIB
   programming path instead of the earlier schema-only foundation.
 
+- **ADR-0063 EVPN runtime instance mutation semantics.** New ADR defines
+  the safe future contract for runtime `[[evpn_instances]]` mutation:
+  a single command-driven EVPN coordinator, validation-first generation
+  updates, and explicit drain/replay across IMET, Type 2, Type 5,
+  DF/ES, and Linux owned state. The current `EvpnService` remains
+  read-only and SIGHUP keeps `[[evpn_instances]]`,
+  `[[evpn_ip_vrfs]]`, and `[[ethernet_segments]]` restart-required
+  until that coordinator exists.
+
 ### Removed
 
 - **`NexthopError::Ipv6Unsupported`.** The v0.20.0 compatibility

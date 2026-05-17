@@ -1,6 +1,6 @@
 # EVPN Enablement Roadmap
 
-Last updated: 2026-05-13
+Last updated: 2026-05-17
 
 Gate-by-gate plan for turning rustbgpd's Phase 1 EVPN Route Reflector into a
 production-ready control plane and, eventually, a VTEP-capable daemon.
@@ -388,7 +388,7 @@ not a tactical feature. Only worth it if there's a specific use case
 |------|----------------|--------|
 | Daemon-level integration test booting with `[[evpn_instances]]` and round-tripping through `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances`. The tripwire that proves config → daemon → gRPC → CLI still works while internals get more dynamic. | `tests/evpn_instances_binary.rs` | landed |
 | Dataplane-boundary ADR — what `crates/evpn-linux` consumes from `crates/evpn`, what it observes from the kernel, what it returns. Diff loop semantics (push / pull / reconcile-on-event). Failure surfacing back to the domain layer. | `docs/adr/0054-evpn-linux-dataplane-boundary.md` | landed |
-| Runtime mutation surface for the startup-pinned `Arc<EvpnInstanceTable>` (`ArcSwap` or `RwLock`) — small refactor, but mutation *semantics* (delete behavior with active learned MACs, instance redefinition during MAC mobility, etc.) is the real work. | `crates/api/src/evpn_service.rs`, daemon wiring | deferred; tracked in [#133](https://github.com/lance0/rustbgpd/issues/133) |
+| Runtime mutation surface for the startup-pinned `Arc<EvpnInstanceTable>` — ADR-0063 rejects a direct `ArcSwap` / `RwLock` table swap as the first implementation. Future mutation needs a command-driven EVPN coordinator that validates the whole candidate model, drains/replays IMET, Type 2, Type 5, DF/ES, and Linux owned state, then publishes a new generation. | `crates/api/src/evpn_service.rs`, daemon wiring | semantics accepted in ADR-0063; implementation deferred and tracked in [#133](https://github.com/lance0/rustbgpd/issues/133) |
 
 **FDB reconciler (PR #34):**
 
