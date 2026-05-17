@@ -270,11 +270,13 @@ landing, tracked here for visibility)
        events. **This unblocks the production-default flip of
        `apply_bum_enforcement` and `apply_aliasing_ecmp` to
        `true`.**
-  2. Optional import-side ES-Import RT filtering on the daemon's
-     own RIB import path (we already *originate* the RT in Gate 8b
-     prep; this would also *import* by it). Tracked in
-     <https://github.com/lance0/rustbgpd/issues/131>.
-  Estimated ~1-2 weeks once started.
+  2. **Local DF-election ES-Import RT filtering.** The daemon now
+     honors the ES-Import RT it already originates on Type 4 ES
+     routes when building the local DF-election candidate set:
+     remote Type 4 routes with a missing or mismatched ES-Import RT
+     are ignored for local DF election, while `QueryEvpnRoutes`,
+     `ListEvpnRoutes`, and RR reflection still expose the complete
+     EVPN Loc-RIB for observability.
 - [x] **Gate 9 — symmetric Interface-less IRB end-to-end (v0.18.0).**
   Per-VRF IP routes via Type 5, MAC-VRF + IP-VRF separation,
   Router MAC extended community lifecycle, the symmetric IRB

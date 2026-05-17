@@ -533,6 +533,14 @@ fn gather_candidates_from_routes(
         if es.esi != state.config.esi {
             continue;
         }
+        if !has_matching_es_import_rt(&r.attributes, state.config.esi) {
+            debug!(
+                esi = %format_esi(state.config.esi),
+                originator_ip = %es.originator_ip,
+                "EVPN segment: ignoring Type 4 ES route without matching ES-Import RT"
+            );
+            continue;
+        }
         // Per-PE candidate. df_algorithm decodes from the route's DF
         // Election extcomm if present; absent extcomm → DefaultModulo
         // + default preference (matches RFC 8584 fallback rules).
@@ -545,6 +553,19 @@ fn gather_candidates_from_routes(
         });
     }
     by_ip.into_values().collect()
+}
+
+fn has_matching_es_import_rt(attrs: &[PathAttribute], esi: EthernetSegmentIdentifier) -> bool {
+    let expected = es_import_rt_from_esi(esi);
+    attrs.iter().any(|attr| {
+        let PathAttribute::ExtendedCommunities(extcomms) = attr else {
+            return false;
+        };
+        extcomms
+            .iter()
+            .copied()
+            .any(|ec| ec.as_es_import_rt() == Some(expected))
+    })
 }
 
 fn decode_df_election_extcomm(attrs: &[PathAttribute]) -> Option<(u32, DfAlgorithm)> {
@@ -846,6 +867,56 @@ mod tests {
         .unwrap()
     }
 
+    fn segment_state(id: EthernetSegmentIdentifier) -> SegmentState {
+        let member_vnis = std::collections::BTreeSet::from([vni(100)]);
+        let config = EthernetSegment {
+            esi: id,
+            member_vnis: member_vnis.clone(),
+            df_preference: 32_768,
+            df_algorithm: DfAlgorithm::DefaultModulo,
+            originator_ip: ipa("10.0.0.1"),
+        };
+        SegmentState {
+            config,
+            es_origin: LocalEsOriginator::new(rd(65000, 100), id, ipa("10.0.0.1")),
+            ead_per_es: LocalEadPerEsOriginator::new(rd(65000, 100), id, MplsLabel::new(123)),
+            ead_per_evi: LocalEadPerEviOriginator::new(rd(65000, 100), id),
+            election: DfElection::new(id, member_vnis),
+            last_roles: BTreeMap::new(),
+            reference_instance_id: vni(100),
+            esi_label: MplsLabel::new(123),
+        }
+    }
+
+    fn type_4_es_route(
+        id: EthernetSegmentIdentifier,
+        originator_ip: &str,
+        attrs: Vec<PathAttribute>,
+    ) -> EvpnRibRoute {
+        EvpnRibRoute {
+            route: EvpnRoute::Es(EvpnEs {
+                rd: rd(65000, 100),
+                esi: id,
+                originator_ip: ipa(originator_ip),
+            }),
+            next_hop: ipa(originator_ip),
+            link_local_next_hop: None,
+            peer: ipa(originator_ip),
+            attributes: Arc::new(attrs),
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::route::RouteOrigin::Ibgp,
+            peer_router_id: "192.0.2.1".parse().unwrap(),
+            is_stale: false,
+            is_llgr_stale: false,
+        }
+    }
+
+    fn attrs_with_es_import_rt(id: EthernetSegmentIdentifier) -> Vec<PathAttribute> {
+        vec![PathAttribute::ExtendedCommunities(vec![
+            ExtendedCommunity::es_import_rt(es_import_rt_from_esi(id)),
+        ])]
+    }
+
     #[test]
     fn esi_label_allocator_is_deterministic_for_first_seen() {
         // The orchestrator now reaches for the per-ESI allocator,
@@ -990,6 +1061,72 @@ mod tests {
             .find_map(ExtendedCommunity::as_es_import_rt)
             .expect("ES-Import RT extcomm attached");
         assert_eq!(derived, [0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+    }
+
+    #[test]
+    fn gather_candidates_accepts_type_4_with_matching_es_import_rt() {
+        let id = esi(0x11);
+        let state = segment_state(id);
+        let routes = vec![type_4_es_route(id, "10.0.0.2", attrs_with_es_import_rt(id))];
+
+        let candidates = gather_candidates_from_routes(&state, &routes);
+
+        assert_eq!(candidates.len(), 2);
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.originator_ip == ipa("10.0.0.1"))
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.originator_ip == ipa("10.0.0.2"))
+        );
+    }
+
+    #[test]
+    fn gather_candidates_ignores_type_4_missing_es_import_rt() {
+        let id = esi(0x12);
+        let state = segment_state(id);
+        let routes = vec![type_4_es_route(id, "10.0.0.2", Vec::new())];
+
+        let candidates = gather_candidates_from_routes(&state, &routes);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].originator_ip, ipa("10.0.0.1"));
+    }
+
+    #[test]
+    fn gather_candidates_ignores_type_4_with_mismatched_es_import_rt() {
+        let id = esi(0x13);
+        let state = segment_state(id);
+        let routes = vec![type_4_es_route(
+            id,
+            "10.0.0.2",
+            attrs_with_es_import_rt(esi(0x44)),
+        )];
+
+        let candidates = gather_candidates_from_routes(&state, &routes);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].originator_ip, ipa("10.0.0.1"));
+    }
+
+    #[test]
+    fn gather_candidates_still_ignores_unrelated_esi_with_matching_rt() {
+        let id = esi(0x14);
+        let other_id = esi(0x15);
+        let state = segment_state(id);
+        let routes = vec![type_4_es_route(
+            other_id,
+            "10.0.0.2",
+            attrs_with_es_import_rt(other_id),
+        )];
+
+        let candidates = gather_candidates_from_routes(&state, &routes);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].originator_ip, ipa("10.0.0.1"));
     }
 
     #[test]

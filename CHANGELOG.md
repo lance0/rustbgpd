@@ -161,6 +161,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- EVPN Type 4 ES routes now honor ES-Import RT at the local
+  DF-election projection boundary. The segment orchestrator ignores
+  remote Type 4 candidates whose ES-Import RT is missing or does not
+  match the configured ESI, while `QueryEvpnRoutes`, `ListEvpnRoutes`,
+  and route-reflector reflection keep exposing the complete EVPN
+  Loc-RIB.
+
 - EVPN planning and operator docs now reflect the post-v0.21 state:
   Gate 7c sub-second mobility is no longer listed as a known issue,
   Gate 8b MAC-churn is recorded as passed, M36/M37/M37+IP/M38 now run
