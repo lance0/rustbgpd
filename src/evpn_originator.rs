@@ -64,7 +64,8 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use rustbgpd_evpn::{
-    EvpnInstance, EvpnInstanceId, EvpnInstanceTable, LocalMacIpOriginator, LocalMacObservation,
+    DuplicateMacAction, DuplicateMacDecision, DuplicateMacDetector, DuplicateMacKey, EvpnInstance,
+    EvpnInstanceId, EvpnInstanceTable, LocalMacIpOriginator, LocalMacObservation,
     LocalMacOriginator, MacAddress, OriginationAction, ProjectedEvpnRoute, RemoteMacIpView,
     RemoteMacView, project_evpn_routes,
 };
@@ -289,6 +290,10 @@ struct OriginatorState {
     remote_mac_view: RemoteMacViewMap,
     /// Cached MAC+IP contender map.
     remote_mac_ip_view: RemoteMacIpViewMap,
+    /// RFC 7432 §15.1 duplicate-MAC detector. The pure detector owns
+    /// the M/N window and active suppressions; this daemon state owns
+    /// the route-withdraw/replay policy.
+    duplicate_mac_detector: DuplicateMacDetector,
 }
 
 impl OriginatorState {
@@ -308,6 +313,7 @@ impl OriginatorState {
             live_mac_ip: BTreeMap::new(),
             remote_mac_view: BTreeMap::new(),
             remote_mac_ip_view: BTreeMap::new(),
+            duplicate_mac_detector: DuplicateMacDetector::default(),
         }
     }
 
@@ -320,6 +326,7 @@ impl OriginatorState {
     }
 }
 
+#[allow(clippy::too_many_lines)] // The actor select keeps shutdown, local observations, RIB events, and poll recovery together.
 async fn originator_loop(
     config: OriginatorConfig,
     runtime: OriginatorRuntime,
@@ -415,6 +422,14 @@ async fn originator_loop(
                 }
             },
             _ = poll_tick.tick() => {
+                recover_duplicate_macs(
+                    &mut state,
+                    &runtime.instances,
+                    &runtime.rib_tx,
+                    &runtime.metrics,
+                    &runtime.originated_local_mac_counts,
+                    &runtime.vni_to_esi,
+                ).await;
                 if let Err(e) = repoll_rib(
                     &runtime.instances,
                     &runtime.rib_tx,
@@ -548,7 +563,254 @@ fn sticky_for(instances: &EvpnInstanceTable, vni: EvpnInstanceId, mac: MacAddres
         .is_some_and(|inst| inst.sticky_macs.contains(&mac))
 }
 
+fn duplicate_action_label(action: DuplicateMacAction) -> &'static str {
+    match action {
+        DuplicateMacAction::DetectOnly => "detect",
+        DuplicateMacAction::SuppressLocal => "suppress_local",
+    }
+}
+
+fn duplicate_mac_is_quarantined(
+    state: &mut OriginatorState,
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+) -> bool {
+    state
+        .duplicate_mac_detector
+        .is_quarantined(DuplicateMacKey::new(vni, mac), Instant::now())
+}
+
+fn record_duplicate_mac_move(
+    metrics: &BgpMetrics,
+    state: &mut OriginatorState,
+    inst: &EvpnInstance,
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+) -> bool {
+    metrics.record_evpn_duplicate_mac_move(vni.as_u32(), &mac.to_string());
+    let config = inst.duplicate_mac_detection;
+    let now = Instant::now();
+    let key = DuplicateMacKey::new(vni, mac);
+    if state.duplicate_mac_detector.expire_key(key, now) {
+        metrics.set_evpn_duplicate_mac_quarantine_active(vni.as_u32(), &mac.to_string(), false);
+    }
+    match state.duplicate_mac_detector.record_move(key, now, config) {
+        DuplicateMacDecision::Recorded { .. } => false,
+        DuplicateMacDecision::ThresholdExceeded { window_count } => {
+            metrics.record_evpn_duplicate_mac_threshold_exceeded(
+                vni.as_u32(),
+                &mac.to_string(),
+                duplicate_action_label(config.action),
+            );
+            warn!(
+                ?vni,
+                ?mac,
+                window_count,
+                threshold = config.threshold,
+                window_seconds = config.window.as_secs(),
+                "EVPN duplicate-MAC threshold exceeded; action is detect-only"
+            );
+            false
+        }
+        DuplicateMacDecision::Quarantined {
+            window_count,
+            until,
+        } => {
+            metrics.record_evpn_duplicate_mac_threshold_exceeded(
+                vni.as_u32(),
+                &mac.to_string(),
+                duplicate_action_label(config.action),
+            );
+            metrics.set_evpn_duplicate_mac_quarantine_active(vni.as_u32(), &mac.to_string(), true);
+            warn!(
+                ?vni,
+                ?mac,
+                window_count,
+                threshold = config.threshold,
+                window_seconds = config.window.as_secs(),
+                recovery_seconds = config.recovery.as_secs(),
+                ?until,
+                "EVPN duplicate-MAC local-origin suppression active"
+            );
+            true
+        }
+        DuplicateMacDecision::AlreadyQuarantined { .. } => true,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
+async fn apply_actions_with_duplicate_policy(
+    mut actions: Vec<OriginationAction>,
+    view_present: bool,
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+    state: &mut OriginatorState,
+    inst: &EvpnInstance,
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    originated_local_mac_counts: &OriginatedLocalMacCounts,
+    vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+) {
+    if view_present
+        && !actions.is_empty()
+        && record_duplicate_mac_move(metrics, state, inst, vni, mac)
+    {
+        actions.clear();
+        suppress_local_originations_for_mac(
+            vni,
+            mac,
+            state,
+            inst,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+            vni_to_esi,
+        )
+        .await;
+        return;
+    }
+    apply_actions(
+        actions,
+        inst,
+        rib_tx,
+        metrics,
+        originated_local_mac_counts,
+        vni_to_esi,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn suppress_local_originations_for_mac(
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+    state: &mut OriginatorState,
+    inst: &EvpnInstance,
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    originated_local_mac_counts: &OriginatedLocalMacCounts,
+    vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+) {
+    let mut actions = Vec::new();
+    if let Some(mac_ip_orig) = state.mac_ip_originators.get_mut(&vni) {
+        actions.extend(mac_ip_orig.on_local_mac_aged(mac));
+    }
+    if let Some(mac_orig) = state.mac_originators.get_mut(&vni) {
+        actions.extend(mac_orig.on_local_aged(mac));
+    }
+    if actions.is_empty() {
+        return;
+    }
+    apply_actions(
+        actions,
+        inst,
+        rib_tx,
+        metrics,
+        originated_local_mac_counts,
+        vni_to_esi,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recover_duplicate_macs(
+    state: &mut OriginatorState,
+    instances: &EvpnInstanceTable,
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    originated_local_mac_counts: &OriginatedLocalMacCounts,
+    vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+) {
+    let recovered = state.duplicate_mac_detector.expire(Instant::now());
+    for key in recovered {
+        metrics.set_evpn_duplicate_mac_quarantine_active(
+            key.vni.as_u32(),
+            &key.mac.to_string(),
+            false,
+        );
+        info!(
+            vni = ?key.vni,
+            mac = ?key.mac,
+            "EVPN duplicate-MAC local-origin suppression recovered"
+        );
+        replay_local_mac_after_recovery(
+            key.vni,
+            key.mac,
+            state,
+            instances,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+            vni_to_esi,
+        )
+        .await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn replay_local_mac_after_recovery(
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+    state: &mut OriginatorState,
+    instances: &EvpnInstanceTable,
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    originated_local_mac_counts: &OriginatedLocalMacCounts,
+    vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+) {
+    let Some(inst) = instances.get(vni) else {
+        return;
+    };
+    let Some(ifindex) = state
+        .local_macs
+        .get(&vni)
+        .and_then(|m| m.get(&mac).copied())
+    else {
+        return;
+    };
+    let sticky = sticky_for(instances, vni, mac);
+    let live_ips: Vec<IpAddr> = state
+        .live_mac_ip
+        .get(&vni)
+        .and_then(|m| m.get(&mac))
+        .map(|ips| ips.iter().copied().collect())
+        .unwrap_or_default();
+    if live_ips.is_empty() {
+        let Some(orig) = state.mac_originators.get_mut(&vni) else {
+            return;
+        };
+        let view = state.remote_mac_view.get(&(vni, mac));
+        let actions = orig.on_local_learned(mac, ifindex, sticky, view);
+        apply_actions(
+            actions,
+            inst,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+            vni_to_esi,
+        )
+        .await;
+        return;
+    }
+    let Some(orig) = state.mac_ip_originators.get_mut(&vni) else {
+        return;
+    };
+    for ip in live_ips {
+        let view = state.remote_mac_ip_view.get(&(vni, mac, ip));
+        let actions = orig.on_local_ip_learned(mac, ip, sticky, view);
+        apply_actions(
+            actions,
+            inst,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+            vni_to_esi,
+        )
+        .await;
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn handle_learned(
     vni: EvpnInstanceId,
     mac: MacAddress,
@@ -579,6 +841,7 @@ async fn handle_learned(
         .remove(&(vni, mac))
         .map(|s| s.into_iter().collect())
         .unwrap_or_default();
+    let quarantined = duplicate_mac_is_quarantined(state, vni, mac);
 
     if pending_ips.is_empty() {
         // No IP bindings yet. Two sub-cases:
@@ -598,16 +861,31 @@ async fn handle_learned(
         if state.is_mac_ip_advertising(vni, mac) {
             return;
         }
+        if quarantined {
+            suppress_local_originations_for_mac(
+                vni,
+                mac,
+                state,
+                inst,
+                rib_tx,
+                metrics,
+                originated_local_mac_counts,
+                vni_to_esi,
+            )
+            .await;
+            return;
+        }
         let Some(orig) = state.mac_originators.get_mut(&vni) else {
             return;
         };
         let view = state.remote_mac_view.get(&(vni, mac));
         let actions = orig.on_local_learned(mac, ifindex, sticky, view);
-        if view.is_some() && !actions.is_empty() {
-            record_duplicate_mac_move(metrics, vni, mac);
-        }
-        apply_actions(
+        apply_actions_with_duplicate_policy(
             actions,
+            view.is_some(),
+            vni,
+            mac,
+            state,
             inst,
             rib_tx,
             metrics,
@@ -616,6 +894,29 @@ async fn handle_learned(
         )
         .await;
     } else {
+        if quarantined {
+            for ip in pending_ips {
+                state
+                    .live_mac_ip
+                    .entry(vni)
+                    .or_default()
+                    .entry(mac)
+                    .or_default()
+                    .insert(ip);
+            }
+            suppress_local_originations_for_mac(
+                vni,
+                mac,
+                state,
+                inst,
+                rib_tx,
+                metrics,
+                originated_local_mac_counts,
+                vni_to_esi,
+            )
+            .await;
+            return;
+        }
         // Pending IPs exist — go straight to MAC+IP. Drop any stale
         // MAC-only from the originator state (idempotent if we never
         // advertised MAC-only).
@@ -633,17 +934,21 @@ async fn handle_learned(
         )
         .await;
 
-        let Some(mac_ip_orig) = state.mac_ip_originators.get_mut(&vni) else {
-            return;
-        };
         for ip in pending_ips {
-            let view = state.remote_mac_ip_view.get(&(vni, mac, ip));
-            let actions = mac_ip_orig.on_local_ip_learned(mac, ip, sticky, view);
-            if view.is_some() && !actions.is_empty() {
-                record_duplicate_mac_move(metrics, vni, mac);
-            }
-            apply_actions(
+            let view_present = state.remote_mac_ip_view.contains_key(&(vni, mac, ip));
+            let actions = {
+                let view = state.remote_mac_ip_view.get(&(vni, mac, ip));
+                let Some(mac_ip_orig) = state.mac_ip_originators.get_mut(&vni) else {
+                    return;
+                };
+                mac_ip_orig.on_local_ip_learned(mac, ip, sticky, view)
+            };
+            apply_actions_with_duplicate_policy(
                 actions,
+                view_present,
+                vni,
+                mac,
+                state,
                 inst,
                 rib_tx,
                 metrics,
@@ -751,6 +1056,27 @@ async fn handle_ip_added(
 
     let sticky = sticky_for(instances, vni, mac);
     let was_mac_only = !state.is_mac_ip_advertising(vni, mac);
+    if duplicate_mac_is_quarantined(state, vni, mac) {
+        state
+            .live_mac_ip
+            .entry(vni)
+            .or_default()
+            .entry(mac)
+            .or_default()
+            .insert(ip);
+        suppress_local_originations_for_mac(
+            vni,
+            mac,
+            state,
+            inst,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+            vni_to_esi,
+        )
+        .await;
+        return;
+    }
 
     // Replace model: if MAC-only is currently advertising, withdraw
     // it before emitting MAC+IP. on_local_aged is idempotent if not
@@ -768,17 +1094,20 @@ async fn handle_ip_added(
         .await;
     }
 
-    // Emit MAC+IP route.
-    let Some(mac_ip_orig) = state.mac_ip_originators.get_mut(&vni) else {
-        return;
+    let view_present = state.remote_mac_ip_view.contains_key(&(vni, mac, ip));
+    let actions = {
+        let view = state.remote_mac_ip_view.get(&(vni, mac, ip));
+        let Some(mac_ip_orig) = state.mac_ip_originators.get_mut(&vni) else {
+            return;
+        };
+        mac_ip_orig.on_local_ip_learned(mac, ip, sticky, view)
     };
-    let view = state.remote_mac_ip_view.get(&(vni, mac, ip));
-    let actions = mac_ip_orig.on_local_ip_learned(mac, ip, sticky, view);
-    if view.is_some() && !actions.is_empty() {
-        record_duplicate_mac_move(metrics, vni, mac);
-    }
-    apply_actions(
+    apply_actions_with_duplicate_policy(
         actions,
+        view_present,
+        vni,
+        mac,
+        state,
         inst,
         rib_tx,
         metrics,
@@ -854,17 +1183,38 @@ async fn handle_ip_removed(
         .get(&vni)
         .and_then(|m| m.get(&mac).copied());
     if empty_after && let Some(ifindex) = ifindex_for_mac {
-        let sticky = sticky_for(instances, vni, mac);
-        let Some(mac_orig) = state.mac_originators.get_mut(&vni) else {
+        if duplicate_mac_is_quarantined(state, vni, mac) {
+            suppress_local_originations_for_mac(
+                vni,
+                mac,
+                state,
+                inst,
+                rib_tx,
+                metrics,
+                originated_local_mac_counts,
+                vni_to_esi,
+            )
+            .await;
             return;
+        }
+        let sticky = sticky_for(instances, vni, mac);
+        let view_present = state.remote_mac_view.contains_key(&(vni, mac));
+        let actions = {
+            let view = state.remote_mac_view.get(&(vni, mac));
+            let Some(mac_orig) = state.mac_originators.get_mut(&vni) else {
+                return;
+            };
+            // Replay the original ifindex so MAC-only's port-move
+            // detection stays anchored to the real bridge port —
+            // a downgrade isn't a port move and shouldn't ratchet up.
+            mac_orig.on_local_learned(mac, ifindex, sticky, view)
         };
-        let view = state.remote_mac_view.get(&(vni, mac));
-        // Replay the original ifindex so MAC-only's port-move
-        // detection stays anchored to the real bridge port —
-        // a downgrade isn't a port move and shouldn't ratchet up.
-        let actions = mac_orig.on_local_learned(mac, ifindex, sticky, view);
-        apply_actions(
+        apply_actions_with_duplicate_policy(
             actions,
+            view_present,
+            vni,
+            mac,
+            state,
             inst,
             rib_tx,
             metrics,
@@ -879,6 +1229,7 @@ async fn handle_ip_removed(
 /// MAC+IP), diff against the cached state, and fire
 /// `on_remote_changed` / `on_remote_ip_changed` for any tracked
 /// `(MAC)` or `(MAC, IP)` whose view changed.
+#[allow(clippy::too_many_lines)] // MAC-only and MAC+IP diffs intentionally stay adjacent for symmetry.
 async fn repoll_rib(
     instances: &EvpnInstanceTable,
     rib_tx: &mpsc::Sender<RibUpdate>,
@@ -903,22 +1254,40 @@ async fn repoll_rib(
         }
     }
     for (vni, mac) in mac_affected {
-        let Some(orig) = state.mac_originators.get_mut(&vni) else {
-            continue;
-        };
-        let view = new_mac_view.get(&(vni, mac));
-        let actions = orig.on_remote_changed(mac, view);
-        if actions.is_empty() {
-            continue;
-        }
-        if view.is_some() {
-            record_duplicate_mac_move(metrics, vni, mac);
-        }
         let Some(inst) = instances.get(vni) else {
             continue;
         };
-        apply_actions(
+        if duplicate_mac_is_quarantined(state, vni, mac) {
+            suppress_local_originations_for_mac(
+                vni,
+                mac,
+                state,
+                inst,
+                rib_tx,
+                metrics,
+                originated_local_mac_counts,
+                vni_to_esi,
+            )
+            .await;
+            continue;
+        }
+        let view_present = new_mac_view.contains_key(&(vni, mac));
+        let actions = {
+            let view = new_mac_view.get(&(vni, mac));
+            let Some(orig) = state.mac_originators.get_mut(&vni) else {
+                continue;
+            };
+            orig.on_remote_changed(mac, view)
+        };
+        if actions.is_empty() {
+            continue;
+        }
+        apply_actions_with_duplicate_policy(
             actions,
+            view_present,
+            vni,
+            mac,
+            state,
             inst,
             rib_tx,
             metrics,
@@ -941,22 +1310,40 @@ async fn repoll_rib(
         }
     }
     for (vni, mac, ip) in mac_ip_affected {
-        let Some(orig) = state.mac_ip_originators.get_mut(&vni) else {
-            continue;
-        };
-        let view = new_mac_ip_view.get(&(vni, mac, ip));
-        let actions = orig.on_remote_ip_changed(mac, ip, view);
-        if actions.is_empty() {
-            continue;
-        }
-        if view.is_some() {
-            record_duplicate_mac_move(metrics, vni, mac);
-        }
         let Some(inst) = instances.get(vni) else {
             continue;
         };
-        apply_actions(
+        if duplicate_mac_is_quarantined(state, vni, mac) {
+            suppress_local_originations_for_mac(
+                vni,
+                mac,
+                state,
+                inst,
+                rib_tx,
+                metrics,
+                originated_local_mac_counts,
+                vni_to_esi,
+            )
+            .await;
+            continue;
+        }
+        let view_present = new_mac_ip_view.contains_key(&(vni, mac, ip));
+        let actions = {
+            let view = new_mac_ip_view.get(&(vni, mac, ip));
+            let Some(orig) = state.mac_ip_originators.get_mut(&vni) else {
+                continue;
+            };
+            orig.on_remote_ip_changed(mac, ip, view)
+        };
+        if actions.is_empty() {
+            continue;
+        }
+        apply_actions_with_duplicate_policy(
             actions,
+            view_present,
+            vni,
+            mac,
+            state,
             inst,
             rib_tx,
             metrics,
@@ -1272,10 +1659,6 @@ pub(crate) fn build_originated_route(
     }
 }
 
-fn record_duplicate_mac_move(metrics: &BgpMetrics, vni: EvpnInstanceId, mac: MacAddress) {
-    metrics.record_evpn_duplicate_mac_move(vni.as_u32(), &mac.to_string());
-}
-
 /// Pull the optional host IP back out of the route key the state
 /// machine produced. Gate 7b+1 always uses `ip = None`, but stays
 /// faithful to the key for forward-compat when ARP suppression
@@ -1502,7 +1885,9 @@ enum RibQueryError {
 mod tests {
     use super::*;
     use prometheus::Encoder;
-    use rustbgpd_evpn::{EvpnInstance, EvpnInstanceTable, RouteTarget};
+    use rustbgpd_evpn::{
+        DuplicateMacAction, DuplicateMacConfig, EvpnInstance, EvpnInstanceTable, RouteTarget,
+    };
     use rustbgpd_rib::route::RouteOrigin;
     use rustbgpd_wire::{EvpnImet, EvpnMacIp, RouteDistinguisher};
 
@@ -1549,6 +1934,24 @@ mod tests {
         let mut t = EvpnInstanceTable::new();
         t.insert(local_instance(v)).unwrap();
         Arc::new(t)
+    }
+
+    fn instance_table_with(inst: EvpnInstance) -> Arc<EvpnInstanceTable> {
+        let mut t = EvpnInstanceTable::new();
+        t.insert(inst).unwrap();
+        Arc::new(t)
+    }
+
+    fn suppress_local_instance(v: u32) -> EvpnInstance {
+        local_instance(v).with_duplicate_mac_detection(
+            DuplicateMacConfig::new(
+                DuplicateMacAction::SuppressLocal,
+                Duration::from_mins(3),
+                1,
+                Duration::from_mins(9),
+            )
+            .unwrap(),
+        )
     }
 
     fn evpn_macip_route(
@@ -1692,6 +2095,83 @@ mod tests {
                 "evpn_duplicate_mac_moves_total{mac=\"aa:aa:aa:aa:aa:aa\",vni=\"100\"} 1"
             ) || text.contains(
                 "evpn_duplicate_mac_moves_total{vni=\"100\",mac=\"aa:aa:aa:aa:aa:aa\"} 1"
+            ),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_mac_suppress_local_withdraws_without_reinjecting() {
+        let instances = instance_table_with(suppress_local_instance(100));
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (log, _responder) = rib_capture_responder(rib_rx);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = OriginatorState::new(&instances);
+
+        handle_observation(
+            &LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
+
+        state.remote_mac_view.insert(
+            (vni(100), mac(0xAA)),
+            RemoteMacView {
+                mac: mac(0xAA),
+                mobility_sequence: Some(3),
+                sticky: false,
+                next_hop: ipa("10.0.0.2"),
+            },
+        );
+        handle_observation(
+            &LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
+
+        let actions = log.lock().await.clone();
+        assert_eq!(
+            actions,
+            vec![
+                RibAction::Inject(macip_key_with(100, 0xAA, None)),
+                RibAction::Withdraw(macip_key_with(100, 0xAA, None)),
+            ],
+            "threshold crossing should withdraw the local route and suppress the would-be re-inject"
+        );
+
+        let text = gather_metrics_text(&metrics);
+        assert!(
+            text.contains(
+                "evpn_duplicate_mac_threshold_exceeded_total{action=\"suppress_local\",mac=\"aa:aa:aa:aa:aa:aa\",vni=\"100\"} 1"
+            ) || text.contains(
+                "evpn_duplicate_mac_threshold_exceeded_total{vni=\"100\",mac=\"aa:aa:aa:aa:aa:aa\",action=\"suppress_local\"} 1"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "evpn_duplicate_mac_quarantine_active{mac=\"aa:aa:aa:aa:aa:aa\",vni=\"100\"} 1"
+            ) || text.contains(
+                "evpn_duplicate_mac_quarantine_active{vni=\"100\",mac=\"aa:aa:aa:aa:aa:aa\"} 1"
             ),
             "{text}"
         );
