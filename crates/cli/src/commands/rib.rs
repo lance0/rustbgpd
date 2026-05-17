@@ -104,15 +104,8 @@ struct JsonFibRouteStatus {
 
 fn print_blackhole_discards(discards: &[crate::proto::BlackholeDiscard], json: bool) {
     if json {
-        let out: Vec<JsonBlackholeDiscard> = discards
-            .iter()
-            .map(|d| JsonBlackholeDiscard {
-                prefix: format!("{}/{}", d.prefix, d.prefix_length),
-                peer_address: d.peer_address.clone(),
-                state: blackhole_state_label(d.state).to_string(),
-                reason: d.reason.clone(),
-            })
-            .collect();
+        let out: Vec<JsonBlackholeDiscard> =
+            discards.iter().map(blackhole_discard_to_json).collect();
         println!(
             "{}",
             serde_json::to_string_pretty(&out)
@@ -137,19 +130,7 @@ fn print_blackhole_discards(discards: &[crate::proto::BlackholeDiscard], json: b
 
 fn print_fib_routes(routes: &[crate::proto::FibRouteStatus], json: bool) {
     if json {
-        let out: Vec<JsonFibRouteStatus> = routes
-            .iter()
-            .map(|r| JsonFibRouteStatus {
-                table_name: r.table_name.clone(),
-                table_id: r.table_id,
-                metric: r.metric,
-                prefix: format!("{}/{}", r.prefix, r.prefix_length),
-                next_hop: r.next_hop.clone(),
-                peer_address: r.peer_address.clone(),
-                state: fib_state_label(r.state).to_string(),
-                reason: r.reason.clone(),
-            })
-            .collect();
+        let out: Vec<JsonFibRouteStatus> = routes.iter().map(fib_route_status_to_json).collect();
         println!(
             "{}",
             serde_json::to_string_pretty(&out)
@@ -174,6 +155,28 @@ fn print_fib_routes(routes: &[crate::proto::FibRouteStatus], json: bool) {
                 r.reason
             );
         }
+    }
+}
+
+fn blackhole_discard_to_json(d: &crate::proto::BlackholeDiscard) -> JsonBlackholeDiscard {
+    JsonBlackholeDiscard {
+        prefix: format!("{}/{}", d.prefix, d.prefix_length),
+        peer_address: d.peer_address.clone(),
+        state: blackhole_state_label(d.state).to_string(),
+        reason: d.reason.clone(),
+    }
+}
+
+fn fib_route_status_to_json(r: &crate::proto::FibRouteStatus) -> JsonFibRouteStatus {
+    JsonFibRouteStatus {
+        table_name: r.table_name.clone(),
+        table_id: r.table_id,
+        metric: r.metric,
+        prefix: format!("{}/{}", r.prefix, r.prefix_length),
+        next_hop: r.next_hop.clone(),
+        peer_address: r.peer_address.clone(),
+        state: fib_state_label(r.state).to_string(),
+        reason: r.reason.clone(),
     }
 }
 
@@ -730,6 +733,48 @@ mod tests {
         let connection = connect(&server.addr, None).await.unwrap();
 
         fib(connection, true).await.unwrap();
+    }
+
+    #[test]
+    fn blackhole_json_shape_is_stable() {
+        let discard = crate::proto::BlackholeDiscard {
+            prefix: "203.0.113.66".to_string(),
+            prefix_length: 32,
+            peer_address: "192.0.2.1".to_string(),
+            state: crate::proto::BlackholeDiscardState::Rejected as i32,
+            reason: "not_ebgp".to_string(),
+        };
+
+        let value = serde_json::to_value(blackhole_discard_to_json(&discard)).unwrap();
+        assert_eq!(value["prefix"], "203.0.113.66/32");
+        assert_eq!(value["peer_address"], "192.0.2.1");
+        assert_eq!(value["state"], "rejected");
+        assert_eq!(value["reason"], "not_ebgp");
+    }
+
+    #[test]
+    fn fib_json_shape_is_stable() {
+        let route = crate::proto::FibRouteStatus {
+            table_name: "edge".to_string(),
+            table_id: 1000,
+            metric: 200,
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+            next_hop: "192.0.2.1".to_string(),
+            peer_address: "198.51.100.1".to_string(),
+            state: crate::proto::FibRouteState::Failed as i32,
+            reason: "install_failed:EPERM".to_string(),
+        };
+
+        let value = serde_json::to_value(fib_route_status_to_json(&route)).unwrap();
+        assert_eq!(value["table_name"], "edge");
+        assert_eq!(value["table_id"], 1000);
+        assert_eq!(value["metric"], 200);
+        assert_eq!(value["prefix"], "203.0.113.0/24");
+        assert_eq!(value["next_hop"], "192.0.2.1");
+        assert_eq!(value["peer_address"], "198.51.100.1");
+        assert_eq!(value["state"], "failed");
+        assert_eq!(value["reason"], "install_failed:EPERM");
     }
 
     /// Pre-existing `best_route` and per-candidate `route` keys

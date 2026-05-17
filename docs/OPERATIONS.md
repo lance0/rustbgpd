@@ -487,6 +487,24 @@ rather than merging the two by wall-clock timestamp. Dataplane and EVPN events
 remain follow-up work. For recent route history without a live tail, use
 `rustbgpctl events --prefix <PREFIX>`.
 
+### Pick the right observability surface
+
+Use the narrowest surface for the question you are asking:
+
+| Question | Command / RPC | Notes |
+|----------|---------------|-------|
+| "What is changing right now?" | `rustbgpctl events watch` / `EventService.WatchEvents` | Live route + session stream. No backfill after reconnect. |
+| "What just changed for this prefix?" | `rustbgpctl events --prefix 203.0.113.0/24` / `ListRouteEvents` | Exact-prefix route history from the bounded in-memory RIB ring. |
+| "What routes does the general FIB runtime own or reject?" | `rustbgpctl rib fib` / `ListFibRoutes` | Snapshot of ADR-0061 configured-table route ownership. |
+| "What BLACKHOLE discards are installed or rejected?" | `rustbgpctl rib blackholes` / `ListBlackholeDiscards` | Snapshot of RFC 7999 discard programming. |
+| "Are EVPN L2/L3 dataplane pieces ready?" | `rustbgpctl evpn instances`, `rustbgpctl evpn nexthops`, `rustbgpctl evpn vrfs` | Snapshot of resolved EVPN config and latest dataplane reports. |
+| "Do I need alerting over time?" | Prometheus `/metrics` | Use counters/gauges for alerting; pair with CLI/RPC snapshots for row-level detail. |
+
+Streams answer "what happened while I was connected." Snapshot RPCs answer
+"what does the daemon currently believe or own." The route-event history ring
+is the only current after-the-fact event timeline; session, policy, dataplane,
+and EVPN histories remain roadmap items.
+
 ### Check health
 
 ```bash

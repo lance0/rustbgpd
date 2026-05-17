@@ -855,4 +855,55 @@ mod tests {
         ];
         validate_route_only_filters(&[], &event_types, None, Some("203.0.113.0/24")).unwrap();
     }
+
+    #[test]
+    fn json_route_event_shape_is_stable() {
+        let event = RouteEvent {
+            event_type: crate::proto::RouteEventType::BestChanged as i32,
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+            peer_address: "10.0.0.2".to_string(),
+            previous_peer_address: "10.0.0.1".to_string(),
+            afi_safi: AddressFamily::Ipv4Unicast as i32,
+            timestamp: "123".to_string(),
+            path_id: 7,
+            event_id: 0,
+        };
+
+        let value = serde_json::to_value(json_event(&event)).unwrap();
+        assert_eq!(value["event_type"], "best_changed");
+        assert_eq!(value["prefix"], "203.0.113.0/24");
+        assert_eq!(value["peer_address"], "10.0.0.2");
+        assert_eq!(value["previous_peer_address"], "10.0.0.1");
+        assert_eq!(value["afi_safi"], "ipv4_unicast");
+        assert_eq!(value["timestamp"], "123");
+        assert_eq!(value["path_id"], 7);
+    }
+
+    #[test]
+    fn json_bgp_event_route_shape_is_stable() {
+        let event = BgpEvent {
+            timestamp: "123".to_string(),
+            category: EventCategory::Route as i32,
+            event_type: BgpEventType::RouteWithdrawn as i32,
+            severity: crate::proto::EventSeverity::Warning as i32,
+            peer_address: "10.0.0.2".to_string(),
+            previous_peer_address: "10.0.0.1".to_string(),
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+            afi_safi: AddressFamily::Ipv4Unicast as i32,
+            summary: "route withdrawn 203.0.113.0/24".to_string(),
+            ..Default::default()
+        };
+
+        let value = json_bgp_event(&event);
+        assert_eq!(value["category"], "route");
+        assert_eq!(value["event_type"], "route_withdrawn");
+        assert_eq!(value["severity"], "warning");
+        assert_eq!(value["peer_address"], "10.0.0.2");
+        assert_eq!(value["previous_peer_address"], "10.0.0.1");
+        assert_eq!(value["prefix"], "203.0.113.0/24");
+        assert_eq!(value["afi_safi"], "ipv4_unicast");
+        assert_eq!(value["summary"], "route withdrawn 203.0.113.0/24");
+    }
 }

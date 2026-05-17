@@ -317,34 +317,10 @@ pub async fn list_nexthops(connection: Connection, json: bool) -> Result<(), Cli
         .into_inner();
 
     if json {
-        let groups: Vec<serde_json::Value> = resp
-            .groups
-            .iter()
-            .map(|g| {
-                serde_json::json!({
-                    "vni": g.vni,
-                    "esi": g.esi,
-                    "ethernet_tag": g.ethernet_tag,
-                    "group_id": g.group_id,
-                    "members": g.members.iter().map(|m| {
-                        serde_json::json!({
-                            "gateway": m.gateway,
-                            "nexthop_id": m.nexthop_id,
-                        })
-                    }).collect::<Vec<_>>(),
-                    "ref_macs": g.ref_macs,
-                })
-            })
-            .collect();
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "groups": groups,
-                "orphan_nexthops_count": resp.orphan_nexthops_count,
-                "pending_delete_count": resp.pending_delete_count,
-                "drift_recovery_disabled": resp.drift_recovery_disabled,
-            }))
-            .expect("failed to serialize EVPN nexthop list as JSON")
+            serde_json::to_string_pretty(&fdb_nexthops_to_json(&resp))
+                .expect("failed to serialize EVPN nexthop list as JSON")
         );
     } else {
         // Print the latch directly rather than label it as
@@ -386,6 +362,34 @@ pub async fn list_nexthops(connection: Connection, json: bool) -> Result<(), Cli
         }
     }
     Ok(())
+}
+
+fn fdb_nexthops_to_json(resp: &crate::proto::ListEvpnNexthopsResponse) -> serde_json::Value {
+    let groups: Vec<serde_json::Value> = resp
+        .groups
+        .iter()
+        .map(|g| {
+            serde_json::json!({
+                "vni": g.vni,
+                "esi": g.esi,
+                "ethernet_tag": g.ethernet_tag,
+                "group_id": g.group_id,
+                "members": g.members.iter().map(|m| {
+                    serde_json::json!({
+                        "gateway": m.gateway,
+                        "nexthop_id": m.nexthop_id,
+                    })
+                }).collect::<Vec<_>>(),
+                "ref_macs": g.ref_macs,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "groups": groups,
+        "orphan_nexthops_count": resp.orphan_nexthops_count,
+        "pending_delete_count": resp.pending_delete_count,
+        "drift_recovery_disabled": resp.drift_recovery_disabled,
+    })
 }
 
 /// List configured IP-VRFs and their readiness (Gate 9, ADR-0058).
@@ -894,5 +898,63 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             .await
             .unwrap();
         super::list_nexthops(connection, true).await.unwrap();
+    }
+
+    #[test]
+    fn fdb_nexthops_json_shape_is_stable() {
+        let value = super::fdb_nexthops_to_json(&crate::proto::ListEvpnNexthopsResponse {
+            groups: vec![crate::proto::EvpnFdbNexthopGroup {
+                vni: 100,
+                esi: "03:00:00:00:00:00:00:00:00:07".to_string(),
+                ethernet_tag: "0".to_string(),
+                group_id: 0x4000_0001,
+                members: vec![crate::proto::EvpnFdbNexthopMember {
+                    gateway: "10.0.0.2".to_string(),
+                    nexthop_id: 0x3000_0001,
+                }],
+                ref_macs: vec!["02:aa:bb:cc:dd:01".to_string()],
+            }],
+            orphan_nexthops_count: 2,
+            pending_delete_count: 1,
+            drift_recovery_disabled: true,
+        });
+
+        assert_eq!(value["orphan_nexthops_count"], 2);
+        assert_eq!(value["pending_delete_count"], 1);
+        assert_eq!(value["drift_recovery_disabled"], true);
+        assert_eq!(value["groups"][0]["vni"], 100);
+        assert_eq!(value["groups"][0]["esi"], "03:00:00:00:00:00:00:00:00:07");
+        assert_eq!(value["groups"][0]["ethernet_tag"], "0");
+        assert_eq!(value["groups"][0]["group_id"], 0x4000_0001);
+        assert_eq!(value["groups"][0]["members"][0]["gateway"], "10.0.0.2");
+        assert_eq!(value["groups"][0]["members"][0]["nexthop_id"], 0x3000_0001);
+        assert_eq!(value["groups"][0]["ref_macs"][0], "02:aa:bb:cc:dd:01");
+    }
+
+    #[test]
+    fn ip_vrf_json_shape_includes_route_counts_and_readiness() {
+        let value = super::ip_vrf_to_json(&crate::proto::IpVrfState {
+            name: "blue".to_string(),
+            vni: 5000,
+            rd: "65000:5000".to_string(),
+            route_targets: vec!["65000:5000".to_string()],
+            local_vtep_ip: "10.0.0.1".to_string(),
+            router_mac: "02:00:00:00:00:01".to_string(),
+            vrf_device: "vrf-blue".to_string(),
+            l3vxlan_device: "vni5000".to_string(),
+            table_id: 5000,
+            readiness_state: crate::proto::IpVrfReadinessState::IpVrfReadinessReady as i32,
+            vrf_ifindex: 11,
+            l3vxlan_ifindex: 12,
+            not_ready_reasons: vec![],
+            originated_routes_count: 3,
+            installed_routes_count: 2,
+        });
+
+        assert_eq!(value["name"], "blue");
+        assert_eq!(value["vni"], 5000);
+        assert_eq!(value["readiness"], "ready");
+        assert_eq!(value["originated_routes_count"], 3);
+        assert_eq!(value["installed_routes_count"], 2);
     }
 }
