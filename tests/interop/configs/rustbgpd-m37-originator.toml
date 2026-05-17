@@ -6,6 +6,7 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
+prometheus_addr = "0.0.0.0:9179"
 
 [global.telemetry.grpc_tcp]
 address = "0.0.0.0:50051"
