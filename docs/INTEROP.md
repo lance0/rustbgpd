@@ -11,8 +11,8 @@ are called out explicitly.
 
 ### CI coverage
 
-16 of the 42 automated interop milestone scripts are gated on every PR
-through `.github/workflows/interop.yml`:
+The hosted `.github/workflows/interop.yml` path gates 16 of the 42
+automated interop milestone scripts on every PR:
 
 - **Foundation** — wire-protocol + core RIB / refresh / policy: **M1**, **M13**, **M15**.
 - **Address-family + topology** — MP-BGP, RR, multi-path: **M10**, **M14**, **M17**.
