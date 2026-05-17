@@ -165,6 +165,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   families, and `ListRoutesRequest` prefix filters reject missing or
   out-of-range prefix lengths instead of silently broadening or clamping.
 
+- `clap_complete` bumped 4.6.3 → 4.6.5 (`rustbgpctl completions` builder).
+
+### Fixed
+
+- TCP transport collision handling now resolves simultaneous inbound
+  collision candidates correctly (#105). Adds regression coverage for
+  local-wins / equal router-id collisions, primary-idle promotion, stale
+  notifications, and pending-candidate disable drain.
+
+- General FIB shutdown and withdraw paths now use key-only deletes so
+  cleanup is not pinned to stale next-hop values.
+
+- EVPN SVI MAC originator no longer double-decrements
+  `originated_local_mac_counts` on shutdown drain — the
+  `drain_to_withdraws` path now relies on `withdraw_svi_mac` for the
+  decrement, matching the bridge-MAC-change fix that landed earlier in
+  the cycle.
+
 ## [0.21.0] — 2026-05-14
 
 ### Added

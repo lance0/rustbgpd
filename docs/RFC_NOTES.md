@@ -784,8 +784,10 @@ implemented per ADR-0040.
   origination, DF-role-aware Type 2 ESI attachment, the
   BUM-suppression kernel primitive behind `apply_bum_enforcement`,
   aliasing projection, and a receive-side EAD-per-ES mass-withdraw
-  filter. Keep `apply_bum_enforcement = false` for production until
-  the 24 h churn soak in `docs/evpn-alpha-soak.md` closes.
+  filter. The 24 h MAC-churn soak passed 2026-05-16
+  ([`docs/soak-gate8b-mac-churn-24h.md`](soak-gate8b-mac-churn-24h.md)),
+  which unblocks the production-default flip; the defaults still ship
+  as `false` so operators opt in deliberately before flipping.
 - **M38 smoke** (`tests/interop/m38-evpn-df-election.clab.yml`):
   2-PE rustbgpd segment, asserts (1) PE1 elected DF, (2) PE2
   elected NonDF, (3) PE2 promotes to DF after PE1 shutdown,

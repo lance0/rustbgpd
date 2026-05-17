@@ -233,9 +233,11 @@ landing, tracked here for visibility)
   `mass_withdraw::AsPathTracker` shipped earlier remains for
   future event-driven RIB-side work where sub-poll latency
   matters.
-- [ ] **Gate 8b — remaining multi-homing enforcement work.** Two
-  concrete slices left (the aliasing-dataplane slice landed via
-  ADR-0059, see above):
+- [x] **Gate 8b — multi-homing enforcement validated under MAC
+  churn.** The MAC-churn 24 h soak passed (slice 1 below). Slice 2
+  (optional import-side ES-Import RT filtering) is a separable
+  follow-up, not a production-default blocker. The aliasing-dataplane
+  slice landed via ADR-0059, see above.
   1. **MAC-churn variant of the 24 h BUM-state soak.** Single-pass
      primitive validation already landed via the Docker harness; the
      baseline 24 h BUM-state soak completed 2026-05-11

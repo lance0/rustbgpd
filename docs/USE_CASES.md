@@ -332,6 +332,7 @@ rustbgpd
 - **Route injection** — announce/withdraw prefixes programmatically
 - **Policy CRUD** — create/modify/delete policies at runtime without restart
 - **WatchRoutes streaming** — receive real-time route change events
+- **WatchEvents unified stream** — one subscription covers route, session lifecycle, BGP NOTIFICATION metadata, policy-mutation audit, and FIB / BLACKHOLE dataplane status; `stream_lagged` signals tell the controller when a slow consumer fell behind
 - **Community manipulation** — set communities for traffic engineering
 - **AS_PATH prepend** — steer traffic across multiple upstreams
 

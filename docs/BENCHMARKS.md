@@ -296,7 +296,11 @@ establishment.
 
 ### Results
 
-Benchmarks run at v0.4.2; no RIB hot-path performance changes through v0.17.0.
+Benchmarks run at v0.4.2; the RIB hot-path has been unchanged through v0.21.0
+in ways that would invalidate these numbers, but the runs themselves have not
+been re-executed against current main. Fresh runs against the v0.21.0 main and
+under EVPN VTEP / IRB modes are tracked as follow-up work; treat the numbers
+below as directional rather than current.
 
 #### 10 peers x 1,000 prefixes (10k total)
 

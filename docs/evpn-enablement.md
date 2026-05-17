@@ -533,19 +533,23 @@ Shipped pieces:
 
 Concrete remaining slices:
 
-1. **MAC-churn variant of the 24 h Gate 8b soak** — synthetic DF
-   flips with concurrent FDB programming before flipping
-   `apply_bum_enforcement` default to `true`. The baseline
-   BUM-state soak completed clean (see
-   `docs/soak-gate8b-24h-bum-state.md`), and the sibling
-   `tests/soak/run-gate8b-mac-churn-soak.sh` harness now exists
-   with process-restart flips. The remaining gate is the 1 h dry run
-   result followed by the full 24 h run.
+1. **MAC-churn variant of the 24 h Gate 8b soak** — **PASSED**
+   2026-05-16 ([`docs/soak-gate8b-mac-churn-24h.md`](soak-gate8b-mac-churn-24h.md)).
+   Synthetic DF flips with concurrent FDB programming via the
+   process-restart harness at
+   `tests/soak/run-gate8b-mac-churn-soak.sh`. 69 complete flip cycles,
+   ~478 K FDB ops, PE1 RSS plateau 17.23–18.93 MB (slope envelope
+   0.08 MB/h), 0 FATAL / WARN / drift events. This unblocks the
+   production-default flip of `apply_bum_enforcement` and
+   `apply_aliasing_ecmp` to `true`; the flip itself is deferred
+   to a separate release decision so operators can opt in
+   explicitly first.
 2. **Optional import-side ES-Import RT filtering** — apply the
    ES-Import RT origination from Gate 8b prep on the daemon's own
    RIB import path so unrelated segments are filtered before they
    reach LocRib. Currently rustbgpd originates the RT but imports via
-   user-configured RTs only.
+   user-configured RTs only. Separable follow-up, not a
+   production-default blocker.
 
 ADR-0059 slice 3.5 hardening (`apply_aliasing_ecmp` off-switch,
 periodic `RTM_GETNEXTHOP` drift recovery, IPv6 alias members)
@@ -553,9 +557,11 @@ shipped in v0.20.0 — PRs #91 / #92 / #93 — and is no longer on
 the remaining-slices list.
 
 **Operator note:** multi-homing enforcement is no longer merely
-observable, but it is still alpha and opt-in. Leave
-`apply_bum_enforcement = false` in production until the soak item
-above closes; enable it deliberately in labs or controlled trials.
+observable. The MAC-churn 24 h soak unblocks the production-default
+flip for `apply_bum_enforcement` and `apply_aliasing_ecmp`, but the
+defaults still ship as `false` so operators opt in explicitly. Flip
+to `true` once your deployment is comfortable with the alpha posture
+documented in this file.
 
 ---
 

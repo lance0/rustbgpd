@@ -32,7 +32,7 @@ This is not a full routing suite replacement. rustbgpd will not implement OSPF, 
 
 **EVPN VTEP — bidirectional (Phase 2 Gates 7a + 7b + 7b+1 + 7b+2 + 7c).** Local EVI/VNI domain types (`crates/evpn`) and an `[[evpn_instances]]` TOML schema with a read-only `EvpnService.ListEvpnInstances` gRPC surface (Gate 7a, ADR-0052). Linux kernel reconciliation programs remote-MAC FDB entries from received Type 2 routes (Gate 7b, ADR-0054). Local-MAC origination subscribes to `RTNLGRP_NEIGH` and emits Type 2 routes per RFC 7432 §15.1 mobility sequencing, plus one Type 3 IMET per L2VNI carrying the PMSI Tunnel attribute (Gate 7b+1, ADR-0055). `advertise_svi_mac` originates a Type 2 for the bridge's own MAC (RFC 9135 §6.1) on instance-Ready by surfacing the bridge link-layer address through `InstanceDataplaneStatus.bridge_mac`; `sticky_macs` (ADR-0056) marks origination with the RFC 7432 §15.4 sticky bit. Gate 7b+2 closes the MAC+IP path: with `bridge link set ... neigh_suppress on`, ARP/ND-snooped `(IP, MAC)` bindings on the bridge's neighbour table drive MAC+IP Type 2 origination under the FRR-style replace model — one Type 2 per MAC at any time, `IpAdded` upgrades from MAC-only to MAC+IP, last `IpRemoved` downgrades back. Mobility events propagate sub-second via the EVPN-keyed `EvpnRouteEvent` broadcast in `crates/rib`; the 5 s `QueryEvpnRoutes` poll stays as a `Lagged` / cold-start backstop (Gate 7c). RR-only deployments (empty `[[evpn_instances]]`) spawn no kernel-facing tasks for either direction.
 
-**Later:** Duplicate-MAC quarantine action (ADR-0055 §9), production-default multi-homing enforcement after the MAC-churn variant of the Gate 8b 24h soak, RFC 9135 overlay-index IRB (Gate 9 ships the Interface-less variant per RFC 9136 §4.4.2 / ADR-0058), auto-derived Route Targets (RFC 8365 §5.1.2.1), VPNv4/v6, MPLS-EVPN encap.
+**Later:** Duplicate-MAC quarantine action (ADR-0055 §9), production-default multi-homing enforcement flip for `apply_bum_enforcement` / `apply_aliasing_ecmp` (the Gate 8b MAC-churn 24 h soak passed 2026-05-16; the default flip is a separate release decision), RFC 9135 overlay-index IRB (Gate 9 ships the Interface-less variant per RFC 9136 §4.4.2 / ADR-0058), auto-derived Route Targets (RFC 8365 §5.1.2.1), VPNv4/v6, MPLS-EVPN encap.
 
 ---
 
@@ -474,9 +474,11 @@ controller-driven injection for Type 2 / Type 3. What remains:
   hardening (PRs #91 / #92 / #93) followed up with the
   `apply_aliasing_ecmp` per-instance off-switch, periodic
   `RTM_GETNEXTHOP` drift recovery, and homogeneous IPv6 alias
-  members. Still ahead: the MAC-churn variant of the Gate 8b
-  soak before flipping the `apply_bum_enforcement` default to
-  `true`.
+  members. The MAC-churn variant of the Gate 8b soak passed
+  2026-05-16 ([`docs/soak-gate8b-mac-churn-24h.md`](soak-gate8b-mac-churn-24h.md)),
+  which unblocks flipping the `apply_bum_enforcement` and
+  `apply_aliasing_ecmp` defaults to `true`; the flip itself is a
+  separate release decision.
 - **Symmetric Interface-less IRB:** Gate 9 ships end-to-end in
   v0.18.0 — RFC 9136 §4.4.2 / ADR-0058. The `[[evpn_ip_vrfs]]`
   config object, `IpVrfStatus` readiness probe, Linux VRF +

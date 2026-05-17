@@ -681,13 +681,19 @@ prefix, type, and severity at the top level even when the payload also carries
 them so category-agnostic clients can render or filter events without unpacking
 the `oneof`.
 
-`ListSessionEvents` accepts `neighbor_address`, session-only `event_types`, and
-`limit` filters. Empty `event_types` means all session event types. The history
-ring holds at most 4096 events; `limit = 0` requests that full bounded daemon
-window, and larger values are clamped to the same ceiling. Responses contain
-the most recent matching events, ordered oldest-to-newest within that selected
-recent window. Route event types are rejected for this RPC; use
-`RibService.ListRouteEvents` for route history.
+`ListSessionEvents` accepts `neighbor_address`, lifecycle-only `event_types`,
+and `limit` filters. Valid `event_types` are the five session lifecycle types:
+`BGP_EVENT_TYPE_SESSION_STATE_CHANGED`, `BGP_EVENT_TYPE_SESSION_ESTABLISHED`,
+`BGP_EVENT_TYPE_SESSION_LOST`, `BGP_EVENT_TYPE_PEER_ENABLED`, and
+`BGP_EVENT_TYPE_PEER_DISABLED`. Empty `event_types` means all five lifecycle
+types. NOTIFICATION sent/received types are not retained in the history ring
+and are rejected here with `INVALID_ARGUMENT`; subscribe to `WatchEvents` with
+`BGP_EVENT_TYPE_NOTIFICATION_SENT` / `BGP_EVENT_TYPE_NOTIFICATION_RECEIVED`
+for live NOTIFICATION metadata. Route event types are likewise rejected; use
+`RibService.ListRouteEvents` for route history. The history ring holds at most
+4096 events; `limit = 0` requests that full bounded daemon window, and larger
+values are clamped to the same ceiling. Responses contain the most recent
+matching events, ordered oldest-to-newest within that selected recent window.
 
 Slow live-stream consumers do not block the daemon. If a `WatchEvents` or
 `WatchRoutes` subscriber falls behind the bounded broadcast channel, missed

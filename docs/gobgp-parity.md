@@ -1,6 +1,6 @@
 # rustbgpd vs GoBGP Feature Parity
 
-Last updated: 2026-05-14 (post-v0.20.0 main + ADR-0061)
+Last updated: 2026-05-16 (post-v0.21.0 main, including the EventService unified stream + bounded session-event history, ADR-0061 FIB hardening, ADR-0062 TCP-AO socket foundation)
 
 ## Address Families
 

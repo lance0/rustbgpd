@@ -31,6 +31,7 @@ Required. Defines the local BGP speaker identity.
 | `honor_blackhole`   | bool   | no       | `false`              | Enable RFC 7999 receiver scoping on EBGP imports — see below |
 | `install_blackhole_discard` | bool | no | `false`              | Install kernel blackhole routes for accepted RFC 7999 host routes — see below |
 | `allow_blackhole_broad_prefixes` | bool | no | `false`           | Permit non-host BLACKHOLE discard installs when the FIB slice is enabled |
+| `apply_bum_enforcement` | bool | no   | `false`              | Apply Gate 8b BUM-suppression filters to the kernel per-port `IFLA_BRPORT_*_FLOOD` triplet. Restart-required. Default keeps observe-only behavior; flip to `true` after validating kernel enforcement on a privileged-runner soak |
 
 ```toml
 [global]
