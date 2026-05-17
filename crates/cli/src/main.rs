@@ -541,7 +541,7 @@ enum EventsAction {
         #[arg(short, long)]
         limit: Option<u32>,
     },
-    /// Show recent policy / peer-group / chain mutation events
+    /// Show recent policy / neighbor-set / peer-group / chain mutation events
     Policy {
         /// Neighbor address filter. Only peer-scoped policy events match.
         #[arg(long)]
