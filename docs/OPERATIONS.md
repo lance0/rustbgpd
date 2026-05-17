@@ -153,7 +153,8 @@ fields.
 listener config (including any TLS / mTLS field), `[rpki]`, `[bmp]`,
 `[mrt]`, `[[evpn_instances]]` (Phase-2 VTEP foundation — gRPC
 `EvpnService` shares an `Arc<EvpnInstanceTable>` built once at
-startup; reload-time mutation lands with kernel reconciliation),
+startup; ADR-0063 requires a future command-driven coordinator before
+reload-time mutation can safely land),
 `[[ethernet_segments]]` (Gate 8 segment orchestrator snapshot),
 `[[evpn_ip_vrfs]]` (Gate 9 IP-VRF foundation — pinned
 `Arc<IpVrfTable>` consumed by the readiness probe),

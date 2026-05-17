@@ -1347,12 +1347,13 @@ message TriggerMrtDumpResponse {
 //
 // Read-only in this slice. The daemon's local EVI/VNI state is the
 // declarative `[[evpn_instances]]` config plus the runtime resolved
-// `EvpnInstanceTable`. Linux kernel reconciliation and Type 2/3 local
-// origination consume that table through daemon actors; runtime
-// instance mutation and Type 5/local IRB origination remain follow-ups
-// (see docs/evpn-enablement.md Gate 7+). Empty when the daemon is
-// acting purely as an EVPN route reflector — RR mode does not need
-// local instance state.
+// `EvpnInstanceTable`. Linux kernel reconciliation, Type 2/3 local
+// origination, and Gate 9 Type 5 / IP-VRF state consume the resolved
+// tables through daemon actors. Runtime instance mutation remains a
+// follow-up and must use the command-driven semantics in ADR-0063,
+// not a direct shared-table swap. Empty when the daemon is acting
+// purely as an EVPN route reflector — RR mode does not need local
+// instance state.
 // ---------------------------------------------------------------------------
 
 service EvpnService {

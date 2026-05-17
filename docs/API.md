@@ -1041,13 +1041,15 @@ when the daemon is acting purely as an EVPN route reflector — RR mode
 does not declare local instances. The same `[[evpn_instances]]` table
 that this service exposes is the input to the Linux kernel
 reconciler (Gate 7b, ADR-0054 — programs remote-MAC FDB entries
-downward) and the local-MAC originator + Type 3 IMET emitter (Gate 7b+1,
+downward), the local-MAC originator + Type 3 IMET emitter (Gate 7b+1,
 ADR-0055 — emits Type 2 / Type 3 routes upward from kernel-learned
-state). The originator and IMET emitter bypass this gRPC surface;
-they translate kernel events directly into `RibUpdate::InjectEvpn` /
-`WithdrawEvpn` against the RIB. See ADR-0052 for the original
-boundary, ADR-0054/ADR-0055 for the dataplane + origination
-boundaries.
+state), the Gate 8 segment/DF orchestrator, and the Gate 9 Type 5 /
+IP-VRF path. The originators and dataplane actors bypass this gRPC
+surface; they translate kernel/RIB events directly into reconcile
+inputs and `RibUpdate::InjectEvpn` / `WithdrawEvpn` against the RIB.
+See ADR-0052 for the original boundary, ADR-0054/ADR-0055 for the
+dataplane + origination boundaries, and ADR-0063 for the required
+future runtime mutation semantics.
 
 | RPC | Description |
 |-----|-------------|
@@ -1057,13 +1059,13 @@ boundaries.
 | `GetIpVrf`          | Detail view of a single IP-VRF including the seven readiness predicates (`not_ready_reasons`) when `readiness_state != Ready` |
 
 Mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) is still out of
-scope. With the kernel reconciler and originator now live (Gates
-7b / 7b+1), runtime mutation needs a swap surface (`ArcSwap` /
-`RwLock`) plus careful interaction with the per-VNI
-`LocalMacOriginator` state — delete must drain its outstanding
-Withdraws before the table swap to avoid leaking advertised MACs.
-Tracked as alpha-soak follow-up — see
-[`docs/evpn-alpha-soak.md`](evpn-alpha-soak.md).
+scope. Runtime mutation is not just a shared-table swap: delete and
+redefine must coordinate IMET, MAC-only/MAC+IP/SVI Type 2 originators,
+DF/ES state, Type 5/IP-VRF state, and Linux owned dataplane state. ADR-0063
+therefore requires a single command-driven EVPN runtime coordinator
+with validation-first model updates and explicit drain/replay semantics
+before any mutating API is added. Tracked in
+[issue #133](https://github.com/lance0/rustbgpd/issues/133).
 
 Operators configure instances via the `[[evpn_instances]]` TOML
 block; SIGHUP that edits any instance is restart-required (see

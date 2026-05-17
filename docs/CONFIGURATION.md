@@ -1477,12 +1477,13 @@ kernel-side ECMP); other L2VNIs in the same daemon are unaffected.
 
 **Restart required**: `[[evpn_instances]]` is pinned at startup today
 — config reload reverts instance-table edits — so flipping
-`apply_aliasing_ecmp` requires a daemon restart to take effect. The
-diff layer is written so that a future runtime instance-mutation
-surface (RPC etc.) would converge cleanly via the standard
-`FdbNhg → SingleDst` transition, but operators cannot drive that
-path today. The remaining runtime-mutation design work is tracked in
-<https://github.com/lance0/rustbgpd/issues/133>.
+`apply_aliasing_ecmp` or any other instance field requires a daemon
+restart to take effect. ADR-0063 defines the future runtime mutation
+contract: a command-driven EVPN coordinator must validate the whole
+candidate model, drain/replay IMET, Type 2, Type 5, DF/ES, and Linux
+owned state explicitly, and then publish a new generation. There is no
+operator-facing RPC or hot-SIGHUP path for that yet. The implementation
+work remains tracked in <https://github.com/lance0/rustbgpd/issues/133>.
 
 **Restart edge case**: if you flip `apply_aliasing_ecmp = false` and
 restart the daemon while tagged FDB nexthop groups from the prior run
@@ -1695,14 +1696,13 @@ snapshot back to the startup value so drift detection stays observable
 across every reload. Gate 8 segment and Gate 8b enforcement settings
 follow the same pinning rule because their actors also resolve startup
 snapshots. The Gate 9 `[[evpn_ip_vrfs]]` table (ADR-0058) is pinned the
-same way; today the reconcile actor consumes it only for the IP-VRF
-readiness probe (Linux netlink dumps of the VRF and L3 VXLAN devices,
-logging Ready / NotReady transitions). The ADR-0061 `[[fib_tables]]`
+same way; the Gate 9 actors consume it for IP-VRF readiness, Type 5
+origination, and L3 FIB programming. The ADR-0061 `[[fib_tables]]`
 table is pinned for the same reason: the general FIB actor owns only the
-explicit tables resolved at startup.
-Reload-time mutation (`AddEvpnInstance` / `DeleteEvpnInstance` and
-SIGHUP delta application) is tracked as alpha-soak follow-up — see
-`docs/evpn-alpha-soak.md`.
+explicit tables resolved at startup. Runtime EVPN mutation
+(`AddEvpnInstance` / `DeleteEvpnInstance` and SIGHUP delta application)
+requires the command-driven coordinator described in ADR-0063 and is
+tracked in <https://github.com/lance0/rustbgpd/issues/133>.
 
 Reload failures are reported per-step with structured logging
 (bucket / target / error). The previous in-memory config snapshot

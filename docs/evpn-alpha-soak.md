@@ -382,9 +382,11 @@ landing, tracked here for visibility)
   Not a correctness blocker.
 - [ ] **`[[evpn_instances]]` mutation surface.** Today the table is
   pinned at startup. `AddEvpnInstance` / `DeleteEvpnInstance` gRPC
-  + SIGHUP reload semantics need a swap surface (`ArcSwap` or
-  `RwLock`) and careful interaction with the originator's per-VNI
-  `LocalMacOriginator` state (delete must drain its Withdraws first).
+  + SIGHUP reload semantics need the ADR-0063 command-driven EVPN
+  coordinator, not a direct shared-table swap: delete/redefine must
+  explicitly drain or replay IMET, MAC-only / MAC+IP / SVI Type 2,
+  Type 5 / IP-VRF, DF/ES, and Linux owned dataplane state before a
+  new runtime generation is published.
 
 ## Field-readiness gates
 
