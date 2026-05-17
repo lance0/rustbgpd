@@ -798,7 +798,7 @@ Be honest about where rustbgpd isn't the right tool:
   RFC 9135 overlay-index IRB; MAC-churn variant of the Gate 8b
   24h soak before enabling BUM enforcement by default; optional
   import-side ES-Import RT filtering; auto-derived RTs (RFC 8365
-  §5.1.2.1); duplicate-MAC quarantine action (ADR-0055 §9). For a
+  §5.1.2.1); duplicate-MAC remote-route processing / dataplane loop-protection (local-origin suppression shipped in ADR-0055 §9). For a
   single-homed L2VNI fabric without overlay-index IRB
   requirements, rustbgpd is a fit today; full FRR-equivalent VTEP
   coverage closes when RFC 9135 overlay-index IRB ships.

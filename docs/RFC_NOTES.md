@@ -753,10 +753,11 @@ implemented per ADR-0040.
   daemon correlation under the FRR-style replace model per
   RFC 9135 §7.2.3 in `src/evpn_originator.rs`. Operator
   prerequisite: bridge `neigh_suppress on`).
-- **Deferred (tracked in ADR-0055 §9 + `docs/evpn-alpha-soak.md`):**
-  RFC 7432 §15.1 duplicate-MAC quarantine action (M=180 s/N=5;
-  detection counters shipped — the operator-facing escalation
-  channel is the deferred half).
+- **Partially shipped (tracked in ADR-0055 §9 +
+  `docs/evpn-alpha-soak.md`):** RFC 7432 §15.1 duplicate-MAC M/N
+  detection defaults to M=180 s / N=5 and can opt into local-origin
+  `suppress_local` recovery. Remote-route processing and dataplane
+  loop-protection remain deferred.
 
 ### Phase 3: Multi-homing foundation (Gate 8, ADR-0057)
 

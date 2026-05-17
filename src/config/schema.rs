@@ -334,16 +334,16 @@ fn default_enabled() -> bool {
     true
 }
 
-const fn default_duplicate_mac_window_seconds() -> u64 {
-    180
+fn default_duplicate_mac_window_seconds() -> u64 {
+    rustbgpd_evpn::DEFAULT_DUPLICATE_MAC_WINDOW.as_secs()
 }
 
 const fn default_duplicate_mac_threshold() -> u32 {
-    5
+    rustbgpd_evpn::DEFAULT_DUPLICATE_MAC_THRESHOLD
 }
 
-const fn default_duplicate_mac_recovery_seconds() -> u64 {
-    540
+fn default_duplicate_mac_recovery_seconds() -> u64 {
+    rustbgpd_evpn::DEFAULT_DUPLICATE_MAC_RECOVERY.as_secs()
 }
 
 fn default_grpc_uds_mode() -> u32 {

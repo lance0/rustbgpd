@@ -710,10 +710,10 @@ for the architectural record.
   foreign-route preservation and route-event wakeup. **M39 containerlab smoke**
   validates the bidirectional symmetric Interface-less IRB
   datapath against FRR 10.3.1.
-- **Still deferred (alpha-soak follow-up):** duplicate-MAC
-  quarantine action (RFC 7432 §15.1 M=180 s/N=5; detection
-  counters shipped, action deferred per ADR-0055 §9), runtime
-  mutation RPCs (`AddEvpnInstance` / `DeleteEvpnInstance`).
+- **Still deferred (alpha-soak follow-up):** duplicate-MAC remote-route
+  processing / dataplane loop-protection (local-origin suppression
+  shipped per ADR-0055 §9), runtime mutation RPCs
+  (`AddEvpnInstance` / `DeleteEvpnInstance`).
   Tracked in [docs/evpn-alpha-soak.md](evpn-alpha-soak.md).
 - **Symmetric Interface-less IRB** (RFC 9136 §4.4.2) — shipped
   end-to-end in v0.18.0 (Gate 9 slice 6 PR A #77 origination +
