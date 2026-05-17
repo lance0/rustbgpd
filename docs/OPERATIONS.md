@@ -79,8 +79,9 @@ Output is grouped into two actionable sections plus a per-neighbor
 effective-impact view:
 
 - **Reload-applied changes** — `[[neighbors]]` deltas, neighbor sets,
-  named policies, peer groups, and global / per-neighbor policy
-  chains. SIGHUP reconciles all of these.
+  named policies, peer groups, global / per-neighbor policy chains, and
+  the hot-applied `[global]` flags `honor_graceful_shutdown` and
+  control-plane-only `honor_blackhole`. SIGHUP reconciles all of these.
 - **Restart-required changes** — `[global]` ASN/router-id/families,
   `[global.telemetry.grpc_*]` listener config (including TLS / mTLS),
   `[rpki]`, `[bmp]`, `[mrt]`, `[[evpn_instances]]`,

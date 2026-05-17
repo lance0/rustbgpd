@@ -188,10 +188,12 @@ those priorities exist.
   `--explain-peer` extension on `rib --explain` (Add-Path send
   view) shipped alongside in the same PR.
 
-  **Not yet shipped:** `rustbgpctl policy diff <candidate.toml>`
-  (runtime-vs-file dry-run that pairs with the SIGHUP reconcile
-  work). Tracked separately under "Runtime-vs-file diff" below
-  when scope is needed.
+  **Runtime-vs-file dry-run:** daemon-side `rustbgpd --diff` now
+  reports reload-applied policy / peer-group / effective-neighbor
+  impact, restart-required startup-only surfaces, and hot-applied
+  global honor flags. A live `rustbgpctl policy diff <candidate.toml>`
+  that compares against an API-exported runtime snapshot remains a
+  larger config-snapshot design task if operators need it.
 - [x] **Auto-retry pending soft-resets and policy hot-applies across
   SIGHUP boundaries.** Shipped on the SIGHUP reconcile branch.
   `update_runtime_policies` is now bail-and-retry across every
