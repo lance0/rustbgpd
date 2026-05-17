@@ -1272,6 +1272,8 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "neighbor_sets_changed": &diff.policy.neighbor_sets_changed,
             "import_chain_changed": diff.policy.import_chain_changed,
             "export_chain_changed": diff.policy.export_chain_changed,
+            "honor_graceful_shutdown_changed": diff.honor_graceful_shutdown_changed,
+            "honor_blackhole_changed": diff.honor_blackhole_changed,
             "effective_neighbor_impact": &diff.effective_neighbor_impact,
         },
         "restart_required": {
@@ -1292,14 +1294,54 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
     })
 }
 
+/// Text styling hooks for config-diff renderers.
+///
+/// The default style is intentionally plain so API and `rustbgpctl`
+/// clients never receive terminal escape codes. The daemon CLI can pass
+/// colored markers without duplicating the section logic.
+pub struct ConfigDiffTextStyle<'a> {
+    pub reload_header: std::borrow::Cow<'a, str>,
+    pub restart_header: std::borrow::Cow<'a, str>,
+    pub add_marker: std::borrow::Cow<'a, str>,
+    pub remove_marker: std::borrow::Cow<'a, str>,
+    pub change_marker: std::borrow::Cow<'a, str>,
+    pub restart_marker: std::borrow::Cow<'a, str>,
+    pub inline_policy_hint: std::borrow::Cow<'a, str>,
+    pub no_changes: std::borrow::Cow<'a, str>,
+}
+
+impl Default for ConfigDiffTextStyle<'_> {
+    fn default() -> Self {
+        Self {
+            reload_header: "Reload-applied changes:".into(),
+            restart_header: "Restart-required changes:".into(),
+            add_marker: "+".into(),
+            remove_marker: "-".into(),
+            change_marker: "~".into(),
+            restart_marker: "!".into(),
+            inline_policy_hint:
+                "(migrate inline policy to named definitions + import_chain/export_chain for hot reload)"
+                    .into(),
+            no_changes: "No changes.".into(),
+        }
+    }
+}
+
 /// Plain-text config diff for API/CLI clients that should not receive
 /// terminal color escapes. Secret-bearing values remain redacted by
 /// the underlying `ConfigDiff` change descriptions.
+pub fn format_config_diff(diff: &ConfigDiff) -> String {
+    format_config_diff_with_style(diff, &ConfigDiffTextStyle::default())
+}
+
+/// Shared config-diff text renderer used by `rustbgpd --diff` and the
+/// live runtime config-diff API. Only markers/headings are styleable;
+/// section ordering and field coverage live in one place to avoid drift.
 #[expect(
     clippy::too_many_lines,
     reason = "plain renderer intentionally mirrors the human config-diff sections"
 )]
-pub fn format_config_diff(diff: &ConfigDiff) -> String {
+pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextStyle<'_>) -> String {
     use std::fmt::Write as _;
 
     let mut out = String::new();
@@ -1317,20 +1359,24 @@ pub fn format_config_diff(diff: &ConfigDiff) -> String {
         || p.export_chain_changed;
 
     if diff.has_reload_applied_changes() {
-        out.push_str("Reload-applied changes:\n\n");
+        let _ = writeln!(out, "{}\n", style.reload_header);
         let raw_neighbor_changes = !diff.neighbors.added.is_empty()
             || !diff.neighbors.removed.is_empty()
             || !diff.neighbors.changed.is_empty();
         if raw_neighbor_changes {
             out.push_str("  Neighbors:\n");
             for n in &diff.neighbors.added {
-                let _ = writeln!(out, "    + {} (AS {})", n.address, n.remote_asn);
+                let _ = writeln!(
+                    out,
+                    "    {} {} (AS {})",
+                    style.add_marker, n.address, n.remote_asn
+                );
             }
             for addr in &diff.neighbors.removed {
-                let _ = writeln!(out, "    - {addr}");
+                let _ = writeln!(out, "    {} {addr}", style.remove_marker);
             }
             for n in &diff.neighbors.changed {
-                let _ = writeln!(out, "    ~ {}:", n.address);
+                let _ = writeln!(out, "    {} {}:", style.change_marker, n.address);
                 for change in &n.changes {
                     let _ = writeln!(out, "        {change}");
                 }
@@ -1341,13 +1387,13 @@ pub fn format_config_diff(diff: &ConfigDiff) -> String {
         if has_pg_changes {
             out.push_str("  Peer groups:\n");
             for name in &diff.peer_groups.added {
-                let _ = writeln!(out, "    + {name}");
+                let _ = writeln!(out, "    {} {name}", style.add_marker);
             }
             for name in &diff.peer_groups.removed {
-                let _ = writeln!(out, "    - {name}");
+                let _ = writeln!(out, "    {} {name}", style.remove_marker);
             }
             for (name, details) in &diff.peer_group_details {
-                let _ = writeln!(out, "    ~ {name}:");
+                let _ = writeln!(out, "    {} {name}:", style.change_marker);
                 for change in details {
                     let _ = writeln!(out, "        {change}");
                 }
@@ -1358,28 +1404,28 @@ pub fn format_config_diff(diff: &ConfigDiff) -> String {
         if has_named_policy_changes {
             out.push_str("  Policy:\n");
             for name in &p.definitions_added {
-                let _ = writeln!(out, "    + definition \"{name}\"");
+                let _ = writeln!(out, "    {} definition \"{name}\"", style.add_marker);
             }
             for name in &p.definitions_removed {
-                let _ = writeln!(out, "    - definition \"{name}\"");
+                let _ = writeln!(out, "    {} definition \"{name}\"", style.remove_marker);
             }
             for name in &p.definitions_changed {
-                let _ = writeln!(out, "    ~ definition \"{name}\"");
+                let _ = writeln!(out, "    {} definition \"{name}\"", style.change_marker);
             }
             for name in &p.neighbor_sets_added {
-                let _ = writeln!(out, "    + neighbor_set \"{name}\"");
+                let _ = writeln!(out, "    {} neighbor_set \"{name}\"", style.add_marker);
             }
             for name in &p.neighbor_sets_removed {
-                let _ = writeln!(out, "    - neighbor_set \"{name}\"");
+                let _ = writeln!(out, "    {} neighbor_set \"{name}\"", style.remove_marker);
             }
             for name in &p.neighbor_sets_changed {
-                let _ = writeln!(out, "    ~ neighbor_set \"{name}\"");
+                let _ = writeln!(out, "    {} neighbor_set \"{name}\"", style.change_marker);
             }
             if p.import_chain_changed {
-                out.push_str("    ~ import_chain\n");
+                let _ = writeln!(out, "    {} import_chain", style.change_marker);
             }
             if p.export_chain_changed {
-                out.push_str("    ~ export_chain\n");
+                let _ = writeln!(out, "    {} export_chain", style.change_marker);
             }
             out.push('\n');
         }
@@ -1387,10 +1433,25 @@ pub fn format_config_diff(diff: &ConfigDiff) -> String {
         if !diff.effective_neighbor_impact.is_empty() {
             out.push_str("  Effectively impacted neighbors (via inheritance):\n");
             for impact in &diff.effective_neighbor_impact {
-                let _ = writeln!(out, "    ~ {}:", impact.address);
+                let _ = writeln!(out, "    {} {}:", style.change_marker, impact.address);
                 for reason in &impact.reasons {
                     let _ = writeln!(out, "        {reason}");
                 }
+            }
+            out.push('\n');
+        }
+
+        let mut hot_applied_global_flags = Vec::new();
+        if diff.honor_graceful_shutdown_changed {
+            hot_applied_global_flags.push("honor_graceful_shutdown");
+        }
+        if diff.honor_blackhole_changed {
+            hot_applied_global_flags.push("honor_blackhole");
+        }
+        if !hot_applied_global_flags.is_empty() {
+            out.push_str("  Global hot-applied flags:\n");
+            for flag in hot_applied_global_flags {
+                let _ = writeln!(out, "    {} {flag}", style.change_marker);
             }
             out.push('\n');
         }
@@ -1434,18 +1495,18 @@ pub fn format_config_diff(diff: &ConfigDiff) -> String {
         restart_sections.push("[policy.export] (inline)");
     }
     if !restart_sections.is_empty() {
-        out.push_str("Restart-required changes:\n");
+        let _ = writeln!(out, "{}", style.restart_header);
         for section in &restart_sections {
-            let _ = writeln!(out, "  ! {section} changed");
+            let _ = writeln!(out, "  {} {section} changed", style.restart_marker);
         }
         if p.import_changed || p.export_changed {
-            out.push_str("    (migrate inline policy to named definitions + import_chain/export_chain for hot reload)\n");
+            let _ = writeln!(out, "    {}", style.inline_policy_hint);
         }
         out.push('\n');
     }
 
     if !diff.has_any_changes() {
-        out.push_str("No changes.\n");
+        let _ = writeln!(out, "{}", style.no_changes);
     }
     out
 }

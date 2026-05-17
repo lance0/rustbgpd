@@ -210,241 +210,30 @@ fn remove_gr_restart_marker(path: &Path) -> std::io::Result<()> {
     }
 }
 
-#[expect(clippy::too_many_lines)]
 fn print_config_diff(diff: &config::ConfigDiff) {
     use owo_colors::OwoColorize;
 
-    // ── Reload-applied changes (what SIGHUP will actually reconcile) ──
-
-    let has_pg_changes = !diff.peer_groups.added.is_empty()
-        || !diff.peer_groups.removed.is_empty()
-        || !diff.peer_groups.changed.is_empty();
-    let p = &diff.policy;
-    let has_named_policy_changes = !p.definitions_added.is_empty()
-        || !p.definitions_removed.is_empty()
-        || !p.definitions_changed.is_empty()
-        || !p.neighbor_sets_added.is_empty()
-        || !p.neighbor_sets_removed.is_empty()
-        || !p.neighbor_sets_changed.is_empty()
-        || p.import_chain_changed
-        || p.export_chain_changed;
-
-    if diff.has_reload_applied_changes() {
-        println!("{}", "Reload-applied changes:".green());
-        println!();
-        let raw_neighbor_changes = !diff.neighbors.added.is_empty()
-            || !diff.neighbors.removed.is_empty()
-            || !diff.neighbors.changed.is_empty();
-        if raw_neighbor_changes {
-            println!("  Neighbors:");
-            for n in &diff.neighbors.added {
-                println!("    {} {} (AS {})", "+".green(), n.address, n.remote_asn);
-            }
-            for addr in &diff.neighbors.removed {
-                println!("    {} {addr}", "-".red());
-            }
-            for n in &diff.neighbors.changed {
-                println!("    {} {}:", "~".yellow(), n.address);
-                for change in &n.changes {
-                    println!("        {change}");
-                }
-            }
-            println!();
-        }
-
-        if has_pg_changes {
-            println!("  Peer groups:");
-            for name in &diff.peer_groups.added {
-                println!("    {} {name}", "+".green());
-            }
-            for name in &diff.peer_groups.removed {
-                println!("    {} {name}", "-".red());
-            }
-            for (name, details) in &diff.peer_group_details {
-                println!("    {} {name}:", "~".yellow());
-                for change in details {
-                    println!("        {change}");
-                }
-            }
-            println!();
-        }
-
-        if has_named_policy_changes {
-            println!("  Policy:");
-            for name in &p.definitions_added {
-                println!("    {} definition \"{name}\"", "+".green());
-            }
-            for name in &p.definitions_removed {
-                println!("    {} definition \"{name}\"", "-".red());
-            }
-            for name in &p.definitions_changed {
-                println!("    {} definition \"{name}\"", "~".yellow());
-            }
-            for name in &p.neighbor_sets_added {
-                println!("    {} neighbor_set \"{name}\"", "+".green());
-            }
-            for name in &p.neighbor_sets_removed {
-                println!("    {} neighbor_set \"{name}\"", "-".red());
-            }
-            for name in &p.neighbor_sets_changed {
-                println!("    {} neighbor_set \"{name}\"", "~".yellow());
-            }
-            if p.import_chain_changed {
-                println!("    {} import_chain", "~".yellow());
-            }
-            if p.export_chain_changed {
-                println!("    {} export_chain", "~".yellow());
-            }
-            println!();
-        }
-
-        // Effective neighbor impact — neighbors whose resolved chain
-        // moves due to upstream peer-group / policy / neighbor-set
-        // edits. May overlap with raw neighbor changes; printing both
-        // is intentional so operators see *which* neighbors a single
-        // peer-group edit cascades to.
-        if !diff.effective_neighbor_impact.is_empty() {
-            println!("  Effectively impacted neighbors (via inheritance):");
-            for impact in &diff.effective_neighbor_impact {
-                println!("    {} {}:", "~".yellow(), impact.address);
-                for reason in &impact.reasons {
-                    println!("        {reason}");
-                }
-            }
-            println!();
-        }
-
-        let hot_applied_global_flags = config_diff_hot_applied_global_flags(diff);
-        if !hot_applied_global_flags.is_empty() {
-            println!("  Global hot-applied flags:");
-            for flag in hot_applied_global_flags {
-                println!("    {} {flag}", "~".yellow());
-            }
-            println!();
-        }
-    }
-
-    // ── Restart-required changes ──
-
-    let mut restart_sections = Vec::new();
-    if diff.global_changed {
-        restart_sections.push("[global]");
-    }
-    if diff.rpki_changed {
-        restart_sections.push("[rpki]");
-    }
-    if diff.bmp_changed {
-        restart_sections.push("[bmp]");
-    }
-    if diff.mrt_changed {
-        restart_sections.push("[mrt]");
-    }
-    if diff.evpn_instances_changed {
-        restart_sections.push("[[evpn_instances]]");
-    }
-    if diff.evpn_ip_vrfs_changed {
-        restart_sections.push("[[evpn_ip_vrfs]]");
-    }
-    if diff.ethernet_segments_changed {
-        restart_sections.push("[[ethernet_segments]]");
-    }
-    if diff.fib_tables_changed {
-        restart_sections.push("[[fib_tables]]");
-    }
-    if diff.apply_bum_enforcement_changed {
-        restart_sections.push("apply_bum_enforcement");
-    }
-    if diff.blackhole_fib_discard_changed {
-        restart_sections.push("BLACKHOLE FIB discard");
-    }
-    if p.import_changed {
-        restart_sections.push("[policy.import] (inline)");
-    }
-    if p.export_changed {
-        restart_sections.push("[policy.export] (inline)");
-    }
-    if !restart_sections.is_empty() {
-        println!("{}", "Restart-required changes:".yellow());
-        for section in &restart_sections {
-            println!("  {} {section} changed", "!".yellow());
-        }
-        if p.import_changed || p.export_changed {
-            println!(
-                "  {}",
-                "  (migrate inline policy to named definitions + import_chain/export_chain for hot reload)".dimmed()
-            );
-        }
-        println!();
-    }
-
-    if !diff.has_any_changes() {
-        println!("No changes.");
-    }
-}
-
-fn config_diff_hot_applied_global_flags(diff: &config::ConfigDiff) -> Vec<&'static str> {
-    let mut flags = Vec::new();
-    if diff.honor_graceful_shutdown_changed {
-        flags.push("honor_graceful_shutdown");
-    }
-    if diff.honor_blackhole_changed {
-        flags.push("honor_blackhole");
-    }
-    flags
-}
-
-fn config_diff_json_output(diff: &config::ConfigDiff) -> serde_json::Value {
-    // The JSON schema mirrors the human `print_config_diff`
-    // bucketing exactly:
-    //   reload_applied  — neighbors + peer-groups + named
-    //                     policies/sets/chains (everything
-    //                     SIGHUP now applies) + the
-    //                     per-neighbor effective-impact view
-    //   restart_required — `[global]`, `[rpki]`, `[bmp]`,
-    //                      `[mrt]`, EVPN startup-only surfaces,
-    //                      plus inline `policy.import` /
-    //                      `policy.export` (no runtime swap surface yet)
-    //   informational    — empty (kept on the schema as a stable
-    //                      bucket so consumers don't break when the
-    //                      predicate is true again in a future release)
-    // Automation that classifies hot-applied edits by which bucket they
-    // land in stays correct after this release.
-    serde_json::json!({
-        "has_actionable_changes": diff.has_actionable_changes(),
-        "has_informational_changes": diff.has_informational_changes(),
-        "has_any_changes": diff.has_any_changes(),
-        "reload_applied": {
-            "neighbors": &diff.neighbors,
-            "peer_groups": &diff.peer_groups,
-            "peer_group_details": &diff.peer_group_details,
-            "policy_definitions_added": &diff.policy.definitions_added,
-            "policy_definitions_removed": &diff.policy.definitions_removed,
-            "policy_definitions_changed": &diff.policy.definitions_changed,
-            "neighbor_sets_added": &diff.policy.neighbor_sets_added,
-            "neighbor_sets_removed": &diff.policy.neighbor_sets_removed,
-            "neighbor_sets_changed": &diff.policy.neighbor_sets_changed,
-            "import_chain_changed": diff.policy.import_chain_changed,
-            "export_chain_changed": diff.policy.export_chain_changed,
-            "honor_graceful_shutdown_changed": diff.honor_graceful_shutdown_changed,
-            "honor_blackhole_changed": diff.honor_blackhole_changed,
-            "effective_neighbor_impact": &diff.effective_neighbor_impact,
-        },
-        "restart_required": {
-            "global_changed": diff.global_changed,
-            "rpki_changed": diff.rpki_changed,
-            "bmp_changed": diff.bmp_changed,
-            "mrt_changed": diff.mrt_changed,
-            "evpn_instances_changed": diff.evpn_instances_changed,
-            "evpn_ip_vrfs_changed": diff.evpn_ip_vrfs_changed,
-            "ethernet_segments_changed": diff.ethernet_segments_changed,
-            "fib_tables_changed": diff.fib_tables_changed,
-            "apply_bum_enforcement_changed": diff.apply_bum_enforcement_changed,
-            "blackhole_fib_discard_changed": diff.blackhole_fib_discard_changed,
-            "inline_policy_import_changed": diff.policy.import_changed,
-            "inline_policy_export_changed": diff.policy.export_changed,
-        },
-        "informational": serde_json::Value::Object(serde_json::Map::new()),
-    })
+    let reload_header = "Reload-applied changes:".green().to_string();
+    let restart_header = "Restart-required changes:".yellow().to_string();
+    let add_marker = "+".green().to_string();
+    let remove_marker = "-".red().to_string();
+    let change_marker = "~".yellow().to_string();
+    let restart_marker = "!".yellow().to_string();
+    let inline_policy_hint =
+        "(migrate inline policy to named definitions + import_chain/export_chain for hot reload)"
+            .dimmed()
+            .to_string();
+    let style = config::ConfigDiffTextStyle {
+        reload_header: reload_header.into(),
+        restart_header: restart_header.into(),
+        add_marker: add_marker.into(),
+        remove_marker: remove_marker.into(),
+        change_marker: change_marker.into(),
+        restart_marker: restart_marker.into(),
+        inline_policy_hint: inline_policy_hint.into(),
+        no_changes: "No changes.".into(),
+    };
+    print!("{}", config::format_config_diff_with_style(diff, &style));
 }
 
 fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) {
@@ -4069,7 +3858,7 @@ hold_time = 90
         );
         let new = load_config_from_toml("diff-json-new", &new_toml);
         let diff = config::diff_config(&old, &new);
-        let value = config_diff_json_output(&diff);
+        let value = config::config_diff_json_value(&diff);
 
         assert_eq!(
             value["reload_applied"]["honor_graceful_shutdown_changed"],
@@ -4090,14 +3879,17 @@ hold_time = 90
         let new = load_config_from_toml("diff-human-new", &new_toml);
         let diff = config::diff_config(&old, &new);
 
-        assert_eq!(
-            config_diff_hot_applied_global_flags(&diff),
-            vec!["honor_graceful_shutdown", "honor_blackhole"]
-        );
         assert!(
             diff.has_reload_applied_changes(),
             "hot-applied global flags must keep the diff in the reload-applied bucket"
         );
+        let rendered = config::format_config_diff(&diff);
+        assert!(
+            rendered.contains("Global hot-applied flags:"),
+            "rendered diff should include the hot-applied flags bucket: {rendered}"
+        );
+        assert!(rendered.contains("honor_graceful_shutdown"), "{rendered}");
+        assert!(rendered.contains("honor_blackhole"), "{rendered}");
     }
 
     /// Adding a named policy definition on reload must surface as a
