@@ -75,7 +75,7 @@ frr_has_mac_ip() {
 # cheap proxy that the EVPN instance and originator loop are Ready.
 frr_has_type3() {
     frr_vtysh "show bgp l2vpn evpn route type multicast" \
-        | grep -qF "$RUSTBGPD_IP"
+        | grep -qF "[3]:[0]:[32]:[$RUSTBGPD_IP]"
 }
 
 rb_fdb_add() {
