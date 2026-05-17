@@ -114,6 +114,7 @@ jobs:
     name: M37 — EVPN local MAC origination (FRR 10.3.1)
     runs-on: [self-hosted, linux, kernel-dataplane]
     needs: [build-image, m36]
+    if: ${{ !cancelled() && needs.build-image.result == 'success' }}
     environment:
       name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
     timeout-minutes: 25
@@ -136,6 +137,7 @@ jobs:
     name: M37+IP — EVPN local MAC/IP origination (FRR 10.3.1)
     runs-on: [self-hosted, linux, kernel-dataplane]
     needs: [build-image, m37]
+    if: ${{ !cancelled() && needs.build-image.result == 'success' }}
     environment:
       name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
     timeout-minutes: 25
@@ -158,6 +160,7 @@ jobs:
     name: M38 — EVPN DF election + Type 1/4 origination
     runs-on: [self-hosted, linux, kernel-dataplane]
     needs: [build-image, m37-ip]
+    if: ${{ !cancelled() && needs.build-image.result == 'success' }}
     environment:
       name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
     timeout-minutes: 25
