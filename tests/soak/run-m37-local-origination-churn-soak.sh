@@ -143,15 +143,17 @@ prom_scrape() {
     curl -sfm 5 "http://${ip}:9179/metrics" 2>/dev/null || true
 }
 
-prom_extract() {
+prom_extract_or_zero() {
     local text="$1" metric="$2" label="${3:-}"
     if [ -n "$label" ]; then
         printf '%s' "$text" | awk -v m="$metric" -v l="$label" '
-            $0 ~ "^"m"\\{" && index($0, l) { print $NF; exit }
+            $0 ~ "^"m"\\{" && index($0, l) { print $NF; found=1; exit }
+            END { if (!found) { print "0" } }
         '
     else
         printf '%s' "$text" | awk -v m="$metric" '
-            $0 ~ "^"m"( |\\{)" { print $NF; exit }
+            $0 ~ "^"m"( |\\{)" { print $NF; found=1; exit }
+            END { if (!found) { print "0" } }
         '
     fi
 }
@@ -278,6 +280,9 @@ sample_row() {
     local add_total=${3:?}
     local del_total=${4:?}
     local now elapsed prom rss fdb_count type2_count established
+    local originations_inject originations_withdraw
+    local origination_errors_inject origination_errors_withdraw
+    local observation_drops duplicate_mac_moves
     now=$(date +%s)
     elapsed=$((now - start_epoch))
     prom=$(prom_scrape)
@@ -288,6 +293,21 @@ sample_row() {
         established=1
     else
         established=0
+    fi
+    if [ -n "$prom" ]; then
+        originations_inject=$(prom_extract_or_zero "$prom" evpn_local_originations_total 'action="inject"')
+        originations_withdraw=$(prom_extract_or_zero "$prom" evpn_local_originations_total 'action="withdraw"')
+        origination_errors_inject=$(prom_extract_or_zero "$prom" evpn_local_origination_errors_total 'action="inject"')
+        origination_errors_withdraw=$(prom_extract_or_zero "$prom" evpn_local_origination_errors_total 'action="withdraw"')
+        observation_drops=$(prom_sum "$prom" evpn_local_observations_dropped_total)
+        duplicate_mac_moves=$(prom_sum "$prom" evpn_duplicate_mac_moves_total)
+    else
+        originations_inject=nan
+        originations_withdraw=nan
+        origination_errors_inject=nan
+        origination_errors_withdraw=nan
+        observation_drops=nan
+        duplicate_mac_moves=nan
     fi
 
     printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
@@ -301,12 +321,12 @@ sample_row() {
         "$churn_cycles" \
         "$add_total" \
         "$del_total" \
-        "$(prom_extract "$prom" evpn_local_originations_total 'action="inject"')" \
-        "$(prom_extract "$prom" evpn_local_originations_total 'action="withdraw"')" \
-        "$(prom_extract "$prom" evpn_local_origination_errors_total 'action="inject"')" \
-        "$(prom_extract "$prom" evpn_local_origination_errors_total 'action="withdraw"')" \
-        "$(prom_sum "$prom" evpn_local_observations_dropped_total)" \
-        "$(prom_sum "$prom" evpn_duplicate_mac_moves_total)" \
+        "$originations_inject" \
+        "$originations_withdraw" \
+        "$origination_errors_inject" \
+        "$origination_errors_withdraw" \
+        "$observation_drops" \
+        "$duplicate_mac_moves" \
         >>"$SAMPLES_CSV"
 }
 
