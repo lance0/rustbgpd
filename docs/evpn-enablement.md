@@ -424,7 +424,7 @@ flow that Gate 7b's foundation left as a stub.
 
 | Task | File / location |
 |------|----------------|
-| MAC duplication detection (RFC 7432 §15.1 M=180s/N=5) — detect-only defaults plus opt-in local-origin `suppress_local` action shipped; remote-route processing and dataplane loop-protection remain follow-up scope tracked in [#139](https://github.com/lance0/rustbgpd/issues/139) | `crates/evpn/src/origination.rs` (extend) |
+| MAC duplication detection (RFC 7432 §15.1 M=180s/N=5) — detect-only defaults plus opt-in local-origin `suppress_local` action shipped; remote-route processing and dataplane loop-protection remain follow-up scope tracked in [#139](https://github.com/lance0/rustbgpd/issues/139) | `crates/evpn/src/duplicate_mac.rs`, `src/evpn_originator.rs`; future receive-side projection / dataplane work |
 | Type 5 IP Prefix origination per L3VNI | ✅ Gate 9 slice 6 (v0.18.0) — kernel-route observation, `IpVrfStatus`-gated origination via `RibUpdate::InjectEvpn`, remote import + transactional L3 FIB programming (`L3OwnedState`), Router MAC conflict detection, four-phase apply ordering, foreign-state preservation. `RTNLGRP_IPV4/IPV6_ROUTE` multicast added sub-second withdraw on tenant `ip addr del`. |
 | Mutation surface (`AddEvpnInstance` / `DeleteEvpnInstance`) | `crates/api/src/evpn_service.rs` |
 | Kernel VXLAN interface config generator? | ops question — maybe not |

@@ -1460,12 +1460,7 @@ MAC+IP), suppresses future local originations while the quarantine is
 active, and automatically retries after `recovery_seconds`:
 
 ```toml
-duplicate_mac_detection = {
-  action = "suppress_local",
-  window_seconds = 180,
-  threshold = 5,
-  recovery_seconds = 540,
-}
+duplicate_mac_detection = { action = "suppress_local", window_seconds = 180, threshold = 5, recovery_seconds = 540 }
 ```
 
 This first action slice is intentionally local-origin scoped. The EVPN

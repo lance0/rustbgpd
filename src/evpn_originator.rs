@@ -321,6 +321,19 @@ impl OriginatorState {
             .get(&vni)
             .is_some_and(|orig| orig.outstanding_keys().any(|(k, _)| k.mac == mac))
     }
+
+    /// Whether the kernel still reports any live `(MAC, IP)` binding
+    /// for this MAC. This is intentionally broader than
+    /// [`Self::is_mac_ip_advertising`]: quarantine can withdraw the
+    /// advertised routes while preserving live bindings for timed
+    /// replay, and a re-learned MAC must not emit MAC-only while those
+    /// bindings are waiting for recovery.
+    fn has_live_mac_ip_bindings(&self, vni: EvpnInstanceId, mac: MacAddress) -> bool {
+        self.live_mac_ip
+            .get(&vni)
+            .and_then(|per_vni| per_vni.get(&mac))
+            .is_some_and(|ips| !ips.is_empty())
+    }
 }
 
 #[allow(clippy::too_many_lines)] // The actor select keeps shutdown, local observations, RIB events, and poll recovery together.
@@ -568,7 +581,7 @@ fn duplicate_action_label(action: DuplicateMacAction) -> &'static str {
 }
 
 fn duplicate_mac_is_quarantined(
-    state: &mut OriginatorState,
+    state: &OriginatorState,
     vni: EvpnInstanceId,
     mac: MacAddress,
 ) -> bool {
@@ -883,7 +896,7 @@ async fn handle_learned(
         //      at most one of {MAC-only, MAC+IP} is advertising").
         //      The `local_macs[vni][mac] = ifindex` update above is
         //      what matters — a future downgrade replays it.
-        if state.is_mac_ip_advertising(vni, mac) {
+        if state.is_mac_ip_advertising(vni, mac) || state.has_live_mac_ip_bindings(vni, mac) {
             return;
         }
         if quarantined {
@@ -964,6 +977,16 @@ async fn handle_learned(
         .await;
 
         for ip in pending_ips {
+            if duplicate_mac_is_quarantined(state, vni, mac) {
+                state
+                    .live_mac_ip
+                    .entry(vni)
+                    .or_default()
+                    .entry(mac)
+                    .or_default()
+                    .insert(ip);
+                continue;
+            }
             let view_present = state.remote_mac_ip_view.contains_key(&(vni, mac, ip));
             let preexisting_keys = outstanding_route_keys_for_mac(state, vni, mac);
             let actions = {
@@ -1942,6 +1965,20 @@ mod tests {
         String::from_utf8(buf).unwrap()
     }
 
+    fn assert_quarantine_metric(metrics: &BgpMetrics, v: u32, m: u8, value: u32) {
+        let text = gather_metrics_text(metrics);
+        assert!(
+            text.contains(&format!(
+                "evpn_duplicate_mac_quarantine_active{{mac=\"{}\",vni=\"{v}\"}} {value}",
+                mac(m)
+            )) || text.contains(&format!(
+                "evpn_duplicate_mac_quarantine_active{{vni=\"{v}\",mac=\"{}\"}} {value}",
+                mac(m)
+            )),
+            "{text}"
+        );
+    }
+
     fn vni(n: u32) -> EvpnInstanceId {
         EvpnInstanceId::new(n).unwrap()
     }
@@ -2035,6 +2072,36 @@ mod tests {
             is_stale: false,
             is_llgr_stale: false,
         }
+    }
+
+    fn remote_mac_ip_view(mac_b: u8, ip_str: &str, seq: Option<u32>) -> RemoteMacIpView {
+        RemoteMacIpView {
+            mac: mac(mac_b),
+            ip: ipa(ip_str),
+            mobility_sequence: seq,
+            sticky: false,
+            next_hop: ipa("10.0.0.2"),
+        }
+    }
+
+    async fn observe_test(
+        obs: LocalMacObservation,
+        state: &mut OriginatorState,
+        instances: &Arc<EvpnInstanceTable>,
+        rib_tx: &mpsc::Sender<RibUpdate>,
+        metrics: &BgpMetrics,
+        counts: &OriginatedLocalMacCounts,
+    ) {
+        handle_observation(
+            &obs,
+            state,
+            instances,
+            rib_tx,
+            metrics,
+            counts,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
     }
 
     #[test]
@@ -2335,15 +2402,110 @@ mod tests {
             ],
             "recovery should replay the still-local MAC once suppression expires"
         );
-        let text = gather_metrics_text(&metrics);
-        assert!(
-            text.contains(
-                "evpn_duplicate_mac_quarantine_active{mac=\"aa:aa:aa:aa:aa:aa\",vni=\"100\"} 0"
-            ) || text.contains(
-                "evpn_duplicate_mac_quarantine_active{vni=\"100\",mac=\"aa:aa:aa:aa:aa:aa\"} 0"
-            ),
-            "{text}"
+        assert_quarantine_metric(&metrics, 100, 0xAA, 0);
+    }
+
+    #[tokio::test]
+    async fn duplicate_mac_mac_ip_quarantine_replays_multiple_live_ips_after_recovery() {
+        let instances = instance_table_with(suppress_local_instance_with(
+            100,
+            1,
+            Duration::from_millis(1),
+        ));
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (log, _responder) = rib_capture_responder(rib_rx);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = OriginatorState::new(&instances);
+        state.remote_mac_ip_view.insert(
+            (vni(100), mac(0xAA), ipa("192.0.2.10")),
+            remote_mac_ip_view(0xAA, "192.0.2.10", Some(3)),
         );
+
+        for ip in ["192.0.2.10", "192.0.2.11"] {
+            observe_test(
+                LocalMacObservation::IpAdded {
+                    vni: vni(100),
+                    mac: mac(0xAA),
+                    ip: ipa(ip),
+                },
+                &mut state,
+                &instances,
+                &rib_tx,
+                &metrics,
+                &counts,
+            )
+            .await;
+        }
+
+        observe_test(
+            LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        assert!(
+            log.lock().await.is_empty(),
+            "pending MAC+IP quarantine must suppress every live IP, not inject later pending IPs"
+        );
+        assert_eq!(
+            state
+                .live_mac_ip
+                .get(&vni(100))
+                .and_then(|per_vni| per_vni.get(&mac(0xAA)))
+                .cloned()
+                .unwrap_or_default(),
+            BTreeSet::from([ipa("192.0.2.10"), ipa("192.0.2.11")]),
+            "suppressed live IPs remain cached for timed replay"
+        );
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        observe_test(
+            LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+        assert!(
+            log.lock().await.is_empty(),
+            "expired quarantine must wait for recovery replay instead of emitting MAC-only while live IPs exist"
+        );
+
+        recover_duplicate_macs(
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
+
+        let actions = log.lock().await.clone();
+        assert_eq!(
+            actions,
+            vec![
+                RibAction::Inject(macip_key_with(100, 0xAA, Some("192.0.2.10"))),
+                RibAction::Inject(macip_key_with(100, 0xAA, Some("192.0.2.11"))),
+            ],
+            "recovery should replay every still-live MAC+IP binding without a MAC-only route"
+        );
+        assert_quarantine_metric(&metrics, 100, 0xAA, 0);
     }
 
     #[test]
