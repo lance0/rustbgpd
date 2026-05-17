@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, DynamicNeighborInfo, PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig,
-    PolicyEvent, ReconcileFailure, ReconcileFailureKind, ReconcileResult,
+    PolicyEvent, ReconcileFailure, ReconcileFailureKind, ReconcileResult, RuntimeConfigDiff,
     SESSION_EVENT_HISTORY_CAPACITY, SessionEvent, SessionLifecycleEvent, SessionLifecycleEventType,
     SessionNotificationEvent, SessionNotificationEventType, SetGshutError,
 };
@@ -2397,6 +2397,23 @@ impl PeerManager {
         }
     }
 
+    fn diff_runtime_config(&self, candidate_toml: &str) -> Result<RuntimeConfigDiff, String> {
+        let candidate =
+            Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")?;
+        let diff = crate::config::diff_config(&self.current_config, &candidate);
+        let diff_json = serde_json::to_string_pretty(&crate::config::config_diff_json_value(&diff))
+            .map_err(|error| format!("failed to serialize config diff: {error}"))?;
+        Ok(RuntimeConfigDiff {
+            has_actionable_changes: diff.has_actionable_changes(),
+            has_reload_applied_changes: diff.has_reload_applied_changes(),
+            has_restart_required_changes: diff.has_restart_required_changes(),
+            has_informational_changes: diff.has_informational_changes(),
+            has_any_changes: diff.has_any_changes(),
+            human_text: crate::config::format_config_diff(&diff),
+            diff_json,
+        })
+    }
+
     /// Run the `PeerManager` event loop until shutdown or channel close.
     #[expect(
         clippy::too_many_lines,
@@ -2453,6 +2470,10 @@ impl PeerManager {
                                 limit,
                                 reply,
                             );
+                        }
+                        PeerManagerCommand::DiffRuntimeConfig { candidate_toml, reply } => {
+                            let result = self.diff_runtime_config(&candidate_toml);
+                            let _ = reply.send(result);
                         }
                         PeerManagerCommand::GetPeerState { address, reply } => {
                             let info = self.get_peer_info(address).await;
@@ -2889,6 +2910,73 @@ mod tests {
             fib_tables: Vec::new(),
             apply_bum_enforcement: false,
         }
+    }
+
+    fn load_test_config(toml: &str) -> Config {
+        Config::load_toml_with_diagnostics(toml, "test config").unwrap()
+    }
+
+    #[test]
+    fn runtime_config_diff_compares_candidate_against_live_snapshot_and_redacts_secret() {
+        let (_tx, rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let current = load_test_config(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+md5_password = "old-secret"
+"#,
+        );
+        let mgr = PeerManager::new_with_config(
+            rx,
+            mpsc::unbounded_channel().1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+            None,
+            current,
+        );
+
+        let diff = mgr
+            .diff_runtime_config(
+                r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+md5_password = "new-secret"
+"#,
+            )
+            .unwrap();
+
+        assert!(diff.has_reload_applied_changes);
+        assert!(diff.has_actionable_changes);
+        assert!(diff.human_text.contains("md5_password: <changed>"));
+        assert!(!diff.human_text.contains("old-secret"));
+        assert!(!diff.human_text.contains("new-secret"));
+        assert!(diff.diff_json.contains("md5_password: <changed>"));
+        assert!(!diff.diff_json.contains("old-secret"));
+        assert!(!diff.diff_json.contains("new-secret"));
     }
 
     fn deny_policy_chain() -> PolicyChain {

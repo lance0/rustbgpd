@@ -99,6 +99,36 @@ message SetGlobalRequest {
 message SetGlobalResponse {}
 
 // ---------------------------------------------------------------------------
+// ConfigService — live runtime config diagnostics
+// ---------------------------------------------------------------------------
+
+service ConfigService {
+  // Compare candidate TOML against the daemon's live runtime config
+  // snapshot. The response returns only redacted diff output; it never
+  // exports the live config document.
+  rpc DiffRuntimeConfig(DiffRuntimeConfigRequest) returns (DiffRuntimeConfigResponse);
+}
+
+message DiffRuntimeConfigRequest {
+  // Complete candidate TOML contents to validate and diff.
+  string candidate_toml = 1;
+}
+
+message DiffRuntimeConfigResponse {
+  bool has_actionable_changes = 1;
+  bool has_reload_applied_changes = 2;
+  bool has_restart_required_changes = 3;
+  bool has_informational_changes = 4;
+  bool has_any_changes = 5;
+  // Plain-text diff suitable for terminal display. Secret-bearing
+  // values follow the same redaction policy as `rustbgpd --diff`.
+  string human_text = 6;
+  // Pretty-printed JSON object using the same schema as
+  // `rustbgpd --diff --json`.
+  string diff_json = 7;
+}
+
+// ---------------------------------------------------------------------------
 // NeighborService — Peer lifecycle and state
 // ---------------------------------------------------------------------------
 

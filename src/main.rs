@@ -643,7 +643,7 @@ fn main() {
         };
         let diff = config::diff_config(&config, &new_config);
         if json_output {
-            let output = config_diff_json_output(&diff);
+            let output = config::config_diff_json_value(&diff);
             match serde_json::to_string_pretty(&output) {
                 Ok(json) => println!("{json}"),
                 Err(e) => {

@@ -178,6 +178,21 @@ impl std::fmt::Display for SetGshutError {
 
 impl std::error::Error for SetGshutError {}
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors stable ConfigDiff summary predicates exposed in the proto"
+)]
+pub struct RuntimeConfigDiff {
+    pub has_actionable_changes: bool,
+    pub has_reload_applied_changes: bool,
+    pub has_restart_required_changes: bool,
+    pub has_informational_changes: bool,
+    pub has_any_changes: bool,
+    pub human_text: String,
+    pub diff_json: String,
+}
+
 pub enum PeerManagerCommand {
     /// Add a new peer with the given configuration.
     AddPeer {
@@ -222,6 +237,13 @@ pub enum PeerManagerCommand {
         limit: usize,
         /// Reply channel returning matching events.
         reply: oneshot::Sender<Vec<SessionLifecycleEvent>>,
+    },
+    /// Diff candidate TOML against the live runtime config snapshot.
+    DiffRuntimeConfig {
+        /// Candidate TOML content supplied by the caller.
+        candidate_toml: String,
+        /// Reply channel returning redacted diff output only.
+        reply: oneshot::Sender<Result<RuntimeConfigDiff, String>>,
     },
     /// Query a single peer's state by address.
     GetPeerState {
