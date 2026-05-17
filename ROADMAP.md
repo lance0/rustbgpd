@@ -107,15 +107,65 @@ the active planning surface.
 
 | Priority | Item | Why now | Main proof / exit condition |
 |----------|------|---------|-----------------------------|
+| P0 | **Cut v0.22.0** | `[Unreleased]` has accumulated 78 commits / 40+ entries since v0.21.0 — a release-and-a-half of operator-facing work (unified EventService surface, bounded route/session/policy history, ConfigService.DiffRuntimeConfig, TCP-AO capability surface, ES-Import RT filtering, duplicate-MAC quarantine, M36-M38 protected CI). Shipping it gets feedback flowing and resets the reviewer-fatigue cost of one giant CHANGELOG section. | Workspace bumped to 0.22.0, CHANGELOG `[Unreleased]` rolled to `## [0.22.0] — <date>`, tag pushed, CI + interop green, GitHub release notes match. |
 | P0 | **Privileged runner expansion for remaining dataplane gates** | The self-hosted `kernel-dataplane` workflow now covers M36, M37, M37+IP, M38, M39, M40, M42, and the Docker `fib_runtime` / `fdb_nhg` selectors behind protected-environment approval. The remaining high-value local-only dataplane gates are long soak variants and platform-diversity checks that intentionally do not run on every PR. | Protected CI covers the repeatable EVPN dataplane / DF-election smokes; any future long-soak gate either gets a protected-runner job or a documented reason for staying manual. |
 | P0 | **ADR-0061 FIB hardening** | GoBGP and FRR both expose kernel route programming. rustbgpd now has the minimal configured-table path, peer / peer-group guardrails, route-count caps, exact-match crash-restart recovery via persisted owned-state, and explicit live-drift preservation. | Decide whether operators need a paginated/detail API for over-cap rejected routes beyond the current sampled `route_limit_exceeded` status rows; larger future work is hot-swap `[[fib_tables]]` and ECMP. |
 | P0 | **gRPC security audit + authorization split** | v1.0 is blocked on an external security review. mTLS exists; operator trust still needs method-level read/write boundaries and audit-ready docs. | Security review complete; mutating RPCs can be disabled or isolated from read-only observability endpoints. |
 | P1 | **EVPN production-default decision point** | The Gate 8b MAC-churn 24 h soak passed 2026-05-16 (postmortem at `docs/soak-gate8b-mac-churn-24h.md`) — 69 flip cycles, ~478 K FDB ops, PE1 RSS plateau 17.23–18.93 MB, 0 ADR-0059 drift events — which unblocks flipping `apply_bum_enforcement` and `apply_aliasing_ecmp` defaults to `true`. The defaults still ship as `false` so operators opt in deliberately; the flip is a separate release decision. | Defaults flipped to `true` in `src/config/schema.rs`, with a documented operator note covering the upgrade implications. |
 | P1 | **TCP-AO (RFC 5925)** | BIRD 3 has TCP-AO on Linux, and it is the modern replacement for TCP MD5. This is a visible route-server/security parity gap. ADR-0062, the internal Linux socket primitive, and read-only host capability status are now in place. | Remaining exit: static-neighbor config schema, inbound-listener socket refactor, outbound/listener apply, interop smoke, and fallback behavior documented. |
 | P1 | **Real-time event/history surface** | Operators debugging policy and convergence need a timeline, not only snapshots. This is where an API-first daemon can beat CLI-first stacks. Bounded unicast route-event history has landed via `RibService.ListRouteEvents` and `rustbgpctl events`, including exact-prefix drilldown; bounded session lifecycle history has landed via `EventService.ListSessionEvents` and `rustbgpctl events sessions`; bounded policy mutation history has landed via `EventService.ListPolicyEvents` and `rustbgpctl events policy`; `EventService.WatchEvents` now exposes route events, structured session lifecycle events, BGP NOTIFICATION sent/received metadata, opt-in policy mutation summary events, and FIB / BLACKHOLE dataplane status-row summary changes through a unified typed stream, with session lifecycle delivery isolated from lossless TCP collision coordination, plus Prometheus visibility for lagged consumers and active subscribers. Route events carry process-local cursors, and `rustbgpctl events watch --backfill N` composes recent route history with a live tail. API/operations docs now classify live streams, bounded history, snapshots, and metrics as separate observability surfaces. | Remaining exit: route-level `policy_filtered` events, richer per-route / per-MAC dataplane and EVPN event categories, retention decisions if operators need durable history beyond the in-memory ring, and precomputed dataplane summary counters or watch channels if snapshot polling cost shows up at large table scale. |
+| P1 | **Mega-module splits — engineering velocity** | Four source files have grown past comfortable rebase boundaries and now serialize every contributor: `src/peer_manager.rs` (~6.4k LoC), `src/evpn_originator.rs` (~4.1k), `src/main.rs` (~4.6k), `crates/api/src/event_service.rs` (~2.3k). Every multi-PR batch in the last two release cycles has hit at least one conflict here, and the `#[expect(clippy::too_many_lines)]` annotation count is up to 90 workspace-wide. Splitting them lets parallel PRs land cleanly and unblocks the cleanups in the sustainability subsection below. | Each of the four modules either drops below ~2k LoC or gains a clear top-level module structure (sub-modules per concern) so future PRs can land in narrower files; `#[expect(clippy::too_many_lines)]` count trends down rather than up. |
 | P2 | **EVPN runtime instance mutation implementation** | `[[evpn_instances]]`, `[[evpn_ip_vrfs]]`, and `[[ethernet_segments]]` are still startup-pinned. ADR-0063 now defines the safe mutation contract: a single command-driven EVPN coordinator, validation-first model updates, and explicit drain/replay across IMET, Type 2, Type 5, DF/ES, and Linux owned state. | Implement the coordinator and first read/write API slice without direct shared-table swaps; keep SIGHUP restart-required until the coordinator can safely converge edits ([#133](https://github.com/lance0/rustbgpd/issues/133)). |
 | P2 | **Runtime-vs-file diff and config UX** | gRPC owns truth after startup; operators need better tooling to compare a candidate TOML to live runtime state. | `rustbgpd --diff` / CLI path can compare candidate file to effective runtime including peer groups and hot-applied policy. |
 | P2 | **Overlay-index IRB / EVPN remaining standards** | Needed for fuller data-center EVPN parity, but lower adoption value than hardening the shipped Interface-less path. | ADR for RFC 9135 overlay-index model and first interop smoke. |
+
+### Sustainability / Engineering Velocity
+
+Cross-cutting cleanups that don't move user-facing capability on their
+own but lower the cost of every future PR. Treat the items here as
+"open to grab when your branch is between features" — none of them
+block a release, but they keep the contributor experience from
+degrading as the codebase grows. The mega-module split lives in the
+priority table above because it has the biggest blast radius.
+
+- [ ] **Doc-collision discipline for `ROADMAP.md` / `CHANGELOG.md` /
+  `docs/evpn-alpha-soak.md` / `docs/evpn-enablement.md`.** Almost every
+  multi-PR batch this release cycle conflicted on the same handful of
+  rows (the Real-time event/history surface row, the `[Unreleased]
+  ### Added` chunk, the Gate 8b residual checklist). Lighter-touch
+  fixes: append-only convention for `[Unreleased]` (newest entry at
+  the bottom of its subsection), separate "shipped this PR" sentences
+  rather than rewriting existing summary prose, one row per concern in
+  the priority table. Heavier option if drift continues: extract a
+  structured manifest the docs are generated from.
+- [ ] **Test fixture extraction into a shared `test-support` surface.**
+  Helpers like `route_event`, `session_event`, `policy_event`,
+  `lifecycle_event`, and the various per-test config builders have
+  drifted across `crates/api`, `crates/cli`, `crates/rib`, and `src/`
+  with subtly different signatures. The recurring symptom is that a
+  field addition (e.g. `event_id`) forces touching three or four copies
+  in one PR. A single `rustbgpd-test-support` crate (or a `pub mod
+  test_support` per existing crate, re-exported under `#[cfg(test)]`)
+  would centralize the fixtures and stop the per-PR churn.
+- [ ] **`unwrap()` audit on daemon-runtime paths.** The workspace has
+  ~2.7k `.unwrap()` calls in non-test source; the hotspots that can
+  actually panic the daemon at runtime are `src/peer_manager.rs` (~136
+  calls), `src/main.rs` (~92), `crates/api/src/event_service.rs` (~64),
+  and `crates/transport/src/session/tests.rs` (~72; test-only, lower
+  priority). Most are proven-unreachable in practice but warrant a
+  before-1.0 sweep to either replace with `expect("...")` carrying the
+  proof or convert to typed errors. Pair with the mega-module splits
+  so the audit can land in narrow PRs per file.
+- [ ] **`#[expect(clippy::too_many_lines)]` reduction.** 90 instances
+  workspace-wide and growing. Some are honest (sectioned renderers,
+  match-heavy dispatch) and should stay; the rest indicate functions
+  ready for extraction. Track absolute count downward release over
+  release rather than gating individual PRs on it.
+- [ ] **Workspace `cargo doc` warning posture.** CI already runs
+  `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`. Make
+  that the standing local pre-flight expectation too — surfacing
+  broken intra-doc-links and bare crate references on the developer
+  machine rather than at PR time.
 
 ### Pre-v1.0 Worklog
 
