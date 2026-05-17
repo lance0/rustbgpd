@@ -578,6 +578,7 @@ service RibService {
 service EventService {
   rpc WatchEvents(WatchEventsRequest) returns (stream BgpEvent);
   rpc ListSessionEvents(ListSessionEventsRequest) returns (ListSessionEventsResponse);
+  rpc ListPolicyEvents(ListPolicyEventsRequest) returns (ListPolicyEventsResponse);
 }
 
 message ListRoutesRequest {
@@ -937,6 +938,25 @@ message ListSessionEventsRequest {
 }
 
 message ListSessionEventsResponse {
+  repeated BgpEvent events = 1;
+}
+
+message ListPolicyEventsRequest {
+  // Optional neighbor address filter. Empty = all policy mutation events.
+  // Only peer-scoped policy events match a peer filter.
+  string neighbor_address = 1;
+  // Empty = all policy event types. Current valid value:
+  // BGP_EVENT_TYPE_POLICY_CHANGED.
+  repeated BgpEventType event_types = 2;
+  // Maximum events to return from the bounded 4096-event in-memory
+  // history. 0 uses the daemon default/full bounded window. Larger
+  // values are clamped to the same 4096-event ceiling. Responses
+  // contain the most recent matching events, ordered oldest-to-newest
+  // within that selected recent window.
+  uint32 limit = 3;
+}
+
+message ListPolicyEventsResponse {
   repeated BgpEvent events = 1;
 }
 

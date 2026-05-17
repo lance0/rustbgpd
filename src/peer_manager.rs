@@ -3,10 +3,11 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, DynamicNeighborInfo, PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig,
-    PolicyEvent, ReconcileFailure, ReconcileFailureKind, ReconcileResult, RuntimeConfigDiff,
-    SESSION_EVENT_HISTORY_CAPACITY, SessionEvent, SessionLifecycleEvent, SessionLifecycleEventType,
-    SessionNotificationEvent, SessionNotificationEventType, SetGshutError,
+    ConfigEvent, DynamicNeighborInfo, POLICY_EVENT_HISTORY_CAPACITY, PeerInfo, PeerManagerCommand,
+    PeerManagerNeighborConfig, PolicyEvent, ReconcileFailure, ReconcileFailureKind,
+    ReconcileResult, RuntimeConfigDiff, SESSION_EVENT_HISTORY_CAPACITY, SessionEvent,
+    SessionLifecycleEvent, SessionLifecycleEventType, SessionNotificationEvent,
+    SessionNotificationEventType, SetGshutError,
 };
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::{PeerConfig, SessionState};
@@ -182,6 +183,7 @@ pub struct PeerManager {
     session_events_tx: broadcast::Sender<SessionEvent>,
     session_event_history: VecDeque<SessionLifecycleEvent>,
     policy_events_tx: broadcast::Sender<PolicyEvent>,
+    policy_event_history: VecDeque<PolicyEvent>,
     current_config: Config,
     /// Resolved dynamic neighbor ranges for prefix-based auto-accept.
     dynamic_ranges: Vec<DynamicRange>,
@@ -373,6 +375,7 @@ impl PeerManager {
             session_events_tx,
             session_event_history: VecDeque::with_capacity(SESSION_EVENT_HISTORY_CAPACITY),
             policy_events_tx,
+            policy_event_history: VecDeque::with_capacity(POLICY_EVENT_HISTORY_CAPACITY),
             dynamic_ranges: Self::parse_dynamic_ranges(&current_config),
             dynamic_peer_count: 0,
             dynamic_neighbor_limit: current_config.global.dynamic_neighbor_limit.unwrap_or(100),
@@ -914,7 +917,11 @@ impl PeerManager {
         self.publish_session_event(SessionEvent::Lifecycle(event));
     }
 
-    fn publish_policy_event(&self, event: PolicyEvent) {
+    fn publish_policy_event(&mut self, event: PolicyEvent) {
+        if self.policy_event_history.len() >= POLICY_EVENT_HISTORY_CAPACITY {
+            self.policy_event_history.pop_front();
+        }
+        self.policy_event_history.push_back(event.clone());
         let _ = self.policy_events_tx.send(event);
     }
 
@@ -984,7 +991,7 @@ impl PeerManager {
         }
     }
 
-    fn publish_policy_config_event(&self, event: &ConfigEvent, affected_peer_count: usize) {
+    fn publish_policy_config_event(&mut self, event: &ConfigEvent, affected_peer_count: usize) {
         let (operation, target_type, target, peer) = Self::policy_event_details(event);
         if target_type == "neighbor" {
             return;
@@ -1107,6 +1114,33 @@ impl PeerManager {
                 None => true,
             })
             .filter(|event| event_types.is_empty() || event_types.contains(&event.event_type))
+            .take(limit)
+            .cloned()
+            .collect();
+        events.reverse();
+        let _ = reply.send(events);
+    }
+
+    fn handle_query_policy_event_history(
+        &self,
+        peer: Option<IpAddr>,
+        limit: usize,
+        reply: oneshot::Sender<Vec<PolicyEvent>>,
+    ) {
+        let limit = if limit == 0 {
+            POLICY_EVENT_HISTORY_CAPACITY
+        } else {
+            limit.min(POLICY_EVENT_HISTORY_CAPACITY)
+        };
+
+        let mut events: Vec<PolicyEvent> = self
+            .policy_event_history
+            .iter()
+            .rev()
+            .filter(|event| match peer {
+                Some(peer) => event.peer == Some(peer),
+                None => true,
+            })
             .take(limit)
             .cloned()
             .collect();
@@ -2458,6 +2492,9 @@ impl PeerManager {
                         PeerManagerCommand::SubscribePolicyEvents { reply } => {
                             let _ = reply.send(self.policy_events_tx.subscribe());
                         }
+                        PeerManagerCommand::QueryPolicyEventHistory { peer, limit, reply } => {
+                            self.handle_query_policy_event_history(peer, limit, reply);
+                        }
                         PeerManagerCommand::QuerySessionEventHistory {
                             peer,
                             event_types,
@@ -2821,6 +2858,28 @@ mod tests {
         let (reply_tx, reply_rx) = oneshot::channel();
         mgr.handle_query_session_event_history(peer, &event_types, limit, reply_tx);
         reply_rx.await.unwrap()
+    }
+
+    async fn query_policy_event_history(
+        mgr: &PeerManager,
+        peer: Option<IpAddr>,
+        limit: usize,
+    ) -> Vec<PolicyEvent> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        mgr.handle_query_policy_event_history(peer, limit, reply_tx);
+        reply_rx.await.unwrap()
+    }
+
+    fn test_policy_event(target: &str, peer: Option<IpAddr>) -> PolicyEvent {
+        PolicyEvent {
+            operation: "set",
+            target_type: "policy",
+            target: target.to_string(),
+            peer,
+            affected_peer_count: usize::from(peer.is_some()),
+            timestamp: "1".to_string(),
+            reason: format!("policy set policy {target}"),
+        }
     }
 
     fn mock_open(router_id: Ipv4Addr) -> OpenMessage {
@@ -3419,6 +3478,53 @@ md5_password = "new-secret"
         let expected_last = format!("event-{SESSION_EVENT_HISTORY_CAPACITY}");
         assert_eq!(
             events.last().map(|event| event.reason.as_str()),
+            Some(expected_last.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_event_history_records_events_without_subscriber() {
+        let mut mgr = test_peer_manager();
+
+        mgr.publish_policy_event(test_policy_event("policy-a", None));
+
+        let events = query_policy_event_history(&mgr, None, 0).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].target, "policy-a");
+        assert_eq!(events[0].reason, "policy set policy policy-a");
+    }
+
+    #[tokio::test]
+    async fn policy_event_history_filters_peer_and_limit_in_order() {
+        let mut mgr = test_peer_manager();
+        let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        mgr.publish_policy_event(test_policy_event("old-match", Some(peer1)));
+        mgr.publish_policy_event(test_policy_event("wrong-peer", Some(peer2)));
+        mgr.publish_policy_event(test_policy_event("global", None));
+        mgr.publish_policy_event(test_policy_event("middle-match", Some(peer1)));
+        mgr.publish_policy_event(test_policy_event("newest-match", Some(peer1)));
+
+        let events = query_policy_event_history(&mgr, Some(peer1), 2).await;
+        let targets: Vec<_> = events.iter().map(|event| event.target.as_str()).collect();
+        assert_eq!(targets, vec!["middle-match", "newest-match"]);
+    }
+
+    #[tokio::test]
+    async fn policy_event_history_capacity_evicts_oldest() {
+        let mut mgr = test_peer_manager();
+
+        for idx in 0..=POLICY_EVENT_HISTORY_CAPACITY {
+            mgr.publish_policy_event(test_policy_event(&format!("policy-{idx}"), None));
+        }
+
+        let events = query_policy_event_history(&mgr, None, 0).await;
+        assert_eq!(events.len(), POLICY_EVENT_HISTORY_CAPACITY);
+        assert_eq!(events[0].target, "policy-1");
+        let expected_last = format!("policy-{POLICY_EVENT_HISTORY_CAPACITY}");
+        assert_eq!(
+            events.last().map(|event| event.target.as_str()),
             Some(expected_last.as_str())
         );
     }

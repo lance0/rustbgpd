@@ -403,6 +403,9 @@ through one RPC shape.
 | Live unicast route deltas | `WatchRoutes` or `EventService.WatchEvents` with `EVENT_CATEGORY_ROUTE` | Streaming event feed | Live-only; slow subscribers can lag and miss events |
 | Recent unicast route timeline | `ListRouteEvents` / `rustbgpctl events` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
 | Live session lifecycle | `EventService.WatchEvents` with `EVENT_CATEGORY_SESSION` | Streaming event feed | Live-only; no replay after reconnect |
+| Recent session lifecycle | `EventService.ListSessionEvents` / `rustbgpctl events sessions` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
+| Live policy mutation summaries | `EventService.WatchEvents` with `EVENT_CATEGORY_POLICY` | Streaming event feed | Live-only; slow subscribers can lag and miss events |
+| Recent policy mutation summaries | `EventService.ListPolicyEvents` / `rustbgpctl events policy` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
 | RFC 7999 discard programming | `ListBlackholeDiscards` / `rustbgpctl rib blackholes` | Snapshot | Current reconcile snapshot only |
 | ADR-0061 general Linux FIB programming | `ListFibRoutes` / `rustbgpctl rib fib` | Snapshot | Current reconcile snapshot plus persisted owned-state semantics |
 | EVPN L2/L3 dataplane readiness | `EvpnService` (`ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`) / `rustbgpctl evpn ...` | Snapshot | Latest daemon or dataplane report snapshot |
@@ -661,6 +664,7 @@ source.
 |-----|-------------|
 | `WatchEvents` | Server-streaming: unified typed event stream sourced from structured daemon events |
 | `ListSessionEvents` | Unary: recent session lifecycle events from the peer manager's bounded in-memory history |
+| `ListPolicyEvents` | Unary: recent policy / neighbor-set / peer-group / chain mutation events from the peer manager's bounded in-memory history |
 
 ### Watch unified events
 
@@ -694,6 +698,11 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"event_types": ["BGP_EVENT_TYPE_SESSION_ESTABLISHED", "BGP_EVENT_TYPE_SESSION_LOST"], "neighbor_address": "10.0.0.2", "limit": 20}' \
   localhost:50051 rustbgpd.v1.EventService/ListSessionEvents
 
+# Query recent peer-scoped policy mutation history
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"event_types": ["BGP_EVENT_TYPE_POLICY_CHANGED"], "neighbor_address": "10.0.0.2", "limit": 20}' \
+  localhost:50051 rustbgpd.v1.EventService/ListPolicyEvents
+
 # Watch FIB / BLACKHOLE dataplane status-row summary changes
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"categories": ["EVENT_CATEGORY_DATAPLANE"], "event_types": ["BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED"]}' \
@@ -715,8 +724,9 @@ events are sourced from the same structured RIB broadcast as `WatchRoutes`;
 session events are sourced from the peer manager's session broadcast and cover
 both lifecycle transitions and metadata-only BGP NOTIFICATION sent/received
 events; policy events are sourced from the peer manager after a runtime policy
-/ neighbor-set / peer-group / chain mutation is accepted; dataplane events are
-status-row count changes from the existing `ListFibRoutes` and
+/ neighbor-set / peer-group / chain mutation is accepted and are also retained
+in the bounded `ListPolicyEvents` process-local history ring; dataplane events
+are status-row count changes from the existing `ListFibRoutes` and
 `ListBlackholeDiscards` snapshots, not per-route or per-MAC dataplane streams.
 The FIB `rejected` count reflects surfaced status rows; high-cardinality
 `route_limit_exceeded` rows are sampled in `ListFibRoutes`, so this is not a
@@ -752,6 +762,17 @@ for live NOTIFICATION metadata. Route event types are likewise rejected; use
 4096 events; `limit = 0` requests that full bounded daemon window, and larger
 values are clamped to the same ceiling. Responses contain the most recent
 matching events, ordered oldest-to-newest within that selected recent window.
+
+`ListPolicyEvents` accepts `neighbor_address`,
+`BGP_EVENT_TYPE_POLICY_CHANGED`, and `limit` filters. Empty `event_types`
+means all policy event types, which is currently equivalent to
+`BGP_EVENT_TYPE_POLICY_CHANGED`; route, session, dataplane, and
+`stream_lagged` event types are rejected with `INVALID_ARGUMENT`. A peer
+filter matches only peer-scoped policy mutations such as neighbor import/export
+chain changes; global policy, neighbor-set, peer-group, and global-chain
+mutations are peerless and do not match a `neighbor_address` filter. The
+history ring holds at most 4096 events, is process-local, and resets on daemon
+restart.
 
 Slow live-stream consumers do not block the daemon. If a `WatchEvents` or
 `WatchRoutes` subscriber falls behind the bounded broadcast channel, missed
