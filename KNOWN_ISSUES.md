@@ -184,13 +184,13 @@ resolved.
 - **Injected routes support multiple paths via path_id.** `InjectionService`
   supports multiple injected routes per prefix using explicit `path_id`.
   Path ID 0 is the default path.
-- **EVPN MAC-mobility convergence is poll-bounded (5s).** The
-  originator polls the RIB on a 5s cadence to detect remote
-  contention; sub-second mobility detection requires an EVPN-specific
-  `RouteEvent` broadcast that the existing `Prefix`-keyed broadcast
-  doesn't supply. RFC 7432 doesn't impose a tighter bound, so this is
-  a convergence-latency optimization rather than a correctness issue.
-  Tracked as Gate 7c in `docs/evpn-enablement.md`.
+- **EVPN instance tables are startup-pinned.** `[[evpn_instances]]`,
+  `[[ethernet_segments]]`, and `[[evpn_ip_vrfs]]` are
+  restart-required today. SIGHUP keeps the running EVPN tables pinned
+  to their startup values so VTEP dataplane/origination state cannot
+  drift silently. Runtime add/delete/redefine semantics still need a
+  design pass before any mutation RPC lands; tracked in
+  <https://github.com/lance0/rustbgpd/issues/133>.
 - **Family scope is still limited.** MP-BGP supports AFI/SAFI negotiation,
   but rustbgpd currently implements IPv4/IPv6 unicast (AFI 1/2, SAFI 1),
   IPv4/IPv6 FlowSpec (AFI 1/2, SAFI 133), and L2VPN/EVPN (AFI 25, SAFI

@@ -1447,18 +1447,14 @@ kernel-side ECMP); other L2VNIs in the same daemon are unaffected.
 diff layer is written so that a future runtime instance-mutation
 surface (RPC etc.) would converge cleanly via the standard
 `FdbNhg → SingleDst` transition, but operators cannot drive that
-path today.
+path today. The remaining runtime-mutation design work is tracked in
+<https://github.com/lance0/rustbgpd/issues/133>.
 
 **Restart edge case**: if you flip `apply_aliasing_ecmp = false` and
 restart the daemon while tagged FDB nexthop groups from the prior run
 are still in the kernel, the orphaned tagged FDB rows remain bound to
 the stale `nh_id` until the next periodic drift cycle cleans them up
 (≤ 60 s, ADR-0059 slice 3.5 PR 2).
-
-Runtime mutation RPCs (`AddEvpnInstance` / `DeleteEvpnInstance`) are
-a follow-up; when they land, the diff layer's
-`FdbNhg → SingleDst` transition path will be the active convergence
-route for live edits.
 
 ---
 

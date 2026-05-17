@@ -159,6 +159,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- EVPN planning and operator docs now reflect the post-v0.21 state:
+  Gate 7c sub-second mobility is no longer listed as a known issue,
+  Gate 8b MAC-churn is recorded as passed, and remaining EVPN work is
+  tracked through concrete GitHub issues for privileged M36/M37/M37+IP/M38
+  coverage, optional ES-Import RT filtering, duplicate-MAC quarantine,
+  runtime `[[evpn_instances]]` mutation semantics, and the M37
+  local-origination churn soak.
+
 - `rustbgpd --diff` now itemizes hot-applied `[global]` flags in both
   human and JSON output. `honor_graceful_shutdown` and
   control-plane-only `honor_blackhole` edits already made the diff
