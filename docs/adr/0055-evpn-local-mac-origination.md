@@ -209,15 +209,21 @@ that follow-up with the `sticky_macs: Vec<String>` field on
 `inst.sticky_macs.contains(&mac)` on `LocalMacObservation::Learned`
 and passes the resolved bit through the existing plumbing.
 
-### 9. MAC duplication detection (counter shipped; quarantine deferred)
+### 9. MAC duplication detection and local-origin suppression
 
-RFC 7432 §15.1 also defines a "5 moves in 180s ⇒ duplicate"
-quarantine heuristic. The detection counter
-(`evpn_duplicate_mac_moves_total{mac,vni}`) shipped in v0.16 and is
-labeled by MAC + VNI for operator alerting. The quarantine *action*
-remains deferred because it requires operator-facing escalation
-channels (gRPC + metrics + log) and a clear "how do we un-quarantine"
-flow; tracked in `docs/evpn-alpha-soak.md`.
+RFC 7432 §15.1 defines a "5 moves in 180s ⇒ duplicate" heuristic. The
+first rustbgpd action slice keeps the default behavior detect-only, but
+adds a per-instance `duplicate_mac_detection` policy that can opt into
+`action = "suppress_local"`. On threshold crossing the originator
+withdraws any locally-originated Type 2 MAC-only and MAC+IP routes for
+the offending `(VNI, MAC)`, suppresses future local originations for
+that key, and retries after `recovery_seconds`.
+
+The action is intentionally scoped to local origination. The EVPN
+Loc-RIB, RR reflection, `ListEvpnRoutes`, and receive-side dataplane
+projection remain visible and unfiltered. Full remote-route processing
+suppression / dataplane loop-protection is tracked separately because it
+crosses the RIB projection and Linux dataplane boundaries.
 
 ## Consequences
 

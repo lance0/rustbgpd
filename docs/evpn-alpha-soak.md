@@ -89,14 +89,22 @@ none of them block the current release on their own.
   on `Ready` ↔ `NotReady` transitions and bridge MAC drift. Pairs
   with `sticky_macs` (ADR-0056) — listing the bridge MAC there
   marks the originated SVI Type 2 sticky.
-- [ ] **RFC 7432 §15.1 duplicate-MAC quarantine** (M=180 s, N=5
-  moves). ADR-0055 §9 defers the action; the detection-only
-  `evpn_duplicate_mac_moves_total{vni,mac}` counter and
-  `evpn_duplicate_mac_first_move_timestamp_seconds{vni,mac}` gauge
-  have landed so operators can see repeated contention for a key and
-  when its current observation window began. Still ahead: quarantine
-  action and the operator-facing escalation channel. Tracked in
-  <https://github.com/lance0/rustbgpd/issues/132>.
+- [x] **RFC 7432 §15.1 duplicate-MAC M/N detector + local-origin
+  suppression action** (M=180 s, N=5 moves by default). The
+  per-instance `duplicate_mac_detection` config defaults to
+  `action = "detect"` and can opt into `action = "suppress_local"`,
+  which withdraws and suppresses locally-originated Type 2 MAC-only and
+  MAC+IP routes for the offending `(VNI, MAC)` until
+  `recovery_seconds` elapses. Observability:
+  `evpn_duplicate_mac_moves_total{vni,mac}`,
+  `evpn_duplicate_mac_first_move_timestamp_seconds{vni,mac}`,
+  `evpn_duplicate_mac_threshold_exceeded_total{vni,mac,action}`, and
+  `evpn_duplicate_mac_quarantine_active{vni,mac}`.
+- [ ] **Duplicate-MAC remote-route processing / loop-protection
+  completion.** Full RFC "stop processing" behavior, receive-side
+  route suppression, dataplane loop-protection drops, and an optional
+  manual clear API remain follow-up scope after the local-origin action
+  slice.
 - [x] **Sticky MAC anti-spoof config schema.** Closed by ADR-0056
   — `[[evpn_instances]].sticky_macs` lists MACs to mark with the
   RFC 7432 §15.4 sticky bit on origination. **Not** a static FDB:

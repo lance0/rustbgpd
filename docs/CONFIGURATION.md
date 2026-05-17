@@ -1407,6 +1407,7 @@ advertise_svi_mac = false              # originate Type 2 for the bridge's own M
 sticky_macs = ["aa:bb:cc:dd:ee:01"]    # MACs to originate with RFC 7432 §15.4 sticky bit (ADR-0056)
 ip_vrf = "vrf1"                        # link this L2VNI to a declared [[evpn_ip_vrfs]] entry (Gate 9 / ADR-0058)
 apply_aliasing_ecmp = true             # program FDB nexthop groups for multi-homed Type 2 (ADR-0059)
+duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold = 5, recovery_seconds = 540 }
 ```
 
 ### Fields
@@ -1422,6 +1423,7 @@ apply_aliasing_ecmp = true             # program FDB nexthop groups for multi-ho
 | `sticky_macs`         | string[] | no       | `[]`    | MAC addresses to originate with the RFC 7432 §15.4 sticky bit; SVI MAC origination honors the same list (ADR-0056) |
 | `ip_vrf`              | string   | no       | --      | Name of an `[[evpn_ip_vrfs]]` entry to link this L2VNI to (Gate 9 IRB binding) |
 | `apply_aliasing_ecmp` | bool     | no       | `true`  | Program ADR-0059 FDB nexthop groups for multi-homed Type 2 routes (aliasing-ECMP via `NDA_NH_ID` + `NHA_FDB`). Flip to `false` to roll this L2VNI back to single-dst FDB rows at the primary VTEP. Single-homed Type 2 entries are unaffected |
+| `duplicate_mac_detection` | table | no | `{ action = "detect", window_seconds = 180, threshold = 5, recovery_seconds = 540 }` | RFC 7432 §15.1 duplicate-MAC M/N detector. `action = "detect"` records threshold crossings only; `action = "suppress_local"` additionally withdraws/suppresses locally-originated Type 2 MAC-only and MAC+IP routes for the offending `(VNI, MAC)` until `recovery_seconds` elapses |
 
 ### Validation
 
@@ -1432,8 +1434,43 @@ apply_aliasing_ecmp = true             # program FDB nexthop groups for multi-ho
 - `advertise_svi_mac = true` requires `bridge` non-empty.
 - `ip_vrf` (when set) must name an `[[evpn_ip_vrfs]]` entry declared
   in the same config.
+- `duplicate_mac_detection.window_seconds`, `threshold`, and
+  `recovery_seconds` must all be greater than zero.
 - Same VNI must not appear in multiple `[[ethernet_segments]]`
   `member_vnis` lists until per-port learned disambiguation is plumbed.
+
+### Duplicate-MAC Detection And Local Suppression
+
+RFC 7432 §15.1 describes duplicate-MAC detection as `N` mobility
+events within `M` seconds, with defaults `N = 5` and `M = 180s`.
+rustbgpd applies that window per `(VNI, MAC)` inside the local
+originator.
+
+Default behavior is detection-only:
+
+```toml
+duplicate_mac_detection = { action = "detect" }
+```
+
+With `action = "suppress_local"`, crossing the threshold withdraws any
+locally-originated Type 2 routes for that MAC on this VNI (MAC-only and
+MAC+IP), suppresses future local originations while the quarantine is
+active, and automatically retries after `recovery_seconds`:
+
+```toml
+duplicate_mac_detection = {
+  action = "suppress_local",
+  window_seconds = 180,
+  threshold = 5,
+  recovery_seconds = 540,
+}
+```
+
+This first action slice is intentionally local-origin scoped. The EVPN
+Loc-RIB, route-reflector behavior, `ListEvpnRoutes`, and receive-side
+dataplane projection remain visible/unchanged; full remote-route
+processing suppression and dataplane loop-protection are tracked as
+follow-up work.
 
 ### Aliasing-ECMP off-switch behavior
 

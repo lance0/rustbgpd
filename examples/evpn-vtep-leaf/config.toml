@@ -56,6 +56,12 @@ families = ["l2vpn_evpn"]
 #                           not synthesize routes for these MACs; it
 #                           only sets the sticky bit when the local
 #                           kernel learns one. See ADR-0056.
+#   - duplicate_mac_detection :
+#                           RFC 7432 §15.1 M/N duplicate-MAC detector.
+#                           Default action is detect-only. Set
+#                           action="suppress_local" to withdraw and
+#                           suppress local Type 2 originations for a
+#                           flapping MAC until recovery_seconds.
 
 [[evpn_instances]]
 vni = 10100
@@ -72,6 +78,9 @@ sticky_macs = [
   "aa:bb:cc:dd:ee:01",
   "aa:bb:cc:dd:ee:02",
 ]
+# RFC 7432 defaults: 5 moves in 180s. Keep detect-only unless this
+# leaf should locally withdraw/suppress Type 2s for a flapping MAC.
+duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold = 5, recovery_seconds = 540 }
 
 [[evpn_instances]]
 vni = 10200
