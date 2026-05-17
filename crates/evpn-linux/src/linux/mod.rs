@@ -325,7 +325,11 @@ async fn notify_loop(
                     if matches!(obs, LocalMacObservation::IpRemoved { .. })
                         && let Some(key) = key
                     {
-                        ip_neighbour_macs.remove(&key);
+                        forget_ip_neighbour_mac(
+                            &mut ip_neighbour_macs,
+                            &mut ip_neighbour_mac_order,
+                            key,
+                        );
                     }
                     forward_observation_or_record_drop(&local_mac_tx, obs, &on_observation_drop);
                 }
@@ -400,6 +404,17 @@ fn remember_ip_neighbour_mac_with_limit(
         order.push_back(key);
     }
     cache.insert(key, mac);
+}
+
+fn forget_ip_neighbour_mac(
+    cache: &mut HashMap<(u32, IpAddr), MacAddress>,
+    order: &mut VecDeque<(u32, IpAddr)>,
+    key: (u32, IpAddr),
+) {
+    cache.remove(&key);
+    if let Some(pos) = order.iter().position(|queued| *queued == key) {
+        order.remove(pos);
+    }
 }
 
 impl Dataplane for LinuxDataplane {
@@ -843,5 +858,9 @@ mod tests {
         assert_eq!(cache.len(), 1);
         assert!(!cache.contains_key(&first_key));
         assert_eq!(cache.get(&second_key), Some(&second_mac));
+
+        forget_ip_neighbour_mac(&mut cache, &mut order, second_key);
+        assert!(cache.is_empty());
+        assert!(order.is_empty());
     }
 }
