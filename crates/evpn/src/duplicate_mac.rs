@@ -22,6 +22,10 @@ pub const DEFAULT_DUPLICATE_MAC_THRESHOLD: u32 = 5;
 /// conservative loop-protection retry guidance in the bis draft while
 /// keeping the first rustbgpd action slice self-recovering.
 pub const DEFAULT_DUPLICATE_MAC_RECOVERY: Duration = Duration::from_mins(9);
+/// Upper bound for local suppression hold time. A year is intentionally
+/// much larger than the default operational window while keeping
+/// `Instant + recovery` safely away from overflow in real deployments.
+pub const MAX_DUPLICATE_MAC_RECOVERY: Duration = Duration::from_hours(365 * 24);
 
 /// Operator-selected action when a `(VNI, MAC)` exceeds the M/N window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +77,9 @@ impl DuplicateMacConfig {
         if recovery.is_zero() {
             return Err(DuplicateMacConfigError::ZeroRecovery);
         }
+        if recovery > MAX_DUPLICATE_MAC_RECOVERY {
+            return Err(DuplicateMacConfigError::RecoveryTooLarge);
+        }
         Ok(Self {
             action,
             window,
@@ -91,6 +98,8 @@ pub enum DuplicateMacConfigError {
     ZeroThreshold,
     #[error("duplicate_mac_detection.recovery_seconds must be greater than 0")]
     ZeroRecovery,
+    #[error("duplicate_mac_detection.recovery_seconds must be <= 31536000")]
+    RecoveryTooLarge,
 }
 
 /// Stable key for duplicate-MAC detection state.
@@ -124,6 +133,7 @@ pub enum DuplicateMacDecision {
 struct DuplicateMacWindow {
     moves: VecDeque<Instant>,
     quarantined_until: Option<Instant>,
+    window: Option<Duration>,
 }
 
 /// Sliding-window detector keyed by `(VNI, MAC)`.
@@ -146,6 +156,7 @@ impl DuplicateMacDetector {
             return DuplicateMacDecision::AlreadyQuarantined { until };
         }
 
+        window.window = Some(config.window);
         prune_old_moves(&mut window.moves, now, config.window);
         window.moves.push_back(now);
         let window_count = u32::try_from(window.moves.len()).unwrap_or(u32::MAX);
@@ -159,7 +170,7 @@ impl DuplicateMacDetector {
                 DuplicateMacDecision::ThresholdExceeded { window_count }
             }
             DuplicateMacAction::SuppressLocal => {
-                let until = now + config.recovery;
+                let until = now.checked_add(config.recovery).unwrap_or(now);
                 window.quarantined_until = Some(until);
                 DuplicateMacDecision::Quarantined {
                     window_count,
@@ -186,19 +197,27 @@ impl DuplicateMacDetector {
     pub fn expire(&mut self, now: Instant) -> Vec<DuplicateMacKey> {
         let mut expired = Vec::new();
         for (key, window) in &mut self.windows {
+            if let Some(span) = window.window {
+                prune_old_moves(&mut window.moves, now, span);
+            }
             if expire_window(window, now) {
                 expired.push(*key);
             }
         }
+        self.windows
+            .retain(|_, window| window.quarantined_until.is_some() || !window.moves.is_empty());
         expired
     }
 
     /// Expire one elapsed suppression. Returns true when the key
     /// transitioned from active/pending recovery to reusable.
     pub fn expire_key(&mut self, key: DuplicateMacKey, now: Instant) -> bool {
-        self.windows
-            .get_mut(&key)
-            .is_some_and(|window| expire_window(window, now))
+        self.windows.get_mut(&key).is_some_and(|window| {
+            if let Some(span) = window.window {
+                prune_old_moves(&mut window.moves, now, span);
+            }
+            expire_window(window, now)
+        })
     }
 }
 
@@ -320,6 +339,20 @@ mod tests {
     }
 
     #[test]
+    fn expire_prunes_idle_windows() {
+        let mut detector = DuplicateMacDetector::default();
+        let now = Instant::now();
+        let cfg = config(DuplicateMacAction::DetectOnly);
+        assert_eq!(
+            detector.record_move(key(), now, cfg),
+            DuplicateMacDecision::Recorded { window_count: 1 }
+        );
+        assert!(detector.windows.contains_key(&key()));
+        assert!(detector.expire(now + Duration::from_secs(11)).is_empty());
+        assert!(!detector.windows.contains_key(&key()));
+    }
+
+    #[test]
     fn config_rejects_zero_values() {
         assert_eq!(
             DuplicateMacConfig::new(
@@ -347,6 +380,15 @@ mod tests {
                 Duration::ZERO
             ),
             Err(DuplicateMacConfigError::ZeroRecovery)
+        );
+        assert_eq!(
+            DuplicateMacConfig::new(
+                DuplicateMacAction::DetectOnly,
+                Duration::from_secs(1),
+                1,
+                MAX_DUPLICATE_MAC_RECOVERY + Duration::from_secs(1)
+            ),
+            Err(DuplicateMacConfigError::RecoveryTooLarge)
         );
     }
 }

@@ -1436,6 +1436,8 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
   in the same config.
 - `duplicate_mac_detection.window_seconds`, `threshold`, and
   `recovery_seconds` must all be greater than zero.
+- `duplicate_mac_detection.recovery_seconds` must be no greater than
+  31,536,000 seconds (365 days).
 - Same VNI must not appear in multiple `[[ethernet_segments]]`
   `member_vnis` lists until per-port learned disambiguation is plumbed.
 

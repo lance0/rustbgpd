@@ -4024,6 +4024,7 @@ fn evpn_duplicate_mac_detection_rejects_zero_values() {
         ("window_seconds", "0"),
         ("threshold", "0"),
         ("recovery_seconds", "0"),
+        ("recovery_seconds", "31536001"),
     ] {
         let toml = evpn_toml_with(&format!(
             r#"

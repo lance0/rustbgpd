@@ -108,16 +108,17 @@ sequence rewrite RFC 7432 §15.1 is structured to avoid. A daemon
 restart re-originates from a clean state and the new sticky markings
 take effect on the next kernel learn — the simplest correct answer.
 
-### Quarantine action: still deferred
+### Quarantine scope
 
-ADR-0055 §9 deferred quarantine actions for duplicate-MAC-move
-detection. The `evpn_duplicate_mac_moves_total` counter shipped in
-v0.16 feeds the future quarantine flow but the action itself stays
-out of scope. Sticky-bit origination ships **without** any automatic
-quarantine behavior on top of it; an operator's sticky MAC and a
-contender at higher seq still produce a normal best-path move today.
-Future work tracked in `docs/evpn-alpha-soak.md` will add the
-detect → defend → notify path.
+ADR-0055 §9 now ships local-origin suppression for duplicate-MAC-move
+detection. With `action = "suppress_local"`, the originator withdraws
+and suppresses locally-originated Type 2 routes for the offending
+`(VNI, MAC)` until timed recovery. Sticky-bit origination remains an
+independent operator signal: an operator's sticky MAC and a contender
+at higher seq still produce normal best-path movement unless duplicate
+MAC detection is separately enabled. Future work tracked in
+`docs/evpn-alpha-soak.md` / #139 will add remote-route processing and
+dataplane loop-protection.
 
 ## Consequences
 
