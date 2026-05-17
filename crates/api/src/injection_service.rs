@@ -1125,6 +1125,48 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn non_evpn_mutations_rejected_on_read_only_listener() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let svc = InjectionService::new(tx, AccessMode::ReadOnly);
+
+        let err = svc
+            .delete_path(Request::new(proto::DeletePathRequest {
+                prefix: "10.0.0.0".into(),
+                prefix_length: 24,
+                path_id: 0,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        let err = svc
+            .add_flow_spec(Request::new(proto::AddFlowSpecRequest {
+                afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                components: Vec::new(),
+                actions: Vec::new(),
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        let err = svc
+            .delete_flow_spec(Request::new(proto::DeleteFlowSpecRequest {
+                afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                components: Vec::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
     #[test]
     fn parse_numeric_value_supports_multiple_terms() {
         let ops = parse_numeric_value(">=1024 & <=65535", "port").unwrap();
@@ -1433,5 +1475,24 @@ mod tests {
         });
         let err = svc.add_evpn_route(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn delete_evpn_rejected_on_read_only_listener() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let svc = InjectionService::new(tx, AccessMode::ReadOnly);
+        let req = Request::new(proto::DeleteEvpnRouteRequest {
+            route_type: 2,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            ip: String::new(),
+        });
+        let err = svc.delete_evpn_route(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 }

@@ -844,6 +844,145 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn policy_and_neighbor_set_mutations_rejected_on_read_only_listener() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx));
+
+        let err = PolicyServiceRpc::delete_policy(
+            &svc,
+            Request::new(proto::DeletePolicyRequest {
+                name: "tag-internal".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        let err = PolicyServiceRpc::set_neighbor_set(
+            &svc,
+            Request::new(proto::SetNeighborSetRequest {
+                name: "ix-clients".into(),
+                definition: Some(proto::NeighborSetDefinition::default()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        let err = PolicyServiceRpc::delete_neighbor_set(
+            &svc,
+            Request::new(proto::DeleteNeighborSetRequest {
+                name: "ix-clients".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(matches!(config_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn global_chain_mutations_rejected_on_read_only_listener() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx));
+
+        let err = PolicyServiceRpc::set_global_import_chain(
+            &svc,
+            Request::new(proto::SetGlobalImportChainRequest {
+                policy_names: vec!["tag-internal".into()],
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        let err = PolicyServiceRpc::set_global_export_chain(
+            &svc,
+            Request::new(proto::SetGlobalExportChainRequest {
+                policy_names: vec!["tag-internal".into()],
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        let err = PolicyServiceRpc::clear_global_import_chain(
+            &svc,
+            Request::new(proto::ClearGlobalImportChainRequest {}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        let err = PolicyServiceRpc::clear_global_export_chain(
+            &svc,
+            Request::new(proto::ClearGlobalExportChainRequest {}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(matches!(config_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn neighbor_chain_mutations_rejected_on_read_only_listener() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx));
+
+        let err = PolicyServiceRpc::set_neighbor_import_chain(
+            &svc,
+            Request::new(proto::SetNeighborImportChainRequest {
+                address: "10.0.0.2".into(),
+                policy_names: vec!["tag-internal".into()],
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        let err = PolicyServiceRpc::set_neighbor_export_chain(
+            &svc,
+            Request::new(proto::SetNeighborExportChainRequest {
+                address: "10.0.0.2".into(),
+                policy_names: vec!["tag-internal".into()],
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        let err = PolicyServiceRpc::clear_neighbor_import_chain(
+            &svc,
+            Request::new(proto::ClearNeighborImportChainRequest {
+                address: "10.0.0.2".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        let err = PolicyServiceRpc::clear_neighbor_export_chain(
+            &svc,
+            Request::new(proto::ClearNeighborExportChainRequest {
+                address: "10.0.0.2".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(matches!(config_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
     async fn delete_policy_in_use_maps_to_failed_precondition() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);

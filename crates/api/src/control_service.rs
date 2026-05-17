@@ -263,6 +263,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trigger_mrt_dump_rejected_on_read_only_listener() {
+        let (peer_tx, _peer_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let metrics = BgpMetrics::new();
+        let svc = ControlService::new(
+            AccessMode::ReadOnly,
+            tokio::time::Instant::now(),
+            metrics,
+            peer_tx,
+            rib_tx,
+            shutdown_tx,
+            None,
+        );
+
+        let err = svc
+            .trigger_mrt_dump(Request::new(proto::TriggerMrtDumpRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
     async fn active_peers_counts_only_established() {
         use crate::peer_types::PeerInfo;
 
