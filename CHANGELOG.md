@@ -209,6 +209,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- EVPN MAC+IP origination now withdraws correctly when Linux emits an
+  `RTM_DELNEIGH` bridge-neighbour notification without `NDA_LLADDR`.
+  The Linux notify loop remembers the MAC from the matching `IpAdded`
+  edge and uses it to synthesize the precise `IpRemoved { MAC, IP }`
+  observation required to withdraw the Type 2 MAC+IP route.
+
 - TCP transport collision handling now resolves simultaneous inbound
   collision candidates correctly (#105). Adds regression coverage for
   local-wins / equal router-id collisions, primary-idle promotion, stale

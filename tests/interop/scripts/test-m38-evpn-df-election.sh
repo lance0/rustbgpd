@@ -38,12 +38,17 @@ ESI_LABEL_TYPESUB="0x0601"
 # Helpers
 # ---------------------------------------------------------------------------
 
-# Scrape Prometheus from inside the named container at port 9179
-# (configured in rustbgpd-m38-pe{1,2}.toml).
+# Scrape Prometheus via the container's management IP. The
+# `rustbgpd:dev` runtime image intentionally stays small and does not
+# carry curl/wget, so do the HTTP request from the host like the soak
+# harnesses do.
 prom_scrape() {
     local container=${1:?}
-    docker exec "$container" wget -qO- http://127.0.0.1:9179/metrics 2>/dev/null \
-        || docker exec "$container" curl -sf http://127.0.0.1:9179/metrics 2>/dev/null \
+    local ip
+    ip=$(resolve_ip "$container")
+    [ -z "$ip" ] && return 0
+    curl -sfm 5 "http://${ip}:9179/metrics" 2>/dev/null \
+        || wget -qO- -T 5 "http://${ip}:9179/metrics" 2>/dev/null \
         || true
 }
 
@@ -62,6 +67,20 @@ prom_df_role() {
                 exit
             }
         '
+}
+
+stop_rustbgpd_daemon() {
+    local container=${1:?}
+    docker exec "$container" sh -c \
+        'pid=$(pidof rustbgpd) && [ -n "$pid" ] && kill -TERM $pid' \
+        2>/dev/null || true
+    for _ in $(seq 1 30); do
+        if ! docker exec "$container" pidof rustbgpd >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
 }
 
 resolve_ip() {
@@ -243,9 +262,13 @@ PE2_BEFORE=$(prom_df_role_changes "$PE2")
 PE2_BEFORE=${PE2_BEFORE:-0}
 echo "PE2 evpn_df_role_changes_total before PE1 shutdown: $PE2_BEFORE"
 
-# Shutdown PE1; PE2 should promote.
-echo "Stopping PE1 to force DF promotion on PE2..."
-docker stop -t 5 "$PE1" >/dev/null
+# Shutdown PE1's daemon; PE2 should promote. Keep the container
+# running so containerlab's veth pair and management address survive.
+# A full `docker stop` tears down the peer netns and destroys PE2's
+# side of the clab link, masking DF-election behavior behind topology
+# loss.
+echo "Stopping PE1 rustbgpd process to force DF promotion on PE2..."
+stop_rustbgpd_daemon "$PE1"
 
 echo "Waiting up to 60s for PE2 to promote to DF..."
 assert "PE2 promotes to DF after PE1 shutdown" \
