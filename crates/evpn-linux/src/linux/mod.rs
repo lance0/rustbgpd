@@ -33,7 +33,7 @@
 //! - `probe()` never fails; a kernel that can't be queried surfaces
 //!   as `NotReady` with a "kernel inventory dump failed" reason.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -285,6 +285,7 @@ async fn notify_loop(
     on_observation_drop: ObservationDropHook,
 ) {
     let mut ip_neighbour_macs: HashMap<(u32, IpAddr), MacAddress> = HashMap::new();
+    let mut ip_neighbour_mac_order: VecDeque<(u32, IpAddr)> = VecDeque::new();
 
     while let Some((msg, _src)) = messages.next().await {
         let NetlinkPayload::InnerMessage(payload) = msg.payload else {
@@ -299,7 +300,12 @@ async fn notify_loop(
                     if let LocalMacObservation::IpAdded { mac, ip, .. } = obs
                         && let Some(key) = notify::ip_neighbour_cache_key(&neigh)
                     {
-                        remember_ip_neighbour_mac(&mut ip_neighbour_macs, key, mac);
+                        remember_ip_neighbour_mac(
+                            &mut ip_neighbour_macs,
+                            &mut ip_neighbour_mac_order,
+                            key,
+                            mac,
+                        );
                         debug_assert_eq!(key.1, ip);
                     }
                     forward_observation_or_record_drop(&local_mac_tx, obs, &on_observation_drop);
@@ -364,24 +370,34 @@ fn forward_observation_or_record_drop(
 
 fn remember_ip_neighbour_mac(
     cache: &mut HashMap<(u32, IpAddr), MacAddress>,
+    order: &mut VecDeque<(u32, IpAddr)>,
     key: (u32, IpAddr),
     mac: MacAddress,
 ) {
-    remember_ip_neighbour_mac_with_limit(cache, key, mac, IP_NEIGHBOUR_MAC_CACHE_LIMIT);
+    remember_ip_neighbour_mac_with_limit(cache, order, key, mac, IP_NEIGHBOUR_MAC_CACHE_LIMIT);
 }
 
 fn remember_ip_neighbour_mac_with_limit(
     cache: &mut HashMap<(u32, IpAddr), MacAddress>,
+    order: &mut VecDeque<(u32, IpAddr)>,
     key: (u32, IpAddr),
     mac: MacAddress,
     limit: usize,
 ) {
-    if !cache.contains_key(&key) && cache.len() >= limit {
-        cache.clear();
-        warn!(
-            limit,
-            "cleared stale IP-neighbour MAC cache after reaching bounded capacity"
-        );
+    let is_new = !cache.contains_key(&key);
+    if is_new && cache.len() >= limit {
+        while let Some(old_key) = order.pop_front() {
+            if cache.remove(&old_key).is_some() {
+                warn!(
+                    limit,
+                    "evicted oldest stale IP-neighbour MAC cache entry after reaching bounded capacity"
+                );
+                break;
+            }
+        }
+    }
+    if is_new {
+        order.push_back(key);
     }
     cache.insert(key, mac);
 }
@@ -814,15 +830,16 @@ mod tests {
     #[test]
     fn ip_neighbour_mac_cache_is_bounded() {
         let mut cache = HashMap::new();
+        let mut order = VecDeque::new();
         let first_key = (7, "192.0.2.1".parse::<IpAddr>().unwrap());
         let second_key = (7, "192.0.2.2".parse::<IpAddr>().unwrap());
         let first_mac = MacAddress::new([0x02, 0, 0, 0, 0, 1]);
         let second_mac = MacAddress::new([0x02, 0, 0, 0, 0, 2]);
 
-        remember_ip_neighbour_mac_with_limit(&mut cache, first_key, first_mac, 1);
+        remember_ip_neighbour_mac_with_limit(&mut cache, &mut order, first_key, first_mac, 1);
         assert_eq!(cache.get(&first_key), Some(&first_mac));
 
-        remember_ip_neighbour_mac_with_limit(&mut cache, second_key, second_mac, 1);
+        remember_ip_neighbour_mac_with_limit(&mut cache, &mut order, second_key, second_mac, 1);
         assert_eq!(cache.len(), 1);
         assert!(!cache.contains_key(&first_key));
         assert_eq!(cache.get(&second_key), Some(&second_mac));

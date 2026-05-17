@@ -83,6 +83,7 @@ stop_rustbgpd_daemon() {
         fi
         sleep 1
     done
+    echo "ERROR: rustbgpd did not exit in $container within 30s of SIGTERM" >&2
     return 1
 }
 
