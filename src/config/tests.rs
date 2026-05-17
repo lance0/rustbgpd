@@ -3957,6 +3957,122 @@ sticky_macs = ["aa:bb:cc:dd:ee:01"]
     );
 }
 
+// ---------------------------------------------------------------------------
+// RFC 7432 §15.1 — duplicate MAC detection / local suppression schema.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn evpn_duplicate_mac_detection_defaults_detect_only() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    );
+    let table = parse(&toml).unwrap().resolve_evpn_instances().unwrap();
+    let inst = table.get(EvpnInstanceId::new(100).unwrap()).unwrap();
+    assert_eq!(
+        inst.duplicate_mac_detection.action,
+        rustbgpd_evpn::DuplicateMacAction::DetectOnly
+    );
+    assert_eq!(
+        inst.duplicate_mac_detection.window,
+        std::time::Duration::from_mins(3)
+    );
+    assert_eq!(inst.duplicate_mac_detection.threshold, 5);
+    assert_eq!(
+        inst.duplicate_mac_detection.recovery,
+        std::time::Duration::from_mins(9)
+    );
+}
+
+#[test]
+fn evpn_duplicate_mac_detection_round_trip_suppress_local() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+duplicate_mac_detection = { action = "suppress_local", window_seconds = 30, threshold = 2, recovery_seconds = 90 }
+"#,
+    );
+    let table = parse(&toml).unwrap().resolve_evpn_instances().unwrap();
+    let inst = table.get(EvpnInstanceId::new(100).unwrap()).unwrap();
+    assert_eq!(
+        inst.duplicate_mac_detection.action,
+        rustbgpd_evpn::DuplicateMacAction::SuppressLocal
+    );
+    assert_eq!(
+        inst.duplicate_mac_detection.window,
+        std::time::Duration::from_secs(30)
+    );
+    assert_eq!(inst.duplicate_mac_detection.threshold, 2);
+    assert_eq!(
+        inst.duplicate_mac_detection.recovery,
+        std::time::Duration::from_secs(90)
+    );
+}
+
+#[test]
+fn evpn_duplicate_mac_detection_rejects_zero_values() {
+    for (field, value) in [
+        ("window_seconds", "0"),
+        ("threshold", "0"),
+        ("recovery_seconds", "0"),
+    ] {
+        let toml = evpn_toml_with(&format!(
+            r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+duplicate_mac_detection = {{ {field} = {value} }}
+"#
+        ));
+        let err = parse(&toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(err, ConfigError::InvalidEvpnInstance { .. }),
+            "expected InvalidEvpnInstance for {field}, got {msg}"
+        );
+        assert!(msg.contains(field), "message should name {field}: {msg}");
+    }
+}
+
+#[test]
+fn evpn_duplicate_mac_detection_diff_marks_restart_required() {
+    let base = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    );
+    let suppress = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+duplicate_mac_detection = { action = "suppress_local" }
+"#,
+    );
+    let old = parse(&base).unwrap();
+    let new = parse(&suppress).unwrap();
+    let diff = diff_config(&old, &new);
+    assert!(diff.evpn_instances_changed);
+    assert!(diff.has_restart_required_changes());
+}
+
 #[test]
 fn ethernet_segments_diff_marks_restart_required() {
     let old = parse(valid_toml()).unwrap();

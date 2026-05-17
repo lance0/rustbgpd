@@ -286,8 +286,64 @@ pub enum GrpcAccessModeConfig {
     ReadWrite,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EvpnDuplicateMacActionConfig {
+    /// Count/report threshold crossings but do not suppress local
+    /// originations. This preserves pre-quarantine behavior.
+    #[default]
+    Detect,
+    /// Withdraw and suppress locally-originated Type 2 routes for the
+    /// quarantined `(VNI, MAC)` until `recovery_seconds` elapses.
+    SuppressLocal,
+}
+
+/// Per-`[[evpn_instances]]` RFC 7432 §15.1 duplicate-MAC detector.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvpnDuplicateMacDetectionConfig {
+    /// Action to take when `threshold` moves occur within
+    /// `window_seconds`. Defaults to detect-only.
+    #[serde(default)]
+    pub action: EvpnDuplicateMacActionConfig,
+    /// RFC 7432 M window in seconds. Default 180.
+    #[serde(default = "default_duplicate_mac_window_seconds")]
+    pub window_seconds: u64,
+    /// RFC 7432 N move threshold. Default 5.
+    #[serde(default = "default_duplicate_mac_threshold")]
+    pub threshold: u32,
+    /// Suppression hold time in seconds for `suppress_local`. Default
+    /// 540 (three M windows). Must still be non-zero in detect-only mode
+    /// so reloads can flip the action without introducing invalid state.
+    #[serde(default = "default_duplicate_mac_recovery_seconds")]
+    pub recovery_seconds: u64,
+}
+
+impl Default for EvpnDuplicateMacDetectionConfig {
+    fn default() -> Self {
+        Self {
+            action: EvpnDuplicateMacActionConfig::default(),
+            window_seconds: default_duplicate_mac_window_seconds(),
+            threshold: default_duplicate_mac_threshold(),
+            recovery_seconds: default_duplicate_mac_recovery_seconds(),
+        }
+    }
+}
+
 fn default_enabled() -> bool {
     true
+}
+
+const fn default_duplicate_mac_window_seconds() -> u64 {
+    180
+}
+
+const fn default_duplicate_mac_threshold() -> u32 {
+    5
+}
+
+const fn default_duplicate_mac_recovery_seconds() -> u64 {
+    540
 }
 
 fn default_grpc_uds_mode() -> u32 {
@@ -599,6 +655,13 @@ pub struct EvpnInstanceConfig {
     /// transition, but operators cannot drive that path today.
     #[serde(default = "default_enabled")]
     pub apply_aliasing_ecmp: bool,
+    /// RFC 7432 §15.1 duplicate-MAC detection and optional local
+    /// quarantine policy. Default is detect-only with the RFC M/N
+    /// window (5 moves in 180s). `action = "suppress_local"` is
+    /// opt-in and withdraws/suppresses locally-originated Type 2 routes
+    /// for the offending `(VNI, MAC)` until `recovery_seconds` elapses.
+    #[serde(default)]
+    pub duplicate_mac_detection: EvpnDuplicateMacDetectionConfig,
 }
 
 /// One IP-VRF / L3VNI tenant served by this VTEP (Gate 9 symmetric

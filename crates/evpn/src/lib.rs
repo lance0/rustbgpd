@@ -93,6 +93,7 @@
 pub mod aliasing;
 pub mod dataplane;
 pub mod df_election;
+pub mod duplicate_mac;
 pub mod instance;
 pub mod ip_vrf;
 pub mod label_allocator;
@@ -114,6 +115,11 @@ pub use dataplane::{
     IpVrfDataplaneStatus,
 };
 pub use df_election::{DfCandidate, DfElection, DfElectionError};
+pub use duplicate_mac::{
+    DEFAULT_DUPLICATE_MAC_RECOVERY, DEFAULT_DUPLICATE_MAC_THRESHOLD, DEFAULT_DUPLICATE_MAC_WINDOW,
+    DuplicateMacAction, DuplicateMacConfig, DuplicateMacConfigError, DuplicateMacDecision,
+    DuplicateMacDetector, DuplicateMacKey,
+};
 pub use instance::{
     EvpnInstance, EvpnInstanceId, EvpnInstanceIdError, EvpnInstanceTable, EvpnInstanceTableError,
 };

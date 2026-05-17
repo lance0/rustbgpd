@@ -8,8 +8,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
 use rustbgpd_evpn::{
-    DfAlgorithm, EthernetSegment, EvpnInstance, EvpnInstanceId, EvpnInstanceTable, IpVrf, IpVrfId,
-    IpVrfTable, RouteTarget,
+    DfAlgorithm, DuplicateMacAction, DuplicateMacConfig, EthernetSegment, EvpnInstance,
+    EvpnInstanceId, EvpnInstanceTable, IpVrf, IpVrfId, IpVrfTable, RouteTarget,
 };
 use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::{
@@ -2007,9 +2007,31 @@ fn parse_evpn_instance(cfg: &EvpnInstanceConfig) -> Result<EvpnInstance, ConfigE
     .map_err(|e| ConfigError::InvalidEvpnInstance {
         reason: format!("vni {}: {e}", cfg.vni),
     })?;
+    let duplicate_mac_detection =
+        parse_duplicate_mac_detection(cfg.vni, &cfg.duplicate_mac_detection)?;
     Ok(inst
         .with_sticky_macs(sticky_macs)
-        .with_apply_aliasing_ecmp(cfg.apply_aliasing_ecmp))
+        .with_apply_aliasing_ecmp(cfg.apply_aliasing_ecmp)
+        .with_duplicate_mac_detection(duplicate_mac_detection))
+}
+
+fn parse_duplicate_mac_detection(
+    vni: u32,
+    cfg: &EvpnDuplicateMacDetectionConfig,
+) -> Result<DuplicateMacConfig, ConfigError> {
+    let action = match cfg.action {
+        EvpnDuplicateMacActionConfig::Detect => DuplicateMacAction::DetectOnly,
+        EvpnDuplicateMacActionConfig::SuppressLocal => DuplicateMacAction::SuppressLocal,
+    };
+    DuplicateMacConfig::new(
+        action,
+        std::time::Duration::from_secs(cfg.window_seconds),
+        cfg.threshold,
+        std::time::Duration::from_secs(cfg.recovery_seconds),
+    )
+    .map_err(|e| ConfigError::InvalidEvpnInstance {
+        reason: format!("vni {vni}: {e}"),
+    })
 }
 
 /// Parse a `aa:bb:cc:dd:ee:ff` MAC string into a [`MacAddress`]. The
