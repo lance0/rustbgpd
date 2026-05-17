@@ -19,6 +19,7 @@ use std::net::IpAddr;
 
 use rustbgpd_wire::{MacAddress, RouteDistinguisher};
 
+use crate::duplicate_mac::DuplicateMacConfig;
 use crate::route_target::RouteTarget;
 
 /// Maximum 24-bit VXLAN Network Identifier (RFC 8365 §5).
@@ -119,6 +120,11 @@ pub struct EvpnInstance {
     /// single-homed Type 2 entries. Single-homed entries are
     /// unaffected by this flag.
     pub apply_aliasing_ecmp: bool,
+    /// RFC 7432 §15.1 duplicate-MAC detection / local-suppression
+    /// policy for this VNI. Defaults to detect-only with the RFC M/N
+    /// window (`5` moves in `180s`); operators can opt a VNI into
+    /// daemon-side local-origin suppression.
+    pub duplicate_mac_detection: DuplicateMacConfig,
 }
 
 impl EvpnInstance {
@@ -157,6 +163,7 @@ impl EvpnInstance {
             advertise_svi_mac,
             sticky_macs: BTreeSet::new(),
             apply_aliasing_ecmp: true,
+            duplicate_mac_detection: DuplicateMacConfig::default(),
         })
     }
 
@@ -179,6 +186,15 @@ impl EvpnInstance {
     #[must_use]
     pub fn with_apply_aliasing_ecmp(mut self, enabled: bool) -> Self {
         self.apply_aliasing_ecmp = enabled;
+        self
+    }
+
+    /// Override the per-instance duplicate-MAC detection policy.
+    /// Used by the config layer after the rest of the instance has
+    /// been validated by [`Self::new`].
+    #[must_use]
+    pub fn with_duplicate_mac_detection(mut self, config: DuplicateMacConfig) -> Self {
+        self.duplicate_mac_detection = config;
         self
     }
 }

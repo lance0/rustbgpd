@@ -77,6 +77,8 @@ pub struct BgpMetrics {
     evpn_local_observations_dropped: IntCounterVec,
     evpn_duplicate_mac_moves: IntCounterVec,
     evpn_duplicate_mac_first_move_timestamp: IntGaugeVec,
+    evpn_duplicate_mac_threshold_exceeded: IntCounterVec,
+    evpn_duplicate_mac_quarantine_active: IntGaugeVec,
     evpn_df_role: IntGaugeVec,
     evpn_df_role_changes: IntCounterVec,
     evpn_ip_vrf_observed_routes: IntGaugeVec,
@@ -425,6 +427,24 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_duplicate_mac_threshold_exceeded = IntCounterVec::new(
+            Opts::new(
+                "evpn_duplicate_mac_threshold_exceeded_total",
+                "EVPN duplicate-MAC M/N threshold crossings by VNI, MAC, and configured action",
+            ),
+            &["vni", "mac", "action"],
+        )
+        .expect("valid metric definition");
+
+        let evpn_duplicate_mac_quarantine_active = IntGaugeVec::new(
+            Opts::new(
+                "evpn_duplicate_mac_quarantine_active",
+                "1 while local Type 2 origination is suppressed for an EVPN duplicate-MAC key; 0 after recovery",
+            ),
+            &["vni", "mac"],
+        )
+        .expect("valid metric definition");
+
         let evpn_df_role = IntGaugeVec::new(
             Opts::new(
                 "evpn_df_role",
@@ -674,6 +694,12 @@ impl BgpMetrics {
             .register(Box::new(evpn_duplicate_mac_first_move_timestamp.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_duplicate_mac_threshold_exceeded.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_duplicate_mac_quarantine_active.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(evpn_df_role.clone()))
             .expect("metric not already registered");
         registry
@@ -758,6 +784,8 @@ impl BgpMetrics {
             evpn_local_observations_dropped,
             evpn_duplicate_mac_moves,
             evpn_duplicate_mac_first_move_timestamp,
+            evpn_duplicate_mac_threshold_exceeded,
+            evpn_duplicate_mac_quarantine_active,
             evpn_df_role,
             evpn_df_role_changes,
             evpn_ip_vrf_observed_routes,
@@ -1057,6 +1085,24 @@ impl BgpMetrics {
                 .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
             first_seen.set(now);
         }
+    }
+
+    /// Record that a `(VNI, MAC)` exceeded the configured duplicate-MAC
+    /// M/N threshold. `action` is the operator-selected action label
+    /// (`detect` or `suppress_local`).
+    pub fn record_evpn_duplicate_mac_threshold_exceeded(&self, vni: u32, mac: &str, action: &str) {
+        let vni = vni.to_string();
+        self.evpn_duplicate_mac_threshold_exceeded
+            .with_label_values(&[vni.as_str(), mac, action])
+            .inc();
+    }
+
+    /// Set local-origin quarantine state for a duplicate-MAC key.
+    pub fn set_evpn_duplicate_mac_quarantine_active(&self, vni: u32, mac: &str, active: bool) {
+        let vni = vni.to_string();
+        self.evpn_duplicate_mac_quarantine_active
+            .with_label_values(&[vni.as_str(), mac])
+            .set(i64::from(active));
     }
 
     /// Set the EVPN Designated Forwarder role gauge for a
@@ -1502,6 +1548,66 @@ mod tests {
         assert!(text.contains("10.0.0.1"));
     }
 
+    fn assert_duplicate_mac_metrics(m: &BgpMetrics, first_move_timestamp: i64, text: &str) {
+        assert_eq!(
+            m.evpn_duplicate_mac_moves
+                .with_label_values(&["100", "02:aa:bb:cc:dd:01"])
+                .get(),
+            2
+        );
+        assert!(
+            first_move_timestamp > 0,
+            "first move timestamp should be set"
+        );
+        assert_eq!(
+            m.evpn_duplicate_mac_first_move_timestamp
+                .with_label_values(&["100", "02:aa:bb:cc:dd:01"])
+                .get(),
+            first_move_timestamp,
+            "first move timestamp should not change on later moves"
+        );
+        assert_eq!(
+            m.evpn_duplicate_mac_threshold_exceeded
+                .with_label_values(&["100", "02:aa:bb:cc:dd:01", "detect"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.evpn_duplicate_mac_quarantine_active
+                .with_label_values(&["100", "02:aa:bb:cc:dd:01"])
+                .get(),
+            1
+        );
+        assert!(
+            text.contains(
+                "evpn_duplicate_mac_moves_total{mac=\"02:aa:bb:cc:dd:01\",vni=\"100\"} 2"
+            ) || text.contains(
+                "evpn_duplicate_mac_moves_total{vni=\"100\",mac=\"02:aa:bb:cc:dd:01\"} 2"
+            )
+        );
+        assert!(
+            text.contains(
+                "evpn_duplicate_mac_first_move_timestamp_seconds{mac=\"02:aa:bb:cc:dd:01\",vni=\"100\"}"
+            ) || text.contains(
+                "evpn_duplicate_mac_first_move_timestamp_seconds{vni=\"100\",mac=\"02:aa:bb:cc:dd:01\"}"
+            )
+        );
+        assert!(
+            text.contains(
+                "evpn_duplicate_mac_threshold_exceeded_total{action=\"detect\",mac=\"02:aa:bb:cc:dd:01\",vni=\"100\"} 1"
+            ) || text.contains(
+                "evpn_duplicate_mac_threshold_exceeded_total{vni=\"100\",mac=\"02:aa:bb:cc:dd:01\",action=\"detect\"} 1"
+            )
+        );
+        assert!(
+            text.contains(
+                "evpn_duplicate_mac_quarantine_active{mac=\"02:aa:bb:cc:dd:01\",vni=\"100\"} 1"
+            ) || text.contains(
+                "evpn_duplicate_mac_quarantine_active{vni=\"100\",mac=\"02:aa:bb:cc:dd:01\"} 1"
+            )
+        );
+    }
+
     #[test]
     fn evpn_local_origination_counters_are_exported() {
         let m = BgpMetrics::new();
@@ -1517,6 +1623,8 @@ mod tests {
             .with_label_values(&["100", "02:aa:bb:cc:dd:01"])
             .get();
         m.record_evpn_duplicate_mac_move(100, "02:aa:bb:cc:dd:01");
+        m.record_evpn_duplicate_mac_threshold_exceeded(100, "02:aa:bb:cc:dd:01", "detect");
+        m.set_evpn_duplicate_mac_quarantine_active(100, "02:aa:bb:cc:dd:01", true);
 
         assert_eq!(
             m.evpn_local_originations
@@ -1554,24 +1662,6 @@ mod tests {
                 .get(),
             1
         );
-        assert_eq!(
-            m.evpn_duplicate_mac_moves
-                .with_label_values(&["100", "02:aa:bb:cc:dd:01"])
-                .get(),
-            2
-        );
-        assert!(
-            first_move_timestamp > 0,
-            "first move timestamp should be set"
-        );
-        assert_eq!(
-            m.evpn_duplicate_mac_first_move_timestamp
-                .with_label_values(&["100", "02:aa:bb:cc:dd:01"])
-                .get(),
-            first_move_timestamp,
-            "first move timestamp should not change on later moves"
-        );
-
         let text = gather_text(&m);
         assert!(text.contains("evpn_local_originations_total{action=\"inject\"} 1"));
         assert!(text.contains("evpn_local_originations_total{action=\"withdraw\"} 1"));
@@ -1581,20 +1671,7 @@ mod tests {
         assert!(
             text.contains("evpn_local_observations_dropped_total{reason=\"channel_closed\"} 1")
         );
-        assert!(
-            text.contains(
-                "evpn_duplicate_mac_moves_total{mac=\"02:aa:bb:cc:dd:01\",vni=\"100\"} 2"
-            ) || text.contains(
-                "evpn_duplicate_mac_moves_total{vni=\"100\",mac=\"02:aa:bb:cc:dd:01\"} 2"
-            )
-        );
-        assert!(
-            text.contains(
-                "evpn_duplicate_mac_first_move_timestamp_seconds{mac=\"02:aa:bb:cc:dd:01\",vni=\"100\"}"
-            ) || text.contains(
-                "evpn_duplicate_mac_first_move_timestamp_seconds{vni=\"100\",mac=\"02:aa:bb:cc:dd:01\"}"
-            )
-        );
+        assert_duplicate_mac_metrics(&m, first_move_timestamp, &text);
     }
 
     #[test]
