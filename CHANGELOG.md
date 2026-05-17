@@ -135,6 +135,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `kernel-dataplane` GitHub Environment so PR code waits for maintainer
   approval before it reaches the self-hosted runner.
 
+- **M37 local-origination MAC-churn soak harness.** New
+  `tests/soak/run-m37-local-origination-churn-soak.sh` drives a
+  bounded rotating bridge-FDB MAC pool against the M37 rustbgpd
+  originator / FRR consumer topology, producing `samples.csv`,
+  `churn.log`, daemon logs, and `run.json` under
+  `tests/soak/runs/m37-local-origination-<UTC>/`. The harness prepares
+  the 24 h validation tracked in #134; it does not claim the soak has
+  passed until a postmortem is filled in.
+
 - **ADR-0061 FIB guardrails.** `[[fib_tables]]` now supports
   `allowed_peer_groups`, `allowed_neighbors`, and `max_routes`.
   Peer / peer-group allow-lists are enforced before kernel apply, and

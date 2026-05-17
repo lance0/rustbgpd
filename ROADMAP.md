@@ -160,8 +160,12 @@ those priorities exist.
   tracks the residuals as a checklist: protected CI for M36 + M37 +
   M37+IP + M38 now lives in `.github/workflows/kernel-dataplane.yml`,
   the M37 local-origination 24 h MAC-churn soak
-  ([#134](https://github.com/lance0/rustbgpd/issues/134)), and
-  RFC 7432 §15.1 duplicate-MAC local-origin suppression action (detect-only by default, opt-in suppress_local shipped; remote-route processing and dataplane loop-protection tracked in #139).
+  (harness ready at `tests/soak/run-m37-local-origination-churn-soak.sh`;
+  run + postmortem still tracked in
+  [#134](https://github.com/lance0/rustbgpd/issues/134)), and
+  RFC 7432 §15.1 duplicate-MAC local-origin suppression action (detect-only
+  by default, opt-in `suppress_local` shipped; remote-route processing and
+  dataplane loop-protection tracked in #139).
   These are the slope to v1.0-grade EVPN confidence.
 - [ ] **CI regression tracking for benchmarks** — automated runs of
   the criterion benchmarks with threshold-based alerts on PR. The
