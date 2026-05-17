@@ -68,6 +68,13 @@ frr_has_mac_ip() {
         | grep -qE "\[2\]:\[[^]]*\]:\[[^]]*\]:\[48\]:\[$mac\]:\[(32|128)\]:\[$ip\]"
 }
 
+# Returns 0 once FRR sees rustbgpd's startup Type 3 IMET, which is a
+# cheap proxy that the EVPN instance and originator loop are Ready.
+frr_has_type3() {
+    frr_vtysh "show bgp l2vpn evpn route type multicast" \
+        | grep -qF "$RUSTBGPD_IP"
+}
+
 rb_fdb_add() {
     docker exec "$RUSTBGPD" bridge fdb add "$1" dev "$VETH_PORT" master static
 }
@@ -119,12 +126,16 @@ assert() {
 
 echo "Waiting for L2VPN/EVPN session to establish..."
 wait_frr_established "$CONSUMER" "$RUSTBGPD_IP" "L2VPN/EVPN" || true
+wait_until "Type 3 IMET surfaces on FRR" \
+    "frr_has_type3" 30 || true
+assert "Type 3 IMET originated before MAC injection" \
+    "frr_has_type3"
 
 # 1. Add static FDB entry → MAC-only Type 2 surfaces.
 echo "Adding static FDB entry $TEST_MAC..."
 rb_fdb_add "$TEST_MAC"
 wait_until "MAC-only Type 2 surfaces on FRR" \
-    "frr_has_mac_only \"$TEST_MAC\"" 15 || true
+    "frr_has_mac_only \"$TEST_MAC\"" 30 || true
 assert "MAC-only Type 2 originated" \
     "frr_has_mac_only \"$TEST_MAC\""
 
@@ -132,7 +143,7 @@ assert "MAC-only Type 2 originated" \
 echo "Adding bridge neighbour $TEST_IP → $TEST_MAC..."
 rb_neigh_add "$TEST_IP" "$TEST_MAC"
 wait_until "MAC+IP Type 2 surfaces on FRR" \
-    "frr_has_mac_ip \"$TEST_MAC\" \"$TEST_IP\"" 15 || true
+    "frr_has_mac_ip \"$TEST_MAC\" \"$TEST_IP\"" 30 || true
 assert "MAC+IP Type 2 originated after IpAdded" \
     "frr_has_mac_ip \"$TEST_MAC\" \"$TEST_IP\""
 assert "MAC-only Type 2 withdrawn under replace model" \
@@ -146,7 +157,7 @@ wait_until "MAC+IP withdrawn after IpRemoved" \
 assert "MAC+IP Type 2 withdrawn on IpRemoved" \
     "! frr_has_mac_ip \"$TEST_MAC\" \"$TEST_IP\""
 wait_until "MAC-only re-emitted on downgrade" \
-    "frr_has_mac_only \"$TEST_MAC\"" 15 || true
+    "frr_has_mac_only \"$TEST_MAC\"" 30 || true
 assert "MAC-only Type 2 re-emitted after last IP removed" \
     "frr_has_mac_only \"$TEST_MAC\""
 

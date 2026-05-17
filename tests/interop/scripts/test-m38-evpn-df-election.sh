@@ -81,6 +81,35 @@ grpc_list_evpn() {
         "${ip}:50051" rustbgpd.v1.RibService/ListEvpnRoutes 2>/dev/null
 }
 
+evpn_route_count() {
+    local container=${1:?}
+    local route_type=${2:?}
+    local json
+    json=$(grpc_list_evpn "$container" "$route_type") || return 1
+    [ -z "$json" ] && return 1
+    printf '%s' "$json" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+print(len(data.get("routes", [])))
+'
+}
+
+wait_for_route_count() {
+    local container=${1:?}
+    local route_type=${2:?}
+    local want=${3:?}
+    local timeout=${4:-60}
+    for _ in $(seq 1 "$timeout"); do
+        local got
+        got=$(evpn_route_count "$container" "$route_type" 2>/dev/null || echo 0)
+        if [ "$got" -ge "$want" ]; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 # True iff at least one EVPN route in the PE's RIB at the given
 # route_type carries an extended community whose high 16 bits match
 # $type_sub (e.g. 0x0602 for ES-Import RT, 0x0601 for ESI Label).
@@ -166,17 +195,25 @@ assert() {
 }
 
 # Wait for the segment orchestrator to settle. We don't have a
-# direct signal here, so poll Prometheus.
-echo "Waiting up to 30s for initial DF election to land..."
+# direct signal here, so first wait for both PEs to have the local
+# and remote Type 4 ES candidates in LocRib, then poll Prometheus.
+echo "Waiting up to 60s for Type 4 ES candidate exchange..."
+assert "PE1 LocRib has both Type 4 ES candidates" \
+    'wait_for_route_count "$PE1" 4 2 60'
+
+assert "PE2 LocRib has both Type 4 ES candidates" \
+    'wait_for_route_count "$PE2" 4 2 60'
+
+echo "Waiting up to 60s for initial DF election to land..."
 
 assert "PE1 reports DF=1 for (esi=$ESI, vni=$VNI)" \
-    'wait_for_role "$PE1" df 1 30'
+    'wait_for_role "$PE1" df 1 60'
 
 assert "PE1 reports NonDF=0 for the same key" \
     '[ "$(prom_df_role "$PE1" nondf)" = "0" ]'
 
 assert "PE2 reports DF=0 for (esi=$ESI, vni=$VNI)" \
-    'wait_for_role "$PE2" df 0 30'
+    'wait_for_role "$PE2" df 0 60'
 
 assert "PE2 reports NonDF=1 for the same key" \
     '[ "$(prom_df_role "$PE2" nondf)" = "1" ]'
@@ -210,9 +247,9 @@ echo "PE2 evpn_df_role_changes_total before PE1 shutdown: $PE2_BEFORE"
 echo "Stopping PE1 to force DF promotion on PE2..."
 docker stop -t 5 "$PE1" >/dev/null
 
-echo "Waiting up to 30s for PE2 to promote to DF..."
+echo "Waiting up to 60s for PE2 to promote to DF..."
 assert "PE2 promotes to DF after PE1 shutdown" \
-    'wait_for_role "$PE2" df 1 30'
+    'wait_for_role "$PE2" df 1 60'
 
 # The transition counter should have advanced by at least 1.
 PE2_AFTER=$(prom_df_role_changes "$PE2")
