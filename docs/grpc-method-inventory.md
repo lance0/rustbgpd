@@ -208,7 +208,8 @@ specific method if the model warrants it.
    gRPC. Read paths never echo secret material back:
    `ListPeerGroups` and `GetPeerGroup` redact `md5_password` instead
    of returning the stored value, while preserving a non-secret
-   `has_md5_password` signal. `DiffRuntimeConfig` also accepts
+   optional `has_md5_password` signal for safe read/modify/write
+   preservation. `DiffRuntimeConfig` also accepts
    candidate TOML that may contain `md5_password` or `tcp_ao.key`;
    audit logging must omit or mask that request body. The model does
    not need a separate "credential-write" tier yet — `operator_only`

@@ -162,6 +162,8 @@ pub struct JsonPeerGroupDefinition {
     #[serde(default)]
     pub md5_password: Option<String>,
     #[serde(default)]
+    pub has_md5_password: Option<bool>,
+    #[serde(default)]
     pub ttl_security: Option<bool>,
     #[serde(default)]
     pub families: Vec<String>,
@@ -199,7 +201,9 @@ pub struct JsonPeerGroupDefinition {
 
 impl From<JsonPeerGroupDefinition> for proto::PeerGroupDefinition {
     fn from(j: JsonPeerGroupDefinition) -> Self {
-        let has_md5_password = j.md5_password.is_some();
+        let has_md5_password = j
+            .has_md5_password
+            .or_else(|| j.md5_password.as_ref().map(|_| true));
         proto::PeerGroupDefinition {
             hold_time: j.hold_time,
             max_prefixes: j.max_prefixes,
@@ -325,5 +329,27 @@ mod tests {
         assert_eq!(proto.import_policy_chain, vec!["from-transit".to_string()]);
         assert_eq!(proto.export_policy_chain, vec!["to-transit".to_string()]);
         assert_eq!(proto.route_reflector_client, Some(true));
+        assert_eq!(proto.has_md5_password, None);
+    }
+
+    #[test]
+    fn peer_group_definition_can_preserve_or_clear_redacted_md5() {
+        let preserve_json = r#"{
+            "families": ["ipv4_unicast"],
+            "has_md5_password": true
+        }"#;
+        let preserve: JsonPeerGroupDefinition = serde_json::from_str(preserve_json).unwrap();
+        let preserve = proto::PeerGroupDefinition::from(preserve);
+        assert_eq!(preserve.md5_password, None);
+        assert_eq!(preserve.has_md5_password, Some(true));
+
+        let clear_json = r#"{
+            "families": ["ipv4_unicast"],
+            "has_md5_password": false
+        }"#;
+        let clear: JsonPeerGroupDefinition = serde_json::from_str(clear_json).unwrap();
+        let clear = proto::PeerGroupDefinition::from(clear);
+        assert_eq!(clear.md5_password, None);
+        assert_eq!(clear.has_md5_password, Some(false));
     }
 }

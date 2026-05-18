@@ -57,8 +57,10 @@ Preferred posture:
   read-only/read-write listener split.
 - Peer-group read RPCs redact `md5_password` rather than echoing stored
   secret material; they expose only the non-secret `has_md5_password`
-  presence flag. Treat the remaining peer-group template, policy, and topology
-  data as sensitive operational metadata.
+  presence flag. The write path preserves an omitted redacted MD5 value by
+  default; clearing requires an explicit `has_md5_password=false`. Treat the
+  remaining peer-group template, policy, and topology data as sensitive
+  operational metadata.
 - Restrict the exposed listener to a management VLAN/interface or a small set
   of management hosts.
 - Even with mTLS in place, treat the API as privileged. Read-only RPCs still

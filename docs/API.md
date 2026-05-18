@@ -350,8 +350,11 @@ Peer-group CRUD plus neighbor membership assignment. Group definitions are
 full-replace and persist back to TOML. When an inherited setting changes, the
 daemon recomputes effective per-neighbor config and reconciles only the peers
 that reference that group. Read responses redact `md5_password` and expose
-only the non-secret `has_md5_password` presence flag; use the configuration
-file or write-side source of truth to inspect credential material.
+only the non-secret `has_md5_password` presence flag. `SetPeerGroup` preserves
+the existing stored MD5 password when the field is omitted or set to `true`
+without a new `md5_password`; set `has_md5_password = false` with no
+`md5_password` to clear it explicitly. Use the configuration file or write-side
+source of truth to inspect credential material.
 
 | RPC | Description |
 |-----|-------------|

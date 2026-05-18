@@ -64,8 +64,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   write-side `SetPeerGroup` path still accepts MD5 material, but read responses
   redact the field and expose only `has_md5_password` so read-only listeners do
   not expose credentials. `SetPeerGroup` preserves an existing MD5 password
-  when a read/modify/write client sends `has_md5_password=true` without a new
-  `md5_password` value.
+  when a read/modify/write client omits `has_md5_password` or sends
+  `has_md5_password=true` without a new `md5_password` value; clients must send
+  `has_md5_password=false` with no `md5_password` to clear it explicitly.
 
 - **FDB nexthop raw-netlink parser hardening.**
   `NexthopSocket` response and `RTM_GETNEXTHOP` dump parsing now returns

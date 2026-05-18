@@ -354,10 +354,11 @@ message PeerGroupDefinition {
   repeated PolicyStatement export_policy = 18;
   repeated string import_policy_chain = 19;
   repeated string export_policy_chain = 20;
-  // Read responses only. For SetPeerGroup, has_md5_password=true with no
-  // md5_password preserves the existing stored value for read/modify/write
-  // clients; set false with no md5_password to clear it.
-  bool has_md5_password = 21;
+  // Read responses set this to expose presence without exposing the secret.
+  // For SetPeerGroup, omitted or true with no md5_password preserves the
+  // existing value for read/modify/write clients; false with no md5_password
+  // explicitly clears it.
+  optional bool has_md5_password = 21;
 }
 
 message NamedPeerGroup {

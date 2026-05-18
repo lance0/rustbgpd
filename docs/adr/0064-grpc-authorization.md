@@ -203,23 +203,26 @@ client must reconnect. Inventory question 4 answered.
 
 ### 6. Backwards compatibility
 
-Add `[security.grpc]` with an `enforcement` field:
+Later runtime-enforcement slices add `[security.grpc]` with an
+`enforcement` field:
 
 ```toml
 [security.grpc]
 enforcement = "legacy"  # default in slice 1; flipped to "tier" in slice 4
 ```
 
-- `legacy` — the authorization layer logs tier decisions but does not enforce them
-  (audit-only). All calls that would have been authorized under the
-  old binary `access_mode` continue to work. Calls that would be
-  rejected under tier enforcement emit a `WARN` log so operators see
-  what would break.
+- `legacy` — once the authorization layer exists, it logs tier
+  decisions but does not enforce them (audit-only). All calls that
+  would have been authorized under the old binary `access_mode`
+  continue to work. Calls that would be rejected under tier
+  enforcement emit a `WARN` log so operators see what would break.
 - `tier` — full enforcement per slices 2–4 below.
 
-Slice 1 ships with `legacy` default. Slice 4 flips the default to
-`tier` and documents the migration in `CHANGELOG.md` and
-`KNOWN_ISSUES.md`. Inventory question 6 answered.
+The shipped slice 1 matrix has no `[security.grpc]` config and no
+runtime authorization/logging behavior change. Slice 2 introduces the
+legacy/audit-only runtime mode; slice 4 flips the default to `tier` and
+documents the migration in `CHANGELOG.md` and `KNOWN_ISSUES.md`.
+Inventory question 6 answered.
 
 ### 7. Audit logging
 
@@ -299,12 +302,12 @@ review/rollback unit.
    `UNIMPLEMENTED` defaults to `operator_only`. Correct this ADR and
    the inventory to match shipped listener-level `access_mode`
    behavior. No runtime enforcement change.
-2. **Identity + roles.** Implement principal extraction from mTLS
+2. **Identity + roles + audit-only runtime.** Implement principal extraction from mTLS
    peer cert (URI-SAN → email-SAN → CN priority), plus explicit
    non-mTLS listener principals for bearer-token / UDS deployments that
    opt into tier enforcement. Add `[security.grpc.roles]` mapping. Add
-   `observer | automation | operator` role-to-tier lookup. Still
-   audit-only.
+   `observer | automation | operator` role-to-tier lookup plus
+   `[security.grpc].enforcement = "legacy"` audit-only mode.
 3. **Listener tier cap.** Add `max_tier` to
    `[[telemetry.grpc_tcp]]` / `[[telemetry.grpc_uds]]`. Translate
    the existing `access_mode = "read_only"` → `max_tier =
