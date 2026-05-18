@@ -9,6 +9,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **FDB nexthop raw-netlink parser hardening.**
+  `NexthopSocket` response and `RTM_GETNEXTHOP` dump parsing now returns
+  typed `NexthopError::Truncated` errors for malformed netlink datagrams
+  instead of relying on guarded runtime slice conversions.
+
 ## [0.22.0] — 2026-05-17
 
 ### Added
