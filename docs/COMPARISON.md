@@ -79,7 +79,7 @@ Last updated: 2026-05-16 (post-v0.21.0 main, including the EventService unified 
 | Feature | rustbgpd | FRR | BIRD | GoBGP | OpenBGPd |
 |---|:---:|:---:|:---:|:---:|:---:|
 | TCP MD5 (RFC 2385) | Yes | Yes | Yes | Yes | Yes |
-| TCP-AO (RFC 5925) | No | No | No | No | No |
+| TCP-AO (RFC 5925) | Schema only | No | No | No | No |
 | GTSM / TTL Security | Yes | Yes | Yes | Yes | Yes |
 | RPKI/RTR (RFC 6810/8210) | Yes | Yes | Yes | Yes | Yes |
 | ASPA verification | Yes | No | Yes | No | Yes |

@@ -4,7 +4,7 @@ use std::path::Path;
 use super::parse::{
     parse_families, parse_named_policy, parse_neighbor_set, parse_policy, resolve_chain,
 };
-use super::{Config, ConfigError, DEFAULT_HOLD_TIME, PeerGroupConfig};
+use super::{Config, ConfigError, DEFAULT_HOLD_TIME, PeerGroupConfig, TcpAoConfig};
 
 impl Config {
     #[expect(clippy::too_many_lines)]
@@ -217,6 +217,26 @@ impl Config {
                         })
                 })
                 .transpose()?;
+
+            if let Some(tcp_ao) = &neighbor.tcp_ao {
+                if neighbor.md5_password.is_some() {
+                    return Err(ConfigError::InvalidNeighborConfig {
+                        address: neighbor.address.clone(),
+                        field: "tcp_ao".to_string(),
+                        reason: "tcp_ao is mutually exclusive with md5_password".to_string(),
+                    });
+                }
+                if group.and_then(|g| g.md5_password.as_ref()).is_some() {
+                    return Err(ConfigError::InvalidNeighborConfig {
+                        address: neighbor.address.clone(),
+                        field: "tcp_ao".to_string(),
+                        reason:
+                            "tcp_ao is mutually exclusive with inherited peer-group md5_password"
+                                .to_string(),
+                    });
+                }
+                validate_tcp_ao_config(&neighbor.address, tcp_ao)?;
+            }
 
             let hold_time = neighbor
                 .hold_time
@@ -691,6 +711,47 @@ fn validate_fib_table_guardrails(
             });
         }
     }
+    Ok(())
+}
+
+fn validate_tcp_ao_config(address: &str, tcp_ao: &TcpAoConfig) -> Result<(), ConfigError> {
+    let key_len = tcp_ao.key.len();
+    if key_len == 0 {
+        return Err(ConfigError::InvalidNeighborConfig {
+            address: address.to_string(),
+            field: "tcp_ao.key".to_string(),
+            reason: "must not be empty".to_string(),
+        });
+    }
+    if key_len > 80 {
+        return Err(ConfigError::InvalidNeighborConfig {
+            address: address.to_string(),
+            field: "tcp_ao.key".to_string(),
+            reason: "must be 80 bytes or fewer".to_string(),
+        });
+    }
+
+    match tcp_ao.algorithm.as_str() {
+        "hmac(sha1)" | "hmac(sha256)" | "cmac(aes128)" => {}
+        other => {
+            return Err(ConfigError::InvalidNeighborConfig {
+                address: address.to_string(),
+                field: "tcp_ao.algorithm".to_string(),
+                reason: format!(
+                    "unknown algorithm {other:?}, expected \"hmac(sha1)\", \"hmac(sha256)\", or \"cmac(aes128)\""
+                ),
+            });
+        }
+    }
+
+    if tcp_ao.preferred && tcp_ao.deprecated {
+        return Err(ConfigError::InvalidNeighborConfig {
+            address: address.to_string(),
+            field: "tcp_ao".to_string(),
+            reason: "preferred and deprecated cannot both be true".to_string(),
+        });
+    }
+
     Ok(())
 }
 

@@ -361,6 +361,10 @@ pub struct Neighbor {
     pub hold_time: Option<u16>,
     pub max_prefixes: Option<u32>,
     pub md5_password: Option<String>,
+    /// Static-neighbor TCP-AO (RFC 5925) configuration. Schema-only in
+    /// ADR-0062's current slice: parsed and validated, but not installed on
+    /// runtime sockets until the listener/outbound wiring lands.
+    pub tcp_ao: Option<TcpAoConfig>,
     pub ttl_security: Option<bool>,
     /// Address families to negotiate (e.g., `["ipv4_unicast", "ipv6_unicast"]`).
     /// Default: `["ipv4_unicast"]`. If the neighbor address is IPv6, `"ipv6_unicast"`
@@ -414,6 +418,27 @@ pub struct Neighbor {
     /// Named policy chain for export (mutually exclusive with `export_policy`).
     #[serde(default)]
     pub export_policy_chain: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TcpAoConfig {
+    /// TCP-AO Master Key Tuple secret. 1..=80 bytes.
+    pub key: String,
+    /// Sender `KeyID` (`sndid` in Linux's TCP-AO UAPI).
+    pub send_id: u8,
+    /// Receiver `KeyID` (`rcvid` in Linux's TCP-AO UAPI).
+    pub recv_id: u8,
+    /// Linux TCP-AO MAC/KDF algorithm name, e.g. `"hmac(sha256)"`.
+    pub algorithm: String,
+    /// Mark this key as the preferred current send key in the future runtime
+    /// wiring. Reserved until TCP-AO socket installation lands.
+    #[serde(default)]
+    pub preferred: bool,
+    /// Mark this key as deprecated for future rollover behavior. Reserved
+    /// until TCP-AO socket installation lands.
+    #[serde(default)]
+    pub deprecated: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

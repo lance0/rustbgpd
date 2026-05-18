@@ -354,6 +354,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     hold_time: cfg.hold_time,
                     max_prefixes: cfg.max_prefixes,
                     md5_password: cfg.md5_password.clone(),
+                    tcp_ao: None,
                     ttl_security: Some(cfg.ttl_security),
                     families: cfg
                         .families
