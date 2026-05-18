@@ -62,7 +62,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Peer-group read RPC secret redaction.** `PeerGroupService.ListPeerGroups`
   and `GetPeerGroup` no longer echo stored `md5_password` values; the
   write-side `SetPeerGroup` path still accepts MD5 material, but read responses
-  redact the field so read-only listeners do not expose credentials.
+  redact the field and expose only `has_md5_password` so read-only listeners do
+  not expose credentials. `SetPeerGroup` preserves an existing MD5 password
+  when a read/modify/write client sends `has_md5_password=true` without a new
+  `md5_password` value.
 
 - **FDB nexthop raw-netlink parser hardening.**
   `NexthopSocket` response and `RTM_GETNEXTHOP` dump parsing now returns

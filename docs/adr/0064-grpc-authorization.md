@@ -15,8 +15,8 @@ RIB/policy/topology reads.
 
 The inventory in `docs/grpc-method-inventory.md` classifies the 66
 RPCs across 10 services into four tiers by worst-case effect on a
-compromised credential: `read` (1), `sensitive_read` (32),
-`mutating` (17), `operator_only` (16). That distribution makes
+compromised credential: `read` (0), `sensitive_read` (33),
+`mutating` (15), `operator_only` (18). That distribution makes
 unscoped `read_write` access too broad for v1.0 — a leaked automation
 credential grants the holder `Shutdown`, network-wide
 `SetGracefulShutdown`, route injection, FlowSpec filter installation,
@@ -47,8 +47,8 @@ endpoints."
 
 The current `access_mode` is a two-tier substitute for the four-tier
 model the inventory needs. It captures "no mutations" reasonably but
-puts `ListReceivedRoutes` (RIB content) and `GetHealth` (liveness
-ping) in the same bucket, and offers no way to require operator-tier
+puts `ListReceivedRoutes` (RIB content) and `GetHealth` (peer/route
+counts) in the same bucket, and offers no way to require operator-tier
 authorization for `Shutdown` while allowing routine `AddNeighbor`.
 
 ### What the design must answer
@@ -71,7 +71,7 @@ section, in summary:
 
 Adopt a **checked per-method tier matrix enforced by a gRPC
 authorization layer, bounded above by a per-listener tier cap**, with
-role-to-tier mapping driven by a cert-identity lookup in
+role-to-tier mapping driven by an authenticated principal lookup in
 `[security.grpc.roles]`. Ship in six slices so the enforcement default
 flip is its own reviewable PR.
 
@@ -144,13 +144,27 @@ granularities, listener as ceiling, per-method as floor.
 
 ### 4. Role-to-tier mapping in config
 
-Authentication identity comes from the mTLS peer cert. We extract a
-**principal string** in this priority order:
+Authentication identity comes from the listener's authenticated
+principal source:
+
+- mTLS listeners extract a **principal string** from the peer cert in
+  this priority order:
 
 1. The first `URI` SAN whose scheme is `rustbgpd` (e.g.
    `rustbgpd://operator/alice`).
 2. The first `email` SAN (e.g. `alice@example.com`).
 3. The cert's Subject Common Name.
+
+- Bearer-token listeners must configure an explicit token principal
+  label before tier enforcement can be enabled, because the token value
+  itself is not a stable audit identity.
+- UDS listeners must configure an explicit listener principal or rely
+  only on `max_tier`; filesystem permissions authenticate the client
+  but do not identify a per-client role.
+
+If tier enforcement is enabled on a listener without either mTLS
+principal extraction or an explicit non-mTLS principal, startup rejects
+the configuration instead of falling back open.
 
 Roles are configured per-principal in `[security.grpc.roles]`:
 
@@ -218,12 +232,13 @@ Every RPC call produces a structured log entry. Minimum level by tier:
 | `mutating` | every call | + redacted argument summary, result code |
 | `operator_only` | every call, at `WARN` | + full argument summary with credential fields masked, caller principal, listener address |
 
-Credential masking is mandatory: `PeerGroupDefinition.md5_password`
-and any field tagged with a future credential marker are replaced with
-`***REDACTED***` before the log line is emitted. TCP-AO key material is
-TOML/runtime-only today and is not accepted by any gRPC request.
-Peer-group read RPCs redact `md5_password` rather than echoing stored
-secret material.
+Credential masking is mandatory: `PeerGroupDefinition.md5_password`,
+`DiffRuntimeConfigRequest.candidate_toml`, and any field tagged with a
+future credential marker are omitted or replaced with `***REDACTED***`
+before the log line is emitted. TCP-AO key material is TOML/runtime-only
+today except when it appears inside `candidate_toml` for config-diff
+validation. Peer-group read RPCs redact `md5_password` rather than
+echoing stored secret material and expose only `has_md5_password`.
 Inventory questions 5 and 8 answered.
 
 ### 8. `UNIMPLEMENTED` methods
@@ -285,9 +300,11 @@ review/rollback unit.
    the inventory to match shipped listener-level `access_mode`
    behavior. No runtime enforcement change.
 2. **Identity + roles.** Implement principal extraction from mTLS
-   peer cert (URI-SAN → email-SAN → CN priority). Add
-   `[security.grpc.roles]` mapping. Add `observer | automation |
-   operator` role-to-tier lookup. Still audit-only.
+   peer cert (URI-SAN → email-SAN → CN priority), plus explicit
+   non-mTLS listener principals for bearer-token / UDS deployments that
+   opt into tier enforcement. Add `[security.grpc.roles]` mapping. Add
+   `observer | automation | operator` role-to-tier lookup. Still
+   audit-only.
 3. **Listener tier cap.** Add `max_tier` to
    `[[telemetry.grpc_tcp]]` / `[[telemetry.grpc_uds]]`. Translate
    the existing `access_mode = "read_only"` → `max_tier =
@@ -329,7 +346,7 @@ communication.
   and on SIGHUP. Live role revocation without a SIGHUP (e.g. a
   "kick this principal" RPC) is not v1.
 - **Capability-token alternative.** A future model could replace
-  per-cert role mapping with short-lived capability tokens minted by
+  static principal role mapping with short-lived capability tokens minted by
   an external IAM. This ADR's principal-lookup mechanism does not
   preclude that direction — a future ADR could add a token-bearer
   interceptor that resolves to the same tier-check primitive.

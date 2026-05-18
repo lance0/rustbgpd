@@ -349,9 +349,9 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 Peer-group CRUD plus neighbor membership assignment. Group definitions are
 full-replace and persist back to TOML. When an inherited setting changes, the
 daemon recomputes effective per-neighbor config and reconciles only the peers
-that reference that group. Read responses redact `md5_password`; use the
-configuration file or write-side source of truth to inspect credential
-material.
+that reference that group. Read responses redact `md5_password` and expose
+only the non-secret `has_md5_password` presence flag; use the configuration
+file or write-side source of truth to inspect credential material.
 
 | RPC | Description |
 |-----|-------------|

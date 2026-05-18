@@ -199,6 +199,7 @@ pub struct JsonPeerGroupDefinition {
 
 impl From<JsonPeerGroupDefinition> for proto::PeerGroupDefinition {
     fn from(j: JsonPeerGroupDefinition) -> Self {
+        let has_md5_password = j.md5_password.is_some();
         proto::PeerGroupDefinition {
             hold_time: j.hold_time,
             max_prefixes: j.max_prefixes,
@@ -220,6 +221,7 @@ impl From<JsonPeerGroupDefinition> for proto::PeerGroupDefinition {
             export_policy: j.export_policy.into_iter().map(Into::into).collect(),
             import_policy_chain: j.import_policy_chain,
             export_policy_chain: j.export_policy_chain,
+            has_md5_password,
         }
     }
 }

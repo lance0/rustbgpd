@@ -160,7 +160,7 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
         "rustbgpd.v1.PolicyService",
         "SetPolicy",
         "/rustbgpd.v1.PolicyService/SetPolicy",
-        AuthTier::Mutating,
+        AuthTier::OperatorOnly,
     ),
     method(
         "rustbgpd.v1.PolicyService",
@@ -184,7 +184,7 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
         "rustbgpd.v1.PolicyService",
         "SetNeighborSet",
         "/rustbgpd.v1.PolicyService/SetNeighborSet",
-        AuthTier::Mutating,
+        AuthTier::OperatorOnly,
     ),
     method(
         "rustbgpd.v1.PolicyService",
@@ -418,7 +418,7 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
         "rustbgpd.v1.ControlService",
         "GetHealth",
         "/rustbgpd.v1.ControlService/GetHealth",
-        AuthTier::Read,
+        AuthTier::SensitiveRead,
     ),
     method(
         "rustbgpd.v1.ControlService",
@@ -478,8 +478,8 @@ mod tests {
 
     const PROTO: &str = include_str!("../../../proto/rustbgpd.proto");
 
-    fn proto_package() -> String {
-        PROTO
+    fn proto_package_from(proto: &str) -> String {
+        proto
             .lines()
             .find_map(|raw| {
                 raw.trim()
@@ -489,35 +489,49 @@ mod tests {
             .expect("proto package declaration missing")
     }
 
-    fn proto_methods() -> BTreeSet<String> {
-        let package = proto_package();
+    fn proto_methods_from(proto: &str) -> BTreeSet<String> {
+        let package = proto_package_from(proto);
         let mut service = None::<String>;
+        let mut service_depth = 0i32;
         let mut methods = BTreeSet::new();
-        for raw in PROTO.lines() {
+        for raw in proto.lines() {
             let line = raw.trim();
-            if let Some(rest) = line.strip_prefix("service ") {
+            if service.is_none()
+                && let Some(rest) = line.strip_prefix("service ")
+            {
                 service = rest
                     .split_whitespace()
                     .next()
                     .map(|name| format!("{package}.{name}"));
+                service_depth = brace_delta(line);
                 continue;
             }
-            if line == "}" {
-                service = None;
-                continue;
+            if let Some(service_name) = service.as_deref() {
+                if let Some(rest) = line.strip_prefix("rpc ")
+                    && let Some(name) = rest.split('(').next()
+                {
+                    methods.insert(format!("/{service_name}/{}", name.trim()));
+                }
+                service_depth += brace_delta(line);
+                if service_depth <= 0 {
+                    service = None;
+                    service_depth = 0;
+                }
             }
-            let Some(rest) = line.strip_prefix("rpc ") else {
-                continue;
-            };
-            let Some(service) = service.as_deref() else {
-                continue;
-            };
-            let Some(name) = rest.split('(').next() else {
-                continue;
-            };
-            methods.insert(format!("/{service}/{name}"));
         }
         methods
+    }
+
+    fn proto_methods() -> BTreeSet<String> {
+        proto_methods_from(PROTO)
+    }
+
+    fn brace_delta(line: &str) -> i32 {
+        let opens = i32::try_from(line.chars().filter(|ch| *ch == '{').count())
+            .expect("proto line has more than i32::MAX opening braces");
+        let closes = i32::try_from(line.chars().filter(|ch| *ch == '}').count())
+            .expect("proto line has more than i32::MAX closing braces");
+        opens - closes
     }
 
     #[test]
@@ -530,6 +544,28 @@ mod tests {
 
         assert_eq!(matrix_methods, proto_methods);
         assert_eq!(METHODS.len(), 66);
+    }
+
+    #[test]
+    fn proto_method_parser_handles_annotated_rpc_blocks() {
+        let proto = r#"
+            syntax = "proto3";
+            package rustbgpd.v1;
+            service DemoService {
+              rpc First (FirstRequest) returns (FirstResponse) {
+                option deprecated = true;
+              }
+              rpc Second (SecondRequest) returns (SecondResponse);
+            }
+        "#;
+        let methods = proto_methods_from(proto);
+        assert_eq!(
+            methods,
+            BTreeSet::from([
+                "/rustbgpd.v1.DemoService/First".to_string(),
+                "/rustbgpd.v1.DemoService/Second".to_string(),
+            ])
+        );
     }
 
     #[test]
@@ -547,17 +583,17 @@ mod tests {
 
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
-        assert_eq!(method_count_by_tier(AuthTier::Read), 1);
-        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 32);
-        assert_eq!(method_count_by_tier(AuthTier::Mutating), 17);
-        assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 16);
+        assert_eq!(method_count_by_tier(AuthTier::Read), 0);
+        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 33);
+        assert_eq!(method_count_by_tier(AuthTier::Mutating), 15);
+        assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 18);
     }
 
     #[test]
     fn method_lookup_returns_expected_tiers() {
         assert_eq!(
             method_authz("/rustbgpd.v1.ControlService/GetHealth").map(|m| m.tier),
-            Some(AuthTier::Read)
+            Some(AuthTier::SensitiveRead)
         );
         assert_eq!(
             method_authz("/rustbgpd.v1.RibService/ListBestRoutes").map(|m| m.tier),

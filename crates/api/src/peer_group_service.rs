@@ -137,6 +137,7 @@ fn input_definition_to_proto(definition: &PeerGroupDefinition) -> proto::PeerGro
         max_prefixes: definition.max_prefixes,
         // Read RPCs expose the group shape, not credential material.
         md5_password: None,
+        has_md5_password: definition.md5_password.is_some(),
         ttl_security: definition.ttl_security,
         families: definition.families.clone(),
         graceful_restart: definition.graceful_restart,
@@ -275,7 +276,29 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
         let definition = req
             .definition
             .ok_or_else(|| Status::invalid_argument("definition is required"))?;
-        let definition = proto_definition_to_input(definition)?;
+        let preserve_md5_password =
+            definition.has_md5_password && definition.md5_password.is_none();
+        let mut definition = proto_definition_to_input(definition)?;
+
+        if preserve_md5_password {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            self.peer_mgr_tx
+                .send(PeerManagerCommand::GetPeerGroup {
+                    name: req.name.clone(),
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| Status::internal("peer manager unavailable"))?;
+            let existing = reply_rx
+                .await
+                .map_err(|_| Status::internal("peer manager dropped reply"))?
+                .ok_or_else(|| {
+                    Status::invalid_argument(
+                        "has_md5_password cannot preserve a missing peer-group secret",
+                    )
+                })?;
+            definition.md5_password = existing.md5_password;
+        }
 
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let persisted = persist_permit.as_ref().map(|_| definition.clone());
@@ -453,6 +476,7 @@ mod tests {
 
         let output = input_definition_to_proto(&definition);
         assert_eq!(output.md5_password, None);
+        assert!(output.has_md5_password);
 
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let svc = PeerGroupService::new(AccessMode::ReadOnly, peer_tx, None);
@@ -491,6 +515,76 @@ mod tests {
             .as_ref()
             .expect("peer-group definition missing");
         assert_eq!(definition.md5_password, None);
+        assert!(definition.has_md5_password);
+    }
+
+    #[tokio::test]
+    async fn set_peer_group_preserves_redacted_md5_when_presence_flag_is_set() {
+        let existing = proto_definition_to_input(sample_definition()).unwrap();
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx));
+
+        let task = tokio::spawn(async move {
+            PeerGroupServiceRpc::set_peer_group(
+                &svc,
+                Request::new(proto::SetPeerGroupRequest {
+                    name: "rs-clients".into(),
+                    definition: Some(proto::PeerGroupDefinition {
+                        has_md5_password: true,
+                        md5_password: None,
+                        families: vec!["ipv6_unicast".into()],
+                        ..Default::default()
+                    }),
+                }),
+            )
+            .await
+        });
+
+        let command = peer_rx.recv().await.expect("expected GetPeerGroup command");
+        match command {
+            PeerManagerCommand::GetPeerGroup { name, reply } => {
+                assert_eq!(name, "rs-clients");
+                reply
+                    .send(Some(existing))
+                    .expect("service dropped GetPeerGroup reply");
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        let command = peer_rx.recv().await.expect("expected SetPeerGroup command");
+        match command {
+            PeerManagerCommand::SetPeerGroup {
+                name,
+                definition,
+                reply,
+            } => {
+                assert_eq!(name, "rs-clients");
+                assert_eq!(definition.md5_password.as_deref(), Some("secret"));
+                assert_eq!(definition.families, vec!["ipv6_unicast"]);
+                reply
+                    .send(Ok(()))
+                    .expect("service dropped SetPeerGroup reply");
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        task.await
+            .expect("SetPeerGroup task panicked")
+            .expect("SetPeerGroup failed");
+
+        let persisted = config_rx
+            .recv()
+            .await
+            .expect("expected SetPeerGroup config event");
+        match persisted {
+            ConfigEvent::SetPeerGroup { name, definition } => {
+                assert_eq!(name, "rs-clients");
+                assert_eq!(definition.md5_password.as_deref(), Some("secret"));
+                assert_eq!(definition.families, vec!["ipv6_unicast"]);
+            }
+            _ => panic!("unexpected config event"),
+        }
     }
 
     #[tokio::test]
