@@ -1,0 +1,18 @@
+[global]
+asn = 65001
+router_id = "10.0.43.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.43.2"
+remote_asn = 65043
+description = "bird3-tcp-ao"
+hold_time = 90
+tcp_ao = { key = "interop-secret-m43", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }

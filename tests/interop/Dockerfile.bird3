@@ -1,0 +1,30 @@
+FROM debian:trixie-slim
+
+ARG BIRD_VERSION=3.2.1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bison \
+    build-essential \
+    ca-certificates \
+    curl \
+    flex \
+    iproute2 \
+    libncurses-dev \
+    libreadline-dev \
+    m4 \
+    make \
+    perl \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tmp/bird
+
+RUN curl -fsSL "https://bird.nic.cz/download/bird-${BIRD_VERSION}.tar.gz" -o bird.tar.gz \
+    && tar -xzf bird.tar.gz --strip-components=1 \
+    && ./configure --prefix=/usr --sysconfdir=/etc/bird --localstatedir=/run/bird \
+    && make -j"$(nproc)" \
+    && make install \
+    && mkdir -p /etc/bird /run/bird \
+    && bird --version
+
+CMD ["sleep", "infinity"]

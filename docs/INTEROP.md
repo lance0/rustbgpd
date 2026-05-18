@@ -11,7 +11,7 @@ are called out explicitly.
 
 ### CI coverage
 
-The hosted `.github/workflows/interop.yml` path gates 16 of the 42
+The hosted `.github/workflows/interop.yml` path gates 16 of the 43
 automated interop milestone scripts on every PR:
 
 - **Foundation** — wire-protocol + core RIB / refresh / policy: **M1**, **M13**, **M15**.
@@ -35,16 +35,18 @@ container exercises a real Linux bridge inside a netns):
 
 The self-hosted `kernel-dataplane` workflow adds the privileged Linux
 coverage that hosted runners cannot reliably exercise: **M36**,
-**M37**, **M37+IP**, **M38**, **M39**, **M40**, **M42**, and the Docker
-`fdb_nhg` / `fib_runtime` netns selectors. Those jobs run on PRs,
-pushes to `main`, nightly schedule, and manual dispatch behind the
-protected `kernel-dataplane` GitHub Environment.
+**M37**, **M37+IP**, **M38**, **M39**, **M40**, **M42**, the conditional
+**M43** TCP-AO smoke, and the Docker `fdb_nhg` / `fib_runtime` netns
+selectors. Those jobs run on PRs, pushes to `main`, nightly schedule, and
+manual dispatch behind the protected `kernel-dataplane` GitHub Environment.
+M43 runs only on runner kernels that advertise `CONFIG_TCP_AO=y`; runners
+without TCP-AO support report a warning and skip that topology.
 
 The remaining interop scripts are local / manual gates because they
 need substantial wall-clock (M11/M16 GR/LLGR, M33 scale soak),
 additional fixtures (StayRTR / mock RTR v2 server), or
-platform-diversity validation (BIRD, GoBGP — exercising alternate
-implementations without gating every PR).
+broader platform-diversity validation (BIRD, GoBGP — exercising alternate
+implementations beyond the protected BIRD TCP-AO smoke).
 
 | Peer | Version | Topology | Status | Notes | Known Quirks | NOTIFICATIONs Observed |
 |------|---------|----------|--------|-------|--------------|------------------------|
@@ -85,6 +87,7 @@ implementations without gating every PR).
 | FRR (bgpd) | 10.3.1 | `tests/interop/m35c-graceful-shutdown-evpn-frr.clab.yml` | Tested (M35c) | RFC 8326 initiator leg on EVPN | Single-peer L2VPN/EVPN topology. Test injects an EVPN Type 2 route first, verifies FRR receives it in steady state, toggles `NeighborService.SetGracefulShutdown { enabled: true }` without delete+re-add, then captures the BGP UPDATEs on the wire inside the FRR container and asserts the existing Type 2 route is re-emitted with the GRACEFUL_SHUTDOWN community (`0xffff0000`). Toggle-off captures the clear-side re-emit and asserts the community is gone. Pins the EVPN outbound advertise site for `attach_graceful_shutdown_if_enabled`. Uses the same per-flow TCP-stream-reassembling Python capture as M35b — FRR's L2VPN EVPN JSON view likewise does not expose standard communities, so packet capture (with TCP reassembly so a community split across segments still parses cleanly) is the only reliable wire-level check. | CI-gated alongside M29/M30/M34/M35 (`.github/workflows/interop.yml`) |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m41-blackhole-frr.clab.yml` | Tested (M41) | RFC 7999 BLACKHOLE receiver scoping + opt-in FIB discard | Single-peer EBGP topology. FRR's outbound route-map tags `203.0.113.66/32` and `198.51.100.0/24` with the `BLACKHOLE` community (`65535:666`) and leaves `203.0.113.67/32` untagged. rustbgpd runs with `[global] honor_blackhole = true` and `[global] install_blackhole_discard = true`; the driver asserts tagged routes in `ListReceivedRoutes` carry both `BLACKHOLE` and `NO_ADVERTISE`, the untagged route carries neither, `ListBlackholeDiscards` reports the host route as `installed`, the broad prefix as `rejected/broad_prefix`, the rustbgpd container FIB has a kernel `blackhole 203.0.113.66` route, the untagged and broad prefixes do not install, and FRR withdrawal removes the kernel discard. **In CI** on every push and PR via `.github/workflows/interop.yml`. |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m42-fib-runtime-frr.clab.yml` | Tested (M42) | ADR-0061 opt-in general unicast Linux FIB runtime | Single-peer EBGP topology. FRR advertises `203.0.113.42/32` and `198.51.100.0/24`; rustbgpd runs with `[[fib_tables]] name="edge", table_id=1000, metric=200, families=["ipv4_unicast"]`. The driver asserts `ListFibRoutes` reports the selected host route as `installed/owned`, the rustbgpd container's table 1000 has `203.0.113.42 via 10.0.0.2 proto bgp metric 200`, an existing `proto static` table-1000 row for `198.51.100.0/24` is preserved and reported as `rejected/foreign_route_exists`, FRR withdrawal removes only the daemon-owned route, and SIGTERM-triggered coordinated shutdown drains the owned route while preserving the foreign row. The privileged netns selector covers the companion drift case: external replacement of an owned row is reported as `owned_route_drifted`, ownership is released, and a later withdraw does not delete the replacement. **Self-hosted kernel-dataplane CI** via `.github/workflows/kernel-dataplane.yml` on PRs, pushes to `main`, nightly schedule, and manual dispatch; every job is gated by the protected `kernel-dataplane` GitHub Environment before it reaches the self-hosted runner. |
+| BIRD | 3.2.1 | `tests/interop/m43-tcp-ao-bird.clab.yml` | Tested (M43) | ADR-0062 static-neighbor TCP-AO protected session | Single-peer EBGP topology. rustbgpd (AS 65001, 10.0.43.1) configures a static neighbor with `tcp_ao = { key = "interop-secret-m43", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }`; BIRD 3.2.1 (AS 65043, 10.0.43.2) uses `authentication ao` with the matching key and advertises `203.0.113.43/32`. The driver asserts BIRD reaches Established, rustbgpd receives the advertised route through `RibService.ListReceivedRoutes`, then restarts BIRD with a mismatched TCP-AO secret and asserts the route withdraws and the session does not re-establish within the fail-closed window. **Self-hosted kernel-dataplane CI** includes M43, but the job runs only when the selected runner kernel advertises `CONFIG_TCP_AO=y`; otherwise it exits early with a warning. |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m36-evpn-vtep-smoke.clab.yml` | Tested (M36) | Gate 7b real-VTEP smoke — rustbgpd as VTEP, FRR as originator | iBGP/AS65000 single-peer topology. rustbgpd container pre-creates `br100` + `vxlan100` (nolearning, local 10.0.0.1) plus a foreign-static FDB entry (`02:99:99:99:99:99 → 10.0.0.99`); FRR injects MAC `02:aa:bb:cc:dd:01` on its dummy bridge port to trigger Type 2 origination. Test asserts rustbgpd's `bridge fdb show dev vxlan100` produces both required kernel rows (the `master <bridge>` row carrying `extern_learn`, and the `self`/`dst <remote>` row also carrying `extern_learn`), then withdraws and asserts cleanup, and verifies the foreign-static entry survives both cycles (validates ADR-0054 §5/§7 foreign-entry preservation against a real Linux 6.17 kernel). 8/8 PASS locally. **Self-hosted kernel-dataplane CI** via `.github/workflows/kernel-dataplane.yml`; the complementary privileged netns test at `crates/evpn-linux/tests/netns_dataplane.rs` (gated on `EVPN_LINUX_NETNS=1`) covers the same FDB programming path under direct cargo control. |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m37-evpn-local-origination.clab.yml` | Tested (M37) | Gate 7b+1 origination smoke — rustbgpd as VTEP originator, FRR as consumer | Inverts M36's roles to validate the upward EVPN flow added in Gate 7b+1. iBGP/AS65000 single-peer topology. rustbgpd container pre-creates `br100` + `vxlan100` + a non-VXLAN bridge port (`veth100a` enslaved to `br100`); the daemon subscribes to `RTNLGRP_NEIGH` (enum group id `3`, **not** the legacy bitmask `RTMGRP_NEIGH = 4`) on the rtnetlink socket and runs the `notify::classify_neigh` classifier on every `RTM_NEWNEIGH AF_BRIDGE` message. Test asserts (1) FRR sees a Type 3 IMET originated by rustbgpd at startup with PMSI Tunnel = Ingress Replication, label = raw 24-bit VNI per RFC 8365 §5.1.3, originator = 10.0.0.1; (2) `bridge fdb add 02:aa:bb:cc:dd:01 dev veth100a master static` triggers a Type 2 origination visible on FRR within ~15s with originator = 10.0.0.1; (3) `bridge fdb del` triggers a Type 2 withdraw within ~15s; (4) `docker stop` on rustbgpd causes the Type 3 IMET to drain (shutdown emits the Withdraw before the daemon exits). 4/4 PASS locally against Linux 6.17 + FRR 10.3.1. Validates ADR-0055 §1-§6 end-to-end. **Self-hosted kernel-dataplane CI** via `.github/workflows/kernel-dataplane.yml`. |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m37-evpn-mac-ip-origination.clab.yml` | Tested (M37+IP) | Gate 7b+2 MAC-with-IP origination smoke — FRR-style replace model | iBGP/AS65000 single-peer topology. Same rustbgpd-as-VTEP / FRR-as-consumer shape as M37 but exercises the upward flow extended in Gate 7b+2: `bridge fdb add MAC` originates a MAC-only Type 2; `ip neigh add IP lladdr MAC dev br100 nud reachable` causes the daemon to withdraw the MAC-only and emit a MAC+IP Type 2 (replace invariant — never both at once). Withdrawing the neighbour pulls the MAC+IP and the MAC-only path re-originates. Operator prerequisite: `neigh_suppress on` on every VXLAN port so the kernel routes ARP/ND bindings into the bridge's neighbour table. **Self-hosted kernel-dataplane CI** via `.github/workflows/kernel-dataplane.yml`. |
@@ -105,6 +108,8 @@ implementations without gating every PR).
 - containerlab installed
 - `rustbgpd:dev` Docker image built: `docker build -t rustbgpd:dev .`
 - `bird:2-bookworm` Docker image built: `docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop/`
+- `bird:3.2.1-tcpao` Docker image built for M43:
+  `docker build -t bird:3.2.1-tcpao -f tests/interop/Dockerfile.bird3 tests/interop/`
 
 ### FRR (M0)
 
@@ -153,6 +158,24 @@ curl -s http://<rustbgpd-mgmt-ip>:9179/metrics
 # Tear down
 containerlab destroy -t tests/interop/m0-bird.clab.yml
 ```
+
+### BIRD TCP-AO (M43)
+
+M43 validates ADR-0062 static-neighbor TCP-AO against BIRD 3.2.1 on a
+Linux kernel with `CONFIG_TCP_AO=y`:
+
+```sh
+docker build -t bird:3.2.1-tcpao -f tests/interop/Dockerfile.bird3 tests/interop/
+docker build -t rustbgpd:dev .
+containerlab deploy -t tests/interop/m43-tcp-ao-bird.clab.yml
+bash tests/interop/scripts/test-m43-tcp-ao-bird.sh
+containerlab destroy -t tests/interop/m43-tcp-ao-bird.clab.yml --cleanup
+```
+
+The driver first proves a matching-key session establishes and imports
+`203.0.113.43/32`, then restarts BIRD with a wrong secret and asserts the
+route withdraws and the session remains down. This is a fail-closed transport
+security check, not key-rotation coverage.
 
 ### Network Layouts
 

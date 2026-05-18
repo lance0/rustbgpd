@@ -1,0 +1,45 @@
+# Containerlab topology: rustbgpd ↔ BIRD 3.x (M43 — TCP-AO)
+#
+# Validates static-neighbor TCP-AO startup support against a real BIRD 3.x
+# peer on a Linux kernel with CONFIG_TCP_AO=y.
+#
+# Usage:
+#   docker build -t bird:3.2.1-tcpao -f tests/interop/Dockerfile.bird3 tests/interop
+#   docker build -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m43-tcp-ao-bird.clab.yml
+#   bash tests/interop/scripts/test-m43-tcp-ao-bird.sh
+#   containerlab destroy -t tests/interop/m43-tcp-ao-bird.clab.yml --cleanup
+
+name: m43-tcp-ao-bird
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m43-tcp-ao.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.43.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    bird:
+      kind: linux
+      image: bird:3.2.1-tcpao
+      binds:
+        - ./configs/bird-m43-tcp-ao.conf:/etc/bird/bird.conf:ro
+        - ./configs/bird-m43-tcp-ao-bad.conf:/etc/bird/bird-bad.conf:ro
+      exec:
+        - ip addr add 10.0.43.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "bird:eth1"]
+
+# Network: 10.0.43.0/24
+# rustbgpd: 10.0.43.1, AS 65001
+# BIRD 3.x: 10.0.43.2, AS 65043
