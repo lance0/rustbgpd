@@ -302,37 +302,42 @@ review/rollback unit.
    `UNIMPLEMENTED` defaults to `operator_only`. Correct this ADR and
    the inventory to match shipped listener-level `access_mode`
    behavior. No runtime enforcement change.
-2. **Identity + roles + audit-only runtime.** Implement principal extraction from mTLS
+2. **Audit-only runtime path.** Add a Tower/tonic runtime layer that
+   can see the gRPC method path, look up `crates/api/src/authz.rs`,
+   and emit structured audit-only tier-decision logs plus bounded
+   Prometheus counters. This slice does not deny requests and does
+   not alter mTLS, bearer-token, UDS, or listener `access_mode`
+   behavior.
+3. **Identity + roles.** Implement principal extraction from mTLS
    peer cert (URI-SAN → email-SAN → CN priority), plus explicit
    non-mTLS listener principals for bearer-token / UDS deployments that
    opt into tier enforcement. Add `[security.grpc.roles]` mapping. Add
    `observer | automation | operator` role-to-tier lookup plus
    `[security.grpc].enforcement = "legacy"` audit-only mode.
-3. **Listener tier cap.** Add `max_tier` to
+4. **Listener tier cap.** Add `max_tier` to
    `[[telemetry.grpc_tcp]]` / `[[telemetry.grpc_uds]]`. Translate
    the existing `access_mode = "read_only"` → `max_tier =
    "sensitive_read"` and `access_mode = "read_write"` → `max_tier =
    "operator_only"` automatically at config-load time; deprecate
    `access_mode` (still parsed, emits a `WARN` on use). Listener
    cap enforces in all modes including `legacy`.
-4. **Authorization layer + enforcement flip.** Add a Tower HTTP layer
-   or equivalent service-level checks that can see the gRPC method
-   path before tonic strips URI information. Default `enforcement =
-   "tier"`. Update
+5. **Enforcement flip.** Use the runtime layer from slice 2 plus the
+   identity/role/listener-cap config from slices 3–4 to deny
+   unauthorized RPCs. Default `enforcement = "tier"`. Update
    `CHANGELOG.md`, `KNOWN_ISSUES.md`, and
    `docs/SECURITY.md` migration notes.
-5. **Audit log hardening.** Add the `[(rustbgpd.v1.credential) =
+6. **Audit log hardening.** Add the `[(rustbgpd.v1.credential) =
    true]` field extension. Mask credential fields in the audit-log
    formatter. Add per-tier log-level configuration.
-6. **External-review prep.** Threat-model doc
+7. **External-review prep.** Threat-model doc
    (`docs/adr/0064-threat-model.md`), per-slice security
    sign-off, external auditor packet (inventory + ADR + threat model
    + audit-log sample).
 
-Slices 1–4 are the v1.0 blocker; slice 5 is hardening that should
-land in the same release window; slice 6 is the gate the external
-review pulls against. Slices 1–3 can ship under `legacy` enforcement
-without breaking any existing operator. Slice 4 is the breaking
+Slices 1–5 are the v1.0 blocker; slice 6 is hardening that should
+land in the same release window; slice 7 is the gate the external
+review pulls against. Slices 1–4 can ship under `legacy` enforcement
+without breaking any existing operator. Slice 5 is the breaking
 moment and gets its own release window's worth of operator
 communication.
 
@@ -357,14 +362,19 @@ communication.
 ## Implementation status
 
 Slice 1 is implemented by the ADR-0064 foundation PR: checked method
-matrix plus inventory/ADR correction. Later slices implement identity,
-listener tier caps, runtime enforcement, and audit logging.
+matrix plus inventory/ADR correction. Slice 2 is implemented by the
+audit-only runtime layer: method-path lookup, structured `grpc_authz`
+decision logs, and bounded-cardinality metrics with no authorization
+behavior change. Later slices implement real principal extraction,
+roles, listener tier caps, runtime enforcement, and result/request
+audit-log hardening.
 
 | Slice | Status |
 |-------|--------|
 | 1. Foundation | Implemented by the checked method-matrix PR |
-| 2. Identity + roles | Not started |
-| 3. Listener tier cap | Not started |
-| 4. Enforcement flip | Not started |
-| 5. Audit log hardening | Not started |
-| 6. External-review prep | Not started |
+| 2. Audit-only runtime path | Implemented by the runtime audit-layer PR |
+| 3. Identity + roles | Not started |
+| 4. Listener tier cap | Not started |
+| 5. Enforcement flip | Not started |
+| 6. Audit log hardening | Not started |
+| 7. External-review prep | Not started |

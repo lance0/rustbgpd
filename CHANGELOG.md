@@ -20,6 +20,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   authorization slices. No runtime authorization behavior changes in this
   foundation slice.
 
+- **ADR-0064 gRPC authorization audit runtime.** gRPC listeners now run an
+  audit-only Tower layer that observes each method path, looks up the checked
+  ADR-0064 tier matrix, emits structured `grpc_authz` log records, and records
+  `bgp_grpc_authz_decisions_total{tier,result,authn,access_mode}` without
+  changing authorization behavior. Existing mTLS, bearer-token, Unix-socket,
+  and `access_mode` checks remain unchanged. Full principal extraction,
+  `[security.grpc.roles]`, listener `max_tier`, and deny-by-tier enforcement
+  remain follow-up ADR-0064 slices.
+
 - **Filtered general FIB status queries.** `RibService.ListFibRoutes` now
   accepts optional `table_name`, `state`, `reason`, exact prefix, and
   peer-address filters, and `rustbgpctl rib fib` exposes the same filters via

@@ -14,6 +14,7 @@ use tonic::transport::Server;
 use tonic::{Request, Status};
 use tracing::{error, info, warn};
 
+use crate::authz_runtime::{GrpcAuthAuditContext, GrpcAuthAuditLayer, GrpcAuthnKind};
 use crate::config_service::ConfigService;
 use crate::control_service::{ControlService, MrtTriggerTx};
 use crate::event_service::{DataplaneEventBroadcaster, EventService, dataplane_event_broadcaster};
@@ -125,11 +126,59 @@ pub enum AccessMode {
     ReadWrite,
 }
 
+impl AccessMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::ReadWrite => "read_write",
+        }
+    }
+}
+
 /// Listener transport.
 #[derive(Clone, Debug)]
 pub enum ListenerEndpoint {
     Tcp(SocketAddr),
     Uds { path: PathBuf, mode: u32 },
+}
+
+fn tcp_audit_context(
+    addr: SocketAddr,
+    access_mode: AccessMode,
+    auth_enabled: bool,
+    tls_enabled: bool,
+) -> GrpcAuthAuditContext {
+    let (authn, principal) = if tls_enabled {
+        (GrpcAuthnKind::Mtls, "mtls-unresolved".to_string())
+    } else if auth_enabled {
+        (GrpcAuthnKind::BearerToken, "bearer-token".to_string())
+    } else {
+        (GrpcAuthnKind::None, "unauthenticated".to_string())
+    };
+    GrpcAuthAuditContext::new(
+        format!("tcp://{addr}"),
+        access_mode.as_str(),
+        authn,
+        principal,
+    )
+}
+
+fn uds_audit_context(
+    path: &Path,
+    access_mode: AccessMode,
+    auth_enabled: bool,
+) -> GrpcAuthAuditContext {
+    let (authn, principal) = if auth_enabled {
+        (GrpcAuthnKind::BearerToken, "bearer-token".to_string())
+    } else {
+        (GrpcAuthnKind::Uds, format!("uds:{}", path.display()))
+    };
+    GrpcAuthAuditContext::new(
+        format!("unix://{}", path.display()),
+        access_mode.as_str(),
+        authn,
+        principal,
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -347,7 +396,11 @@ async fn run_listener(
     }
 }
 
-#[expect(clippy::too_many_arguments, reason = "startup wiring for one listener")]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "startup wiring for one listener"
+)]
 async fn run_tcp_listener(
     addr: SocketAddr,
     access_mode: AccessMode,
@@ -383,6 +436,7 @@ async fn run_tcp_listener(
         tls_enabled = tls.is_some(),
         "starting gRPC TCP listener"
     );
+    let audit_context = tcp_audit_context(addr, access_mode, auth_token.is_some(), tls.is_some());
     let interceptor = AuthInterceptor::new(auth_token);
     let mut builder = Server::builder();
     if let Some(tls) = tls {
@@ -395,6 +449,7 @@ async fn run_tcp_listener(
             .tls_config(tls_cfg)
             .map_err(|e| format!("TCP listener {addr} TLS config invalid: {e}"))?;
     }
+    let mut builder = builder.layer(GrpcAuthAuditLayer::new(audit_context, metrics.clone()));
     builder
         .add_service(RibServiceServer::with_interceptor(
             RibService::with_status_snapshots_and_metrics(
@@ -506,6 +561,7 @@ async fn run_uds_listener(
 ) -> Result<(), String> {
     let auth_enabled = auth_token.is_some();
     let uds_listener = bind_uds_listener(&path, mode)?;
+    let audit_context = uds_audit_context(&path, access_mode, auth_enabled);
     info!(
         path = %path.display(),
         access_mode = ?access_mode,
@@ -514,6 +570,7 @@ async fn run_uds_listener(
     );
     let interceptor = AuthInterceptor::new(auth_token);
     let result = Server::builder()
+        .layer(GrpcAuthAuditLayer::new(audit_context, metrics.clone()))
         .add_service(RibServiceServer::with_interceptor(
             RibService::with_status_snapshots_and_metrics(
                 rib_query_tx.clone(),
