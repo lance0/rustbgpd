@@ -2,9 +2,13 @@
 
 use std::net::{IpAddr, SocketAddr};
 
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
+
+/// Match Tokio's default listener backlog.
+const DEFAULT_LISTEN_BACKLOG: i32 = 1024;
 
 /// An accepted inbound TCP connection.
 pub struct AcceptedConnection {
@@ -27,16 +31,30 @@ impl BgpListener {
     /// # Errors
     ///
     /// Returns an error if binding fails.
+    #[allow(clippy::unused_async)] // Preserve the existing async public API for callers.
     pub async fn bind(
         addr: SocketAddr,
         accept_tx: mpsc::Sender<AcceptedConnection>,
     ) -> std::io::Result<Self> {
-        let listener = TcpListener::bind(addr).await?;
-        info!(%addr, "BGP listener bound");
+        let listener = bind_socket2_listener(addr)?;
+        let bound_addr = listener.local_addr().unwrap_or(addr);
+        info!(addr = %bound_addr, requested_addr = %addr, "BGP listener bound");
         Ok(Self {
             listener,
             accept_tx,
         })
+    }
+
+    /// Return the local socket address the listener is bound to.
+    ///
+    /// This is primarily useful for tests that bind port `0`; production
+    /// callers already know the configured listen address.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the OS cannot report the listener's local address.
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.listener.local_addr()
     }
 
     /// Run the accept loop until the channel is closed.
@@ -61,4 +79,19 @@ impl BgpListener {
             }
         }
     }
+}
+
+fn bind_socket2_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let domain = if addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    socket.bind(&SockAddr::from(addr))?;
+    socket.listen(DEFAULT_LISTEN_BACKLOG)?;
+    socket.set_nonblocking(true)?;
+
+    let std_listener: std::net::TcpListener = socket.into();
+    TcpListener::from_std(std_listener)
 }

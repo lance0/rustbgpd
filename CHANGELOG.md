@@ -9,6 +9,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **BGP listener socket boundary prepared for TCP-AO.** The inbound BGP
+  listener now creates its listening socket through `socket2` before handing
+  it to Tokio. Runtime behavior is unchanged, but the transport layer now has
+  the pre-listen socket-option hook needed by future ADR-0062 TCP-AO key
+  installation on passive OPEN.
+
 ### Fixed
 
 - **FDB nexthop raw-netlink parser hardening.**
