@@ -43,7 +43,7 @@ use std::time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH};
 
 use rustbgpd_rib::{RibManager, RibUpdate};
 use rustbgpd_telemetry::{BgpMetrics, init_logging};
-use rustbgpd_transport::BgpListener;
+use rustbgpd_transport::{BgpListener, ListenerSocketOptions, TcpAoListenerKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -1315,42 +1315,62 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         .await;
     });
 
-    // Spawn BGP inbound TCP listener
-    let listen_addr = config.listen_addr();
-    let listener_peer_mgr_tx = peer_mgr_tx.clone();
-    tokio::spawn(async move {
-        let (accept_tx, mut accept_rx) =
-            mpsc::channel::<rustbgpd_transport::AcceptedConnection>(64);
-        match BgpListener::bind(listen_addr, accept_tx).await {
-            Ok(listener) => {
-                // Forward accepted connections to PeerManager in a separate task
-                let tx = listener_peer_mgr_tx;
-                tokio::spawn(async move {
-                    while let Some(conn) = accept_rx.recv().await {
-                        if let Err(e) = tx
-                            .send(PeerManagerCommand::AcceptInbound {
-                                stream: conn.stream,
-                                peer_addr: conn.peer_addr,
-                            })
-                            .await
-                        {
-                            warn!(error = %e, "failed to forward inbound connection to peer manager");
-                        }
-                    }
-                });
-                listener.run().await;
-            }
-            Err(e) => {
-                warn!(%listen_addr, error = %e, "failed to bind BGP listener");
-            }
-        }
-    });
-
-    // Add initial peers from config via PeerManager
     let peer_configs = config.resolved_neighbors().unwrap_or_else(|e| {
         error!("invalid policy configuration: {e}");
         process::exit(1);
     });
+    let listener_options = ListenerSocketOptions {
+        tcp_ao_keys: peer_configs
+            .iter()
+            .filter_map(|neighbor| {
+                neighbor
+                    .transport_config
+                    .tcp_ao
+                    .as_ref()
+                    .map(|tcp_ao| TcpAoListenerKey {
+                        peer: neighbor.transport_config.remote_addr.ip(),
+                        config: tcp_ao.clone(),
+                    })
+            })
+            .collect(),
+    };
+
+    // Spawn BGP inbound TCP listener
+    let listen_addr = config.listen_addr();
+    let tcp_ao_listener_required = !listener_options.tcp_ao_keys.is_empty();
+    let (accept_tx, mut accept_rx) = mpsc::channel::<rustbgpd_transport::AcceptedConnection>(64);
+    match BgpListener::bind_with_options(listen_addr, accept_tx, listener_options).await {
+        Ok(listener) => {
+            let listener_peer_mgr_tx = peer_mgr_tx.clone();
+            tokio::spawn(async move {
+                while let Some(conn) = accept_rx.recv().await {
+                    if let Err(e) = listener_peer_mgr_tx
+                        .send(PeerManagerCommand::AcceptInbound {
+                            stream: conn.stream,
+                            peer_addr: conn.peer_addr,
+                        })
+                        .await
+                    {
+                        warn!(error = %e, "failed to forward inbound connection to peer manager");
+                    }
+                }
+            });
+            tokio::spawn(listener.run());
+        }
+        Err(e) => {
+            if tcp_ao_listener_required {
+                error!(
+                    %listen_addr,
+                    error = %e,
+                    "failed to configure TCP-AO listener keys; refusing to start with partially protected peers"
+                );
+                process::exit(1);
+            }
+            warn!(%listen_addr, error = %e, "failed to bind BGP listener");
+        }
+    }
+
+    // Add initial peers from config via PeerManager
     for neighbor in peer_configs {
         let transport_config = neighbor.transport_config;
         let label = neighbor.label;
@@ -1374,6 +1394,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                     hold_time: Some(transport_config.peer.hold_time),
                     max_prefixes: transport_config.max_prefixes,
                     md5_password: transport_config.md5_password.clone(),
+                    tcp_ao: transport_config.tcp_ao.clone(),
                     ttl_security: transport_config.ttl_security,
                     families: transport_config.peer.families.clone(),
                     graceful_restart: transport_config.peer.graceful_restart,

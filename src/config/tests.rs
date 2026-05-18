@@ -578,7 +578,7 @@ ttl_security = true
 }
 
 #[test]
-fn neighbor_tcp_ao_schema_parses_without_runtime_wiring() {
+fn neighbor_tcp_ao_schema_maps_to_transport_config() {
     let toml_str = r#"
 [global]
 asn = 65001
@@ -605,6 +605,14 @@ tcp_ao = { key = "secret", send_id = 7, recv_id = 9, algorithm = "hmac(sha256)",
 
     let peers = config.to_peer_configs().unwrap();
     assert!(peers[0].0.md5_password.is_none());
+    let runtime_tcp_ao = peers[0].0.tcp_ao.as_ref().unwrap();
+    assert_eq!(runtime_tcp_ao.key, "secret");
+    assert_eq!(runtime_tcp_ao.send_id, 7);
+    assert_eq!(runtime_tcp_ao.recv_id, 9);
+    assert_eq!(
+        runtime_tcp_ao.algorithm,
+        rustbgpd_transport::TcpAoAlgorithm::HmacSha256
+    );
 }
 
 #[test]
@@ -2617,7 +2625,7 @@ fn diff_neighbors_no_changes() {
 }
 
 #[test]
-fn diff_neighbors_ignores_tcp_ao_only_changes_until_runtime_wiring() {
+fn diff_neighbors_ignores_tcp_ao_only_changes_because_reload_pins_them() {
     let old = vec![test_neighbor("10.0.0.1", 65001)];
     let mut new_neighbor = test_neighbor("10.0.0.1", 65001);
     new_neighbor.tcp_ao = Some(TcpAoConfig {
@@ -2633,6 +2641,118 @@ fn diff_neighbors_ignores_tcp_ao_only_changes_until_runtime_wiring() {
     assert!(diff.added.is_empty());
     assert!(diff.removed.is_empty());
     assert!(diff.changed.is_empty());
+}
+
+#[test]
+fn diff_config_flags_tcp_ao_changes_as_restart_required() {
+    let mut old = parse(valid_toml()).unwrap();
+    old.neighbors[0].tcp_ao = Some(TcpAoConfig {
+        key: "old-secret".into(),
+        send_id: 1,
+        recv_id: 1,
+        algorithm: "hmac(sha256)".into(),
+        preferred: false,
+        deprecated: false,
+    });
+    let mut new = old.clone();
+    new.neighbors[0].tcp_ao = Some(TcpAoConfig {
+        key: "new-secret".into(),
+        send_id: 1,
+        recv_id: 1,
+        algorithm: "hmac(sha256)".into(),
+        preferred: false,
+        deprecated: false,
+    });
+
+    let diff = super::diff_config(&old, &new);
+    assert!(diff.neighbor_tcp_ao_changed);
+    assert!(diff.has_restart_required_changes());
+    assert!(!diff.has_reload_applied_changes());
+
+    let json = super::config_diff_json_value(&diff);
+    assert_eq!(json["restart_required"]["neighbor_tcp_ao_changed"], true);
+
+    let text = super::format_config_diff_with_style(&diff, &super::ConfigDiffTextStyle::default());
+    assert!(text.contains("[[neighbors]].tcp_ao changed"));
+    assert!(!text.contains("old-secret"));
+    assert!(!text.contains("new-secret"));
+}
+
+#[test]
+fn diff_config_pins_entire_neighbor_when_tcp_ao_changes() {
+    let mut old = parse(valid_toml()).unwrap();
+    old.neighbors[0].hold_time = Some(90);
+    old.neighbors[0].tcp_ao = Some(TcpAoConfig {
+        key: "old-secret".into(),
+        send_id: 1,
+        recv_id: 1,
+        algorithm: "hmac(sha256)".into(),
+        preferred: false,
+        deprecated: false,
+    });
+    let mut new = old.clone();
+    new.neighbors[0].hold_time = Some(120);
+    new.neighbors[0].tcp_ao = Some(TcpAoConfig {
+        key: "new-secret".into(),
+        send_id: 1,
+        recv_id: 1,
+        algorithm: "hmac(sha256)".into(),
+        preferred: false,
+        deprecated: false,
+    });
+
+    let diff = super::diff_config(&old, &new);
+
+    assert!(diff.neighbor_tcp_ao_changed);
+    assert!(diff.neighbors.changed.is_empty());
+    assert!(!diff.has_reload_applied_changes());
+    assert!(diff.has_restart_required_changes());
+}
+
+#[test]
+fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
+    let old = parse(valid_toml()).unwrap();
+    let mut new = old.clone();
+    new.neighbors.push(Neighbor {
+        address: "10.0.0.3".into(),
+        remote_asn: 65003,
+        description: None,
+        peer_group: None,
+        hold_time: None,
+        max_prefixes: None,
+        md5_password: None,
+        tcp_ao: Some(TcpAoConfig {
+            key: "secret".into(),
+            send_id: 1,
+            recv_id: 1,
+            algorithm: "hmac(sha256)".into(),
+            preferred: false,
+            deprecated: false,
+        }),
+        ttl_security: None,
+        families: Vec::new(),
+        graceful_restart: None,
+        gr_restart_time: None,
+        gr_stale_routes_time: None,
+        llgr_stale_time: None,
+        local_ipv6_nexthop: None,
+        route_reflector_client: None,
+        route_server_client: None,
+        remove_private_as: None,
+        add_path: None,
+        import_policy: Vec::new(),
+        export_policy: Vec::new(),
+        import_policy_chain: Vec::new(),
+        export_policy_chain: Vec::new(),
+        log_level: None,
+    });
+
+    let diff = super::diff_config(&old, &new);
+
+    assert!(diff.neighbor_tcp_ao_changed);
+    assert!(diff.neighbors.added.is_empty());
+    assert!(!diff.has_reload_applied_changes());
+    assert!(diff.has_restart_required_changes());
 }
 
 #[test]
@@ -2683,7 +2803,27 @@ fn describe_neighbor_changes_hides_tcp_ao_key() {
     });
 
     let changes = super::describe_neighbor_changes(&old, &new);
-    assert_eq!(changes, vec!["tcp_ao: <changed schema-only>".to_string()]);
+    assert_eq!(
+        changes,
+        vec!["tcp_ao: <changed restart-required>".to_string()]
+    );
+}
+
+#[test]
+fn tcp_ao_debug_redacts_key() {
+    let tcp_ao = TcpAoConfig {
+        key: "secret".into(),
+        send_id: 1,
+        recv_id: 1,
+        algorithm: "hmac(sha256)".into(),
+        preferred: false,
+        deprecated: false,
+    };
+
+    let rendered = format!("{tcp_ao:?}");
+
+    assert!(rendered.contains("<redacted>"));
+    assert!(!rendered.contains("secret"));
 }
 
 #[test]

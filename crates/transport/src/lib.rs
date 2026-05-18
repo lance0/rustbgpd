@@ -19,11 +19,11 @@ pub(crate) mod session;
 mod socket_opts;
 pub mod timer;
 
-pub use config::{RemovePrivateAs, TransportConfig};
+pub use config::{RemovePrivateAs, TcpAoAlgorithm, TcpAoConfig, TransportConfig};
 pub use error::TransportError;
 pub use handle::{
     PeerCommand, PeerHandle, PeerSessionState, SessionIdentity, SessionLifecycleNotification,
     SessionNotification, SessionNotificationDirection, SessionNotificationEvent, SessionRole,
 };
-pub use listener::{AcceptedConnection, BgpListener};
+pub use listener::{AcceptedConnection, BgpListener, ListenerSocketOptions, TcpAoListenerKey};
 pub use socket_opts::{TcpAoSupport, probe_tcp_ao_support};

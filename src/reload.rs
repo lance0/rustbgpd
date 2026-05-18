@@ -32,6 +32,7 @@ fn build_peer_mgr_config(
         hold_time: Some(tc.peer.hold_time),
         max_prefixes: tc.max_prefixes,
         md5_password: tc.md5_password.clone(),
+        tcp_ao: tc.tcp_ao.clone(),
         ttl_security: tc.ttl_security,
         families: tc.peer.families.clone(),
         graceful_restart: tc.peer.graceful_restart,
@@ -416,6 +417,16 @@ pub(crate) async fn reload_config(
         );
         new_config.global.honor_blackhole = current.global.honor_blackhole;
         honor_blackhole_changed = false;
+    }
+    let tcp_ao_pinned_neighbors =
+        config::pin_tcp_ao_startup_only_neighbors(&mut new_config.neighbors, &current.neighbors);
+    if tcp_ao_pinned_neighbors > 0 {
+        error!(
+            neighbors = tcp_ao_pinned_neighbors,
+            "[[neighbors]].tcp_ao differs from the live listener/session startup keys: \
+             TCP-AO MKTs are installed only when sockets are created. Restart rustbgpd \
+             to add, remove, or rotate TCP-AO keys."
+        );
     }
 
     let policy_diff = config::diff_policy(&current.policy, &new_config.policy);
@@ -2088,6 +2099,36 @@ hold_time = 90
         );
         assert!(rendered.contains("honor_graceful_shutdown"), "{rendered}");
         assert!(rendered.contains("honor_blackhole"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn reload_pins_tcp_ao_key_edits_to_startup_snapshot() {
+        let initial = baseline_toml().replace(
+            "hold_time = 90",
+            "hold_time = 90\ntcp_ao = { key = \"old-secret\", send_id = 1, recv_id = 1, algorithm = \"hmac(sha256)\" }",
+        );
+        let new_toml = baseline_toml().replace(
+            "hold_time = 90",
+            "hold_time = 90\ntcp_ao = { key = \"new-secret\", send_id = 1, recv_id = 1, algorithm = \"hmac(sha256)\" }",
+        );
+
+        let (returned, tags) = drive_reload(&initial, &new_toml).await;
+        let returned = returned.expect("reload should return pinned runtime config");
+
+        assert!(
+            tags.is_empty(),
+            "tcp_ao-only edits are restart-required and must not reconcile peers: {tags:?}"
+        );
+        assert_eq!(
+            returned.neighbors[0].tcp_ao.as_ref().unwrap().key,
+            "old-secret",
+            "runtime snapshot must keep the startup listener/session key"
+        );
+        assert_eq!(
+            returned.desired.neighbors[0].tcp_ao.as_ref().unwrap().key,
+            "new-secret",
+            "desired TOML must preserve the operator's edit for restart"
+        );
     }
 
     /// Adding a named policy definition on reload must surface as a

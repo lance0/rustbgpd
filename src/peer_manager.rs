@@ -439,6 +439,7 @@ impl PeerManager {
         transport.max_prefixes = config.max_prefixes;
         transport.peer_group.clone_from(&config.peer_group);
         transport.md5_password.clone_from(&config.md5_password);
+        transport.tcp_ao.clone_from(&config.tcp_ao);
         transport.ttl_security = config.ttl_security;
         transport.local_ipv6_nexthop = config.local_ipv6_nexthop;
         transport.gr_stale_routes_time = config.gr_stale_routes_time;
@@ -1360,6 +1361,7 @@ impl PeerManager {
             hold_time: Some(tc.peer.hold_time),
             max_prefixes: tc.max_prefixes,
             md5_password: tc.md5_password.clone(),
+            tcp_ao: tc.tcp_ao.clone(),
             ttl_security: tc.ttl_security,
             families: tc.peer.families.clone(),
             graceful_restart: tc.peer.graceful_restart,
@@ -2513,6 +2515,7 @@ mod tests {
             hold_time: None,
             max_prefixes: None,
             md5_password: None,
+            tcp_ao: None,
             ttl_security: false,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
             graceful_restart: true,
@@ -6129,5 +6132,41 @@ md5_password = "new-secret"
 
         let transport = mgr.build_transport_config(&cfg);
         assert!(transport.gr_restart_until.is_none());
+    }
+
+    #[test]
+    fn build_transport_config_carries_tcp_ao_key() {
+        let (_tx, rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let mgr = PeerManager::new(
+            rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        );
+        let mut cfg = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
+        cfg.tcp_ao = Some(rustbgpd_transport::TcpAoConfig {
+            key: "secret".to_string(),
+            send_id: 1,
+            recv_id: 2,
+            algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+            preferred: false,
+            deprecated: false,
+        });
+
+        let transport = mgr.build_transport_config(&cfg);
+
+        let tcp_ao = transport.tcp_ao.as_ref().expect("tcp_ao carried");
+        assert_eq!(tcp_ao.key, "secret");
+        assert_eq!(tcp_ao.send_id, 1);
+        assert_eq!(tcp_ao.recv_id, 2);
+        assert_eq!(
+            tcp_ao.algorithm,
+            rustbgpd_transport::TcpAoAlgorithm::HmacSha256
+        );
     }
 }

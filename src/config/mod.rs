@@ -16,7 +16,9 @@ use rustbgpd_policy::{
     CommunityMatch, NextHopAction, Policy, PolicyAction, PolicyChain, PolicyStatement,
     RouteModifications, parse_community_match,
 };
-use rustbgpd_transport::{RemovePrivateAs, TransportConfig};
+use rustbgpd_transport::{
+    RemovePrivateAs, TcpAoAlgorithm, TcpAoConfig as TransportTcpAoConfig, TransportConfig,
+};
 use rustbgpd_wire::{
     Afi, EthernetSegmentIdentifier, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity,
     MacAddress, Prefix, RouteDistinguisher, Safi,
@@ -581,6 +583,15 @@ impl Config {
             .md5_password
             .clone()
             .or_else(|| group.and_then(|g| g.md5_password.clone()));
+        transport.tcp_ao = neighbor.tcp_ao.as_ref().map(|tcp_ao| TransportTcpAoConfig {
+            key: tcp_ao.key.clone(),
+            send_id: tcp_ao.send_id,
+            recv_id: tcp_ao.recv_id,
+            algorithm: TcpAoAlgorithm::from_linux_name(&tcp_ao.algorithm)
+                .expect("validated in Config::load"),
+            preferred: tcp_ao.preferred,
+            deprecated: tcp_ao.deprecated,
+        });
         transport.ttl_security = neighbor
             .ttl_security
             .or_else(|| group.and_then(|g| g.ttl_security))
@@ -970,7 +981,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<String> 
         changes.push("md5_password: <changed>".to_string());
     }
     if old.tcp_ao != new.tcp_ao {
-        changes.push("tcp_ao: <changed schema-only>".to_string());
+        changes.push("tcp_ao: <changed restart-required>".to_string());
     }
 
     // Policy changes: summarize rather than dump full config
@@ -999,10 +1010,10 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<String> 
 /// Compare two neighbor lists and return the differences.
 ///
 /// Two neighbors with the same address but different runtime-affecting
-/// configuration are reported in `changed`. Schema-only TCP-AO edits are
-/// deliberately ignored until ADR-0062 runtime key installation lands: a
-/// SIGHUP should update the config snapshot without bouncing a session for a
-/// field the transport layer cannot apply yet.
+/// configuration are reported in `changed`. TCP-AO edits are deliberately
+/// excluded here because they are startup-listener key material: `diff_config`
+/// reports them through `neighbor_tcp_ao_changed`, and SIGHUP pins them until
+/// daemon restart rather than hot-reconciling a peer with stale listener MKTs.
 pub fn diff_neighbors(old: &[Neighbor], new: &[Neighbor]) -> NeighborDiff {
     let old_map: std::collections::HashMap<&str, &Neighbor> =
         old.iter().map(|n| (n.address.as_str(), n)).collect();
@@ -1160,6 +1171,11 @@ pub struct ConfigDiff {
     /// once at startup, so edits are restart-required and must remain
     /// visible in `--diff`.
     pub blackhole_fib_discard_changed: bool,
+    /// Static-neighbor TCP-AO startup keys changed. The active and
+    /// passive sockets install MKTs only at peer/listener creation, so
+    /// edits require a daemon restart until runtime listener key
+    /// rotation exists.
+    pub neighbor_tcp_ao_changed: bool,
 }
 
 /// Per-neighbor impact derived from inheritance / chain resolution.
@@ -1258,6 +1274,7 @@ impl ConfigDiff {
             || self.fib_tables_changed
             || self.apply_bum_enforcement_changed
             || self.blackhole_fib_discard_changed
+            || self.neighbor_tcp_ao_changed
     }
 
     /// Changes detected but not applied by current SIGHUP. Empty
@@ -1320,6 +1337,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "fib_tables_changed": diff.fib_tables_changed,
             "apply_bum_enforcement_changed": diff.apply_bum_enforcement_changed,
             "blackhole_fib_discard_changed": diff.blackhole_fib_discard_changed,
+            "neighbor_tcp_ao_changed": diff.neighbor_tcp_ao_changed,
             "inline_policy_import_changed": diff.policy.import_changed,
             "inline_policy_export_changed": diff.policy.export_changed,
         },
@@ -1521,6 +1539,9 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     if diff.blackhole_fib_discard_changed {
         restart_sections.push("BLACKHOLE FIB discard");
     }
+    if diff.neighbor_tcp_ao_changed {
+        restart_sections.push("[[neighbors]].tcp_ao");
+    }
     if p.import_changed {
         restart_sections.push("[policy.import] (inline)");
     }
@@ -1546,7 +1567,10 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
 
 /// Compare two full configurations and return a structured diff.
 pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
-    let neighbor_diff = diff_neighbors(&old.neighbors, &new.neighbors);
+    let neighbor_tcp_ao_changed = neighbor_tcp_ao_restart_required_changed(old, new);
+    let mut reload_new_neighbors = new.neighbors.clone();
+    pin_tcp_ao_startup_only_neighbors(&mut reload_new_neighbors, &old.neighbors);
+    let neighbor_diff = diff_neighbors(&old.neighbors, &reload_new_neighbors);
 
     let old_map: HashMap<&str, &Neighbor> = old
         .neighbors
@@ -1627,7 +1651,73 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         fib_tables_changed: old.fib_tables != new.fib_tables,
         apply_bum_enforcement_changed: old.apply_bum_enforcement != new.apply_bum_enforcement,
         blackhole_fib_discard_changed,
+        neighbor_tcp_ao_changed,
     }
+}
+
+fn neighbor_tcp_ao_restart_required_changed(old: &Config, new: &Config) -> bool {
+    let old_by_addr: HashMap<&str, &Neighbor> = old
+        .neighbors
+        .iter()
+        .map(|neighbor| (neighbor.address.as_str(), neighbor))
+        .collect();
+    let new_by_addr: HashMap<&str, &Neighbor> = new
+        .neighbors
+        .iter()
+        .map(|neighbor| (neighbor.address.as_str(), neighbor))
+        .collect();
+
+    for new_neighbor in &new.neighbors {
+        match old_by_addr.get(new_neighbor.address.as_str()) {
+            Some(old_neighbor) if old_neighbor.tcp_ao != new_neighbor.tcp_ao => return true,
+            None if new_neighbor.tcp_ao.is_some() => return true,
+            _ => {}
+        }
+    }
+
+    old.neighbors.iter().any(|old_neighbor| {
+        old_neighbor.tcp_ao.is_some() && !new_by_addr.contains_key(old_neighbor.address.as_str())
+    })
+}
+
+pub(crate) fn pin_tcp_ao_startup_only_neighbors(
+    new_neighbors: &mut Vec<Neighbor>,
+    current_neighbors: &[Neighbor],
+) -> usize {
+    let current_by_addr: HashMap<&str, &Neighbor> = current_neighbors
+        .iter()
+        .map(|neighbor| (neighbor.address.as_str(), neighbor))
+        .collect();
+
+    let mut pinned = 0usize;
+    for neighbor in new_neighbors.iter_mut() {
+        match current_by_addr.get(neighbor.address.as_str()) {
+            Some(current_neighbor) if current_neighbor.tcp_ao != neighbor.tcp_ao => {
+                *neighbor = (*current_neighbor).clone();
+                pinned += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let before_len = new_neighbors.len();
+    new_neighbors.retain(|neighbor| {
+        current_by_addr.contains_key(neighbor.address.as_str()) || neighbor.tcp_ao.is_none()
+    });
+    pinned += before_len - new_neighbors.len();
+
+    let new_addrs: HashSet<String> = new_neighbors
+        .iter()
+        .map(|neighbor| neighbor.address.clone())
+        .collect();
+    for current_neighbor in current_neighbors {
+        if current_neighbor.tcp_ao.is_some() && !new_addrs.contains(&current_neighbor.address) {
+            new_neighbors.push(current_neighbor.clone());
+            pinned += 1;
+        }
+    }
+
+    pinned
 }
 
 fn global_restart_required_changed(old: &Config, new: &Config) -> bool {

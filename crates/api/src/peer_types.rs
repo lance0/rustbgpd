@@ -6,7 +6,7 @@ use std::net::{IpAddr, Ipv6Addr};
 use bytes::Bytes;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_transport::RemovePrivateAs;
+use rustbgpd_transport::{RemovePrivateAs, TcpAoConfig};
 use rustbgpd_wire::{Afi, Safi};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, oneshot};
@@ -711,6 +711,8 @@ pub struct PeerManagerNeighborConfig {
     pub max_prefixes: Option<u32>,
     /// Optional TCP MD5 password.
     pub md5_password: Option<String>,
+    /// Optional TCP-AO key for static-neighbor runtime sockets.
+    pub tcp_ao: Option<TcpAoConfig>,
     /// Whether GTSM / TTL security is enabled.
     pub ttl_security: bool,
     /// Negotiated address families for this peer.

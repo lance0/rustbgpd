@@ -443,6 +443,16 @@ async fn create_and_connect(
         debug!(peer = %peer_label, "TCP MD5 authentication configured");
     }
 
+    if let Some(ref tcp_ao) = config.tcp_ao {
+        crate::socket_opts::set_tcp_ao_config(
+            &socket,
+            config.remote_addr.ip(),
+            tcp_ao,
+            crate::socket_opts::TcpAoSocketRole::ActiveOpen,
+        )?;
+        debug!(peer = %peer_label, "TCP-AO authentication configured");
+    }
+
     if config.ttl_security {
         crate::socket_opts::set_gtsm(&socket)?;
         debug!(peer = %peer_label, "GTSM / TTL security configured");

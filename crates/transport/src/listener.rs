@@ -2,6 +2,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 
+use crate::config::TcpAoConfig;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -16,6 +17,22 @@ pub struct AcceptedConnection {
     pub stream: TcpStream,
     /// IP address of the remote peer.
     pub peer_addr: IpAddr,
+}
+
+/// TCP-AO key to install on the inbound listener socket.
+#[derive(Clone)]
+pub struct TcpAoListenerKey {
+    /// Remote peer address matched by this listener MKT.
+    pub peer: IpAddr,
+    /// TCP-AO key configuration for the peer.
+    pub config: TcpAoConfig,
+}
+
+/// Socket options installed before the BGP listener enters `listen(2)`.
+#[derive(Clone, Default)]
+pub struct ListenerSocketOptions {
+    /// Static-neighbor TCP-AO MKTs for passive opens.
+    pub tcp_ao_keys: Vec<TcpAoListenerKey>,
 }
 
 /// BGP inbound listener. Accepts TCP connections and forwards them
@@ -36,9 +53,29 @@ impl BgpListener {
         addr: SocketAddr,
         accept_tx: mpsc::Sender<AcceptedConnection>,
     ) -> std::io::Result<Self> {
-        let listener = bind_socket2_listener(addr)?;
+        Self::bind_with_options(addr, accept_tx, ListenerSocketOptions::default()).await
+    }
+
+    /// Create a new listener with explicit pre-listen socket options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if binding or pre-listen option installation fails.
+    #[allow(clippy::unused_async)] // Preserve the async API shape for callers.
+    pub async fn bind_with_options(
+        addr: SocketAddr,
+        accept_tx: mpsc::Sender<AcceptedConnection>,
+        options: ListenerSocketOptions,
+    ) -> std::io::Result<Self> {
+        let tcp_ao_keys = options.tcp_ao_keys.len();
+        let listener = bind_socket2_listener(addr, &options)?;
         let bound_addr = listener.local_addr().unwrap_or(addr);
-        info!(addr = %bound_addr, requested_addr = %addr, "BGP listener bound");
+        info!(
+            addr = %bound_addr,
+            requested_addr = %addr,
+            tcp_ao_keys,
+            "BGP listener bound"
+        );
         Ok(Self {
             listener,
             accept_tx,
@@ -81,7 +118,21 @@ impl BgpListener {
     }
 }
 
-fn bind_socket2_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
+fn bind_socket2_listener(
+    addr: SocketAddr,
+    options: &ListenerSocketOptions,
+) -> std::io::Result<TcpListener> {
+    bind_socket2_listener_with(addr, options, install_listener_tcp_ao_key)
+}
+
+fn bind_socket2_listener_with<F>(
+    addr: SocketAddr,
+    options: &ListenerSocketOptions,
+    mut install_tcp_ao: F,
+) -> std::io::Result<TcpListener>
+where
+    F: FnMut(&Socket, &TcpAoListenerKey) -> std::io::Result<()>,
+{
     let domain = if addr.is_ipv4() {
         Domain::IPV4
     } else {
@@ -89,9 +140,66 @@ fn bind_socket2_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
     };
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
     socket.bind(&SockAddr::from(addr))?;
+    for key in &options.tcp_ao_keys {
+        install_tcp_ao(&socket, key)?;
+        debug!(peer = %key.peer, "TCP-AO listener key configured");
+    }
     socket.listen(DEFAULT_LISTEN_BACKLOG)?;
     socket.set_nonblocking(true)?;
 
     let std_listener: std::net::TcpListener = socket.into();
     TcpListener::from_std(std_listener)
+}
+
+fn install_listener_tcp_ao_key(socket: &Socket, key: &TcpAoListenerKey) -> std::io::Result<()> {
+    crate::socket_opts::set_tcp_ao_config(
+        socket,
+        key.peer,
+        &key.config,
+        crate::socket_opts::TcpAoSocketRole::Listener,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{TcpAoAlgorithm, TcpAoConfig};
+    use std::cell::RefCell;
+    use std::net::Ipv4Addr;
+
+    fn tcp_ao_config() -> TcpAoConfig {
+        TcpAoConfig {
+            key: "secret".to_string(),
+            send_id: 1,
+            recv_id: 1,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            preferred: false,
+            deprecated: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_socket2_listener_installs_tcp_ao_keys_before_listen() {
+        let installed = RefCell::new(Vec::new());
+        let options = ListenerSocketOptions {
+            tcp_ao_keys: vec![TcpAoListenerKey {
+                peer: IpAddr::from(Ipv4Addr::new(192, 0, 2, 1)),
+                config: tcp_ao_config(),
+            }],
+        };
+
+        let listener =
+            bind_socket2_listener_with("127.0.0.1:0".parse().unwrap(), &options, |_socket, key| {
+                installed.borrow_mut().push(key.peer);
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(listener.local_addr().unwrap().port() > 0);
+        assert_eq!(
+            installed.into_inner(),
+            vec![IpAddr::from(Ipv4Addr::new(192, 0, 2, 1))]
+        );
+        tokio::task::yield_now().await;
+    }
 }

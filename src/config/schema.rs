@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -361,9 +362,8 @@ pub struct Neighbor {
     pub hold_time: Option<u16>,
     pub max_prefixes: Option<u32>,
     pub md5_password: Option<String>,
-    /// Static-neighbor TCP-AO (RFC 5925) configuration. Schema-only in
-    /// ADR-0062's current slice: parsed and validated, but not installed on
-    /// runtime sockets until the listener/outbound wiring lands.
+    /// Static-neighbor TCP-AO (RFC 5925) configuration. Installed on
+    /// startup active-open sockets and the passive listener when configured.
     pub tcp_ao: Option<TcpAoConfig>,
     pub ttl_security: Option<bool>,
     /// Address families to negotiate (e.g., `["ipv4_unicast", "ipv6_unicast"]`).
@@ -420,7 +420,7 @@ pub struct Neighbor {
     pub export_policy_chain: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TcpAoConfig {
     /// TCP-AO Master Key Tuple secret. 1..=80 bytes.
@@ -439,6 +439,19 @@ pub struct TcpAoConfig {
     /// until TCP-AO socket installation lands.
     #[serde(default)]
     pub deprecated: bool,
+}
+
+impl fmt::Debug for TcpAoConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TcpAoConfig")
+            .field("key", &"<redacted>")
+            .field("send_id", &self.send_id)
+            .field("recv_id", &self.recv_id)
+            .field("algorithm", &self.algorithm)
+            .field("preferred", &self.preferred)
+            .field("deprecated", &self.deprecated)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
