@@ -970,7 +970,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<String> 
         changes.push("md5_password: <changed>".to_string());
     }
     if old.tcp_ao != new.tcp_ao {
-        changes.push("tcp_ao: <changed>".to_string());
+        changes.push("tcp_ao: <changed schema-only>".to_string());
     }
 
     // Policy changes: summarize rather than dump full config

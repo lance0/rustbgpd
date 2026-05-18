@@ -2683,7 +2683,7 @@ fn describe_neighbor_changes_hides_tcp_ao_key() {
     });
 
     let changes = super::describe_neighbor_changes(&old, &new);
-    assert_eq!(changes, vec!["tcp_ao: <changed>".to_string()]);
+    assert_eq!(changes, vec!["tcp_ao: <changed schema-only>".to_string()]);
 }
 
 #[test]
