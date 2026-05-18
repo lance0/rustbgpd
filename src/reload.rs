@@ -72,7 +72,7 @@ pub(crate) struct ReloadedConfig {
 }
 
 impl ReloadedConfig {
-    pub(crate) fn new(runtime: Config, desired: Config) -> Self {
+    fn new(runtime: Config, desired: Config) -> Self {
         Self { runtime, desired }
     }
 }
@@ -1161,4 +1161,1607 @@ fn halt_partial(
         "config reload halted at this step — runtime state matches the in-memory snapshot returned by reload (partial). Re-edit TOML and reload again to converge."
     );
     Some(ReloadedConfig::new(working_config, desired_config.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+    use crate::config_persister::ConfigPersister;
+
+    fn unique_temp_path(name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("rustbgpd-{name}-{suffix}.toml"))
+    }
+
+    /// SIGHUP that adds mTLS to `grpc_tcp` must NOT advance the
+    /// in-memory config's `grpc_tcp` field — the live listener is
+    /// still serving the prior config (no listener rebind on
+    /// reload), so the runtime snapshot has to keep pointing at the
+    /// live state. Without this, future reloads compare against the
+    /// already-mutated snapshot and the drift error stops firing.
+    #[tokio::test]
+    async fn reload_pins_grpc_tcp_to_live_listener_snapshot() {
+        let path = unique_temp_path("reload-grpc-tcp-pin");
+
+        // Initial config: grpc_tcp present but plaintext (no TLS).
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        assert!(
+            live_grpc_tcp
+                .as_ref()
+                .is_some_and(|cfg| cfg.tls_cert_file.is_none()),
+            "initial listener must be plaintext"
+        );
+
+        // Operator overwrites the file with an mTLS-enabled config.
+        // Validation now reads PEM material at config load, so the
+        // paths must point at real PEM-shaped files.
+        let cert = unique_temp_path("reload-pin-cert.pem");
+        let key = unique_temp_path("reload-pin-key.pem");
+        let ca = unique_temp_path("reload-pin-ca.pem");
+        std::fs::write(
+            &cert,
+            "-----BEGIN CERTIFICATE-----\nMIIBstub\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &key,
+            "-----BEGIN PRIVATE KEY-----\nMIIBstub\n-----END PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &ca,
+            "-----BEGIN CERTIFICATE-----\nMIIBstub\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let mtls_toml = format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+tls_cert_file = {cert:?}
+tls_key_file = {key:?}
+tls_client_ca_file = {ca:?}
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+            cert = cert.to_str().unwrap(),
+            key = key.to_str().unwrap(),
+            ca = ca.to_str().unwrap(),
+        );
+        std::fs::write(&path, mtls_toml).unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await
+        .expect("reload should return a config even when grpc_tcp drifts");
+
+        // The returned config's grpc_tcp MUST equal the live listener
+        // snapshot, NOT the new declared mTLS config. Otherwise a
+        // second reload would compare new declared vs already-updated
+        // snapshot and stop warning.
+        assert_eq!(
+            returned.global.telemetry.grpc_tcp, live_grpc_tcp,
+            "reload must pin grpc_tcp to the live listener snapshot until the daemon restarts"
+        );
+        assert!(
+            returned
+                .global
+                .telemetry
+                .grpc_tcp
+                .as_ref()
+                .is_some_and(|cfg| cfg.tls_cert_file.is_none()),
+            "returned grpc_tcp must NOT carry the newly declared TLS material"
+        );
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&cert).ok();
+        std::fs::remove_file(&key).ok();
+        std::fs::remove_file(&ca).ok();
+    }
+
+    /// SIGHUP that edits `[[evpn_instances]]` must NOT advance the
+    /// in-memory config's `evpn_instances` field — the gRPC
+    /// `EvpnService` is still serving the startup `Arc<EvpnInstanceTable>`
+    /// (no swap surface yet, ADR-0052). Without pinning, the next
+    /// reload would compare against the already-mutated snapshot and
+    /// the drift error would silently stop firing — operators would
+    /// believe their edits had taken effect when in fact the gRPC
+    /// surface is still on the prior instance set.
+    #[tokio::test]
+    async fn reload_pins_evpn_instances_to_startup_snapshot() {
+        let path = unique_temp_path("reload-evpn-pin");
+
+        // Initial config: one EVPN instance.
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        assert_eq!(initial.evpn_instances.len(), 1);
+        assert_eq!(initial.evpn_instances[0].vni, 100);
+
+        // Operator rewrites the file: VNI changes, RTs expand, a new
+        // instance appears. None of this can take effect on a SIGHUP
+        // in the foundation slice, but the reload path must surface
+        // the drift and pin the snapshot.
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100", "65000:200"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await
+        .expect("reload should return a config even when only evpn_instances drift");
+
+        // The returned config's evpn_instances MUST equal the startup
+        // snapshot, NOT the new declared block. Otherwise a second
+        // reload would compare new declared vs already-updated snapshot
+        // and stop warning.
+        assert_eq!(
+            returned.evpn_instances, initial.evpn_instances,
+            "reload must pin evpn_instances to the startup snapshot until the daemon restarts"
+        );
+        assert_eq!(
+            returned.evpn_instances.len(),
+            1,
+            "second instance must NOT have advanced into the runtime snapshot"
+        );
+        assert_eq!(
+            returned.evpn_instances[0].route_targets.len(),
+            1,
+            "RT-list expansion must NOT have advanced into the runtime snapshot"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// SIGHUP that edits `[[evpn_ip_vrfs]]` must not advance the
+    /// in-memory snapshot. Gate 9 currently validates IP-VRF schema
+    /// at startup only; letting reload adopt the new table would make
+    /// the next reload stop reporting drift even though no Type 5 /
+    /// L3VNI runtime state changed.
+    #[tokio::test]
+    async fn reload_pins_evpn_ip_vrfs_to_startup_snapshot() {
+        let path = unique_temp_path("reload-evpn-ip-vrf-pin");
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.1"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#,
+        )
+        .unwrap();
+
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        assert_eq!(initial.evpn_ip_vrfs.len(), 1);
+        assert_eq!(initial.evpn_ip_vrfs[0].name, "tenant-blue");
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000", "65000:6000"]
+local_vtep_ip = "10.0.0.1"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+
+[[evpn_ip_vrfs]]
+name = "tenant-red"
+vni = 5001
+rd = "65000:5001"
+route_targets = ["65000:5001"]
+local_vtep_ip = "10.0.0.1"
+router_mac = "02:00:00:00:00:02"
+vrf_device = "vrf-red"
+l3vxlan_device = "vni5001"
+table_id = 5001
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await
+        .expect("reload should return a config even when only evpn_ip_vrfs drift");
+
+        assert_eq!(
+            returned.evpn_ip_vrfs, initial.evpn_ip_vrfs,
+            "reload must pin evpn_ip_vrfs to the startup snapshot until restart"
+        );
+        assert_eq!(
+            returned.evpn_ip_vrfs.len(),
+            1,
+            "new IP-VRF must not advance into the runtime snapshot"
+        );
+        assert_eq!(
+            returned.evpn_ip_vrfs[0].route_targets.len(),
+            1,
+            "RT-list expansion must not advance into the runtime snapshot"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// SIGHUP must also pin Gate 8 startup-only EVPN surfaces that
+    /// feed long-lived actors: the Ethernet Segment table and the
+    /// kernel-enforcement opt-in. Otherwise a reload would advance
+    /// `current`, the actor would still be on its startup state, and
+    /// the next reload would stop reporting drift.
+    #[tokio::test]
+    async fn reload_pins_ethernet_segments_and_bum_enforcement_to_startup_snapshot() {
+        let path = unique_temp_path("reload-evpn-gate8-pin");
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        assert!(initial.ethernet_segments.is_empty());
+        assert!(!initial.apply_bum_enforcement);
+
+        std::fs::write(
+            &path,
+            r#"
+apply_bum_enforcement = true
+
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await
+        .expect("reload should return a config even when only Gate 8 surfaces drift");
+
+        assert_eq!(
+            returned.ethernet_segments, initial.ethernet_segments,
+            "reload must pin ethernet_segments to the startup snapshot until restart"
+        );
+        assert_eq!(
+            returned.apply_bum_enforcement, initial.apply_bum_enforcement,
+            "reload must pin apply_bum_enforcement to the startup snapshot until restart"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn reload_hot_applies_honor_graceful_shutdown() {
+        let path = unique_temp_path("reload-honor-gshut-hot-apply");
+
+        // Initial: honor knob OFF (default).
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        assert!(!initial.global.honor_graceful_shutdown);
+
+        // Operator rewrites: turns the knob ON. Reload must advance
+        // the runtime snapshot and ask the peer manager to recompute
+        // EBGP runtime policies so the implicit chain-tail rule lands
+        // on already-running sessions.
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+honor_graceful_shutdown = true
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+        let peer_mgr = tokio::spawn(async move {
+            match peer_mgr_rx.recv().await {
+                Some(PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply }) => {
+                    let _ = reply.send(Ok(()));
+                    enabled
+                }
+                _ => panic!("expected SetHonorGracefulShutdown command"),
+            }
+        });
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await
+        .expect("reload should hot-apply honor_graceful_shutdown");
+
+        assert!(
+            returned.global.honor_graceful_shutdown,
+            "reload must advance honor_graceful_shutdown after peer manager hot-apply succeeds"
+        );
+        assert!(
+            peer_mgr.await.unwrap(),
+            "peer manager command must carry enabled=true"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn reload_hot_applies_honor_blackhole() {
+        let path = unique_temp_path("reload-honor-blackhole-hot-apply");
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        assert!(!initial.global.honor_blackhole);
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+honor_blackhole = true
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+        let peer_mgr = tokio::spawn(async move {
+            match peer_mgr_rx.recv().await {
+                Some(PeerManagerCommand::SetHonorBlackhole { enabled, reply }) => {
+                    let _ = reply.send(Ok(()));
+                    enabled
+                }
+                _ => panic!("expected SetHonorBlackhole command"),
+            }
+        });
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await
+        .expect("reload should hot-apply honor_blackhole");
+
+        assert!(
+            returned.global.honor_blackhole,
+            "reload must advance honor_blackhole after peer manager hot-apply succeeds"
+        );
+        assert!(
+            peer_mgr.await.unwrap(),
+            "peer manager command must carry enabled=true"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn reload_pins_honor_blackhole_when_fib_discard_enabled() {
+        let path = unique_temp_path("reload-pins-honor-blackhole-with-fib");
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+honor_blackhole = true
+install_blackhole_discard = true
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+honor_blackhole = false
+install_blackhole_discard = true
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await
+        .expect("reload should pin honor_blackhole to the startup FIB snapshot");
+
+        assert!(
+            returned.global.honor_blackhole,
+            "honor_blackhole must stay pinned while the FIB reconciler is running"
+        );
+        assert!(returned.global.install_blackhole_discard);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn reload_hot_applies_graceful_shutdown_and_blackhole_together() {
+        let path = unique_temp_path("reload-honor-gshut-blackhole-hot-apply");
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        assert!(!initial.global.honor_graceful_shutdown);
+        assert!(!initial.global.honor_blackhole);
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+honor_graceful_shutdown = true
+honor_blackhole = true
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+        let peer_mgr = tokio::spawn(async move {
+            let mut commands = Vec::new();
+            for _ in 0..2 {
+                match peer_mgr_rx.recv().await {
+                    Some(PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply }) => {
+                        let _ = reply.send(Ok(()));
+                        commands.push(("gshut", enabled));
+                    }
+                    Some(PeerManagerCommand::SetHonorBlackhole { enabled, reply }) => {
+                        let _ = reply.send(Ok(()));
+                        commands.push(("blackhole", enabled));
+                    }
+                    _ => panic!("unexpected peer manager command"),
+                }
+            }
+            commands
+        });
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await
+        .expect("reload should hot-apply both honor knobs");
+
+        assert!(returned.global.honor_graceful_shutdown);
+        assert!(returned.global.honor_blackhole);
+        assert_eq!(
+            peer_mgr.await.unwrap(),
+            vec![("gshut", true), ("blackhole", true)]
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Tag string identifying the kind of `PeerManagerCommand` the
+    /// mock observed during a reload — used by reload tests to
+    /// assert the right sequence of commands fired without coupling
+    /// to the full command struct.
+    fn cmd_tag(cmd: &PeerManagerCommand) -> String {
+        match cmd {
+            PeerManagerCommand::SetPolicy { name, .. } => format!("SetPolicy({name})"),
+            PeerManagerCommand::DeletePolicy { name, .. } => format!("DeletePolicy({name})"),
+            PeerManagerCommand::SetNeighborSet { name, .. } => format!("SetNeighborSet({name})"),
+            PeerManagerCommand::DeleteNeighborSet { name, .. } => {
+                format!("DeleteNeighborSet({name})")
+            }
+            PeerManagerCommand::SetPeerGroup { name, .. } => format!("SetPeerGroup({name})"),
+            PeerManagerCommand::DeletePeerGroup { name, .. } => format!("DeletePeerGroup({name})"),
+            PeerManagerCommand::SetGlobalImportChain { policy_names, .. } => {
+                format!("SetGlobalImportChain({})", policy_names.join(","))
+            }
+            PeerManagerCommand::SetGlobalExportChain { policy_names, .. } => {
+                format!("SetGlobalExportChain({})", policy_names.join(","))
+            }
+            PeerManagerCommand::ClearGlobalImportChain { .. } => {
+                "ClearGlobalImportChain".to_string()
+            }
+            PeerManagerCommand::ClearGlobalExportChain { .. } => {
+                "ClearGlobalExportChain".to_string()
+            }
+            PeerManagerCommand::ReconcilePeers {
+                added,
+                removed,
+                changed,
+                ..
+            } => {
+                format!(
+                    "ReconcilePeers(+{},-{},~{})",
+                    added.len(),
+                    removed.len(),
+                    changed.len(),
+                )
+            }
+            PeerManagerCommand::SoftResetIn { address, .. } => {
+                format!("SoftResetIn({address})")
+            }
+            _ => "Other".to_string(),
+        }
+    }
+
+    /// Drive a reload against the given initial+next TOML and return
+    /// the commands the mock peer manager observed, in order.
+    /// Replies `Ok(())` to every command that carries a reply channel.
+    async fn drive_reload(
+        initial_toml: &str,
+        new_toml: &str,
+    ) -> (Option<ReloadedConfig>, Vec<String>) {
+        let path = unique_temp_path("reload-driver");
+        std::fs::write(&path, initial_toml).unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+
+        std::fs::write(&path, new_toml).unwrap();
+
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
+        let mock = tokio::spawn(async move {
+            use rustbgpd_api::peer_types::ReconcileResult;
+            let mut tags = Vec::new();
+            while let Some(cmd) = peer_mgr_rx.recv().await {
+                tags.push(cmd_tag(&cmd));
+                // Respond Ok(()) to every command that has a reply
+                // channel so reload_config doesn't hang.
+                match cmd {
+                    PeerManagerCommand::SetPolicy { reply, .. }
+                    | PeerManagerCommand::DeletePolicy { reply, .. }
+                    | PeerManagerCommand::SetNeighborSet { reply, .. }
+                    | PeerManagerCommand::DeleteNeighborSet { reply, .. }
+                    | PeerManagerCommand::SetPeerGroup { reply, .. }
+                    | PeerManagerCommand::DeletePeerGroup { reply, .. }
+                    | PeerManagerCommand::SetGlobalImportChain { reply, .. }
+                    | PeerManagerCommand::SetGlobalExportChain { reply, .. }
+                    | PeerManagerCommand::ClearGlobalImportChain { reply }
+                    | PeerManagerCommand::ClearGlobalExportChain { reply }
+                    | PeerManagerCommand::SoftResetIn { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerManagerCommand::ReconcilePeers { reply, .. } => {
+                        let _ = reply.send(ReconcileResult::default());
+                    }
+                    _ => {}
+                }
+            }
+            tags
+        });
+
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await;
+        drop(peer_mgr_tx);
+        let tags = mock.await.unwrap();
+        std::fs::remove_file(&path).ok();
+        (returned, tags)
+    }
+
+    fn baseline_toml() -> &'static str {
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#
+    }
+
+    fn load_config_from_toml(name: &str, toml: &str) -> Config {
+        let path = unique_temp_path(name);
+        std::fs::write(&path, toml).unwrap();
+        let config = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+        config
+    }
+
+    #[test]
+    fn config_diff_json_includes_hot_applied_global_flags() {
+        let old = load_config_from_toml("diff-json-old", baseline_toml());
+        let new_toml = baseline_toml().replace(
+            "listen_port = 179",
+            "listen_port = 179\nhonor_graceful_shutdown = true\nhonor_blackhole = true",
+        );
+        let new = load_config_from_toml("diff-json-new", &new_toml);
+        let diff = config::diff_config(&old, &new);
+        let value = config::config_diff_json_value(&diff);
+
+        assert_eq!(
+            value["reload_applied"]["honor_graceful_shutdown_changed"],
+            true
+        );
+        assert_eq!(value["reload_applied"]["honor_blackhole_changed"], true);
+        assert_eq!(value["restart_required"]["global_changed"], false);
+        assert_eq!(value["has_actionable_changes"], true);
+    }
+
+    #[test]
+    fn config_diff_human_bucket_lists_hot_applied_global_flags() {
+        let old = load_config_from_toml("diff-human-old", baseline_toml());
+        let new_toml = baseline_toml().replace(
+            "listen_port = 179",
+            "listen_port = 179\nhonor_graceful_shutdown = true\nhonor_blackhole = true",
+        );
+        let new = load_config_from_toml("diff-human-new", &new_toml);
+        let diff = config::diff_config(&old, &new);
+
+        assert!(
+            diff.has_reload_applied_changes(),
+            "hot-applied global flags must keep the diff in the reload-applied bucket"
+        );
+        let rendered = config::format_config_diff(&diff);
+        assert!(
+            rendered.contains("Global hot-applied flags:"),
+            "rendered diff should include the hot-applied flags bucket: {rendered}"
+        );
+        assert!(rendered.contains("honor_graceful_shutdown"), "{rendered}");
+        assert!(rendered.contains("honor_blackhole"), "{rendered}");
+    }
+
+    /// Adding a named policy definition on reload must surface as a
+    /// `SetPolicy` command to the peer manager — proving the reload
+    /// path no longer silently ignores `[policy.definitions.*]` edits.
+    #[tokio::test]
+    async fn reload_applies_named_policy_addition() {
+        let new_toml = format!(
+            "{}\n[policy.definitions.block-private]\ndefault_action = \"deny\"\n",
+            baseline_toml()
+        );
+        let (returned, tags) = drive_reload(baseline_toml(), &new_toml).await;
+        assert!(returned.is_some(), "reload must succeed");
+        assert!(
+            tags.contains(&"SetPolicy(block-private)".to_string()),
+            "expected SetPolicy(block-private) — saw {tags:?}"
+        );
+    }
+
+    /// Adding a peer-group definition on reload must surface as a
+    /// `SetPeerGroup` command. Catches the silent-ignore failure mode
+    /// where peer-group edits would only be detected, not applied.
+    #[tokio::test]
+    async fn reload_applies_peer_group_addition() {
+        let new_toml = format!(
+            "{}\n[peer_groups.external]\nhold_time = 60\n",
+            baseline_toml()
+        );
+        let (returned, tags) = drive_reload(baseline_toml(), &new_toml).await;
+        assert!(returned.is_some(), "reload must succeed");
+        assert!(
+            tags.contains(&"SetPeerGroup(external)".to_string()),
+            "expected SetPeerGroup(external) — saw {tags:?}"
+        );
+    }
+
+    /// Changing the global `import_chain` on reload must surface as
+    /// `SetGlobalImportChain` (or `ClearGlobalImportChain` when empty).
+    #[tokio::test]
+    async fn reload_applies_global_import_chain_change() {
+        let initial = format!(
+            "{}\n[policy.definitions.foo]\ndefault_action = \"permit\"\n",
+            baseline_toml()
+        );
+        let new_toml = format!(
+            "{}\n[policy.definitions.foo]\ndefault_action = \"permit\"\n[policy]\nimport_chain = [\"foo\"]\n",
+            baseline_toml()
+        );
+        let (returned, tags) = drive_reload(&initial, &new_toml).await;
+        assert!(returned.is_some(), "reload must succeed");
+        assert!(
+            tags.iter().any(|t| t.starts_with("SetGlobalImportChain")),
+            "expected SetGlobalImportChain — saw {tags:?}"
+        );
+    }
+
+    /// Removing a policy definition must surface as `DeletePolicy`
+    /// AFTER any neighbor reconciliation, so the still-referenced
+    /// rejection path doesn't fire transiently.
+    #[tokio::test]
+    async fn reload_applies_policy_removal_after_neighbor_reconcile() {
+        let initial = format!(
+            "{}\n[policy.definitions.old]\ndefault_action = \"permit\"\n",
+            baseline_toml()
+        );
+        let (returned, tags) = drive_reload(&initial, baseline_toml()).await;
+        assert!(returned.is_some(), "reload must succeed");
+        assert!(
+            tags.contains(&"DeletePolicy(old)".to_string()),
+            "expected DeletePolicy(old) — saw {tags:?}"
+        );
+    }
+
+    /// When a step early in the reload sequence succeeds and a later
+    /// step fails, reload returns a partial-state snapshot so the
+    /// daemon's in-memory config matches what the peer manager
+    /// actually applied — instead of the previous behaviour where it
+    /// returned `None` ("kept current") while the manager already had
+    /// half the new state in effect. `SetPolicy` lands, then
+    /// `ReconcilePeers` fails; the returned config must contain the
+    /// new policy but not the new neighbors.
+    #[tokio::test]
+    async fn reload_halts_on_failure_with_honest_partial_snapshot() {
+        use rustbgpd_api::peer_types::{ReconcileFailure, ReconcileFailureKind, ReconcileResult};
+
+        let initial_toml = baseline_toml().to_string();
+        let new_toml = format!(
+            "{baseline}\n[policy.definitions.block-private]\ndefault_action = \"deny\"\n\n[[neighbors]]\naddress = \"10.0.0.99\"\nremote_asn = 65099\nhold_time = 90\n",
+            baseline = baseline_toml()
+        );
+
+        let path = unique_temp_path("reload-halt-partial");
+        std::fs::write(&path, &initial_toml).unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        std::fs::write(&path, &new_toml).unwrap();
+
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(32);
+        let mock = tokio::spawn(async move {
+            // Reply Ok to every non-reconcile command; reply with a
+            // reconcile failure to simulate a runtime rejection from
+            // the peer manager. Models a valid TOML that fails for
+            // an operational reason at the manager (port bind, TCP
+            // setup, MD5 key push, etc.). Track command tags so the
+            // test can assert which earlier steps successfully fired.
+            let mut tags: Vec<String> = Vec::new();
+            while let Some(cmd) = peer_mgr_rx.recv().await {
+                tags.push(cmd_tag(&cmd));
+                match cmd {
+                    PeerManagerCommand::SetPolicy { reply, .. }
+                    | PeerManagerCommand::DeletePolicy { reply, .. }
+                    | PeerManagerCommand::SetNeighborSet { reply, .. }
+                    | PeerManagerCommand::DeleteNeighborSet { reply, .. }
+                    | PeerManagerCommand::SetPeerGroup { reply, .. }
+                    | PeerManagerCommand::DeletePeerGroup { reply, .. }
+                    | PeerManagerCommand::SetGlobalImportChain { reply, .. }
+                    | PeerManagerCommand::SetGlobalExportChain { reply, .. }
+                    | PeerManagerCommand::ClearGlobalImportChain { reply }
+                    | PeerManagerCommand::ClearGlobalExportChain { reply } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerManagerCommand::ReconcilePeers { reply, .. } => {
+                        let result = ReconcileResult {
+                            failures: vec![ReconcileFailure {
+                                kind: ReconcileFailureKind::Add,
+                                address: "10.0.0.99".parse().unwrap(),
+                                error: "simulated reconcile failure".to_string(),
+                            }],
+                        };
+                        let _ = reply.send(result);
+                    }
+                    _ => {}
+                }
+            }
+            tags
+        });
+
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await;
+        drop(peer_mgr_tx);
+        let tags = mock.await.unwrap();
+        std::fs::remove_file(&path).ok();
+
+        // Reconcile partial failure returns None: live peer-manager
+        // state is ambiguous (delete-then-readd ordering, independent
+        // adds/removes), so guessing a snapshot would let the next
+        // reload diff against a config that doesn't match reality.
+        // Operators investigate live state via `rustbgpctl neighbor
+        // list`. Earlier reload steps (the SetPolicy here) DID land
+        // at the manager and remain in effect — assert via the mock's
+        // command log, since the in-memory config doesn't advance for
+        // this failure class.
+        assert!(
+            returned.is_none(),
+            "reconcile partial failure must return None — guessing a snapshot \
+             when live state is ambiguous would let the next reload diff against \
+             a fictional config"
+        );
+        assert!(
+            tags.contains(&"SetPolicy(block-private)".to_string()),
+            "earlier reload steps must still have fired before the reconcile failure — saw {tags:?}"
+        );
+    }
+
+    /// `apply_reload_outcome` must send to the peer manager FIRST, so
+    /// the authoritative runtime view always advances even if the
+    /// optional bridge channel later fails. Drives the helper directly
+    /// with a closed bridge channel to assert the failure stage name
+    /// matches and the peer manager already received the snapshot
+    /// before the bridge send was attempted.
+    #[tokio::test]
+    async fn apply_reload_outcome_bridge_failure_after_peer_mgr_snapshot() {
+        let (peer_mgr_internal_tx, mut peer_mgr_internal_rx) =
+            mpsc::unbounded_channel::<InternalCommand>();
+        let (bridge_tx, bridge_rx) = mpsc::unbounded_channel::<Box<Config>>();
+        // Drop the bridge rx so the helper's send fails immediately
+        // with a closed-channel error.
+        drop(bridge_rx);
+
+        let path = unique_temp_path("apply-reload-outcome");
+        std::fs::write(&path, baseline_toml()).unwrap();
+        let cfg = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        let result = apply_reload_outcome(
+            ReloadedConfig::new(cfg.clone(), cfg.clone()),
+            &peer_mgr_internal_tx,
+            Some(&bridge_tx),
+        )
+        .await;
+
+        assert_eq!(
+            result.err(),
+            Some("config_bridge"),
+            "bridge failure must surface as the named stage so the caller's log line is actionable"
+        );
+        let snapshot = peer_mgr_internal_rx
+            .try_recv()
+            .expect("peer manager must receive the snapshot before the bridge send is attempted");
+        match snapshot {
+            InternalCommand::ReplaceConfigSnapshot(received) => {
+                assert_eq!(received.global.asn, cfg.global.asn);
+            }
+        }
+    }
+
+    /// Bridge-disabled mode (no `file_path`, so no persister and no
+    /// bridge) must succeed: the helper takes `Option<&Sender>`, and a
+    /// `None` bridge is the runtime configuration when rustbgpd starts
+    /// without a `--config` file (gRPC mutations are non-persistent in
+    /// that mode by design).
+    #[tokio::test]
+    async fn apply_reload_outcome_succeeds_without_bridge() {
+        let (peer_mgr_internal_tx, mut peer_mgr_internal_rx) =
+            mpsc::unbounded_channel::<InternalCommand>();
+
+        let path = unique_temp_path("apply-reload-outcome-nobridge");
+        std::fs::write(&path, baseline_toml()).unwrap();
+        let cfg = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        let advanced = apply_reload_outcome(
+            ReloadedConfig::new(cfg.clone(), cfg.clone()),
+            &peer_mgr_internal_tx,
+            None,
+        )
+        .await
+        .expect("no-bridge mode must succeed");
+        assert_eq!(advanced.global.asn, cfg.global.asn);
+        assert!(peer_mgr_internal_rx.try_recv().is_ok());
+    }
+
+    /// Regression test for the bridge stale-snapshot bug. The bridge
+    /// owns the pre-persist snapshot used by gRPC mutations. A
+    /// SIGHUP-driven refresh must update that snapshot without writing
+    /// the reloaded file back out, otherwise restart-required pinning
+    /// would destroy an operator's edit-then-restart TOML.
+    /// This test drives the bridge directly: send a snapshot
+    /// replacement, then a `ConfigEvent` that adds a named policy,
+    /// and assert the resulting persisted `ReplaceConfig` was computed
+    /// against the *replacement* base — i.e. the bridge's internal
+    /// snapshot was successfully swapped.
+    #[tokio::test]
+    async fn config_bridge_replacement_makes_subsequent_events_apply_to_new_snapshot() {
+        use rustbgpd_api::peer_types::{ConfigEvent, NamedPolicyDefinition};
+
+        let stale_path = unique_temp_path("bridge-replace-stale");
+        std::fs::write(&stale_path, baseline_toml()).unwrap();
+        let stale = Config::load_with_diagnostics(stale_path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&stale_path).ok();
+
+        let new_toml = format!(
+            "{baseline}\n[peer_groups.upstream]\nhold_time = 90\n",
+            baseline = baseline_toml()
+        );
+        let new_path = unique_temp_path("bridge-replace-new");
+        std::fs::write(&new_path, &new_toml).unwrap();
+        let reloaded = Config::load_with_diagnostics(new_path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&new_path).ok();
+
+        assert!(
+            stale.peer_groups.is_empty(),
+            "stale baseline must not have peer groups (preconditions)"
+        );
+        assert!(
+            reloaded.peer_groups.contains_key("upstream"),
+            "reloaded baseline must have the new peer_groups.upstream (preconditions)"
+        );
+
+        let (event_tx, event_rx) = mpsc::channel::<ConfigEvent>(8);
+        let (replace_tx, replace_rx) = mpsc::unbounded_channel::<Box<Config>>();
+        let (mutation_tx, mut mutation_rx) = mpsc::channel::<ConfigMutation>(8);
+
+        let bridge = tokio::spawn(run_config_bridge(event_rx, replace_rx, mutation_tx, stale));
+
+        // Push the SIGHUP-style replacement first.
+        replace_tx.send(Box::new(reloaded.clone())).unwrap();
+        // Then a gRPC mutation that adds a policy definition. If the
+        // bridge missed the swap, this would compute against `stale`
+        // and the resulting ReplaceConfig wouldn't carry the new
+        // peer_groups.upstream entry.
+        event_tx
+            .send(ConfigEvent::SetPolicy {
+                name: "block-private".to_string(),
+                definition: NamedPolicyDefinition {
+                    default_action: "deny".to_string(),
+                    statements: Vec::new(),
+                },
+            })
+            .await
+            .unwrap();
+
+        // First persister message is the replacement itself, but as a
+        // no-persist refresh. The on-disk TOML is already the
+        // operator's desired snapshot; rewriting it here would clobber
+        // restart-required edits that runtime intentionally pinned.
+        let replace_msg = mutation_rx.recv().await.expect("replacement forwarded");
+        let ConfigMutation::RefreshSnapshotNoPersist(received_replace) = replace_msg else {
+            panic!("bridge must forward replacement as RefreshSnapshotNoPersist");
+        };
+        assert!(
+            received_replace.peer_groups.contains_key("upstream"),
+            "replacement message must carry the new peer_groups.upstream"
+        );
+
+        // Second persister message is the post-event snapshot — must
+        // contain BOTH the replacement-supplied peer_groups.upstream
+        // AND the event-applied policy. If the bridge had missed the
+        // swap, peer_groups.upstream would be absent (proving the
+        // event applied to stale).
+        let event_msg = mutation_rx.recv().await.expect("event forwarded");
+        let ConfigMutation::ReplaceConfig(received_event) = event_msg else {
+            panic!("bridge must forward event-derived snapshot as ReplaceConfig");
+        };
+        assert!(
+            received_event.peer_groups.contains_key("upstream"),
+            "post-event snapshot must still carry the replacement-supplied peer group — \
+             absence here would mean the bridge applied the event to a stale snapshot"
+        );
+        assert!(
+            received_event
+                .policy
+                .definitions
+                .contains_key("block-private"),
+            "post-event snapshot must carry the event-applied policy"
+        );
+
+        drop(replace_tx);
+        drop(event_tx);
+        bridge.await.unwrap();
+    }
+
+    async fn reload_then_persist_policy_after_desired_refresh(new_toml: &str) -> (Config, Config) {
+        use rustbgpd_api::peer_types::{ConfigEvent, NamedPolicyDefinition};
+
+        let path = unique_temp_path("reload-desired-refresh");
+        std::fs::write(&path, baseline_toml()).unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+
+        let (event_tx, event_rx) = mpsc::channel::<ConfigEvent>(8);
+        let (replace_tx, replace_rx) = mpsc::unbounded_channel::<Box<Config>>();
+        let (mutation_tx, mutation_rx) = mpsc::channel::<ConfigMutation>(8);
+        let persister =
+            tokio::spawn(ConfigPersister::new(mutation_rx, path.clone(), initial.clone()).run());
+        let bridge = tokio::spawn(run_config_bridge(
+            event_rx,
+            replace_rx,
+            mutation_tx,
+            initial.clone(),
+        ));
+
+        std::fs::write(&path, new_toml).unwrap();
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let reloaded = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await
+        .expect("reload should return pinned runtime plus desired config");
+
+        let (peer_mgr_internal_tx, mut peer_mgr_internal_rx) =
+            mpsc::unbounded_channel::<InternalCommand>();
+        let runtime = apply_reload_outcome(reloaded, &peer_mgr_internal_tx, Some(&replace_tx))
+            .await
+            .expect("post-reload sync should succeed");
+        assert!(
+            peer_mgr_internal_rx.try_recv().is_ok(),
+            "peer manager snapshot must be refreshed"
+        );
+
+        event_tx
+            .send(ConfigEvent::SetPolicy {
+                name: "after-reload".to_string(),
+                definition: NamedPolicyDefinition {
+                    default_action: "deny".to_string(),
+                    statements: Vec::new(),
+                },
+            })
+            .await
+            .unwrap();
+
+        drop(event_tx);
+        drop(replace_tx);
+        bridge.await.unwrap();
+        persister.await.unwrap();
+
+        let disk = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(
+            disk.policy.definitions.contains_key("after-reload"),
+            "gRPC-style mutation after SIGHUP must persist on top of refreshed desired base"
+        );
+        (runtime, disk)
+    }
+
+    #[tokio::test]
+    async fn reload_pin_grpc_uds_preserves_desired_toml_for_later_persistence() {
+        let new_toml = format!(
+            "{}\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-edited.sock\"\n",
+            baseline_toml()
+        );
+        let (runtime, disk) = reload_then_persist_policy_after_desired_refresh(&new_toml).await;
+
+        assert_ne!(
+            runtime.global.telemetry.grpc_uds, disk.global.telemetry.grpc_uds,
+            "runtime must stay pinned to the live listener while disk keeps the operator edit"
+        );
+        assert_eq!(
+            disk.global
+                .telemetry
+                .grpc_uds
+                .as_ref()
+                .unwrap()
+                .path
+                .as_deref(),
+            Some("/tmp/rustbgpd-edited.sock")
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_pin_apply_bum_preserves_desired_toml_for_later_persistence() {
+        let new_toml = format!("apply_bum_enforcement = true\n{}", baseline_toml());
+        let (runtime, disk) = reload_then_persist_policy_after_desired_refresh(&new_toml).await;
+
+        assert!(!runtime.apply_bum_enforcement);
+        assert!(disk.apply_bum_enforcement);
+    }
+
+    #[tokio::test]
+    async fn reload_pin_evpn_instances_preserves_desired_toml_for_later_persistence() {
+        let new_toml = format!(
+            "{}\n[[evpn_instances]]\nvni = 100\nrd = \"65000:100\"\nroute_targets = [\"65000:100\"]\nlocal_vtep_ip = \"10.0.0.1\"\n",
+            baseline_toml()
+        );
+        let (runtime, disk) = reload_then_persist_policy_after_desired_refresh(&new_toml).await;
+
+        assert!(runtime.evpn_instances.is_empty());
+        assert_eq!(disk.evpn_instances.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reload_pin_blackhole_fib_preserves_desired_toml_for_later_persistence() {
+        let new_toml = baseline_toml().replace(
+            "listen_port = 179",
+            "listen_port = 179\nhonor_blackhole = true\ninstall_blackhole_discard = true",
+        );
+        let (runtime, disk) = reload_then_persist_policy_after_desired_refresh(&new_toml).await;
+
+        assert!(!runtime.global.honor_blackhole);
+        assert!(!runtime.global.install_blackhole_discard);
+        assert!(disk.global.honor_blackhole);
+        assert!(disk.global.install_blackhole_discard);
+    }
+
+    // SoftResetIn-on-import-policy-change coverage is now PM-side:
+    // `update_runtime_policies` fires `soft_reset_in` automatically
+    // when import policy materially changes, for any peer in
+    // `self.peers` (which includes dynamic peers — the original
+    // motivation for moving this out of the binary's reload loop).
+    // Asserting that behavior at this layer would require a real
+    // `PeerManager` task with established peers; that level of
+    // integration coverage belongs in `peer_manager::tests`. The
+    // reload tests above already prove the SetPolicy / SetPeerGroup
+    // / chain commands fire on the right edits — that's the seam
+    // this layer can exercise without a real peer.
+
+    /// Effective-impact must catch a *changed policy definition*
+    /// referenced via the global `import_chain`, even when the chain
+    /// list itself is unchanged. Regression for the reviewer's
+    /// transitive-reference finding: prior heuristic only flagged
+    /// changes when the chain list moved, missing the common edit
+    /// shape where operators tweak a definition in place.
+    #[test]
+    fn effective_impact_flags_global_chain_policy_definition_change() {
+        let old_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+
+[policy.definitions.block-private]
+default_action = "permit"
+
+[policy]
+import_chain = ["block-private"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+"#;
+        let new_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+
+[policy.definitions.block-private]
+default_action = "deny"
+
+[policy]
+import_chain = ["block-private"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+"#;
+        let path_a = unique_temp_path("eff-impact-global-old");
+        let path_b = unique_temp_path("eff-impact-global-new");
+        std::fs::write(&path_a, old_toml).unwrap();
+        std::fs::write(&path_b, new_toml).unwrap();
+        let old = Config::load_with_diagnostics(path_a.to_str().unwrap()).unwrap();
+        let new = Config::load_with_diagnostics(path_b.to_str().unwrap()).unwrap();
+        let diff = config::diff_config(&old, &new);
+        let impacted: Vec<_> = diff
+            .effective_neighbor_impact
+            .iter()
+            .map(|i| i.address.as_str())
+            .collect();
+        assert!(
+            impacted.contains(&"10.0.0.2"),
+            "neighbor must be flagged when a definition referenced via the unchanged global \
+             import_chain changes — got {impacted:?}"
+        );
+        std::fs::remove_file(&path_a).ok();
+        std::fs::remove_file(&path_b).ok();
+    }
+
+    /// Same shape but for a peer-group chain reference: a definition
+    /// changes; the peer-group's chain list is unchanged; the
+    /// peer-group record is unchanged. Members must still be flagged.
+    #[test]
+    fn effective_impact_flags_peer_group_chain_policy_definition_change() {
+        let old_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+
+[policy.definitions.block-private]
+default_action = "permit"
+
+[peer_groups.ix]
+hold_time = 90
+import_policy_chain = ["block-private"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "ix"
+"#;
+        let new_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+
+[policy.definitions.block-private]
+default_action = "deny"
+
+[peer_groups.ix]
+hold_time = 90
+import_policy_chain = ["block-private"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "ix"
+"#;
+        let path_a = unique_temp_path("eff-impact-pg-chain-old");
+        let path_b = unique_temp_path("eff-impact-pg-chain-new");
+        std::fs::write(&path_a, old_toml).unwrap();
+        std::fs::write(&path_b, new_toml).unwrap();
+        let old = Config::load_with_diagnostics(path_a.to_str().unwrap()).unwrap();
+        let new = Config::load_with_diagnostics(path_b.to_str().unwrap()).unwrap();
+        let diff = config::diff_config(&old, &new);
+        let impacted: Vec<_> = diff
+            .effective_neighbor_impact
+            .iter()
+            .map(|i| i.address.as_str())
+            .collect();
+        assert!(
+            impacted.contains(&"10.0.0.2"),
+            "neighbor must be flagged when a definition referenced via its peer-group's \
+             import_policy_chain changes — got {impacted:?}"
+        );
+        std::fs::remove_file(&path_a).ok();
+        std::fs::remove_file(&path_b).ok();
+    }
+
+    /// Effective neighbor impact view: when only a peer-group field
+    /// changes, the diff must flag every member neighbor as
+    /// effectively impacted (cascade via inheritance) even though
+    /// their direct neighbor records are unchanged.
+    #[test]
+    fn effective_impact_flags_peer_group_members() {
+        let old_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.ix]
+hold_time = 90
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "ix"
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "ix"
+"#;
+        let new_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.ix]
+hold_time = 60
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "ix"
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "ix"
+"#;
+        let path_a = unique_temp_path("eff-impact-old");
+        let path_b = unique_temp_path("eff-impact-new");
+        std::fs::write(&path_a, old_toml).unwrap();
+        std::fs::write(&path_b, new_toml).unwrap();
+        let old = Config::load_with_diagnostics(path_a.to_str().unwrap()).unwrap();
+        let new = Config::load_with_diagnostics(path_b.to_str().unwrap()).unwrap();
+        let diff = config::diff_config(&old, &new);
+        let impacted: Vec<_> = diff
+            .effective_neighbor_impact
+            .iter()
+            .map(|i| i.address.as_str())
+            .collect();
+        assert!(
+            impacted.contains(&"10.0.0.2") && impacted.contains(&"10.0.0.3"),
+            "both ix members must be flagged as effectively impacted — got {impacted:?}"
+        );
+        std::fs::remove_file(&path_a).ok();
+        std::fs::remove_file(&path_b).ok();
+    }
 }
