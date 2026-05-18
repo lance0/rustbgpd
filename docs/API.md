@@ -77,9 +77,14 @@ mutate daemon state.
 
 `docs/grpc-method-inventory.md` and `crates/api/src/authz.rs` classify every
 RPC into `read`, `sensitive_read`, `mutating`, or `operator_only` for
-ADR-0064. That matrix is advisory in this release: runtime enforcement remains
-the listener-level `access_mode` split below. Future ADR-0064 slices use the
-matrix for finer-grained role and listener-tier authorization.
+ADR-0064. The runtime records audit-only tier decisions for every RPC via
+structured `grpc_authz` logs and
+`bgp_grpc_authz_decisions_total{tier,result,authn,access_mode}`. Runtime
+enforcement remains the listener-level `access_mode` split below; future
+ADR-0064 slices add principal extraction, role mapping, listener tier caps, and
+deny-by-tier enforcement. In this audit-only slice, `result="audit_forward"`
+means the request continued to the existing bearer-token / mTLS / UDS /
+`access_mode` checks rather than being permitted by a new tier engine.
 
 | Service | Read-only RPCs | Mutating RPCs rejected on `read_only` |
 |---------|----------------|---------------------------------------|

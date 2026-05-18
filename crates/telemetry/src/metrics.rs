@@ -41,6 +41,7 @@ pub struct BgpMetrics {
     // ── Event streams ───────────────────────────────────────────
     event_stream_lagged: IntCounterVec,
     event_stream_subscribers: IntGaugeVec,
+    grpc_authz_decisions: IntCounterVec,
 
     // ── Policy ──────────────────────────────────────────────────
     max_prefix_exceeded: IntCounterVec,
@@ -241,6 +242,15 @@ impl BgpMetrics {
                 "Current live event-stream subscriber count by service and source.",
             ),
             &["service", "source"],
+        )
+        .expect("valid metric definition");
+
+        let grpc_authz_decisions = IntCounterVec::new(
+            Opts::new(
+                "bgp_grpc_authz_decisions_total",
+                "Audit-only ADR-0064 gRPC authorization tier decisions by bounded listener and decision labels.",
+            ),
+            &["tier", "result", "authn", "access_mode"],
         )
         .expect("valid metric definition");
 
@@ -628,6 +638,9 @@ impl BgpMetrics {
             .register(Box::new(event_stream_subscribers.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(grpc_authz_decisions.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(max_prefix_exceeded.clone()))
             .expect("metric not already registered");
         registry
@@ -762,6 +775,7 @@ impl BgpMetrics {
             route_event_history_capacity,
             event_stream_lagged,
             event_stream_subscribers,
+            grpc_authz_decisions,
             max_prefix_exceeded,
             outbound_route_drops,
             blackhole_discard_installed,
@@ -938,6 +952,23 @@ impl BgpMetrics {
             service,
             source,
         }
+    }
+
+    /// Record an ADR-0064 audit-only gRPC authorization decision.
+    ///
+    /// Labels are deliberately bounded: method path, listener address,
+    /// and principal are emitted in structured logs by `rustbgpd-api`
+    /// rather than as Prometheus labels.
+    pub fn record_grpc_authz_decision(
+        &self,
+        tier: &str,
+        result: &str,
+        authn: &str,
+        access_mode: &str,
+    ) {
+        self.grpc_authz_decisions
+            .with_label_values(&[tier, result, authn, access_mode])
+            .inc();
     }
 
     /// Record a max-prefix-exceeded event for a peer.
@@ -1403,6 +1434,24 @@ mod tests {
                 .get(),
             0
         );
+    }
+
+    #[test]
+    fn grpc_authz_decision_counter_uses_bounded_labels() {
+        let m = BgpMetrics::new();
+        m.record_grpc_authz_decision("operator_only", "audit_forward", "mtls", "read_write");
+        m.record_grpc_authz_decision("operator_only", "audit_forward", "mtls", "read_write");
+
+        assert_eq!(
+            m.grpc_authz_decisions
+                .with_label_values(&["operator_only", "audit_forward", "mtls", "read_write"])
+                .get(),
+            2
+        );
+
+        let text = gather_text(&m);
+        assert!(text.contains("bgp_grpc_authz_decisions_total"));
+        assert!(!text.contains("rustbgpd.v1.ControlService"));
     }
 
     #[test]

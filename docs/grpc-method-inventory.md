@@ -225,12 +225,12 @@ specific method if the model warrants it.
    the implementation — otherwise the natural temptation is to ship
    it as `mutating` because "it's just a write." Catching this
    pre-implementation is cheap; catching it post-CVE is not.
-8. **Audit logging.** The external review will want a per-call audit
-   log. The tier assignment defines the minimum log level: all
-   `mutating` and `operator_only` calls must log who-did-what-when
-   regardless of result; credential-bearing fields must be masked;
-   `sensitive_read` calls should log peer-identity at minimum;
-   `read` can sample.
+8. **Audit logging.** The runtime now emits audit-only tier-decision
+   logs and the low-cardinality `bgp_grpc_authz_decisions_total`
+   metric for every RPC. The external review still needs the later
+   hardening slice: principal extraction, result-aware audit records,
+   request summaries with credential-bearing fields masked, and
+   enforcement decisions once roles/listener caps exist.
 
 ## Code matrix
 
