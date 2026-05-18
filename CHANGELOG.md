@@ -25,8 +25,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   config diffs, validates key length and Linux TCP-AO algorithm names, aborts
   startup on listener key-install failure, and fails active-open connect attempts
   without falling back to unauthenticated TCP. Dynamic-neighbor TCP-AO, runtime
-  key rotation, multi-key rollover, and protected interop smoke remain follow-up
-  work.
+  key rotation, multi-key rollover, and accepted-socket inspection remain
+  follow-up work.
+
+- **M43 BIRD 3.2.1 TCP-AO interop smoke.** New
+  `tests/interop/m43-tcp-ao-bird.clab.yml` topology and
+  `tests/interop/scripts/test-m43-tcp-ao-bird.sh` driver validate
+  ADR-0062 static-neighbor TCP-AO against a real BIRD 3.2.1 peer on Linux:
+  matching keys establish and import `203.0.113.43/32`, then a mismatched BIRD
+  key withdraws the route and fails closed instead of re-establishing. The
+  protected self-hosted `kernel-dataplane` workflow now runs M43 after building
+  the BIRD 3.2.1 image because hosted runners do not guarantee
+  `CONFIG_TCP_AO=y`.
 
 ### Changed
 

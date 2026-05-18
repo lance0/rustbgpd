@@ -10,6 +10,7 @@ name: Kernel Dataplane
 #   - FDB nexthop groups     — kernel >= 5.8 (netns fdb_nhg selectors)
 #   - real netns route table — configured-table FIB runtime (M42,
 #                              netns fib_runtime selector)
+#   - CONFIG_TCP_AO          — TCP-AO protected BIRD 3.x session (M43)
 #
 # Security: external / non-owner PRs target the protected
 # `kernel-dataplane` environment and require maintainer approval before
@@ -19,7 +20,7 @@ name: Kernel Dataplane
 #
 # The runner pool is expected to be multiple runner services on the same
 # host, sharing one Docker daemon. The build job creates `rustbgpd:dev`
-# once; M39/M40/M42 and the netns selectors can fan out. M36-M38 are
+# once; M39/M40/M42/M43 and the netns selectors can fan out. M36-M38 are
 # ordered below to reduce shared-host load while still reporting each
 # milestone independently after an earlier smoke fails; each job
 # pre-cleans its own topology before deploy.
@@ -246,6 +247,48 @@ jobs:
       - name: Destroy topology
         if: always()
         run: sudo containerlab destroy -t tests/interop/m42-fib-runtime-frr.clab.yml --cleanup || true
+
+  m43:
+    name: M43 — ADR-0062 TCP-AO protected session (BIRD 3.2.1)
+    runs-on: [self-hosted, linux, kernel-dataplane]
+    needs: build-image
+    environment:
+      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify TCP-AO kernel support
+        run: |
+          set -euo pipefail
+          require_tcp_ao() {
+            if ! "$@"; then
+              echo "::error::M43 requires a Linux kernel with CONFIG_TCP_AO=y"
+              exit 1
+            fi
+          }
+          if [ -f "/boot/config-$(uname -r)" ]; then
+            require_tcp_ao grep -q '^CONFIG_TCP_AO=y' "/boot/config-$(uname -r)"
+          elif [ -f /proc/config.gz ]; then
+            require_tcp_ao zgrep -q '^CONFIG_TCP_AO=y' /proc/config.gz
+          else
+            echo "::warning::Kernel config not readable; M43 will rely on runtime TCP-AO probe"
+          fi
+
+      - name: Build BIRD 3.2.1 TCP-AO image
+        run: docker build -t bird:3.2.1-tcpao -f tests/interop/Dockerfile.bird3 tests/interop
+
+      - name: Deploy M43 topology
+        run: |
+          sudo containerlab destroy -t tests/interop/m43-tcp-ao-bird.clab.yml --cleanup 2>/dev/null || true
+          sudo containerlab deploy -t tests/interop/m43-tcp-ao-bird.clab.yml
+
+      - name: Run M43 test
+        run: bash tests/interop/scripts/test-m43-tcp-ao-bird.sh
+
+      - name: Destroy topology
+        if: always()
+        run: sudo containerlab destroy -t tests/interop/m43-tcp-ao-bird.clab.yml --cleanup || true
 
   netns:
     name: Privileged netns selectors (fdb_nhg + fib_runtime)

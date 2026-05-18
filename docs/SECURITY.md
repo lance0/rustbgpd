@@ -146,8 +146,11 @@ partially protected listener; active-open key-install failures fail the
 connection attempt and retry later without falling back to unauthenticated TCP.
 Runtime deletion of configured TCP-AO neighbors is rejected because listener
 MKTs are installed on the startup listener socket and are not deleted yet.
-Dynamic-neighbor TCP-AO, runtime key rotation, multi-key rollover, and protected
-interop validation remain deferred.
+Static-neighbor protected interop is validated by M43 against BIRD 3.2.1:
+matching keys establish and import a route, while a mismatched key withdraws
+the route and does not re-establish within the fail-closed window.
+Dynamic-neighbor TCP-AO, runtime key rotation, multi-key rollover, and richer
+accepted-socket inspection remain deferred.
 
 ## Linux EVPN VTEP — `CAP_NET_ADMIN` requirement
 
@@ -231,13 +234,16 @@ The following security improvements are intentionally deferred and tracked in
 the roadmap:
 
 - Finer-grained gRPC authorization beyond "listener allowed / denied"
-- TCP-AO (RFC 5925) dynamic-neighbor support, runtime key rotation, multi-key
-  rollover, and protected interop validation for BGP session protection
+- TCP-AO (RFC 5925) dynamic-neighbor support, runtime key rotation,
+  multi-key rollover, and accepted-socket inspection for BGP session
+  protection
 
 ## Current gaps
 
 - Authorization is listener-wide (`read_only` vs `read_write`), not per-RPC or
   per-role
 - TCP-AO currently supports static-neighbor startup keys only; dynamic
-  neighbors, live key rotation, and multi-key rollover remain follow-up work
+  neighbors, live key rotation, and multi-key rollover remain follow-up work.
+  Protected static-neighbor interop is covered by M43 against BIRD 3.2.1 on
+  Linux with `CONFIG_TCP_AO=y`.
 - Cert rotation on the gRPC TLS listener requires a daemon restart (not SIGHUP)
