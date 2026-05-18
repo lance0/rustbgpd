@@ -2451,6 +2451,31 @@ impl PeerManager {
                             ).await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::SetPeerGroupPreserveMd5 { name, mut definition, reply } => {
+                            let affected: Vec<IpAddr> = self.current_config
+                                .neighbors
+                                .iter()
+                                .filter(|neighbor| neighbor.peer_group.as_deref() == Some(name.as_str()))
+                                .filter_map(|neighbor| neighbor.address.parse().ok())
+                                .collect();
+                            let result = match named_peer_group_from_config(&self.current_config, &name) {
+                                Some(existing) => {
+                                    definition.md5_password = existing.md5_password;
+                                    let applied_definition = definition.clone();
+                                    self.apply_peer_group_change(
+                                        ConfigEvent::SetPeerGroup { name, definition },
+                                        affected,
+                                    )
+                                    .await
+                                    .map(|()| applied_definition)
+                                }
+                                None => Err(
+                                    "has_md5_password cannot preserve a missing peer-group secret"
+                                        .to_string(),
+                                ),
+                            };
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::DeletePeerGroup { name, reply } => {
                             let result = self.apply_peer_group_change(
                                 ConfigEvent::DeletePeerGroup { name },

@@ -11,6 +11,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0064 gRPC authorization foundation.** Added a checked
+  `crates/api/src/authz.rs` method-tier matrix that classifies all 66 gRPC RPCs
+  as `read`, `sensitive_read`, `mutating`, or `operator_only`, with tests that
+  parse `proto/rustbgpd.proto` and fail when a new RPC lacks a tier assignment.
+  `docs/grpc-method-inventory.md` and ADR-0064 now match the current
+  listener-level `access_mode` behavior and document the future finer-grained
+  authorization slices. No runtime authorization behavior changes in this
+  foundation slice.
+
 - **Filtered general FIB status queries.** `RibService.ListFibRoutes` now
   accepts optional `table_name`, `state`, `reason`, exact prefix, and
   peer-address filters, and `rustbgpctl rib fib` exposes the same filters via
@@ -49,6 +58,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reason until listener MKT deletion / key rotation support lands.
 
 ### Fixed
+
+- **Peer-group read RPC secret redaction.** `PeerGroupService.ListPeerGroups`
+  and `GetPeerGroup` no longer echo stored `md5_password` values; the
+  write-side `SetPeerGroup` path still accepts MD5 material, but read responses
+  redact the field and expose only `has_md5_password` so read-only listeners do
+  not expose credentials. `SetPeerGroup` preserves an existing MD5 password
+  when a read/modify/write client omits `has_md5_password` or sends
+  `has_md5_password=true` without a new `md5_password` value; clients must send
+  `has_md5_password=false` with no `md5_password` to clear it explicitly.
 
 - **FDB nexthop raw-netlink parser hardening.**
   `NexthopSocket` response and `RTM_GETNEXTHOP` dump parsing now returns

@@ -71,6 +71,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0061](0061-opt-in-unicast-linux-fib-integration.md) | Opt-in unicast Linux FIB integration | Accepted | 2026-05-14 |
 | [0062](0062-tcp-ao-foundation.md) | TCP-AO foundation | Accepted | 2026-05-16 |
 | [0063](0063-evpn-runtime-instance-mutation.md) | EVPN runtime instance mutation semantics | Accepted | 2026-05-17 |
+| [0064](0064-grpc-authorization.md) | gRPC per-method authorization | Accepted | 2026-05-18 |
 
 ## Template
 

@@ -75,9 +75,16 @@ per-user roles: every client accepted by that listener gets the same read-only
 surface. Use a separate `read_write` listener for automation that needs to
 mutate daemon state.
 
+`docs/grpc-method-inventory.md` and `crates/api/src/authz.rs` classify every
+RPC into `read`, `sensitive_read`, `mutating`, or `operator_only` for
+ADR-0064. That matrix is advisory in this release: runtime enforcement remains
+the listener-level `access_mode` split below. Future ADR-0064 slices use the
+matrix for finer-grained role and listener-tier authorization.
+
 | Service | Read-only RPCs | Mutating RPCs rejected on `read_only` |
 |---------|----------------|---------------------------------------|
 | `GlobalService` | `GetGlobal` | `SetGlobal` |
+| `ConfigService` | `DiffRuntimeConfig` | None |
 | `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
@@ -342,7 +349,12 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 Peer-group CRUD plus neighbor membership assignment. Group definitions are
 full-replace and persist back to TOML. When an inherited setting changes, the
 daemon recomputes effective per-neighbor config and reconciles only the peers
-that reference that group.
+that reference that group. Read responses redact `md5_password` and expose
+only the non-secret `has_md5_password` presence flag. `SetPeerGroup` preserves
+the existing stored MD5 password when the field is omitted or set to `true`
+without a new `md5_password`; set `has_md5_password = false` with no
+`md5_password` to clear it explicitly. Use the configuration file or write-side
+source of truth to inspect credential material.
 
 | RPC | Description |
 |-----|-------------|

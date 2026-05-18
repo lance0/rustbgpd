@@ -1,6 +1,7 @@
 # gRPC Method Inventory and Authorization Classification
 
-**Status:** Draft. Input artifact for ADR-0064 (gRPC authorization).
+**Status:** Accepted. Input artifact for ADR-0064 (gRPC authorization)
+and mirrored in `crates/api/src/authz.rs`.
 **Source:** `proto/rustbgpd.proto`.
 **Maintenance:** Re-derive whenever an RPC is added, renamed, or
 removed; the ADR's enforcement model assumes every method has a tier
@@ -8,11 +9,14 @@ assignment.
 
 ## Purpose
 
-Today, gRPC access is binary: anything that completes the mTLS
-handshake on a configured listener can call any method on any service.
-ROADMAP P0 ("gRPC security audit + authorization split") needs a
-method-level read/write boundary, and the v1.0 external security
-review needs a documented per-method risk classification to audit.
+Today, gRPC authorization is listener-level. A configured
+`access_mode = "read_only"` listener rejects mutating handlers, while
+`access_mode = "read_write"` exposes the full service surface to any
+client accepted by that listener's transport authentication (UDS
+permissions, bearer token, and/or mTLS). ROADMAP P0 ("gRPC security
+audit + authorization split") needs a method-level risk boundary, and
+the v1.0 external security review needs a documented per-method
+classification to audit.
 
 This document is the inventory the ADR-0064 enforcement model maps
 against. It does not pick the enforcement mechanism (RBAC vs.
@@ -23,7 +27,8 @@ RPC so the model has something concrete to assign roles to.
 ## Classification scheme
 
 Every RPC is tagged with exactly one of four tiers. The criteria are
-**worst-case effect on a compromised mTLS cert**, not nominal use.
+**worst-case effect on any accepted gRPC credential or principal**, not
+nominal use.
 
 | Tier | Definition | Worst-case if compromised |
 |------|------------|---------------------------|
@@ -38,25 +43,24 @@ shape itself does not raise the tier.
 
 ## Per-service inventory
 
-### GlobalService (3 RPCs)
+### GlobalService (2 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
 | `GetGlobal` | `sensitive_read` | Returns `GlobalState`: `asn`, `router_id`, `listen_port`, TCP-AO kernel-support probe. Topology disclosure. |
 | `SetGlobal` | `operator_only` | Reserved; currently `UNIMPLEMENTED`. Future implementation would touch global daemon state, so classify defensively now to avoid the "we'll tag it later" trap. |
-| `SetGracefulShutdown` (`NeighborService` block, lives there but is global in scope when address is empty) | `operator_only` | When `address` is empty, attaches the RFC 8326 GRACEFUL_SHUTDOWN community to outbound updates on **every** peer — network-wide drain signal. |
 
 ### ConfigService (1 RPC)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
-| `DiffRuntimeConfig` | `sensitive_read` | Response is redacted by design (per RPC comment), but the diff structure exposes policy layout, peer-group inheritance, and which fields differ between candidate and runtime. Reconnaissance value even when secrets are masked. |
+| `DiffRuntimeConfig` | `sensitive_read` | Response is redacted by design (per RPC comment), but the diff structure exposes policy layout, peer-group inheritance, and which fields differ between candidate and runtime. Request `candidate_toml` can contain credentials and must be omitted or masked by future audit logging. |
 
 ### NeighborService (11 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
-| `AddNeighbor` | `mutating` | Input carries `md5_password` (line 337); credential ingress. Reversible per-peer. |
+| `AddNeighbor` | `mutating` | Reversible per-peer. Runtime neighbor creation does not currently accept TCP MD5 or TCP-AO key material over gRPC. |
 | `DeleteNeighbor` | `mutating` | Single-peer scope. |
 | `ListNeighbors` | `sensitive_read` | Returns full topology: addresses, ASNs, families, peer-group memberships, route-server flags, counters. No credentials in response. |
 | `GetNeighborState` | `sensitive_read` | Single-peer detail; same shape as `ListNeighbors` element. |
@@ -66,19 +70,19 @@ shape itself does not raise the tier.
 | `ListDynamicNeighbors` | `sensitive_read` | Topology disclosure for the dynamic-prefix accepted peers. |
 | `AddDynamicNeighbor` | `mutating` | Adds an accept-prefix range. Wider than `AddNeighbor` (multi-peer effective), but still per-prefix scope. |
 | `DeleteDynamicNeighbor` | `mutating` | Removes a prefix range; existing sessions inside the range tear down. |
-| `SetGracefulShutdown` | `operator_only` | See GlobalService row — listed here because the proto puts it in `NeighborService`. Empty address ⇒ all peers. |
+| `SetGracefulShutdown` | `operator_only` | Network-wide when `address` is empty; listed here because the proto puts it in `NeighborService`. |
 
-### PolicyService (17 RPCs)
+### PolicyService (18 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
 | `ListPolicies` | `sensitive_read` | Exposes named policies, statements, actions, communities. |
 | `GetPolicy` | `sensitive_read` | Single-policy detail. |
-| `SetPolicy` | `mutating` | Replaces a named policy; per-name scope. |
+| `SetPolicy` | `operator_only` | Replaces a named policy and hot-applies every affected peer; a widely referenced policy can change routing decisions network-wide. |
 | `DeletePolicy` | `mutating` | Per-name. Will fail if still referenced (typed error in the works). |
 | `ListNeighborSets` | `sensitive_read` | Topology grouping disclosure. |
 | `GetNeighborSet` | `sensitive_read` | Single-set detail. |
-| `SetNeighborSet` | `mutating` | Per-name. |
+| `SetNeighborSet` | `operator_only` | Replaces a named match set and hot-applies every affected peer; a globally referenced set has network-wide policy impact. |
 | `DeleteNeighborSet` | `mutating` | Per-name. |
 | `GetGlobalPolicyChains` | `sensitive_read` | Global import/export chain structure. |
 | `SetGlobalImportChain` | `operator_only` | Affects every neighbor without a per-peer override. Inbound-policy at the daemon scope. |
@@ -95,9 +99,9 @@ shape itself does not raise the tier.
 
 | RPC | Tier | Notes |
 |-----|------|-------|
-| `ListPeerGroups` | `sensitive_read` | Exposes group templates including inherited policy chain names. |
-| `GetPeerGroup` | `sensitive_read` | Single-group. |
-| `SetPeerGroup` | `operator_only` | Edits propagate to every neighbor inheriting the group — blast radius is N peers, not one. |
+| `ListPeerGroups` | `sensitive_read` | Exposes group templates including inherited policy chain names; `md5_password` is redacted from read responses and represented by `has_md5_password`. |
+| `GetPeerGroup` | `sensitive_read` | Single-group; `md5_password` is redacted from read responses and represented by `has_md5_password`. |
+| `SetPeerGroup` | `operator_only` | Edits propagate to every neighbor inheriting the group — blast radius is N peers, not one. This is also the current gRPC-visible credential ingress for `md5_password`. |
 | `DeletePeerGroup` | `operator_only` | Same propagation; will fail if any neighbor still references the group. |
 | `SetNeighborPeerGroup` | `mutating` | Single-neighbor reassignment. |
 | `ClearNeighborPeerGroup` | `mutating` | Single-neighbor. |
@@ -142,7 +146,7 @@ shape itself does not raise the tier.
 | RPC | Tier | Notes |
 |-----|------|-------|
 | `Shutdown` | `operator_only` | Process termination. Worst-case outage primitive on the daemon. |
-| `GetHealth` | `read` | Liveness ping. No state, no topology. Only true `read` in the whole inventory. |
+| `GetHealth` | `sensitive_read` | Liveness plus `active_peers` and `total_routes`; the counts reveal operational state and route volume. |
 | `GetMetrics` | `sensitive_read` | Returns Prometheus-shaped counters; volumetric metadata leaks RIB size, peer count, churn rate. |
 | `TriggerMrtDump` | `operator_only` | Writes a TABLE_DUMP_V2 snapshot to disk. Disk-I/O burst, potentially very large; also exposes RIB content to whoever can read the dump file later. |
 
@@ -159,10 +163,10 @@ shape itself does not raise the tier.
 
 | Tier | Count | % |
 |------|------:|--:|
-| `read` | 1 | 1.5% |
-| `sensitive_read` | 38 | 57.6% |
-| `mutating` | 16 | 24.2% |
-| `operator_only` | 11 | 16.7% |
+| `read` | 0 | 0.0% |
+| `sensitive_read` | 33 | 50.0% |
+| `mutating` | 15 | 22.7% |
+| `operator_only` | 18 | 27.3% |
 | **Total** | **66** | **100%** |
 
 (Counts treat `SetGracefulShutdown` as one RPC even though it appears once in `NeighborService`.)
@@ -175,19 +179,21 @@ in doubt, raise the tier") so the ADR can negotiate a lower tier for a
 specific method if the model warrants it.
 
 1. **Tier vs. service granularity.** Every service has at least one
-   `sensitive_read` method, but `RibService` and `EventService` are
+   `sensitive_read` method, and there are currently no true `read`
+   methods because even `GetHealth` returns peer and route counts.
+   `RibService` and `EventService` are
    pure observability (no mutations at all). The minimum-viable
    enforcement could be a per-service listener split: read-only
-   listener for those two plus the read-tier methods elsewhere,
+   listener for those two plus lightweight health checks elsewhere,
    mutating listener for everything else. The 4-tier scheme allows
    richer enforcement (e.g., per-method capability tokens) but the
    per-service split is the cheapest first step.
-2. **`operator_only` is small enough to gate by cert role.** 11
+2. **`operator_only` is small enough to gate by principal role.** 18
    methods total; carving these out into a separate listener or
-   requiring a distinct cert role (`operator` vs. `automation`) has
+   requiring a distinct principal role (`operator` vs. `automation`) has
    low operational cost and high blast-radius reduction.
 3. **InjectionService is uniformly `operator_only`.** Six of the
-   eleven `operator_only` methods live here. The simplest model is
+   eighteen `operator_only` methods live here. The simplest model is
    to make the whole service gated behind an `inject` capability or a
    dedicated listener — operators rarely use it for automation, and
    when they do it should be a deliberate channel.
@@ -195,17 +201,25 @@ specific method if the model warrants it.
    per-message.** `WatchEvents` and `WatchRoutes` open once and live
    for the connection lifetime. The enforcement model needs to
    reject at handshake, not pretend to filter per-event.
-5. **Credential ingress is at `AddNeighbor` only.** `md5_password`
-   and (after #156) `tcp_ao` keys flow inbound through
-   `AddNeighborRequest`. Read paths never echo them back. The model
-   does not need a separate "credential-write" tier — `mutating`
-   suffices because the existing write surface is bounded.
-6. **Backwards compatibility.** Today's binary access (any
-   authenticated cert ⇒ any method) is what every existing operator
-   relies on. The ADR needs a migration mode (e.g., a
-   `[security.gRPC]` block that defaults to legacy-permissive but
-   can opt into per-tier enforcement) so the cut-over isn't a
-   breaking change for everyone on the same release.
+5. **Credential ingress is narrow but not `AddNeighbor`.** The
+   gRPC-visible credential-bearing field today is
+   `PeerGroupDefinition.md5_password` through `SetPeerGroup`; static
+   neighbor TCP-AO is TOML/runtime-only and is not exposed through
+   gRPC. Read paths never echo secret material back:
+   `ListPeerGroups` and `GetPeerGroup` redact `md5_password` instead
+   of returning the stored value, while preserving a non-secret
+   optional `has_md5_password` signal for safe read/modify/write
+   preservation. `DiffRuntimeConfig` also accepts
+   candidate TOML that may contain `md5_password` or `tcp_ao.key`;
+   audit logging must omit or mask that request body. The model does
+   not need a separate "credential-write" tier yet — `operator_only`
+   plus mandatory audit redaction covers the current surface.
+6. **Backwards compatibility.** Today's coarse listener access is
+   what existing operators rely on. The ADR needs a migration mode
+   (for example a `[security.grpc]` block that defaults to
+   legacy-permissive but can opt into per-tier enforcement) so the
+   cut-over is not a breaking change for everyone on the same
+   release.
 7. **`SetGlobal` is `UNIMPLEMENTED` today.** Classifying it
    `operator_only` now sets the design constraint for whoever lands
    the implementation — otherwise the natural temptation is to ship
@@ -214,8 +228,17 @@ specific method if the model warrants it.
 8. **Audit logging.** The external review will want a per-call audit
    log. The tier assignment defines the minimum log level: all
    `mutating` and `operator_only` calls must log who-did-what-when
-   regardless of result; `sensitive_read` calls should log
-   peer-identity at minimum; `read` can sample.
+   regardless of result; credential-bearing fields must be masked;
+   `sensitive_read` calls should log peer-identity at minimum;
+   `read` can sample.
+
+## Code matrix
+
+`crates/api/src/authz.rs` contains the same 66-method classification
+as a static Rust table. Its tests parse `proto/rustbgpd.proto` and
+fail if a new RPC is added without a tier assignment, making this
+document and ADR-0064 reviewable against code instead of a hand-counted
+spreadsheet alone.
 
 ## Maintenance
 

@@ -84,7 +84,7 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
                 JsonPeerGroupSummary {
                     name: pg.name.clone(),
                     families: def.map(|d| d.families.clone()).unwrap_or_default(),
-                    has_md5_password: def.and_then(|d| d.md5_password.as_ref()).is_some(),
+                    has_md5_password: def.and_then(|d| d.has_md5_password).unwrap_or(false),
                     add_path_send: def.and_then(|d| d.add_path_send).unwrap_or(false),
                     add_path_send_max: def.and_then(|d| d.add_path_send_max).unwrap_or(0),
                     import_chain_len: def.map(|d| d.import_policy_chain.len()).unwrap_or(0),
@@ -131,7 +131,7 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
             name: resp.name.clone(),
             hold_time: def.hold_time,
             max_prefixes: def.max_prefixes,
-            has_md5_password: def.md5_password.is_some(),
+            has_md5_password: def.has_md5_password.unwrap_or(false),
             ttl_security: def.ttl_security,
             families: def.families.clone(),
             graceful_restart: def.graceful_restart,
@@ -163,7 +163,7 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
         if let Some(m) = def.max_prefixes {
             println!("Max Prefixes:          {m}");
         }
-        if def.md5_password.is_some() {
+        if def.has_md5_password.unwrap_or(false) {
             println!("MD5 Password:          (set)");
         }
         if let Some(t) = def.ttl_security {

@@ -482,6 +482,16 @@ pub enum PeerManagerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Create or replace a peer group while preserving the existing
+    /// MD5 password atomically inside the peer-manager actor.
+    SetPeerGroupPreserveMd5 {
+        /// Peer-group name.
+        name: String,
+        /// Full replacement definition except for the MD5 password.
+        definition: PeerGroupDefinition,
+        /// Reply channel returning the applied definition for persistence.
+        reply: oneshot::Sender<Result<PeerGroupDefinition, String>>,
+    },
     /// Delete a peer group.
     DeletePeerGroup {
         /// Peer-group name.
