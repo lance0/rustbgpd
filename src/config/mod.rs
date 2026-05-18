@@ -1036,11 +1036,29 @@ pub fn diff_neighbors(old: &[Neighbor], new: &[Neighbor]) -> NeighborDiff {
 }
 
 fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
-    let mut old = old.clone();
-    let mut new = new.clone();
-    old.tcp_ao = None;
-    new.tcp_ao = None;
-    old == new
+    old.address == new.address
+        && old.remote_asn == new.remote_asn
+        && old.description == new.description
+        && old.peer_group == new.peer_group
+        && old.hold_time == new.hold_time
+        && old.max_prefixes == new.max_prefixes
+        && old.md5_password == new.md5_password
+        && old.ttl_security == new.ttl_security
+        && old.families == new.families
+        && old.graceful_restart == new.graceful_restart
+        && old.gr_restart_time == new.gr_restart_time
+        && old.gr_stale_routes_time == new.gr_stale_routes_time
+        && old.llgr_stale_time == new.llgr_stale_time
+        && old.local_ipv6_nexthop == new.local_ipv6_nexthop
+        && old.route_reflector_client == new.route_reflector_client
+        && old.route_server_client == new.route_server_client
+        && old.remove_private_as == new.remove_private_as
+        && old.add_path == new.add_path
+        && old.log_level == new.log_level
+        && old.import_policy == new.import_policy
+        && old.export_policy == new.export_policy
+        && old.import_policy_chain == new.import_policy_chain
+        && old.export_policy_chain == new.export_policy_chain
 }
 
 /// Differences between two peer group maps, keyed by name.
