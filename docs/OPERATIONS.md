@@ -595,10 +595,14 @@ rustbgpctl rib
 ```bash
 rustbgpctl rib fib
 rustbgpctl -j rib fib
+rustbgpctl rib fib --table edge --state rejected --reason route_limit_exceeded
+rustbgpctl rib fib --prefix 203.0.113.0/24 --peer 198.51.100.2
 ```
 
 This reports only the ADR-0061 configured-table runtime, not the ordinary
-Loc-RIB. Rows are `installed`, `rejected`, or `failed`.
+Loc-RIB. Rows are `installed`, `rejected`, or `failed`. The filters compose
+with AND semantics. The `--prefix` filter is exact prefix+length matching, not
+longest-prefix or containment matching.
 
 - `installed` / `owned`: rustbgpd owns the row and the kernel table matches
   the current best route.
