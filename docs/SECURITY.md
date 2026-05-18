@@ -55,7 +55,10 @@ Preferred posture:
   per-method tiers (`read`, `sensitive_read`, `mutating`,
   `operator_only`). The runtime now emits audit-only `grpc_authz`
   decision logs and `bgp_grpc_authz_decisions_total`, but current
-  enforcement is still the read-only/read-write listener split.
+  enforcement is still the read-only/read-write listener split. The
+  external-review packet in `docs/adr/0064-threat-model.md` summarizes
+  the trust boundaries, abuse paths, evidence checklist, and residual
+  risks for that migration.
 - Peer-group read RPCs redact `md5_password` rather than echoing stored
   secret material; they expose only the non-secret `has_md5_password`
   presence flag. The write path preserves an omitted redacted MD5 value by
@@ -251,8 +254,10 @@ the roadmap:
 
 - ADR-0064 runtime enforcement for the checked gRPC method-tier matrix
   (`read`, `sensitive_read`, `mutating`, `operator_only`). Audit-only
-  method-tier decision logs and metrics are present; principal roles,
-  listener tier caps, and deny-by-tier enforcement remain deferred.
+  method-tier decision logs, metrics, and the
+  `docs/adr/0064-threat-model.md` audit packet are present; principal
+  roles, listener tier caps, deny-by-tier enforcement, and audit-log
+  hardening remain deferred.
 - TCP-AO (RFC 5925) dynamic-neighbor support, runtime key rotation,
   multi-key rollover, and accepted-socket inspection for BGP session
   protection

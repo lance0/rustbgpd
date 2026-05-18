@@ -24,6 +24,12 @@ capability tokens vs. proto-annotation tags vs. listener-tier split)
 — that is the ADR's job. It only fixes the classification of each
 RPC so the model has something concrete to assign roles to.
 
+For external review, read this inventory together with
+`docs/adr/0064-grpc-authorization.md` and
+`docs/adr/0064-threat-model.md`. The threat model explains the
+management-plane assets, trust boundaries, abuse paths, current controls,
+and residual enforcement gaps behind the tier assignments.
+
 ## Classification scheme
 
 Every RPC is tagged with exactly one of four tiers. The criteria are
