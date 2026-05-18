@@ -356,9 +356,9 @@ fn parse_response_for_seq(buf: &[u8], seq: u32) -> Result<Option<AckOutcome>, Ne
     let mut offset = 0;
     while offset + NLMSGHDR_SIZE <= buf.len() {
         let header_slice = &buf[offset..offset + NLMSGHDR_SIZE];
-        let nlmsg_len = u32::from_ne_bytes(header_slice[0..4].try_into().unwrap()) as usize;
-        let nlmsg_type = u16::from_ne_bytes(header_slice[4..6].try_into().unwrap());
-        let nlmsg_seq = u32::from_ne_bytes(header_slice[8..12].try_into().unwrap());
+        let nlmsg_len = read_u32_ne(header_slice, 0)? as usize;
+        let nlmsg_type = read_u16_ne(header_slice, 4)?;
+        let nlmsg_seq = read_u32_ne(header_slice, 8)?;
 
         if nlmsg_len < NLMSGHDR_SIZE || offset + nlmsg_len > buf.len() {
             return Err(NexthopError::Truncated);
@@ -380,10 +380,7 @@ fn parse_response_for_seq(buf: &[u8], seq: u32) -> Result<Option<AckOutcome>, Ne
                 if nlmsg_len < NLMSGHDR_SIZE + 4 {
                     return Err(NexthopError::Truncated);
                 }
-                let errno_bytes: [u8; 4] = buf[offset + NLMSGHDR_SIZE..offset + NLMSGHDR_SIZE + 4]
-                    .try_into()
-                    .unwrap();
-                let raw = i32::from_ne_bytes(errno_bytes);
+                let raw = read_i32_ne(buf, offset + NLMSGHDR_SIZE)?;
                 if raw == 0 {
                     return Ok(Some(AckOutcome::Ok));
                 }
@@ -405,6 +402,26 @@ fn parse_response_for_seq(buf: &[u8], seq: u32) -> Result<Option<AckOutcome>, Ne
 
 const fn nla_align(len: usize) -> usize {
     (len + 3) & !3
+}
+
+fn read_bytes<const N: usize>(buf: &[u8], offset: usize) -> Result<[u8; N], NexthopError> {
+    let end = offset.checked_add(N).ok_or(NexthopError::Truncated)?;
+    let slice = buf.get(offset..end).ok_or(NexthopError::Truncated)?;
+    let mut out = [0u8; N];
+    out.copy_from_slice(slice);
+    Ok(out)
+}
+
+fn read_u16_ne(buf: &[u8], offset: usize) -> Result<u16, NexthopError> {
+    Ok(u16::from_ne_bytes(read_bytes(buf, offset)?))
+}
+
+fn read_u32_ne(buf: &[u8], offset: usize) -> Result<u32, NexthopError> {
+    Ok(u32::from_ne_bytes(read_bytes(buf, offset)?))
+}
+
+fn read_i32_ne(buf: &[u8], offset: usize) -> Result<i32, NexthopError> {
+    Ok(i32::from_ne_bytes(read_bytes(buf, offset)?))
 }
 
 /// Per-datagram dump-pump state.
@@ -435,9 +452,9 @@ fn drain_dump_datagram(
     let mut offset = 0;
     while offset + NLMSGHDR_SIZE <= buf.len() {
         let hdr = &buf[offset..offset + NLMSGHDR_SIZE];
-        let nlmsg_len = u32::from_ne_bytes(hdr[0..4].try_into().unwrap()) as usize;
-        let nlmsg_type = u16::from_ne_bytes(hdr[4..6].try_into().unwrap());
-        let nlmsg_seq = u32::from_ne_bytes(hdr[8..12].try_into().unwrap());
+        let nlmsg_len = read_u32_ne(hdr, 0)? as usize;
+        let nlmsg_type = read_u16_ne(hdr, 4)?;
+        let nlmsg_seq = read_u32_ne(hdr, 8)?;
 
         if nlmsg_len < NLMSGHDR_SIZE || offset + nlmsg_len > buf.len() {
             return Err(NexthopError::Truncated);
@@ -457,10 +474,7 @@ fn drain_dump_datagram(
                 if nlmsg_len < NLMSGHDR_SIZE + 4 {
                     return Err(NexthopError::Truncated);
                 }
-                let errno_bytes: [u8; 4] = buf[offset + NLMSGHDR_SIZE..offset + NLMSGHDR_SIZE + 4]
-                    .try_into()
-                    .unwrap();
-                let raw = i32::from_ne_bytes(errno_bytes);
+                let raw = read_i32_ne(buf, offset + NLMSGHDR_SIZE)?;
                 if raw == 0 {
                     // Kernel-side ACK with no data (shouldn't happen on
                     // a dump request) — treat as end-of-dump.
@@ -506,38 +520,39 @@ fn parse_dump_message(body: &[u8]) -> Result<Option<KernelNexthop>, NexthopError
     let mut member_ids: Option<Vec<u32>> = None;
 
     while attrs.len() >= 4 {
-        let nla_len = u16::from_ne_bytes(attrs[0..2].try_into().unwrap()) as usize;
-        let nla_type = u16::from_ne_bytes(attrs[2..4].try_into().unwrap());
+        let nla_len = read_u16_ne(attrs, 0)? as usize;
+        let nla_type = read_u16_ne(attrs, 2)?;
         if nla_len < 4 || nla_len > attrs.len() {
             return Err(NexthopError::Truncated);
         }
         let payload = &attrs[4..nla_len];
         match nla_type {
             NHA_ID if payload.len() == 4 => {
-                id = Some(u32::from_ne_bytes(payload.try_into().unwrap()));
+                id = Some(read_u32_ne(payload, 0)?);
             }
             NHA_FDB => {
                 is_fdb = true;
             }
             NHA_GATEWAY => match payload.len() {
                 4 => {
-                    let v4: [u8; 4] = payload.try_into().unwrap();
+                    let v4 = read_bytes(payload, 0)?;
                     gateway = Some(IpAddr::V4(v4.into()));
                 }
                 16 => {
-                    let v6: [u8; 16] = payload.try_into().unwrap();
+                    let v6 = read_bytes(payload, 0)?;
                     gateway = Some(IpAddr::V6(v6.into()));
                 }
                 _ => {} // malformed; ignore
             },
             NHA_GROUP => {
                 // Payload is an array of `nexthop_grp` (8 bytes each).
+                let chunks = payload.chunks_exact(8);
+                if !chunks.remainder().is_empty() {
+                    return Err(NexthopError::Truncated);
+                }
                 let mut ids = Vec::with_capacity(payload.len() / 8);
-                let mut off = 0;
-                while off + 8 <= payload.len() {
-                    let id_bytes: [u8; 4] = payload[off..off + 4].try_into().unwrap();
-                    ids.push(u32::from_ne_bytes(id_bytes));
-                    off += 8;
+                for chunk in chunks {
+                    ids.push(read_u32_ne(chunk, 0)?);
                 }
                 member_ids = Some(ids);
             }
@@ -636,6 +651,18 @@ mod tests {
         assert!(matches!(
             parse_response_for_seq(&buf, 42),
             Err(NexthopError::UnexpectedMessage(999))
+        ));
+    }
+
+    #[test]
+    fn native_read_helpers_report_truncated() {
+        assert!(matches!(
+            read_u32_ne(&[1, 2, 3], 0),
+            Err(NexthopError::Truncated)
+        ));
+        assert!(matches!(
+            read_u16_ne(&[1, 2], usize::MAX),
+            Err(NexthopError::Truncated)
         ));
     }
 
@@ -766,6 +793,38 @@ mod tests {
         ]);
         let entry = parse_dump_message(&body).unwrap().expect("entry");
         assert!(matches!(entry.kind, KernelNexthopKind::Member { .. }));
+    }
+
+    #[test]
+    fn parse_dump_errors_on_oversized_attr_len() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0u8; NHMSG_SIZE]);
+        body.extend_from_slice(&8u16.to_ne_bytes());
+        body.extend_from_slice(&NHA_ID.to_ne_bytes());
+
+        assert!(matches!(
+            parse_dump_message(&body),
+            Err(NexthopError::Truncated)
+        ));
+    }
+
+    #[test]
+    fn parse_group_dump_rejects_trailing_partial_member() {
+        let id = 0x4000_0001u32;
+        let mut group_payload = Vec::new();
+        group_payload.extend_from_slice(&12u32.to_ne_bytes());
+        group_payload.extend_from_slice(&[0u8, 0, 0, 0]);
+        group_payload.extend_from_slice(&13u32.to_ne_bytes());
+
+        let body = build_dump_body(&[
+            (NHA_ID, id.to_ne_bytes().to_vec()),
+            (NHA_GROUP, group_payload),
+            (NHA_FDB, vec![]),
+        ]);
+        assert!(matches!(
+            parse_dump_message(&body),
+            Err(NexthopError::Truncated)
+        ));
     }
 
     #[test]

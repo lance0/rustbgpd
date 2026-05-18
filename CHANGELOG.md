@@ -17,6 +17,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--table`, `--state`, `--reason`, `--prefix`, and `--peer`. Filters compose
   with AND semantics and the prefix filter is an exact prefix+length match.
 
+### Changed
+
+- **BGP listener socket boundary prepared for TCP-AO.** The inbound BGP
+  listener now creates its listening socket through `socket2` before handing
+  it to Tokio. Runtime behavior is unchanged, but the transport layer now has
+  the pre-listen socket-option hook needed by future ADR-0062 TCP-AO key
+  installation on passive OPEN.
+
+### Fixed
+
+- **FDB nexthop raw-netlink parser hardening.**
+  `NexthopSocket` response and `RTM_GETNEXTHOP` dump parsing now returns
+  typed `NexthopError::Truncated` errors for malformed netlink datagrams
+  instead of relying on guarded runtime slice conversions.
+
 ## [0.22.0] — 2026-05-17
 
 ### Added
