@@ -124,6 +124,32 @@ kill $DAEMON_PID
 rm -rf /tmp/rustbgpd-auth /tmp/rustbgpd-token /tmp/rustbgpd-auth-test.toml
 ```
 
+### gRPC authorization audit smoke
+
+When ADR-0064 changes land, capture one request against a test listener and
+confirm both audit surfaces move:
+
+```bash
+# With the token-auth daemon above still running:
+./target/release/rustbgpctl -s unix:///tmp/rustbgpd-auth/grpc.sock \
+  --token-file /tmp/rustbgpd-token health
+
+# Logs should include target="grpc_authz" with path, tier, result, authn,
+# access_mode, and principal fields.
+
+# Metrics should expose bounded-label decision counters, with no method path or
+# principal labels:
+curl -fsS http://127.0.0.1:19179/metrics | grep bgp_grpc_authz_decisions_total
+```
+
+For external audit prep, verify the current method inventory and threat model:
+
+```bash
+cargo test -p rustbgpd-api authz
+test -s docs/grpc-method-inventory.md
+test -s docs/adr/0064-threat-model.md
+```
+
 ### Interop smoke (requires Docker + containerlab)
 
 Run at least one from each category:
