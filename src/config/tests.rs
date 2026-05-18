@@ -578,6 +578,177 @@ ttl_security = true
 }
 
 #[test]
+fn neighbor_tcp_ao_schema_parses_without_runtime_wiring() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+tcp_ao = { key = "secret", send_id = 7, recv_id = 9, algorithm = "hmac(sha256)", preferred = true }
+"#;
+    let config = parse(toml_str).unwrap();
+    let tcp_ao = config.neighbors[0].tcp_ao.as_ref().unwrap();
+    assert_eq!(tcp_ao.key, "secret");
+    assert_eq!(tcp_ao.send_id, 7);
+    assert_eq!(tcp_ao.recv_id, 9);
+    assert_eq!(tcp_ao.algorithm, "hmac(sha256)");
+    assert!(tcp_ao.preferred);
+    assert!(!tcp_ao.deprecated);
+
+    let peers = config.to_peer_configs().unwrap();
+    assert!(peers[0].0.md5_password.is_none());
+}
+
+#[test]
+fn neighbor_tcp_ao_rejects_md5_conflicts() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+md5_password = "md5-secret"
+tcp_ao = { key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha1)" }
+"#;
+    let err = parse(toml_str).unwrap_err();
+    assert!(matches!(
+        err,
+        ConfigError::InvalidNeighborConfig { field, .. } if field == "tcp_ao"
+    ));
+}
+
+#[test]
+fn neighbor_tcp_ao_rejects_inherited_md5_conflict() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.secure]
+md5_password = "md5-secret"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "secure"
+tcp_ao = { key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha1)" }
+"#;
+    let err = parse(toml_str).unwrap_err();
+    assert!(matches!(
+        err,
+        ConfigError::InvalidNeighborConfig { field, .. } if field == "tcp_ao"
+    ));
+}
+
+#[test]
+fn neighbor_tcp_ao_rejects_invalid_key_and_algorithm() {
+    let base = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+"#;
+
+    let empty_key = format!(
+        "{base}tcp_ao = {{ key = \"\", send_id = 1, recv_id = 1, algorithm = \"hmac(sha1)\" }}\n"
+    );
+    assert!(matches!(
+        parse(&empty_key).unwrap_err(),
+        ConfigError::InvalidNeighborConfig { field, .. } if field == "tcp_ao.key"
+    ));
+
+    let long_key = "x".repeat(81);
+    let long_key_toml = format!(
+        "{base}tcp_ao = {{ key = \"{long_key}\", send_id = 1, recv_id = 1, algorithm = \"hmac(sha1)\" }}\n"
+    );
+    assert!(matches!(
+        parse(&long_key_toml).unwrap_err(),
+        ConfigError::InvalidNeighborConfig { field, .. } if field == "tcp_ao.key"
+    ));
+
+    let bad_alg = format!(
+        "{base}tcp_ao = {{ key = \"secret\", send_id = 1, recv_id = 1, algorithm = \"md5\" }}\n"
+    );
+    assert!(matches!(
+        parse(&bad_alg).unwrap_err(),
+        ConfigError::InvalidNeighborConfig { field, .. } if field == "tcp_ao.algorithm"
+    ));
+}
+
+#[test]
+fn neighbor_tcp_ao_rejects_conflicting_rollover_flags() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+tcp_ao = { key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha1)", preferred = true, deprecated = true }
+"#;
+    let err = parse(toml_str).unwrap_err();
+    assert!(matches!(
+        err,
+        ConfigError::InvalidNeighborConfig { field, .. } if field == "tcp_ao"
+    ));
+}
+
+#[test]
+fn neighbor_tcp_ao_rejects_unknown_field() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+tcp_ao = { key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha1)", typo = true }
+"#;
+    let err = parse(toml_str).unwrap_err();
+    assert!(matches!(err, ConfigError::Parse(_)));
+}
+
+#[test]
 fn policy_config_parsed() {
     let toml_str = r#"
 [global]
@@ -2374,6 +2545,7 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         hold_time: None,
         max_prefixes: None,
         md5_password: None,
+        tcp_ao: None,
         ttl_security: Some(false),
         families: Vec::new(),
         graceful_restart: None,
@@ -2445,6 +2617,25 @@ fn diff_neighbors_no_changes() {
 }
 
 #[test]
+fn diff_neighbors_ignores_tcp_ao_only_changes_until_runtime_wiring() {
+    let old = vec![test_neighbor("10.0.0.1", 65001)];
+    let mut new_neighbor = test_neighbor("10.0.0.1", 65001);
+    new_neighbor.tcp_ao = Some(TcpAoConfig {
+        key: "secret".into(),
+        send_id: 1,
+        recv_id: 1,
+        algorithm: "hmac(sha256)".into(),
+        preferred: true,
+        deprecated: false,
+    });
+
+    let diff = super::diff_neighbors(&old, &[new_neighbor]);
+    assert!(diff.added.is_empty());
+    assert!(diff.removed.is_empty());
+    assert!(diff.changed.is_empty());
+}
+
+#[test]
 fn describe_neighbor_changes_detects_field_diffs() {
     let old = test_neighbor("10.0.0.1", 65001);
     let mut new = old.clone();
@@ -2476,6 +2667,23 @@ fn describe_neighbor_changes_hides_md5_value() {
     assert_eq!(changes.len(), 1);
     assert!(changes[0].contains("<changed>"));
     assert!(!changes[0].contains("secret"));
+}
+
+#[test]
+fn describe_neighbor_changes_hides_tcp_ao_key() {
+    let old = test_neighbor("10.0.0.1", 65001);
+    let mut new = old.clone();
+    new.tcp_ao = Some(TcpAoConfig {
+        key: "secret".into(),
+        send_id: 1,
+        recv_id: 1,
+        algorithm: "hmac(sha256)".into(),
+        preferred: true,
+        deprecated: false,
+    });
+
+    let changes = super::describe_neighbor_changes(&old, &new);
+    assert_eq!(changes, vec!["tcp_ao: <changed>".to_string()]);
 }
 
 #[test]

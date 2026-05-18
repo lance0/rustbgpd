@@ -138,9 +138,9 @@ These protect BGP transport sessions, not the gRPC management surface.
 
 TCP-AO (RFC 5925) is the intended successor to TCP MD5. rustbgpd now has
 an internal Linux socket primitive and capability probe for TCP-AO
-(ADR-0062), but it does not yet expose TCP-AO operator configuration or
-apply AO keys to live BGP sessions. Runtime support is deferred until both
-the outbound and inbound listener paths can install keys before TCP active
+(ADR-0062), plus static-neighbor `tcp_ao` TOML parsing/validation. It does
+not yet apply AO keys to live BGP sessions. Runtime support is deferred until
+both the outbound and inbound listener paths can install keys before TCP active
 or passive OPEN.
 
 ## Linux EVPN VTEP — `CAP_NET_ADMIN` requirement
@@ -225,13 +225,13 @@ The following security improvements are intentionally deferred and tracked in
 the roadmap:
 
 - Finer-grained gRPC authorization beyond "listener allowed / denied"
-- TCP-AO (RFC 5925) runtime configuration and interop validation for BGP
-  session protection (currently TCP MD5 and GTSM)
+- TCP-AO (RFC 5925) runtime key installation and interop validation for BGP
+  session protection (currently TCP MD5 and GTSM; TCP-AO TOML schema only)
 
 ## Current gaps
 
 - Authorization is listener-wide (`read_only` vs `read_write`), not per-RPC or
   per-role
-- No runtime TCP-AO configuration yet; TCP MD5 and GTSM are the supported
+- No runtime TCP-AO key installation yet; TCP MD5 and GTSM are the supported
   session protections
 - Cert rotation on the gRPC TLS listener requires a daemon restart (not SIGHUP)

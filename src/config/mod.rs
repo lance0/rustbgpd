@@ -642,6 +642,7 @@ impl Config {
             hold_time: None,
             max_prefixes: None,
             md5_password: None,
+            tcp_ao: None,
             ttl_security: None,
             families: Vec::new(),
             graceful_restart: None,
@@ -968,6 +969,9 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<String> 
     if old.md5_password != new.md5_password {
         changes.push("md5_password: <changed>".to_string());
     }
+    if old.tcp_ao != new.tcp_ao {
+        changes.push("tcp_ao: <changed>".to_string());
+    }
 
     // Policy changes: summarize rather than dump full config
     if old.import_policy != new.import_policy {
@@ -994,8 +998,11 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<String> 
 
 /// Compare two neighbor lists and return the differences.
 ///
-/// Two neighbors with the same address but different configuration
-/// (any field difference) are reported in `changed`.
+/// Two neighbors with the same address but different runtime-affecting
+/// configuration are reported in `changed`. Schema-only TCP-AO edits are
+/// deliberately ignored until ADR-0062 runtime key installation lands: a
+/// SIGHUP should update the config snapshot without bouncing a session for a
+/// field the transport layer cannot apply yet.
 pub fn diff_neighbors(old: &[Neighbor], new: &[Neighbor]) -> NeighborDiff {
     let old_map: std::collections::HashMap<&str, &Neighbor> =
         old.iter().map(|n| (n.address.as_str(), n)).collect();
@@ -1008,7 +1015,7 @@ pub fn diff_neighbors(old: &[Neighbor], new: &[Neighbor]) -> NeighborDiff {
         match old_map.get(addr) {
             None => added.push((*new_n).clone()),
             Some(old_n) => {
-                if *old_n != *new_n {
+                if !neighbor_runtime_equal(old_n, new_n) {
                     changed.push((*new_n).clone());
                 }
             }
@@ -1026,6 +1033,14 @@ pub fn diff_neighbors(old: &[Neighbor], new: &[Neighbor]) -> NeighborDiff {
         removed,
         changed,
     }
+}
+
+fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
+    let mut old = old.clone();
+    let mut new = new.clone();
+    old.tcp_ao = None;
+    new.tcp_ao = None;
+    old == new
 }
 
 /// Differences between two peer group maps, keyed by name.

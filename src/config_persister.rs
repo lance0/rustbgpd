@@ -140,6 +140,7 @@ log_format = "json"
             hold_time: None,
             max_prefixes: None,
             md5_password: None,
+            tcp_ao: None,
             ttl_security: Some(false),
             families: Vec::new(),
             graceful_restart: None,

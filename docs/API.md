@@ -121,8 +121,8 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 
 `tcp_ao_support` is a read-only Linux capability probe for future RFC 5925
 TCP-AO support. It reports whether the host kernel accepts the TCP-AO socket
-primitive; rustbgpd does not yet accept TCP-AO neighbor configuration or apply
-TCP-AO keys to BGP sessions.
+primitive. Static-neighbor TCP-AO TOML is parsed and validated, but rustbgpd
+does not yet apply TCP-AO keys to BGP sessions.
 
 ---
 
@@ -140,7 +140,8 @@ and receive only the same redacted diff buckets used by
 `DiffRuntimeConfigResponse` contains boolean summary fields, a
 plain-text `human_text` rendering, and `diff_json` using the
 `rustbgpd --diff --json` schema. Secret-bearing fields such as
-neighbor `md5_password` are redacted in both renderings.
+neighbor `md5_password` and `tcp_ao.key` material are redacted in both
+renderings.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \

@@ -17,6 +17,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--table`, `--state`, `--reason`, `--prefix`, and `--peer`. Filters compose
   with AND semantics and the prefix filter is an exact prefix+length match.
 
+- **ADR-0062 TCP-AO static-neighbor schema.** `[[neighbors]]` now accepts a
+  `tcp_ao = { key, send_id, recv_id, algorithm, preferred, deprecated }`
+  table for RFC 5925 configuration validation. The schema is mutually exclusive
+  with `md5_password`, redacts secrets in config diffs, and validates key
+  length and Linux TCP-AO algorithm names. Runtime key installation remains
+  deferred; this release does not apply TCP-AO keys to BGP sessions.
+
 ### Changed
 
 - **BGP listener socket boundary prepared for TCP-AO.** The inbound BGP
