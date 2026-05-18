@@ -1,5 +1,3 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use crate::peer_types::{
     PolicyEvent, SessionEvent, SessionLifecycleEvent, SessionLifecycleEventType,
     SessionNotificationEvent, SessionNotificationEventType,
@@ -222,11 +220,7 @@ pub(super) fn dataplane_summary_to_bgp_event(
         failed: summary.failed,
     };
     proto::BgpEvent {
-        timestamp: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-            .to_string(),
+        timestamp: rustbgpd_rib::event::unix_timestamp_now(),
         category: proto::EventCategory::Dataplane as i32,
         event_type: proto::BgpEventType::DataplaneStatusChanged as i32,
         severity: severity as i32,
