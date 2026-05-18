@@ -29,6 +29,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `[security.grpc.roles]`, listener `max_tier`, and deny-by-tier enforcement
   remain follow-up ADR-0064 slices.
 
+- **ADR-0064 external-audit packet.** Added
+  `docs/adr/0064-threat-model.md`, a repository-grounded gRPC management-plane
+  threat model covering assets, trust boundaries, attacker capabilities, abuse
+  paths, residual risks, external review evidence, and concrete follow-up issues
+  for the remaining authorization/enforcement slices.
+
 - **Filtered general FIB status queries.** `RibService.ListFibRoutes` now
   accepts optional `table_name`, `state`, `reason`, exact prefix, and
   peer-address filters, and `rustbgpctl rib fib` exposes the same filters via
