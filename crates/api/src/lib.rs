@@ -9,6 +9,7 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
+pub mod authz;
 mod config_service;
 mod control_service;
 mod event_service;

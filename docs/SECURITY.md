@@ -49,6 +49,12 @@ Preferred posture:
 - If you need to expose monitoring directly, prefer a dedicated
   `access_mode = "read_only"` listener over exposing the mutating control
   surface.
+- `access_mode` is still a listener-level boundary, not per-client RBAC. The
+  method-risk inventory in `docs/grpc-method-inventory.md` and
+  `crates/api/src/authz.rs` is the ADR-0064 foundation for future
+  per-method tiers (`read`, `sensitive_read`, `mutating`,
+  `operator_only`), but current runtime enforcement is still the
+  read-only/read-write listener split.
 - Restrict the exposed listener to a management VLAN/interface or a small set
   of management hosts.
 - Even with mTLS in place, treat the API as privileged. Read-only RPCs still
@@ -236,15 +242,17 @@ needed by rustbgpd.
 The following security improvements are intentionally deferred and tracked in
 the roadmap:
 
-- Finer-grained gRPC authorization beyond "listener allowed / denied"
+- ADR-0064 runtime enforcement for the checked gRPC method-tier matrix
+  (`read`, `sensitive_read`, `mutating`, `operator_only`)
 - TCP-AO (RFC 5925) dynamic-neighbor support, runtime key rotation,
   multi-key rollover, and accepted-socket inspection for BGP session
   protection
 
 ## Current gaps
 
-- Authorization is listener-wide (`read_only` vs `read_write`), not per-RPC or
-  per-role
+- Authorization is still listener-wide at runtime (`read_only` vs
+  `read_write`). ADR-0064 classifies every RPC, but per-RPC / per-role
+  enforcement is not active yet.
 - TCP-AO currently supports static-neighbor startup keys only; dynamic
   neighbors, live key rotation, and multi-key rollover remain follow-up work.
   Protected static-neighbor interop is covered by M43 against BIRD 3.2.1 on

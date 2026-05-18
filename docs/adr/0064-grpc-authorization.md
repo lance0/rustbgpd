@@ -1,23 +1,26 @@
 # ADR-0064: gRPC per-method authorization
 
-**Status:** Draft
+**Status:** Accepted
 **Date:** 2026-05-18
 
 ## Context
 
-rustbgpd's gRPC surface is currently binary: any client that completes
-the mTLS handshake on a configured `[[telemetry.grpc_tcp]]` or
-`[[telemetry.grpc_uds]]` listener can call any method on any service.
-Read and write surfaces share the same listener, the same client cert,
-and the same code path through the tonic service routers.
+rustbgpd's gRPC surface is currently protected at the listener level:
+clients must satisfy the listener's transport/authentication boundary
+(Unix socket permissions, optional bearer token, and/or mTLS), and
+`access_mode = "read_only"` rejects mutating handlers. A
+`read_write` listener still exposes the full service surface to any
+accepted client, and `read_only` does not distinguish liveness from
+RIB/policy/topology reads.
 
 The inventory in `docs/grpc-method-inventory.md` classifies the 66
 RPCs across 10 services into four tiers by worst-case effect on a
-compromised mTLS cert: `read` (1), `sensitive_read` (38), `mutating`
-(16), `operator_only` (11). That distribution makes the binary model
-indefensible at v1.0 — a leaked observability cert grants the holder
-`Shutdown`, network-wide `SetGracefulShutdown`, route injection,
-FlowSpec filter installation, and EVPN MAC hijack origination.
+compromised credential: `read` (1), `sensitive_read` (32),
+`mutating` (17), `operator_only` (16). That distribution makes
+unscoped `read_write` access too broad for v1.0 — a leaked automation
+credential grants the holder `Shutdown`, network-wide
+`SetGracefulShutdown`, route injection, FlowSpec filter installation,
+and EVPN MAC hijack origination.
 
 ROADMAP P0 ("gRPC security audit + authorization split") lists this
 as a v1.0 blocker. The exit criterion is: "Security review complete;
@@ -57,7 +60,8 @@ section, in summary:
 2. Role-to-tier mapping mechanism.
 3. Authentication identity extraction from mTLS.
 4. Streaming RPC handshake-time vs per-event check.
-5. Credential ingress (`AddNeighbor`) handling in audit logs.
+5. Credential ingress (`SetPeerGroup` for `md5_password`) handling
+   in audit logs.
 6. Backwards-compatibility migration mode.
 7. Defensive classification of `UNIMPLEMENTED` methods like
    `SetGlobal`.
@@ -65,10 +69,11 @@ section, in summary:
 
 ## Decision
 
-Adopt a **per-method tier annotation enforced by a tonic interceptor,
-bounded above by a per-listener tier cap**, with role-to-tier mapping
-driven by a cert-identity lookup in `[security.grpc.roles]`. Ship in
-six slices so the enforcement default flip is its own reviewable PR.
+Adopt a **checked per-method tier matrix enforced by a gRPC
+authorization layer, bounded above by a per-listener tier cap**, with
+role-to-tier mapping driven by a cert-identity lookup in
+`[security.grpc.roles]`. Ship in six slices so the enforcement default
+flip is its own reviewable PR.
 
 ### 1. Tier model
 
@@ -84,37 +89,30 @@ Tiers are totally ordered: `read < sensitive_read < mutating <
 operator_only`. A role authorized for tier N is implicitly authorized
 for all tiers < N.
 
-### 2. Per-method annotation in proto
+### 2. Checked per-method matrix
 
-Embed the tier in the proto so it is the single source of truth and
-ships to every consumer:
+The first implementation source of truth is a static Rust matrix in
+`crates/api/src/authz.rs`:
 
-```proto
-import "rustbgpd/v1/authz.proto";
-
-extend google.protobuf.MethodOptions {
-  optional rustbgpd.v1.AuthTier auth_tier = 50000;
-}
-
-enum AuthTier {
-  AUTH_TIER_UNSPECIFIED = 0;
-  AUTH_TIER_READ = 1;
-  AUTH_TIER_SENSITIVE_READ = 2;
-  AUTH_TIER_MUTATING = 3;
-  AUTH_TIER_OPERATOR_ONLY = 4;
-}
-
-service RibService {
-  rpc ListReceivedRoutes(ListRoutesRequest) returns (ListRoutesResponse) {
-    option (auth_tier) = AUTH_TIER_SENSITIVE_READ;
-  }
-  // ...
+```rust
+GrpcMethodAuthz {
+    path: "/rustbgpd.v1.RibService/ListReceivedRoutes",
+    service: "rustbgpd.v1.RibService",
+    method: "ListReceivedRoutes",
+    tier: AuthTier::SensitiveRead,
 }
 ```
 
-`AUTH_TIER_UNSPECIFIED` is treated by the interceptor as
-`operator_only` (defense in depth: a method that forgets to declare a
-tier fails closed, not open). This is the mechanism that catches the
+Unit tests parse `proto/rustbgpd.proto` and fail if a new RPC is added
+without a tier assignment. This gives the daemon an immediately
+testable source of truth without depending on prost/tonic descriptor
+reflection. A future proto `MethodOptions` annotation can still be
+added for external consumers, but runtime enforcement does not depend
+on it.
+
+Unknown method paths are treated as `operator_only` once enforcement
+lands (defense in depth: a method that forgets to enter the matrix
+fails closed, not open). This is the mechanism that catches the
 `SetGlobal` trap from inventory question 7.
 
 ### 3. Per-listener tier cap
@@ -137,7 +135,7 @@ path = "/run/rustbgpd/inject.sock"
 max_tier = "operator_only"   # route-injection channel, UDS-scoped
 ```
 
-The listener's `max_tier` is a hard ceiling: the interceptor rejects
+The listener's `max_tier` is a hard ceiling: the authorization layer rejects
 any call whose method tier exceeds `max_tier` regardless of caller
 role. This gives operators a defense-in-depth knob — even if a cert
 is misclassified or a role assignment is wrong, the listener tier
@@ -184,10 +182,8 @@ re-issuing certs.
 
 ### 5. Streaming RPCs
 
-`WatchRoutes` and `WatchEvents` are validated **once at the unary
-handshake portion of the streaming open**, not per emitted message.
-Tonic's interceptor sees the metadata-and-tier check before the
-service handler accepts the stream. A subsequent role change in the
+`WatchRoutes` and `WatchEvents` are validated **once when the stream
+opens**, not per emitted message. A subsequent role change in the
 daemon's config does not retroactively close existing streams; the
 client must reconnect. Inventory question 4 answered.
 
@@ -200,7 +196,7 @@ Add `[security.grpc]` with an `enforcement` field:
 enforcement = "legacy"  # default in slice 1; flipped to "tier" in slice 4
 ```
 
-- `legacy` — interceptor logs tier decisions but does not enforce them
+- `legacy` — the authorization layer logs tier decisions but does not enforce them
   (audit-only). All calls that would have been authorized under the
   old binary `access_mode` continue to work. Calls that would be
   rejected under tier enforcement emit a `WARN` log so operators see
@@ -222,24 +218,25 @@ Every RPC call produces a structured log entry. Minimum level by tier:
 | `mutating` | every call | + redacted argument summary, result code |
 | `operator_only` | every call, at `WARN` | + full argument summary with credential fields masked, caller principal, listener address |
 
-Credential masking is mandatory: `md5_password` (in
-`AddNeighborRequest`), `tcp_ao.key` (in `AddNeighborRequest.tcp_ao`),
-and any field tagged with a future `[(rustbgpd.v1.credential) = true]`
-extension are replaced with `***REDACTED***` before the log line is
-emitted. Inventory questions 5 and 8 answered.
+Credential masking is mandatory: `PeerGroupDefinition.md5_password`
+and any field tagged with a future credential marker are replaced with
+`***REDACTED***` before the log line is emitted. TCP-AO key material is
+TOML/runtime-only today and is not accepted by any gRPC request.
+Inventory questions 5 and 8 answered.
 
 ### 8. `UNIMPLEMENTED` methods
 
-Annotate every `UNIMPLEMENTED` method as `AUTH_TIER_OPERATOR_ONLY` so
-the eventual implementation must explicitly downgrade if warranted.
-`SetGlobal` is the current example. Inventory question 7 answered.
+Assign every `UNIMPLEMENTED` method `operator_only` in the method
+matrix so the eventual implementation must explicitly downgrade if
+warranted. `SetGlobal` is the current example. Inventory question 7
+answered.
 
 ## Consequences
 
 **Positive:**
 
-- Per-method tier comes from the proto, so external consumers see the
-  classification in generated code and bindings.
+- Per-method tier is checked in code against the proto inventory, so a
+  new RPC cannot land silently without an authorization classification.
 - Listener tier cap gives operators a coarse-grained kill-switch
   independent of role-mapping correctness.
 - Three-role mapping with TOML-driven principal lookup is cheap to
@@ -256,9 +253,8 @@ the eventual implementation must explicitly downgrade if warranted.
 - Six-slice ladder means full enforcement is not on by default until
   slice 4. Until then, the audit-only mode produces signal but no
   protection.
-- Proto annotation requires every consumer to regenerate after
-  slice 1. Wire compatibility is preserved (method semantics
-  unchanged); only generated code differs.
+- A Rust matrix is daemon-local; external consumers do not see tier
+  metadata in generated bindings until a later proto annotation slice.
 - The per-listener `max_tier` field deprecates the existing binary
   `access_mode` over one release. Auto-translation at config-load
   keeps existing operator TOML working; the `WARN` on use is the
@@ -268,23 +264,23 @@ the eventual implementation must explicitly downgrade if warranted.
   using bare-CN certs without SANs need to migrate their PKI or
   configure CN-based principal mapping. The fallback to Subject CN
   in §4 covers them, but cleanest practice is URI or email SANs.
-- The four-tier model still doesn't separate "credential ingress"
-  from other `mutating` calls. `AddNeighbor` carrying
-  `md5_password` is the only credential-write surface today; if
-  more land later, a future ADR may split a `credential_write`
-  tier off. Audit-log masking is the v1.0 mitigation.
+- The four-tier model still does not separate "credential ingress"
+  from other writes. `SetPeerGroup` can carry `md5_password` today; if
+  more credential-write surfaces land later, a future ADR may split a
+  `credential_write` tier off. Audit-log masking is the v1.0
+  mitigation.
 
 ## Slicing
 
 Each slice ships as one or more PRs. The slice boundary is the
 review/rollback unit.
 
-1. **Foundation.** Add the `AuthTier` enum, the
-   `option (auth_tier)` extension, the `[security.grpc]` table with
-   `enforcement = "legacy"` default, and the interceptor scaffolding
-   that resolves the tier per call and logs (does not enforce). All
-   66 methods get their inventory-assigned annotation. `UNIMPLEMENTED`
-   defaults to `operator_only`.
+1. **Foundation.** Add the `AuthTier` enum and static method matrix in
+   `crates/api/src/authz.rs`; tests parse `proto/rustbgpd.proto` and
+   require all 66 methods to have an inventory-assigned tier.
+   `UNIMPLEMENTED` defaults to `operator_only`. Correct this ADR and
+   the inventory to match shipped listener-level `access_mode`
+   behavior. No runtime enforcement change.
 2. **Identity + roles.** Implement principal extraction from mTLS
    peer cert (URI-SAN → email-SAN → CN priority). Add
    `[security.grpc.roles]` mapping. Add `observer | automation |
@@ -296,7 +292,10 @@ review/rollback unit.
    "operator_only"` automatically at config-load time; deprecate
    `access_mode` (still parsed, emits a `WARN` on use). Listener
    cap enforces in all modes including `legacy`.
-4. **Enforcement flip.** Default `enforcement = "tier"`. Update
+4. **Authorization layer + enforcement flip.** Add a Tower HTTP layer
+   or equivalent service-level checks that can see the gRPC method
+   path before tonic strips URI information. Default `enforcement =
+   "tier"`. Update
    `CHANGELOG.md`, `KNOWN_ISSUES.md`, and
    `docs/SECURITY.md` migration notes.
 5. **Audit log hardening.** Add the `[(rustbgpd.v1.credential) =
@@ -334,13 +333,13 @@ communication.
 
 ## Implementation status
 
-Slice 1 not yet started. This ADR is the design entry; PRs implement
-slices in order. Each slice PR updates the **Implementation Status**
-section below.
+Slice 1 is implemented by the ADR-0064 foundation PR: checked method
+matrix plus inventory/ADR correction. Later slices implement identity,
+listener tier caps, runtime enforcement, and audit logging.
 
 | Slice | Status |
 |-------|--------|
-| 1. Foundation | Not started |
+| 1. Foundation | Implemented by the checked method-matrix PR |
 | 2. Identity + roles | Not started |
 | 3. Listener tier cap | Not started |
 | 4. Enforcement flip | Not started |

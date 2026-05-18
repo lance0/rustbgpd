@@ -75,6 +75,12 @@ per-user roles: every client accepted by that listener gets the same read-only
 surface. Use a separate `read_write` listener for automation that needs to
 mutate daemon state.
 
+`docs/grpc-method-inventory.md` and `crates/api/src/authz.rs` classify every
+RPC into `read`, `sensitive_read`, `mutating`, or `operator_only` for
+ADR-0064. That matrix is advisory in this release: runtime enforcement remains
+the listener-level `access_mode` split below. Future ADR-0064 slices use the
+matrix for finer-grained role and listener-tier authorization.
+
 | Service | Read-only RPCs | Mutating RPCs rejected on `read_only` |
 |---------|----------------|---------------------------------------|
 | `GlobalService` | `GetGlobal` | `SetGlobal` |
