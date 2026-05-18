@@ -338,6 +338,90 @@ fn apply_route_filters(routes: Vec<Route>, filters: &RouteFilters) -> Vec<Route>
     routes.into_iter().filter(|r| filters.matches(r)).collect()
 }
 
+struct FibRouteFilters {
+    table_name: Option<String>,
+    state: Option<proto::FibRouteState>,
+    reason: Option<String>,
+    prefix: Option<(String, u32)>,
+    peer_address: Option<String>,
+}
+
+impl FibRouteFilters {
+    #[allow(clippy::result_large_err)]
+    fn from_request(req: &proto::ListFibRoutesRequest) -> Result<Self, Status> {
+        let table_name = (!req.table_name.is_empty()).then(|| req.table_name.clone());
+        let reason = (!req.reason.is_empty()).then(|| req.reason.clone());
+        let prefix =
+            parse_route_event_prefix_filter(&req.prefix, req.prefix_length, None)?.map(|prefix| {
+                let (addr, len) = prefix_parts(prefix);
+                (addr, len)
+            });
+        let peer_address = if req.peer_address.is_empty() {
+            None
+        } else {
+            let addr: IpAddr = req
+                .peer_address
+                .parse()
+                .map_err(|e| Status::invalid_argument(format!("invalid peer_address: {e}")))?;
+            Some(addr.to_string())
+        };
+        let state = match proto::FibRouteState::try_from(req.state) {
+            Ok(proto::FibRouteState::Unspecified) => None,
+            Ok(state) => Some(state),
+            Err(_) => {
+                return Err(Status::invalid_argument(format!(
+                    "invalid fib route state: {}",
+                    req.state
+                )));
+            }
+        };
+
+        Ok(Self {
+            table_name,
+            state,
+            reason,
+            prefix,
+            peer_address,
+        })
+    }
+
+    fn matches(&self, row: &proto::FibRouteStatus) -> bool {
+        if let Some(table_name) = &self.table_name
+            && &row.table_name != table_name
+        {
+            return false;
+        }
+        if let Some(state) = self.state
+            && proto::FibRouteState::try_from(row.state).ok() != Some(state)
+        {
+            return false;
+        }
+        if let Some(reason) = &self.reason
+            && &row.reason != reason
+        {
+            return false;
+        }
+        if let Some((prefix, prefix_length)) = &self.prefix
+            && (&row.prefix != prefix || row.prefix_length != *prefix_length)
+        {
+            return false;
+        }
+        if let Some(peer_address) = &self.peer_address
+            && &row.peer_address != peer_address
+        {
+            return false;
+        }
+        true
+    }
+}
+
+fn prefix_parts(prefix: Prefix) -> (String, u32) {
+    match prefix {
+        Prefix::V4(prefix) => (prefix.addr.to_string(), u32::from(prefix.len)),
+        Prefix::V6(prefix) => (prefix.addr.to_string(), u32::from(prefix.len)),
+    }
+}
+
 fn parse_page_params(req: &proto::ListRoutesRequest) -> Result<(usize, usize), &'static str> {
     let offset: usize = if req.page_token.is_empty() {
         0
@@ -791,11 +875,14 @@ impl proto::rib_service_server::RibService for RibService {
 
     async fn list_fib_routes(
         &self,
-        _request: Request<proto::ListFibRoutesRequest>,
+        request: Request<proto::ListFibRoutesRequest>,
     ) -> Result<Response<proto::ListFibRoutesResponse>, Status> {
-        Ok(Response::new(proto::ListFibRoutesResponse {
-            routes: (self.fib_route_snapshot)(),
-        }))
+        let filters = FibRouteFilters::from_request(&request.into_inner())?;
+        let routes = (self.fib_route_snapshot)()
+            .into_iter()
+            .filter(|route| filters.matches(route))
+            .collect();
+        Ok(Response::new(proto::ListFibRoutesResponse { routes }))
     }
 
     async fn list_route_events(
@@ -1414,6 +1501,27 @@ mod tests {
         }
     }
 
+    fn fib_status(
+        table_name: &str,
+        prefix: &str,
+        prefix_length: u32,
+        peer_address: &str,
+        state: proto::FibRouteState,
+        reason: &str,
+    ) -> proto::FibRouteStatus {
+        proto::FibRouteStatus {
+            table_name: table_name.to_string(),
+            table_id: 1000,
+            metric: 200,
+            prefix: prefix.to_string(),
+            prefix_length,
+            next_hop: "192.0.2.1".to_string(),
+            peer_address: peer_address.to_string(),
+            state: state as i32,
+            reason: reason.to_string(),
+        }
+    }
+
     fn make_watch_routes_service(
         metrics: BgpMetrics,
     ) -> (RibService, broadcast::Sender<rustbgpd_rib::RouteEvent>) {
@@ -1738,7 +1846,7 @@ mod tests {
         );
 
         let resp = svc
-            .list_fib_routes(Request::new(proto::ListFibRoutesRequest {}))
+            .list_fib_routes(Request::new(proto::ListFibRoutesRequest::default()))
             .await
             .unwrap()
             .into_inner();
@@ -1754,6 +1862,97 @@ mod tests {
         assert_eq!(row.peer_address, "198.51.100.1");
         assert_eq!(row.state, proto::FibRouteState::Installed as i32);
         assert_eq!(row.reason, "owned");
+    }
+
+    #[tokio::test]
+    async fn list_fib_routes_filters_snapshot_rows() {
+        let (tx, _rx) = mpsc::channel(16);
+        let svc = RibService::with_status_snapshots(
+            tx,
+            Arc::new(Vec::new),
+            Arc::new(|| {
+                vec![
+                    fib_status(
+                        "edge",
+                        "203.0.113.0",
+                        24,
+                        "198.51.100.1",
+                        proto::FibRouteState::Installed,
+                        "owned",
+                    ),
+                    fib_status(
+                        "edge",
+                        "203.0.113.0",
+                        24,
+                        "198.51.100.2",
+                        proto::FibRouteState::Rejected,
+                        "route_limit_exceeded",
+                    ),
+                    fib_status(
+                        "backup",
+                        "2001:db8::",
+                        64,
+                        "2001:db8::1",
+                        proto::FibRouteState::Installed,
+                        "owned",
+                    ),
+                ]
+            }),
+        );
+
+        let resp = svc
+            .list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+                table_name: "edge".to_string(),
+                state: proto::FibRouteState::Rejected as i32,
+                reason: "route_limit_exceeded".to_string(),
+                prefix: "203.0.113.0".to_string(),
+                prefix_length: 24,
+                peer_address: "198.51.100.2".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.routes.len(), 1);
+        assert_eq!(resp.routes[0].peer_address, "198.51.100.2");
+        assert_eq!(resp.routes[0].state, proto::FibRouteState::Rejected as i32);
+    }
+
+    #[tokio::test]
+    async fn list_fib_routes_rejects_bad_filters() {
+        let (tx, _rx) = mpsc::channel(16);
+        let svc = RibService::with_status_snapshots(tx, Arc::new(Vec::new), Arc::new(Vec::new));
+
+        let err = svc
+            .list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+                prefix: "203.0.113.0".to_string(),
+                prefix_length: 33,
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("prefix_length"));
+
+        let err = svc
+            .list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+                peer_address: "not-an-ip".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("peer_address"));
+
+        let err = svc
+            .list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+                state: 99,
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("invalid fib route state"));
     }
 
     #[tokio::test]

@@ -21,6 +21,15 @@ pub struct RouteFilterOpts {
     pub large_community: Vec<String>,
 }
 
+/// Parsed general FIB status filter options from CLI flags.
+pub struct FibRouteFilterOpts {
+    pub table: Option<String>,
+    pub state: Option<String>,
+    pub reason: Option<String>,
+    pub prefix: Option<String>,
+    pub peer: Option<String>,
+}
+
 fn make_route_request(
     neighbor: Option<&str>,
     family: Option<i32>,
@@ -44,6 +53,47 @@ fn make_route_request(
         origin_asn: filters.origin_asn.unwrap_or(0),
         community_filter: filters.community.clone(),
         large_community_filter: filters.large_community.clone(),
+    })
+}
+
+fn parse_fib_state(s: &str) -> Result<i32, CliError> {
+    match s {
+        "installed" => Ok(FibRouteState::Installed as i32),
+        "rejected" => Ok(FibRouteState::Rejected as i32),
+        "failed" => Ok(FibRouteState::Failed as i32),
+        other => Err(CliError::Argument(format!(
+            "unsupported FIB route state {other:?}; expected installed, rejected, or failed"
+        ))),
+    }
+}
+
+fn make_fib_request(filters: &FibRouteFilterOpts) -> Result<ListFibRoutesRequest, CliError> {
+    let (prefix, prefix_length) = if let Some(prefix) = &filters.prefix {
+        output::parse_prefix(prefix).map_err(CliError::Argument)?
+    } else {
+        (String::new(), 0)
+    };
+    let peer_address = if let Some(peer) = &filters.peer {
+        let addr: std::net::IpAddr = peer
+            .parse()
+            .map_err(|e| CliError::Argument(format!("invalid --peer address: {e}")))?;
+        addr.to_string()
+    } else {
+        String::new()
+    };
+
+    Ok(ListFibRoutesRequest {
+        table_name: filters.table.clone().unwrap_or_default(),
+        state: filters
+            .state
+            .as_deref()
+            .map(parse_fib_state)
+            .transpose()?
+            .unwrap_or(FibRouteState::Unspecified as i32),
+        reason: filters.reason.clone().unwrap_or_default(),
+        prefix,
+        prefix_length,
+        peer_address,
     })
 }
 
@@ -562,11 +612,15 @@ pub async fn blackholes(connection: Connection, json: bool) -> Result<(), CliErr
     Ok(())
 }
 
-pub async fn fib(connection: Connection, json: bool) -> Result<(), CliError> {
+pub async fn fib(
+    connection: Connection,
+    filters: FibRouteFilterOpts,
+    json: bool,
+) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let resp = client
-        .list_fib_routes(ListFibRoutesRequest {})
+        .list_fib_routes(make_fib_request(&filters)?)
         .await?
         .into_inner();
     print_fib_routes(&resp.routes, json);
@@ -732,7 +786,61 @@ mod tests {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
 
-        fib(connection, true).await.unwrap();
+        fib(
+            connection,
+            FibRouteFilterOpts {
+                table: None,
+                state: None,
+                reason: None,
+                prefix: None,
+                peer: None,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn fib_request_filters_are_parsed() {
+        let request = make_fib_request(&FibRouteFilterOpts {
+            table: Some("edge".to_string()),
+            state: Some("rejected".to_string()),
+            reason: Some("route_limit_exceeded".to_string()),
+            prefix: Some("203.0.113.0/24".to_string()),
+            peer: Some("198.51.100.2".to_string()),
+        })
+        .unwrap();
+
+        assert_eq!(request.table_name, "edge");
+        assert_eq!(request.state, FibRouteState::Rejected as i32);
+        assert_eq!(request.reason, "route_limit_exceeded");
+        assert_eq!(request.prefix, "203.0.113.0");
+        assert_eq!(request.prefix_length, 24);
+        assert_eq!(request.peer_address, "198.51.100.2");
+    }
+
+    #[test]
+    fn fib_request_rejects_bad_filters() {
+        let err = make_fib_request(&FibRouteFilterOpts {
+            table: None,
+            state: Some("stuck".to_string()),
+            reason: None,
+            prefix: None,
+            peer: None,
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("unsupported FIB route state"));
+
+        let err = make_fib_request(&FibRouteFilterOpts {
+            table: None,
+            state: None,
+            reason: None,
+            prefix: None,
+            peer: Some("not-an-ip".to_string()),
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid --peer address"));
     }
 
     #[test]

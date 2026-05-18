@@ -625,6 +625,8 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 
 rustbgpctl rib fib          # human table
 rustbgpctl rib fib --json   # JSON array for scripts
+rustbgpctl rib fib --table edge --state rejected --reason route_limit_exceeded
+rustbgpctl rib fib --prefix 203.0.113.0/24 --peer 198.51.100.2
 ```
 
 Returns one row per desired route, daemon-owned route, or one-pass
@@ -637,6 +639,15 @@ carries values such as `owned`, `foreign_route_exists`,
 `route_limit_exceeded`, `owned_route_drifted`, `dump_failed:DETAIL`,
 `rib_query_failed:DETAIL`, or a kernel apply error such as
 `install_failed:DETAIL`.
+
+`ListFibRoutesRequest` supports optional filters for `table_name`, `state`,
+`reason`, exact `prefix` + `prefix_length`, and `peer_address`; filters compose
+with AND semantics. The prefix filter is an exact route-key match, not
+longest-prefix or containment matching, so `203.0.113.0/24` does not match
+`203.0.113.128/25`. Empty strings and `FIB_ROUTE_STATE_UNSPECIFIED` mean "no
+filter"; for direct gRPC callers, `prefix_length` must be `0` when `prefix` is
+empty. `rustbgpctl rib fib` exposes the same filters as `--table`, `--state`,
+`--reason`, `--prefix`, and `--peer`.
 
 `table_id`, `metric`, `prefix`, `prefix_length`, and `next_hop` describe
 the route identity and forwarding value. The CLI human table renders

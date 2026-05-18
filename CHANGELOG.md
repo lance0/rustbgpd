@@ -9,6 +9,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Filtered general FIB status queries.** `RibService.ListFibRoutes` now
+  accepts optional `table_name`, `state`, `reason`, exact prefix, and
+  peer-address filters, and `rustbgpctl rib fib` exposes the same filters via
+  `--table`, `--state`, `--reason`, `--prefix`, and `--peer`. Filters compose
+  with AND semantics and the prefix filter is an exact prefix+length match.
+
 ## [0.22.0] — 2026-05-17
 
 ### Added

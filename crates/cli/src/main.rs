@@ -429,7 +429,23 @@ enum RibAction {
     /// Show RFC 7999 BLACKHOLE discard install status
     Blackholes,
     /// Show ADR-0061 general FIB route install status
-    Fib,
+    Fib {
+        /// FIB table-name filter
+        #[arg(long)]
+        table: Option<String>,
+        /// FIB route state filter: installed, rejected, failed
+        #[arg(long)]
+        state: Option<String>,
+        /// Exact reason-code filter, e.g. owned or route_limit_exceeded
+        #[arg(long)]
+        reason: Option<String>,
+        /// Exact prefix filter, e.g. 203.0.113.0/24
+        #[arg(long)]
+        prefix: Option<String>,
+        /// Source peer-address filter
+        #[arg(long)]
+        peer: Option<String>,
+    },
     /// Inject a route
     Add {
         /// Prefix (e.g., 10.0.0.0/24)
@@ -685,6 +701,11 @@ fn reject_rib_status_filters(
         || !filters.community.is_empty()
         || !filters.large_community.is_empty()
     {
+        if command == "fib" {
+            return Err(CliError::Argument(
+                "rib fib does not support parent route filters; put FIB status filters after `fib`, for example `rustbgpctl rib fib --prefix 203.0.113.0/24`".into(),
+            ));
+        }
         return Err(CliError::Argument(format!(
             "rib {command} does not support route filters; use `rustbgpctl rib {command}`"
         )));
@@ -835,29 +856,57 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             community,
             large_community,
         } => {
-            if matches!(action, Some(RibAction::Blackholes | RibAction::Fib)) {
-                let command = if matches!(action, Some(RibAction::Fib)) {
-                    "fib"
-                } else {
-                    "blackholes"
-                };
-                reject_rib_status_filters(
-                    command,
-                    RibStatusFilterArgs {
-                        family: &family,
-                        prefix: &prefix,
-                        longer,
-                        explain,
-                        explain_peer: &explain_peer,
-                        origin_asn,
-                        community: &community,
-                        large_community: &large_community,
-                    },
-                )?;
-                if matches!(action, Some(RibAction::Fib)) {
-                    return commands::rib::fib(connection, json).await;
+            match action {
+                Some(RibAction::Fib {
+                    table,
+                    state,
+                    reason,
+                    prefix: fib_prefix,
+                    peer,
+                }) => {
+                    reject_rib_status_filters(
+                        "fib",
+                        RibStatusFilterArgs {
+                            family: &family,
+                            prefix: &prefix,
+                            longer,
+                            explain,
+                            explain_peer: &explain_peer,
+                            origin_asn,
+                            community: &community,
+                            large_community: &large_community,
+                        },
+                    )?;
+                    return commands::rib::fib(
+                        connection,
+                        commands::rib::FibRouteFilterOpts {
+                            table,
+                            state,
+                            reason,
+                            prefix: fib_prefix,
+                            peer,
+                        },
+                        json,
+                    )
+                    .await;
                 }
-                return commands::rib::blackholes(connection, json).await;
+                Some(RibAction::Blackholes) => {
+                    reject_rib_status_filters(
+                        "blackholes",
+                        RibStatusFilterArgs {
+                            family: &family,
+                            prefix: &prefix,
+                            longer,
+                            explain,
+                            explain_peer: &explain_peer,
+                            origin_asn,
+                            community: &community,
+                            large_community: &large_community,
+                        },
+                    )?;
+                    return commands::rib::blackholes(connection, json).await;
+                }
+                _ => {}
             }
 
             let family_val = resolve_family(&family)?;
@@ -954,8 +1003,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                         commands::rib::advertised(connection, &address, f, &filters, json).await
                     }
                 }
-                Some(RibAction::Blackholes) => commands::rib::blackholes(connection, json).await,
-                Some(RibAction::Fib) => commands::rib::fib(connection, json).await,
+                Some(RibAction::Blackholes | RibAction::Fib { .. }) => {
+                    unreachable!("RIB status subcommands return before route filter handling")
+                }
                 Some(RibAction::Add {
                     prefix,
                     nexthop,
@@ -1473,9 +1523,50 @@ mod tests {
         .unwrap_err();
         assert!(
             err.to_string()
-                .contains("rib fib does not support route filters"),
+                .contains("put FIB status filters after `fib`"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_parse_rib_fib_filters() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "rib",
+            "fib",
+            "--table",
+            "edge",
+            "--state",
+            "rejected",
+            "--reason",
+            "route_limit_exceeded",
+            "--prefix",
+            "203.0.113.0/24",
+            "--peer",
+            "198.51.100.2",
+        ])
+        .unwrap();
+
+        if let Command::Rib {
+            action:
+                Some(RibAction::Fib {
+                    table,
+                    state,
+                    reason,
+                    prefix,
+                    peer,
+                }),
+            ..
+        } = cli.command
+        {
+            assert_eq!(table.as_deref(), Some("edge"));
+            assert_eq!(state.as_deref(), Some("rejected"));
+            assert_eq!(reason.as_deref(), Some("route_limit_exceeded"));
+            assert_eq!(prefix.as_deref(), Some("203.0.113.0/24"));
+            assert_eq!(peer.as_deref(), Some("198.51.100.2"));
+        } else {
+            panic!("expected Rib Fib command");
+        }
     }
 
     #[test]

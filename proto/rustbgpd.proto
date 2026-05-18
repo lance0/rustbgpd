@@ -752,7 +752,22 @@ message ListBlackholeDiscardsResponse {
   repeated BlackholeDiscard discards = 1;
 }
 
-message ListFibRoutesRequest {}
+message ListFibRoutesRequest {
+  // Optional exact table-name filter. Empty = all configured FIB tables.
+  string table_name = 1;
+  // Optional state filter. UNSPECIFIED = all states.
+  FibRouteState state = 2;
+  // Optional exact reason filter, e.g. "owned",
+  // "route_limit_exceeded", or "foreign_route_exists". Empty = all reasons.
+  string reason = 3;
+  // Optional exact prefix filter. Empty = all prefixes and requires
+  // prefix_length = 0. This is an exact prefix+length match, not
+  // longest-prefix / containment.
+  string prefix = 4;
+  uint32 prefix_length = 5;
+  // Optional source peer-address filter. Empty = all peers.
+  string peer_address = 6;
+}
 
 enum FibRouteState {
   FIB_ROUTE_STATE_UNSPECIFIED = 0;
