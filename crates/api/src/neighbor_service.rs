@@ -246,6 +246,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
                 None
             },
             md5_password: None,
+            tcp_ao: None,
             ttl_security: false,
             families,
             graceful_restart: true,

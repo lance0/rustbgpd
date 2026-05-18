@@ -11,6 +11,8 @@ use std::io;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 
+#[cfg(target_os = "linux")]
+use crate::config::{TcpAoAlgorithm, TcpAoConfig};
 use socket2::Socket;
 
 /// Set TCP MD5 signature on a socket for a specific peer.
@@ -89,25 +91,11 @@ pub fn set_tcp_md5sig(_socket: &Socket, _peer: SocketAddr, _password: &str) -> i
     ))
 }
 
-/// TCP-AO MAC/KDF algorithm names accepted by Linux's TCP-AO UAPI.
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) enum TcpAoAlgorithm {
-    HmacSha1,
-    HmacSha256,
-    CmacAes128,
-}
-
-#[cfg(target_os = "linux")]
-impl TcpAoAlgorithm {
-    const fn linux_name(self) -> &'static str {
-        match self {
-            Self::HmacSha1 => "hmac(sha1)",
-            Self::HmacSha256 => "hmac(sha256)",
-            Self::CmacAes128 => "cmac(aes128)",
-        }
-    }
+pub(crate) enum TcpAoSocketRole {
+    ActiveOpen,
+    Listener,
 }
 
 /// A single Linux TCP-AO Master Key Tuple for a peer address.
@@ -181,9 +169,73 @@ const TCP_AO_ADD_SET_RNEXT: u32 = 1 << 1;
 
 /// Add a TCP-AO key to a socket.
 ///
-/// This is an internal foundation primitive. Runtime session wiring is
-/// intentionally deferred until the listener/passive-open path can install
-/// keys before the kernel accepts inbound TCP handshakes.
+/// The public transport config only carries one key per static neighbor in
+/// the first runtime slice. Active-open sockets install it as both current and
+/// rnext so the initial SYN is signed. Listener sockets install the same MKT
+/// without current/rnext flags because Linux rejects those flags on listening
+/// sockets.
+///
+/// Do not set `TCP_AO_INFO.ao_required` here. Linux treats peers matching an
+/// MKT as TCP-AO candidates, while the global `ao_required` bit would require
+/// TCP-AO from every inbound peer on rustbgpd's shared BGP listener, including
+/// static neighbors that intentionally do not configure TCP-AO.
+#[cfg(target_os = "linux")]
+pub(crate) fn set_tcp_ao_config(
+    socket: &Socket,
+    peer: IpAddr,
+    config: &TcpAoConfig,
+    role: TcpAoSocketRole,
+) -> io::Result<()> {
+    let key = tcp_ao_key_from_config(peer, config, role);
+    set_tcp_ao_key(socket, &key)
+}
+
+#[cfg(target_os = "linux")]
+fn tcp_ao_key_from_config(
+    peer: IpAddr,
+    config: &TcpAoConfig,
+    role: TcpAoSocketRole,
+) -> TcpAoKey<'_> {
+    let prefix_len = match peer {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    };
+    TcpAoKey {
+        peer,
+        scope_id: 0,
+        prefix_len,
+        send_id: config.send_id,
+        recv_id: config.recv_id,
+        algorithm: config.algorithm,
+        mac_len: 0,
+        key: config.key.as_bytes(),
+        set_current: matches!(role, TcpAoSocketRole::ActiveOpen),
+        set_rnext: matches!(role, TcpAoSocketRole::ActiveOpen),
+    }
+}
+
+/// Stub for non-Linux platforms.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn set_tcp_ao_config(
+    _socket: &Socket,
+    _peer: std::net::IpAddr,
+    _config: &crate::config::TcpAoConfig,
+    _role: TcpAoSocketRole,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP-AO authentication is only supported on Linux",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TcpAoSocketRole {
+    ActiveOpen,
+    Listener,
+}
+
+/// Add a TCP-AO key to a socket.
 #[cfg(target_os = "linux")]
 #[allow(dead_code, unsafe_code, clippy::cast_possible_truncation)]
 pub(crate) fn set_tcp_ao_key(socket: &Socket, key: &TcpAoKey<'_>) -> io::Result<()> {
@@ -510,6 +562,55 @@ mod tests {
     fn tcp_ao_rejects_algorithm_names_without_nul_room() {
         let mut alg_name = [0u8; 64];
         assert!(write_alg_name(&mut alg_name, &"x".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn tcp_ao_config_for_active_open_sets_current_and_rnext() {
+        let config = TcpAoConfig {
+            key: "secret".to_string(),
+            send_id: 10,
+            recv_id: 11,
+            algorithm: TcpAoAlgorithm::HmacSha1,
+            preferred: false,
+            deprecated: false,
+        };
+
+        let key = tcp_ao_key_from_config(
+            IpAddr::from([198, 51, 100, 1]),
+            &config,
+            TcpAoSocketRole::ActiveOpen,
+        );
+
+        assert_eq!(key.prefix_len, 32);
+        assert_eq!(key.send_id, 10);
+        assert_eq!(key.recv_id, 11);
+        assert_eq!(key.algorithm, TcpAoAlgorithm::HmacSha1);
+        assert_eq!(key.key, b"secret");
+        assert!(key.set_current);
+        assert!(key.set_rnext);
+    }
+
+    #[test]
+    fn tcp_ao_config_for_listener_does_not_set_current_or_rnext() {
+        let config = TcpAoConfig {
+            key: "secret".to_string(),
+            send_id: 10,
+            recv_id: 11,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            preferred: true,
+            deprecated: false,
+        };
+
+        let key = tcp_ao_key_from_config(
+            "2001:db8::1".parse().unwrap(),
+            &config,
+            TcpAoSocketRole::Listener,
+        );
+
+        assert_eq!(key.prefix_len, 128);
+        assert_eq!(key.algorithm, TcpAoAlgorithm::HmacSha256);
+        assert!(!key.set_current);
+        assert!(!key.set_rnext);
     }
 
     #[test]

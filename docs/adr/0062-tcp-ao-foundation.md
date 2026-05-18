@@ -55,13 +55,13 @@ apply it would be a silent security footgun.
   active and passive opens.
 - Gives follow-on slices tested UAPI building blocks and capability probing.
 
-**Negative:**
+**Negative at foundation time:**
 
-- TCP-AO remains unsupported at runtime until later slices wire config and
-  session/listener integration.
-- The listener path must be refactored from direct Tokio binding to a
-  `socket2`-created listener so keys can be installed before passive opens.
-- Dynamic-neighbor TCP-AO remains out of scope until a prefix/wildcard MKT
+- The first slice left TCP-AO unsupported at runtime until later slices wired
+  config and session/listener integration.
+- The listener path had to be refactored from direct Tokio binding to a
+  `socket2`-created listener so keys could be installed before passive opens.
+- Dynamic-neighbor TCP-AO remained out of scope until a prefix/wildcard MKT
   design exists.
 
 ## Follow-up Slices
@@ -74,3 +74,25 @@ apply it would be a silent security footgun.
 3. Apply AO keys on outbound active-open sockets and listener sockets.
 4. Add a protected-runner interop smoke against a TCP-AO peer implementation
    such as BIRD 3.x on Linux.
+
+## Implementation Status
+
+The foundation decision above describes the first ADR-0062 slice. Subsequent
+slices have now shipped static-neighbor startup support:
+
+- `[[neighbors]].tcp_ao` is parsed and validated, mutually exclusive with TCP
+  MD5, and redacted in config diffs.
+- Outbound active-open sockets install the configured TCP-AO key before
+  `connect()` and fail that connect attempt if the key cannot be installed.
+- The passive BGP listener is created through `socket2`, installs configured
+  static-neighbor TCP-AO keys before `listen()`, and fails closed if a key
+  cannot be installed.
+- SIGHUP additions, removals, or rotations of `tcp_ao` are restart-required and
+  pinned to the live startup snapshot along with validation-affecting startup
+  dependencies.
+- Runtime deletion of a configured TCP-AO neighbor is rejected until listener
+  MKT deletion / key rotation support exists.
+
+Still deferred: dynamic-neighbor wildcard MKTs, runtime key rotation / deletion
+on an already-listening socket, multi-key rollover, accepted-socket inspection,
+and protected BIRD 3.x interop smoke.

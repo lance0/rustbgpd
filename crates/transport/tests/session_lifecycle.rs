@@ -91,6 +91,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         connect_timeout: Duration::from_secs(5),
         max_prefixes: None,
         md5_password: None,
+        tcp_ao: None,
         ttl_security: false,
         local_ipv6_nexthop: None,
         peer_group: None,

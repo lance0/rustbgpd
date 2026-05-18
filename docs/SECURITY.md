@@ -138,10 +138,16 @@ These protect BGP transport sessions, not the gRPC management surface.
 
 TCP-AO (RFC 5925) is the intended successor to TCP MD5. rustbgpd now has
 an internal Linux socket primitive and capability probe for TCP-AO
-(ADR-0062), plus static-neighbor `tcp_ao` TOML parsing/validation. It does
-not yet apply AO keys to live BGP sessions. Runtime support is deferred until
-both the outbound and inbound listener paths can install keys before TCP active
-or passive OPEN.
+(ADR-0062), plus static-neighbor `tcp_ao` TOML parsing/validation and startup
+runtime installation. Outbound active-open sockets install the key before
+`connect()`, and the passive BGP listener installs configured peer keys before
+`listen()`. Listener key-install failures abort startup rather than running a
+partially protected listener; active-open key-install failures fail the
+connection attempt and retry later without falling back to unauthenticated TCP.
+Runtime deletion of configured TCP-AO neighbors is rejected because listener
+MKTs are installed on the startup listener socket and are not deleted yet.
+Dynamic-neighbor TCP-AO, runtime key rotation, multi-key rollover, and protected
+interop validation remain deferred.
 
 ## Linux EVPN VTEP — `CAP_NET_ADMIN` requirement
 
@@ -225,13 +231,13 @@ The following security improvements are intentionally deferred and tracked in
 the roadmap:
 
 - Finer-grained gRPC authorization beyond "listener allowed / denied"
-- TCP-AO (RFC 5925) runtime key installation and interop validation for BGP
-  session protection (currently TCP MD5 and GTSM; TCP-AO TOML schema only)
+- TCP-AO (RFC 5925) dynamic-neighbor support, runtime key rotation, multi-key
+  rollover, and protected interop validation for BGP session protection
 
 ## Current gaps
 
 - Authorization is listener-wide (`read_only` vs `read_write`), not per-RPC or
   per-role
-- No runtime TCP-AO key installation yet; TCP MD5 and GTSM are the supported
-  session protections
+- TCP-AO currently supports static-neighbor startup keys only; dynamic
+  neighbors, live key rotation, and multi-key rollover remain follow-up work
 - Cert rotation on the gRPC TLS listener requires a daemon restart (not SIGHUP)

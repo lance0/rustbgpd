@@ -32,6 +32,7 @@ fn build_peer_mgr_config(
         hold_time: Some(tc.peer.hold_time),
         max_prefixes: tc.max_prefixes,
         md5_password: tc.md5_password.clone(),
+        tcp_ao: tc.tcp_ao.clone(),
         ttl_security: tc.ttl_security,
         families: tc.peer.families.clone(),
         graceful_restart: tc.peer.graceful_restart,
@@ -416,6 +417,18 @@ pub(crate) async fn reload_config(
         );
         new_config.global.honor_blackhole = current.global.honor_blackhole;
         honor_blackhole_changed = false;
+    }
+    let tcp_ao_pinned_neighbors = config::pin_tcp_ao_startup_only_runtime(&mut new_config, current);
+    if tcp_ao_pinned_neighbors > 0 {
+        error!(
+            neighbors = tcp_ao_pinned_neighbors,
+            "[[neighbors]].tcp_ao differs from the live listener/session startup keys: \
+             TCP-AO MKTs are installed only when sockets are created. Restart rustbgpd \
+             to add, remove, or rotate TCP-AO keys. Peer-group and policy dependencies \
+             referenced by pinned TCP-AO neighbors, plus restart-required global fields \
+             that affect neighbor validation, are also kept at their live startup values \
+             for this reload."
+        );
     }
 
     let policy_diff = config::diff_policy(&current.policy, &new_config.policy);
@@ -2088,6 +2101,116 @@ hold_time = 90
         );
         assert!(rendered.contains("honor_graceful_shutdown"), "{rendered}");
         assert!(rendered.contains("honor_blackhole"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn reload_pins_tcp_ao_key_edits_to_startup_snapshot() {
+        let initial = baseline_toml().replace(
+            "hold_time = 90",
+            "hold_time = 90\ntcp_ao = { key = \"old-secret\", send_id = 1, recv_id = 1, algorithm = \"hmac(sha256)\" }",
+        );
+        let new_toml = baseline_toml().replace(
+            "hold_time = 90",
+            "hold_time = 90\ntcp_ao = { key = \"new-secret\", send_id = 1, recv_id = 1, algorithm = \"hmac(sha256)\" }",
+        );
+
+        let (returned, tags) = drive_reload(&initial, &new_toml).await;
+        let returned = returned.expect("reload should return pinned runtime config");
+
+        assert!(
+            tags.is_empty(),
+            "tcp_ao-only edits are restart-required and must not reconcile peers: {tags:?}"
+        );
+        assert_eq!(
+            returned.neighbors[0].tcp_ao.as_ref().unwrap().key,
+            "old-secret",
+            "runtime snapshot must keep the startup listener/session key"
+        );
+        assert_eq!(
+            returned.desired.neighbors[0].tcp_ao.as_ref().unwrap().key,
+            "new-secret",
+            "desired TOML must preserve the operator's edit for restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_pins_tcp_ao_dependency_edits_to_startup_snapshot() {
+        let initial = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.secure]
+hold_time = 90
+import_policy_chain = ["keep"]
+
+[policy.definitions.keep]
+default_action = "permit"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "secure"
+tcp_ao = { key = "old-secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }
+"#;
+        let new_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.secure]
+hold_time = 90
+md5_password = "md5-secret"
+import_policy_chain = ["keep"]
+
+[policy.definitions.keep]
+default_action = "deny"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "secure"
+"#;
+
+        let (returned, tags) = drive_reload(initial, new_toml).await;
+        let returned = returned.expect("reload should return pinned runtime config");
+
+        assert!(
+            tags.is_empty(),
+            "tcp_ao dependency edits must be restart-required and must not hot-apply: {tags:?}"
+        );
+        assert!(
+            returned.peer_groups["secure"].md5_password.is_none(),
+            "runtime peer-group dependency snapshot must stay compatible with the live TCP-AO neighbor"
+        );
+        assert!(
+            returned.policy.definitions["keep"].default_action == "permit",
+            "runtime policy dependencies must be pinned with the live TCP-AO neighbor"
+        );
+        assert_eq!(
+            returned.desired.peer_groups["secure"]
+                .md5_password
+                .as_deref(),
+            Some("md5-secret"),
+            "desired TOML must keep the operator's peer-group edit for restart"
+        );
+        assert!(
+            returned
+                .desired
+                .policy
+                .definitions
+                .get("keep")
+                .is_some_and(|definition| definition.default_action == "deny"),
+            "desired TOML must keep the operator's policy edit for restart"
+        );
     }
 
     /// Adding a named policy definition on reload must surface as a

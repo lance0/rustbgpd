@@ -1,5 +1,6 @@
 //! Transport-layer configuration types.
 
+use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,67 @@ pub enum RemovePrivateAs {
     Replace,
 }
 
+/// TCP-AO MAC/KDF algorithm names accepted by Linux's TCP-AO UAPI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpAoAlgorithm {
+    HmacSha1,
+    HmacSha256,
+    CmacAes128,
+}
+
+impl TcpAoAlgorithm {
+    /// Return the Linux UAPI algorithm name.
+    #[must_use]
+    pub const fn linux_name(self) -> &'static str {
+        match self {
+            Self::HmacSha1 => "hmac(sha1)",
+            Self::HmacSha256 => "hmac(sha256)",
+            Self::CmacAes128 => "cmac(aes128)",
+        }
+    }
+
+    /// Parse a Linux UAPI algorithm name.
+    #[must_use]
+    pub fn from_linux_name(name: &str) -> Option<Self> {
+        match name {
+            "hmac(sha1)" => Some(Self::HmacSha1),
+            "hmac(sha256)" => Some(Self::HmacSha256),
+            "cmac(aes128)" => Some(Self::CmacAes128),
+            _ => None,
+        }
+    }
+}
+
+/// Static-neighbor TCP-AO configuration for one peer.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TcpAoConfig {
+    /// TCP-AO Master Key Tuple secret.
+    pub key: String,
+    /// Sender `KeyID` (`sndid` in Linux's TCP-AO UAPI).
+    pub send_id: u8,
+    /// Receiver `KeyID` (`rcvid` in Linux's TCP-AO UAPI).
+    pub recv_id: u8,
+    /// TCP-AO MAC/KDF algorithm.
+    pub algorithm: TcpAoAlgorithm,
+    /// Rollover metadata reserved for future multi-key support.
+    pub preferred: bool,
+    /// Rollover metadata reserved for future multi-key support.
+    pub deprecated: bool,
+}
+
+impl fmt::Debug for TcpAoConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TcpAoConfig")
+            .field("key", &"<redacted>")
+            .field("send_id", &self.send_id)
+            .field("recv_id", &self.recv_id)
+            .field("algorithm", &self.algorithm)
+            .field("preferred", &self.preferred)
+            .field("deprecated", &self.deprecated)
+            .finish()
+    }
+}
+
 /// Transport-layer configuration for a single BGP peer.
 #[derive(Clone, Debug)]
 pub struct TransportConfig {
@@ -34,6 +96,8 @@ pub struct TransportConfig {
     pub peer_group: Option<String>,
     /// TCP MD5 authentication password (RFC 2385).
     pub md5_password: Option<String>,
+    /// TCP-AO authentication key (RFC 5925).
+    pub tcp_ao: Option<TcpAoConfig>,
     /// Enable GTSM / TTL security (RFC 5082).
     pub ttl_security: bool,
     /// Explicit IPv6 next-hop for eBGP advertisements. Used when the TCP
@@ -73,6 +137,7 @@ impl TransportConfig {
             max_prefixes: None,
             peer_group: None,
             md5_password: None,
+            tcp_ao: None,
             ttl_security: false,
             local_ipv6_nexthop: None,
             gr_stale_routes_time: 360,
@@ -83,5 +148,27 @@ impl TransportConfig {
             remove_private_as: RemovePrivateAs::Disabled,
             cluster_id: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tcp_ao_config_debug_redacts_key() {
+        let config = TcpAoConfig {
+            key: "secret".to_string(),
+            send_id: 1,
+            recv_id: 1,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            preferred: false,
+            deprecated: false,
+        };
+
+        let rendered = format!("{config:?}");
+
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("secret"));
     }
 }
