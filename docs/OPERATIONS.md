@@ -572,12 +572,13 @@ rustbgpctl health
 rustbgpctl global
 ```
 
-The `TCP-AO` row reports the local kernel capability probe for future RFC 5925
+The `TCP-AO` row reports the local kernel capability probe for RFC 5925
 TCP-AO support. `supported` means the daemon's internal socket primitive can
-install a probe key on this host. `unsupported` / `probe_failed` means TCP-AO
-session wiring should not be attempted on this host yet. Static-neighbor
-`tcp_ao` TOML is parsed and validated, but this remains status only: session
-key installation is deferred.
+install keys on this host. `unsupported` / `probe_failed` means any configured
+static-neighbor `tcp_ao` key will fail closed at startup rather than falling
+back to unauthenticated sessions. TCP-AO key additions, removals, and rotations
+are restart-required because Linux requires the keys to exist when active-open
+or passive-listener sockets are created.
 
 ### View received routes from a peer
 

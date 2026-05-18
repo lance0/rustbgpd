@@ -17,20 +17,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--table`, `--state`, `--reason`, `--prefix`, and `--peer`. Filters compose
   with AND semantics and the prefix filter is an exact prefix+length match.
 
-- **ADR-0062 TCP-AO static-neighbor schema.** `[[neighbors]]` now accepts a
-  `tcp_ao = { key, send_id, recv_id, algorithm, preferred, deprecated }`
-  table for RFC 5925 configuration validation. The schema is mutually exclusive
-  with `md5_password`, redacts secrets in config diffs, and validates key
-  length and Linux TCP-AO algorithm names. Runtime key installation remains
-  deferred; this release does not apply TCP-AO keys to BGP sessions.
+- **ADR-0062 static-neighbor TCP-AO runtime support.** `[[neighbors]]` now
+  accepts `tcp_ao = { key, send_id, recv_id, algorithm, preferred,
+  deprecated }` and installs RFC 5925 TCP-AO keys on Linux startup active-open
+  sockets before `connect()` and on the passive BGP listener before `listen()`.
+  The schema is mutually exclusive with `md5_password`, redacts secrets in
+  config diffs, validates key length and Linux TCP-AO algorithm names, and fails
+  closed if a configured key cannot be installed. Dynamic-neighbor TCP-AO,
+  runtime key rotation, multi-key rollover, and protected interop smoke remain
+  follow-up work.
 
 ### Changed
 
-- **BGP listener socket boundary prepared for TCP-AO.** The inbound BGP
-  listener now creates its listening socket through `socket2` before handing
-  it to Tokio. Runtime behavior is unchanged, but the transport layer now has
-  the pre-listen socket-option hook needed by future ADR-0062 TCP-AO key
-  installation on passive OPEN.
+- **TCP-AO edits are restart-required on SIGHUP.** Static-neighbor
+  `tcp_ao` additions, removals, or key changes are pinned to the live startup
+  snapshot during reload and reported through `--diff` / config-diff JSON as
+  restart-required because Linux TCP-AO MKTs must be installed when sockets are
+  created.
 
 ### Fixed
 

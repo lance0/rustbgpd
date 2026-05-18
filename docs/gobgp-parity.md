@@ -1,6 +1,6 @@
 # rustbgpd vs GoBGP Feature Parity
 
-Last updated: 2026-05-16 (post-v0.21.0 main, including the EventService unified stream + bounded session-event history, ADR-0061 FIB hardening, ADR-0062 TCP-AO socket foundation)
+Last updated: 2026-05-18 (post-v0.22.0 main, including the EventService unified stream + bounded session-event history, ADR-0061 FIB hardening, ADR-0062 static-neighbor TCP-AO startup support)
 
 ## Address Families
 
@@ -123,7 +123,7 @@ Last updated: 2026-05-16 (post-v0.21.0 main, including the EventService unified 
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
 | TCP MD5 (RFC 2385) | Yes | Yes | |
-| TCP-AO (RFC 5925) | No | Schema only | rustbgpd parses static-neighbor TCP-AO config and probes Linux capability; neither daemon applies TCP-AO keys at runtime yet |
+| TCP-AO (RFC 5925) | No | Static startup | rustbgpd applies static-neighbor TCP-AO keys on Linux startup active-open and passive-listener sockets; dynamic neighbors, live rotation, and multi-key rollover remain follow-ups |
 | GTSM / TTL Security (RFC 5082) | Yes | Yes | |
 | RPKI/RTR (RFC 6811/8210) | Yes | Yes | Persistent RTR session with `SerialNotify`, fallback serial polling, and enforced expiry |
 | Private AS removal | Yes | Yes | Three modes: `remove`, `all`, `replace` (ADR-0045) |

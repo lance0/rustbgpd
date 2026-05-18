@@ -286,7 +286,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `hold_time`            | u16      | no       | 90      | BGP hold timer in seconds (0 or >= 3)            |
 | `max_prefixes`         | u32      | no       | --      | Maximum prefixes accepted before session teardown |
 | `md5_password`         | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
-| `tcp_ao`               | table    | no       | --      | TCP-AO schema for static neighbors (RFC 5925; parsed/validated only, not applied yet) |
+| `tcp_ao`               | table    | no       | --      | TCP-AO key for static neighbors (RFC 5925; Linux startup sockets, restart-required edits) |
 | `ttl_security`         | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only) |
 | `families`             | [string] | no       | (auto)  | Address families to negotiate (see below)        |
 | `graceful_restart`     | bool     | no       | true    | Enable Graceful Restart receiving speaker (RFC 4724) |
@@ -302,20 +302,23 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `add_path`             | table    | no       | --      | Add-Path (RFC 7911) config table (see below)                         |
 | `log_level`            | string   | no       | --      | Override log level for this peer: `"error"`, `"warn"`, `"info"`, `"debug"`, or `"trace"` |
 
-TCP-AO (RFC 5925) `tcp_ao` schema is accepted for static `[[neighbors]]`
-only, but keys are **not installed on runtime sockets yet**. The field exists
-so operators can validate intended configuration before the listener/outbound
-key-installation slices land. Until then, `md5_password` remains the only
-configured TCP authentication option that affects BGP sessions.
-`rustbgpctl global` / `GlobalService.GetGlobal` expose a host capability probe
-so operators can verify kernel readiness independently of this schema.
-Because the field is schema-only today, changing `tcp_ao` on SIGHUP updates the
-validated config snapshot but does not reconnect the peer or change socket
-state.
+TCP-AO (RFC 5925) `tcp_ao` is accepted for static `[[neighbors]]` only. On
+Linux, rustbgpd installs the configured key on outbound active-open sockets
+before `connect()` and on the passive BGP listener before `listen()`. If a
+configured TCP-AO key cannot be installed, startup fails closed instead of
+silently accepting unauthenticated sessions. `rustbgpctl global` /
+`GlobalService.GetGlobal` expose the host capability probe so operators can
+verify kernel support before enabling the field.
+
+Linux TCP-AO Master Key Tuples are socket state, so `tcp_ao` additions,
+removals, and key changes are restart-required. On SIGHUP, rustbgpd pins the
+live neighbor back to the startup snapshot, reports `[[neighbors]].tcp_ao` as
+restart-required in `--diff` / config-diff JSON, and leaves the edited TOML as
+the desired config for the next daemon restart.
 
 `tcp_ao` is mutually exclusive with `md5_password`, including an inherited
-peer-group MD5 password. The schema is not available in `[peer_groups.*]`
-because dynamic-neighbor TCP-AO needs a separate wildcard-MKT design. Example:
+peer-group MD5 password. It is not available in `[peer_groups.*]` because
+dynamic-neighbor TCP-AO needs a separate wildcard-MKT design. Example:
 
 ```toml
 [[neighbors]]
@@ -333,7 +336,10 @@ tcp_ao = {
 
 Allowed `algorithm` values are `"hmac(sha1)"`, `"hmac(sha256)"`, and
 `"cmac(aes128)"`. `key` must be 1--80 bytes. `send_id` and `recv_id` are
-TCP-AO KeyIDs (`0..=255`). `preferred` and `deprecated` cannot both be true.
+TCP-AO KeyIDs (`0..=255`). `preferred` and `deprecated` are parsed as
+rollover metadata for future multi-key support; with the current single-key
+runtime, the configured key is installed as the initial current / receive-next
+key. `preferred` and `deprecated` cannot both be true.
 
 ### Address families
 
@@ -399,8 +405,8 @@ hold_time = 45  # neighbor override beats peer-group default
 Peer-group fields mirror inheritable neighbor settings: timers, families,
 GR/LLGR, Add-Path, route-server / RR flags, private-AS handling, MD5/GTSM,
 `local_ipv6_nexthop`, `log_level`, and import/export inline policy or named
-chains. TCP-AO is intentionally not inherited through peer groups in the
-schema-only slice.
+chains. TCP-AO is intentionally not inherited through peer groups because
+dynamic-neighbor TCP-AO needs a separate wildcard-MKT design.
 
 ```toml
 # IPv4 peer with dual-stack
