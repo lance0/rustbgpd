@@ -123,7 +123,7 @@ Last updated: 2026-05-16 (post-v0.21.0 main, including the EventService unified 
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
 | TCP MD5 (RFC 2385) | Yes | Yes | |
-| TCP-AO (RFC 5925) | Schema only | No | rustbgpd parses static-neighbor TCP-AO config and probes Linux capability; neither daemon applies TCP-AO keys at runtime yet |
+| TCP-AO (RFC 5925) | No | Schema only | rustbgpd parses static-neighbor TCP-AO config and probes Linux capability; neither daemon applies TCP-AO keys at runtime yet |
 | GTSM / TTL Security (RFC 5082) | Yes | Yes | |
 | RPKI/RTR (RFC 6811/8210) | Yes | Yes | Persistent RTR session with `SerialNotify`, fallback serial polling, and enforced expiry |
 | Private AS removal | Yes | Yes | Three modes: `remove`, `all`, `replace` (ADR-0045) |
