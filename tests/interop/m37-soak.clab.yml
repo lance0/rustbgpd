@@ -1,0 +1,53 @@
+# Containerlab topology: M37 local-origination MAC-churn SOAK variant.
+#
+# Identical wiring to m37-evpn-local-origination.clab.yml; only the
+# topology `name:` differs. The distinct name produces container names
+# (`clab-m37-soak-rustbgpd`, `clab-m37-soak-consumer`) that the protected
+# `kernel-dataplane` CI workflow's M37 smoke cannot match when it runs
+# `containerlab destroy` against the interop topology, so a push to main
+# during an active soak no longer kills the soak's containers.
+#
+# Use the interop file for the M-series smoke; use this file for the
+# soak harness (tests/soak/run-m37-local-origination-churn-soak.sh).
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   sudo containerlab deploy -t tests/interop/m37-soak.clab.yml
+#   bash tests/soak/run-m37-local-origination-churn-soak.sh
+#   sudo containerlab destroy -t tests/interop/m37-soak.clab.yml
+
+name: m37-soak
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m37-originator.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-originator.sh:/usr/local/bin/start-rustbgpd-originator.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-originator.sh 10.0.0.1 100
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug,rustbgpd::evpn_originator=debug,rustbgpd::evpn_imet=debug
+        VTEP_LOOPBACK: 10.0.0.1
+        VTEP_VNI: "100"
+
+    consumer:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m37-consumer.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/lib/frr/frrinit.sh start
+      env:
+        VTEP_LOOPBACK: 10.0.0.2
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "consumer:eth1"]

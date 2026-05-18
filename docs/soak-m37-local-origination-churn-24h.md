@@ -17,7 +17,7 @@ bounded bridge-FDB churn.
 | Field | Value |
 |-------|-------|
 | Duration | TODO |
-| Topology | `tests/interop/m37-evpn-local-origination.clab.yml` |
+| Topology | `tests/interop/m37-soak.clab.yml` |
 | Harness | `tests/soak/run-m37-local-origination-churn-soak.sh` |
 | MAC pool | TODO |
 | Live target | TODO |

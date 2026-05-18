@@ -10,7 +10,13 @@
 #
 # Prerequisites:
 #   docker build -t rustbgpd:dev .
-#   containerlab deploy -t tests/interop/m37-evpn-local-origination.clab.yml
+#   containerlab deploy -t tests/interop/m37-soak.clab.yml
+#
+# The soak uses tests/interop/m37-soak.clab.yml (topology name
+# `m37-soak`) rather than the interop variant so a concurrent CI run of
+# the protected `kernel-dataplane` M37 smoke cannot destroy the soak's
+# containers by-name. Override TOPOLOGY/TOPO/RUSTBGPD/CONSUMER to point
+# at a different topology if needed.
 #
 # Usage:
 #   SOAK_SECONDS=600 bash tests/soak/run-m37-local-origination-churn-soak.sh
@@ -29,7 +35,7 @@ set -euo pipefail
 
 SOAK_SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SOAK_SCRIPT_DIR/../.." && pwd)"
-TOPOLOGY="$REPO_ROOT/tests/interop/m37-evpn-local-origination.clab.yml"
+TOPOLOGY="${TOPOLOGY:-$REPO_ROOT/tests/interop/m37-soak.clab.yml}"
 
 SOAK_HOURS="${SOAK_HOURS:-24}"
 SOAK_SECONDS="${SOAK_SECONDS:-$((SOAK_HOURS * 3600))}"
@@ -42,7 +48,7 @@ WARMUP_SEC="${WARMUP_SEC:-300}"
 CLEANUP="${CLEANUP:-0}"
 DRAIN_ON_EXIT="${DRAIN_ON_EXIT:-1}"
 
-TOPO="m37-evpn-local-origination"
+TOPO="${TOPO:-m37-soak}"
 RUSTBGPD="${RUSTBGPD:-clab-${TOPO}-rustbgpd}"
 CONSUMER="${CONSUMER:-clab-${TOPO}-consumer}"
 RUSTBGPD_IP="${RUSTBGPD_IP:-10.0.0.1}"

@@ -173,7 +173,7 @@ DF flips and FDB programming in flight.
 
 ```bash
 docker build -t rustbgpd:dev .
-containerlab deploy -t tests/interop/m37-evpn-local-origination.clab.yml
+containerlab deploy -t tests/interop/m37-soak.clab.yml
 
 # 10-minute wiring check:
 SOAK_SECONDS=600 bash tests/soak/run-m37-local-origination-churn-soak.sh
@@ -187,6 +187,12 @@ bash tests/soak/run-m37-local-origination-churn-soak.sh
 # Destroy the topology on exit:
 CLEANUP=1 bash tests/soak/run-m37-local-origination-churn-soak.sh
 ```
+
+The soak deploys `m37-soak.clab.yml` rather than the interop
+`m37-evpn-local-origination.clab.yml`: both wire identically, but the
+distinct topology name keeps the soak's containers out of the protected
+`kernel-dataplane` M37 smoke's `containerlab destroy` blast radius, so a
+push to main while the soak is running cannot kill it.
 
 If your host requires elevated privileges for containerlab, run the
 `containerlab deploy` / `destroy` commands using your normal local setup.
