@@ -34,9 +34,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ADR-0062 static-neighbor TCP-AO against a real BIRD 3.2.1 peer on Linux:
   matching keys establish and import `203.0.113.43/32`, then a mismatched BIRD
   key withdraws the route and fails closed instead of re-establishing. The
-  protected self-hosted `kernel-dataplane` workflow now runs M43 after building
-  the BIRD 3.2.1 image because hosted runners do not guarantee
-  `CONFIG_TCP_AO=y`.
+  protected self-hosted `kernel-dataplane` workflow now includes M43 and runs
+  it on runner kernels that advertise `CONFIG_TCP_AO=y` after building the
+  BIRD 3.2.1 image; runners without TCP-AO support skip the job with a warning
+  because hosted runners do not guarantee the feature.
 
 ### Changed
 

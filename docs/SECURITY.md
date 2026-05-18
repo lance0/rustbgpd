@@ -148,7 +148,10 @@ Runtime deletion of configured TCP-AO neighbors is rejected because listener
 MKTs are installed on the startup listener socket and are not deleted yet.
 Static-neighbor protected interop is validated by M43 against BIRD 3.2.1:
 matching keys establish and import a route, while a mismatched key withdraws
-the route and does not re-establish within the fail-closed window.
+the route and does not re-establish within the fail-closed window. The
+protected `kernel-dataplane` workflow includes M43 and runs it on kernels that
+advertise `CONFIG_TCP_AO=y`; runners without TCP-AO support skip that topology
+with a warning.
 Dynamic-neighbor TCP-AO, runtime key rotation, multi-key rollover, and richer
 accepted-socket inspection remain deferred.
 
