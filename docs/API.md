@@ -84,6 +84,7 @@ matrix for finer-grained role and listener-tier authorization.
 | Service | Read-only RPCs | Mutating RPCs rejected on `read_only` |
 |---------|----------------|---------------------------------------|
 | `GlobalService` | `GetGlobal` | `SetGlobal` |
+| `ConfigService` | `DiffRuntimeConfig` | None |
 | `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
@@ -348,7 +349,9 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 Peer-group CRUD plus neighbor membership assignment. Group definitions are
 full-replace and persist back to TOML. When an inherited setting changes, the
 daemon recomputes effective per-neighbor config and reconciles only the peers
-that reference that group.
+that reference that group. Read responses redact `md5_password`; use the
+configuration file or write-side source of truth to inspect credential
+material.
 
 | RPC | Description |
 |-----|-------------|

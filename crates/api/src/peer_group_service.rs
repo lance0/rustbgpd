@@ -135,7 +135,8 @@ fn input_definition_to_proto(definition: &PeerGroupDefinition) -> proto::PeerGro
     proto::PeerGroupDefinition {
         hold_time: definition.hold_time.map(u32::from),
         max_prefixes: definition.max_prefixes,
-        md5_password: definition.md5_password.clone(),
+        // Read RPCs expose the group shape, not credential material.
+        md5_password: None,
         ttl_security: definition.ttl_security,
         families: definition.families.clone(),
         graceful_restart: definition.graceful_restart,
@@ -432,15 +433,64 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peer_types::NamedPeerGroupSnapshot;
     use crate::proto::peer_group_service_server::PeerGroupService as PeerGroupServiceRpc;
     use tokio::sync::mpsc::error::TryRecvError;
 
     fn sample_definition() -> proto::PeerGroupDefinition {
         proto::PeerGroupDefinition {
             families: vec!["ipv4_unicast".into()],
+            md5_password: Some("secret".into()),
             route_server_client: Some(true),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn read_peer_group_responses_redact_md5_password() {
+        let definition = proto_definition_to_input(sample_definition()).unwrap();
+        assert_eq!(definition.md5_password.as_deref(), Some("secret"));
+
+        let output = input_definition_to_proto(&definition);
+        assert_eq!(output.md5_password, None);
+
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let svc = PeerGroupService::new(AccessMode::ReadOnly, peer_tx, None);
+
+        let task = tokio::spawn(async move {
+            PeerGroupServiceRpc::list_peer_groups(
+                &svc,
+                Request::new(proto::ListPeerGroupsRequest {}),
+            )
+            .await
+        });
+
+        let command = peer_rx
+            .recv()
+            .await
+            .expect("expected ListPeerGroups command");
+        match command {
+            PeerManagerCommand::ListPeerGroups { reply } => {
+                reply
+                    .send(vec![NamedPeerGroupSnapshot {
+                        name: "rs-clients".into(),
+                        definition,
+                    }])
+                    .expect("service dropped ListPeerGroups reply");
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        let response = task
+            .await
+            .expect("ListPeerGroups task panicked")
+            .expect("ListPeerGroups failed")
+            .into_inner();
+        let definition = response.peer_groups[0]
+            .definition
+            .as_ref()
+            .expect("peer-group definition missing");
+        assert_eq!(definition.md5_password, None);
     }
 
     #[tokio::test]

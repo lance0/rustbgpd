@@ -478,7 +478,19 @@ mod tests {
 
     const PROTO: &str = include_str!("../../../proto/rustbgpd.proto");
 
+    fn proto_package() -> String {
+        PROTO
+            .lines()
+            .find_map(|raw| {
+                raw.trim()
+                    .strip_prefix("package ")
+                    .map(|package| package.trim_end_matches(';').to_string())
+            })
+            .expect("proto package declaration missing")
+    }
+
     fn proto_methods() -> BTreeSet<String> {
+        let package = proto_package();
         let mut service = None::<String>;
         let mut methods = BTreeSet::new();
         for raw in PROTO.lines() {
@@ -487,7 +499,7 @@ mod tests {
                 service = rest
                     .split_whitespace()
                     .next()
-                    .map(|name| format!("rustbgpd.v1.{name}"));
+                    .map(|name| format!("{package}.{name}"));
                 continue;
             }
             if line == "}" {
@@ -518,6 +530,19 @@ mod tests {
 
         assert_eq!(matrix_methods, proto_methods);
         assert_eq!(METHODS.len(), 66);
+    }
+
+    #[test]
+    fn method_matrix_paths_match_service_and_method_fields() {
+        for method in METHODS {
+            assert_eq!(
+                method.path,
+                format!("/{}/{}", method.service, method.method),
+                "path mismatch for {}.{}",
+                method.service,
+                method.method
+            );
+        }
     }
 
     #[test]

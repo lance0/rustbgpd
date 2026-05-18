@@ -55,6 +55,9 @@ Preferred posture:
   per-method tiers (`read`, `sensitive_read`, `mutating`,
   `operator_only`), but current runtime enforcement is still the
   read-only/read-write listener split.
+- Peer-group read RPCs redact `md5_password` rather than echoing stored
+  secret material. Treat the remaining peer-group template, policy, and
+  topology data as sensitive operational metadata.
 - Restrict the exposed listener to a management VLAN/interface or a small set
   of management hosts.
 - Even with mTLS in place, treat the API as privileged. Read-only RPCs still

@@ -222,6 +222,8 @@ Credential masking is mandatory: `PeerGroupDefinition.md5_password`
 and any field tagged with a future credential marker are replaced with
 `***REDACTED***` before the log line is emitted. TCP-AO key material is
 TOML/runtime-only today and is not accepted by any gRPC request.
+Peer-group read RPCs redact `md5_password` rather than echoing stored
+secret material.
 Inventory questions 5 and 8 answered.
 
 ### 8. `UNIMPLEMENTED` methods
@@ -265,10 +267,11 @@ answered.
   configure CN-based principal mapping. The fallback to Subject CN
   in §4 covers them, but cleanest practice is URI or email SANs.
 - The four-tier model still does not separate "credential ingress"
-  from other writes. `SetPeerGroup` can carry `md5_password` today; if
-  more credential-write surfaces land later, a future ADR may split a
-  `credential_write` tier off. Audit-log masking is the v1.0
-  mitigation.
+  from other writes. `SetPeerGroup` can carry `md5_password` today,
+  while `ListPeerGroups` / `GetPeerGroup` redact that field on read
+  responses. If more credential-write surfaces land later, a future
+  ADR may split a `credential_write` tier off. Audit-log masking and
+  read-response redaction are the v1.0 mitigations.
 
 ## Slicing
 

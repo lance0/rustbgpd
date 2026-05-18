@@ -69,7 +69,7 @@ shape itself does not raise the tier.
 | `ListDynamicNeighbors` | `sensitive_read` | Topology disclosure for the dynamic-prefix accepted peers. |
 | `AddDynamicNeighbor` | `mutating` | Adds an accept-prefix range. Wider than `AddNeighbor` (multi-peer effective), but still per-prefix scope. |
 | `DeleteDynamicNeighbor` | `mutating` | Removes a prefix range; existing sessions inside the range tear down. |
-| `SetGracefulShutdown` | `operator_only` | See GlobalService row — listed here because the proto puts it in `NeighborService`. Empty address ⇒ all peers. |
+| `SetGracefulShutdown` | `operator_only` | Network-wide when `address` is empty; listed here because the proto puts it in `NeighborService`. |
 
 ### PolicyService (18 RPCs)
 
@@ -98,8 +98,8 @@ shape itself does not raise the tier.
 
 | RPC | Tier | Notes |
 |-----|------|-------|
-| `ListPeerGroups` | `sensitive_read` | Exposes group templates including inherited policy chain names. |
-| `GetPeerGroup` | `sensitive_read` | Single-group. |
+| `ListPeerGroups` | `sensitive_read` | Exposes group templates including inherited policy chain names; `md5_password` is redacted from read responses. |
+| `GetPeerGroup` | `sensitive_read` | Single-group; `md5_password` is redacted from read responses. |
 | `SetPeerGroup` | `operator_only` | Edits propagate to every neighbor inheriting the group — blast radius is N peers, not one. This is also the current gRPC-visible credential ingress for `md5_password`. |
 | `DeletePeerGroup` | `operator_only` | Same propagation; will fail if any neighbor still references the group. |
 | `SetNeighborPeerGroup` | `mutating` | Single-neighbor reassignment. |
@@ -202,9 +202,11 @@ specific method if the model warrants it.
    gRPC-visible credential-bearing field today is
    `PeerGroupDefinition.md5_password` through `SetPeerGroup`; static
    neighbor TCP-AO is TOML/runtime-only and is not exposed through
-   gRPC. Read paths never echo secret material back. The model does
-   not need a separate "credential-write" tier yet — `operator_only`
-   plus mandatory audit redaction covers the current surface.
+   gRPC. Read paths never echo secret material back:
+   `ListPeerGroups` and `GetPeerGroup` redact `md5_password` instead
+   of returning the stored value. The model does not need a separate
+   "credential-write" tier yet — `operator_only` plus mandatory audit
+   redaction covers the current surface.
 6. **Backwards compatibility.** Today's coarse listener access is
    what existing operators rely on. The ADR needs a migration mode
    (for example a `[security.grpc]` block that defaults to
