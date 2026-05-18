@@ -1568,9 +1568,9 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
 /// Compare two full configurations and return a structured diff.
 pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
     let neighbor_tcp_ao_changed = neighbor_tcp_ao_restart_required_changed(old, new);
-    let mut reload_new_neighbors = new.neighbors.clone();
-    pin_tcp_ao_startup_only_neighbors(&mut reload_new_neighbors, &old.neighbors);
-    let neighbor_diff = diff_neighbors(&old.neighbors, &reload_new_neighbors);
+    let mut reload_new = new.clone();
+    pin_tcp_ao_startup_only_runtime(&mut reload_new, old);
+    let neighbor_diff = diff_neighbors(&old.neighbors, &reload_new.neighbors);
 
     let old_map: HashMap<&str, &Neighbor> = old
         .neighbors
@@ -1606,13 +1606,13 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
             .collect(),
     };
 
-    let peer_groups = diff_peer_groups(&old.peer_groups, &new.peer_groups);
+    let peer_groups = diff_peer_groups(&old.peer_groups, &reload_new.peer_groups);
     let peer_group_details = peer_groups
         .changed
         .iter()
         .filter_map(|name| {
             let old_pg = old.peer_groups.get(name)?;
-            let new_pg = new.peer_groups.get(name)?;
+            let new_pg = reload_new.peer_groups.get(name)?;
             let changes = describe_peer_group_changes(old_pg, new_pg);
             if changes.is_empty() {
                 None
@@ -1622,9 +1622,9 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         })
         .collect();
 
-    let policy = diff_policy(&old.policy, &new.policy);
+    let policy = diff_policy(&old.policy, &reload_new.policy);
     let effective_neighbor_impact =
-        compute_effective_neighbor_impact(old, new, &peer_groups, &policy);
+        compute_effective_neighbor_impact(old, &reload_new, &peer_groups, &policy);
     let blackhole_fib_discard_changed = old.global.install_blackhole_discard
         != new.global.install_blackhole_discard
         || old.global.allow_blackhole_broad_prefixes != new.global.allow_blackhole_broad_prefixes
@@ -1680,21 +1680,67 @@ fn neighbor_tcp_ao_restart_required_changed(old: &Config, new: &Config) -> bool 
     })
 }
 
-pub(crate) fn pin_tcp_ao_startup_only_neighbors(
+/// Pin TCP-AO runtime state to the live startup snapshot.
+///
+/// A reload that keeps a live TCP-AO neighbor but hot-applies its inherited
+/// dependencies can synthesize an invalid runtime shape, for example old
+/// TCP-AO plus newly-inherited TCP MD5, or an old route-reflector client under
+/// a newly edited local ASN. When any TCP-AO neighbor is pinned, pin the
+/// restart-required global fields and the peer-group/policy dependency graph
+/// with it.
+pub(crate) fn pin_tcp_ao_startup_only_runtime(new_config: &mut Config, current: &Config) -> usize {
+    let result = pin_tcp_ao_startup_only_neighbors(&mut new_config.neighbors, &current.neighbors);
+    if result.pinned > 0 {
+        pin_tcp_ao_restart_required_globals(new_config, current);
+        pin_tcp_ao_dependency_graph(
+            new_config,
+            current,
+            result.pinned_current_neighbors.iter().map(String::as_str),
+        );
+    }
+    result.pinned
+}
+
+fn pin_tcp_ao_restart_required_globals(new_config: &mut Config, current: &Config) {
+    let honor_graceful_shutdown = new_config.global.honor_graceful_shutdown;
+    let honor_blackhole = new_config.global.honor_blackhole;
+    let install_blackhole_discard = new_config.global.install_blackhole_discard;
+    let allow_blackhole_broad_prefixes = new_config.global.allow_blackhole_broad_prefixes;
+
+    new_config.global.clone_from(&current.global);
+
+    // These knobs have explicit reload paths or are pinned before TCP-AO
+    // pinning when their startup-gated actor is live. Preserve the already
+    // shaped value so TCP-AO dependency pinning does not hide unrelated
+    // hot-apply intent.
+    new_config.global.honor_graceful_shutdown = honor_graceful_shutdown;
+    new_config.global.honor_blackhole = honor_blackhole;
+    new_config.global.install_blackhole_discard = install_blackhole_discard;
+    new_config.global.allow_blackhole_broad_prefixes = allow_blackhole_broad_prefixes;
+}
+
+struct TcpAoPinResult {
+    pinned: usize,
+    pinned_current_neighbors: Vec<String>,
+}
+
+fn pin_tcp_ao_startup_only_neighbors(
     new_neighbors: &mut Vec<Neighbor>,
     current_neighbors: &[Neighbor],
-) -> usize {
+) -> TcpAoPinResult {
     let current_by_addr: HashMap<&str, &Neighbor> = current_neighbors
         .iter()
         .map(|neighbor| (neighbor.address.as_str(), neighbor))
         .collect();
 
     let mut pinned = 0usize;
+    let mut pinned_current_neighbors = Vec::new();
     for neighbor in new_neighbors.iter_mut() {
         match current_by_addr.get(neighbor.address.as_str()) {
             Some(current_neighbor) if current_neighbor.tcp_ao != neighbor.tcp_ao => {
                 *neighbor = (*current_neighbor).clone();
                 pinned += 1;
+                pinned_current_neighbors.push(current_neighbor.address.clone());
             }
             _ => {}
         }
@@ -1714,10 +1760,200 @@ pub(crate) fn pin_tcp_ao_startup_only_neighbors(
         if current_neighbor.tcp_ao.is_some() && !new_addrs.contains(&current_neighbor.address) {
             new_neighbors.push(current_neighbor.clone());
             pinned += 1;
+            pinned_current_neighbors.push(current_neighbor.address.clone());
         }
     }
 
-    pinned
+    TcpAoPinResult {
+        pinned,
+        pinned_current_neighbors,
+    }
+}
+
+fn pin_tcp_ao_dependency_graph<'a>(
+    new_config: &mut Config,
+    current: &Config,
+    pinned_current_neighbors: impl Iterator<Item = &'a str>,
+) {
+    let current_by_addr: HashMap<&str, &Neighbor> = current
+        .neighbors
+        .iter()
+        .map(|neighbor| (neighbor.address.as_str(), neighbor))
+        .collect();
+
+    let mut policy_names = HashSet::new();
+    let mut neighbor_set_names = HashSet::new();
+    let mut peer_group_names = HashSet::new();
+    let mut pin_global_import_chain = false;
+    let mut pin_global_export_chain = false;
+
+    for address in pinned_current_neighbors {
+        let Some(neighbor) = current_by_addr.get(address) else {
+            continue;
+        };
+        let pinned_global = collect_tcp_ao_neighbor_dependency_refs(
+            neighbor,
+            current,
+            &mut policy_names,
+            &mut neighbor_set_names,
+            &mut peer_group_names,
+        );
+        pin_global_import_chain |= pinned_global.import;
+        pin_global_export_chain |= pinned_global.export;
+    }
+
+    if pin_global_import_chain {
+        new_config
+            .policy
+            .import_chain
+            .clone_from(&current.policy.import_chain);
+    }
+    if pin_global_export_chain {
+        new_config
+            .policy
+            .export_chain
+            .clone_from(&current.policy.export_chain);
+    }
+
+    let mut processed_peer_groups = HashSet::new();
+    let mut processed_policies = HashSet::new();
+    let mut processed_neighbor_sets = HashSet::new();
+    loop {
+        let mut progressed = false;
+
+        for name in peer_group_names
+            .difference(&processed_peer_groups)
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            processed_peer_groups.insert(name.clone());
+            progressed = true;
+            if let Some(group) = current.peer_groups.get(&name) {
+                new_config.peer_groups.insert(name, group.clone());
+                collect_policy_refs_from_peer_group(
+                    group,
+                    &mut policy_names,
+                    &mut neighbor_set_names,
+                );
+            }
+        }
+
+        for name in policy_names
+            .difference(&processed_policies)
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            processed_policies.insert(name.clone());
+            progressed = true;
+            if let Some(policy) = current.policy.definitions.get(&name) {
+                collect_neighbor_set_refs_from_policy(policy, &mut neighbor_set_names);
+                new_config.policy.definitions.insert(name, policy.clone());
+            }
+        }
+
+        for name in neighbor_set_names
+            .difference(&processed_neighbor_sets)
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            processed_neighbor_sets.insert(name.clone());
+            progressed = true;
+            if let Some(set) = current.policy.neighbor_sets.get(&name) {
+                peer_group_names.extend(set.peer_groups.iter().cloned());
+                new_config.policy.neighbor_sets.insert(name, set.clone());
+            }
+        }
+
+        if !progressed {
+            break;
+        }
+    }
+}
+
+struct PinnedGlobalPolicyChains {
+    import: bool,
+    export: bool,
+}
+
+fn collect_tcp_ao_neighbor_dependency_refs(
+    neighbor: &Neighbor,
+    current: &Config,
+    policy_names: &mut HashSet<String>,
+    neighbor_set_names: &mut HashSet<String>,
+    peer_group_names: &mut HashSet<String>,
+) -> PinnedGlobalPolicyChains {
+    collect_policy_refs_from_neighbor(neighbor, policy_names, neighbor_set_names);
+
+    let group = neighbor
+        .peer_group
+        .as_deref()
+        .and_then(|group_name| current.peer_groups.get(group_name));
+
+    if let Some(group_name) = neighbor.peer_group.as_deref() {
+        peer_group_names.insert(group_name.to_string());
+    }
+
+    let import = neighbor.import_policy_chain.is_empty()
+        && neighbor.import_policy.is_empty()
+        && group.is_none_or(|group| {
+            group.import_policy_chain.is_empty() && group.import_policy.is_empty()
+        })
+        && !current.policy.import_chain.is_empty();
+    if import {
+        policy_names.extend(current.policy.import_chain.iter().cloned());
+    }
+
+    let export = neighbor.export_policy_chain.is_empty()
+        && neighbor.export_policy.is_empty()
+        && group.is_none_or(|group| {
+            group.export_policy_chain.is_empty() && group.export_policy.is_empty()
+        })
+        && !current.policy.export_chain.is_empty();
+    if export {
+        policy_names.extend(current.policy.export_chain.iter().cloned());
+    }
+
+    PinnedGlobalPolicyChains { import, export }
+}
+
+fn collect_policy_refs_from_neighbor(
+    neighbor: &Neighbor,
+    policy_names: &mut HashSet<String>,
+    neighbor_set_names: &mut HashSet<String>,
+) {
+    policy_names.extend(neighbor.import_policy_chain.iter().cloned());
+    policy_names.extend(neighbor.export_policy_chain.iter().cloned());
+    collect_neighbor_set_refs_from_statements(&neighbor.import_policy, neighbor_set_names);
+    collect_neighbor_set_refs_from_statements(&neighbor.export_policy, neighbor_set_names);
+}
+
+fn collect_policy_refs_from_peer_group(
+    group: &PeerGroupConfig,
+    policy_names: &mut HashSet<String>,
+    neighbor_set_names: &mut HashSet<String>,
+) {
+    policy_names.extend(group.import_policy_chain.iter().cloned());
+    policy_names.extend(group.export_policy_chain.iter().cloned());
+    collect_neighbor_set_refs_from_statements(&group.import_policy, neighbor_set_names);
+    collect_neighbor_set_refs_from_statements(&group.export_policy, neighbor_set_names);
+}
+
+fn collect_neighbor_set_refs_from_policy(
+    policy: &NamedPolicyConfig,
+    neighbor_set_names: &mut HashSet<String>,
+) {
+    collect_neighbor_set_refs_from_statements(&policy.statements, neighbor_set_names);
+}
+
+fn collect_neighbor_set_refs_from_statements(
+    statements: &[PolicyStatementConfig],
+    neighbor_set_names: &mut HashSet<String>,
+) {
+    neighbor_set_names.extend(
+        statements
+            .iter()
+            .filter_map(|statement| statement.match_neighbor_set.clone()),
+    );
 }
 
 fn global_restart_required_changed(old: &Config, new: &Config) -> bool {

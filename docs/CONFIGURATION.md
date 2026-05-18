@@ -304,17 +304,30 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 
 TCP-AO (RFC 5925) `tcp_ao` is accepted for static `[[neighbors]]` only. On
 Linux, rustbgpd installs the configured key on outbound active-open sockets
-before `connect()` and on the passive BGP listener before `listen()`. If a
-configured TCP-AO key cannot be installed, startup fails closed instead of
-silently accepting unauthenticated sessions. `rustbgpctl global` /
-`GlobalService.GetGlobal` expose the host capability probe so operators can
-verify kernel support before enabling the field.
+before `connect()` and on the passive BGP listener before `listen()` when the
+peer address family matches the configured listener socket. If a configured
+TCP-AO listener key cannot be installed, startup fails closed instead of
+running a partially protected listener. Active-open key installation failures
+fail that session connect attempt and retry later; they do not fall back to an
+unauthenticated session. `rustbgpctl global` / `GlobalService.GetGlobal` expose
+the host capability probe so operators can verify kernel support before
+enabling the field.
+
+Active-open sockets install the key as both Linux `current_key` and `rnext_key`
+so the initial SYN is signed. Listener sockets install the per-peer MKT without
+`current_key` / `rnext_key`; Linux rejects those flags on listening sockets.
+rustbgpd does not set the socket-wide `ao_required` bit because a shared BGP
+listener may also serve non-TCP-AO neighbors.
 
 Linux TCP-AO Master Key Tuples are socket state, so `tcp_ao` additions,
 removals, and key changes are restart-required. On SIGHUP, rustbgpd pins the
 live neighbor back to the startup snapshot, reports `[[neighbors]].tcp_ao` as
-restart-required in `--diff` / config-diff JSON, and leaves the edited TOML as
-the desired config for the next daemon restart.
+restart-required in `--diff` / config-diff JSON, pins peer-group and policy
+dependencies referenced by the pinned TCP-AO neighbors and restart-required
+global fields that affect neighbor validation to the live snapshot for that
+reload, and leaves the edited TOML as the desired config for the next daemon
+restart. Runtime deletion of a configured TCP-AO neighbor is also rejected
+until listener MKT deletion / key rotation support lands.
 
 `tcp_ao` is mutually exclusive with `md5_password`, including an inherited
 peer-group MD5 password. It is not available in `[peer_groups.*]` because
@@ -338,8 +351,9 @@ Allowed `algorithm` values are `"hmac(sha1)"`, `"hmac(sha256)"`, and
 `"cmac(aes128)"`. `key` must be 1--80 bytes. `send_id` and `recv_id` are
 TCP-AO KeyIDs (`0..=255`). `preferred` and `deprecated` are parsed as
 rollover metadata for future multi-key support; with the current single-key
-runtime, the configured key is installed as the initial current / receive-next
-key. `preferred` and `deprecated` cannot both be true.
+runtime, active-open sockets install the configured key as the initial current
+/ receive-next key, while listener MKTs are installed without current /
+receive-next flags. `preferred` and `deprecated` cannot both be true.
 
 ### Address families
 

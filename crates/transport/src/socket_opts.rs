@@ -174,6 +174,11 @@ const TCP_AO_ADD_SET_RNEXT: u32 = 1 << 1;
 /// rnext so the initial SYN is signed. Listener sockets install the same MKT
 /// without current/rnext flags because Linux rejects those flags on listening
 /// sockets.
+///
+/// Do not set `TCP_AO_INFO.ao_required` here. Linux treats peers matching an
+/// MKT as TCP-AO candidates, while the global `ao_required` bit would require
+/// TCP-AO from every inbound peer on rustbgpd's shared BGP listener, including
+/// static neighbors that intentionally do not configure TCP-AO.
 #[cfg(target_os = "linux")]
 pub(crate) fn set_tcp_ao_config(
     socket: &Socket,

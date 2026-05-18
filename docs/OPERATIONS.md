@@ -575,10 +575,11 @@ rustbgpctl global
 The `TCP-AO` row reports the local kernel capability probe for RFC 5925
 TCP-AO support. `supported` means the daemon's internal socket primitive can
 install keys on this host. `unsupported` / `probe_failed` means any configured
-static-neighbor `tcp_ao` key will fail closed at startup rather than falling
-back to unauthenticated sessions. TCP-AO key additions, removals, and rotations
-are restart-required because Linux requires the keys to exist when active-open
-or passive-listener sockets are created.
+static-neighbor `tcp_ao` key will fail closed instead of falling back to
+unauthenticated sessions: listener failures abort startup, while active-open
+failures reject that connect attempt and retry later. TCP-AO key additions,
+removals, and rotations are restart-required because Linux requires the keys to
+exist when active-open or passive-listener sockets are created.
 
 ### View received routes from a peer
 

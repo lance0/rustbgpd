@@ -141,7 +141,11 @@ an internal Linux socket primitive and capability probe for TCP-AO
 (ADR-0062), plus static-neighbor `tcp_ao` TOML parsing/validation and startup
 runtime installation. Outbound active-open sockets install the key before
 `connect()`, and the passive BGP listener installs configured peer keys before
-`listen()`. Startup fails closed if a configured key cannot be installed.
+`listen()`. Listener key-install failures abort startup rather than running a
+partially protected listener; active-open key-install failures fail the
+connection attempt and retry later without falling back to unauthenticated TCP.
+Runtime deletion of configured TCP-AO neighbors is rejected because listener
+MKTs are installed on the startup listener socket and are not deleted yet.
 Dynamic-neighbor TCP-AO, runtime key rotation, multi-key rollover, and protected
 interop validation remain deferred.
 

@@ -83,12 +83,15 @@ slices have now shipped static-neighbor startup support:
 - `[[neighbors]].tcp_ao` is parsed and validated, mutually exclusive with TCP
   MD5, and redacted in config diffs.
 - Outbound active-open sockets install the configured TCP-AO key before
-  `connect()`.
+  `connect()` and fail that connect attempt if the key cannot be installed.
 - The passive BGP listener is created through `socket2`, installs configured
   static-neighbor TCP-AO keys before `listen()`, and fails closed if a key
   cannot be installed.
 - SIGHUP additions, removals, or rotations of `tcp_ao` are restart-required and
-  pinned to the live startup snapshot.
+  pinned to the live startup snapshot along with validation-affecting startup
+  dependencies.
+- Runtime deletion of a configured TCP-AO neighbor is rejected until listener
+  MKT deletion / key rotation support exists.
 
 Still deferred: dynamic-neighbor wildcard MKTs, runtime key rotation / deletion
 on an already-listening socket, multi-key rollover, accepted-socket inspection,

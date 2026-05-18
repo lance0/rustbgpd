@@ -35,7 +35,7 @@ mod peer_manager;
 mod policy_admin;
 mod reload;
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::process;
 use std::sync::Arc;
@@ -206,6 +206,21 @@ fn remove_gr_restart_marker(path: &Path) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+fn tcp_ao_listener_key_for_neighbor(
+    listen_addr: SocketAddr,
+    neighbor: &config::ResolvedNeighbor,
+) -> Option<TcpAoListenerKey> {
+    let tcp_ao = neighbor.transport_config.tcp_ao.as_ref()?;
+    let peer = neighbor.transport_config.remote_addr.ip();
+    if listen_addr.is_ipv4() != peer.is_ipv4() {
+        return None;
+    }
+    Some(TcpAoListenerKey {
+        peer,
+        config: tcp_ao.clone(),
+    })
 }
 
 fn print_config_diff(diff: &config::ConfigDiff) {
@@ -1319,24 +1334,18 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         error!("invalid policy configuration: {e}");
         process::exit(1);
     });
+    // Spawn BGP inbound TCP listener. The current daemon opens one
+    // listener socket from `Config::listen_addr()`; only install TCP-AO
+    // MKTs whose peer family can match that socket. Outbound active-open
+    // sockets still install their per-neighbor key independently below.
+    let listen_addr = config.listen_addr();
     let listener_options = ListenerSocketOptions {
         tcp_ao_keys: peer_configs
             .iter()
-            .filter_map(|neighbor| {
-                neighbor
-                    .transport_config
-                    .tcp_ao
-                    .as_ref()
-                    .map(|tcp_ao| TcpAoListenerKey {
-                        peer: neighbor.transport_config.remote_addr.ip(),
-                        config: tcp_ao.clone(),
-                    })
-            })
+            .filter_map(|neighbor| tcp_ao_listener_key_for_neighbor(listen_addr, neighbor))
             .collect(),
     };
 
-    // Spawn BGP inbound TCP listener
-    let listen_addr = config.listen_addr();
     let tcp_ao_listener_required = !listener_options.tcp_ao_keys.is_empty();
     let (accept_tx, mut accept_rx) = mpsc::channel::<rustbgpd_transport::AcceptedConnection>(64);
     match BgpListener::bind_with_options(listen_addr, accept_tx, listener_options).await {
@@ -1362,7 +1371,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 error!(
                     %listen_addr,
                     error = %e,
-                    "failed to configure TCP-AO listener keys; refusing to start with partially protected peers"
+                    "failed to start BGP listener with TCP-AO-protected peers configured; refusing to run partially protected"
                 );
                 process::exit(1);
             }
@@ -1710,6 +1719,33 @@ mod tests {
         std::env::temp_dir().join(format!("rustbgpd-{name}-{suffix}.toml"))
     }
 
+    fn load_config_from_toml(name: &str, toml: &str) -> Config {
+        let path = unique_temp_path(name);
+        std::fs::write(&path, toml).unwrap();
+        let config = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+        config
+    }
+
+    fn tcp_ao_neighbor_toml(address: &str) -> String {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "{address}"
+remote_asn = 65002
+tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }}
+"#
+        )
+    }
+
     #[test]
     fn gr_restart_marker_round_trip() {
         let path = unique_temp_path("gr-restart-marker");
@@ -1730,6 +1766,25 @@ mod tests {
         let err = read_gr_restart_marker(&path).unwrap_err();
         assert!(err.contains("unsupported marker version"));
         remove_gr_restart_marker(&path).unwrap();
+    }
+
+    #[test]
+    fn tcp_ao_listener_key_includes_peer_matching_listener_family() {
+        let config = load_config_from_toml("listener-tcp-ao-v4", &tcp_ao_neighbor_toml("10.0.0.2"));
+        let peer = config.resolved_neighbors().unwrap().pop().unwrap();
+
+        let key = tcp_ao_listener_key_for_neighbor(config.listen_addr(), &peer).unwrap();
+
+        assert_eq!(key.peer.to_string(), "10.0.0.2");
+    }
+
+    #[test]
+    fn tcp_ao_listener_key_skips_peer_outside_listener_family() {
+        let config =
+            load_config_from_toml("listener-tcp-ao-v6", &tcp_ao_neighbor_toml("2001:db8::2"));
+        let peer = config.resolved_neighbors().unwrap().pop().unwrap();
+
+        assert!(tcp_ao_listener_key_for_neighbor(config.listen_addr(), &peer).is_none());
     }
 
     #[test]

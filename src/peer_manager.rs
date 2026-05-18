@@ -15,7 +15,8 @@ use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{
     PeerHandle, PeerSessionState, SessionIdentity, SessionLifecycleNotification,
-    SessionNotification, SessionNotificationEvent as TransportNotificationEvent, TransportConfig,
+    SessionNotification, SessionNotificationEvent as TransportNotificationEvent, TcpAoConfig,
+    TransportConfig,
 };
 use rustbgpd_wire::{Afi, Safi};
 use tokio::net::TcpStream;
@@ -837,6 +838,38 @@ impl PeerManager {
         address: IpAddr,
         sync_config_snapshot: bool,
     ) -> Result<(), String> {
+        self.delete_peer_checked(address, sync_config_snapshot, None)
+            .await
+    }
+
+    async fn delete_peer_for_reconfigure(
+        &mut self,
+        address: IpAddr,
+        next_tcp_ao: Option<&TcpAoConfig>,
+    ) -> Result<(), String> {
+        self.delete_peer_checked(address, false, next_tcp_ao).await
+    }
+
+    async fn delete_peer_checked(
+        &mut self,
+        address: IpAddr,
+        sync_config_snapshot: bool,
+        next_tcp_ao: Option<&TcpAoConfig>,
+    ) -> Result<(), String> {
+        let current_tcp_ao = self
+            .peers
+            .get(&address)
+            .and_then(|managed| managed.transport_config.tcp_ao.as_ref())
+            .cloned();
+        if current_tcp_ao
+            .as_ref()
+            .is_some_and(|current| next_tcp_ao != Some(current))
+        {
+            return Err(format!(
+                "peer {address} uses TCP-AO; removing protected peers requires restart until listener MKT deletion is implemented"
+            ));
+        }
+
         let managed = self
             .peers
             .remove(&address)
@@ -1405,11 +1438,7 @@ impl PeerManager {
                 .peers
                 .get(&address)
                 .is_none_or(|managed| managed.enabled);
-            if self.peers.contains_key(&address) {
-                self.delete_peer(address, false).await?;
-            }
-
-            if let Some(neighbor) = next_config
+            let next_peer_config = if let Some(neighbor) = next_config
                 .neighbors
                 .iter()
                 .find(|neighbor| neighbor.address == address.to_string())
@@ -1417,7 +1446,20 @@ impl PeerManager {
                 let resolved = next_config
                     .resolve_neighbor(neighbor)
                     .map_err(|e| e.to_string())?;
-                let cfg = Self::peer_manager_config_from_resolved(resolved, false);
+                Some(Self::peer_manager_config_from_resolved(resolved, false))
+            } else {
+                None
+            };
+            if self.peers.contains_key(&address) {
+                if let Some(cfg) = next_peer_config.as_ref() {
+                    self.delete_peer_for_reconfigure(address, cfg.tcp_ao.as_ref())
+                        .await?;
+                } else {
+                    self.delete_peer(address, false).await?;
+                }
+            }
+
+            if let Some(cfg) = next_peer_config {
                 self.add_peer(cfg, false).await?;
                 affected_peer_count += 1;
                 if !was_enabled {
@@ -2057,13 +2099,17 @@ impl PeerManager {
         // Changed peers: delete then re-add
         for cfg in &changed {
             let addr = cfg.address;
-            if let Err(e) = self.delete_peer(addr, false).await {
+            if let Err(e) = self
+                .delete_peer_for_reconfigure(addr, cfg.tcp_ao.as_ref())
+                .await
+            {
                 warn!(%addr, error = %e, "reconcile: failed to remove changed peer");
                 result.failures.push(ReconcileFailure {
                     kind: ReconcileFailureKind::ChangeRemove,
                     address: addr,
                     error: e,
                 });
+                continue;
             }
             if let Err(e) = self.add_peer(cfg.clone(), false).await {
                 warn!(%addr, error = %e, "reconcile: failed to re-add changed peer");
@@ -3357,6 +3403,137 @@ md5_password = "new-secret"
             .unwrap();
         let peers = reply_rx.await.unwrap();
         assert!(peers.is_empty());
+
+        tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_tcp_ao_peer_is_restart_required() {
+        let (tx, rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mgr = PeerManager::new(
+            rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+        );
+        let handle = tokio::spawn(mgr.run());
+
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut config = make_config(addr, 65002);
+        config.tcp_ao = Some(rustbgpd_transport::TcpAoConfig {
+            key: "secret".to_string(),
+            send_id: 1,
+            recv_id: 1,
+            algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+            preferred: false,
+            deprecated: false,
+        });
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::AddPeer {
+            config,
+            sync_config_snapshot: false,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        assert!(reply_rx.await.unwrap().is_ok());
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::DeletePeer {
+            address: addr,
+            sync_config_snapshot: true,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let err = reply_rx
+            .await
+            .unwrap()
+            .expect_err("TCP-AO peer deletion must be restart-required");
+        assert!(err.contains("requires restart"), "{err}");
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::ListPeers { reply: reply_tx })
+            .await
+            .unwrap();
+        let peers = reply_rx.await.unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].address, addr);
+
+        tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_key_tcp_ao_peer_reconfigure_is_allowed() {
+        let (tx, rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mgr = PeerManager::new(
+            rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+        );
+        let handle = tokio::spawn(mgr.run());
+
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let tcp_ao = rustbgpd_transport::TcpAoConfig {
+            key: "secret".to_string(),
+            send_id: 1,
+            recv_id: 1,
+            algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+            preferred: false,
+            deprecated: false,
+        };
+        let mut config = make_config(addr, 65002);
+        config.tcp_ao = Some(tcp_ao.clone());
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::AddPeer {
+            config,
+            sync_config_snapshot: false,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        assert!(reply_rx.await.unwrap().is_ok());
+
+        let mut changed = make_config(addr, 65002);
+        changed.description = "updated-description".to_string();
+        changed.tcp_ao = Some(tcp_ao);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::ReconcilePeers {
+            added: Vec::new(),
+            removed: Vec::new(),
+            changed: vec![changed],
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let result = reply_rx.await.unwrap();
+        assert!(result.failures.is_empty(), "{:?}", result.failures);
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::ListPeers { reply: reply_tx })
+            .await
+            .unwrap();
+        let peers = reply_rx.await.unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].address, addr);
+        assert_eq!(peers[0].description, "updated-description");
 
         tx.send(PeerManagerCommand::Shutdown).await.unwrap();
         handle.await.unwrap();

@@ -2710,6 +2710,435 @@ fn diff_config_pins_entire_neighbor_when_tcp_ao_changes() {
 }
 
 #[test]
+fn diff_config_pins_tcp_ao_neighbor_dependencies() {
+    let old_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.secure]
+hold_time = 90
+import_policy_chain = ["keep"]
+
+[peer_groups.rs-clients]
+hold_time = 60
+
+[policy.neighbor_sets.ixp]
+peer_groups = ["rs-clients"]
+
+[[policy.definitions.keep.statements]]
+action = "permit"
+match_neighbor_set = "ixp"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "secure"
+tcp_ao = { key = "old-secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }
+"#;
+    let new_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.secure]
+hold_time = 90
+md5_password = "md5-secret"
+import_policy_chain = ["keep"]
+
+[policy.definitions.keep]
+default_action = "deny"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "secure"
+"#;
+    let old = parse(old_toml).unwrap();
+    let new = parse(new_toml).unwrap();
+
+    let diff = super::diff_config(&old, &new);
+
+    assert!(diff.neighbor_tcp_ao_changed);
+    assert!(diff.peer_groups.changed.is_empty());
+    assert!(diff.policy.definitions_changed.is_empty());
+    assert!(!diff.has_reload_applied_changes());
+    assert!(diff.has_restart_required_changes());
+}
+
+#[test]
+fn diff_config_pins_removed_tcp_ao_neighbor_dependencies() {
+    let old_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.secure]
+hold_time = 90
+import_policy_chain = ["keep"]
+
+[peer_groups.rs-clients]
+hold_time = 60
+
+[policy.neighbor_sets.ixp]
+peer_groups = ["rs-clients"]
+
+[[policy.definitions.keep.statements]]
+action = "permit"
+match_neighbor_set = "ixp"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "secure"
+tcp_ao = { key = "old-secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }
+"#;
+    let new_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+"#;
+    let old = parse(old_toml).unwrap();
+    let mut runtime = parse(new_toml).unwrap();
+
+    let pinned = super::pin_tcp_ao_startup_only_runtime(&mut runtime, &old);
+
+    assert_eq!(pinned, 1);
+    assert!(runtime.validate().is_ok());
+    assert!(
+        runtime
+            .neighbors
+            .iter()
+            .any(|neighbor| neighbor.address == "10.0.0.2"
+                && neighbor.peer_group.as_deref() == Some("secure")
+                && neighbor.tcp_ao.is_some())
+    );
+    assert!(runtime.peer_groups.contains_key("secure"));
+    assert!(runtime.peer_groups.contains_key("rs-clients"));
+    assert!(runtime.policy.definitions.contains_key("keep"));
+    assert!(runtime.policy.neighbor_sets.contains_key("ixp"));
+
+    let diff = super::diff_config(&old, &runtime);
+    assert!(diff.neighbors.removed.is_empty());
+    assert!(diff.peer_groups.removed.is_empty());
+    assert!(diff.policy.definitions_removed.is_empty());
+    assert!(diff.policy.neighbor_sets_removed.is_empty());
+}
+
+#[test]
+fn tcp_ao_pinning_preserves_inherited_global_policy_chains() {
+    let old_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[policy]
+import_chain = ["import-keep"]
+export_chain = ["export-keep"]
+
+[policy.definitions.import-keep]
+default_action = "permit"
+
+[policy.definitions.export-keep]
+default_action = "permit"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+tcp_ao = { key = "old-secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }
+"#;
+    let new_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+"#;
+    let old = parse(old_toml).unwrap();
+    let mut runtime = parse(new_toml).unwrap();
+
+    let pinned = super::pin_tcp_ao_startup_only_runtime(&mut runtime, &old);
+
+    assert_eq!(pinned, 1);
+    assert_eq!(runtime.policy.import_chain, vec!["import-keep"]);
+    assert_eq!(runtime.policy.export_chain, vec!["export-keep"]);
+    assert!(runtime.policy.definitions.contains_key("import-keep"));
+    assert!(runtime.policy.definitions.contains_key("export-keep"));
+    assert!(runtime.validate().is_ok());
+
+    let diff = super::diff_config(&old, &runtime);
+    assert!(!diff.policy.import_chain_changed);
+    assert!(!diff.policy.export_chain_changed);
+    assert!(diff.policy.definitions_removed.is_empty());
+}
+
+#[test]
+fn tcp_ao_pinning_keeps_global_asn_with_removed_rr_neighbor() {
+    let old_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+route_reflector_client = true
+tcp_ao = { key = "old-secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }
+"#;
+    let new_toml = r#"
+[global]
+asn = 65002
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+"#;
+    let old = parse(old_toml).unwrap();
+    let mut runtime = parse(new_toml).unwrap();
+
+    let pinned = super::pin_tcp_ao_startup_only_runtime(&mut runtime, &old);
+
+    assert_eq!(pinned, 1);
+    assert_eq!(runtime.global.asn, 65001);
+    assert!(runtime.validate().is_ok());
+    assert!(runtime.neighbors.iter().any(|neighbor| {
+        neighbor.address == "10.0.0.2"
+            && neighbor.remote_asn == 65001
+            && neighbor.route_reflector_client == Some(true)
+            && neighbor.tcp_ao.is_some()
+    }));
+}
+
+#[test]
+fn tcp_ao_pinning_keeps_global_asn_with_rotated_rr_neighbor() {
+    let old_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+route_reflector_client = true
+tcp_ao = { key = "old-secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }
+"#;
+    let new_toml = r#"
+[global]
+asn = 65002
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+route_reflector_client = true
+tcp_ao = { key = "new-secret", send_id = 2, recv_id = 2, algorithm = "hmac(sha256)" }
+"#;
+    let old = parse(old_toml).unwrap();
+    let mut runtime = parse(new_toml).unwrap();
+
+    let pinned = super::pin_tcp_ao_startup_only_runtime(&mut runtime, &old);
+
+    assert_eq!(pinned, 1);
+    assert_eq!(runtime.global.asn, 65001);
+    assert!(runtime.validate().is_ok());
+    let neighbor = runtime
+        .neighbors
+        .iter()
+        .find(|neighbor| neighbor.address == "10.0.0.2")
+        .expect("pinned neighbor restored");
+    assert_eq!(neighbor.remote_asn, 65001);
+    assert_eq!(
+        neighbor.tcp_ao.as_ref().map(|tcp_ao| tcp_ao.key.as_str()),
+        Some("old-secret")
+    );
+}
+
+#[test]
+fn diff_config_preserves_unrelated_policy_diff_when_tcp_ao_neighbor_is_pinned() {
+    let old_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+tcp_ao = { key = "old-secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }
+"#;
+    let new_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[policy.import]]
+action = "permit"
+prefix = "10.0.0.0/8"
+
+[policy.definitions.unrelated]
+default_action = "permit"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+"#;
+    let old = parse(old_toml).unwrap();
+    let new = parse(new_toml).unwrap();
+
+    let diff = super::diff_config(&old, &new);
+
+    assert!(diff.neighbor_tcp_ao_changed);
+    assert!(diff.policy.import_changed);
+    assert_eq!(diff.policy.definitions_added, vec!["unrelated"]);
+    assert!(diff.has_reload_applied_changes());
+    assert!(diff.has_restart_required_changes());
+}
+
+#[test]
+fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
+    let old = parse(valid_toml()).unwrap();
+    let mut new = old.clone();
+    new.peer_groups.insert(
+        "new-group".to_string(),
+        PeerGroupConfig {
+            hold_time: Some(60),
+            max_prefixes: None,
+            md5_password: None,
+            ttl_security: None,
+            families: Vec::new(),
+            graceful_restart: None,
+            gr_restart_time: None,
+            gr_stale_routes_time: None,
+            llgr_stale_time: None,
+            local_ipv6_nexthop: None,
+            route_reflector_client: None,
+            route_server_client: None,
+            remove_private_as: None,
+            add_path: None,
+            log_level: None,
+            import_policy: Vec::new(),
+            export_policy: Vec::new(),
+            import_policy_chain: Vec::new(),
+            export_policy_chain: Vec::new(),
+        },
+    );
+    new.neighbors.push(Neighbor {
+        address: "10.0.0.3".into(),
+        remote_asn: 65003,
+        description: None,
+        peer_group: Some("new-group".into()),
+        hold_time: None,
+        max_prefixes: None,
+        md5_password: None,
+        tcp_ao: Some(TcpAoConfig {
+            key: "secret".into(),
+            send_id: 1,
+            recv_id: 1,
+            algorithm: "hmac(sha256)".into(),
+            preferred: false,
+            deprecated: false,
+        }),
+        ttl_security: None,
+        families: Vec::new(),
+        graceful_restart: None,
+        gr_restart_time: None,
+        gr_stale_routes_time: None,
+        llgr_stale_time: None,
+        local_ipv6_nexthop: None,
+        route_reflector_client: None,
+        route_server_client: None,
+        remove_private_as: None,
+        add_path: None,
+        import_policy: Vec::new(),
+        export_policy: Vec::new(),
+        import_policy_chain: Vec::new(),
+        export_policy_chain: Vec::new(),
+        log_level: None,
+    });
+    new.neighbors.push(Neighbor {
+        address: "10.0.0.4".into(),
+        remote_asn: 65004,
+        description: None,
+        peer_group: Some("new-group".into()),
+        hold_time: None,
+        max_prefixes: None,
+        md5_password: None,
+        tcp_ao: None,
+        ttl_security: None,
+        families: Vec::new(),
+        graceful_restart: None,
+        gr_restart_time: None,
+        gr_stale_routes_time: None,
+        llgr_stale_time: None,
+        local_ipv6_nexthop: None,
+        route_reflector_client: None,
+        route_server_client: None,
+        remove_private_as: None,
+        add_path: None,
+        import_policy: Vec::new(),
+        export_policy: Vec::new(),
+        import_policy_chain: Vec::new(),
+        export_policy_chain: Vec::new(),
+        log_level: None,
+    });
+
+    let pinned = super::pin_tcp_ao_startup_only_runtime(&mut new, &old);
+
+    assert_eq!(pinned, 1);
+    assert!(new.validate().is_ok());
+    assert!(new.neighbors.iter().any(|neighbor| {
+        neighbor.address == "10.0.0.4" && neighbor.peer_group.as_deref() == Some("new-group")
+    }));
+    assert!(
+        new.neighbors
+            .iter()
+            .all(|neighbor| neighbor.address != "10.0.0.3")
+    );
+}
+
+#[test]
 fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
     let old = parse(valid_toml()).unwrap();
     let mut new = old.clone();

@@ -22,10 +22,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   deprecated }` and installs RFC 5925 TCP-AO keys on Linux startup active-open
   sockets before `connect()` and on the passive BGP listener before `listen()`.
   The schema is mutually exclusive with `md5_password`, redacts secrets in
-  config diffs, validates key length and Linux TCP-AO algorithm names, and fails
-  closed if a configured key cannot be installed. Dynamic-neighbor TCP-AO,
-  runtime key rotation, multi-key rollover, and protected interop smoke remain
-  follow-up work.
+  config diffs, validates key length and Linux TCP-AO algorithm names, aborts
+  startup on listener key-install failure, and fails active-open connect attempts
+  without falling back to unauthenticated TCP. Dynamic-neighbor TCP-AO, runtime
+  key rotation, multi-key rollover, and protected interop smoke remain follow-up
+  work.
 
 ### Changed
 
@@ -33,7 +34,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tcp_ao` additions, removals, or key changes are pinned to the live startup
   snapshot during reload and reported through `--diff` / config-diff JSON as
   restart-required because Linux TCP-AO MKTs must be installed when sockets are
-  created.
+  created. Runtime deletion of a protected TCP-AO peer is rejected for the same
+  reason until listener MKT deletion / key rotation support lands.
 
 ### Fixed
 

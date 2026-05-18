@@ -141,7 +141,12 @@ where
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
     socket.bind(&SockAddr::from(addr))?;
     for key in &options.tcp_ao_keys {
-        install_tcp_ao(&socket, key)?;
+        // This installs a peer-specific MKT, not the socket-wide
+        // `ao_required` bit. Linux tcp_ao_required() returns true for either
+        // ao_info->ao_required or a matching MKT, and tcp_inbound_hash()
+        // rejects unsigned packets in that case. A global requirement would
+        // also reject non-AO peers on the shared BGP listener.
+        install_tcp_ao(&socket, key).map_err(|err| listener_tcp_ao_error(key, &err))?;
         debug!(peer = %key.peer, "TCP-AO listener key configured");
     }
     socket.listen(DEFAULT_LISTEN_BACKLOG)?;
@@ -157,6 +162,20 @@ fn install_listener_tcp_ao_key(socket: &Socket, key: &TcpAoListenerKey) -> std::
         key.peer,
         &key.config,
         crate::socket_opts::TcpAoSocketRole::Listener,
+    )
+}
+
+fn listener_tcp_ao_error(key: &TcpAoListenerKey, err: &std::io::Error) -> std::io::Error {
+    std::io::Error::new(
+        err.kind(),
+        format!(
+            "failed to install TCP-AO listener key for peer {} \
+             (send_id={}, recv_id={}, algorithm={}): {err}",
+            key.peer,
+            key.config.send_id,
+            key.config.recv_id,
+            key.config.algorithm.linux_name()
+        ),
     )
 }
 
@@ -196,6 +215,36 @@ mod tests {
             .unwrap();
 
         assert!(listener.local_addr().unwrap().port() > 0);
+        assert_eq!(
+            installed.into_inner(),
+            vec![IpAddr::from(Ipv4Addr::new(192, 0, 2, 1))]
+        );
+        tokio::task::yield_now().await;
+    }
+
+    #[tokio::test]
+    async fn bind_socket2_listener_fails_when_tcp_ao_key_install_fails() {
+        let installed = RefCell::new(Vec::new());
+        let options = ListenerSocketOptions {
+            tcp_ao_keys: vec![TcpAoListenerKey {
+                peer: IpAddr::from(Ipv4Addr::new(192, 0, 2, 1)),
+                config: tcp_ao_config(),
+            }],
+        };
+
+        let err =
+            bind_socket2_listener_with("127.0.0.1:0".parse().unwrap(), &options, |_socket, key| {
+                installed.borrow_mut().push(key.peer);
+                Err(std::io::Error::other("tcp-ao install failed"))
+            })
+            .expect_err("listener bind must fail when TCP-AO key install fails");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+        let message = err.to_string();
+        assert!(message.contains("192.0.2.1"), "{message}");
+        assert!(message.contains("send_id=1"), "{message}");
+        assert!(message.contains("recv_id=1"), "{message}");
+        assert!(message.contains("hmac(sha256)"), "{message}");
         assert_eq!(
             installed.into_inner(),
             vec![IpAddr::from(Ipv4Addr::new(192, 0, 2, 1))]

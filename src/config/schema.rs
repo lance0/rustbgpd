@@ -431,12 +431,12 @@ pub struct TcpAoConfig {
     pub recv_id: u8,
     /// Linux TCP-AO MAC/KDF algorithm name, e.g. `"hmac(sha256)"`.
     pub algorithm: String,
-    /// Mark this key as the preferred current send key in the future runtime
-    /// wiring. Reserved until TCP-AO socket installation lands.
+    /// Mark this key as the preferred current send key for startup socket
+    /// installation. Runtime key rotation remains deferred.
     #[serde(default)]
     pub preferred: bool,
-    /// Mark this key as deprecated for future rollover behavior. Reserved
-    /// until TCP-AO socket installation lands.
+    /// Mark this key as deprecated for future rollover behavior. Startup socket
+    /// installation carries the flag through; runtime rollover remains deferred.
     #[serde(default)]
     pub deprecated: bool,
 }

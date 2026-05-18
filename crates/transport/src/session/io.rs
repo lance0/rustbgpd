@@ -444,12 +444,38 @@ async fn create_and_connect(
     }
 
     if let Some(ref tcp_ao) = config.tcp_ao {
+        // Active-open sockets install one exact peer MKT as current/rnext; the
+        // Linux connect path rejects TCP-AO sockets without a matching MKT,
+        // signs the initial SYN with the selected current key, and
+        // tcp_inbound_hash() rejects unsigned replies from matching peers.
         crate::socket_opts::set_tcp_ao_config(
             &socket,
             config.remote_addr.ip(),
             tcp_ao,
             crate::socket_opts::TcpAoSocketRole::ActiveOpen,
-        )?;
+        )
+        .map_err(|err| {
+            warn!(
+                peer = %peer_label,
+                addr = %config.remote_addr,
+                send_id = tcp_ao.send_id,
+                recv_id = tcp_ao.recv_id,
+                algorithm = tcp_ao.algorithm.linux_name(),
+                error = %err,
+                "failed to configure TCP-AO authentication before active connect; protected session will retry without unauthenticated fallback"
+            );
+            std::io::Error::new(
+                err.kind(),
+                format!(
+                    "failed to install TCP-AO key for peer {peer_label} at {} \
+                     (send_id={}, recv_id={}, algorithm={}): {err}",
+                    config.remote_addr,
+                    tcp_ao.send_id,
+                    tcp_ao.recv_id,
+                    tcp_ao.algorithm.linux_name()
+                ),
+            )
+        })?;
         debug!(peer = %peer_label, "TCP-AO authentication configured");
     }
 
