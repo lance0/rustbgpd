@@ -30,3 +30,7 @@ clab-*/
 
 # Soak harness output (one directory per run; machine-specific timeseries)
 tests/soak/runs/
+
+# M44 mTLS PKI fixture — regenerated per CI run by gen-m44-certs.sh so
+# certificate validity windows never expire in the repo.
+tests/interop/configs/m44-certs/

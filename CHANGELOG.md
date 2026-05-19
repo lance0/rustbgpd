@@ -56,6 +56,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **M44 — gRPC tier-authorization interop smoke.** New hosted-CI interop test
+  (`tests/interop/m44-grpc-tier-authz.clab.yml`) proves the ADR-0064
+  `enforcement = "tier"` default enforces over the wire, not just in config
+  validation. `tests/interop/scripts/gen-m44-certs.sh` builds an mTLS PKI with
+  four client certs whose `rustbgpd://` URI SANs map to `observer` /
+  `automation` / `operator` roles plus one unmapped principal; the driver
+  asserts per-tier allow/deny via `grpcurl` (observer can read but not mutate,
+  automation can mutate but not run operator-only RPCs, operator can, unmapped
+  is denied everything) and confirms `bgp_grpc_authz_decisions_total` records
+  the `role_tier_denied` / `principal_unmapped` labels. Runs in
+  `.github/workflows/interop.yml` — no kernel features required.
+
 - **ADR-0064 machine-readable method-tier inventory.**
   `docs/grpc-method-inventory.json` now exports the checked 66-RPC gRPC
   authorization matrix for auditors and generated clients. The API `authz`
