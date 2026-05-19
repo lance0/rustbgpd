@@ -111,6 +111,9 @@ fn write_config(dir: &Path) -> PathBuf {
     let config_path = dir.join("rustbgpd.toml");
     let config = format!(
         r#"
+[security.grpc]
+enforcement = "legacy"
+
 [global]
 asn = 65001
 router_id = "10.0.0.1"

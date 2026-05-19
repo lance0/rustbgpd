@@ -24,3 +24,6 @@ remote_asn = 65001
 description = "rr-client2"
 hold_time = 90
 route_reflector_client = true
+
+[security.grpc]
+enforcement = "legacy"

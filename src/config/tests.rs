@@ -9,6 +9,35 @@ use rustbgpd_wire::{Afi, Safi};
 use tempfile::NamedTempFile;
 
 fn valid_toml() -> &'static str {
+    // Shared test fixture used by hundreds of config tests below.
+    // Opts into `enforcement = "legacy"` explicitly so the fixture
+    // exercises pre-v0.24.0 gRPC authorization behavior; tier-mode
+    // semantics are covered by dedicated tests via `valid_toml_no_grpc_security`.
+    r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "peer-1"
+hold_time = 90
+"#
+}
+
+fn valid_toml_no_grpc_security() -> &'static str {
+    // Variant of `valid_toml()` without a `[security.grpc]` block so
+    // gRPC security tests can append their own enforcement / roles
+    // sections without colliding with a duplicate-key TOML error.
     r#"
 [global]
 asn = 65001
@@ -27,8 +56,33 @@ hold_time = 90
 "#
 }
 
-fn parse(toml_str: &str) -> Result<Config, ConfigError> {
+/// Test entry that exercises the production parse + validate path
+/// without injecting any test-only defaults. gRPC security tests use
+/// this so they see the v0.24.0 production-default `enforcement =
+/// "tier"` behavior, including the validation failures an unstaged
+/// operator config would hit.
+fn parse_strict(toml_str: &str) -> Result<Config, ConfigError> {
     let config: Config = toml::from_str(toml_str).map_err(ConfigError::Parse)?;
+    config.validate()?;
+    Ok(config)
+}
+
+/// Test entry used by most config tests. Auto-injects
+/// `[security.grpc] enforcement = "legacy"` when the input lacks a
+/// `[security.grpc]` block, so tests that do not exercise the gRPC
+/// authorization surface keep working after the v0.24.0 default flip
+/// without hundreds of one-line opt-in edits. Dedicated
+/// `grpc_security_*` tests use `parse_strict()` so they see the
+/// production behavior unchanged.
+fn parse(toml_str: &str) -> Result<Config, ConfigError> {
+    let augmented;
+    let to_parse = if toml_str.contains("[security.grpc]") {
+        toml_str
+    } else {
+        augmented = format!("[security.grpc]\nenforcement = \"legacy\"\n{toml_str}");
+        augmented.as_str()
+    };
+    let config: Config = toml::from_str(to_parse).map_err(ConfigError::Parse)?;
     config.validate()?;
     Ok(config)
 }
@@ -422,10 +476,15 @@ fn grpc_listener_max_tier_can_be_stricter_than_access_mode() {
 }
 
 #[test]
-fn grpc_security_roles_parse_with_legacy_default() {
+fn grpc_security_roles_parse_with_explicit_legacy_enforcement() {
+    // After the v0.24.0 default flip, operators who want the prior
+    // pre-enforcement posture must set `enforcement = "legacy"`
+    // explicitly. This test pins that the explicit opt-out still
+    // parses cleanly alongside a populated roles map (operators
+    // staging roles ahead of flipping enforcement to "tier").
     let toml_str = format!(
-        "{}\n[security.grpc.roles]\n\"observer-readonly\" = \"observer\"\n\"automation.example\" = \"automation\"\n\"operator.example\" = \"operator\"\n",
-        valid_toml()
+        "{}\n[security.grpc]\nenforcement = \"legacy\"\n\n[security.grpc.roles]\n\"observer-readonly\" = \"observer\"\n\"automation.example\" = \"automation\"\n\"operator.example\" = \"operator\"\n",
+        valid_toml_no_grpc_security()
     );
     let config = parse(&toml_str).unwrap();
     assert_eq!(
@@ -447,10 +506,91 @@ fn grpc_security_roles_parse_with_legacy_default() {
 }
 
 #[test]
+fn grpc_security_default_is_tier_since_v0_24() {
+    // Pinned by the v0.24.0 ADR-0064 slice 4b default flip. If this
+    // regresses to Legacy without a deliberate schema change, the
+    // production security posture has silently rolled back. Builds
+    // a minimal tier-ready config (no [security.grpc] block — relies
+    // entirely on the default — plus one role + grpc_uds with
+    // matching principal) so validation passes.
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_uds]
+path = "/tmp/rustbgpd-default-tier-test.sock"
+principal = "local-operator"
+
+[security.grpc.roles]
+"local-operator" = "operator"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "peer-1"
+hold_time = 90
+"#;
+    // parse_strict bypasses the test-only legacy auto-inject so we
+    // observe the actual schema default that production sees.
+    let config = parse_strict(toml_str).unwrap();
+    assert_eq!(
+        config.security.grpc.enforcement,
+        GrpcEnforcementConfig::Tier,
+        "GrpcEnforcementConfig default flipped to Tier in v0.24.0; \
+         regression would silently restore pre-enforcement behavior"
+    );
+}
+
+#[test]
+fn grpc_security_empty_config_fails_tier_validation_with_legacy_hint() {
+    // After the v0.24.0 default flip, an operator who upgrades
+    // without staging [security.grpc.roles] should see a clean
+    // validation failure whose error message points at the
+    // migration checklist AND the legacy escape hatch. Uses a TOML
+    // without any [security.grpc] block to exercise the bare-upgrade
+    // path.
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "peer-1"
+hold_time = 90
+"#;
+    // parse_strict bypasses the test-only legacy auto-inject so this
+    // test sees the v0.24.0 production-default tier validation path.
+    let result = parse_strict(toml_str);
+    let err = result.expect_err("default-tier mode with no roles must fail validation");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("v0.24.0 default"),
+        "validation error should call out the v0.24.0 default flip: {msg}"
+    );
+    assert!(
+        msg.contains("enforcement = \\\"legacy\\\"") || msg.contains("enforcement = \"legacy\""),
+        "validation error should mention the legacy escape hatch: {msg}"
+    );
+}
+
+#[test]
 fn grpc_security_tier_enforcement_parses_with_explicit_uds_principal() {
     let toml_str = format!(
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"local-admin\" = \"operator\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nprincipal = \"local-admin\"\n",
-        valid_toml()
+        valid_toml_no_grpc_security()
     );
     let config = parse(&toml_str).unwrap();
     assert_eq!(
@@ -499,7 +639,7 @@ fn grpc_security_reserved_unresolved_mtls_role_rejected() {
 fn grpc_security_tier_requires_roles() {
     let toml_str = format!(
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nprincipal = \"local-admin\"\n",
-        valid_toml()
+        valid_toml_no_grpc_security()
     );
     let err = parse(&toml_str).unwrap_err();
     let ConfigError::InvalidGrpcConfig { reason } = err else {
@@ -515,7 +655,7 @@ fn grpc_security_tier_requires_roles() {
 fn grpc_security_tier_rejects_implicit_uds_without_principal() {
     let toml_str = format!(
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"local-admin\" = \"operator\"\n",
-        valid_toml()
+        valid_toml_no_grpc_security()
     );
     let err = parse(&toml_str).unwrap_err();
     let ConfigError::InvalidGrpcConfig { reason } = err else {
@@ -531,7 +671,7 @@ fn grpc_security_tier_rejects_implicit_uds_without_principal() {
 fn grpc_security_tier_rejects_uds_without_principal() {
     let toml_str = format!(
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"local-admin\" = \"operator\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\n",
-        valid_toml()
+        valid_toml_no_grpc_security()
     );
     let err = parse(&toml_str).unwrap_err();
     let ConfigError::InvalidGrpcConfig { reason } = err else {
@@ -549,7 +689,7 @@ fn grpc_security_tier_rejects_bearer_tcp_without_principal() {
     fs::write(token_file.path(), "secret").unwrap();
     let toml_str = format!(
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"automation.example\" = \"automation\"\n\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntoken_file = {:?}\n",
-        valid_toml(),
+        valid_toml_no_grpc_security(),
         token_file.path()
     );
     let err = parse(&toml_str).unwrap_err();
@@ -568,7 +708,7 @@ fn grpc_security_tier_rejects_non_mtls_principal_absent_from_roles() {
     fs::write(token_file.path(), "secret").unwrap();
     let toml_str = format!(
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"other.example\" = \"automation\"\n\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntoken_file = {:?}\nprincipal = \"automation.example\"\n",
-        valid_toml(),
+        valid_toml_no_grpc_security(),
         token_file.path()
     );
     let err = parse(&toml_str).unwrap_err();
@@ -585,7 +725,7 @@ fn grpc_security_tier_rejects_non_mtls_principal_absent_from_roles() {
 fn grpc_security_tier_rejects_unauthenticated_tcp() {
     let toml_str = format!(
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"automation.example\" = \"automation\"\n\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\n",
-        valid_toml()
+        valid_toml_no_grpc_security()
     );
     let err = parse(&toml_str).unwrap_err();
     let ConfigError::InvalidGrpcConfig { reason } = err else {
@@ -604,7 +744,7 @@ fn grpc_security_tier_accepts_native_mtls_without_configured_principal() {
     let ca = write_pem(STUB_CERT);
     let toml_str = format!(
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"rustbgpd://operator/alice\" = \"operator\"\n\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntls_cert_file = {:?}\ntls_key_file = {:?}\ntls_client_ca_file = {:?}\n",
-        valid_toml(),
+        valid_toml_no_grpc_security(),
         cert.path(),
         key.path(),
         ca.path()
@@ -667,7 +807,7 @@ fn grpc_security_tier_accepts_bearer_tcp_with_principal_role() {
     fs::write(token_file.path(), "secret").unwrap();
     let toml_str = format!(
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"automation.example\" = \"automation\"\n\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntoken_file = {:?}\nprincipal = \"automation.example\"\nmax_tier = \"mutating\"\n",
-        valid_toml(),
+        valid_toml_no_grpc_security(),
         token_file.path()
     );
     let config = parse(&toml_str).unwrap();

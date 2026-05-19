@@ -929,8 +929,11 @@ fn validate_grpc_tier_enforcement(config: &Config) -> Result<(), ConfigError> {
     }
     if config.security.grpc.roles.is_empty() {
         return Err(ConfigError::InvalidGrpcConfig {
-            reason: "security.grpc.enforcement = \"tier\" requires at least one \
-                     [security.grpc.roles] entry"
+            reason: "security.grpc.enforcement = \"tier\" (the v0.24.0 \
+                     default) requires at least one [security.grpc.roles] \
+                     entry — see docs/CONFIGURATION.md for the migration \
+                     checklist, or opt back into legacy with \
+                     `[security.grpc] enforcement = \"legacy\"`"
                 .to_string(),
         });
     }
@@ -940,9 +943,13 @@ fn validate_grpc_tier_enforcement(config: &Config) -> Result<(), ConfigError> {
     let uds = telemetry.grpc_uds.as_ref().filter(|cfg| cfg.enabled);
     if tcp.is_none() && uds.is_none() {
         return Err(ConfigError::InvalidGrpcConfig {
-            reason: "security.grpc.enforcement = \"tier\" requires an explicit \
-                     gRPC listener with mTLS or a configured principal; the \
-                     implicit UDS listener has no role identity"
+            reason: "security.grpc.enforcement = \"tier\" (the v0.24.0 \
+                     default) requires an explicit gRPC listener with mTLS \
+                     or a configured principal; the implicit UDS listener \
+                     has no role identity. Configure \
+                     [global.telemetry.grpc_uds] with `principal`, or opt \
+                     back into legacy with `[security.grpc] enforcement = \
+                     \"legacy\"`"
                 .to_string(),
         });
     }

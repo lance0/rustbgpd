@@ -204,7 +204,7 @@ Later runtime-enforcement slices add `[security.grpc]` with an
 
 ```toml
 [security.grpc]
-enforcement = "legacy"  # default until the enforcement-flip slice
+enforcement = "tier"  # default since v0.24.0 (slice 4b default flip)
 ```
 
 - `legacy` — preserves role authorization behavior. Listener
@@ -401,7 +401,7 @@ optional proto credential markers.
 | 1. Foundation | Implemented by the checked method-matrix PR + machine-readable JSON export |
 | 2. Audit-only runtime path | Implemented by the runtime audit-layer PR |
 | 3. Identity + roles | Partial: roles config + bearer/UDS principals + mTLS audit principal extraction |
-| 4. Listener tier cap | Partial: `max_tier` listener cap enforced; role/default flip deferred |
-| 5. Enforcement + default flip | Partial: opt-in `tier` role enforcement implemented; migration guidance landed; default flip deferred |
+| 4. Listener tier cap | Done: `max_tier` listener cap enforced |
+| 5. Enforcement + default flip | Done in v0.24.0: opt-in `tier` role enforcement (slice 4a) + migration prep + default flip from `legacy` to `tier` (slice 4b, closes #164) |
 | 6. Audit log hardening | Partial: result-aware records + explicit credential masking table + operations guidance for audit retention and resource guardrails |
 | 7. External-review prep | Not started |

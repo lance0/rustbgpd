@@ -14,3 +14,6 @@ address = "10.0.0.2"
 remote_asn = 65099
 description = "frr-badopen"
 hold_time = 90
+
+[security.grpc]
+enforcement = "legacy"

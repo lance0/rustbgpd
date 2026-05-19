@@ -11,6 +11,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **BREAKING — `[security.grpc].enforcement` now defaults to `"tier"`.** The
+  ADR-0064 slice 4b default flip lands the v1.0 security gate: gRPC requests
+  are now authorized by per-principal role ceilings out of the box, in
+  addition to the listener `max_tier` cap that already shipped in v0.23.0.
+  Existing deployments that have not staged a `[security.grpc.roles]` block
+  will fail validation at startup with a message pointing at the migration
+  checklist in `docs/CONFIGURATION.md` AND the legacy escape hatch
+  (`[security.grpc] enforcement = "legacy"`). The migration checklist has
+  shipped since v0.24-prep so operators have had the upgrade path documented
+  with concrete `--check` validation steps. The opt-out remains supported
+  indefinitely — `enforcement = "legacy"` continues to honor explicit
+  configuration. Closes #164. Slice 4a opt-in enforcement, slice 4b
+  migration prep, and the operations runbook for `grpc_authz` audit
+  collection all shipped earlier in this release cycle and are
+  prerequisites for the flip.
+
 - **`rustbgpd:dev` container build ~7.6× faster on per-commit source changes.**
   Added `[profile.ci]` (release-shaped without fat-LTO / single-codegen-unit)
   for the interop / dev / CI container image; release-tagged binaries still

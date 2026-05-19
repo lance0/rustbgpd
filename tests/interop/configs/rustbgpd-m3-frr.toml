@@ -21,3 +21,6 @@ address = "10.0.1.2"
 remote_asn = 65003
 description = "frr-b"
 hold_time = 90
+
+[security.grpc]
+enforcement = "legacy"

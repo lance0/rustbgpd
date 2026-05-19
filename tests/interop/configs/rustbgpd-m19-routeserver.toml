@@ -25,3 +25,6 @@ remote_asn = 65003
 description = "frr-b"
 hold_time = 90
 route_server_client = true
+
+[security.grpc]
+enforcement = "legacy"

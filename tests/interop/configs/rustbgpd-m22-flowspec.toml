@@ -16,3 +16,6 @@ remote_asn = 65002
 description = "frr-m22-flowspec"
 hold_time = 90
 families = ["ipv4_unicast", "ipv4_flowspec"]
+
+[security.grpc]
+enforcement = "legacy"

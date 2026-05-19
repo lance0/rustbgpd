@@ -29,3 +29,6 @@ remote_asn = 65000
 description = "consumer-frr"
 hold_time = 30
 families = ["l2vpn_evpn"]
+
+[security.grpc]
+enforcement = "legacy"

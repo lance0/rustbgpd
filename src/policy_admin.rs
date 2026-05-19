@@ -605,6 +605,10 @@ mod tests {
     use super::*;
 
     fn minimal_config() -> Config {
+        // Bypasses `Config::load_*_with_diagnostics` so the
+        // test-only legacy-grpc auto-inject doesn't fire; declare
+        // the legacy posture explicitly so post-mutation
+        // validation in `apply_config_event` accepts the config.
         let toml = r#"
 [global]
 asn = 65001
@@ -614,6 +618,9 @@ listen_port = 179
 [global.telemetry]
 prometheus_addr = "127.0.0.1:9179"
 log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
 
 [[neighbors]]
 address = "10.0.0.2"

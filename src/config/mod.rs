@@ -55,7 +55,8 @@ impl Config {
     /// content instead of a filesystem path. The returned config does
     /// not expose a `file_path`.
     pub fn load_toml_with_diagnostics(content: &str, source_name: &str) -> Result<Self, String> {
-        Self::load_from_toml_source(content, source_name)
+        let content = test_only_inject_legacy_grpc_security(content);
+        Self::load_from_toml_source(content.as_ref(), source_name)
     }
 
     /// Load config and, on failure, render a diagnostic with source context.
@@ -68,7 +69,8 @@ impl Config {
             Ok(c) => c,
             Err(e) => return Err(format!("error: failed to read {path}: {e}")),
         };
-        let mut config = Self::load_from_toml_source(&content, path)?;
+        let content = test_only_inject_legacy_grpc_security(&content);
+        let mut config = Self::load_from_toml_source(content.as_ref(), path)?;
         config.file_path = Some(PathBuf::from(path));
         Ok(config)
     }
@@ -957,6 +959,42 @@ const fn access_mode_compatibility_max_tier(access_mode: GrpcAccessMode) -> Grpc
         GrpcAccessMode::ReadOnly => GrpcMaxTier::SensitiveRead,
         GrpcAccessMode::ReadWrite => GrpcMaxTier::OperatorOnly,
     }
+}
+
+/// Test-only auto-inject for the v0.24.0 `enforcement = "tier"`
+/// default flip. When compiled with `#[cfg(test)]` and the supplied
+/// TOML contains no `[security.grpc]` block, prepends an explicit
+/// `enforcement = "legacy"` so existing test fixtures continue to
+/// exercise pre-flip behavior without per-test churn. Production
+/// builds compile this as an identity passthrough — operators see
+/// the real default flip without any test-only divergence.
+#[cfg(test)]
+fn test_only_inject_legacy_grpc_security(content: &str) -> std::borrow::Cow<'_, str> {
+    // The substring check is intentionally exact: `[security.grpc]`
+    // as a TOML table header. The `[security.grpc.roles]` sub-table
+    // also matches, but that's fine — an operator providing roles
+    // without explicit enforcement gets the production default
+    // (Tier), same as production.
+    if content.contains("[security.grpc]\n")
+        || content.contains("[security.grpc] ")
+        || content.contains("[security.grpc]\r\n")
+    {
+        std::borrow::Cow::Borrowed(content)
+    } else {
+        // Append the injected table to the END of the content. A
+        // prepend would cause any subsequent bare-key (top-level)
+        // declarations in the test TOML to be parsed under the
+        // injected `[security.grpc]` table, producing
+        // "unknown field" errors.
+        std::borrow::Cow::Owned(format!(
+            "{content}\n[security.grpc]\nenforcement = \"legacy\"\n"
+        ))
+    }
+}
+
+#[cfg(not(test))]
+fn test_only_inject_legacy_grpc_security(content: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Borrowed(content)
 }
 
 fn effective_grpc_max_tier(
