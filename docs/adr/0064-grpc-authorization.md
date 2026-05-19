@@ -384,8 +384,10 @@ certificate principal extraction (`rustbgpd:` URI SAN, then email SAN, then
 Subject CN). Slice 5a adds opt-in per-principal role enforcement while leaving
 `legacy` as the default. Slice 6a adds result-aware audit records and
 credential-masked request summaries for `DiffRuntimeConfig` and `SetPeerGroup`.
-Later slices implement the default enforcement flip, durable audit-sink
-guidance, and optional proto credential markers.
+Slice 5b adds migration guidance and config-test coverage for staged tier-mode
+UDS / bearer-token deployments without flipping the default. Later slices
+implement the default enforcement flip, durable audit-sink guidance, and
+optional proto credential markers.
 
 | Slice | Status |
 |-------|--------|
@@ -393,6 +395,6 @@ guidance, and optional proto credential markers.
 | 2. Audit-only runtime path | Implemented by the runtime audit-layer PR |
 | 3. Identity + roles | Partial: roles config + bearer/UDS principals + mTLS audit principal extraction |
 | 4. Listener tier cap | Partial: `max_tier` listener cap enforced; role/default flip deferred |
-| 5. Enforcement + default flip | Partial: opt-in `tier` role enforcement implemented; default flip deferred |
+| 5. Enforcement + default flip | Partial: opt-in `tier` role enforcement implemented; migration guidance landed; default flip deferred |
 | 6. Audit log hardening | Partial: result-aware records + explicit credential masking table |
 | 7. External-review prep | Not started |

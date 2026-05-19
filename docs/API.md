@@ -108,6 +108,14 @@ CN. A validated cert without those fields falls back to `mtls-unresolved` while
 legacy mode remains active. Extracted principal values must fit the bounded
 audit label form and must not contain embedded control characters; unsupported
 values also fall back to `mtls-unresolved`.
+
+Before the future default flip to tier enforcement, operators should stage
+`[security.grpc.roles]` plus explicit listener principals while still running
+`enforcement = "legacy"`, validate the candidate config with `rustbgpd --check`,
+then opt into `enforcement = "tier"`. The implicit default UDS listener is safe
+for local access under legacy mode, but tier mode requires an explicit
+`[global.telemetry.grpc_uds]` block with `principal` so requests can be mapped
+to a role.
 `docs/adr/0064-threat-model.md` is the external-review packet for this surface:
 it maps trust boundaries, abuse paths, residual risks, and the evidence an
 auditor should collect.
