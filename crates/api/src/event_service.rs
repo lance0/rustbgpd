@@ -14,13 +14,14 @@ mod convert;
 mod dataplane;
 mod filters;
 
-use convert::{policy_event_to_bgp_event, session_event_to_bgp_event};
+use convert::{evpn_event_to_bgp_event, policy_event_to_bgp_event, session_event_to_bgp_event};
 pub(crate) use convert::{route_event_to_bgp_event, stream_lag_bgp_event};
 use dataplane::spawn_dataplane_poller;
 #[cfg(test)]
 use dataplane::{DataplaneSummary, dataplane_summaries};
 use filters::{
-    parse_list_policy_events_filter, parse_list_session_events_filter, parse_watch_events_filter,
+    parse_list_evpn_events_filter, parse_list_policy_events_filter,
+    parse_list_session_events_filter, parse_watch_events_filter,
 };
 
 use crate::peer_types::{PeerManagerCommand, SessionEvent};
@@ -381,12 +382,77 @@ impl proto::event_service_server::EventService for EventService {
                 Box::pin(tokio_stream::empty())
             };
 
+        let evpn_stream: Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send>> =
+            if filter.wants_evpn_events() {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                self.rib_tx
+                    .send(RibUpdate::SubscribeEvpnRouteEvents { reply: reply_tx })
+                    .await
+                    .map_err(|_| Status::internal("RIB manager unavailable"))?;
+                let broadcast_rx = reply_rx
+                    .await
+                    .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+                let evpn_filter = filter.clone();
+                let evpn_metrics = self.metrics.clone();
+                let evpn_subscriber_guard =
+                    evpn_metrics.event_stream_subscriber_guard("watch_events", "evpn");
+                Box::pin(BroadcastStream::new(broadcast_rx).filter_map(
+                    move |result| match result {
+                        Err(BroadcastStreamRecvError::Lagged(missed)) => {
+                            let _subscriber_guard = &evpn_subscriber_guard;
+                            evpn_metrics.record_event_stream_lagged("watch_events", "evpn", missed);
+                            debug!(
+                                missed,
+                                "WatchEvents EVPN subscriber lagged, emitting missed-event signal"
+                            );
+                            Some(Ok(stream_lag_bgp_event(proto::EventCategory::Evpn, missed)))
+                        }
+                        Ok(event) => {
+                            let _subscriber_guard = &evpn_subscriber_guard;
+                            if evpn_filter.matches_evpn_event(&event) {
+                                Some(Ok(evpn_event_to_bgp_event(event)))
+                            } else {
+                                None
+                            }
+                        }
+                    },
+                ))
+            } else {
+                Box::pin(tokio_stream::empty())
+            };
+
         Ok(Response::new(Box::pin(
             route_stream
                 .merge(session_stream)
                 .merge(policy_stream)
-                .merge(dataplane_stream),
+                .merge(dataplane_stream)
+                .merge(evpn_stream),
         )))
+    }
+
+    async fn list_evpn_events(
+        &self,
+        request: Request<proto::ListEvpnEventsRequest>,
+    ) -> Result<Response<proto::ListEvpnEventsResponse>, Status> {
+        let filter = parse_list_evpn_events_filter(&request.into_inner())?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::QueryEvpnRouteEventHistory {
+                peer: filter.peer,
+                route_type: filter.route_type,
+                rd: filter.rd,
+                event_types: filter.event_types,
+                limit: filter.limit,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+        let events = reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+        Ok(Response::new(proto::ListEvpnEventsResponse {
+            events: events.into_iter().map(evpn_event_to_bgp_event).collect(),
+        }))
     }
 
     async fn list_session_events(
@@ -449,7 +515,11 @@ mod tests {
     use crate::proto::event_service_server::EventService as EventServiceTrait;
     use prometheus::Encoder;
     use rustbgpd_fsm::SessionState;
-    use rustbgpd_rib::RouteEvent;
+    use rustbgpd_rib::{EvpnRouteEvent, RouteEvent};
+    use rustbgpd_wire::{
+        EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel,
+        Origin, PathAttribute, RouteDistinguisher,
+    };
     use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::sync::{Arc, Mutex};
@@ -476,18 +546,153 @@ mod tests {
         }
     }
 
+    fn evpn_route(peer: IpAddr, mac_byte: u8) -> rustbgpd_rib::route::EvpnRibRoute {
+        let route = EvpnRoute::MacIp(EvpnMacIp {
+            rd: RouteDistinguisher::new([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+            esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: EthernetTagId(0),
+            mac: MacAddress::new([mac_byte; 6]),
+            ip: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, mac_byte))),
+            label1: MplsLabel::new(100),
+            label2: None,
+        });
+        rustbgpd_rib::route::EvpnRibRoute {
+            route,
+            next_hop: peer,
+            link_local_next_hop: None,
+            peer,
+            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            received_at: std::time::Instant::now(),
+            origin_type: rustbgpd_rib::route::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, mac_byte),
+            is_stale: false,
+            is_llgr_stale: false,
+        }
+    }
+
+    fn evpn_event(
+        event_type: RouteEventType,
+        peer: Option<IpAddr>,
+        previous_peer: Option<IpAddr>,
+    ) -> EvpnRouteEvent {
+        let route = peer.map(|peer| evpn_route(peer, 1));
+        let previous_best = previous_peer.map(|peer| evpn_route(peer, 2));
+        let key = route
+            .as_ref()
+            .or(previous_best.as_ref())
+            .expect("test event needs a route")
+            .key();
+        EvpnRouteEvent {
+            event_type,
+            key,
+            best: route,
+            previous_best,
+            peer,
+            previous_peer,
+            timestamp: "123".to_string(),
+        }
+    }
+
     fn spawn_fake_rib() -> (mpsc::Sender<RibUpdate>, broadcast::Sender<RouteEvent>) {
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
         let (events_tx, _) = broadcast::channel(16);
+        let (evpn_events_tx, _) = broadcast::channel(16);
         let events_tx_for_task = events_tx.clone();
+        let evpn_events_tx_for_task = evpn_events_tx.clone();
         tokio::spawn(async move {
             while let Some(update) = rib_rx.recv().await {
-                if let RibUpdate::SubscribeRouteEvents { reply } = update {
-                    let _ = reply.send(events_tx_for_task.subscribe());
+                match update {
+                    RibUpdate::SubscribeRouteEvents { reply } => {
+                        let _ = reply.send(events_tx_for_task.subscribe());
+                    }
+                    RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                        let _ = reply.send(evpn_events_tx_for_task.subscribe());
+                    }
+                    RibUpdate::QueryEvpnRouteEventHistory { reply, .. } => {
+                        let _ = reply.send(Vec::new());
+                    }
+                    _ => {}
                 }
             }
         });
         (rib_tx, events_tx)
+    }
+
+    fn spawn_fake_rib_with_evpn_history(history: Vec<EvpnRouteEvent>) -> mpsc::Sender<RibUpdate> {
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let (events_tx, _) = broadcast::channel(16);
+        let history = Arc::new(history);
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                match update {
+                    RibUpdate::SubscribeRouteEvents { reply } => {
+                        let _ = reply.send(events_tx.subscribe());
+                    }
+                    RibUpdate::QueryEvpnRouteEventHistory {
+                        peer,
+                        route_type,
+                        rd,
+                        event_types,
+                        limit,
+                        reply,
+                    } => {
+                        let limit = if limit == 0 { 4096 } else { limit.min(4096) };
+                        let mut events: Vec<_> = history
+                            .iter()
+                            .rev()
+                            .filter(|event| {
+                                route_type
+                                    .is_none_or(|route_type| event.key.route_type() == route_type)
+                            })
+                            .filter(|event| {
+                                rd.is_none_or(|rd| {
+                                    rustbgpd_rib::event::evpn_key_rd(&event.key) == rd
+                                })
+                            })
+                            .filter(|event| {
+                                event_types.is_empty() || event_types.contains(&event.event_type)
+                            })
+                            .filter(|event| match peer {
+                                Some(peer) => {
+                                    event.peer == Some(peer) || event.previous_peer == Some(peer)
+                                }
+                                None => true,
+                            })
+                            .take(limit)
+                            .cloned()
+                            .collect();
+                        events.reverse();
+                        let _ = reply.send(events);
+                    }
+                    _ => {}
+                }
+            }
+        });
+        rib_tx
+    }
+
+    fn spawn_fake_evpn_rib() -> (mpsc::Sender<RibUpdate>, broadcast::Sender<EvpnRouteEvent>) {
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let (route_events_tx, _) = broadcast::channel(16);
+        let (evpn_events_tx, _) = broadcast::channel(16);
+        let evpn_events_tx_for_task = evpn_events_tx.clone();
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                match update {
+                    RibUpdate::SubscribeRouteEvents { reply } => {
+                        let _ = reply.send(route_events_tx.subscribe());
+                    }
+                    RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                        let _ = reply.send(evpn_events_tx_for_task.subscribe());
+                    }
+                    RibUpdate::QueryEvpnRouteEventHistory { reply, .. } => {
+                        let _ = reply.send(Vec::new());
+                    }
+                    _ => {}
+                }
+            }
+        });
+        (rib_tx, evpn_events_tx)
     }
 
     fn spawn_fake_peer_manager() -> (
@@ -785,6 +990,35 @@ mod tests {
         assert_eq!(route.path_id, 42);
     }
 
+    #[test]
+    fn evpn_bgp_event_contract_uses_l2vpn_payload() {
+        let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let bgp_event = evpn_event_to_bgp_event(evpn_event(
+            RouteEventType::BestChanged,
+            Some(peer2),
+            Some(peer1),
+        ));
+
+        assert_eq!(bgp_event.timestamp, "123");
+        assert_eq!(bgp_event.category, proto::EventCategory::Evpn as i32);
+        assert_eq!(
+            bgp_event.event_type,
+            proto::BgpEventType::EvpnRouteBestChanged as i32
+        );
+        assert_eq!(bgp_event.peer_address, peer2.to_string());
+        assert_eq!(bgp_event.previous_peer_address, peer1.to_string());
+        assert_eq!(bgp_event.afi_safi, proto::AddressFamily::L2vpnEvpn as i32);
+        assert!(bgp_event.summary.contains("EVPN route best changed"));
+        let Some(proto::bgp_event::Payload::Evpn(evpn)) = bgp_event.payload else {
+            panic!("expected EVPN payload");
+        };
+        assert_eq!(evpn.route_type, 2);
+        assert_eq!(evpn.rd, "65000:100");
+        assert!(evpn.route.is_some());
+        assert!(evpn.previous_route.is_some());
+    }
+
     #[tokio::test]
     async fn dataplane_category_filter_does_not_subscribe_route_or_session_events() {
         let (rib_tx, route_events_tx) = spawn_fake_rib();
@@ -802,6 +1036,38 @@ mod tests {
         assert_eq!(route_events_tx.receiver_count(), 0);
         assert_eq!(session_events_tx.receiver_count(), 0);
         drop(response);
+    }
+
+    #[tokio::test]
+    async fn evpn_event_bridge_emits_bgp_event() {
+        let (rib_tx, evpn_events_tx) = spawn_fake_evpn_rib();
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Evpn as i32],
+                event_types: vec![proto::BgpEventType::EvpnRouteAdded as i32],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        evpn_events_tx
+            .send(evpn_event(
+                RouteEventType::Added,
+                Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+                None,
+            ))
+            .unwrap();
+
+        let event = stream.next().await.unwrap().unwrap();
+        assert_eq!(event.category, proto::EventCategory::Evpn as i32);
+        assert_eq!(event.event_type, proto::BgpEventType::EvpnRouteAdded as i32);
+        assert!(matches!(
+            event.payload,
+            Some(proto::bgp_event::Payload::Evpn(_))
+        ));
     }
 
     #[tokio::test]
@@ -1284,6 +1550,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_evpn_events_returns_bgp_event_history() {
+        let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let rib_tx = spawn_fake_rib_with_evpn_history(vec![
+            evpn_event(RouteEventType::Added, Some(peer1), None),
+            evpn_event(RouteEventType::BestChanged, Some(peer2), Some(peer1)),
+        ]);
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+
+        let response = service
+            .list_evpn_events(Request::new(proto::ListEvpnEventsRequest {
+                neighbor_address: peer1.to_string(),
+                event_types: vec![proto::BgpEventType::EvpnRouteBestChanged as i32],
+                route_type_filter: 2,
+                rd_filter: "65000:100".to_string(),
+                limit: 10,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.events.len(), 1);
+        let event = &response.events[0];
+        assert_eq!(event.category, proto::EventCategory::Evpn as i32);
+        assert_eq!(
+            event.event_type,
+            proto::BgpEventType::EvpnRouteBestChanged as i32
+        );
+        assert_eq!(event.previous_peer_address, peer1.to_string());
+    }
+
+    #[tokio::test]
+    async fn list_evpn_events_rejects_route_event_type_filter() {
+        let rib_tx = spawn_fake_rib_with_evpn_history(Vec::new());
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+
+        let Err(err) = service
+            .list_evpn_events(Request::new(proto::ListEvpnEventsRequest {
+                event_types: vec![proto::BgpEventType::RouteAdded as i32],
+                ..Default::default()
+            }))
+            .await
+        else {
+            panic!("route event type should be rejected for EVPN history");
+        };
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
     async fn prefix_filter_does_not_match_session_events() {
         let (rib_tx, _) = spawn_fake_rib();
         let (peer_tx, session_events_tx, _) = spawn_fake_peer_manager();
@@ -1435,6 +1752,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_watch_does_not_subscribe_evpn_events() {
+        let (rib_tx, evpn_events_tx) = spawn_fake_evpn_rib();
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest::default()))
+            .await
+            .unwrap();
+
+        assert_eq!(evpn_events_tx.receiver_count(), 0);
+        drop(response);
+    }
+
+    #[tokio::test]
+    async fn evpn_event_type_filter_subscribes_without_evpn_category() {
+        let (rib_tx, evpn_events_tx) = spawn_fake_evpn_rib();
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                event_types: vec![proto::BgpEventType::EvpnRouteAdded as i32],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(evpn_events_tx.receiver_count(), 1);
+        drop(response);
+    }
+
+    #[tokio::test]
     async fn rejects_unsupported_category_filter() {
         let (rib_tx, _) = spawn_fake_rib();
         let (peer_tx, _, _) = spawn_fake_peer_manager();
@@ -1564,6 +1912,41 @@ mod tests {
             panic!("expected stream lag payload");
         };
         assert_eq!(lag.source_category, proto::EventCategory::Session as i32);
+        assert!(lag.missed_count > 0);
+    }
+
+    #[tokio::test]
+    async fn evpn_lag_emits_missed_event_signal() {
+        let (rib_tx, evpn_events_tx) = spawn_fake_evpn_rib();
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Evpn as i32],
+                event_types: vec![proto::BgpEventType::EvpnRouteAdded as i32],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        for _ in 0..32 {
+            evpn_events_tx
+                .send(evpn_event(
+                    RouteEventType::Added,
+                    Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+                    None,
+                ))
+                .unwrap();
+        }
+
+        let event = stream.next().await.unwrap().unwrap();
+        assert_eq!(event.category, proto::EventCategory::Evpn as i32);
+        assert_eq!(event.event_type, proto::BgpEventType::StreamLagged as i32);
+        let Some(proto::bgp_event::Payload::StreamLag(lag)) = event.payload else {
+            panic!("expected stream lag payload");
+        };
+        assert_eq!(lag.source_category, proto::EventCategory::Evpn as i32);
         assert!(lag.missed_count > 0);
     }
 

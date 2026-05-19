@@ -585,6 +585,7 @@ service RibService {
 
 service EventService {
   rpc WatchEvents(WatchEventsRequest) returns (stream BgpEvent);
+  rpc ListEvpnEvents(ListEvpnEventsRequest) returns (ListEvpnEventsResponse);
   rpc ListSessionEvents(ListSessionEventsRequest) returns (ListSessionEventsResponse);
   rpc ListPolicyEvents(ListPolicyEventsRequest) returns (ListPolicyEventsResponse);
 }
@@ -892,6 +893,7 @@ enum EventCategory {
   EVENT_CATEGORY_SESSION = 2;
   EVENT_CATEGORY_POLICY = 3;
   EVENT_CATEGORY_DATAPLANE = 4;
+  EVENT_CATEGORY_EVPN = 5;
 }
 
 enum BgpEventType {
@@ -911,6 +913,9 @@ enum BgpEventType {
   BGP_EVENT_TYPE_DATAPLANE_ROUTE_INSTALLED = 31;
   BGP_EVENT_TYPE_DATAPLANE_ROUTE_WITHDRAWN = 32;
   BGP_EVENT_TYPE_DATAPLANE_ROUTE_FAILED = 33;
+  BGP_EVENT_TYPE_EVPN_ROUTE_ADDED = 40;
+  BGP_EVENT_TYPE_EVPN_ROUTE_WITHDRAWN = 41;
+  BGP_EVENT_TYPE_EVPN_ROUTE_BEST_CHANGED = 42;
   // A WatchEvents subscriber fell behind a bounded source stream and
   // missed one or more events. The payload identifies the source
   // category and missed count.
@@ -940,18 +945,42 @@ message WatchEventsRequest {
   // match both current and previous peer, same as WatchRoutes,
   // WatchRouteEvents, and ListRouteEvents. Session events match their
   // peer address. Policy events match only when tied to one peer.
+  // EVPN route events match both current and previous peer, same as route
+  // events. Per-route FIB dataplane events match their source peer.
   // Dataplane summary events are peerless and do not match this filter.
-  // Per-route FIB dataplane events match their source peer.
   string neighbor_address = 3;
   // Optional family filter. Applies to route events and per-route FIB
-  // dataplane events; session, policy, and peerless dataplane summary
+  // dataplane events; session, policy, EVPN, and peerless dataplane summary
   // events do not match a family-filtered request.
   AddressFamily afi_safi = 4;
   // Optional exact prefix filter. Applies to route events and per-route
-  // FIB dataplane events; session, policy, and peerless dataplane summary
-  // events do not match a prefix-filtered request.
+  // FIB dataplane events; session, policy, EVPN, and peerless dataplane
+  // summary events do not match a prefix-filtered request.
   string prefix = 5;
   uint32 prefix_length = 6;
+}
+
+message ListEvpnEventsRequest {
+  // Optional neighbor address filter. Matches both current and previous
+  // best-path peer so peer-scoped queries include withdraws and best-path
+  // moves away from the peer.
+  string neighbor_address = 1;
+  // Empty = all EVPN event types. Current valid values:
+  // BGP_EVENT_TYPE_EVPN_ROUTE_ADDED / WITHDRAWN / BEST_CHANGED.
+  repeated BgpEventType event_types = 2;
+  // Maximum events to return from the bounded 4096-event in-memory EVPN
+  // history. 0 uses the daemon default/full bounded window. Larger values
+  // are clamped to the same 4096-event ceiling. Responses contain the most
+  // recent matching events, ordered oldest-to-newest within that window.
+  uint32 limit = 3;
+  // RFC 7432/9136 EVPN route type filter (1..=5). 0 = no filter.
+  uint32 route_type_filter = 4;
+  // Route Distinguisher filter in display format. Empty = no filter.
+  string rd_filter = 5;
+}
+
+message ListEvpnEventsResponse {
+  repeated BgpEvent events = 1;
 }
 
 message ListSessionEventsRequest {
@@ -1093,6 +1122,27 @@ message DataplaneRouteEvent {
   string reason = 11;
 }
 
+message EvpnRouteEvent {
+  BgpEventType event_type = 1;
+  string peer_address = 2;
+  string previous_peer_address = 3;
+  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
+  string timestamp = 4;
+  // RFC 7432 route type (1..=5).
+  uint32 route_type = 5;
+  // Route Distinguisher in display format.
+  string rd = 6;
+  // Stable operator-facing key summary, derived from the EVPN route key.
+  string route_key = 7;
+  // Current best path. Absent for withdrawals.
+  EvpnRouteEntry route = 8;
+  // Best path immediately before this change. Present for withdrawals and
+  // best-path moves when the RIB retained the prior path.
+  EvpnRouteEntry previous_route = 9;
+  // Stable operator-facing reason/summary string for this event.
+  string reason = 10;
+}
+
 message BgpEvent {
   // Unix epoch seconds, matching existing RouteEvent timestamp shape.
   string timestamp = 1;
@@ -1117,7 +1167,7 @@ message BgpEvent {
     NotificationEvent notification = 14;
     PolicyEvent policy = 15;
     DataplaneEvent dataplane = 16;
-    // Tag 17 is intentionally left available for EVPN route events in #147.
+    EvpnRouteEvent evpn = 17;
     DataplaneRouteEvent dataplane_route = 18;
   }
 }

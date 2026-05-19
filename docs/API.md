@@ -467,6 +467,8 @@ through one RPC shape.
 | Recent session lifecycle | `EventService.ListSessionEvents` / `rustbgpctl events sessions` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
 | Live policy mutation summaries | `EventService.WatchEvents` with `EVENT_CATEGORY_POLICY` | Streaming event feed | Live-only; slow subscribers can lag and miss events |
 | Recent policy mutation summaries | `EventService.ListPolicyEvents` / `rustbgpctl events policy` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
+| Live EVPN route best-path deltas | `EventService.WatchEvents` with `EVENT_CATEGORY_EVPN` | Streaming event feed | Live-only; slow subscribers can lag and miss events |
+| Recent EVPN route timeline | `EventService.ListEvpnEvents` / `rustbgpctl events evpn` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
 | RFC 7999 discard programming | `ListBlackholeDiscards` / `rustbgpctl rib blackholes` | Snapshot | Current reconcile snapshot only |
 | ADR-0061 general Linux FIB programming | `ListFibRoutes` / `rustbgpctl rib fib` | Snapshot | Current reconcile snapshot plus persisted owned-state semantics |
 | ADR-0061 FIB route apply outcomes | `EventService.WatchEvents` with `EVENT_CATEGORY_DATAPLANE` and `BGP_EVENT_TYPE_DATAPLANE_ROUTE_*` / `rustbgpctl events watch --category dataplane` | Streaming event feed | Live-only; no history API |
@@ -736,16 +738,16 @@ does not delete that replacement on a later withdraw.
 
 Unified typed live event stream. Current categories are route events, session
 events (peer lifecycle plus BGP NOTIFICATION sent/received metadata), policy
-mutation summary events, dataplane status-row summary changes for the
-daemon-owned FIB / BLACKHOLE discard reconcilers, and live ADR-0061 per-route
-FIB apply outcomes. EVPN events are reserved for follow-up slices until their
-subsystems expose one complete structured event source.
+mutation summary events, EVPN route best-path events, dataplane status-row
+summary changes for the daemon-owned FIB / BLACKHOLE discard reconcilers, and
+live ADR-0061 per-route FIB apply outcomes.
 
 | RPC | Description |
 |-----|-------------|
 | `WatchEvents` | Server-streaming: unified typed event stream sourced from structured daemon events |
 | `ListSessionEvents` | Unary: recent session lifecycle events from the peer manager's bounded in-memory history |
 | `ListPolicyEvents` | Unary: recent policy / neighbor-set / peer-group / chain mutation events from the peer manager's bounded in-memory history |
+| `ListEvpnEvents` | Unary: recent EVPN route add / withdraw / best-change events from the RIB's bounded in-memory history |
 
 ### Watch unified events
 
@@ -793,6 +795,16 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"categories": ["EVENT_CATEGORY_DATAPLANE"], "event_types": ["BGP_EVENT_TYPE_DATAPLANE_ROUTE_FAILED"], "prefix": "203.0.113.0", "prefix_length": 24}' \
   localhost:50051 rustbgpd.v1.EventService/WatchEvents
+
+# Watch EVPN route best-path changes for one peer
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"categories": ["EVENT_CATEGORY_EVPN"], "event_types": ["BGP_EVENT_TYPE_EVPN_ROUTE_ADDED", "BGP_EVENT_TYPE_EVPN_ROUTE_WITHDRAWN", "BGP_EVENT_TYPE_EVPN_ROUTE_BEST_CHANGED"], "neighbor_address": "10.0.0.2"}' \
+  localhost:50051 rustbgpd.v1.EventService/WatchEvents
+
+# Query recent Type 2 EVPN route events for one RD
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"route_type_filter": 2, "rd_filter": "65000:100", "limit": 20}' \
+  localhost:50051 rustbgpd.v1.EventService/ListEvpnEvents
 ```
 
 `WatchEvents` is a live stream only: it does not replay the bounded
@@ -815,15 +827,19 @@ in the bounded `ListPolicyEvents` process-local history ring; dataplane summary
 events are status-row count changes from the existing `ListFibRoutes` and
 `ListBlackholeDiscards` snapshots. ADR-0061 per-route FIB dataplane events are
 emitted directly by the FIB runtime when a route is installed, withdrawn, or
-fails to apply. They are live-only and are not replayed by `ListFibRoutes`.
+fails to apply, and are live-only and not replayed by `ListFibRoutes`. EVPN
+events are sourced from the RIB's EVPN best-path broadcast and are also
+retained in a bounded `ListEvpnEvents` process-local history ring.
 The FIB `rejected` count reflects surfaced status rows; high-cardinality
 `route_limit_exceeded` rows are sampled in `ListFibRoutes`, so this is not a
 global suppressed-route total. Empty category and type filters subscribe to
 the default route + session live stream. A non-empty type filter narrows the
-stream; `BGP_EVENT_TYPE_POLICY_CHANGED` or
-`BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED` with empty categories selects those
-streams, and `EVENT_CATEGORY_POLICY` or `EVENT_CATEGORY_DATAPLANE` selects them
-explicitly. Transport sessions send ordinary state-change lifecycle events over
+stream; `BGP_EVENT_TYPE_POLICY_CHANGED`,
+`BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED`, or an EVPN route event type with
+empty categories selects the corresponding opt-in stream, and
+`EVENT_CATEGORY_POLICY`, `EVENT_CATEGORY_DATAPLANE`, or `EVENT_CATEGORY_EVPN`
+selects those streams explicitly. Transport sessions send ordinary
+state-change lifecycle events over
 a bounded channel that is separate from the lossless TCP collision-coordination
 path, so high churn can drop observability events without risking collision
 handling. If a subscriber falls behind either bounded broadcast, the stream
@@ -831,8 +847,9 @@ emits a `stream_lagged` warning event with the source category and missed
 count; lag warnings are delivered for subscribed source categories even when
 the request's event-type filter is otherwise restrictive. Prefix and family
 filters match unicast route events and per-route FIB dataplane events; session,
-policy, and peerless dataplane summary events do not match requests that set
-`prefix` or `afi_safi`. Peer filters do not match peerless dataplane summary
+policy, EVPN, and peerless dataplane summary events do not match requests that
+set `prefix` or `afi_safi`. Peer filters match route, session, EVPN, and
+per-route FIB dataplane events; they do not match peerless dataplane summary
 events. `BgpEvent` repeats common fields such as peer,
 prefix, type, and severity at the top level even when the payload also carries
 them so category-agnostic clients can render or filter events without unpacking
@@ -862,6 +879,18 @@ chain changes; global policy, neighbor-set, peer-group, and global-chain
 mutations are peerless and do not match a `neighbor_address` filter. The
 history ring holds at most 4096 events, is process-local, and resets on daemon
 restart.
+
+`ListEvpnEvents` accepts `neighbor_address`, EVPN route-event `event_types`,
+`route_type_filter`, `rd_filter`, and `limit`. Valid event types are
+`BGP_EVENT_TYPE_EVPN_ROUTE_ADDED`,
+`BGP_EVENT_TYPE_EVPN_ROUTE_WITHDRAWN`, and
+`BGP_EVENT_TYPE_EVPN_ROUTE_BEST_CHANGED`; empty `event_types` means all three.
+The peer filter matches both the current and previous best-path peer so
+withdrawals and best-path moves away from a peer remain visible to
+peer-scoped dashboards. `route_type_filter` accepts RFC 7432 / RFC 9136 route
+types 1 through 5, and `rd_filter` uses the same display format as
+`ListEvpnRoutes`. The history ring holds at most 4096 events, is process-local,
+and resets on daemon restart.
 
 Slow live-stream consumers do not block the daemon. If a `WatchEvents`,
 `WatchRouteEvents`, or `WatchRoutes` subscriber falls behind the bounded

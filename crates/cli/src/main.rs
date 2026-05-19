@@ -7,6 +7,8 @@ mod test_support;
 mod tui;
 
 pub mod proto {
+    #![allow(clippy::large_enum_variant)]
+
     tonic::include_proto!("rustbgpd.v1");
 }
 
@@ -514,7 +516,7 @@ enum FlowspecAction {
 enum EventsAction {
     /// Watch the unified live event stream
     Watch {
-        /// Event category filter: route, session, policy, dataplane
+        /// Event category filter: route, session, policy, dataplane, evpn
         #[arg(long = "category", value_delimiter = ',')]
         categories: Vec<String>,
 
@@ -534,7 +536,8 @@ enum EventsAction {
         /// state_changed, established, lost, peer_enabled, peer_disabled,
         /// notification_sent, notification_received, policy_changed,
         /// dataplane_status_changed, dataplane_route_installed,
-        /// dataplane_route_withdrawn, dataplane_route_failed
+        /// dataplane_route_withdrawn, dataplane_route_failed, evpn_added,
+        /// evpn_withdrawn, evpn_best_changed
         #[arg(long = "type", value_delimiter = ',')]
         event_types: Vec<String>,
 
@@ -569,6 +572,28 @@ enum EventsAction {
         event_types: Vec<String>,
 
         /// Maximum recent policy events to return (default 100; explicit 0 requests the daemon's full bounded window)
+        #[arg(short, long)]
+        limit: Option<u32>,
+    },
+    /// Show recent EVPN route events
+    Evpn {
+        /// Neighbor address filter. Matches current and previous best-path peer.
+        #[arg(long)]
+        address: Option<String>,
+
+        /// EVPN route type filter (1..=5)
+        #[arg(long)]
+        route_type: Option<u32>,
+
+        /// Route Distinguisher filter, e.g. "65000:100"
+        #[arg(long)]
+        rd: Option<String>,
+
+        /// EVPN event type filter: evpn_added, evpn_withdrawn, evpn_best_changed
+        #[arg(long = "type", value_delimiter = ',')]
+        event_types: Vec<String>,
+
+        /// Maximum recent EVPN events to return (default 100; explicit 0 requests the daemon's full bounded window)
         #[arg(short, long)]
         limit: Option<u32>,
     },
@@ -1136,6 +1161,32 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 commands::watch::policy_history(
                     connection,
                     policy_address,
+                    event_types,
+                    limit,
+                    json,
+                )
+                .await
+            }
+            Some(EventsAction::Evpn {
+                address: evpn_address,
+                route_type,
+                rd,
+                event_types,
+                limit: evpn_limit,
+            }) => {
+                reject_events_parent_filters_for_subcommand(
+                    "events evpn",
+                    &address,
+                    &family,
+                    &prefix,
+                    limit,
+                )?;
+                let limit = evpn_limit.unwrap_or(100);
+                commands::watch::evpn_history(
+                    connection,
+                    evpn_address,
+                    route_type,
+                    rd,
                     event_types,
                     limit,
                     json,
@@ -1862,6 +1913,41 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_events_evpn() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "events",
+            "evpn",
+            "--address",
+            "10.0.0.2",
+            "--route-type",
+            "2",
+            "--rd",
+            "65000:100",
+            "--type",
+            "evpn_added,evpn_best_changed",
+            "--limit",
+            "5",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Events {
+                action: Some(EventsAction::Evpn {
+                    address: Some(ref address),
+                    route_type: Some(2),
+                    rd: Some(ref rd),
+                    ref event_types,
+                    limit: Some(5),
+                }),
+                ..
+            } if address == "10.0.0.2"
+                && rd == "65000:100"
+                && event_types == &vec!["evpn_added".to_string(), "evpn_best_changed".to_string()]
+        ));
+    }
+
+    #[test]
     fn events_parent_filters_are_rejected_for_subcommands() {
         let err = reject_events_parent_filters_for_subcommand(
             "events sessions",
@@ -1925,6 +2011,36 @@ mod tests {
                 }),
                 ..
             } if categories == &vec!["dataplane".to_string()] && event_types.len() == 1
+        ));
+    }
+
+    #[test]
+    fn test_parse_events_watch_evpn_category() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "events",
+            "watch",
+            "--category",
+            "evpn",
+            "--type",
+            "evpn_added,evpn_withdrawn",
+            "--address",
+            "192.0.2.1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Events {
+                action: Some(EventsAction::Watch {
+                    ref categories,
+                    ref event_types,
+                    address: Some(ref address),
+                    ..
+                }),
+                ..
+            } if categories == &vec!["evpn".to_string()]
+                && event_types == &vec!["evpn_added".to_string(), "evpn_withdrawn".to_string()]
+                && address == "192.0.2.1"
         ));
     }
 

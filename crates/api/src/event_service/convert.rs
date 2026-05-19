@@ -3,10 +3,11 @@ use crate::peer_types::{
     SessionNotificationEvent, SessionNotificationEventType,
 };
 use crate::proto;
-use crate::rib_service::route_event_to_proto;
+use crate::rib_service::{evpn_route_to_proto, route_event_to_proto};
 
 use super::filters::{
-    route_event_type_to_bgp_event_type, session_lifecycle_event_type_to_bgp_event_type,
+    route_event_type_to_bgp_event_type, route_event_type_to_evpn_bgp_event_type,
+    session_lifecycle_event_type_to_bgp_event_type,
     session_notification_event_type_to_bgp_event_type,
 };
 
@@ -32,6 +33,9 @@ pub(crate) fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto
             | proto::BgpEventType::DataplaneRouteInstalled
             | proto::BgpEventType::DataplaneRouteWithdrawn
             | proto::BgpEventType::DataplaneRouteFailed
+            | proto::BgpEventType::EvpnRouteAdded
+            | proto::BgpEventType::EvpnRouteWithdrawn
+            | proto::BgpEventType::EvpnRouteBestChanged
             | proto::BgpEventType::StreamLagged => "changed",
         },
         route.prefix,
@@ -50,6 +54,91 @@ pub(crate) fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto
         afi_safi: route.afi_safi,
         summary,
         payload: Some(proto::bgp_event::Payload::Route(route)),
+    }
+}
+
+pub(crate) fn evpn_event_to_bgp_event(event: rustbgpd_rib::EvpnRouteEvent) -> proto::BgpEvent {
+    let event_type = route_event_type_to_evpn_bgp_event_type(event.event_type);
+    let peer_address = event.peer.map_or_else(String::new, |peer| peer.to_string());
+    let previous_peer_address = event
+        .previous_peer
+        .map_or_else(String::new, |peer| peer.to_string());
+    let rd = rustbgpd_rib::event::evpn_key_rd(&event.key).to_string();
+    let route_type = u32::from(event.key.route_type());
+    let route_key = format_evpn_route_key(&event.key);
+    let action = match event_type {
+        proto::BgpEventType::EvpnRouteAdded => "added",
+        proto::BgpEventType::EvpnRouteWithdrawn => "withdrawn",
+        proto::BgpEventType::EvpnRouteBestChanged => "best changed",
+        _ => "changed",
+    };
+    let summary = format!("EVPN route {action} type={route_type} key={route_key}");
+    let route = event.best.as_ref().map(evpn_route_to_proto);
+    let previous_route = event.previous_best.as_ref().map(evpn_route_to_proto);
+    let payload = proto::EvpnRouteEvent {
+        event_type: event_type as i32,
+        peer_address: peer_address.clone(),
+        previous_peer_address: previous_peer_address.clone(),
+        timestamp: event.timestamp.clone(),
+        route_type,
+        rd,
+        route_key,
+        route,
+        previous_route,
+        reason: summary.clone(),
+    };
+
+    proto::BgpEvent {
+        timestamp: event.timestamp,
+        category: proto::EventCategory::Evpn as i32,
+        event_type: event_type as i32,
+        severity: proto::EventSeverity::Info as i32,
+        peer_address,
+        previous_peer_address,
+        prefix: String::new(),
+        prefix_length: 0,
+        afi_safi: proto::AddressFamily::L2vpnEvpn as i32,
+        summary,
+        payload: Some(proto::bgp_event::Payload::Evpn(payload)),
+    }
+}
+
+fn format_evpn_route_key(key: &rustbgpd_wire::EvpnRouteKey) -> String {
+    match key {
+        rustbgpd_wire::EvpnRouteKey::EadPerEs {
+            rd,
+            esi,
+            ethernet_tag,
+        } => format!("ead-per-es rd={rd} esi={esi} ethernet_tag={ethernet_tag}"),
+        rustbgpd_wire::EvpnRouteKey::EadPerEvi {
+            rd,
+            esi,
+            ethernet_tag,
+        } => format!("ead-per-evi rd={rd} esi={esi} ethernet_tag={ethernet_tag}"),
+        rustbgpd_wire::EvpnRouteKey::MacIp {
+            rd,
+            ethernet_tag,
+            mac,
+            ip,
+        } => format!(
+            "mac-ip rd={rd} ethernet_tag={ethernet_tag} mac={mac} ip={}",
+            ip.map_or_else(String::new, |ip| ip.to_string())
+        ),
+        rustbgpd_wire::EvpnRouteKey::Imet {
+            rd,
+            ethernet_tag,
+            originator_ip,
+        } => format!("imet rd={rd} ethernet_tag={ethernet_tag} originator_ip={originator_ip}"),
+        rustbgpd_wire::EvpnRouteKey::Es {
+            rd,
+            esi,
+            originator_ip,
+        } => format!("es rd={rd} esi={esi} originator_ip={originator_ip}"),
+        rustbgpd_wire::EvpnRouteKey::IpPrefix {
+            rd,
+            ethernet_tag,
+            prefix,
+        } => format!("ip-prefix rd={rd} ethernet_tag={ethernet_tag} prefix={prefix}"),
     }
 }
 
@@ -184,6 +273,7 @@ pub(crate) fn stream_lag_bgp_event(
         proto::EventCategory::Session => "session",
         proto::EventCategory::Policy => "policy",
         proto::EventCategory::Dataplane => "dataplane",
+        proto::EventCategory::Evpn => "evpn",
         proto::EventCategory::Unspecified => "unknown",
     };
     let summary = format!("{source} event stream lagged; missed {missed_count} event(s)");
