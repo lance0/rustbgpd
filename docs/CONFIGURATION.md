@@ -317,9 +317,14 @@ When `enforcement = "tier"` is configured:
 - Requests from principals absent from `[security.grpc.roles]` fail closed with
   `PERMISSION_DENIED`.
 
-**Preparing for the future default flip:** the daemon still defaults to
-`enforcement = "legacy"`, but operators should make their configs tier-ready
-before the project changes that default. The safe migration sequence is:
+**Default changed to `tier` in v0.24.0.** Upgrading an existing
+deployment without staging the migration first will fail validation
+at startup; the error message points at this section and at the
+`enforcement = "legacy"` escape hatch. Already-staged operators see
+no behavior change.
+
+The safe migration sequence (run against a pre-upgrade daemon if
+possible):
 
 1. Add `[security.grpc.roles]` entries for every expected gRPC principal.
 2. Set an explicit `principal` on each UDS listener and each bearer-token TCP
@@ -328,22 +333,30 @@ before the project changes that default. The safe migration sequence is:
 3. For remote TCP, prefer native mTLS so the principal is derived from the
    client certificate; otherwise use `token_file` plus a non-secret
    `principal` label.
-4. Keep `enforcement = "legacy"` while staging labels and roles, then run
+4. Set `enforcement = "legacy"` while staging labels and roles, then run
    `rustbgpd --check` against the candidate TOML.
-5. Set `enforcement = "tier"` and monitor `grpc_authz` logs/metrics for
-   `principal_unmapped` and `role_tier_denied` before relying on the future
-   default.
-6. If you need to preserve legacy behavior after the default flip, set
-   `enforcement = "legacy"` explicitly.
+5. Remove the explicit `enforcement = "legacy"` (or change it to
+   `"tier"`) and monitor `grpc_authz` logs/metrics for
+   `principal_unmapped` and `role_tier_denied`.
+6. If you need to preserve the pre-v0.24.0 behavior indefinitely, set
+   `enforcement = "legacy"` explicitly and keep it there.
 
 ```toml
+# The v0.24.0 default — equivalent to omitting [security.grpc]
+# entirely on a tier-ready config.
 [security.grpc]
-enforcement = "legacy"
+enforcement = "tier"
 
 [security.grpc.roles]
 "observer-readonly" = "observer"
 "automation.example" = "automation"
 "operator.example" = "operator"
+```
+
+```toml
+# Pre-v0.24.0 behavior. Explicit opt-out preserved indefinitely.
+[security.grpc]
+enforcement = "legacy"
 ```
 
 ```toml

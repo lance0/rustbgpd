@@ -225,7 +225,22 @@ impl PeerManager {
                     install_blackhole_discard: false,
                     allow_blackhole_broad_prefixes: false,
                 },
-                security: crate::config::SecurityConfig::default(),
+                // PeerManager::new constructs an in-memory baseline
+                // Config before the operator's TOML is applied. The
+                // schema default is `enforcement = "tier"` after the
+                // v0.24.0 flip, but a defaulted Config has no
+                // [security.grpc.roles], which would fail
+                // post-apply validation in `apply_config_event`.
+                // Use the explicit legacy posture here so the
+                // baseline is internally consistent; the real
+                // config arrives via reload / config-bridge with
+                // its own [security.grpc] block.
+                security: crate::config::SecurityConfig {
+                    grpc: crate::config::GrpcSecurityConfig {
+                        enforcement: crate::config::GrpcEnforcementConfig::Legacy,
+                        roles: std::collections::HashMap::new(),
+                    },
+                },
                 neighbors: Vec::new(),
                 peer_groups: HashMap::new(),
                 policy: crate::config::PolicyConfig::default(),

@@ -2046,6 +2046,11 @@ hold_time = 90
     }
 
     fn baseline_toml() -> &'static str {
+        // Shared test fixture: opts into `enforcement = "legacy"`
+        // explicitly so reload tests exercise pre-v0.24.0 gRPC
+        // authorization behavior (matching the `parse()` test helper
+        // pattern in src/config/tests.rs). Reload-mode tier-mode
+        // semantics are not the focus here.
         r#"
 [global]
 asn = 65001
@@ -2054,6 +2059,9 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
 
 [[neighbors]]
 address = "10.0.0.2"

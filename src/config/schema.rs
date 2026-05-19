@@ -99,13 +99,21 @@ pub struct GrpcSecurityConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GrpcEnforcementConfig {
-    /// Preserve existing role authorization behavior. Listener
-    /// `max_tier` caps still apply in this mode.
-    #[default]
+    /// Preserve pre-v0.24.0 role authorization behavior. Listener
+    /// `max_tier` caps still apply in this mode, but per-principal
+    /// role ceilings are not enforced. Operators who need this
+    /// behavior after v0.24.0 must set `enforcement = "legacy"`
+    /// explicitly.
     Legacy,
     /// Enforce per-principal role ceilings in addition to listener
-    /// `max_tier` caps. This is opt-in until the dedicated default-flip
-    /// migration slice.
+    /// `max_tier` caps. **Default since v0.24.0** after the
+    /// migration window documented in `docs/CONFIGURATION.md`.
+    /// Existing deployments that do not configure
+    /// `[security.grpc.roles]` will fail validation at startup with
+    /// a message pointing at the migration checklist; operators who
+    /// have not staged their config can opt back into `legacy`
+    /// explicitly.
+    #[default]
     Tier,
 }
 
