@@ -36,3 +36,4 @@ tonic-prost-build.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
+tokio-rustls.workspace = true

@@ -35,8 +35,8 @@ pub enum PrincipalExtractionError {
 /// # Errors
 ///
 /// Returns [`PrincipalExtractionError::MissingPeerCertificate`] when
-/// the chain is empty, or propagates the first certificate's parse /
-/// missing-principal error from [`principal_from_der`].
+/// the chain is empty, or propagates the first certificate's extraction
+/// error from [`principal_from_der`].
 pub fn principal_from_peer_certs<C>(certs: &[C]) -> Result<String, PrincipalExtractionError>
 where
     C: AsRef<[u8]>,

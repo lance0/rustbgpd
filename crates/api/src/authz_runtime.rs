@@ -422,10 +422,21 @@ mod tests {
     use std::convert::Infallible;
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::Arc;
 
     use prometheus::Encoder;
+    use rcgen::{
+        BasicConstraints, Certificate, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa,
+        Issuer, KeyPair, KeyUsagePurpose, SanType,
+    };
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_rustls::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use tokio_rustls::rustls::server::WebPkiClientVerifier;
+    use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig};
+    use tokio_rustls::{TlsAcceptor, TlsConnector};
     use tonic::body::Body;
     use tonic::codegen::http::{Request, Response};
+    use tonic::transport::server::Connected;
 
     use super::*;
 
@@ -452,6 +463,96 @@ mod tests {
         let mut buf = Vec::new();
         encoder.encode(&families, &mut buf).unwrap();
         String::from_utf8(buf).unwrap()
+    }
+
+    fn private_key(key: &KeyPair) -> PrivateKeyDer<'static> {
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()))
+    }
+
+    fn test_ca() -> (Certificate, Issuer<'static, KeyPair>) {
+        let mut params =
+            CertificateParams::new(Vec::new()).expect("empty SAN list is valid for CA");
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "rustbgpd test CA");
+        params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+        params.key_usages.push(KeyUsagePurpose::KeyCertSign);
+        params.key_usages.push(KeyUsagePurpose::CrlSign);
+
+        let key = KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        (cert, Issuer::new(params, key))
+    }
+
+    fn signed_leaf(
+        issuer: &Issuer<'static, KeyPair>,
+        common_name: &str,
+        sans: Vec<SanType>,
+        eku: ExtendedKeyUsagePurpose,
+    ) -> (Certificate, KeyPair) {
+        let mut params = CertificateParams::new(Vec::new()).expect("empty SAN list is valid");
+        params.subject_alt_names = sans;
+        params
+            .distinguished_name
+            .push(DnType::CommonName, common_name);
+        params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+        params.extended_key_usages.push(eku);
+
+        let key = KeyPair::generate().unwrap();
+        let cert = params.signed_by(&key, issuer).unwrap();
+        (cert, key)
+    }
+
+    async fn tonic_tls_connect_info_with_client_cert(
+        ca_cert: &Certificate,
+        issuer: &Issuer<'static, KeyPair>,
+        client_cert: Certificate,
+        client_key: KeyPair,
+    ) -> TlsConnectInfo<TcpConnectInfo> {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let (server_cert, server_key) = signed_leaf(
+            issuer,
+            "localhost",
+            vec![SanType::DnsName("localhost".try_into().unwrap())],
+            ExtendedKeyUsagePurpose::ServerAuth,
+        );
+
+        let mut server_roots = RootCertStore::empty();
+        server_roots.add(ca_cert.der().clone()).unwrap();
+        let client_verifier = WebPkiClientVerifier::builder(Arc::new(server_roots))
+            .build()
+            .unwrap();
+        let server_config = ServerConfig::builder()
+            .with_client_cert_verifier(client_verifier)
+            .with_single_cert(vec![server_cert.der().clone()], private_key(&server_key))
+            .unwrap();
+
+        let mut client_roots = RootCertStore::empty();
+        client_roots.add(ca_cert.der().clone()).unwrap();
+        let client_config = ClientConfig::builder()
+            .with_root_certificates(client_roots)
+            .with_client_auth_cert(vec![client_cert.der().clone()], private_key(&client_key))
+            .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            TlsAcceptor::from(Arc::new(server_config))
+                .accept(stream)
+                .await
+                .unwrap()
+        });
+
+        let client_stream = TcpStream::connect(addr).await.unwrap();
+        let connector = TlsConnector::from(Arc::new(client_config));
+        let server_name = "localhost".to_string().try_into().unwrap();
+        let client = connector.connect(server_name, client_stream).await.unwrap();
+        let server = server.await.unwrap();
+        let info = server.connect_info();
+        drop(client);
+        info
     }
 
     #[test]
@@ -634,6 +735,38 @@ mod tests {
                 .principal_for_extensions(&http::Extensions::new())
                 .as_ref(),
             "mtls-unresolved"
+        );
+    }
+
+    #[tokio::test]
+    async fn mtls_principal_resolution_uses_tonic_tls_connect_info_peer_certs() {
+        let (ca_cert, issuer) = test_ca();
+        let (client_cert, client_key) = signed_leaf(
+            &issuer,
+            "alice-cn",
+            vec![
+                SanType::URI("rustbgpd://operator/alice".try_into().unwrap()),
+                SanType::Rfc822Name("alice@example.com".try_into().unwrap()),
+            ],
+            ExtendedKeyUsagePurpose::ClientAuth,
+        );
+        let connect_info =
+            tonic_tls_connect_info_with_client_cert(&ca_cert, &issuer, client_cert, client_key)
+                .await;
+        let mut extensions = http::Extensions::new();
+        extensions.insert(connect_info);
+        let context = GrpcAuthAuditContext::new(
+            "tcp://127.0.0.1:50051",
+            "read_write",
+            AuthTier::OperatorOnly,
+            GrpcAuthnKind::Mtls,
+            "mtls-unresolved",
+        )
+        .with_mtls_peer_principal();
+
+        assert_eq!(
+            context.principal_for_extensions(&extensions).as_ref(),
+            "rustbgpd://operator/alice"
         );
     }
 }
