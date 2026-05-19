@@ -1,3 +1,13 @@
 target/
 .git/
 clab-*/
+
+# Test/operational artifacts that bloat the build context without being
+# referenced by the Dockerfile. None of these affect the cooked deps
+# layer or the workspace compile, so excluding them keeps `COPY . .`
+# tight and avoids invalidating cache layers when an operator drops a
+# postmortem into the tree.
+tests/soak/runs/
+docs/artifacts/
+target/criterion/
+*.log
