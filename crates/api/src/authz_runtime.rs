@@ -21,6 +21,7 @@ use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tower::{Layer, Service};
 use tracing::{debug, info, warn};
 
+use crate::audit::{GrpcAuditHandle, GrpcRequestSummary};
 use crate::authz::{AuthTier, GrpcMethodAuthz, method_authz};
 use crate::authz_principal::{PrincipalExtractionError, principal_from_peer_certs};
 
@@ -205,8 +206,6 @@ pub struct GrpcAuthAuditDecision {
     pub tier: AuthTier,
     /// Whether the method path exists in the checked matrix.
     pub known_method: bool,
-    /// Stable default result label before listener-cap enforcement is applied.
-    pub result: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -227,13 +226,11 @@ fn audit_lookup_for_path(path: &str) -> GrpcAuthAuditLookup {
         GrpcAuthAuditDecision {
             tier: method.tier,
             known_method: true,
-            result: "audit_forward",
         }
     } else {
         GrpcAuthAuditDecision {
             tier: AuthTier::OperatorOnly,
             known_method: false,
-            result: "unknown_audit_forward",
         }
     };
     GrpcAuthAuditLookup { decision, method }
@@ -289,9 +286,9 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, req: http::Request<B>) -> Self::Future {
-        let path = req.uri().path();
-        let lookup = audit_lookup_for_path(path);
+    fn call(&mut self, mut req: http::Request<B>) -> Self::Future {
+        let path = req.uri().path().to_string();
+        let lookup = audit_lookup_for_path(&path);
         let decision = lookup.decision;
         let principal = self.context.principal_for_extensions(req.extensions());
         if decision.tier > self.context.max_tier {
@@ -301,23 +298,25 @@ where
             // learning listener tier details via PERMISSION_DENIED.
             if let Some(status) = self.context.bearer_auth_error(req.headers()) {
                 record_audit_decision(
-                    path,
+                    &path,
                     &lookup,
                     &self.context,
                     principal.as_ref(),
                     &self.metrics,
                     "authn_failed",
+                    None,
                 );
                 let response = status.into_http::<Body>();
                 return Box::pin(async move { Ok(response) });
             }
             record_audit_decision(
-                path,
+                &path,
                 &lookup,
                 &self.context,
                 principal.as_ref(),
                 &self.metrics,
                 "listener_tier_denied",
+                None,
             );
             let max_tier = self.context.max_tier.as_str();
             let tier = decision.tier.as_str();
@@ -327,16 +326,30 @@ where
             .into_http::<Body>();
             return Box::pin(async move { Ok(response) });
         }
-        record_audit_decision(
-            path,
-            &lookup,
-            &self.context,
-            principal.as_ref(),
-            &self.metrics,
-            decision.result,
-        );
+        let audit_handle = GrpcAuditHandle::default();
+        req.extensions_mut().insert(audit_handle.clone());
+        let context = self.context.clone();
+        let metrics = self.metrics.clone();
+        let principal = principal.into_owned();
         let fut = self.inner.call(req);
-        Box::pin(fut)
+        Box::pin(async move {
+            let response = fut.await;
+            let result = match &response {
+                Ok(response) => audit_result_for_response(response),
+                Err(_) => "handler_service_error",
+            };
+            let summary = audit_handle.summary();
+            record_audit_decision(
+                &path,
+                &lookup,
+                &context,
+                &principal,
+                &metrics,
+                result,
+                summary.as_ref(),
+            );
+            response
+        })
     }
 }
 
@@ -358,6 +371,7 @@ fn record_audit_decision(
     principal: &str,
     metrics: &BgpMetrics,
     result: &'static str,
+    request_summary: Option<&GrpcRequestSummary>,
 ) {
     let decision = lookup.decision;
     metrics.record_grpc_authz_decision(
@@ -375,6 +389,7 @@ fn record_audit_decision(
     let access_mode = context.access_mode;
     let max_tier = context.max_tier.as_str();
     let authn = context.authn.as_str();
+    let request_summary = request_summary.map_or("", GrpcRequestSummary::as_str);
 
     if decision.tier == AuthTier::OperatorOnly {
         warn!(
@@ -390,6 +405,7 @@ fn record_audit_decision(
             max_tier,
             authn,
             principal,
+            request_summary,
             "gRPC authorization audit decision"
         );
     } else {
@@ -406,8 +422,42 @@ fn record_audit_decision(
             max_tier,
             authn,
             principal,
+            request_summary,
             "gRPC authorization audit decision"
         );
+    }
+}
+
+fn audit_result_for_response(response: &http::Response<Body>) -> &'static str {
+    if let Some(status) = Status::from_header_map(response.headers()) {
+        return audit_result_for_code(status.code());
+    }
+    if response.status().is_success() {
+        "handler_ok"
+    } else {
+        "handler_http_error"
+    }
+}
+
+fn audit_result_for_code(code: tonic::Code) -> &'static str {
+    match code {
+        tonic::Code::Ok => "handler_ok",
+        tonic::Code::Cancelled => "handler_cancelled",
+        tonic::Code::Unknown => "handler_unknown",
+        tonic::Code::InvalidArgument => "handler_invalid_argument",
+        tonic::Code::DeadlineExceeded => "handler_deadline_exceeded",
+        tonic::Code::NotFound => "handler_not_found",
+        tonic::Code::AlreadyExists => "handler_already_exists",
+        tonic::Code::PermissionDenied => "handler_permission_denied",
+        tonic::Code::ResourceExhausted => "handler_resource_exhausted",
+        tonic::Code::FailedPrecondition => "handler_failed_precondition",
+        tonic::Code::Aborted => "handler_aborted",
+        tonic::Code::OutOfRange => "handler_out_of_range",
+        tonic::Code::Unimplemented => "handler_unimplemented",
+        tonic::Code::Internal => "handler_internal",
+        tonic::Code::Unavailable => "handler_unavailable",
+        tonic::Code::DataLoss => "handler_data_loss",
+        tonic::Code::Unauthenticated => "handler_unauthenticated",
     }
 }
 
@@ -454,6 +504,48 @@ mod tests {
 
         fn call(&mut self, _req: Request<Body>) -> Self::Future {
             Box::pin(async { Ok(Response::new(Body::empty())) })
+        }
+    }
+
+    #[derive(Clone)]
+    struct InvalidArgumentService;
+
+    impl Service<Request<Body>> for InvalidArgumentService {
+        type Response = Response<Body>;
+        type Error = Infallible;
+        type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: Request<Body>) -> Self::Future {
+            Box::pin(async { Ok(Status::invalid_argument("bad request").into_http::<Body>()) })
+        }
+    }
+
+    #[derive(Clone)]
+    struct SummaryService;
+
+    impl Service<Request<Body>> for SummaryService {
+        type Response = Response<Body>;
+        type Error = Infallible;
+        type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: Request<Body>) -> Self::Future {
+            let handle = req
+                .extensions()
+                .get::<GrpcAuditHandle>()
+                .expect("auth layer should attach audit handle")
+                .clone();
+            Box::pin(async move {
+                handle.set_summary(GrpcRequestSummary::new("candidate_toml=<redacted>"));
+                Ok(Response::new(Body::empty()))
+            })
         }
     }
 
@@ -560,7 +652,6 @@ mod tests {
         let decision = audit_decision_for_path("/rustbgpd.v1.ControlService/Shutdown");
         assert_eq!(decision.tier, AuthTier::OperatorOnly);
         assert!(decision.known_method);
-        assert_eq!(decision.result, "audit_forward");
     }
 
     #[test]
@@ -568,7 +659,6 @@ mod tests {
         let decision = audit_decision_for_path("/rustbgpd.v1.Unknown/Nope");
         assert_eq!(decision.tier, AuthTier::OperatorOnly);
         assert!(!decision.known_method);
-        assert_eq!(decision.result, "unknown_audit_forward");
     }
 
     #[tokio::test]
@@ -594,9 +684,59 @@ mod tests {
         let text = gather_text(&metrics);
         assert!(text.contains("bgp_grpc_authz_decisions_total"));
         assert!(text.contains("tier=\"sensitive_read\""));
-        assert!(text.contains("result=\"audit_forward\""));
+        assert!(text.contains("result=\"handler_ok\""));
         assert!(text.contains("authn=\"bearer_token\""));
         assert!(text.contains("access_mode=\"read_write\""));
+    }
+
+    #[tokio::test]
+    async fn audit_layer_records_handler_error_status() {
+        let metrics = BgpMetrics::new();
+        let context = GrpcAuthAuditContext::new(
+            "tcp://127.0.0.1:50051",
+            "read_write",
+            AuthTier::OperatorOnly,
+            GrpcAuthnKind::BearerToken,
+            "bearer-token",
+        );
+        let layer = GrpcAuthzLayer::new(context, metrics.clone());
+        let mut service = layer.layer(InvalidArgumentService);
+        let request = Request::builder()
+            .uri("/rustbgpd.v1.ConfigService/DiffRuntimeConfig")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+        let status = tonic::Status::from_header_map(response.headers()).unwrap();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let text = gather_text(&metrics);
+        assert!(text.contains("tier=\"sensitive_read\""));
+        assert!(text.contains("result=\"handler_invalid_argument\""));
+    }
+
+    #[tokio::test]
+    async fn audit_layer_attaches_request_summary_handle() {
+        let metrics = BgpMetrics::new();
+        let context = GrpcAuthAuditContext::new(
+            "tcp://127.0.0.1:50051",
+            "read_write",
+            AuthTier::OperatorOnly,
+            GrpcAuthnKind::BearerToken,
+            "bearer-token",
+        );
+        let layer = GrpcAuthzLayer::new(context, metrics.clone());
+        let mut service = layer.layer(SummaryService);
+        let request = Request::builder()
+            .uri("/rustbgpd.v1.ConfigService/DiffRuntimeConfig")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+        assert_eq!(response.status(), http::StatusCode::OK);
+
+        let text = gather_text(&metrics);
+        assert!(text.contains("result=\"handler_ok\""));
     }
 
     #[tokio::test]

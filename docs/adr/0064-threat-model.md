@@ -178,6 +178,9 @@ flowchart LR
   forgot `read_only_rejection()`.
 - Cannot read stored `md5_password` through `ListPeerGroups` or `GetPeerGroup`;
   those responses use `has_md5_password`.
+- Cannot leak current credential-bearing gRPC request fields through
+  `grpc_authz` request summaries: `candidate_toml`, peer-group
+  `md5_password`, and TCP-AO keys embedded in candidate TOML are masked.
 - Cannot directly execute code through gRPC; the modeled risk is privileged
   daemon operation abuse, not arbitrary code execution.
 
@@ -223,7 +226,7 @@ flowchart LR
 | TM-002 | Leaked bearer token | Bearer-token listener exposed to attacker | Authenticate as the shared token principal and call any allowed surface | Credential grants all listener rights; no per-token role | gRPC management surface | Token file required non-empty; constant-time compare; optional read-only access mode | Token principal is placeholder; no role map | Add explicit token principals and roles (#165); rotate token on suspected leak | Track `authn="bearer_token"` operator-only calls; token-file rotation runbook | Medium | High | High |
 | TM-003 | Valid but overbroad mTLS client cert | Client cert chains to configured CA | Use cert to access all listener-authorized methods | Overprivileged automation or user can mutate network state | gRPC management, route state | mTLS rejects unverified clients; audit labels `authn="mtls"` and derives principal from URI/email/CN | Principal roles are not enforced yet | Map extracted principals to roles and enforce per method | Alert on unexpected mTLS principals and any fallback `mtls-unresolved` audit record | Medium | High | High |
 | TM-004 | Same-host user with UDS access | Socket mode/group permits user to connect | Call read-write methods through UDS | Local privilege boundary becomes daemon-control boundary | Daemon lifecycle, routing state | UDS default is local-only; operator controls socket path/mode | No per-client identity beyond filesystem boundary | Use restrictive mode/group; add UDS explicit principal/roles (#165) | Audit `authn="uds"` operator-only calls | Medium | Medium | Medium |
-| TM-005 | Authenticated client supplies secret-bearing request data | Calls `DiffRuntimeConfig` or `SetPeerGroup` with secrets | Secrets appear in logs/audit output or responses | Secret disclosure and credential reuse | MD5/TCP-AO/token/TLS config material | Diff responses are redacted; peer-group reads redact MD5 | Audit request-summary masking not implemented | Add credential field annotations and masked audit formatter | Test logs for absence of `md5_password`, `tcp_ao.key`, token contents | Low | High | Medium |
+| TM-005 | Authenticated client supplies secret-bearing request data | Calls `DiffRuntimeConfig` or `SetPeerGroup` with secrets | Secrets appear in logs/audit output or responses | Secret disclosure and credential reuse | MD5/TCP-AO/token/TLS config material | Diff responses are redacted; peer-group reads redact MD5; `grpc_authz` request summaries mask candidate TOML and peer-group MD5 state | Durable audit sink / retention and future proto credential markers remain follow-up | Add durable audit guidance; extend mask table or field marker when new credential fields land | Test logs for absence of `md5_password`, `tcp_ao.key`, token contents | Low | High | Medium |
 | TM-006 | Unauthenticated remote client | Non-loopback TCP listener without token/mTLS | Call privileged RPCs | Full management-plane compromise | All gRPC-controlled state | Startup warning for unauthenticated non-loopback; docs recommend UDS/mTLS | Warning is not fail-closed | Consider config guardrail for unauthenticated non-loopback read-write | Alert on `authn="none"` and non-loopback listener | Low | High | Medium |
 | TM-007 | Slow or high-rate observer | Accepted read listener or read-write listener | High-volume list/watch calls consume CPU/memory or drop live events | Availability degradation, missed audit/event signal | API service, actor queues, event streams | Broadcast/ring buffers are bounded; lag metrics exist | No per-principal rate limits | Document scale limits; add stream/query guardrails if abused | Watch `bgp_event_stream_lagged_total`, request latency, CPU | Medium | Medium | Medium |
 | TM-008 | Developer adds new RPC | New proto method without tier assignment | Method escapes authorization policy | Future bypass or under-classification | gRPC authz model | `authz.rs` tests parse proto and require all methods | External generated clients do not see tier metadata | Add proto annotations or machine-readable inventory export | CI failure on missing method classification | Low | High | Medium |
@@ -264,7 +267,8 @@ External reviewers should be able to verify:
 - Runtime audit telemetry:
   generate any gRPC call, then inspect structured logs for
   `target="grpc_authz"` and metrics for
-  `bgp_grpc_authz_decisions_total{tier,result,authn,access_mode}`.
+  `bgp_grpc_authz_decisions_total{tier,result,authn,access_mode}`. Forwarded
+  calls are result-aware and credential-bearing request summaries are masked.
 - mTLS audit identity:
   mTLS listeners derive the `principal` audit field from the client
   certificate in ADR-0064 order: first `rustbgpd:` URI SAN, then email SAN,

@@ -235,9 +235,15 @@ specific method if the model warrants it.
    low-cardinality `bgp_grpc_authz_decisions_total` metric for every RPC;
    listener `max_tier` denials use the bounded
    `result="listener_tier_denied"` label, and unauthenticated over-cap probes
-   use `result="authn_failed"` without exposing tier details. The external
-   review still needs the later hardening slice: result-aware audit records,
-   request summaries with credential-bearing fields masked, and
+   use `result="authn_failed"` without exposing tier details. Forwarded calls
+   emit result-aware bounded labels such as `handler_ok` and
+   `handler_invalid_argument`. mTLS listeners derive the audit principal from
+   the client certificate (URI SAN → email SAN → Subject CN); non-mTLS
+   listeners still emit operator-controlled principal labels.
+   `DiffRuntimeConfig` and `SetPeerGroup` request summaries mask
+   credential-bearing fields, including candidate TOML that may contain
+   `md5_password` or `tcp_ao.key`. The external review still needs durable
+   audit sink / retention guidance, optional proto credential markers, and
    per-principal role enforcement.
 
 ## Code matrix

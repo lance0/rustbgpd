@@ -234,11 +234,14 @@ Every RPC call produces a structured log entry. Minimum level by tier:
 
 Credential masking is mandatory: `PeerGroupDefinition.md5_password`,
 `DiffRuntimeConfigRequest.candidate_toml`, and any field tagged with a
-future credential marker are omitted or replaced with `***REDACTED***`
+future credential marker are omitted or replaced with redacted metadata
 before the log line is emitted. TCP-AO key material is TOML/runtime-only
 today except when it appears inside `candidate_toml` for config-diff
-validation. Peer-group read RPCs redact `md5_password` rather than
-echoing stored secret material and expose only `has_md5_password`.
+validation. The first implementation uses an explicit mask table for
+the current narrow credential ingress instead of descriptor-driven proto
+field-option reflection; a proto credential marker remains a future schema
+aid if the field set grows. Peer-group read RPCs redact `md5_password`
+rather than echoing stored secret material and expose only `has_md5_password`.
 Inventory questions 5 and 8 answered.
 
 ### 8. `UNIMPLEMENTED` methods
@@ -261,7 +264,9 @@ answered.
 - `UNIMPLEMENTED → operator_only` default prevents the "we'll classify
   it when we implement it" trap.
 - Audit log with mandatory credential masking is a v1.0 compliance
-  prerequisite, not bolted on after.
+  prerequisite, not bolted on after. Result-aware audit records now cover
+  forwarded calls with bounded labels such as `handler_ok` and
+  `handler_invalid_argument`.
 - Backwards-compat `enforcement = "legacy"` keeps existing operators
   running through one release while surfacing what would break.
 
@@ -323,9 +328,12 @@ review/rollback unit.
    unauthorized RPCs. Default `enforcement = "tier"`. Update
    `CHANGELOG.md`, `KNOWN_ISSUES.md`, and
    `docs/SECURITY.md` migration notes.
-6. **Audit log hardening.** Add the `[(rustbgpd.v1.credential) =
-   true]` field extension. Mask credential fields in the audit-log
-   formatter. Add per-tier log-level configuration.
+6. **Audit log hardening.** First add result-aware audit records and
+   explicit masking for the current credential ingress
+   (`candidate_toml`, peer-group `md5_password`, and TCP-AO keys embedded in
+   candidate TOML). Add the `[(rustbgpd.v1.credential) = true]` field extension
+   and per-tier log-level configuration in follow-up slices if the credential
+   field set expands or operators need configurable sampling.
 7. **External-review prep.** Threat-model doc
    (`docs/adr/0064-threat-model.md`), per-slice security
    sign-off, external auditor packet (inventory + ADR + threat model
@@ -367,8 +375,10 @@ listener principal labels for bearer-token TCP and UDS audit identity.
 Slice 4a adds enforced per-listener `max_tier` caps while preserving
 `access_mode` as a compatibility ceiling. Slice 3b adds audit-only native mTLS
 certificate principal extraction (`rustbgpd:` URI SAN, then email SAN, then
-Subject CN). Later slices implement per-principal role enforcement, the default
-enforcement flip, and result/request audit-log hardening.
+Subject CN). Slice 6a adds result-aware audit records and credential-masked
+request summaries for `DiffRuntimeConfig` and `SetPeerGroup`. Later slices
+implement per-principal role enforcement, the default enforcement flip,
+durable audit-sink guidance, and optional proto credential markers.
 
 | Slice | Status |
 |-------|--------|
@@ -377,5 +387,5 @@ enforcement flip, and result/request audit-log hardening.
 | 3. Identity + roles | Partial: roles config + bearer/UDS principals + mTLS audit principal extraction |
 | 4. Listener tier cap | Partial: `max_tier` listener cap enforced; role/default flip deferred |
 | 5. Enforcement flip | Not started |
-| 6. Audit log hardening | Not started |
+| 6. Audit log hardening | Partial: result-aware records + explicit credential masking table |
 | 7. External-review prep | Not started |

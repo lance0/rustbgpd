@@ -3,6 +3,7 @@
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
+use crate::audit::{diff_runtime_config_summary, set_request_summary};
 use crate::peer_types::{PeerManagerCommand, RuntimeConfigDiff};
 use crate::proto;
 
@@ -34,6 +35,10 @@ impl proto::config_service_server::ConfigService for ConfigService {
         &self,
         request: Request<proto::DiffRuntimeConfigRequest>,
     ) -> Result<Response<proto::DiffRuntimeConfigResponse>, Status> {
+        set_request_summary(
+            &request,
+            diff_runtime_config_summary(&request.get_ref().candidate_toml),
+        );
         let candidate_toml = request.into_inner().candidate_toml;
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
@@ -57,6 +62,7 @@ impl proto::config_service_server::ConfigService for ConfigService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::GrpcAuditHandle;
     use proto::config_service_server::ConfigService as _;
 
     #[tokio::test]
@@ -99,6 +105,77 @@ mod tests {
         assert!(resp.has_restart_required_changes);
         assert_eq!(resp.human_text, "Restart-required changes:\n");
         assert_eq!(resp.diff_json, "{\"has_any_changes\":true}");
+    }
+
+    #[tokio::test]
+    async fn diff_runtime_config_audit_summary_redacts_candidate_toml() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let svc = ConfigService::new(tx);
+        tokio::spawn(async move {
+            let Some(PeerManagerCommand::DiffRuntimeConfig { reply, .. }) = rx.recv().await else {
+                panic!("expected DiffRuntimeConfig command");
+            };
+            let _ = reply.send(Ok(RuntimeConfigDiff {
+                has_actionable_changes: false,
+                has_reload_applied_changes: false,
+                has_restart_required_changes: false,
+                has_informational_changes: false,
+                has_any_changes: false,
+                human_text: String::new(),
+                diff_json: "{}".to_string(),
+            }));
+        });
+
+        let audit_handle = GrpcAuditHandle::default();
+        let mut request = Request::new(proto::DiffRuntimeConfigRequest {
+            candidate_toml: "[global]\nmd5_password = \"secret\"\n".to_string(),
+        });
+        request.extensions_mut().insert(audit_handle.clone());
+
+        svc.diff_runtime_config(request).await.unwrap();
+
+        let summary = audit_handle.summary().expect("audit summary missing");
+        assert!(summary.as_str().contains("candidate_toml=<redacted>"));
+        assert!(summary.as_str().contains("candidate_toml_bytes="));
+        assert!(!summary.as_str().contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn diff_runtime_config_audit_summary_redacts_tcp_ao_key() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let svc = ConfigService::new(tx);
+        tokio::spawn(async move {
+            let Some(PeerManagerCommand::DiffRuntimeConfig { reply, .. }) = rx.recv().await else {
+                panic!("expected DiffRuntimeConfig command");
+            };
+            let _ = reply.send(Ok(RuntimeConfigDiff {
+                has_actionable_changes: false,
+                has_reload_applied_changes: false,
+                has_restart_required_changes: false,
+                has_informational_changes: false,
+                has_any_changes: false,
+                human_text: String::new(),
+                diff_json: "{}".to_string(),
+            }));
+        });
+
+        let audit_handle = GrpcAuditHandle::default();
+        let mut request = Request::new(proto::DiffRuntimeConfigRequest {
+            candidate_toml: r#"
+[[neighbors]]
+address = "192.0.2.1"
+tcp_ao = { key = "ao-secret", algorithm = "hmac-sha-1-96" }
+"#
+            .to_string(),
+        });
+        request.extensions_mut().insert(audit_handle.clone());
+
+        svc.diff_runtime_config(request).await.unwrap();
+
+        let summary = audit_handle.summary().expect("audit summary missing");
+        assert!(summary.as_str().contains("candidate_toml=<redacted>"));
+        assert!(!summary.as_str().contains("ao-secret"));
+        assert!(!summary.as_str().contains("hmac-sha"));
     }
 
     #[tokio::test]
