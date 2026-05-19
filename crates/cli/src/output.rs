@@ -322,6 +322,10 @@ pub struct JsonRouteEvent {
     pub timestamp: String,
     #[serde(skip_serializing_if = "is_zero")]
     pub path_id: u32,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub missed_count: u64,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub reason: String,
 }
 
 fn is_zero_u64(v: &u64) -> bool {

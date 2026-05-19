@@ -14,10 +14,8 @@ mod convert;
 mod dataplane;
 mod filters;
 
-use convert::{
-    policy_event_to_bgp_event, route_event_to_bgp_event, session_event_to_bgp_event,
-    stream_lag_bgp_event,
-};
+use convert::{policy_event_to_bgp_event, session_event_to_bgp_event};
+pub(crate) use convert::{route_event_to_bgp_event, stream_lag_bgp_event};
 use dataplane::spawn_dataplane_poller;
 #[cfg(test)]
 use dataplane::{DataplaneSummary, dataplane_summaries};

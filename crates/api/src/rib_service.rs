@@ -9,6 +9,7 @@ use tokio_stream::{Stream, StreamExt, wrappers::BroadcastStream};
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
+use crate::event_service::{route_event_to_bgp_event, stream_lag_bgp_event};
 use crate::proto;
 use rustbgpd_rib::{
     EvpnRibRoute, ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision, FlowSpecRoute,
@@ -737,64 +738,6 @@ fn route_event_matches_watch_filter(
     true
 }
 
-fn route_event_bgp_event_type(event_type: i32) -> proto::BgpEventType {
-    match proto::RouteEventType::try_from(event_type) {
-        Ok(proto::RouteEventType::Added) => proto::BgpEventType::RouteAdded,
-        Ok(proto::RouteEventType::Withdrawn) => proto::BgpEventType::RouteWithdrawn,
-        Ok(proto::RouteEventType::BestChanged) => proto::BgpEventType::RouteBestChanged,
-        Ok(proto::RouteEventType::Unspecified) | Err(_) => proto::BgpEventType::Unspecified,
-    }
-}
-
-fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto::BgpEvent {
-    let route = route_event_to_proto(event);
-    let event_type = route_event_bgp_event_type(route.event_type);
-    let label = match event_type {
-        proto::BgpEventType::RouteAdded => "added",
-        proto::BgpEventType::RouteWithdrawn => "withdrawn",
-        proto::BgpEventType::RouteBestChanged => "best changed",
-        _ => "changed",
-    };
-    let summary = format!("route {label} {}/{}", route.prefix, route.prefix_length);
-
-    proto::BgpEvent {
-        timestamp: route.timestamp.clone(),
-        category: proto::EventCategory::Route as i32,
-        event_type: event_type as i32,
-        severity: proto::EventSeverity::Info as i32,
-        peer_address: route.peer_address.clone(),
-        previous_peer_address: route.previous_peer_address.clone(),
-        prefix: route.prefix.clone(),
-        prefix_length: route.prefix_length,
-        afi_safi: route.afi_safi,
-        summary,
-        payload: Some(proto::bgp_event::Payload::Route(route)),
-    }
-}
-
-fn route_stream_lag_bgp_event(missed_count: u64) -> proto::BgpEvent {
-    let summary = format!("route event stream lagged; missed {missed_count} event(s)");
-    proto::BgpEvent {
-        timestamp: rustbgpd_rib::event::unix_timestamp_now(),
-        category: proto::EventCategory::Route as i32,
-        event_type: proto::BgpEventType::StreamLagged as i32,
-        severity: proto::EventSeverity::Warning as i32,
-        peer_address: String::new(),
-        previous_peer_address: String::new(),
-        prefix: String::new(),
-        prefix_length: 0,
-        afi_safi: proto::AddressFamily::Unspecified as i32,
-        summary: summary.clone(),
-        payload: Some(proto::bgp_event::Payload::StreamLag(
-            proto::StreamLagEvent {
-                source_category: proto::EventCategory::Route as i32,
-                missed_count,
-                reason: summary,
-            },
-        )),
-    }
-}
-
 pub(crate) fn route_event_afi_filter(afi_safi: i32) -> Result<Option<Afi>, Status> {
     match afi_safi {
         0 => Ok(None),
@@ -1100,7 +1043,10 @@ impl proto::rib_service_server::RibService for RibService {
                     missed,
                     "WatchRouteEvents subscriber lagged, emitting missed-event signal"
                 );
-                Some(Ok(route_stream_lag_bgp_event(missed)))
+                Some(Ok(stream_lag_bgp_event(
+                    proto::EventCategory::Route,
+                    missed,
+                )))
             }
         });
 

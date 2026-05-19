@@ -10,7 +10,7 @@ use super::filters::{
     session_notification_event_type_to_bgp_event_type,
 };
 
-pub(super) fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto::BgpEvent {
+pub(crate) fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto::BgpEvent {
     let event_type = route_event_type_to_bgp_event_type(event.event_type);
     let route = route_event_to_proto(event);
     let summary = format!(
@@ -172,7 +172,7 @@ pub(super) fn policy_event_to_bgp_event(event: PolicyEvent) -> proto::BgpEvent {
     }
 }
 
-pub(super) fn stream_lag_bgp_event(
+pub(crate) fn stream_lag_bgp_event(
     source_category: proto::EventCategory,
     missed_count: u64,
 ) -> proto::BgpEvent {

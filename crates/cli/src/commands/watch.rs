@@ -5,7 +5,7 @@ use crate::proto::event_service_client::EventServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddressFamily, BgpEvent, BgpEventType, EventCategory, ListPolicyEventsRequest,
-    ListRouteEventsRequest, ListSessionEventsRequest, RouteEvent, RouteEventType,
+    ListRouteEventsRequest, ListSessionEventsRequest, RouteEvent, RouteEventType, StreamLagEvent,
     WatchEventsRequest, WatchRoutesRequest,
 };
 use std::net::IpAddr;
@@ -39,6 +39,8 @@ fn json_event(event: &RouteEvent) -> JsonRouteEvent {
         afi_safi: output::format_family(event.afi_safi).to_string(),
         timestamp: event.timestamp.clone(),
         path_id: event.path_id,
+        missed_count: 0,
+        reason: String::new(),
     }
 }
 
@@ -398,11 +400,48 @@ fn print_bgp_event(event: &BgpEvent, json: bool) {
     println!("{}", format_bgp_event_line(event));
 }
 
+fn json_route_stream_lag_event(event: &BgpEvent, lag: &StreamLagEvent) -> JsonRouteEvent {
+    JsonRouteEvent {
+        event_id: 0,
+        event_type: bgp_event_type_display_label(event.event_type).to_string(),
+        prefix: String::new(),
+        peer_address: String::new(),
+        previous_peer_address: String::new(),
+        afi_safi: output::format_family(event.afi_safi).to_string(),
+        timestamp: event.timestamp.clone(),
+        path_id: 0,
+        missed_count: lag.missed_count,
+        reason: lag.reason.clone(),
+    }
+}
+
+fn json_route_watch_event(event: &BgpEvent) -> serde_json::Value {
+    match event.payload.as_ref() {
+        Some(crate::proto::bgp_event::Payload::Route(route)) => {
+            serde_json::to_value(json_event(route)).expect("failed to serialize route event")
+        }
+        Some(crate::proto::bgp_event::Payload::StreamLag(lag)) => {
+            serde_json::to_value(json_route_stream_lag_event(event, lag))
+                .expect("failed to serialize route stream lag event")
+        }
+        _ => json_bgp_event(event),
+    }
+}
+
 fn print_route_watch_event(event: &BgpEvent, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&json_route_watch_event(event))
+                .expect("failed to serialize route watch event as JSON")
+        );
+        return;
+    }
+
     if let Some(crate::proto::bgp_event::Payload::Route(route)) = event.payload.as_ref() {
-        print_event(route, json);
+        print_event(route, false);
     } else {
-        print_bgp_event(event, json);
+        print_bgp_event(event, false);
     }
 }
 
@@ -939,6 +978,8 @@ mod tests {
         assert_eq!(value["afi_safi"], "ipv4_unicast");
         assert!(value.get("previous_peer_address").is_none());
         assert!(value.get("path_id").is_none());
+        assert!(value.get("missed_count").is_none());
+        assert!(value.get("reason").is_none());
     }
 
     #[test]
@@ -1042,6 +1083,36 @@ mod tests {
         assert_eq!(value["source_category"], "route");
         assert_eq!(value["missed_count"], 7);
         assert!(value["afi_safi"].is_null());
+    }
+
+    #[test]
+    fn json_route_watch_stream_lag_uses_route_event_shape() {
+        let event = BgpEvent {
+            timestamp: "2".to_string(),
+            category: EventCategory::Route as i32,
+            event_type: BgpEventType::StreamLagged as i32,
+            severity: 2,
+            afi_safi: AddressFamily::Unspecified as i32,
+            summary: "route event stream lagged; missed 7 event(s)".to_string(),
+            payload: Some(crate::proto::bgp_event::Payload::StreamLag(
+                crate::proto::StreamLagEvent {
+                    source_category: EventCategory::Route as i32,
+                    missed_count: 7,
+                    reason: "route event stream lagged; missed 7 event(s)".to_string(),
+                },
+            )),
+            ..Default::default()
+        };
+
+        let value = json_route_watch_event(&event);
+        assert_eq!(value["event_type"], "stream_lagged");
+        assert_eq!(value["missed_count"], 7);
+        assert_eq!(
+            value["reason"],
+            "route event stream lagged; missed 7 event(s)"
+        );
+        assert!(value.get("category").is_none());
+        assert!(value.get("severity").is_none());
     }
 
     #[test]
