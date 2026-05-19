@@ -219,11 +219,14 @@ withdraws any locally-originated Type 2 MAC-only and MAC+IP routes for
 the offending `(VNI, MAC)`, suppresses future local originations for
 that key, and retries after `recovery_seconds`.
 
-The action is intentionally scoped to local origination. The EVPN
-Loc-RIB, RR reflection, `ListEvpnRoutes`, and receive-side dataplane
-projection remain visible and unfiltered. Full remote-route processing
-suppression / dataplane loop-protection is tracked separately because it
-crosses the RIB projection and Linux dataplane boundaries.
+The first receive-side follow-up publishes the active duplicate-MAC
+quarantine set to the dataplane supervisor. The supervisor filters
+matching Type 2 `(VNI, MAC)` entries out of remote-FDB intent so Linux
+FDB / NHG reconciliation stops programming a forwarding path toward a
+quarantined remote MAC. The EVPN Loc-RIB, RR reflection, and
+`ListEvpnRoutes` remain visible; full BGP route-processing suppression,
+kernel drop / filter primitives, and an optional manual clear API remain
+tracked separately.
 
 ## Consequences
 

@@ -946,6 +946,11 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             .expect("EVPN IP-VRFs re-resolve cleanly after Config::validate"),
     );
 
+    let (evpn_duplicate_mac_quarantine_tx, evpn_duplicate_mac_quarantine_rx) =
+        tokio::sync::watch::channel(std::sync::Arc::new(std::collections::BTreeSet::<
+            rustbgpd_evpn::DuplicateMacKey,
+        >::new()));
+
     // EVPN Linux dataplane reconciler (Gate 7b). Returns None when
     // [[evpn_instances]] is empty — RR-only deployments don't open a
     // netlink socket and don't spawn the actor. The handle is moved
@@ -957,13 +962,14 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         cfg.actor_config.apply_bum_enforcement = config.apply_bum_enforcement;
         cfg
     };
-    let mut evpn_dataplane_handle = evpn_dataplane::spawn(
+    let mut evpn_dataplane_handle = evpn_dataplane::spawn_with_quarantine(
         supervisor_config,
         &evpn_instances,
         &evpn_ip_vrfs,
         rib_tx.clone(),
         metrics.clone(),
         evpn_dataplane_shutdown.clone(),
+        evpn_duplicate_mac_quarantine_rx,
     )
     .await;
 
@@ -1005,7 +1011,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         std::sync::Arc::new(map)
     };
     let evpn_originator_handle = if let Some(handle) = evpn_dataplane_handle.as_mut() {
-        evpn_originator::spawn(
+        evpn_originator::spawn_with_quarantine(
             evpn_originator::OriginatorConfig::default(),
             &evpn_instances,
             rib_tx.clone(),
@@ -1014,6 +1020,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             evpn_originated_local_mac_counts.clone(),
             evpn_originator_shutdown.clone(),
             vni_to_esi.clone(),
+            evpn_duplicate_mac_quarantine_tx.clone(),
         )
     } else {
         None
