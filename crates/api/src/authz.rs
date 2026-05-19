@@ -536,6 +536,8 @@ mod tests {
 
     const PROTO: &str = include_str!("../../../proto/rustbgpd.proto");
     const INVENTORY_JSON: &str = include_str!("../../../docs/grpc-method-inventory.json");
+    const AUTHZ_SOURCE_PATH: &str = "crates/api/src/authz.rs";
+    const PROTO_PATH: &str = "proto/rustbgpd.proto";
 
     fn proto_package_from(proto: &str) -> String {
         proto
@@ -600,9 +602,9 @@ mod tests {
 
         json!({
             "schema_version": 1,
-            "package": "rustbgpd.v1",
-            "source": "crates/api/src/authz.rs",
-            "proto": "proto/rustbgpd.proto",
+            "package": proto_package_from(PROTO),
+            "source": AUTHZ_SOURCE_PATH,
+            "proto": PROTO_PATH,
             "method_count": METHODS.len(),
             "tier_counts": {
                 "read": method_count_by_tier(AuthTier::Read),
