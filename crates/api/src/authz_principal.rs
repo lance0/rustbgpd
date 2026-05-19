@@ -28,7 +28,9 @@ pub enum PrincipalExtractionError {
 ///
 /// Priority order is URI SAN with `rustbgpd` scheme, then email SAN,
 /// then Subject Common Name. The full URI SAN string is used as the
-/// principal so role-map entries can distinguish URI namespaces.
+/// principal so role-map entries can distinguish URI namespaces. Unsafe
+/// candidate values are skipped so a malformed higher-priority name cannot
+/// mask a later safe principal.
 ///
 /// # Errors
 ///
@@ -52,29 +54,40 @@ where
 /// Returns [`PrincipalExtractionError::InvalidCertificate`] when the
 /// DER cannot be parsed as X.509, or
 /// [`PrincipalExtractionError::MissingPrincipal`] when no supported
-/// principal field is present.
+/// principal field is present. Returns
+/// [`PrincipalExtractionError::UnsafePrincipal`] when supported principal
+/// fields exist but none are safe to log or match.
 pub fn principal_from_der(der: &[u8]) -> Result<String, PrincipalExtractionError> {
     let (_, cert) = X509Certificate::from_der(der)
         .map_err(|err| PrincipalExtractionError::InvalidCertificate(err.to_string()))?;
     let san = cert
         .subject_alternative_name()
         .map_err(|err| PrincipalExtractionError::InvalidCertificate(err.to_string()))?;
+    let mut tracker = PrincipalScan::default();
 
     if let Some(san) = san.as_ref() {
-        if let Some(principal) = rustbgpd_uri_san(&san.value.general_names)? {
+        if let Some(principal) = rustbgpd_uri_san(&san.value.general_names, &mut tracker) {
             return Ok(principal);
         }
-        if let Some(principal) = email_san(&san.value.general_names)? {
+        if let Some(principal) = email_san(&san.value.general_names, &mut tracker) {
             return Ok(principal);
         }
     }
-    if let Some(principal) = subject_common_name(&cert)? {
+    if let Some(principal) = subject_common_name(&cert, &mut tracker)? {
         return Ok(principal);
+    }
+    if tracker.unsafe_candidate {
+        return Err(PrincipalExtractionError::UnsafePrincipal);
     }
     Err(PrincipalExtractionError::MissingPrincipal)
 }
 
-fn rustbgpd_uri_san(names: &[GeneralName<'_>]) -> Result<Option<String>, PrincipalExtractionError> {
+#[derive(Default)]
+struct PrincipalScan {
+    unsafe_candidate: bool,
+}
+
+fn rustbgpd_uri_san(names: &[GeneralName<'_>], scan: &mut PrincipalScan) -> Option<String> {
     for name in names {
         let candidate = match name {
             GeneralName::URI(uri)
@@ -84,32 +97,33 @@ fn rustbgpd_uri_san(names: &[GeneralName<'_>]) -> Result<Option<String>, Princip
             }
             _ => None,
         };
-        if let Some(principal) = sanitize_principal(candidate)? {
-            return Ok(Some(principal));
+        if let Some(principal) = sanitize_principal(candidate, scan) {
+            return Some(principal);
         }
     }
-    Ok(None)
+    None
 }
 
-fn email_san(names: &[GeneralName<'_>]) -> Result<Option<String>, PrincipalExtractionError> {
+fn email_san(names: &[GeneralName<'_>], scan: &mut PrincipalScan) -> Option<String> {
     for name in names {
         if let GeneralName::RFC822Name(email) = name
-            && let Some(principal) = sanitize_principal(Some(*email))?
+            && let Some(principal) = sanitize_principal(Some(*email), scan)
         {
-            return Ok(Some(principal));
+            return Some(principal);
         }
     }
-    Ok(None)
+    None
 }
 
 fn subject_common_name(
     cert: &X509Certificate<'_>,
+    scan: &mut PrincipalScan,
 ) -> Result<Option<String>, PrincipalExtractionError> {
     for cn in cert.subject().iter_common_name() {
         let cn = cn
             .as_str()
             .map_err(|err| PrincipalExtractionError::InvalidCertificate(err.to_string()))?;
-        if let Some(principal) = sanitize_principal(Some(cn))? {
+        if let Some(principal) = sanitize_principal(Some(cn), scan) {
             return Ok(Some(principal));
         }
     }
@@ -120,18 +134,17 @@ fn uri_scheme(uri: &str) -> Option<&str> {
     uri.split_once(':').map(|(scheme, _)| scheme)
 }
 
-fn sanitize_principal(value: Option<&str>) -> Result<Option<String>, PrincipalExtractionError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
+fn sanitize_principal(value: Option<&str>, scan: &mut PrincipalScan) -> Option<String> {
+    let value = value?;
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Ok(None);
+        return None;
     }
     if trimmed.len() > MAX_PRINCIPAL_LEN || trimmed.chars().any(char::is_control) {
-        return Err(PrincipalExtractionError::UnsafePrincipal);
+        scan.unsafe_candidate = true;
+        return None;
     }
-    Ok(Some(trimmed.to_string()))
+    Some(trimmed.to_string())
 }
 
 #[cfg(test)]
@@ -183,6 +196,31 @@ mod tests {
         );
 
         assert_eq!(principal_from_der(&der).unwrap(), "alice@example.com");
+    }
+
+    #[test]
+    fn principal_skips_unsafe_uri_san_for_safe_email_san() {
+        let unsafe_uri = format!("rustbgpd://{}", "a".repeat(MAX_PRINCIPAL_LEN + 1));
+        let der = cert_with_sans(
+            vec![
+                SanType::URI(unsafe_uri.try_into().unwrap()),
+                SanType::Rfc822Name("alice@example.com".try_into().unwrap()),
+            ],
+            "alice-cn",
+        );
+
+        assert_eq!(principal_from_der(&der).unwrap(), "alice@example.com");
+    }
+
+    #[test]
+    fn principal_skips_unsafe_email_san_for_safe_cn() {
+        let unsafe_email = format!("{}@example.com", "a".repeat(MAX_PRINCIPAL_LEN + 1));
+        let der = cert_with_sans(
+            vec![SanType::Rfc822Name(unsafe_email.try_into().unwrap())],
+            "alice-cn",
+        );
+
+        assert_eq!(principal_from_der(&der).unwrap(), "alice-cn");
     }
 
     #[test]
