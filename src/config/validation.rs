@@ -933,7 +933,7 @@ fn validate_grpc_tier_enforcement(config: &Config) -> Result<(), ConfigError> {
                      default) requires at least one [security.grpc.roles] \
                      entry — see docs/CONFIGURATION.md for the migration \
                      checklist, or opt back into legacy with \
-                     `[security.grpc] enforcement = \"legacy\"`"
+                     `security.grpc.enforcement = \"legacy\"`"
                 .to_string(),
         });
     }
@@ -948,8 +948,8 @@ fn validate_grpc_tier_enforcement(config: &Config) -> Result<(), ConfigError> {
                      or a configured principal; the implicit UDS listener \
                      has no role identity. Configure \
                      [global.telemetry.grpc_uds] with `principal`, or opt \
-                     back into legacy with `[security.grpc] enforcement = \
-                     \"legacy\"`"
+                     back into legacy with \
+                     `security.grpc.enforcement = \"legacy\"`"
                 .to_string(),
         });
     }

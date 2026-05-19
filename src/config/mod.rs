@@ -963,22 +963,21 @@ const fn access_mode_compatibility_max_tier(access_mode: GrpcAccessMode) -> Grpc
 
 /// Test-only auto-inject for the v0.24.0 `enforcement = "tier"`
 /// default flip. When compiled with `#[cfg(test)]` and the supplied
-/// TOML contains no `[security.grpc]` block, prepends an explicit
-/// `enforcement = "legacy"` so existing test fixtures continue to
-/// exercise pre-flip behavior without per-test churn. Production
-/// builds compile this as an identity passthrough — operators see
-/// the real default flip without any test-only divergence.
+/// TOML declares no `security.grpc` table or sub-table, appends an
+/// explicit `enforcement = "legacy"` so existing test fixtures
+/// continue to exercise pre-flip behavior without per-test churn.
+/// Production builds compile this as an identity passthrough —
+/// operators see the real default flip without any test-only
+/// divergence.
 #[cfg(test)]
 fn test_only_inject_legacy_grpc_security(content: &str) -> std::borrow::Cow<'_, str> {
-    // The substring check is intentionally exact: `[security.grpc]`
-    // as a TOML table header. The `[security.grpc.roles]` sub-table
-    // also matches, but that's fine — an operator providing roles
-    // without explicit enforcement gets the production default
-    // (Tier), same as production.
-    if content.contains("[security.grpc]\n")
-        || content.contains("[security.grpc] ")
-        || content.contains("[security.grpc]\r\n")
-    {
+    // Skip the inject if the TOML declares ANY `security.grpc`
+    // configuration — the `[security.grpc]` table header or any
+    // sub-table such as `[security.grpc.roles]`. A fixture that
+    // configures roles but omits `enforcement` deliberately relies
+    // on the production default (Tier), so we must not override it
+    // with a legacy inject.
+    if content.contains("[security.grpc]") || content.contains("[security.grpc.") {
         std::borrow::Cow::Borrowed(content)
     } else {
         // Append the injected table to the END of the content. A
