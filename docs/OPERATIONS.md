@@ -281,15 +281,15 @@ via gRPC `GetMetrics` and `GetHealth` RPCs.
 
 | Metric | What it tells you |
 |--------|-------------------|
-| `bgp_event_stream_lagged_total{service,source}` | Events skipped because a live stream subscriber fell behind the bounded broadcast channel. `service` is `watch_events` or `watch_routes`; `source` is `route`, `session`, or `dataplane` where applicable |
+| `bgp_event_stream_lagged_total{service,source}` | Events skipped because a live stream subscriber fell behind the bounded broadcast channel. `service` is `watch_events`, `watch_route_events`, or `watch_routes`; `source` is `route`, `session`, or `dataplane` where applicable |
 | `bgp_event_stream_subscribers{service,source}` | Current live stream subscriber count by service/source |
 | `bgp_route_event_history_depth` | Current number of unicast route events retained for `ListRouteEvents` / `rustbgpctl events` history queries |
 | `bgp_route_event_history_capacity` | Fixed capacity of the bounded unicast route-event history ring |
 
-`WatchEvents` / `WatchRoutes` are live tails, not durable queues. Non-zero
-`bgp_event_stream_lagged_total` means at least one client missed events and
-should combine a fresh snapshot or `ListRouteEvents` query with a new live
-watch.
+`WatchEvents`, `WatchRouteEvents`, and `WatchRoutes` are live tails, not
+durable queues. Non-zero `bgp_event_stream_lagged_total` means at least one
+client missed events and should combine a fresh snapshot or `ListRouteEvents`
+query with a new live watch.
 
 ## gRPC authorization audit and resource guardrails
 
@@ -380,7 +380,7 @@ The RPCs that deserve the most attention are:
 | Class | Examples | Guardrail |
 |-------|----------|-----------|
 | Large sensitive reads | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ListEvpnRoutes`, `ListFlowSpecRoutes`, `GetMetrics` | Prefer pagination or narrow filters, set client deadlines, and alert on sustained `sensitive_read` volume |
-| Live streams | `WatchRoutes`, `EventService.WatchEvents` | Keep clients draining, reconnect after `stream_lagged`, and alert on subscriber count or lag spikes |
+| Live streams | `WatchRoutes`, `WatchRouteEvents`, `EventService.WatchEvents` | Keep clients draining, reconnect after `stream_lagged`, and alert on subscriber count or lag spikes |
 | History queries | `ListRouteEvents`, `ListSessionEvents`, `ListPolicyEvents` | Histories are bounded and process-local; use explicit limits for dashboards |
 | Mutating calls | Neighbor, policy, peer-group, injection RPCs | Use listener `max_tier`, role enforcement, and audit alerts on `mutating` volume |
 | Operator-only calls | `Shutdown`, `TriggerMrtDump`, `SetGracefulShutdown`, selected policy/global changes | Restrict to operator principals/listeners and page on unexpected `operator_only` activity |

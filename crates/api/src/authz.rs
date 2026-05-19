@@ -401,6 +401,12 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
     ),
     method(
         "rustbgpd.v1.RibService",
+        "WatchRouteEvents",
+        "/rustbgpd.v1.RibService/WatchRouteEvents",
+        AuthTier::SensitiveRead,
+    ),
+    method(
+        "rustbgpd.v1.RibService",
         "ListFlowSpecRoutes",
         "/rustbgpd.v1.RibService/ListFlowSpecRoutes",
         AuthTier::SensitiveRead,
@@ -633,7 +639,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 66);
+        assert_eq!(METHODS.len(), 67);
     }
 
     #[test]
@@ -674,7 +680,7 @@ mod tests {
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 0);
-        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 33);
+        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 34);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 15);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 18);
     }

@@ -9,6 +9,7 @@ use tokio_stream::{Stream, StreamExt, wrappers::BroadcastStream};
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
+use crate::event_service::{route_event_to_bgp_event, stream_lag_bgp_event};
 use crate::proto;
 use rustbgpd_rib::{
     EvpnRibRoute, ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision, FlowSpecRoute,
@@ -713,6 +714,30 @@ pub(crate) fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::Ro
     }
 }
 
+fn route_event_matches_watch_filter(
+    event: &rustbgpd_rib::RouteEvent,
+    afi_safi_filter: i32,
+    peer_filter: Option<IpAddr>,
+) -> bool {
+    if afi_safi_filter != 0 {
+        let is_v4 = matches!(event.prefix, Prefix::V4(_));
+        let want_v4 = afi_safi_filter == proto::AddressFamily::Ipv4Unicast as i32;
+        if is_v4 != want_v4 {
+            return false;
+        }
+    }
+
+    if let Some(filter_addr) = peer_filter {
+        let matches_current = event.peer == Some(filter_addr);
+        let matches_previous = event.previous_peer == Some(filter_addr);
+        if !matches_current && !matches_previous {
+            return false;
+        }
+    }
+
+    true
+}
+
 pub(crate) fn route_event_afi_filter(afi_safi: i32) -> Result<Option<Afi>, Status> {
     match afi_safi {
         0 => Ok(None),
@@ -728,6 +753,8 @@ pub(crate) fn route_event_afi_filter(afi_safi: i32) -> Result<Option<Afi>, Statu
 impl proto::rib_service_server::RibService for RibService {
     type WatchRoutesStream =
         Pin<Box<dyn Stream<Item = Result<proto::RouteEvent, Status>> + Send + 'static>>;
+    type WatchRouteEventsStream =
+        Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send + 'static>>;
 
     async fn list_received_routes(
         &self,
@@ -956,27 +983,8 @@ impl proto::rib_service_server::RibService for RibService {
         let stream = BroadcastStream::new(broadcast_rx).filter_map(move |result| match result {
             Ok(event) => {
                 let _subscriber_guard = &subscriber_guard;
-                // Filter by AFI/SAFI if requested
-                if afi_safi_filter != 0 {
-                    let is_v4 = matches!(event.prefix, Prefix::V4(_));
-                    let want_v4 = afi_safi_filter == proto::AddressFamily::Ipv4Unicast as i32;
-                    if is_v4 != want_v4 {
-                        return None;
-                    }
-                }
-
-                // Filter by peer address if requested — check both current
-                // and previous peer so subscribers filtered to a specific peer
-                // see BestChanged/Withdrawn events when the route moves away.
-                if let Some(filter_addr) = peer_filter {
-                    let matches_current = event.peer == Some(filter_addr);
-                    let matches_previous = event.previous_peer == Some(filter_addr);
-                    if !matches_current && !matches_previous {
-                        return None;
-                    }
-                }
-
-                Some(Ok(route_event_to_proto(event)))
+                route_event_matches_watch_filter(&event, afi_safi_filter, peer_filter)
+                    .then(|| Ok(route_event_to_proto(event)))
             }
             Err(BroadcastStreamRecvError::Lagged(missed)) => {
                 let _subscriber_guard = &subscriber_guard;
@@ -986,6 +994,59 @@ impl proto::rib_service_server::RibService for RibService {
                     "WatchRoutes subscriber lagged, skipping missed events"
                 );
                 None
+            }
+        });
+
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn watch_route_events(
+        &self,
+        request: Request<proto::WatchRoutesRequest>,
+    ) -> Result<Response<Self::WatchRouteEventsStream>, Status> {
+        let req = request.into_inner();
+        validate_unicast_afi_safi(req.afi_safi)?;
+
+        let afi_safi_filter = req.afi_safi;
+        let peer_filter: Option<IpAddr> = if req.neighbor_address.is_empty() {
+            None
+        } else {
+            Some(
+                req.neighbor_address
+                    .parse()
+                    .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?,
+            )
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::SubscribeRouteEvents { reply: reply_tx })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+
+        let broadcast_rx = reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+
+        let metrics = self.metrics.clone();
+        let subscriber_guard = metrics.event_stream_subscriber_guard("watch_route_events", "route");
+        let stream = BroadcastStream::new(broadcast_rx).filter_map(move |result| match result {
+            Ok(event) => {
+                let _subscriber_guard = &subscriber_guard;
+                route_event_matches_watch_filter(&event, afi_safi_filter, peer_filter)
+                    .then(|| Ok(route_event_to_bgp_event(event)))
+            }
+            Err(BroadcastStreamRecvError::Lagged(missed)) => {
+                let _subscriber_guard = &subscriber_guard;
+                metrics.record_event_stream_lagged("watch_route_events", "route", missed);
+                debug!(
+                    missed,
+                    "WatchRouteEvents subscriber lagged, emitting missed-event signal"
+                );
+                Some(Ok(stream_lag_bgp_event(
+                    proto::EventCategory::Route,
+                    missed,
+                )))
             }
         });
 
@@ -1604,6 +1665,99 @@ mod tests {
         let text = gather_text(&metrics);
         assert!(text.contains(
             "bgp_event_stream_lagged_total{service=\"watch_routes\",source=\"route\"} 4"
+        ));
+    }
+
+    #[tokio::test]
+    async fn watch_route_events_emits_bgp_route_event_and_applies_filters() {
+        let metrics = BgpMetrics::new();
+        let (svc, events_tx) = make_watch_routes_service(metrics);
+
+        let response = svc
+            .watch_route_events(Request::new(proto::WatchRoutesRequest {
+                neighbor_address: "192.0.2.1".to_string(),
+                afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        events_tx
+            .send(route_event(
+                Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 64)),
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            ))
+            .unwrap();
+        events_tx
+            .send(route_event(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 24)),
+                IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+            ))
+            .unwrap();
+        events_tx
+            .send(route_event(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 2, 0, 0), 24)),
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            ))
+            .unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(event.category, proto::EventCategory::Route as i32);
+        assert_eq!(event.event_type, proto::BgpEventType::RouteAdded as i32);
+        assert_eq!(event.peer_address, "192.0.2.1");
+        assert_eq!(event.prefix, "10.2.0.0");
+        assert_eq!(event.prefix_length, 24);
+        assert_eq!(event.summary, "route added 10.2.0.0/24");
+        assert!(matches!(
+            event.payload,
+            Some(proto::bgp_event::Payload::Route(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn watch_route_events_lagged_subscriber_emits_signal() {
+        let metrics = BgpMetrics::new();
+        let (svc, events_tx) = make_watch_routes_service(metrics.clone());
+
+        let response = svc
+            .watch_route_events(Request::new(proto::WatchRoutesRequest::default()))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        for index in 0..20 {
+            events_tx
+                .send(route_event(
+                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 3, 0, index), 32)),
+                    IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+                ))
+                .unwrap();
+        }
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.category, proto::EventCategory::Route as i32);
+        assert_eq!(event.event_type, proto::BgpEventType::StreamLagged as i32);
+        assert_eq!(event.severity, proto::EventSeverity::Warning as i32);
+        match event.payload {
+            Some(proto::bgp_event::Payload::StreamLag(lag)) => {
+                assert_eq!(lag.source_category, proto::EventCategory::Route as i32);
+                assert_eq!(lag.missed_count, 4);
+            }
+            other => panic!("expected stream lag payload, got {other:?}"),
+        }
+
+        let text = gather_text(&metrics);
+        assert!(text.contains(
+            "bgp_event_stream_lagged_total{service=\"watch_route_events\",source=\"route\"} 4"
         ));
     }
 
