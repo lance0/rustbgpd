@@ -1,0 +1,165 @@
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr};
+
+use rustbgpd_api::peer_types::PeerInfo;
+use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
+use rustbgpd_fsm::SessionState;
+use rustbgpd_transport::{PeerHandle, PeerSessionState};
+use tracing::warn;
+
+use super::{ManagedPeer, PEER_QUERY_TIMEOUT, PeerManager};
+
+/// Build a `PeerInfo` snapshot from config + an optional fresh
+/// `PeerSessionState`. `session_state = None` means the bounded
+/// `query_state` either timed out (peer parked on TCP write) or its task
+/// has already exited; in both cases we surface `state = Idle, stale =
+/// true` so consumers know the field isn't authoritative.
+fn build_peer_info(
+    address: IpAddr,
+    managed: &ManagedPeer,
+    session_state: Option<&PeerSessionState>,
+) -> PeerInfo {
+    let stale = session_state.is_none();
+    PeerInfo {
+        address,
+        remote_asn: managed.remote_asn,
+        description: managed.description.clone(),
+        peer_group: managed.peer_group.clone(),
+        state: session_state.map_or(SessionState::Idle, |s| s.fsm_state),
+        enabled: managed.enabled,
+        prefix_count: session_state.map_or(0, |s| s.prefix_count),
+        hold_time: managed.hold_time,
+        max_prefixes: managed.max_prefixes,
+        families: managed.transport_config.peer.families.clone(),
+        remove_private_as: managed.transport_config.remove_private_as,
+        route_server_client: managed.transport_config.route_server_client,
+        add_path_receive: managed.transport_config.peer.add_path_receive,
+        add_path_send: managed.transport_config.peer.add_path_send,
+        add_path_send_max: managed.transport_config.peer.add_path_send_max,
+        updates_received: session_state.map_or(0, |s| s.updates_received),
+        updates_sent: session_state.map_or(0, |s| s.updates_sent),
+        notifications_received: session_state.map_or(0, |s| s.notifications_received),
+        notifications_sent: session_state.map_or(0, |s| s.notifications_sent),
+        flap_count: session_state.map_or(0, |s| s.flap_count),
+        uptime_secs: session_state.map_or(0, |s| s.uptime_secs),
+        last_error: session_state.map_or_else(String::new, |s| s.last_error.clone()),
+        is_dynamic: managed.is_dynamic,
+        stale,
+    }
+}
+
+/// Run a bounded `query_state` against every peer concurrently.
+///
+/// Each query is bounded by [`PEER_QUERY_TIMEOUT`]; a peer whose session
+/// task is parked on TCP write (or whose command channel is full) lands
+/// in the result map as `Some(addr) -> None`. A peer whose task spawn
+/// failed entirely is absent from the map. Both cases are treated as
+/// `stale = true` by [`build_peer_info`].
+async fn collect_session_states(
+    peers: &HashMap<IpAddr, ManagedPeer>,
+) -> HashMap<IpAddr, Option<PeerSessionState>> {
+    let mut tasks: Vec<tokio::task::JoinHandle<(IpAddr, Option<PeerSessionState>)>> =
+        Vec::with_capacity(peers.len());
+    for (&addr, managed) in peers {
+        let commands = managed.handle.commands_sender();
+        tasks.push(tokio::spawn(async move {
+            let state = PeerHandle::query_state_with(commands, PEER_QUERY_TIMEOUT).await;
+            (addr, state)
+        }));
+    }
+
+    let mut out = HashMap::with_capacity(tasks.len());
+    for task in tasks {
+        match task.await {
+            Ok((addr, state)) => {
+                out.insert(addr, state);
+            }
+            Err(e) => {
+                warn!(error = %e, "query_state task join failed");
+            }
+        }
+    }
+    out
+}
+
+impl PeerManager {
+    pub(super) async fn get_peer_info(&self, address: IpAddr) -> Option<PeerInfo> {
+        let managed = self.peers.get(&address)?;
+        let session_state = managed.handle.query_state_timeout(PEER_QUERY_TIMEOUT).await;
+        Some(build_peer_info(address, managed, session_state.as_ref()))
+    }
+
+    pub(super) async fn list_peers(&self) -> Vec<PeerInfo> {
+        // Concurrent fan-out: one bounded `query_state` per peer in parallel.
+        // Sequential `.await` per peer was the GetHealth wedge — a session
+        // task parked on TCP write back-pressure couldn't service its
+        // QueryState command, and the loop hung on the first such peer.
+        // Spawning per-peer tasks needs `'static` futures, so we drive the
+        // query through `PeerHandle::query_state_with` over a cloned command
+        // sender (the sender is `Clone`; the handle proper is not).
+        let states = collect_session_states(&self.peers).await;
+
+        let mut infos = Vec::with_capacity(self.peers.len());
+        for (&addr, managed) in &self.peers {
+            let session_state = states.get(&addr).and_then(Option::as_ref);
+            infos.push(build_peer_info(addr, managed, session_state));
+        }
+        infos
+    }
+
+    fn bmp_peer_info(
+        peer_addr: IpAddr,
+        remote_asn: u32,
+        remote_router_id: Option<Ipv4Addr>,
+        four_octet_as: Option<bool>,
+    ) -> BmpPeerInfo {
+        BmpPeerInfo {
+            peer_addr,
+            peer_asn: remote_asn,
+            peer_bgp_id: remote_router_id.unwrap_or(Ipv4Addr::UNSPECIFIED),
+            peer_type: BmpPeerType::Global,
+            is_ipv6: peer_addr.is_ipv6(),
+            is_post_policy: false,
+            is_as4: four_octet_as.unwrap_or(true),
+            timestamp: std::time::SystemTime::now(),
+        }
+    }
+
+    pub(super) async fn emit_periodic_bmp_stats(&self) {
+        let Some(ref bmp_tx) = self.bmp_tx else {
+            return;
+        };
+
+        // Same fan-out pattern as `list_peers` — sequential awaits would let
+        // any one TCP-back-pressured peer block the per-minute BMP tick and,
+        // through it, every other admin command queued behind the BMP arm.
+        let states = collect_session_states(&self.peers).await;
+        for (&peer_addr, managed) in &self.peers {
+            let Some(Some(state)) = states.get(&peer_addr) else {
+                continue;
+            };
+            if state.fsm_state != SessionState::Established {
+                continue;
+            }
+
+            let prefix_count = u64::try_from(state.prefix_count).unwrap_or(u64::MAX);
+            let event = BmpEvent::StatsReport {
+                peer_info: Self::bmp_peer_info(
+                    peer_addr,
+                    managed.remote_asn,
+                    state.remote_router_id,
+                    state.four_octet_as,
+                ),
+                adj_rib_in_routes: prefix_count,
+            };
+
+            if let Err(e) = bmp_tx.try_send(event) {
+                warn!(
+                    peer = %peer_addr,
+                    error = %e,
+                    "BMP event channel full or closed, dropping periodic stats report"
+                );
+            }
+        }
+    }
+}
