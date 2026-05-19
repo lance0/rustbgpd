@@ -274,9 +274,14 @@ echo "PE2 evpn_df_role_changes_total before PE1 shutdown: $PE2_BEFORE"
 echo "Stopping PE1 rustbgpd process to force DF promotion on PE2..."
 stop_rustbgpd_daemon "$PE1"
 
-echo "Waiting up to 60s for PE2 to promote to DF..."
+echo "Waiting up to 120s for PE2 to promote to DF..."
+# DF re-election depends on BGP hold-timer expiry on PE2 after PE1's
+# session dies; under host contention (CI runner running multiple
+# workloads concurrently) that can slip past a tight 60s window.
+# Widening to 120s costs nothing in the success case and absorbs the
+# observed jitter without masking real regressions.
 assert "PE2 promotes to DF after PE1 shutdown" \
-    'wait_for_role "$PE2" df 1 60'
+    'wait_for_role "$PE2" df 1 120'
 
 # The transition counter should have advanced by at least 1.
 PE2_AFTER=$(prom_df_role_changes "$PE2")

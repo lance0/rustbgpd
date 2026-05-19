@@ -9,6 +9,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **CI interop test lifecycle now bounded-retries transient failures.**
+  Added `.github/actions/run-interop-test` composite action that wraps
+  `destroy → deploy → run → destroy-on-exit` for every M-series interop
+  job (M1, M10, M13, M14, M15, M17, M22, M24, M25, M29, M30, M34, M35,
+  M35b, M35c, M41, plus self-hosted M36 / M37 / M37+IP / M38 / M39 /
+  M40 / M42 / M43) with a 2-attempt retry on transient failure. A
+  successful retry annotates a workflow `::warning::` so the CI flake
+  stays visible in the UI rather than silently hiding. M38's
+  "PE2 promotes to DF after PE1 shutdown" gate widened from 60s to
+  120s to absorb BGP hold-timer jitter under host contention. The
+  `build-image`, MSRV, clippy, doc, and security-audit jobs are
+  intentionally **not** retried — those failures are real regressions.
+
 ### Added
 
 - **ADR-0064 machine-readable method-tier inventory.**
