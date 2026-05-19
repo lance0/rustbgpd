@@ -154,10 +154,11 @@ fn tcp_audit_context(
     addr: SocketAddr,
     access_mode: AccessMode,
     max_tier: AuthTier,
-    auth_enabled: bool,
+    auth_token: Option<&str>,
     tls_enabled: bool,
     configured_principal: Option<&str>,
 ) -> GrpcAuthAuditContext {
+    let auth_enabled = auth_token.is_some();
     let (authn, principal) = if tls_enabled {
         (GrpcAuthnKind::Mtls, "mtls-unresolved".to_string())
     } else if auth_enabled {
@@ -175,15 +176,17 @@ fn tcp_audit_context(
         authn,
         principal,
     )
+    .with_bearer_token(auth_token)
 }
 
 fn uds_audit_context(
     path: &Path,
     access_mode: AccessMode,
     max_tier: AuthTier,
-    auth_enabled: bool,
+    auth_token: Option<&str>,
     configured_principal: Option<&str>,
 ) -> GrpcAuthAuditContext {
+    let auth_enabled = auth_token.is_some();
     let (authn, principal) = if let Some(principal) = configured_principal {
         (
             if auth_enabled {
@@ -205,6 +208,7 @@ fn uds_audit_context(
         authn,
         principal,
     )
+    .with_bearer_token(auth_token)
 }
 
 #[derive(Clone, Debug)]
@@ -480,7 +484,7 @@ async fn run_tcp_listener(
         addr,
         access_mode,
         max_tier,
-        auth_token.is_some(),
+        auth_token.as_deref(),
         tls.is_some(),
         principal.as_deref(),
     );
@@ -612,13 +616,13 @@ async fn run_uds_listener(
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
 ) -> Result<(), String> {
-    let auth_enabled = auth_token.is_some();
     let uds_listener = bind_uds_listener(&path, mode)?;
+    let auth_enabled = auth_token.is_some();
     let audit_context = uds_audit_context(
         &path,
         access_mode,
         max_tier,
-        auth_enabled,
+        auth_token.as_deref(),
         principal.as_deref(),
     );
     info!(
@@ -816,7 +820,7 @@ mod tests {
             "127.0.0.1:50051".parse().unwrap(),
             AccessMode::ReadWrite,
             AuthTier::OperatorOnly,
-            true,
+            Some("secret"),
             false,
             Some("automation.example"),
         );
@@ -831,7 +835,7 @@ mod tests {
             "127.0.0.1:50051".parse().unwrap(),
             AccessMode::ReadWrite,
             AuthTier::Mutating,
-            true,
+            Some("secret"),
             true,
             Some("automation.example"),
         );
@@ -846,7 +850,7 @@ mod tests {
             Path::new("/run/rustbgpd/grpc.sock"),
             AccessMode::ReadWrite,
             AuthTier::SensitiveRead,
-            false,
+            None,
             Some("local-admin"),
         );
         assert_eq!(context.authn(), GrpcAuthnKind::Uds);

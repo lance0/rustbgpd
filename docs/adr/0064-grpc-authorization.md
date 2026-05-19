@@ -122,15 +122,11 @@ with a `max_tier` field while keeping the existing binary
 `access_mode` as a compatibility ceiling:
 
 ```toml
-[[telemetry.grpc_tcp]]
+[global.telemetry.grpc_tcp]
 address = "0.0.0.0:50051"
 max_tier = "operator_only"   # full surface
 
-[[telemetry.grpc_tcp]]
-address = "127.0.0.1:50052"
-max_tier = "sensitive_read"  # observability listener
-
-[[telemetry.grpc_uds]]
+[global.telemetry.grpc_uds]
 path = "/run/rustbgpd/inject.sock"
 max_tier = "operator_only"   # route-injection channel, UDS-scoped
 ```

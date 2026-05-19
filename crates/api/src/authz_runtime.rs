@@ -9,6 +9,7 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use rustbgpd_telemetry::BgpMetrics;
@@ -54,6 +55,7 @@ pub struct GrpcAuthAuditContext {
     max_tier: AuthTier,
     authn: GrpcAuthnKind,
     principal: String,
+    expected_bearer_header: Option<Arc<String>>,
 }
 
 impl GrpcAuthAuditContext {
@@ -72,7 +74,14 @@ impl GrpcAuthAuditContext {
             max_tier,
             authn,
             principal: principal.into(),
+            expected_bearer_header: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_bearer_token(mut self, token: Option<&str>) -> Self {
+        self.expected_bearer_header = token.map(|token| Arc::new(format!("Bearer {token}")));
+        self
     }
 
     #[cfg(test)]
@@ -88,6 +97,23 @@ impl GrpcAuthAuditContext {
     #[cfg(test)]
     pub(crate) fn max_tier(&self) -> AuthTier {
         self.max_tier
+    }
+
+    fn bearer_auth_error(&self, headers: &http::HeaderMap) -> Option<Status> {
+        let expected = self.expected_bearer_header.as_ref()?;
+        let Some(value) = headers.get("authorization") else {
+            return Some(Status::unauthenticated("missing authorization metadata"));
+        };
+        let Ok(actual) = value.to_str() else {
+            return Some(Status::unauthenticated(
+                "authorization metadata must be ASCII",
+            ));
+        };
+        if constant_time_eq(actual.as_bytes(), expected.as_bytes()) {
+            None
+        } else {
+            Some(Status::unauthenticated("invalid bearer token"))
+        }
     }
 }
 
@@ -174,6 +200,14 @@ where
         let path = req.uri().path();
         let decision = audit_decision_for_path(path);
         if decision.tier > self.context.max_tier {
+            // This layer wraps tonic's per-service interceptors. For an
+            // over-cap bearer-token request, authenticate first so
+            // invalid callers still receive UNAUTHENTICATED instead of
+            // learning listener tier details via PERMISSION_DENIED.
+            if let Some(status) = self.context.bearer_auth_error(req.headers()) {
+                let response = status.into_http::<Body>();
+                return Box::pin(async move { Ok(response) });
+            }
             record_audit_decision(path, &self.context, &self.metrics, "listener_tier_denied");
             let max_tier = self.context.max_tier.as_str();
             let tier = decision.tier.as_str();
@@ -187,6 +221,17 @@ where
         let fut = self.inner.call(req);
         Box::pin(fut)
     }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let max_len = a.len().max(b.len());
+    let mut diff = a.len() ^ b.len();
+    for idx in 0..max_len {
+        let lhs = a.get(idx).copied().unwrap_or(0);
+        let rhs = b.get(idx).copied().unwrap_or(0);
+        diff |= usize::from(lhs ^ rhs);
+    }
+    diff == 0
 }
 
 fn record_audit_decision(
@@ -382,5 +427,31 @@ mod tests {
         let response = service.call(request).await.unwrap();
         let status = tonic::Status::from_header_map(response.headers()).unwrap();
         assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn audit_layer_authenticates_bearer_token_before_listener_cap() {
+        let metrics = BgpMetrics::new();
+        let context = GrpcAuthAuditContext::new(
+            "tcp://127.0.0.1:50051",
+            "read_write",
+            AuthTier::SensitiveRead,
+            GrpcAuthnKind::BearerToken,
+            "bearer-token",
+        )
+        .with_bearer_token(Some("secret"));
+        let layer = GrpcAuthAuditLayer::new(context, metrics.clone());
+        let mut service = layer.layer(EchoService);
+        let request = Request::builder()
+            .uri("/rustbgpd.v1.NeighborService/AddNeighbor")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+        let status = tonic::Status::from_header_map(response.headers()).unwrap();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+
+        let text = gather_text(&metrics);
+        assert!(!text.contains("listener_tier_denied"));
     }
 }

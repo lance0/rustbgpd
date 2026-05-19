@@ -111,7 +111,7 @@ The API uses gRPC status codes consistently across services:
 | Code | Meaning |
 |------|---------|
 | `UNAUTHENTICATED` | Listener authentication failed: missing bearer token, non-ASCII authorization metadata, or a token mismatch |
-| `PERMISSION_DENIED` | The request reached a read-only listener but called a mutating RPC |
+| `PERMISSION_DENIED` | The request reached a read-only listener but called a mutating RPC, or the RPC method tier exceeds the listener `max_tier` ceiling |
 | `INVALID_ARGUMENT` | Client-supplied request data is malformed, missing, out of range, uses an unsupported enum value, or combines incompatible filters |
 | `NOT_FOUND` | A named or targeted resource does not exist: peer, policy, neighbor set, peer group, IP-VRF, route-event target, or injected route |
 | `ALREADY_EXISTS` | A create request targets an existing resource, currently duplicate neighbor creation |
