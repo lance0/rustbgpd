@@ -225,7 +225,8 @@ specific method if the model warrants it.
    (for example a `[security.grpc]` block that defaults to
    legacy-permissive but can opt into per-tier enforcement) so the
    cut-over is not a breaking change for everyone on the same
-   release.
+   release. That opt-in path is now the slice-5a behavior; the
+   production default flip remains a separate migration slice.
 7. **`SetGlobal` is `UNIMPLEMENTED` today.** Classifying it
    `operator_only` now sets the design constraint for whoever lands
    the implementation — otherwise the natural temptation is to ship
@@ -240,11 +241,13 @@ specific method if the model warrants it.
    `handler_invalid_argument`. mTLS listeners derive the audit principal from
    the client certificate (URI SAN → email SAN → Subject CN); non-mTLS
    listeners still emit operator-controlled principal labels.
-   `DiffRuntimeConfig` and `SetPeerGroup` request summaries mask
+   In opt-in tier mode, `principal_unmapped` and `role_tier_denied`
+   distinguish role-map denials from listener caps. `DiffRuntimeConfig`
+   and `SetPeerGroup` request summaries mask
    credential-bearing fields, including candidate TOML that may contain
    `md5_password` or `tcp_ao.key`. The external review still needs durable
    audit sink / retention guidance, optional proto credential markers, and
-   per-principal role enforcement.
+   the default enforcement flip.
 
 ## Code matrix
 

@@ -447,18 +447,19 @@ fn grpc_security_roles_parse_with_legacy_default() {
 }
 
 #[test]
-fn grpc_security_tier_enforcement_rejected_until_runtime_slice() {
+fn grpc_security_tier_enforcement_parses_with_explicit_uds_principal() {
     let toml_str = format!(
-        "{}\n[security.grpc]\nenforcement = \"tier\"\n",
+        "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"local-admin\" = \"operator\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nprincipal = \"local-admin\"\n",
         valid_toml()
     );
-    let err = parse(&toml_str).unwrap_err();
-    let ConfigError::InvalidGrpcConfig { reason } = err else {
-        panic!("expected InvalidGrpcConfig");
-    };
-    assert!(
-        reason.contains("not implemented yet"),
-        "got unexpected reason: {reason}"
+    let config = parse(&toml_str).unwrap();
+    assert_eq!(
+        config.security.grpc.enforcement,
+        GrpcEnforcementConfig::Tier
+    );
+    assert_eq!(
+        config.security.grpc.roles["local-admin"],
+        GrpcRoleConfig::Operator
     );
 }
 
@@ -476,6 +477,149 @@ fn grpc_security_empty_role_principal_rejected() {
         reason.contains("principal keys must not be empty"),
         "got unexpected reason: {reason}"
     );
+}
+
+#[test]
+fn grpc_security_reserved_unresolved_mtls_role_rejected() {
+    let toml_str = format!(
+        "{}\n[security.grpc.roles]\n\"mtls-unresolved\" = \"operator\"\n",
+        valid_toml()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    let ConfigError::InvalidGrpcConfig { reason } = err else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(
+        reason.contains("reserved principal"),
+        "got unexpected reason: {reason}"
+    );
+}
+
+#[test]
+fn grpc_security_tier_requires_roles() {
+    let toml_str = format!(
+        "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nprincipal = \"local-admin\"\n",
+        valid_toml()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    let ConfigError::InvalidGrpcConfig { reason } = err else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(
+        reason.contains("requires at least one"),
+        "got unexpected reason: {reason}"
+    );
+}
+
+#[test]
+fn grpc_security_tier_rejects_implicit_uds_without_principal() {
+    let toml_str = format!(
+        "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"local-admin\" = \"operator\"\n",
+        valid_toml()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    let ConfigError::InvalidGrpcConfig { reason } = err else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(
+        reason.contains("implicit UDS listener"),
+        "got unexpected reason: {reason}"
+    );
+}
+
+#[test]
+fn grpc_security_tier_rejects_uds_without_principal() {
+    let toml_str = format!(
+        "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"local-admin\" = \"operator\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\n",
+        valid_toml()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    let ConfigError::InvalidGrpcConfig { reason } = err else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(
+        reason.contains("requires grpc_uds.principal"),
+        "got unexpected reason: {reason}"
+    );
+}
+
+#[test]
+fn grpc_security_tier_rejects_bearer_tcp_without_principal() {
+    let token_file = NamedTempFile::new().unwrap();
+    fs::write(token_file.path(), "secret").unwrap();
+    let toml_str = format!(
+        "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"automation.example\" = \"automation\"\n\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntoken_file = {:?}\n",
+        valid_toml(),
+        token_file.path()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    let ConfigError::InvalidGrpcConfig { reason } = err else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(
+        reason.contains("requires grpc_tcp.principal"),
+        "got unexpected reason: {reason}"
+    );
+}
+
+#[test]
+fn grpc_security_tier_rejects_non_mtls_principal_absent_from_roles() {
+    let token_file = NamedTempFile::new().unwrap();
+    fs::write(token_file.path(), "secret").unwrap();
+    let toml_str = format!(
+        "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"other.example\" = \"automation\"\n\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntoken_file = {:?}\nprincipal = \"automation.example\"\n",
+        valid_toml(),
+        token_file.path()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    let ConfigError::InvalidGrpcConfig { reason } = err else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(
+        reason.contains("to be present in [security.grpc.roles]"),
+        "got unexpected reason: {reason}"
+    );
+}
+
+#[test]
+fn grpc_security_tier_rejects_unauthenticated_tcp() {
+    let toml_str = format!(
+        "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"automation.example\" = \"automation\"\n\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\n",
+        valid_toml()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    let ConfigError::InvalidGrpcConfig { reason } = err else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(
+        reason.contains("rejects unauthenticated TCP"),
+        "got unexpected reason: {reason}"
+    );
+}
+
+#[test]
+fn grpc_security_tier_accepts_native_mtls_without_configured_principal() {
+    let cert = write_pem(STUB_CERT);
+    let key = write_pem(STUB_KEY);
+    let ca = write_pem(STUB_CERT);
+    let toml_str = format!(
+        "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"rustbgpd://operator/alice\" = \"operator\"\n\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntls_cert_file = {:?}\ntls_key_file = {:?}\ntls_client_ca_file = {:?}\n",
+        valid_toml(),
+        cert.path(),
+        key.path(),
+        ca.path()
+    );
+    let config = parse(&toml_str).unwrap();
+    assert_eq!(
+        config.security.grpc.enforcement,
+        GrpcEnforcementConfig::Tier
+    );
+    let listeners = config.grpc_listeners();
+    let GrpcListener::Tcp { principal, tls, .. } = &listeners[0] else {
+        panic!("expected TCP listener");
+    };
+    assert_eq!(principal, &None);
+    assert!(tls.is_some());
 }
 
 #[test]

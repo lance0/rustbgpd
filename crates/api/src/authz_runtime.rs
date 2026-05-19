@@ -1,12 +1,14 @@
 //! Runtime ADR-0064 audit layer for gRPC method-tier decisions.
 //!
 //! This layer records the method tier that feeds ADR-0064 authorization,
-//! enforces the per-listener method-tier cap, then forwards permitted
-//! requests to the existing tonic services. Bearer-token authentication
-//! and listener `AccessMode` checks remain in `server.rs` and the
-//! service handlers.
+//! enforces the per-listener method-tier cap plus optional
+//! per-principal role ceilings, then forwards permitted requests to
+//! the existing tonic services. Bearer-token authentication and
+//! listener `AccessMode` checks remain in `server.rs` and the service
+//! handlers.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -22,7 +24,7 @@ use tower::{Layer, Service};
 use tracing::{debug, info, warn};
 
 use crate::audit::{GrpcAuditHandle, GrpcRequestSummary};
-use crate::authz::{AuthTier, GrpcMethodAuthz, method_authz};
+use crate::authz::{AuthEnforcement, AuthTier, GrpcMethodAuthz, PrincipalRole, method_authz};
 use crate::authz_principal::{PrincipalExtractionError, principal_from_peer_certs};
 
 /// Bounded set of listener authentication surfaces for audit labels.
@@ -59,6 +61,8 @@ pub struct GrpcAuthAuditContext {
     max_tier: AuthTier,
     authn: GrpcAuthnKind,
     principal: String,
+    enforcement: AuthEnforcement,
+    roles: Arc<BTreeMap<String, PrincipalRole>>,
     resolve_mtls_principal: bool,
     expected_bearer_header: Option<BearerAuthSecret>,
 }
@@ -79,9 +83,23 @@ impl GrpcAuthAuditContext {
             max_tier,
             authn,
             principal: principal.into(),
+            enforcement: AuthEnforcement::Legacy,
+            roles: Arc::new(BTreeMap::new()),
             resolve_mtls_principal: false,
             expected_bearer_header: None,
         }
+    }
+
+    /// Attach the global ADR-0064 enforcement mode and principal-role map.
+    #[must_use]
+    pub fn with_role_enforcement(
+        mut self,
+        enforcement: AuthEnforcement,
+        roles: Arc<BTreeMap<String, PrincipalRole>>,
+    ) -> Self {
+        self.enforcement = enforcement;
+        self.roles = roles;
+        self
     }
 
     /// Mark this context as an mTLS listener whose per-request
@@ -118,6 +136,28 @@ impl GrpcAuthAuditContext {
         expected.auth_error_from_http_headers(headers)
     }
 
+    fn role_denial(&self, principal: &str, tier: AuthTier) -> Option<RoleDenial> {
+        if self.enforcement != AuthEnforcement::Tier {
+            return None;
+        }
+        let Some(role) = self.roles.get(principal).copied() else {
+            return Some(RoleDenial::PrincipalUnmapped);
+        };
+        if tier > role.max_tier() {
+            return Some(RoleDenial::RoleTierDenied { role });
+        }
+        None
+    }
+
+    fn role_label(&self, principal: &str) -> &'static str {
+        if self.enforcement != AuthEnforcement::Tier {
+            return "legacy";
+        }
+        self.roles
+            .get(principal)
+            .map_or("unmapped", |role| role.as_str())
+    }
+
     fn principal_for_extensions<'a>(&'a self, extensions: &http::Extensions) -> Cow<'a, str> {
         if !self.resolve_mtls_principal {
             return Cow::Borrowed(self.principal.as_str());
@@ -133,6 +173,35 @@ impl GrpcAuthAuditContext {
                 );
                 Cow::Borrowed(self.principal.as_str())
             }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RoleDenial {
+    PrincipalUnmapped,
+    RoleTierDenied { role: PrincipalRole },
+}
+
+impl RoleDenial {
+    const fn result_label(self) -> &'static str {
+        match self {
+            Self::PrincipalUnmapped => "principal_unmapped",
+            Self::RoleTierDenied { .. } => "role_tier_denied",
+        }
+    }
+
+    fn status(self, tier: AuthTier, path: &str) -> Status {
+        match self {
+            Self::PrincipalUnmapped => Status::permission_denied(format!(
+                "principal is not mapped to a gRPC role for {tier} RPC {path}",
+                tier = tier.as_str()
+            )),
+            Self::RoleTierDenied { role } => Status::permission_denied(format!(
+                "principal role {role} does not permit {tier} RPC {path}",
+                role = role.as_str(),
+                tier = tier.as_str()
+            )),
         }
     }
 }
@@ -326,6 +395,32 @@ where
             .into_http::<Body>();
             return Box::pin(async move { Ok(response) });
         }
+        if let Some(denial) = self.context.role_denial(principal.as_ref(), decision.tier) {
+            if let Some(status) = self.context.bearer_auth_error(req.headers()) {
+                record_audit_decision(
+                    &path,
+                    &lookup,
+                    &self.context,
+                    principal.as_ref(),
+                    &self.metrics,
+                    "authn_failed",
+                    None,
+                );
+                let response = status.into_http::<Body>();
+                return Box::pin(async move { Ok(response) });
+            }
+            record_audit_decision(
+                &path,
+                &lookup,
+                &self.context,
+                principal.as_ref(),
+                &self.metrics,
+                denial.result_label(),
+                None,
+            );
+            let response = denial.status(decision.tier, &path).into_http::<Body>();
+            return Box::pin(async move { Ok(response) });
+        }
         let audit_handle = GrpcAuditHandle::default();
         req.extensions_mut().insert(audit_handle.clone());
         let context = self.context.clone();
@@ -389,6 +484,8 @@ fn record_audit_decision(
     let access_mode = context.access_mode;
     let max_tier = context.max_tier.as_str();
     let authn = context.authn.as_str();
+    let enforcement = context.enforcement.as_str();
+    let role = context.role_label(principal);
     let request_summary = request_summary.map_or("", GrpcRequestSummary::as_str);
 
     if decision.tier == AuthTier::OperatorOnly {
@@ -404,6 +501,8 @@ fn record_audit_decision(
             access_mode,
             max_tier,
             authn,
+            enforcement,
+            role,
             principal,
             request_summary,
             "gRPC authorization audit decision"
@@ -421,6 +520,8 @@ fn record_audit_decision(
             access_mode,
             max_tier,
             authn,
+            enforcement,
+            role,
             principal,
             request_summary,
             "gRPC authorization audit decision"
@@ -469,6 +570,7 @@ impl<S> fmt::Debug for GrpcAuthzService<S> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::convert::Infallible;
     use std::future::Future;
     use std::pin::Pin;
@@ -489,6 +591,7 @@ mod tests {
     use tonic::transport::server::Connected;
 
     use super::*;
+    use crate::authz::{AuthEnforcement, PrincipalRole};
 
     #[derive(Clone)]
     struct EchoService;
@@ -555,6 +658,15 @@ mod tests {
         let mut buf = Vec::new();
         encoder.encode(&families, &mut buf).unwrap();
         String::from_utf8(buf).unwrap()
+    }
+
+    fn roles(entries: &[(&str, PrincipalRole)]) -> Arc<BTreeMap<String, PrincipalRole>> {
+        Arc::new(
+            entries
+                .iter()
+                .map(|(principal, role)| ((*principal).to_string(), *role))
+                .collect(),
+        )
     }
 
     fn private_key(key: &KeyPair) -> PrivateKeyDer<'static> {
@@ -840,6 +952,212 @@ mod tests {
         let text = gather_text(&metrics);
         assert!(text.contains("result=\"listener_tier_denied\""));
         assert!(!text.contains("result=\"authn_failed\""));
+    }
+
+    #[tokio::test]
+    async fn tier_enforcement_allows_observer_sensitive_read() {
+        let metrics = BgpMetrics::new();
+        let context = GrpcAuthAuditContext::new(
+            "tcp://127.0.0.1:50051",
+            "read_write",
+            AuthTier::OperatorOnly,
+            GrpcAuthnKind::BearerToken,
+            "observer.example",
+        )
+        .with_role_enforcement(
+            AuthEnforcement::Tier,
+            roles(&[("observer.example", PrincipalRole::Observer)]),
+        )
+        .with_bearer_token(Some("secret"));
+        let layer = GrpcAuthzLayer::new(context, metrics.clone());
+        let mut service = layer.layer(EchoService);
+        let request = Request::builder()
+            .uri("/rustbgpd.v1.ConfigService/DiffRuntimeConfig")
+            .header("authorization", "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+        assert_eq!(response.status(), http::StatusCode::OK);
+
+        let text = gather_text(&metrics);
+        assert!(text.contains("result=\"handler_ok\""));
+    }
+
+    #[tokio::test]
+    async fn tier_enforcement_denies_mutating_for_observer() {
+        let metrics = BgpMetrics::new();
+        let context = GrpcAuthAuditContext::new(
+            "tcp://127.0.0.1:50051",
+            "read_write",
+            AuthTier::OperatorOnly,
+            GrpcAuthnKind::BearerToken,
+            "observer.example",
+        )
+        .with_role_enforcement(
+            AuthEnforcement::Tier,
+            roles(&[("observer.example", PrincipalRole::Observer)]),
+        )
+        .with_bearer_token(Some("secret"));
+        let layer = GrpcAuthzLayer::new(context, metrics.clone());
+        let mut service = layer.layer(EchoService);
+        let request = Request::builder()
+            .uri("/rustbgpd.v1.NeighborService/AddNeighbor")
+            .header("authorization", "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+        let status = tonic::Status::from_header_map(response.headers()).unwrap();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+
+        let text = gather_text(&metrics);
+        assert!(text.contains("result=\"role_tier_denied\""));
+        assert!(text.contains("tier=\"mutating\""));
+    }
+
+    #[tokio::test]
+    async fn tier_enforcement_denies_operator_only_for_automation() {
+        let metrics = BgpMetrics::new();
+        let context = GrpcAuthAuditContext::new(
+            "unix:///run/rustbgpd/grpc.sock",
+            "read_write",
+            AuthTier::OperatorOnly,
+            GrpcAuthnKind::Uds,
+            "automation.example",
+        )
+        .with_role_enforcement(
+            AuthEnforcement::Tier,
+            roles(&[("automation.example", PrincipalRole::Automation)]),
+        );
+        let layer = GrpcAuthzLayer::new(context, metrics.clone());
+        let mut service = layer.layer(EchoService);
+        let request = Request::builder()
+            .uri("/rustbgpd.v1.ControlService/Shutdown")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+        let status = tonic::Status::from_header_map(response.headers()).unwrap();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+
+        let text = gather_text(&metrics);
+        assert!(text.contains("result=\"role_tier_denied\""));
+    }
+
+    #[tokio::test]
+    async fn tier_enforcement_allows_operator_only_for_operator() {
+        let metrics = BgpMetrics::new();
+        let context = GrpcAuthAuditContext::new(
+            "unix:///run/rustbgpd/grpc.sock",
+            "read_write",
+            AuthTier::OperatorOnly,
+            GrpcAuthnKind::Uds,
+            "operator.example",
+        )
+        .with_role_enforcement(
+            AuthEnforcement::Tier,
+            roles(&[("operator.example", PrincipalRole::Operator)]),
+        );
+        let layer = GrpcAuthzLayer::new(context, metrics.clone());
+        let mut service = layer.layer(EchoService);
+        let request = Request::builder()
+            .uri("/rustbgpd.v1.ControlService/Shutdown")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+        assert_eq!(response.status(), http::StatusCode::OK);
+
+        let text = gather_text(&metrics);
+        assert!(text.contains("result=\"handler_ok\""));
+    }
+
+    #[tokio::test]
+    async fn tier_enforcement_denies_unmapped_principal() {
+        let metrics = BgpMetrics::new();
+        let context = GrpcAuthAuditContext::new(
+            "unix:///run/rustbgpd/grpc.sock",
+            "read_write",
+            AuthTier::OperatorOnly,
+            GrpcAuthnKind::Uds,
+            "unmapped.example",
+        )
+        .with_role_enforcement(AuthEnforcement::Tier, roles(&[]));
+        let layer = GrpcAuthzLayer::new(context, metrics.clone());
+        let mut service = layer.layer(EchoService);
+        let request = Request::builder()
+            .uri("/rustbgpd.v1.ConfigService/DiffRuntimeConfig")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+        let status = tonic::Status::from_header_map(response.headers()).unwrap();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+
+        let text = gather_text(&metrics);
+        assert!(text.contains("result=\"principal_unmapped\""));
+    }
+
+    #[tokio::test]
+    async fn tier_enforcement_authenticates_bearer_before_role_denial() {
+        let metrics = BgpMetrics::new();
+        let context = GrpcAuthAuditContext::new(
+            "tcp://127.0.0.1:50051",
+            "read_write",
+            AuthTier::OperatorOnly,
+            GrpcAuthnKind::BearerToken,
+            "observer.example",
+        )
+        .with_role_enforcement(
+            AuthEnforcement::Tier,
+            roles(&[("observer.example", PrincipalRole::Observer)]),
+        )
+        .with_bearer_token(Some("secret"));
+        let layer = GrpcAuthzLayer::new(context, metrics.clone());
+        let mut service = layer.layer(EchoService);
+        let request = Request::builder()
+            .uri("/rustbgpd.v1.NeighborService/AddNeighbor")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+        let status = tonic::Status::from_header_map(response.headers()).unwrap();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+
+        let text = gather_text(&metrics);
+        assert!(text.contains("result=\"authn_failed\""));
+        assert!(!text.contains("result=\"role_tier_denied\""));
+    }
+
+    #[tokio::test]
+    async fn listener_cap_remains_stricter_than_operator_role() {
+        let metrics = BgpMetrics::new();
+        let context = GrpcAuthAuditContext::new(
+            "unix:///run/rustbgpd/grpc.sock",
+            "read_write",
+            AuthTier::SensitiveRead,
+            GrpcAuthnKind::Uds,
+            "operator.example",
+        )
+        .with_role_enforcement(
+            AuthEnforcement::Tier,
+            roles(&[("operator.example", PrincipalRole::Operator)]),
+        );
+        let layer = GrpcAuthzLayer::new(context, metrics.clone());
+        let mut service = layer.layer(EchoService);
+        let request = Request::builder()
+            .uri("/rustbgpd.v1.NeighborService/AddNeighbor")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+        let status = tonic::Status::from_header_map(response.headers()).unwrap();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+
+        let text = gather_text(&metrics);
+        assert!(text.contains("result=\"listener_tier_denied\""));
+        assert!(!text.contains("result=\"role_tier_denied\""));
     }
 
     #[test]

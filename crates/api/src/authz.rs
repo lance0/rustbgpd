@@ -1,10 +1,10 @@
 //! Static gRPC authorization inventory.
 //!
 //! ADR-0064 uses this table as the code-level source of truth for
-//! method risk tiers. Runtime authorization currently enforces
-//! listener-level `AccessMode` checks in `server.rs` plus per-listener
-//! `max_tier` ceilings in `authz_runtime.rs`; per-principal role
-//! enforcement is still deferred.
+//! method risk tiers. Runtime authorization enforces listener-level
+//! `AccessMode` checks in `server.rs`, per-listener `max_tier`
+//! ceilings in `authz_runtime.rs`, and opt-in per-principal role
+//! ceilings when ADR-0064 `enforcement = "tier"` is enabled.
 
 /// Authorization tier assigned to one gRPC method.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -28,6 +28,62 @@ impl AuthTier {
             Self::SensitiveRead => "sensitive_read",
             Self::Mutating => "mutating",
             Self::OperatorOnly => "operator_only",
+        }
+    }
+}
+
+/// Runtime gRPC authorization enforcement mode.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AuthEnforcement {
+    /// Preserve legacy listener-wide behavior. Listener `max_tier`
+    /// caps still apply, but principal roles do not authorize calls.
+    #[default]
+    Legacy,
+    /// Enforce per-principal role ceilings in addition to listener
+    /// `max_tier` caps.
+    Tier,
+}
+
+impl AuthEnforcement {
+    /// Stable lower-case label used by logs and tests.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Tier => "tier",
+        }
+    }
+}
+
+/// ADR-0064 role assigned to an authenticated gRPC principal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrincipalRole {
+    /// Read-only observer. Can use `read` and `sensitive_read` RPCs.
+    Observer,
+    /// Automation role. Can use read RPCs plus reversible mutating RPCs.
+    Automation,
+    /// Operator role. Can use the full gRPC surface.
+    Operator,
+}
+
+impl PrincipalRole {
+    /// Maximum method tier permitted by this role.
+    #[must_use]
+    pub const fn max_tier(self) -> AuthTier {
+        match self {
+            Self::Observer => AuthTier::SensitiveRead,
+            Self::Automation => AuthTier::Mutating,
+            Self::Operator => AuthTier::OperatorOnly,
+        }
+    }
+
+    /// Stable lower-case label used by structured logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Observer => "observer",
+            Self::Automation => "automation",
+            Self::Operator => "operator",
         }
     }
 }

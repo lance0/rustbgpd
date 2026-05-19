@@ -103,8 +103,9 @@ pub enum GrpcEnforcementConfig {
     /// `max_tier` caps still apply in this mode.
     #[default]
     Legacy,
-    /// Parsed for forward compatibility, but rejected by validation
-    /// until deny-by-tier enforcement is implemented.
+    /// Enforce per-principal role ceilings in addition to listener
+    /// `max_tier` caps. This is opt-in until the dedicated default-flip
+    /// migration slice.
     Tier,
 }
 

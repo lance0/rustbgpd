@@ -1,5 +1,6 @@
 //! gRPC server startup and wiring.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -14,7 +15,7 @@ use tonic::transport::Server;
 use tonic::{Request, Status};
 use tracing::{error, info, warn};
 
-use crate::authz::AuthTier;
+use crate::authz::{AuthEnforcement, AuthTier, PrincipalRole};
 use crate::authz_runtime::{BearerAuthSecret, GrpcAuthAuditContext, GrpcAuthnKind, GrpcAuthzLayer};
 use crate::config_service::ConfigService;
 use crate::control_service::{ControlService, MrtTriggerTx};
@@ -103,6 +104,10 @@ pub struct ListenerConfig {
     pub access_mode: AccessMode,
     /// Effective ADR-0064 listener method-tier ceiling.
     pub max_tier: AuthTier,
+    /// ADR-0064 principal-role enforcement mode.
+    pub enforcement: AuthEnforcement,
+    /// Global principal-to-role map used when `enforcement = tier`.
+    pub roles: Arc<BTreeMap<String, PrincipalRole>>,
     pub auth_token: Option<String>,
     /// Optional stable principal label for audit records. Bearer-token
     /// and UDS listeners may use it to avoid placeholder identities in
@@ -150,10 +155,17 @@ pub enum ListenerEndpoint {
     Uds { path: PathBuf, mode: u32 },
 }
 
+#[derive(Clone)]
+struct RuntimeAuthzConfig {
+    enforcement: AuthEnforcement,
+    roles: Arc<BTreeMap<String, PrincipalRole>>,
+}
+
 fn tcp_audit_context(
     addr: SocketAddr,
     access_mode: AccessMode,
     max_tier: AuthTier,
+    role_config: RuntimeAuthzConfig,
     auth_token: Option<&str>,
     tls_enabled: bool,
     configured_principal: Option<&str>,
@@ -176,6 +188,7 @@ fn tcp_audit_context(
         authn,
         principal,
     )
+    .with_role_enforcement(role_config.enforcement, role_config.roles)
     .with_bearer_token(auth_token);
     if tls_enabled {
         context.with_mtls_peer_principal()
@@ -188,6 +201,7 @@ fn uds_audit_context(
     path: &Path,
     access_mode: AccessMode,
     max_tier: AuthTier,
+    role_config: RuntimeAuthzConfig,
     auth_token: Option<&str>,
     configured_principal: Option<&str>,
 ) -> GrpcAuthAuditContext {
@@ -213,6 +227,7 @@ fn uds_audit_context(
         authn,
         principal,
     )
+    .with_role_enforcement(role_config.enforcement, role_config.roles)
     .with_bearer_token(auth_token)
 }
 
@@ -346,6 +361,8 @@ async fn run_listener(
         endpoint,
         access_mode,
         max_tier,
+        enforcement,
+        roles,
         auth_token,
         principal,
         tls,
@@ -357,6 +374,8 @@ async fn run_listener(
                 addr,
                 access_mode,
                 max_tier,
+                enforcement,
+                roles,
                 auth_token,
                 principal,
                 tls,
@@ -391,6 +410,8 @@ async fn run_listener(
                 mode,
                 access_mode,
                 max_tier,
+                enforcement,
+                roles,
                 auth_token,
                 principal,
                 rib_tx,
@@ -430,6 +451,8 @@ async fn run_tcp_listener(
     addr: SocketAddr,
     access_mode: AccessMode,
     max_tier: AuthTier,
+    enforcement: AuthEnforcement,
+    roles: Arc<BTreeMap<String, PrincipalRole>>,
     auth_token: Option<String>,
     principal: Option<String>,
     tls: Option<TlsParams>,
@@ -467,6 +490,7 @@ async fn run_tcp_listener(
         addr,
         access_mode,
         max_tier,
+        RuntimeAuthzConfig { enforcement, roles },
         auth_token.as_deref(),
         tls.is_some(),
         principal.as_deref(),
@@ -574,6 +598,8 @@ async fn run_uds_listener(
     mode: u32,
     access_mode: AccessMode,
     max_tier: AuthTier,
+    enforcement: AuthEnforcement,
+    roles: Arc<BTreeMap<String, PrincipalRole>>,
     auth_token: Option<String>,
     principal: Option<String>,
     rib_tx: mpsc::Sender<RibUpdate>,
@@ -605,6 +631,7 @@ async fn run_uds_listener(
         &path,
         access_mode,
         max_tier,
+        RuntimeAuthzConfig { enforcement, roles },
         auth_token.as_deref(),
         principal.as_deref(),
     );
@@ -763,6 +790,17 @@ async fn await_shutdown(mut shutdown_rx: watch::Receiver<bool>) {
 mod tests {
     use super::*;
 
+    fn empty_roles() -> Arc<BTreeMap<String, PrincipalRole>> {
+        Arc::new(BTreeMap::new())
+    }
+
+    fn legacy_authz() -> RuntimeAuthzConfig {
+        RuntimeAuthzConfig {
+            enforcement: AuthEnforcement::Legacy,
+            roles: empty_roles(),
+        }
+    }
+
     #[test]
     fn auth_interceptor_allows_unprotected_requests() {
         let mut interceptor = AuthInterceptor::new(None);
@@ -803,6 +841,7 @@ mod tests {
             "127.0.0.1:50051".parse().unwrap(),
             AccessMode::ReadWrite,
             AuthTier::OperatorOnly,
+            legacy_authz(),
             Some("secret"),
             false,
             Some("automation.example"),
@@ -818,6 +857,7 @@ mod tests {
             "127.0.0.1:50051".parse().unwrap(),
             AccessMode::ReadWrite,
             AuthTier::Mutating,
+            legacy_authz(),
             Some("secret"),
             true,
             Some("automation.example"),
@@ -833,6 +873,7 @@ mod tests {
             Path::new("/run/rustbgpd/grpc.sock"),
             AccessMode::ReadWrite,
             AuthTier::SensitiveRead,
+            legacy_authz(),
             None,
             Some("local-admin"),
         );

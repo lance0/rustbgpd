@@ -80,18 +80,26 @@ RPC into `read`, `sensitive_read`, `mutating`, or `operator_only` for
 ADR-0064. The runtime records tier decisions for every RPC via structured
 `grpc_authz` logs and
 `bgp_grpc_authz_decisions_total{tier,result,authn,access_mode}`. Listener
-`max_tier` caps are enforced now; role-to-tier enforcement remains deferred.
+`max_tier` caps are enforced in all modes. When
+`[security.grpc].enforcement = "tier"` is enabled, the same runtime layer also
+enforces the authenticated principal's configured role ceiling before the
+handler runs; the default remains `"legacy"` until the dedicated migration
+slice flips it.
 Forwarded calls emit result-aware labels such as `result="handler_ok"` or
 `result="handler_invalid_argument"` after the handler returns. Rejected calls use
 bounded pre-handler labels: `result="listener_tier_denied"` means the method was
 rejected before the handler ran, and `result="authn_failed"` means an over-cap
 bearer-token request failed authentication before tier details were disclosed.
+Tier-mode denials use `result="principal_unmapped"` when the authenticated
+principal has no role entry and `result="role_tier_denied"` when the principal's
+role is below the method tier.
 Credential-bearing request summaries are masked before entering `grpc_authz`
 logs; `DiffRuntimeConfigRequest.candidate_toml` is always summarized as
 redacted metadata, and `SetPeerGroup` logs MD5 state without the MD5 value.
 Operators can now predeclare `[security.grpc.roles]` and set explicit
-listener `principal` labels for bearer-token TCP and UDS listeners; those
-labels improve audit identity only and do not yet authorize or deny calls.
+listener `principal` labels for bearer-token TCP and UDS listeners. In legacy
+mode those labels improve audit identity only; in tier mode they are the
+principal strings looked up in `[security.grpc.roles]`.
 Native mTLS listeners derive the audit principal from the client certificate
 using ADR-0064 precedence: `rustbgpd:` URI SAN, then email SAN, then Subject
 CN. A validated cert without those fields falls back to `mtls-unresolved` while
@@ -122,7 +130,7 @@ The API uses gRPC status codes consistently across services:
 | Code | Meaning |
 |------|---------|
 | `UNAUTHENTICATED` | Listener authentication failed: missing bearer token, non-ASCII authorization metadata, or a token mismatch |
-| `PERMISSION_DENIED` | The request reached a read-only listener but called a mutating RPC, or the RPC method tier exceeds the listener `max_tier` ceiling |
+| `PERMISSION_DENIED` | The request reached a read-only listener but called a mutating RPC, the RPC method tier exceeds the listener `max_tier` ceiling, the principal is unmapped in tier mode, or the principal's role is below the method tier |
 | `INVALID_ARGUMENT` | Client-supplied request data is malformed, missing, out of range, uses an unsupported enum value, or combines incompatible filters |
 | `NOT_FOUND` | A named or targeted resource does not exist: peer, policy, neighbor set, peer group, IP-VRF, route-event target, or injected route |
 | `ALREADY_EXISTS` | A create request targets an existing resource, currently duplicate neighbor creation |
