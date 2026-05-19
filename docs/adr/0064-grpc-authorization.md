@@ -117,9 +117,9 @@ fails closed, not open). This is the mechanism that catches the
 
 ### 3. Per-listener tier cap
 
-Extend `[[telemetry.grpc_tcp]]` and `[[telemetry.grpc_uds]]` with a
-`max_tier` field (and deprecate the existing binary `access_mode`
-field over one release):
+Extend `[global.telemetry.grpc_tcp]` and `[global.telemetry.grpc_uds]`
+with a `max_tier` field while keeping the existing binary
+`access_mode` as a compatibility ceiling:
 
 ```toml
 [[telemetry.grpc_tcp]]
@@ -208,20 +208,21 @@ Later runtime-enforcement slices add `[security.grpc]` with an
 
 ```toml
 [security.grpc]
-enforcement = "legacy"  # default in slice 1; flipped to "tier" in slice 4
+enforcement = "legacy"  # default until the enforcement-flip slice
 ```
 
-- `legacy` — once the authorization layer exists, it logs tier
-  decisions but does not enforce them (audit-only). All calls that
-  would have been authorized under the old binary `access_mode`
-  continue to work. Calls that would be rejected under tier
-  enforcement emit a `WARN` log so operators see what would break.
-- `tier` — full enforcement per slices 2–4 below.
+- `legacy` — preserves role authorization behavior. Listener
+  `max_tier` caps still deny methods above the listener ceiling, but
+  principal roles are not used to authorize or deny calls.
+- `tier` — full per-principal enforcement in the later enforcement
+  slice.
 
 The shipped slice 1 matrix has no `[security.grpc]` config and no
 runtime authorization/logging behavior change. Slice 2 introduces the
-legacy/audit-only runtime mode; slice 4 flips the default to `tier` and
-documents the migration in `CHANGELOG.md` and `KNOWN_ISSUES.md`.
+legacy audit runtime mode; Slice 4 adds listener tier caps while
+keeping `legacy` as the default. The later enforcement-flip slice
+defaults to `tier` and documents the migration in `CHANGELOG.md` and
+`KNOWN_ISSUES.md`.
 Inventory question 6 answered.
 
 ### 7. Audit logging
@@ -270,16 +271,15 @@ answered.
 
 **Negative:**
 
-- Six-slice ladder means full enforcement is not on by default until
-  slice 4. Until then, the audit-only mode produces signal but no
-  protection.
+- Six-slice ladder means full per-principal enforcement is not on by default
+  until the enforcement-flip slice. Until then, listener `max_tier` caps provide
+  coarse protection, but role mappings remain audit/planning data.
 - A Rust matrix is daemon-local; external consumers do not see tier
   metadata in generated bindings until a later proto annotation slice.
-- The per-listener `max_tier` field deprecates the existing binary
-  `access_mode` over one release. Auto-translation at config-load
-  keeps existing operator TOML working; the `WARN` on use is the
-  forcing function to update the config before the deprecation
-  window closes.
+- The per-listener `max_tier` field overlaps with the existing binary
+  `access_mode`. Auto-translation at config-load keeps existing operator TOML
+  working, and `access_mode = "read_only"` remains a compatibility ceiling that
+  cannot be weakened by `max_tier`.
 - Principal extraction depends on cert SAN conventions; operators
   using bare-CN certs without SANs need to migrate their PKI or
   configure CN-based principal mapping. The fallback to Subject CN
@@ -313,14 +313,15 @@ review/rollback unit.
    non-mTLS listener principals for bearer-token / UDS deployments that
    opt into tier enforcement. Add `[security.grpc.roles]` mapping. Add
    `observer | automation | operator` role-to-tier lookup plus
-   `[security.grpc].enforcement = "legacy"` audit-only mode.
+   `[security.grpc].enforcement = "legacy"` role-audit mode.
 4. **Listener tier cap.** Add `max_tier` to
-   `[[telemetry.grpc_tcp]]` / `[[telemetry.grpc_uds]]`. Translate
-   the existing `access_mode = "read_only"` → `max_tier =
-   "sensitive_read"` and `access_mode = "read_write"` → `max_tier =
-   "operator_only"` automatically at config-load time; deprecate
-   `access_mode` (still parsed, emits a `WARN` on use). Listener
-   cap enforces in all modes including `legacy`.
+   `[global.telemetry.grpc_tcp]` / `[global.telemetry.grpc_uds]`.
+   Translate the existing `access_mode = "read_only"` to a
+   `sensitive_read` compatibility ceiling and `access_mode =
+   "read_write"` to `operator_only`. If both `access_mode` and
+   `max_tier` are configured, the effective cap is the stricter one.
+   Listener cap enforcement is active in all modes including
+   `legacy`.
 5. **Enforcement flip.** Use the runtime layer from slice 2 plus the
    identity/role/listener-cap config from slices 3–4 to deny
    unauthorized RPCs. Default `enforcement = "tier"`. Update
@@ -363,20 +364,21 @@ communication.
 
 Slice 1 is implemented by the ADR-0064 foundation PR: checked method
 matrix plus inventory/ADR correction. Slice 2 is implemented by the
-audit-only runtime layer: method-path lookup, structured `grpc_authz`
-decision logs, and bounded-cardinality metrics with no authorization
-behavior change. Slice 3a adds staged `[security.grpc.roles]`,
-`enforcement = "legacy"`, and explicit non-mTLS listener principal
-labels for bearer-token TCP and UDS audit identity. Later slices
-implement mTLS certificate principal extraction, listener tier caps,
-runtime enforcement, and result/request audit-log hardening.
+runtime tier-decision layer: method-path lookup, structured `grpc_authz`
+decision logs, and bounded-cardinality metrics. Slice 3a adds staged
+`[security.grpc.roles]`, `enforcement = "legacy"`, and explicit non-mTLS
+listener principal labels for bearer-token TCP and UDS audit identity.
+Slice 4a adds enforced per-listener `max_tier` caps while preserving
+`access_mode` as a compatibility ceiling. Later slices implement mTLS
+certificate principal extraction, per-principal role enforcement, the
+default enforcement flip, and result/request audit-log hardening.
 
 | Slice | Status |
 |-------|--------|
 | 1. Foundation | Implemented by the checked method-matrix PR |
 | 2. Audit-only runtime path | Implemented by the runtime audit-layer PR |
 | 3. Identity + roles | Partial: roles config + non-mTLS audit principals |
-| 4. Listener tier cap | Not started |
+| 4. Listener tier cap | Partial: `max_tier` listener cap enforced; role/default flip deferred |
 | 5. Enforcement flip | Not started |
 | 6. Audit log hardening | Not started |
 | 7. External-review prep | Not started |

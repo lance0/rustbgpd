@@ -209,6 +209,7 @@ configured, rustbgpd enables this listener by default at
 | `path`       | string | no       | `<runtime_state_dir>/grpc.sock` | Absolute Unix socket path |
 | `mode`       | u32    | no       | `0o600` | Filesystem mode applied to the socket after bind |
 | `access_mode` | string | no      | `"read_write"` | Listener authorization mode: `"read_write"` or `"read_only"` |
+| `max_tier`   | string | no       | implied by `access_mode` | ADR-0064 per-method listener cap: `read`, `sensitive_read`, `mutating`, or `operator_only` |
 | `token_file` | string | no       | --      | Optional bearer token file for listener auth |
 | `principal`  | string | no       | --      | Stable ADR-0064 audit principal label for this UDS listener |
 
@@ -222,6 +223,7 @@ container/network exposure.
 | `enabled`    | bool   | no       | `true`  | Enable this listener when the table is present |
 | `address`    | string | yes*     | --      | `host:port` bind address (`required when enabled = true`) |
 | `access_mode` | string | no      | `"read_write"` | Listener authorization mode: `"read_write"` or `"read_only"` |
+| `max_tier`   | string | no       | implied by `access_mode` | ADR-0064 per-method listener cap: `read`, `sensitive_read`, `mutating`, or `operator_only` |
 | `token_file` | string | no       | --      | Optional bearer token file for listener auth |
 | `principal`  | string | no       | --      | Stable ADR-0064 audit principal label for non-mTLS bearer-token listeners |
 | `tls_cert_file` | string | no   | --      | PEM-encoded server certificate (mTLS — requires the two siblings below) |
@@ -249,6 +251,15 @@ changes, shutdown, and MRT trigger requests with `PERMISSION_DENIED`. This is
 intended for monitoring or dashboard listeners that should not expose control
 plane writes.
 
+**ADR-0064 listener tier caps:** `max_tier` is a per-listener ceiling based on
+the checked gRPC method-tier matrix. Calls whose method tier is higher than the
+effective listener cap return `PERMISSION_DENIED` before the handler runs. The
+field is backwards-compatible with `access_mode`: omitting `max_tier` preserves
+the existing `access_mode` behavior, `read_only` implies `sensitive_read`, and
+`read_write` implies `operator_only`. When both fields are set, the effective
+cap is the stricter of the two, so `access_mode = "read_only"` cannot be
+weakened by `max_tier = "operator_only"`.
+
 **Token file lifecycle:** When `token_file` is configured, the file must exist
 and contain a non-empty token at daemon startup. The token is read once during
 config validation and kept in memory for the daemon's lifetime. Token rotation
@@ -268,7 +279,8 @@ extraction is a later ADR-0064 slice and continues to report
 
 ADR-0064 per-method authorization is staged behind a legacy mode. The current
 release parses role configuration and uses listener `principal` labels for
-audit records, but it does **not** deny by role or method tier yet.
+audit records. Listener `max_tier` caps are enforced in legacy mode, but
+principal role mapping still does **not** authorize or deny calls yet.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
@@ -307,6 +319,7 @@ principal = "local-admin"
 [global.telemetry.grpc_tcp]
 address = "127.0.0.1:50051"
 access_mode = "read_only"
+max_tier = "sensitive_read"
 # token_file = "/etc/rustbgpd/grpc.token"
 # principal = "observer-readonly"
 ```
@@ -1814,6 +1827,7 @@ starting:
 | `grpc_uds.path` must be absolute when configured | `invalid gRPC config` |
 | `grpc_uds.mode` must be <= `0o777` | `invalid gRPC config` |
 | `grpc_*.access_mode` must be `read_only` or `read_write` | `invalid gRPC config` |
+| `grpc_*.max_tier` must be `read`, `sensitive_read`, `mutating`, or `operator_only` | TOML parse error |
 | `grpc_*.token_file` must exist, be readable, and contain a non-empty token when configured | `invalid gRPC config` |
 | `grpc_*.principal` must not be empty when configured | `invalid gRPC config` |
 | `grpc_tcp.principal` requires `grpc_tcp.token_file` and is rejected on mTLS listeners until cert principal extraction lands | `invalid gRPC config` |
