@@ -13,12 +13,15 @@
 #   - mold linker: parallel final link, faster than the default GNU ld
 #
 # Build:
-#   DOCKER_BUILDKIT=1 docker build -t rustbgpd:dev .
+#   docker build -t rustbgpd:dev .
 #
-# CI workflows use docker/build-push-action@v7 with GHA cache backend
-# (see .github/workflows/interop.yml + kernel-dataplane.yml). Plain
-# `docker build` without BuildKit will skip the `--mount=type=cache`
-# directives but still build correctly.
+# BuildKit is required for the `RUN --mount=type=cache` directives
+# below; the legacy Docker builder rejects them with a parse error.
+# Modern Docker (>= 23.0) and buildx enable BuildKit by default, and
+# the CI workflows use `docker/build-push-action@v7` which is
+# BuildKit-native — see .github/workflows/interop.yml and
+# kernel-dataplane.yml. If you hit a parse error on the cache mounts,
+# either upgrade Docker or set `DOCKER_BUILDKIT=1` explicitly.
 
 FROM rust:1.92-bookworm AS chef
 RUN apt-get update && apt-get install -y --no-install-recommends \
