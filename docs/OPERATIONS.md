@@ -291,6 +291,107 @@ via gRPC `GetMetrics` and `GetHealth` RPCs.
 should combine a fresh snapshot or `ListRouteEvents` query with a new live
 watch.
 
+## gRPC authorization audit and resource guardrails
+
+ADR-0064 v1 uses the daemon's structured JSON log path plus Prometheus metrics
+as the operational audit surface. rustbgpd does not run a separate in-daemon
+audit file writer or remote audit sink in this release. That keeps audit
+emission on the existing non-blocking logging path instead of adding a second
+I/O path that could wedge routing-control tasks if a disk, syslog daemon, or
+collector stalls.
+
+For production, collect stdout/stderr with journald, syslog, or your log agent
+of choice and apply retention outside the daemon:
+
+- Retain `grpc_authz` records for at least the same window as management-plane
+  change approvals and incident timelines. Thirty to ninety days is a practical
+  minimum for most environments; regulated deployments should use their own
+  audit policy.
+- Store gRPC authorization logs where only network operators, security
+  responders, and the log-collection service account can read them. The records
+  mask known credential-bearing fields, but they still expose management-plane
+  method names, principals, listener posture, peer names, and topology context.
+- Rotate locally before the filesystem can pressure the daemon host. With
+  journald, bound `SystemMaxUse` / `RuntimeMaxUse`; with syslog or a file-based
+  collector, use normal logrotate or collector retention controls.
+- Export logs to remote storage when `operator_only` actions, role denials, or
+  authentication failures need tamper-resistant evidence.
+
+Useful local queries:
+
+```bash
+# All gRPC authorization records from a systemd unit.
+journalctl -u rustbgpd -o cat --since -24h \
+  | jq 'select(.target == "grpc_authz")'
+
+# Operator-only calls, including forwarded and denied attempts.
+journalctl -u rustbgpd -o cat --since -24h \
+  | jq 'select(.target == "grpc_authz" and .tier == "operator_only")'
+
+# Tier or role denials that should be investigated before enabling tier mode.
+journalctl -u rustbgpd -o cat --since -24h \
+  | jq 'select(.target == "grpc_authz"
+      and (.result == "listener_tier_denied"
+        or .result == "principal_unmapped"
+        or .result == "role_tier_denied"
+        or .result == "authn_failed"))'
+
+# Mutating/operator activity grouped by principal when jq has group_by.
+journalctl -u rustbgpd -o cat --since -24h \
+  | jq -s '[.[] | select(.target == "grpc_authz"
+      and (.tier == "mutating" or .tier == "operator_only"))]
+      | group_by(.principal)
+      | map({principal: .[0].principal, count: length})'
+```
+
+Prometheus should watch both authorization volume and stream pressure:
+
+```promql
+# Any denied management-plane call in the last five minutes.
+sum by (tier, result, authn, access_mode) (
+  increase(bgp_grpc_authz_decisions_total{
+    result=~"listener_tier_denied|principal_unmapped|role_tier_denied|authn_failed"
+  }[5m])
+)
+
+# Operator-only calls, successful or denied.
+sum by (result, authn, access_mode) (
+  increase(bgp_grpc_authz_decisions_total{tier="operator_only"}[5m])
+)
+
+# Slow live-stream consumers missing events.
+sum by (service, source) (
+  increase(bgp_event_stream_lagged_total[5m])
+)
+
+# Current live stream fan-out.
+sum by (service, source) (bgp_event_stream_subscribers)
+```
+
+Resource-abuse posture for v1 is intentionally operational rather than a new
+daemon-side rate limiter. The existing controls are listener `max_tier`, opt-in
+per-principal tier enforcement, pagination on large route-list RPCs, bounded
+event-history rings, bounded stream broadcasts, subscriber gauges, and lag
+counters. Keep accepted clients on a management network and use separate
+listeners when monitoring, automation, and operators need different ceilings.
+
+The RPCs that deserve the most attention are:
+
+| Class | Examples | Guardrail |
+|-------|----------|-----------|
+| Large sensitive reads | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ListEvpnRoutes`, `ListFlowSpecRoutes`, `GetMetrics` | Prefer pagination or narrow filters, set client deadlines, and alert on sustained `sensitive_read` volume |
+| Live streams | `WatchRoutes`, `EventService.WatchEvents` | Keep clients draining, reconnect after `stream_lagged`, and alert on subscriber count or lag spikes |
+| History queries | `ListRouteEvents`, `ListSessionEvents`, `ListPolicyEvents` | Histories are bounded and process-local; use explicit limits for dashboards |
+| Mutating calls | Neighbor, policy, peer-group, injection RPCs | Use listener `max_tier`, role enforcement, and audit alerts on `mutating` volume |
+| Operator-only calls | `Shutdown`, `TriggerMrtDump`, `SetGracefulShutdown`, selected policy/global changes | Restrict to operator principals/listeners and page on unexpected `operator_only` activity |
+
+Clients should set realistic deadlines on unary inventory queries and avoid
+opening idle streams that do not continuously read responses. For long-lived
+streams, use keepalive settings conservatively; aggressive keepalives can
+create avoidable load and disconnected streams fail like any other RPC. After a
+lag warning, treat the stream as a live tail after a gap and refresh state with
+a snapshot or bounded history query.
+
 ### General Unicast FIB
 
 These metrics are present when the daemon is built with the ADR-0061 general
