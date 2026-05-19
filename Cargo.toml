@@ -57,6 +57,7 @@ tokio-stream = { version = "0.1", features = ["sync", "net"] }
 axum = "0.8"
 tower = "0.5"
 libc = "0.2"
+x509-parser = "0.18"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 toml_edit = "0.25"
@@ -68,6 +69,7 @@ criterion = { version = "0.8", features = ["html_reports"] }
 smallvec = "1"
 tikv-jemallocator = { version = "0.6", features = ["profiling"] }
 dhat = "0.3"
+rcgen = "0.14"
 
 [package]
 name = "rustbgpd"

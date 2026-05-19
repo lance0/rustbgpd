@@ -188,7 +188,7 @@ flowchart LR
 | TCP gRPC listener | Configured `grpc_tcp.address` | Remote network -> daemon | Optional bearer token and optional mTLS | `crates/api/src/server.rs::run_tcp_listener` |
 | UDS gRPC listener | Default or configured socket path | Same-host OS users -> daemon | Filesystem permissions, optional token | `crates/api/src/server.rs::run_uds_listener` |
 | Bearer token metadata | `authorization` header | Client metadata -> interceptor | Constant-time compare, token read at startup | `AuthInterceptor` |
-| mTLS client cert | TLS handshake | Client cert -> tonic TLS layer | Peer principal extraction not implemented yet | `run_tcp_listener`, ADR-0064 slice 3 |
+| mTLS client cert | TLS handshake | Client cert -> tonic TLS layer | Peer principal is extracted for audit from `rustbgpd:` URI SAN, email SAN, then Subject CN | `run_tcp_listener`, ADR-0064 slice 3 |
 | Read/write RPCs | Generated gRPC services | Service handlers -> daemon actors | High-risk methods classified `operator_only` | `proto/rustbgpd.proto`, `authz.rs` |
 | Config diff | `DiffRuntimeConfig` | Client TOML -> config parser | Response redacted; request still credential-bearing | `ConfigService`, proto comments |
 | Peer-group writes | `SetPeerGroup` | Client request -> policy/config state | Can carry `md5_password` | `peer_group_service.rs` |
@@ -219,9 +219,9 @@ flowchart LR
 
 | Threat ID | Threat source | Prerequisites | Threat action | Impact | Impacted assets | Existing controls | Gaps | Recommended mitigations | Detection ideas | Likelihood | Impact severity | Priority |
 |-----------|---------------|---------------|---------------|--------|-----------------|-------------------|------|-------------------------|-----------------|------------|-----------------|----------|
-| TM-001 | Remote client with accepted read-write credential | TCP/UDS listener accepts the client and is `read_write` | Call `InjectionService` or policy/peer-group operator methods | Route hijack, traffic drop, broad policy mutation | RIB, FlowSpec, EVPN, peer policy | Method inventory marks injection/operator methods `operator_only`; audit layer logs/counters every call | No role/tier enforcement yet | Implement issues #164-#166 and deny over-tier calls | Alert on `grpc_authz` `tier="operator_only"` and unexpected principal/listener | Medium | High | High |
+| TM-001 | Remote client with accepted read-write credential | TCP/UDS listener accepts the client and is `read_write` | Call `InjectionService` or policy/peer-group operator methods | Route hijack, traffic drop, broad policy mutation | RIB, FlowSpec, EVPN, peer policy | Method inventory marks injection/operator methods `operator_only`; audit layer logs/counters every call | No role/tier enforcement yet | Implement issue #164 deny-by-tier enforcement after identity prerequisites are complete | Alert on `grpc_authz` `tier="operator_only"` and unexpected principal/listener | Medium | High | High |
 | TM-002 | Leaked bearer token | Bearer-token listener exposed to attacker | Authenticate as the shared token principal and call any allowed surface | Credential grants all listener rights; no per-token role | gRPC management surface | Token file required non-empty; constant-time compare; optional read-only access mode | Token principal is placeholder; no role map | Add explicit token principals and roles (#165); rotate token on suspected leak | Track `authn="bearer_token"` operator-only calls; token-file rotation runbook | Medium | High | High |
-| TM-003 | Valid but overbroad mTLS client cert | Client cert chains to configured CA | Use cert to access all listener-authorized methods | Overprivileged automation or user can mutate network state | gRPC management, route state | mTLS rejects unverified clients; audit labels `authn="mtls"` | Principal extraction and roles not implemented (#166) | Extract URI/email/CN principal, map to roles, enforce per method | Alert on unknown or `mtls-unresolved` principals after slice 3 lands | Medium | High | High |
+| TM-003 | Valid but overbroad mTLS client cert | Client cert chains to configured CA | Use cert to access all listener-authorized methods | Overprivileged automation or user can mutate network state | gRPC management, route state | mTLS rejects unverified clients; audit labels `authn="mtls"` and derives principal from URI/email/CN | Principal roles are not enforced yet | Map extracted principals to roles and enforce per method | Alert on unexpected mTLS principals and any fallback `mtls-unresolved` audit record | Medium | High | High |
 | TM-004 | Same-host user with UDS access | Socket mode/group permits user to connect | Call read-write methods through UDS | Local privilege boundary becomes daemon-control boundary | Daemon lifecycle, routing state | UDS default is local-only; operator controls socket path/mode | No per-client identity beyond filesystem boundary | Use restrictive mode/group; add UDS explicit principal/roles (#165) | Audit `authn="uds"` operator-only calls | Medium | Medium | Medium |
 | TM-005 | Authenticated client supplies secret-bearing request data | Calls `DiffRuntimeConfig` or `SetPeerGroup` with secrets | Secrets appear in logs/audit output or responses | Secret disclosure and credential reuse | MD5/TCP-AO/token/TLS config material | Diff responses are redacted; peer-group reads redact MD5 | Audit request-summary masking not implemented | Add credential field annotations and masked audit formatter | Test logs for absence of `md5_password`, `tcp_ao.key`, token contents | Low | High | Medium |
 | TM-006 | Unauthenticated remote client | Non-loopback TCP listener without token/mTLS | Call privileged RPCs | Full management-plane compromise | All gRPC-controlled state | Startup warning for unauthenticated non-loopback; docs recommend UDS/mTLS | Warning is not fail-closed | Consider config guardrail for unauthenticated non-loopback read-write | Alert on `authn="none"` and non-loopback listener | Low | High | Medium |
@@ -265,6 +265,12 @@ External reviewers should be able to verify:
   generate any gRPC call, then inspect structured logs for
   `target="grpc_authz"` and metrics for
   `bgp_grpc_authz_decisions_total{tier,result,authn,access_mode}`.
+- mTLS audit identity:
+  mTLS listeners derive the `principal` audit field from the client
+  certificate in ADR-0064 order: first `rustbgpd:` URI SAN, then email SAN,
+  then Subject CN. Validated certificates without those fields, or with an
+  unsafe / overlong selected principal value, fall back to `mtls-unresolved`
+  while legacy mode remains active.
 - Listener auth smoke:
   `docs/RELEASE_CHECKLIST.md` token-auth smoke verifies missing token fails and
   matching token succeeds.
@@ -303,8 +309,8 @@ Already filed:
   deny-by-tier enforcement after the listener `max_tier` sub-scope.
 - [#165](https://github.com/lance0/rustbgpd/issues/165) — add explicit
   bearer-token / UDS principals and gRPC roles.
-- [#166](https://github.com/lance0/rustbgpd/issues/166) — implement mTLS
-  principal extraction for gRPC authorization.
+- [#166](https://github.com/lance0/rustbgpd/issues/166) — close once the mTLS
+  principal extraction PR lands and the audit evidence is merged.
 
 Additional filed follow-ups:
 

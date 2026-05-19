@@ -6,6 +6,7 @@
 //! and listener `AccessMode` checks remain in `server.rs` and the
 //! service handlers.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -16,10 +17,12 @@ use rustbgpd_telemetry::BgpMetrics;
 use tonic::Status;
 use tonic::body::Body;
 use tonic::codegen::http;
+use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tower::{Layer, Service};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::authz::{AuthTier, GrpcMethodAuthz, method_authz};
+use crate::authz_principal::{PrincipalExtractionError, principal_from_peer_certs};
 
 /// Bounded set of listener authentication surfaces for audit labels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,6 +58,7 @@ pub struct GrpcAuthAuditContext {
     max_tier: AuthTier,
     authn: GrpcAuthnKind,
     principal: String,
+    resolve_mtls_principal: bool,
     expected_bearer_header: Option<BearerAuthSecret>,
 }
 
@@ -74,8 +78,17 @@ impl GrpcAuthAuditContext {
             max_tier,
             authn,
             principal: principal.into(),
+            resolve_mtls_principal: false,
             expected_bearer_header: None,
         }
+    }
+
+    /// Mark this context as an mTLS listener whose per-request
+    /// principal should be derived from the peer certificate.
+    #[must_use]
+    pub fn with_mtls_peer_principal(mut self) -> Self {
+        self.resolve_mtls_principal = true;
+        self
     }
 
     #[must_use]
@@ -103,6 +116,34 @@ impl GrpcAuthAuditContext {
         let expected = self.expected_bearer_header.as_ref()?;
         expected.auth_error_from_http_headers(headers)
     }
+
+    fn principal_for_extensions<'a>(&'a self, extensions: &http::Extensions) -> Cow<'a, str> {
+        if !self.resolve_mtls_principal {
+            return Cow::Borrowed(self.principal.as_str());
+        }
+        match mtls_principal_from_extensions(extensions) {
+            Ok(principal) => Cow::Owned(principal),
+            Err(error) => {
+                debug!(
+                    target: "grpc_authz",
+                    error = %error,
+                    fallback = %self.principal,
+                    "failed to extract mTLS peer principal for gRPC audit"
+                );
+                Cow::Borrowed(self.principal.as_str())
+            }
+        }
+    }
+}
+
+fn mtls_principal_from_extensions(
+    extensions: &http::Extensions,
+) -> Result<String, PrincipalExtractionError> {
+    let certs = extensions
+        .get::<TlsConnectInfo<TcpConnectInfo>>()
+        .and_then(TlsConnectInfo::peer_certs)
+        .ok_or(PrincipalExtractionError::MissingPeerCertificate)?;
+    principal_from_peer_certs(certs.as_ref())
 }
 
 /// Redacted bearer-token verifier shared by the audit layer and tonic interceptor.
@@ -252,13 +293,21 @@ where
         let path = req.uri().path();
         let lookup = audit_lookup_for_path(path);
         let decision = lookup.decision;
+        let principal = self.context.principal_for_extensions(req.extensions());
         if decision.tier > self.context.max_tier {
             // This layer wraps tonic's per-service interceptors. For an
             // over-cap bearer-token request, authenticate first so
             // invalid callers still receive UNAUTHENTICATED instead of
             // learning listener tier details via PERMISSION_DENIED.
             if let Some(status) = self.context.bearer_auth_error(req.headers()) {
-                record_audit_decision(path, &lookup, &self.context, &self.metrics, "authn_failed");
+                record_audit_decision(
+                    path,
+                    &lookup,
+                    &self.context,
+                    principal.as_ref(),
+                    &self.metrics,
+                    "authn_failed",
+                );
                 let response = status.into_http::<Body>();
                 return Box::pin(async move { Ok(response) });
             }
@@ -266,6 +315,7 @@ where
                 path,
                 &lookup,
                 &self.context,
+                principal.as_ref(),
                 &self.metrics,
                 "listener_tier_denied",
             );
@@ -277,7 +327,14 @@ where
             .into_http::<Body>();
             return Box::pin(async move { Ok(response) });
         }
-        record_audit_decision(path, &lookup, &self.context, &self.metrics, decision.result);
+        record_audit_decision(
+            path,
+            &lookup,
+            &self.context,
+            principal.as_ref(),
+            &self.metrics,
+            decision.result,
+        );
         let fut = self.inner.call(req);
         Box::pin(fut)
     }
@@ -298,6 +355,7 @@ fn record_audit_decision(
     path: &str,
     lookup: &GrpcAuthAuditLookup,
     context: &GrpcAuthAuditContext,
+    principal: &str,
     metrics: &BgpMetrics,
     result: &'static str,
 ) {
@@ -317,7 +375,6 @@ fn record_audit_decision(
     let access_mode = context.access_mode;
     let max_tier = context.max_tier.as_str();
     let authn = context.authn.as_str();
-    let principal = context.principal.as_str();
 
     if decision.tier == AuthTier::OperatorOnly {
         warn!(
@@ -559,5 +616,24 @@ mod tests {
         assert!(rendered.contains("<redacted>"));
         assert!(!rendered.contains("secret"));
         assert!(!rendered.contains("Bearer secret"));
+    }
+
+    #[test]
+    fn mtls_principal_resolution_falls_back_without_peer_certs() {
+        let context = GrpcAuthAuditContext::new(
+            "tcp://127.0.0.1:50051",
+            "read_write",
+            AuthTier::OperatorOnly,
+            GrpcAuthnKind::Mtls,
+            "mtls-unresolved",
+        )
+        .with_mtls_peer_principal();
+
+        assert_eq!(
+            context
+                .principal_for_extensions(&http::Extensions::new())
+                .as_ref(),
+            "mtls-unresolved"
+        );
     }
 }

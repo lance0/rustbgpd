@@ -9,6 +9,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **ADR-0064 mTLS audit principal extraction.** Native gRPC mTLS listeners now
+  derive the `grpc_authz` audit principal from the validated client
+  certificate (`rustbgpd:` URI SAN, then email SAN, then Subject CN) instead of
+  always reporting `mtls-unresolved`. This is audit-only: listener `max_tier`
+  caps still enforce the current boundary, while per-principal deny-by-tier
+  enforcement and the default flip remain deferred.
+
 ## [0.23.0] — 2026-05-19
 
 ### Added

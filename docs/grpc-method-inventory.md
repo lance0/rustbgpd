@@ -236,9 +236,8 @@ specific method if the model warrants it.
    listener `max_tier` denials use the bounded
    `result="listener_tier_denied"` label, and unauthenticated over-cap probes
    use `result="authn_failed"` without exposing tier details. The external
-   review still needs the later hardening slice: mTLS principal extraction,
-   result-aware audit
-   records, request summaries with credential-bearing fields masked, and
+   review still needs the later hardening slice: result-aware audit records,
+   request summaries with credential-bearing fields masked, and
    per-principal role enforcement.
 
 ## Code matrix

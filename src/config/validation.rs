@@ -101,7 +101,7 @@ impl Config {
             if cfg.principal.is_some() && tls_count == 3 {
                 return Err(ConfigError::InvalidGrpcConfig {
                     reason: "grpc_tcp.principal is for non-mTLS bearer-token listeners; \
-                             mTLS principal extraction is tracked by ADR-0064 #166"
+                             mTLS audit principals are derived from the client certificate"
                         .to_string(),
                 });
             }

@@ -104,10 +104,10 @@ pub struct ListenerConfig {
     /// Effective ADR-0064 listener method-tier ceiling.
     pub max_tier: AuthTier,
     pub auth_token: Option<String>,
-    /// Optional stable principal label for audit records. mTLS
-    /// listeners ignore this until certificate principal extraction
-    /// lands; bearer-token and UDS listeners may use it to avoid
-    /// placeholder identities in `grpc_authz` logs.
+    /// Optional stable principal label for audit records. Bearer-token
+    /// and UDS listeners may use it to avoid placeholder identities in
+    /// `grpc_authz` logs; mTLS listeners derive their audit principal
+    /// from the peer certificate instead.
     pub principal: Option<String>,
     /// Optional native mTLS for TCP listeners. The server presents
     /// `cert_pem` and accepts client connections that present a
@@ -169,14 +169,19 @@ fn tcp_audit_context(
     } else {
         (GrpcAuthnKind::None, "unauthenticated".to_string())
     };
-    GrpcAuthAuditContext::new(
+    let context = GrpcAuthAuditContext::new(
         format!("tcp://{addr}"),
         access_mode.as_str(),
         max_tier,
         authn,
         principal,
     )
-    .with_bearer_token(auth_token)
+    .with_bearer_token(auth_token);
+    if tls_enabled {
+        context.with_mtls_peer_principal()
+    } else {
+        context
+    }
 }
 
 fn uds_audit_context(
@@ -808,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn tcp_audit_context_keeps_mtls_unresolved_until_cert_extraction() {
+    fn tcp_audit_context_uses_mtls_fallback_until_request_cert_available() {
         let context = tcp_audit_context(
             "127.0.0.1:50051".parse().unwrap(),
             AccessMode::ReadWrite,

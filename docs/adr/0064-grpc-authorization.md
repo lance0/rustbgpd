@@ -365,15 +365,16 @@ decision logs, and bounded-cardinality metrics. Slice 3a adds staged
 `[security.grpc.roles]`, `enforcement = "legacy"`, and explicit non-mTLS
 listener principal labels for bearer-token TCP and UDS audit identity.
 Slice 4a adds enforced per-listener `max_tier` caps while preserving
-`access_mode` as a compatibility ceiling. Later slices implement mTLS
-certificate principal extraction, per-principal role enforcement, the
-default enforcement flip, and result/request audit-log hardening.
+`access_mode` as a compatibility ceiling. Slice 3b adds audit-only native mTLS
+certificate principal extraction (`rustbgpd:` URI SAN, then email SAN, then
+Subject CN). Later slices implement per-principal role enforcement, the default
+enforcement flip, and result/request audit-log hardening.
 
 | Slice | Status |
 |-------|--------|
 | 1. Foundation | Implemented by the checked method-matrix PR |
 | 2. Audit-only runtime path | Implemented by the runtime audit-layer PR |
-| 3. Identity + roles | Partial: roles config + non-mTLS audit principals |
+| 3. Identity + roles | Partial: roles config + bearer/UDS principals + mTLS audit principal extraction |
 | 4. Listener tier cap | Partial: `max_tier` listener cap enforced; role/default flip deferred |
 | 5. Enforcement flip | Not started |
 | 6. Audit log hardening | Not started |

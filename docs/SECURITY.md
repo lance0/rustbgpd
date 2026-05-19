@@ -61,8 +61,12 @@ Preferred posture:
   risks for that migration.
 - `[security.grpc.roles]` and listener `principal` labels can be staged now so
   audit records use stable operator-controlled identities on bearer-token TCP
-  and UDS listeners. These roles are configuration-only until ADR-0064
-  deny-by-tier enforcement lands.
+  and UDS listeners. Native mTLS listeners derive audit principals from the
+  client certificate (`rustbgpd:` URI SAN, then email SAN, then Subject CN);
+  unsafe or overlong cert values fall back to `mtls-unresolved` rather than
+  entering structured logs verbatim.
+  These roles are configuration-only until ADR-0064 deny-by-tier enforcement
+  lands.
 - Listener `max_tier` caps are enforced now and should be used to bound remote
   TCP listeners to the smallest required method tier. `access_mode =
   "read_only"` remains a compatibility ceiling equivalent to
@@ -264,9 +268,8 @@ the roadmap:
   (`read`, `sensitive_read`, `mutating`, `operator_only`). Runtime
   method-tier decision logs/metrics, staged principal/role config, enforced
   listener tier caps, and the `docs/adr/0064-threat-model.md` audit packet are
-  present. Per-principal role enforcement is still audit/deferred; mTLS
-  certificate principal extraction, role-based deny-by-tier enforcement, and
-  audit-log hardening remain deferred.
+  present. Per-principal role enforcement is still audit/deferred;
+  role-based deny-by-tier enforcement and audit-log hardening remain deferred.
 - TCP-AO (RFC 5925) dynamic-neighbor support, runtime key rotation,
   multi-key rollover, and accepted-socket inspection for BGP session
   protection
