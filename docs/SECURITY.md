@@ -281,8 +281,12 @@ the roadmap:
   migration path is documented: stage `[security.grpc.roles]`, add explicit
   principals for UDS and bearer-token listeners, validate the candidate config
   with `rustbgpd --check`, then opt into `enforcement = "tier"`. The production
-  default still remains `legacy`; the final default flip and durable audit-sink
-  / retention guidance remain deferred.
+  default still remains `legacy`; the final default flip remains deferred.
+  Structured-log audit collection, retention, query examples, and
+  resource-abuse guardrails are documented in
+  [`docs/OPERATIONS.md`](OPERATIONS.md#grpc-authorization-audit-and-resource-guardrails).
+  A separate in-daemon durable audit sink remains deferred until file/syslog
+  backpressure and failure semantics are designed.
 - TCP-AO (RFC 5925) dynamic-neighbor support, runtime key rotation,
   multi-key rollover, and accepted-socket inspection for BGP session
   protection
@@ -295,6 +299,10 @@ the roadmap:
   The default flip to tier mode remains a future migration slice; configs that
   rely on the implicit UDS listener must declare `[global.telemetry.grpc_uds]`
   with a `principal` before they can run under tier enforcement.
+- Per-principal request-rate and stream-count budgets are not implemented in
+  the daemon. Use listener tier caps, role enforcement, management-network
+  controls, client deadlines, and the documented `grpc_authz` / stream metrics
+  to detect or constrain accepted-client abuse in v1.
 - TCP-AO currently supports static-neighbor startup keys only; dynamic
   neighbors, live key rotation, and multi-key rollover remain follow-up work.
   Protected static-neighbor interop is covered by M43 against BIRD 3.2.1 on

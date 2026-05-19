@@ -83,8 +83,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `DiffRuntimeConfigRequest.candidate_toml` is summarized as redacted metadata
   (covering embedded `md5_password` and `tcp_ao.key` values), and
   `SetPeerGroup` records only MD5 state (`set_redacted`, `preserve`, or
-  `clear`) without secret material. Durable audit sinks, retention, and proto
+  `clear`) without secret material. In-daemon durable audit sinks and proto
   credential-field annotations remain follow-up ADR-0064 slices.
+
+- **ADR-0064 gRPC operations guardrails.** `docs/OPERATIONS.md` now documents
+  the v1 audit posture for `grpc_authz` records: collect structured daemon logs
+  with journald/syslog/log agents, apply external retention and access controls,
+  query high-tier and denied calls, and alert on
+  `bgp_grpc_authz_decisions_total`, stream lag, and subscriber gauges. The same
+  runbook inventories expensive unary and streaming RPC classes and explains
+  why in-daemon audit sinks and per-principal request budgets remain deferred
+  design work rather than v1 defaults.
 
 ## [0.23.0] — 2026-05-19
 

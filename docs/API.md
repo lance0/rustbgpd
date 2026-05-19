@@ -119,6 +119,9 @@ to a role.
 `docs/adr/0064-threat-model.md` is the external-review packet for this surface:
 it maps trust boundaries, abuse paths, residual risks, and the evidence an
 auditor should collect.
+Operational collection, retention, query examples, and resource-abuse guardrails
+for `grpc_authz` logs and the related Prometheus metrics live in
+[`docs/OPERATIONS.md`](OPERATIONS.md#grpc-authorization-audit-and-resource-guardrails).
 
 | Service | Read-only RPCs | Mutating RPCs rejected on `read_only` |
 |---------|----------------|---------------------------------------|
@@ -848,7 +851,10 @@ events are skipped and `bgp_event_stream_lagged_total{service,source}` records
 the missed count. Use `bgp_event_stream_subscribers{service,source}` to see
 active stream readers and `bgp_route_event_history_depth` /
 `bgp_route_event_history_capacity` to understand how much recent unicast route
-history is available through `ListRouteEvents`.
+history is available through `ListRouteEvents`. See
+[`docs/OPERATIONS.md`](OPERATIONS.md#grpc-authorization-audit-and-resource-guardrails)
+for alerting guidance that combines these stream metrics with ADR-0064
+authorization decision volume.
 
 Unified event types:
 

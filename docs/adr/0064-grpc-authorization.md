@@ -357,9 +357,16 @@ own migration window.
   factor (e.g. signed timestamp from a hardware token) for `Shutdown`
   and `TriggerMrtDump`. Out of scope for v1; revisit if external
   review flags it.
-- **Audit-log durability.** v1.0 ships structured stderr logs; a
-  durable audit channel (file rotation, syslog, remote sink) is a
-  future operations slice.
+- **Audit-log durability.** v1.0 ships structured daemon logs collected by
+  journald, syslog, or an external log agent. `docs/OPERATIONS.md` now defines
+  retention, access-control, and query guidance for `grpc_authz` records. A
+  separate in-daemon durable audit channel remains a future design item because
+  file/syslog/remote-sink backpressure semantics need an explicit decision.
+- **Accepted-client resource budgets.** v1.0 relies on listener `max_tier`,
+  tier roles, pagination, bounded histories, stream lag/subscriber metrics, and
+  operational network controls. Per-principal or per-listener request/stream
+  budgets remain future work if production evidence shows the existing signals
+  are insufficient.
 - **Dynamic role updates.** Slice 2 reads the role map at startup
   and on SIGHUP. Live role revocation without a SIGHUP (e.g. a
   "kick this principal" RPC) is not v1.
@@ -396,5 +403,5 @@ optional proto credential markers.
 | 3. Identity + roles | Partial: roles config + bearer/UDS principals + mTLS audit principal extraction |
 | 4. Listener tier cap | Partial: `max_tier` listener cap enforced; role/default flip deferred |
 | 5. Enforcement + default flip | Partial: opt-in `tier` role enforcement implemented; migration guidance landed; default flip deferred |
-| 6. Audit log hardening | Partial: result-aware records + explicit credential masking table |
+| 6. Audit log hardening | Partial: result-aware records + explicit credential masking table + operations guidance for audit retention and resource guardrails |
 | 7. External-review prep | Not started |
