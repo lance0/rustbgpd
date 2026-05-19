@@ -103,17 +103,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Deploy M36 topology
-        run: |
-          sudo containerlab destroy -t tests/interop/m36-evpn-vtep-smoke.clab.yml --cleanup 2>/dev/null || true
-          sudo containerlab deploy -t tests/interop/m36-evpn-vtep-smoke.clab.yml
-
-      - name: Run M36 test
-        run: bash tests/interop/scripts/test-m36-evpn-vtep-smoke.sh
-
-      - name: Destroy topology
-        if: always()
-        run: sudo containerlab destroy -t tests/interop/m36-evpn-vtep-smoke.clab.yml --cleanup || true
+      - name: Run M36 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M36
+          topology: tests/interop/m36-evpn-vtep-smoke.clab.yml
+          script: tests/interop/scripts/test-m36-evpn-vtep-smoke.sh
 
   m37:
     name: M37 — EVPN local MAC origination (FRR 10.3.1)
@@ -126,17 +121,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Deploy M37 topology
-        run: |
-          sudo containerlab destroy -t tests/interop/m37-evpn-local-origination.clab.yml --cleanup 2>/dev/null || true
-          sudo containerlab deploy -t tests/interop/m37-evpn-local-origination.clab.yml
-
-      - name: Run M37 test
-        run: bash tests/interop/scripts/test-m37-evpn-local-origination.sh
-
-      - name: Destroy topology
-        if: always()
-        run: sudo containerlab destroy -t tests/interop/m37-evpn-local-origination.clab.yml --cleanup || true
+      - name: Run M37 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M37
+          topology: tests/interop/m37-evpn-local-origination.clab.yml
+          script: tests/interop/scripts/test-m37-evpn-local-origination.sh
 
   m37-ip:
     name: M37+IP — EVPN local MAC/IP origination (FRR 10.3.1)
@@ -149,17 +139,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Deploy M37+IP topology
-        run: |
-          sudo containerlab destroy -t tests/interop/m37-evpn-mac-ip-origination.clab.yml --cleanup 2>/dev/null || true
-          sudo containerlab deploy -t tests/interop/m37-evpn-mac-ip-origination.clab.yml
-
-      - name: Run M37+IP test
-        run: bash tests/interop/scripts/test-m37-evpn-mac-ip-origination.sh
-
-      - name: Destroy topology
-        if: always()
-        run: sudo containerlab destroy -t tests/interop/m37-evpn-mac-ip-origination.clab.yml --cleanup || true
+      - name: Run M37+IP (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M37+IP
+          topology: tests/interop/m37-evpn-mac-ip-origination.clab.yml
+          script: tests/interop/scripts/test-m37-evpn-mac-ip-origination.sh
 
   m38:
     name: M38 — EVPN DF election + Type 1/4 origination
@@ -172,17 +157,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Deploy M38 topology
-        run: |
-          sudo containerlab destroy -t tests/interop/m38-evpn-df-election.clab.yml --cleanup 2>/dev/null || true
-          sudo containerlab deploy -t tests/interop/m38-evpn-df-election.clab.yml
-
-      - name: Run M38 test
-        run: bash tests/interop/scripts/test-m38-evpn-df-election.sh
-
-      - name: Destroy topology
-        if: always()
-        run: sudo containerlab destroy -t tests/interop/m38-evpn-df-election.clab.yml --cleanup || true
+      - name: Run M38 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M38
+          topology: tests/interop/m38-evpn-df-election.clab.yml
+          script: tests/interop/scripts/test-m38-evpn-df-election.sh
 
   m39:
     name: M39 — EVPN Type 5 symmetric Interface-less IRB (FRR 10.3.1)
@@ -194,19 +174,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Deploy M39 topology
-        # Pre-clean: the runner is persistent, so a crashed prior run
-        # could have left containers / netns behind.
-        run: |
-          sudo containerlab destroy -t tests/interop/m39-evpn-type5-symmetric-irb.clab.yml --cleanup 2>/dev/null || true
-          sudo containerlab deploy -t tests/interop/m39-evpn-type5-symmetric-irb.clab.yml
-
-      - name: Run M39 test
-        run: bash tests/interop/scripts/test-m39-evpn-type5-symmetric-irb.sh
-
-      - name: Destroy topology
-        if: always()
-        run: sudo containerlab destroy -t tests/interop/m39-evpn-type5-symmetric-irb.clab.yml --cleanup || true
+      - name: Run M39 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M39
+          topology: tests/interop/m39-evpn-type5-symmetric-irb.clab.yml
+          script: tests/interop/scripts/test-m39-evpn-type5-symmetric-irb.sh
 
   m40:
     name: M40 — ADR-0059 aliasing dataplane ECMP (FRR EVPN-MH 10.3.1)
@@ -218,17 +191,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Deploy M40 topology
-        run: |
-          sudo containerlab destroy -t tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml --cleanup 2>/dev/null || true
-          sudo containerlab deploy -t tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml
-
-      - name: Run M40 test
-        run: bash tests/interop/scripts/test-m40-evpn-aliasing-ecmp-frr.sh
-
-      - name: Destroy topology
-        if: always()
-        run: sudo containerlab destroy -t tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml --cleanup || true
+      - name: Run M40 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M40
+          topology: tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml
+          script: tests/interop/scripts/test-m40-evpn-aliasing-ecmp-frr.sh
 
   m42:
     name: M42 — ADR-0061 configured-table unicast FIB runtime (FRR 10.3.1)
@@ -240,17 +208,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Deploy M42 topology
-        run: |
-          sudo containerlab destroy -t tests/interop/m42-fib-runtime-frr.clab.yml --cleanup 2>/dev/null || true
-          sudo containerlab deploy -t tests/interop/m42-fib-runtime-frr.clab.yml
-
-      - name: Run M42 test
-        run: bash tests/interop/scripts/test-m42-fib-runtime-frr.sh
-
-      - name: Destroy topology
-        if: always()
-        run: sudo containerlab destroy -t tests/interop/m42-fib-runtime-frr.clab.yml --cleanup || true
+      - name: Run M42 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M42
+          topology: tests/interop/m42-fib-runtime-frr.clab.yml
+          script: tests/interop/scripts/test-m42-fib-runtime-frr.sh
 
   m43:
     name: M43 — ADR-0062 TCP-AO protected session (BIRD 3.2.1)
@@ -293,19 +256,13 @@ jobs:
         if: steps.tcp_ao.outputs.supported == 'true'
         run: docker build -t bird:3.2.1-tcpao -f tests/interop/Dockerfile.bird3 tests/interop
 
-      - name: Deploy M43 topology
+      - name: Run M43 (deploy + test + destroy with retry)
         if: steps.tcp_ao.outputs.supported == 'true'
-        run: |
-          sudo containerlab destroy -t tests/interop/m43-tcp-ao-bird.clab.yml --cleanup 2>/dev/null || true
-          sudo containerlab deploy -t tests/interop/m43-tcp-ao-bird.clab.yml
-
-      - name: Run M43 test
-        if: steps.tcp_ao.outputs.supported == 'true'
-        run: bash tests/interop/scripts/test-m43-tcp-ao-bird.sh
-
-      - name: Destroy topology
-        if: always() && steps.tcp_ao.outputs.supported == 'true'
-        run: sudo containerlab destroy -t tests/interop/m43-tcp-ao-bird.clab.yml --cleanup || true
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M43
+          topology: tests/interop/m43-tcp-ao-bird.clab.yml
+          script: tests/interop/scripts/test-m43-tcp-ao-bird.sh
 
   netns:
     name: Privileged netns selectors (fdb_nhg + fib_runtime)

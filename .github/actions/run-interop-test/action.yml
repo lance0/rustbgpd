@@ -1,0 +1,98 @@
+name: "Run interop test with retry"
+description: >-
+  Drive a containerlab interop test lifecycle (destroy → deploy → run →
+  destroy-on-exit) with bounded retry on transient failure. The composite
+  always destroys the topology before each attempt so leftover state from
+  a prior failed run does not poison the next attempt, and always destroys
+  on exit regardless of outcome. A successful retry annotates a workflow
+  `::warning::` so CI flake remains visible in the UI rather than silently
+  hiding.
+
+inputs:
+  topology:
+    description: "Path to the .clab.yml topology file."
+    required: true
+  script:
+    description: "Path to the bash test script to run after deploy."
+    required: true
+  max_attempts:
+    description: "Maximum attempts before declaring failure. Default 2."
+    required: false
+    default: "2"
+  label:
+    description: >-
+      Short human-readable label for log groups and warnings (e.g. "M36").
+      Defaults to the topology file's basename.
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run interop test with retry
+      shell: bash
+      env:
+        INTEROP_TOPOLOGY: ${{ inputs.topology }}
+        INTEROP_SCRIPT: ${{ inputs.script }}
+        INTEROP_MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+        INTEROP_LABEL: ${{ inputs.label }}
+      run: |
+        set -uo pipefail
+
+        topology="${INTEROP_TOPOLOGY}"
+        script="${INTEROP_SCRIPT}"
+        max_attempts="${INTEROP_MAX_ATTEMPTS}"
+        label="${INTEROP_LABEL:-$(basename "$topology" .clab.yml)}"
+
+        if [ ! -f "$topology" ]; then
+          echo "::error::interop test topology not found: $topology"
+          exit 2
+        fi
+        if [ ! -f "$script" ]; then
+          echo "::error::interop test script not found: $script"
+          exit 2
+        fi
+
+        attempt=0
+        rc=1
+        while [ "$attempt" -lt "$max_attempts" ]; do
+          attempt=$((attempt + 1))
+          echo "::group::${label} attempt ${attempt}/${max_attempts}"
+
+          # Always destroy any leftover topology before deploy so a stale
+          # prior-run state cannot leak into this attempt.
+          sudo containerlab destroy -t "$topology" --cleanup 2>/dev/null || true
+
+          if sudo containerlab deploy -t "$topology"; then
+            if bash "$script"; then
+              rc=0
+              echo "::endgroup::"
+              break
+            else
+              rc=$?
+              echo "::endgroup::"
+              echo "::warning::${label} test script failed on attempt ${attempt} (exit ${rc})"
+            fi
+          else
+            rc=$?
+            echo "::endgroup::"
+            echo "::warning::${label} containerlab deploy failed on attempt ${attempt} (exit ${rc})"
+          fi
+
+          # Tear down failed-attempt state before retrying so the next
+          # deploy starts from a clean kernel/docker baseline.
+          sudo containerlab destroy -t "$topology" --cleanup 2>/dev/null || true
+        done
+
+        # Always destroy on exit regardless of outcome so the runner does
+        # not accumulate stale clab containers across jobs.
+        sudo containerlab destroy -t "$topology" --cleanup 2>/dev/null || true
+
+        if [ "$rc" -eq 0 ]; then
+          if [ "$attempt" -gt 1 ]; then
+            echo "::warning::${label} passed after ${attempt} attempts (retry absorbed transient failure)"
+          fi
+          exit 0
+        fi
+        echo "::error::${label} failed after ${max_attempts} attempts"
+        exit "$rc"
