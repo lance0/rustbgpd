@@ -43,14 +43,15 @@
 //! - ADR-0054 §2 (snapshot/watch input)
 //! - ADR-0054 §6 (level-triggered reconcile)
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use rustbgpd_evpn::ip_vrf::IpVrfTable;
 use rustbgpd_evpn::{
-    BumEnforcementTable, DataplaneIntent, DataplaneReport, EvpnInstanceTable, FdbNhgDriftCounters,
-    LocalMacObservation, ProjectedEvpnEadPerEvi, ProjectedEvpnRoute, RemoteMacTable,
-    project_evpn_routes_with_aliases,
+    BumEnforcementTable, DataplaneIntent, DataplaneReport, DuplicateMacKey, EvpnInstanceTable,
+    FdbNhgDriftCounters, LocalMacObservation, ProjectedEvpnEadPerEvi, ProjectedEvpnRoute,
+    RemoteMacTable, project_evpn_routes_with_aliases,
 };
 use rustbgpd_evpn_linux::{Dataplane, ReconcileActor, ReconcileActorConfig};
 use rustbgpd_rib::{RibUpdate, route::EvpnRibRoute};
@@ -170,6 +171,7 @@ impl EvpnDataplaneHandle {
 ///    platforms the function returns `None` because the dataplane
 ///    is meaningless.
 #[must_use = "drop the handle to shut down the EVPN dataplane stack"]
+#[allow(dead_code)]
 pub async fn spawn(
     config: SupervisorConfig,
     evpn_instances: &Arc<EvpnInstanceTable>,
@@ -177,6 +179,34 @@ pub async fn spawn(
     rib_tx: mpsc::Sender<RibUpdate>,
     metrics: BgpMetrics,
     daemon_shutdown: CancellationToken,
+) -> Option<EvpnDataplaneHandle> {
+    let (_, duplicate_mac_quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+    spawn_with_quarantine(
+        config,
+        evpn_instances,
+        ip_vrfs,
+        rib_tx,
+        metrics,
+        daemon_shutdown,
+        duplicate_mac_quarantine_rx,
+    )
+    .await
+}
+
+/// Spawn the EVPN dataplane stack with an external duplicate-MAC
+/// quarantine feed from the local originator.
+///
+/// Quarantined `(VNI, MAC)` keys are excluded from remote-FDB intent while
+/// preserving RIB and route-reflector visibility.
+#[allow(clippy::too_many_arguments)]
+pub async fn spawn_with_quarantine(
+    config: SupervisorConfig,
+    evpn_instances: &Arc<EvpnInstanceTable>,
+    ip_vrfs: &Arc<IpVrfTable>,
+    rib_tx: mpsc::Sender<RibUpdate>,
+    metrics: BgpMetrics,
+    daemon_shutdown: CancellationToken,
+    duplicate_mac_quarantine_rx: watch::Receiver<Arc<BTreeSet<DuplicateMacKey>>>,
 ) -> Option<EvpnDataplaneHandle> {
     if evpn_instances.is_empty() && ip_vrfs.is_empty() {
         info!(
@@ -198,7 +228,7 @@ pub async fn spawn(
         {
             Ok(mut dataplane) => {
                 let local_mac_rx = dataplane.take_local_mac_rx();
-                let mut handle = spawn_with_dataplane(
+                let mut handle = spawn_with_dataplane_and_quarantine(
                     config,
                     evpn_instances,
                     ip_vrfs,
@@ -206,6 +236,7 @@ pub async fn spawn(
                     &metrics,
                     daemon_shutdown,
                     dataplane,
+                    duplicate_mac_quarantine_rx,
                 );
                 handle.local_mac_rx = local_mac_rx;
                 Some(handle)
@@ -223,7 +254,13 @@ pub async fn spawn(
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (config, rib_tx, metrics, daemon_shutdown);
+        let _ = (
+            config,
+            rib_tx,
+            metrics,
+            daemon_shutdown,
+            duplicate_mac_quarantine_rx,
+        );
         info!(
             target = std::env::consts::OS,
             "EVPN Linux dataplane not available on this platform; \
@@ -243,6 +280,7 @@ pub async fn spawn(
 /// receive a handle with `local_mac_rx = None`; tests that need
 /// observations should call `take_local_mac_rx` themselves before
 /// passing the dataplane in.
+#[allow(dead_code)]
 pub fn spawn_with_dataplane<D>(
     config: SupervisorConfig,
     evpn_instances: &Arc<EvpnInstanceTable>,
@@ -251,6 +289,35 @@ pub fn spawn_with_dataplane<D>(
     metrics: &BgpMetrics,
     daemon_shutdown: CancellationToken,
     dataplane: D,
+) -> EvpnDataplaneHandle
+where
+    D: Dataplane + rustbgpd_evpn_linux::dataplane::NexthopOps + Send + Sync + 'static,
+{
+    let (_, duplicate_mac_quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+    spawn_with_dataplane_and_quarantine(
+        config,
+        evpn_instances,
+        ip_vrfs,
+        rib_tx,
+        metrics,
+        daemon_shutdown,
+        dataplane,
+        duplicate_mac_quarantine_rx,
+    )
+}
+
+/// Test/production helper that injects a dataplane implementation and an
+/// external duplicate-MAC quarantine feed.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_with_dataplane_and_quarantine<D>(
+    config: SupervisorConfig,
+    evpn_instances: &Arc<EvpnInstanceTable>,
+    ip_vrfs: &Arc<IpVrfTable>,
+    rib_tx: mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    daemon_shutdown: CancellationToken,
+    dataplane: D,
+    duplicate_mac_quarantine_rx: watch::Receiver<Arc<BTreeSet<DuplicateMacKey>>>,
 ) -> EvpnDataplaneHandle
 where
     D: Dataplane + rustbgpd_evpn_linux::dataplane::NexthopOps + Send + Sync + 'static,
@@ -311,6 +378,7 @@ where
         rib_tx,
         intent_tx,
         bum_enforcement_rx,
+        duplicate_mac_quarantine_rx,
         supervisor_shutdown,
     ));
 
@@ -353,6 +421,7 @@ fn record_fdb_nhg_drift_metrics(metrics: &BgpMetrics, counters: FdbNhgDriftCount
 /// startup (ADR-0052), so equality on the two mutable tables is
 /// sufficient — if the instance set ever becomes mutable here, extend
 /// the comparison.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Supervisor wiring intentionally keeps actor dependencies explicit.
 async fn supervisor_loop(
     poll_interval: Duration,
     instances: Arc<EvpnInstanceTable>,
@@ -360,12 +429,14 @@ async fn supervisor_loop(
     rib_tx: mpsc::Sender<RibUpdate>,
     intent_tx: watch::Sender<Arc<DataplaneIntent>>,
     mut bum_enforcement_rx: watch::Receiver<Arc<BumEnforcementTable>>,
+    mut duplicate_mac_quarantine_rx: watch::Receiver<Arc<BTreeSet<DuplicateMacKey>>>,
     shutdown: CancellationToken,
 ) {
     let mut generation: u64 = 0;
     let mut last_table = RemoteMacTable::new();
     let mut last_ip_prefixes = rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable::new();
     let mut last_bum_enforcement = BumEnforcementTable::new();
+    let mut duplicate_mac_quarantine_updates_open = true;
     let mut tick = tokio::time::interval(poll_interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -377,7 +448,13 @@ async fn supervisor_loop(
                 return;
             }
             _ = tick.tick() => {
-                let tables = match build_intent_tables(&rib_tx, &instances, &ip_vrfs).await {
+                let quarantined = duplicate_mac_quarantine_rx.borrow().clone();
+                let tables = match build_intent_tables(
+                    &rib_tx,
+                    &instances,
+                    &ip_vrfs,
+                    quarantined.as_ref(),
+                ).await {
                     Ok(t) => t,
                     Err(e) => {
                         warn!(error = %e, "EVPN dataplane supervisor: RIB query failed");
@@ -440,6 +517,50 @@ async fn supervisor_loop(
                     return;
                 }
             }
+            changed = duplicate_mac_quarantine_rx.changed(), if duplicate_mac_quarantine_updates_open => {
+                if changed.is_err() {
+                    debug!("duplicate-MAC quarantine publisher gone; continuing with periodic polls");
+                    duplicate_mac_quarantine_updates_open = false;
+                    continue;
+                }
+                let quarantined = duplicate_mac_quarantine_rx.borrow_and_update().clone();
+                let tables = match build_intent_tables(
+                    &rib_tx,
+                    &instances,
+                    &ip_vrfs,
+                    quarantined.as_ref(),
+                ).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!(error = %e, "EVPN dataplane supervisor: RIB query failed");
+                        continue;
+                    }
+                };
+                let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
+                if tables.remote_macs == last_table
+                    && tables.remote_ip_prefixes == last_ip_prefixes
+                    && bum_enforcement == last_bum_enforcement
+                    && generation > 0
+                {
+                    continue;
+                }
+                generation = generation.saturating_add(1);
+                last_table = tables.remote_macs.clone();
+                last_ip_prefixes = tables.remote_ip_prefixes.clone();
+                last_bum_enforcement = bum_enforcement.clone();
+                let intent = Arc::new(DataplaneIntent {
+                    generation,
+                    instances: instances.clone(),
+                    remote_macs: Arc::new(tables.remote_macs),
+                    bum_enforcement: Arc::new(bum_enforcement),
+                    ip_vrfs: ip_vrfs.clone(),
+                    remote_ip_prefixes: Arc::new(tables.remote_ip_prefixes),
+                });
+                if intent_tx.send(intent).is_err() {
+                    debug!("intent receiver gone; supervisor exiting");
+                    return;
+                }
+            }
         }
     }
 }
@@ -452,7 +573,10 @@ async fn supervisor_loop(
 /// routes drive the receiver-side mass-withdraw filter (RFC 7432 §8.4):
 /// a Type 2 with non-zero ESI is dropped from the projection if the
 /// originating peer does not currently advertise an EAD-per-ES route
-/// for the same ESI. Other route types (Type 3 IMET, Type 4 ES, Type 5
+/// for the same ESI. Active duplicate-MAC quarantine keys are also
+/// dropped from the remote-FDB intent so the dataplane stops forwarding
+/// toward a quarantined remote MAC while the RIB/RR surfaces remain
+/// visible. Other route types (Type 3 IMET, Type 4 ES, Type 5
 /// IP-Prefix) are ignored for Gate 7b — they're carried by the RR but
 /// the L2VNI dataplane boundary only programs Type 2 MACs.
 /// Outcome of one RIB query: the L2 (Type 2) remote-MAC table plus
@@ -468,6 +592,7 @@ async fn build_intent_tables(
     rib_tx: &mpsc::Sender<RibUpdate>,
     instances: &EvpnInstanceTable,
     ip_vrfs: &rustbgpd_evpn::ip_vrf::IpVrfTable,
+    quarantined_macs: &BTreeSet<DuplicateMacKey>,
 ) -> Result<IntentTables, RibQueryError> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     rib_tx
@@ -502,6 +627,7 @@ async fn build_intent_tables(
     let projected: Vec<ProjectedEvpnRoute> = routes
         .iter()
         .filter_map(|r| project_one(r, &active_ead_per_es))
+        .filter(|route| !projected_route_is_quarantined(route, quarantined_macs))
         .collect();
     let ead_per_evi: Vec<ProjectedEvpnEadPerEvi> = routes
         .iter()
@@ -524,6 +650,20 @@ async fn build_intent_tables(
         remote_macs,
         remote_ip_prefixes,
     })
+}
+
+fn projected_route_is_quarantined(
+    route: &ProjectedEvpnRoute,
+    quarantined_macs: &BTreeSet<DuplicateMacKey>,
+) -> bool {
+    let raw_vni = route.label1.as_vni();
+    if raw_vni == 0 {
+        return false;
+    }
+    let Ok(vni) = rustbgpd_evpn::EvpnInstanceId::new(raw_vni) else {
+        return false;
+    };
+    quarantined_macs.contains(&DuplicateMacKey::new(vni, route.mac))
 }
 
 /// Translate an `EvpnRibRoute` carrying a Type 5 NLRI into the
@@ -675,6 +815,9 @@ mod tests {
 
     fn vni(n: u32) -> EvpnInstanceId {
         EvpnInstanceId::new(n).unwrap()
+    }
+    fn mac(b: u8) -> MacAddress {
+        MacAddress::new([b; 6])
     }
     fn ipa(s: &str) -> IpAddr {
         s.parse().unwrap()
@@ -867,6 +1010,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn build_intent_tables_filters_quarantined_remote_macs() {
+        let instances = local_instance_table(100, Some("br100"));
+        let ip_vrfs = IpVrfTable::new();
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let _responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let routes = vec![
+                    evpn_macip_route(100, 1, "10.0.0.2", Some(7)),
+                    evpn_macip_route(100, 2, "10.0.0.3", Some(7)),
+                ];
+                let _ = reply.send(routes);
+            }
+        });
+
+        let mut quarantined = BTreeSet::new();
+        quarantined.insert(DuplicateMacKey::new(vni(100), mac(1)));
+
+        let tables = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &quarantined)
+            .await
+            .unwrap();
+        assert!(
+            tables.remote_macs.get(vni(100), mac(1)).is_none(),
+            "quarantined MAC must be excluded from remote-FDB intent"
+        );
+        assert_eq!(
+            tables
+                .remote_macs
+                .get(vni(100), mac(2))
+                .unwrap()
+                .remote_vtep_ip,
+            ipa("10.0.0.3")
+        );
+    }
+
     #[test]
     fn extract_seq_returns_none_without_extcomm() {
         let attrs: Vec<PathAttribute> = vec![];
@@ -1056,6 +1234,7 @@ mod tests {
         // supervisor's deduplication logic.
         let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
         let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
         let supervisor_shutdown = shutdown.clone();
         let ip_vrfs = Arc::new(IpVrfTable::new());
         let join = tokio::spawn(super::supervisor_loop(
@@ -1065,6 +1244,7 @@ mod tests {
             rib_tx,
             intent_tx,
             bum_rx,
+            quarantine_rx,
             supervisor_shutdown,
         ));
 
@@ -1096,5 +1276,64 @@ mod tests {
             observed_generations.len() <= 2,
             "supervisor bumped generation on stable table: {observed_generations:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn supervisor_reprojects_on_duplicate_mac_quarantine_change() {
+        let instances = Arc::new(local_instance_table(100, Some("br100")));
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let shutdown = CancellationToken::new();
+
+        let _rib_responder = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+                    let route = evpn_macip_route(100, 1, "10.0.0.2", Some(1));
+                    let _ = reply.send(vec![route]);
+                }
+            }
+        });
+
+        let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+        let supervisor_shutdown = shutdown.clone();
+        let ip_vrfs = Arc::new(IpVrfTable::new());
+        let join = tokio::spawn(super::supervisor_loop(
+            Duration::from_mins(1),
+            instances,
+            ip_vrfs,
+            rib_tx,
+            intent_tx,
+            bum_rx,
+            quarantine_rx,
+            supervisor_shutdown,
+        ));
+
+        tokio::time::timeout(Duration::from_millis(200), intent_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let initial = intent_rx.borrow_and_update().clone();
+        assert!(
+            initial.remote_macs.get(vni(100), mac(1)).is_some(),
+            "initial projection should include the remote MAC"
+        );
+
+        let mut quarantined = BTreeSet::new();
+        quarantined.insert(DuplicateMacKey::new(vni(100), mac(1)));
+        quarantine_tx.send_replace(Arc::new(quarantined));
+
+        tokio::time::timeout(Duration::from_millis(200), intent_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let updated = intent_rx.borrow_and_update().clone();
+        assert!(
+            updated.remote_macs.get(vni(100), mac(1)).is_none(),
+            "quarantine update should re-project before the next long poll interval"
+        );
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(Duration::from_millis(200), join).await;
     }
 }

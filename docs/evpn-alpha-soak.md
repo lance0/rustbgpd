@@ -100,11 +100,17 @@ none of them block the current release on their own.
   `evpn_duplicate_mac_first_move_timestamp_seconds{vni,mac}`,
   `evpn_duplicate_mac_threshold_exceeded_total{vni,mac,action}`, and
   `evpn_duplicate_mac_quarantine_active{vni,mac}`.
-- [ ] **Duplicate-MAC remote-route processing / loop-protection
-  completion.** Full RFC "stop processing" behavior, receive-side
-  route suppression, dataplane loop-protection drops, and an optional
-  manual clear API remain follow-up scope after the local-origin action
-  slice.
+- [x] **Duplicate-MAC receive-side remote-FDB intent filtering.**
+  Active `suppress_local` quarantines are published from the originator
+  to the EVPN dataplane supervisor. The supervisor filters matching
+  Type 2 `(VNI, MAC)` entries out of `DataplaneIntent.remote_macs`, so
+  Linux FDB / NHG reconciliation stops programming forwarding state for
+  a quarantined remote MAC while Loc-RIB, RR reflection, and
+  `ListEvpnRoutes` remain visible.
+- [ ] **Duplicate-MAC full remote-route processing / loop-protection
+  completion.** Full RFC "stop processing" behavior, BGP
+  route-processing suppression semantics, kernel drop / filter
+  primitives, and an optional manual clear API remain follow-up scope.
 - [x] **Sticky MAC anti-spoof config schema.** Closed by ADR-0056
   — `[[evpn_instances]].sticky_macs` lists MACs to mark with the
   RFC 7432 §15.4 sticky bit on origination. **Not** a static FDB:

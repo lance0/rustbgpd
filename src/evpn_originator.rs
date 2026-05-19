@@ -75,7 +75,7 @@ use rustbgpd_wire::{
     AsPath, EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, EvpnRouteKey,
     ExtendedCommunity, MplsLabel, Origin, PathAttribute,
 };
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -205,6 +205,7 @@ struct OriginatorRuntime {
 /// (empty `evpn_instances`).
 #[allow(clippy::too_many_arguments)]
 // ESI-aware origination nudged the count over the threshold; the daemon-side spawn is the only caller.
+#[allow(dead_code)]
 #[must_use = "call `EvpnOriginatorHandle::shutdown` to stop the originator — \
               dropping the handle leaves the task running"]
 pub fn spawn(
@@ -217,13 +218,46 @@ pub fn spawn(
     daemon_shutdown: CancellationToken,
     vni_to_esi: Arc<std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>>,
 ) -> Option<EvpnOriginatorHandle> {
+    let (duplicate_mac_quarantine_tx, _) = watch::channel(Arc::new(BTreeSet::new()));
+    spawn_with_quarantine(
+        config,
+        evpn_instances,
+        rib_tx,
+        local_mac_rx,
+        metrics,
+        originated_local_mac_counts,
+        daemon_shutdown,
+        vni_to_esi,
+        duplicate_mac_quarantine_tx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[must_use = "call `EvpnOriginatorHandle::shutdown` to stop the originator — \
+              dropping the handle leaves the task running"]
+/// Spawn the originator with an external duplicate-MAC quarantine publisher.
+///
+/// The publisher lets the dataplane supervisor filter remote-FDB intent for
+/// active RFC 7432 section 15.1 duplicate-MAC quarantines without changing
+/// RIB or route-reflector visibility.
+pub fn spawn_with_quarantine(
+    config: OriginatorConfig,
+    evpn_instances: &Arc<EvpnInstanceTable>,
+    rib_tx: mpsc::Sender<RibUpdate>,
+    local_mac_rx: Option<mpsc::Receiver<LocalMacObservation>>,
+    metrics: BgpMetrics,
+    originated_local_mac_counts: OriginatedLocalMacCounts,
+    daemon_shutdown: CancellationToken,
+    vni_to_esi: Arc<std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>>,
+    duplicate_mac_quarantine_tx: watch::Sender<Arc<BTreeSet<DuplicateMacKey>>>,
+) -> Option<EvpnOriginatorHandle> {
     if evpn_instances.is_empty() {
         info!("no EVPN instances configured — originator not spawned (RR-only deployment)");
         return None;
     }
     let local_mac_rx = local_mac_rx?;
 
-    let state = OriginatorState::new(evpn_instances);
+    let state = OriginatorState::new(evpn_instances, duplicate_mac_quarantine_tx);
 
     let shutdown = daemon_shutdown;
     let runtime = OriginatorRuntime {
@@ -292,11 +326,19 @@ struct OriginatorState {
     /// the M/N window and active suppressions; this daemon state owns
     /// the route-withdraw/replay policy.
     duplicate_mac_detector: DuplicateMacDetector,
+    /// Active duplicate-MAC quarantine keys published to the EVPN
+    /// dataplane supervisor. The supervisor filters these keys out of
+    /// remote-FDB intent while leaving Loc-RIB/RR visibility intact.
+    active_duplicate_mac_quarantines: BTreeSet<DuplicateMacKey>,
+    duplicate_mac_quarantine_tx: watch::Sender<Arc<BTreeSet<DuplicateMacKey>>>,
 }
 
 impl OriginatorState {
     /// Build a fresh state bundle for a given instance set.
-    fn new(instances: &EvpnInstanceTable) -> Self {
+    fn new(
+        instances: &EvpnInstanceTable,
+        duplicate_mac_quarantine_tx: watch::Sender<Arc<BTreeSet<DuplicateMacKey>>>,
+    ) -> Self {
         let mut mac_originators = BTreeMap::new();
         let mut mac_ip_originators = BTreeMap::new();
         for inst in instances.iter() {
@@ -312,6 +354,8 @@ impl OriginatorState {
             remote_mac_view: BTreeMap::new(),
             remote_mac_ip_view: BTreeMap::new(),
             duplicate_mac_detector: DuplicateMacDetector::default(),
+            active_duplicate_mac_quarantines: BTreeSet::new(),
+            duplicate_mac_quarantine_tx,
         }
     }
 
@@ -590,6 +634,31 @@ fn duplicate_mac_is_quarantined(
         .is_quarantined(DuplicateMacKey::new(vni, mac), Instant::now())
 }
 
+fn publish_duplicate_mac_quarantines(
+    tx: &watch::Sender<Arc<BTreeSet<DuplicateMacKey>>>,
+    active: &BTreeSet<DuplicateMacKey>,
+) {
+    tx.send_replace(Arc::new(active.clone()));
+}
+
+fn set_duplicate_mac_quarantine_active(
+    state: &mut OriginatorState,
+    key: DuplicateMacKey,
+    active: bool,
+) {
+    let changed = if active {
+        state.active_duplicate_mac_quarantines.insert(key)
+    } else {
+        state.active_duplicate_mac_quarantines.remove(&key)
+    };
+    if changed {
+        publish_duplicate_mac_quarantines(
+            &state.duplicate_mac_quarantine_tx,
+            &state.active_duplicate_mac_quarantines,
+        );
+    }
+}
+
 fn outstanding_route_keys_for_mac(
     state: &OriginatorState,
     vni: EvpnInstanceId,
@@ -624,6 +693,7 @@ fn record_duplicate_mac_move(
     let key = DuplicateMacKey::new(vni, mac);
     if state.duplicate_mac_detector.expire_key(key, now) {
         metrics.set_evpn_duplicate_mac_quarantine_active(vni.as_u32(), &mac.to_string(), false);
+        set_duplicate_mac_quarantine_active(state, key, false);
     }
     match state.duplicate_mac_detector.record_move(key, now, config) {
         DuplicateMacDecision::Recorded { .. } => false,
@@ -653,6 +723,7 @@ fn record_duplicate_mac_move(
                 duplicate_action_label(config.action),
             );
             metrics.set_evpn_duplicate_mac_quarantine_active(vni.as_u32(), &mac.to_string(), true);
+            set_duplicate_mac_quarantine_active(state, key, true);
             warn!(
                 ?vni,
                 ?mac,
@@ -767,6 +838,7 @@ async fn recover_duplicate_macs(
             &key.mac.to_string(),
             false,
         );
+        set_duplicate_mac_quarantine_active(state, key, false);
         info!(
             vni = ?key.vni,
             mac = ?key.mac,
@@ -1979,6 +2051,14 @@ mod tests {
         );
     }
 
+    fn duplicate_mac_quarantine_tx() -> watch::Sender<Arc<BTreeSet<DuplicateMacKey>>> {
+        watch::channel(Arc::new(BTreeSet::new())).0
+    }
+
+    fn originator_state(instances: &EvpnInstanceTable) -> OriginatorState {
+        OriginatorState::new(instances, duplicate_mac_quarantine_tx())
+    }
+
     fn vni(n: u32) -> EvpnInstanceId {
         EvpnInstanceId::new(n).unwrap()
     }
@@ -2036,6 +2116,24 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn duplicate_mac_quarantine_publisher_tracks_active_set() {
+        let inst = suppress_local_instance(100);
+        let instances = instance_table_with(inst.clone());
+        let (tx, rx) = watch::channel(Arc::new(BTreeSet::new()));
+        let mut state = OriginatorState::new(&instances, tx);
+        let metrics = BgpMetrics::new();
+        let key = DuplicateMacKey::new(vni(100), mac(0xAA));
+
+        assert!(record_duplicate_mac_move(
+            &metrics, &mut state, &inst, key.vni, key.mac
+        ));
+        assert!(rx.borrow().contains(&key));
+
+        set_duplicate_mac_quarantine_active(&mut state, key, false);
+        assert!(!rx.borrow().contains(&key));
     }
 
     fn evpn_macip_route(
@@ -2169,7 +2267,7 @@ mod tests {
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(4);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
         state.remote_mac_view.insert(
             (vni(100), mac(0xAA)),
             RemoteMacView {
@@ -2221,7 +2319,7 @@ mod tests {
         let (log, _responder) = rib_capture_responder(rib_rx);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
 
         handle_observation(
             &LocalMacObservation::Learned {
@@ -2298,7 +2396,7 @@ mod tests {
         let (log, _responder) = rib_capture_responder(rib_rx);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
         state.remote_mac_view.insert(
             (vni(100), mac(0xAA)),
             RemoteMacView {
@@ -2341,7 +2439,7 @@ mod tests {
         let (log, _responder) = rib_capture_responder(rib_rx);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
 
         handle_observation(
             &LocalMacObservation::Learned {
@@ -2416,7 +2514,7 @@ mod tests {
         let (log, _responder) = rib_capture_responder(rib_rx);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
         state.remote_mac_ip_view.insert(
             (vni(100), mac(0xAA), ipa("192.0.2.10")),
             remote_mac_ip_view(0xAA, "192.0.2.10", Some(3)),
@@ -2995,7 +3093,7 @@ mod tests {
         let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
 
         // RIB has one Type 2 from 10.0.0.2; the responder returns it
         // for every QueryEvpnRoutes.
@@ -3043,7 +3141,7 @@ mod tests {
         let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
 
         // Two routes for the same (VNI, MAC) under different RDs.
         // PE-A wins on mobility seq (10 > 1).
@@ -3101,7 +3199,7 @@ mod tests {
         let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
         state.remote_mac_view.insert(
             (vni(100), mac(0xAA)),
             RemoteMacView {
@@ -3162,7 +3260,7 @@ mod tests {
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(4);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
 
         let query_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let qc = query_count.clone();
@@ -3306,7 +3404,7 @@ mod tests {
         let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
         state.remote_mac_view.insert(
             (vni(100), mac(0xCC)),
             RemoteMacView {
@@ -3410,7 +3508,7 @@ mod tests {
         let (log, _responder) = rib_capture_responder(rib_rx);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
 
         handle_observation(
             &LocalMacObservation::Learned {
@@ -3463,7 +3561,7 @@ mod tests {
         let (log, _responder) = rib_capture_responder(rib_rx);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
 
         handle_observation(
             &LocalMacObservation::IpAdded {
@@ -3500,7 +3598,7 @@ mod tests {
         let (log, _responder) = rib_capture_responder(rib_rx);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
 
         // IpAdded first (parked).
         handle_observation(
@@ -3564,7 +3662,7 @@ mod tests {
         let (log, _responder) = rib_capture_responder(rib_rx);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
 
         handle_observation(
             &LocalMacObservation::Learned {
@@ -3633,7 +3731,7 @@ mod tests {
         let (log, _responder) = rib_capture_responder(rib_rx);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
 
         handle_observation(
             &LocalMacObservation::Learned {
@@ -3704,7 +3802,7 @@ mod tests {
         let (log, _responder) = rib_capture_responder(rib_rx);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
 
         handle_observation(
             &LocalMacObservation::Learned {
@@ -3799,7 +3897,7 @@ mod tests {
         let (_log, _responder) = rib_capture_responder(rib_rx);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
 
         handle_observation(
             &LocalMacObservation::Learned {
@@ -3908,7 +4006,7 @@ mod tests {
         let (log, _responder) = rib_capture_responder(rib_rx);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
 
         // Drive the MAC into MAC+IP regime: Learned then IpAdded.
         handle_observation(
@@ -4009,7 +4107,7 @@ mod tests {
 
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut state = OriginatorState::new(&instances);
+        let mut state = originator_state(&instances);
 
         handle_observation(
             &LocalMacObservation::Learned {
