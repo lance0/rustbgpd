@@ -421,7 +421,7 @@ fn record_fdb_nhg_drift_metrics(metrics: &BgpMetrics, counters: FdbNhgDriftCount
 /// startup (ADR-0052), so equality on the two mutable tables is
 /// sufficient — if the instance set ever becomes mutable here, extend
 /// the comparison.
-#[allow(clippy::too_many_arguments)] // Supervisor wiring intentionally keeps actor dependencies explicit.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Supervisor wiring intentionally keeps actor dependencies explicit.
 async fn supervisor_loop(
     poll_interval: Duration,
     instances: Arc<EvpnInstanceTable>,
@@ -429,13 +429,14 @@ async fn supervisor_loop(
     rib_tx: mpsc::Sender<RibUpdate>,
     intent_tx: watch::Sender<Arc<DataplaneIntent>>,
     mut bum_enforcement_rx: watch::Receiver<Arc<BumEnforcementTable>>,
-    duplicate_mac_quarantine_rx: watch::Receiver<Arc<BTreeSet<DuplicateMacKey>>>,
+    mut duplicate_mac_quarantine_rx: watch::Receiver<Arc<BTreeSet<DuplicateMacKey>>>,
     shutdown: CancellationToken,
 ) {
     let mut generation: u64 = 0;
     let mut last_table = RemoteMacTable::new();
     let mut last_ip_prefixes = rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable::new();
     let mut last_bum_enforcement = BumEnforcementTable::new();
+    let mut duplicate_mac_quarantine_updates_open = true;
     let mut tick = tokio::time::interval(poll_interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -510,6 +511,50 @@ async fn supervisor_loop(
                     bum_enforcement: Arc::new(bum_enforcement),
                     ip_vrfs: ip_vrfs.clone(),
                     remote_ip_prefixes: Arc::new(last_ip_prefixes.clone()),
+                });
+                if intent_tx.send(intent).is_err() {
+                    debug!("intent receiver gone; supervisor exiting");
+                    return;
+                }
+            }
+            changed = duplicate_mac_quarantine_rx.changed(), if duplicate_mac_quarantine_updates_open => {
+                if changed.is_err() {
+                    debug!("duplicate-MAC quarantine publisher gone; continuing with periodic polls");
+                    duplicate_mac_quarantine_updates_open = false;
+                    continue;
+                }
+                let quarantined = duplicate_mac_quarantine_rx.borrow_and_update().clone();
+                let tables = match build_intent_tables(
+                    &rib_tx,
+                    &instances,
+                    &ip_vrfs,
+                    quarantined.as_ref(),
+                ).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!(error = %e, "EVPN dataplane supervisor: RIB query failed");
+                        continue;
+                    }
+                };
+                let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
+                if tables.remote_macs == last_table
+                    && tables.remote_ip_prefixes == last_ip_prefixes
+                    && bum_enforcement == last_bum_enforcement
+                    && generation > 0
+                {
+                    continue;
+                }
+                generation = generation.saturating_add(1);
+                last_table = tables.remote_macs.clone();
+                last_ip_prefixes = tables.remote_ip_prefixes.clone();
+                last_bum_enforcement = bum_enforcement.clone();
+                let intent = Arc::new(DataplaneIntent {
+                    generation,
+                    instances: instances.clone(),
+                    remote_macs: Arc::new(tables.remote_macs),
+                    bum_enforcement: Arc::new(bum_enforcement),
+                    ip_vrfs: ip_vrfs.clone(),
+                    remote_ip_prefixes: Arc::new(tables.remote_ip_prefixes),
                 });
                 if intent_tx.send(intent).is_err() {
                     debug!("intent receiver gone; supervisor exiting");
@@ -1231,5 +1276,64 @@ mod tests {
             observed_generations.len() <= 2,
             "supervisor bumped generation on stable table: {observed_generations:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn supervisor_reprojects_on_duplicate_mac_quarantine_change() {
+        let instances = Arc::new(local_instance_table(100, Some("br100")));
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let shutdown = CancellationToken::new();
+
+        let _rib_responder = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+                    let route = evpn_macip_route(100, 1, "10.0.0.2", Some(1));
+                    let _ = reply.send(vec![route]);
+                }
+            }
+        });
+
+        let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+        let supervisor_shutdown = shutdown.clone();
+        let ip_vrfs = Arc::new(IpVrfTable::new());
+        let join = tokio::spawn(super::supervisor_loop(
+            Duration::from_mins(1),
+            instances,
+            ip_vrfs,
+            rib_tx,
+            intent_tx,
+            bum_rx,
+            quarantine_rx,
+            supervisor_shutdown,
+        ));
+
+        tokio::time::timeout(Duration::from_millis(200), intent_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let initial = intent_rx.borrow_and_update().clone();
+        assert!(
+            initial.remote_macs.get(vni(100), mac(1)).is_some(),
+            "initial projection should include the remote MAC"
+        );
+
+        let mut quarantined = BTreeSet::new();
+        quarantined.insert(DuplicateMacKey::new(vni(100), mac(1)));
+        quarantine_tx.send_replace(Arc::new(quarantined));
+
+        tokio::time::timeout(Duration::from_millis(200), intent_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let updated = intent_rx.borrow_and_update().clone();
+        assert!(
+            updated.remote_macs.get(vni(100), mac(1)).is_none(),
+            "quarantine update should re-project before the next long poll interval"
+        );
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(Duration::from_millis(200), join).await;
     }
 }
