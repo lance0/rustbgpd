@@ -17,6 +17,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tests verify the JSON artifact against `crates/api/src/authz.rs`, while the
   existing proto coverage test still fails if a new RPC lacks a tier assignment.
 
+- **ADR-0064 mTLS principal cache.** Native gRPC mTLS listeners now carry an
+  API-internal tonic connection-info cache for the principal derived from the
+  validated client certificate. Repeated RPCs on the same HTTP/2 TLS
+  connection reuse the cached result instead of reparsing the DER chain on
+  every request, while preserving `mtls-unresolved` fallback and
+  fail-closed role-enforcement behavior.
+
 - **ADR-0064 opt-in gRPC role enforcement.** `security.grpc.enforcement =
   "tier"` is now accepted when every enabled listener has an authenticated
   principal source and `[security.grpc.roles]` maps principals to `observer`,

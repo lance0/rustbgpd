@@ -11,7 +11,7 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 const RUSTBGPD_URI_SCHEME: &str = "rustbgpd";
 const MAX_PRINCIPAL_LEN: usize = 256;
 
-#[derive(Debug, Error, Eq, PartialEq)]
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum PrincipalExtractionError {
     #[error("mTLS peer certificate chain is empty")]
     MissingPeerCertificate,
