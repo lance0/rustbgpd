@@ -26,8 +26,10 @@ topology:
         - ./configs/rustbgpd-m44-tier-authz.toml:/etc/rustbgpd/config.toml:ro
         - ./configs/m44-certs:/etc/rustbgpd/certs:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
-      exec:
-        - ip addr add 10.0.0.1/24 dev eth1
-        - ip link set eth1 up
+      # No `exec` data-plane setup and no `links:` — this is a
+      # single-node topology that only exercises the gRPC management
+      # listener over the container's management network. The
+      # configured neighbor never establishes a session; it exists
+      # only so sensitive-read RPCs have a target to resolve.
       env:
         RUST_LOG: info,rustbgpd_api=debug

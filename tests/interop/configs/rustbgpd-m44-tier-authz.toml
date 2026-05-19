@@ -1,10 +1,13 @@
 # M44 smoke: rustbgpd with ADR-0064 tier enforcement over native mTLS.
 #
-# enforcement = "tier" (the v0.24.0 default, set explicitly here for
-# documentation) maps each authenticated mTLS principal to a role
-# ceiling. The M44 driver presents client certs whose rustbgpd:// URI
-# SANs match these principals and asserts the per-tier allow/deny
-# contract over the wire.
+# Deliberately omits an explicit `[security.grpc] enforcement = ...`
+# key so the daemon falls back to the v0.24.0 production default
+# (`tier`). M44 therefore proves the default-flip path end-to-end:
+# a config that only declares roles + an mTLS listener enforces
+# per-principal tier ceilings over the wire. Each principal's role
+# ceiling is mapped below; the driver presents client certs whose
+# rustbgpd:// URI SANs match these principals and asserts the
+# allow/deny contract.
 [global]
 asn = 65001
 router_id = "10.0.0.1"
@@ -19,9 +22,6 @@ address = "0.0.0.0:50051"
 tls_cert_file = "/etc/rustbgpd/certs/server.pem"
 tls_key_file = "/etc/rustbgpd/certs/server.key"
 tls_client_ca_file = "/etc/rustbgpd/certs/ca.pem"
-
-[security.grpc]
-enforcement = "tier"
 
 [security.grpc.roles]
 "rustbgpd://observer/ci" = "observer"
