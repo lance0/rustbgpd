@@ -277,7 +277,7 @@ pub(crate) fn stream_lag_bgp_event(
     let source = match source_category {
         proto::EventCategory::Route => "route",
         proto::EventCategory::Session => "session",
-        proto::EventCategory::Evpn => "EVPN",
+        proto::EventCategory::Evpn => "evpn",
         proto::EventCategory::Policy
         | proto::EventCategory::Dataplane
         | proto::EventCategory::Unspecified => "unknown",
