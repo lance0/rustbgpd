@@ -6,7 +6,8 @@ use crate::proto;
 use crate::rib_service::{evpn_route_to_proto, route_event_to_proto};
 
 use super::filters::{
-    route_event_type_to_bgp_event_type, session_lifecycle_event_type_to_bgp_event_type,
+    route_event_type_to_bgp_event_type, route_event_type_to_evpn_bgp_event_type,
+    session_lifecycle_event_type_to_bgp_event_type,
     session_notification_event_type_to_bgp_event_type,
 };
 
@@ -96,16 +97,6 @@ pub(crate) fn evpn_event_to_bgp_event(event: rustbgpd_rib::EvpnRouteEvent) -> pr
         afi_safi: proto::AddressFamily::L2vpnEvpn as i32,
         summary,
         payload: Some(proto::bgp_event::Payload::Evpn(payload)),
-    }
-}
-
-pub(super) fn route_event_type_to_evpn_bgp_event_type(
-    event_type: rustbgpd_rib::RouteEventType,
-) -> proto::BgpEventType {
-    match event_type {
-        rustbgpd_rib::RouteEventType::Added => proto::BgpEventType::EvpnRouteAdded,
-        rustbgpd_rib::RouteEventType::Withdrawn => proto::BgpEventType::EvpnRouteWithdrawn,
-        rustbgpd_rib::RouteEventType::BestChanged => proto::BgpEventType::EvpnRouteBestChanged,
     }
 }
 
