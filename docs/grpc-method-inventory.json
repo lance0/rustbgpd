@@ -3,10 +3,10 @@
   "package": "rustbgpd.v1",
   "source": "crates/api/src/authz.rs",
   "proto": "proto/rustbgpd.proto",
-  "method_count": 66,
+  "method_count": 67,
   "tier_counts": {
     "read": 0,
-    "sensitive_read": 33,
+    "sensitive_read": 34,
     "mutating": 15,
     "operator_only": 18
   },
@@ -58,6 +58,7 @@
     { "service": "rustbgpd.v1.RibService", "method": "ListFibRoutes", "path": "/rustbgpd.v1.RibService/ListFibRoutes", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "ListRouteEvents", "path": "/rustbgpd.v1.RibService/ListRouteEvents", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "WatchRoutes", "path": "/rustbgpd.v1.RibService/WatchRoutes", "tier": "sensitive_read" },
+    { "service": "rustbgpd.v1.RibService", "method": "WatchRouteEvents", "path": "/rustbgpd.v1.RibService/WatchRouteEvents", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "ListFlowSpecRoutes", "path": "/rustbgpd.v1.RibService/ListFlowSpecRoutes", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "ListEvpnRoutes", "path": "/rustbgpd.v1.RibService/ListEvpnRoutes", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EventService", "method": "WatchEvents", "path": "/rustbgpd.v1.EventService/WatchEvents", "tier": "sensitive_read" },

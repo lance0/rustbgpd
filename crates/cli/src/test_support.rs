@@ -557,6 +557,8 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
 impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
     type WatchRoutesStream =
         std::pin::Pin<Box<dyn Stream<Item = Result<server_proto::RouteEvent, Status>> + Send>>;
+    type WatchRouteEventsStream =
+        std::pin::Pin<Box<dyn Stream<Item = Result<server_proto::BgpEvent, Status>> + Send>>;
 
     async fn list_received_routes(
         &self,
@@ -673,6 +675,13 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         _request: Request<server_proto::WatchRoutesRequest>,
     ) -> Result<Response<Self::WatchRoutesStream>, Status> {
+        Err(Status::unimplemented("not used in CLI tests"))
+    }
+
+    async fn watch_route_events(
+        &self,
+        _request: Request<server_proto::WatchRoutesRequest>,
+    ) -> Result<Response<Self::WatchRouteEventsStream>, Status> {
         Err(Status::unimplemented("not used in CLI tests"))
     }
 

@@ -574,6 +574,7 @@ service RibService {
   rpc ListFibRoutes(ListFibRoutesRequest) returns (ListFibRoutesResponse);
   rpc ListRouteEvents(ListRouteEventsRequest) returns (ListRouteEventsResponse);
   rpc WatchRoutes(WatchRoutesRequest) returns (stream RouteEvent);
+  rpc WatchRouteEvents(WatchRoutesRequest) returns (stream BgpEvent);
   rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);
   rpc ListEvpnRoutes(ListEvpnRequest) returns (ListEvpnResponse);
 }
@@ -932,10 +933,10 @@ message WatchEventsRequest {
   // Empty = all event types for the selected categories.
   repeated BgpEventType event_types = 2;
   // Optional neighbor address filter. Empty = all peers. Route events
-  // match both current and previous peer, same as WatchRoutes and
-  // ListRouteEvents. Session events match their peer address. Policy
-  // events match only when tied to one peer. Dataplane summary events
-  // are peerless and do not match this filter.
+  // match both current and previous peer, same as WatchRoutes,
+  // WatchRouteEvents, and ListRouteEvents. Session events match their
+  // peer address. Policy events match only when tied to one peer.
+  // Dataplane summary events are peerless and do not match this filter.
   string neighbor_address = 3;
   // Optional family filter. Applies only to route events; session and
   // dataplane events do not match a family-filtered request.

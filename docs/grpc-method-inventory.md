@@ -116,7 +116,7 @@ shape itself does not raise the tier.
 | `SetNeighborPeerGroup` | `mutating` | Single-neighbor reassignment. |
 | `ClearNeighborPeerGroup` | `mutating` | Single-neighbor. |
 
-### RibService (11 RPCs)
+### RibService (12 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -129,6 +129,7 @@ shape itself does not raise the tier.
 | `ListFibRoutes` | `sensitive_read` | ADR-0061 FIB status snapshot — exposes which routes are installed in the kernel. |
 | `ListRouteEvents` | `sensitive_read` | Bounded route-event history. |
 | `WatchRoutes` (stream) | `sensitive_read` | Live route-event stream. Streaming shape; same data as `ListRouteEvents`. |
+| `WatchRouteEvents` (stream) | `sensitive_read` | Enveloped live route-event stream with explicit `stream_lagged` signals. |
 | `ListFlowSpecRoutes` | `sensitive_read` | RFC 5575 flow-spec routes — discloses traffic filter installations. |
 | `ListEvpnRoutes` | `sensitive_read` | EVPN Type 1/2/3/4/5 routes — MAC/IP topology, multi-homing ES layout. |
 
@@ -208,7 +209,7 @@ specific method if the model warrants it.
    dedicated listener — operators rarely use it for automation, and
    when they do it should be a deliberate channel.
 4. **Streaming methods need session-establishment authorization, not
-   per-message.** `WatchEvents` and `WatchRoutes` open once and live
+   per-message.** `WatchEvents`, `WatchRouteEvents`, and `WatchRoutes` open once and live
    for the connection lifetime. The enforcement model needs to
    reject at handshake, not pretend to filter per-event.
 5. **Credential ingress is narrow but not `AddNeighbor`.** The

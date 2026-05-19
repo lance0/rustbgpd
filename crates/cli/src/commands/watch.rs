@@ -398,6 +398,14 @@ fn print_bgp_event(event: &BgpEvent, json: bool) {
     println!("{}", format_bgp_event_line(event));
 }
 
+fn print_route_watch_event(event: &BgpEvent, json: bool) {
+    if let Some(crate::proto::bgp_event::Payload::Route(route)) = event.payload.as_ref() {
+        print_event(route, json);
+    } else {
+        print_bgp_event(event, json);
+    }
+}
+
 fn is_route_event_type(event_type: i32) -> bool {
     matches!(
         BgpEventType::try_from(event_type),
@@ -519,7 +527,7 @@ pub async fn run(
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let mut stream = client
-        .watch_routes(WatchRoutesRequest {
+        .watch_route_events(WatchRoutesRequest {
             neighbor_address: neighbor.unwrap_or_default(),
             afi_safi: family.unwrap_or(0),
         })
@@ -527,7 +535,7 @@ pub async fn run(
         .into_inner();
 
     while let Some(event) = stream.message().await? {
-        print_event(&event, json);
+        print_route_watch_event(&event, json);
     }
     Ok(())
 }

@@ -452,6 +452,7 @@ Query the routing information base and subscribe to real-time route changes.
 | `ListFibRoutes` | ADR-0061 general unicast Linux FIB route status for configured `[[fib_tables]]` |
 | `ListRouteEvents` | Recent unicast best-path event history from the bounded in-memory RIB ring |
 | `WatchRoutes` | Server-streaming: real-time route add/withdraw/best-change events |
+| `WatchRouteEvents` | Server-streaming: real-time route add/withdraw/best-change events wrapped as `BgpEvent`, including explicit lag warnings |
 
 ### Runtime observability surfaces
 
@@ -460,7 +461,7 @@ through one RPC shape.
 
 | Need | Surface | Shape | Retention / loss behavior |
 |------|---------|-------|---------------------------|
-| Live unicast route deltas | `WatchRoutes` or `EventService.WatchEvents` with `EVENT_CATEGORY_ROUTE` | Streaming event feed | Live-only; slow subscribers can lag and miss events |
+| Live unicast route deltas | `WatchRoutes`, `WatchRouteEvents`, or `EventService.WatchEvents` with `EVENT_CATEGORY_ROUTE` | Streaming event feed | Live-only; `WatchRouteEvents` / `WatchEvents` emit `stream_lagged` when slow subscribers miss events |
 | Recent unicast route timeline | `ListRouteEvents` / `rustbgpctl events` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
 | Live session lifecycle | `EventService.WatchEvents` with `EVENT_CATEGORY_SESSION` | Streaming event feed | Live-only; no replay after reconnect |
 | Recent session lifecycle | `EventService.ListSessionEvents` / `rustbgpctl events sessions` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
@@ -532,12 +533,13 @@ policy/statement attribution are deferred.
 
 ### Address family filtering
 
-Route-listing RPCs that return RIB routes (`ListReceivedRoutes`,
-`ListBestRoutes`, `ListAdvertisedRoutes`, and `WatchRoutes`) accept an
+Route-listing RPCs and route-event streams (`ListReceivedRoutes`,
+`ListBestRoutes`, `ListAdvertisedRoutes`, `WatchRoutes`, and
+`WatchRouteEvents`) accept an
 `afi_safi` field to filter by address family. Supported values are
 `IPV4_UNICAST` (1), `IPV6_UNICAST` (2), or unspecified (0, returns both
-unicast families). `WatchRoutes` events include the address family of each
-route change. FlowSpec routes use `ListFlowSpecRoutes` with
+unicast families). Route watch events include the address family of each route
+change. FlowSpec routes use `ListFlowSpecRoutes` with
 `IPV4_FLOWSPEC` (3), `IPV6_FLOWSPEC` (4), or unspecified (0). EVPN routes
 use `ListEvpnRoutes` and its EVPN-specific filters.
 
@@ -563,7 +565,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ### Watch route changes (streaming)
 
 ```bash
-# Watch all route changes (streams until interrupted)
+# Legacy bare RouteEvent stream (streams until interrupted)
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.RibService/WatchRoutes
 
@@ -571,10 +573,14 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"neighbor_address": "10.0.0.2"}' \
   localhost:50051 rustbgpd.v1.RibService/WatchRoutes
+
+# Lag-aware BgpEvent route stream
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.RibService/WatchRouteEvents
 ```
 
-The `WatchRoutesRequest` also accepts an `afi_safi` field to filter the stream
-by address family.
+Both `WatchRoutes` and `WatchRouteEvents` use `WatchRoutesRequest`, which
+accepts an `afi_safi` field to filter the stream by address family.
 
 Event types: `ROUTE_EVENT_TYPE_ADDED`, `ROUTE_EVENT_TYPE_WITHDRAWN`,
 `ROUTE_EVENT_TYPE_BEST_CHANGED`.
@@ -584,12 +590,15 @@ is assigned before the event is written to history and broadcast to live
 subscribers. The cursor resets on daemon restart and is not reused within one
 process.
 
-`WatchRoutes` does not backfill recent events for new subscribers. Clients that
-need both context and a live tail should call `ListRouteEvents` first, then
-open `WatchRoutes` for subsequent deltas. `WatchRoutes` also preserves its
-legacy bare `RouteEvent` response shape and does not emit explicit lag
-warnings; clients that need a live missed-event signal should use
-`EventService.WatchEvents`.
+`WatchRoutes` and `WatchRouteEvents` do not backfill recent events for new
+subscribers. Clients that need both context and a live tail should call
+`ListRouteEvents` first, then open a live stream for subsequent deltas.
+`WatchRoutes` preserves its legacy bare `RouteEvent` response shape and does
+not emit explicit lag warnings. `WatchRouteEvents` returns the same route
+deltas wrapped in `BgpEvent` and emits `BGP_EVENT_TYPE_STREAM_LAGGED` with a
+`StreamLagEvent` payload when this subscriber falls behind the bounded route
+broadcast. `EventService.WatchEvents` provides the same lag-aware route events
+alongside session, policy, and dataplane categories.
 
 ### List recent route events
 
@@ -845,11 +854,14 @@ mutations are peerless and do not match a `neighbor_address` filter. The
 history ring holds at most 4096 events, is process-local, and resets on daemon
 restart.
 
-Slow live-stream consumers do not block the daemon. If a `WatchEvents` or
-`WatchRoutes` subscriber falls behind the bounded broadcast channel, missed
-events are skipped and `bgp_event_stream_lagged_total{service,source}` records
-the missed count. Use `bgp_event_stream_subscribers{service,source}` to see
-active stream readers and `bgp_route_event_history_depth` /
+Slow live-stream consumers do not block the daemon. If a `WatchEvents`,
+`WatchRouteEvents`, or `WatchRoutes` subscriber falls behind the bounded
+broadcast channel, missed events are skipped and
+`bgp_event_stream_lagged_total{service,source}` records the missed count.
+`WatchRouteEvents` and `WatchEvents` also emit an in-band `stream_lagged`
+warning to the affected subscriber. Use
+`bgp_event_stream_subscribers{service,source}` to see active stream readers and
+`bgp_route_event_history_depth` /
 `bgp_route_event_history_capacity` to understand how much recent unicast route
 history is available through `ListRouteEvents`. See
 [`docs/OPERATIONS.md`](OPERATIONS.md#grpc-authorization-audit-and-resource-guardrails)
