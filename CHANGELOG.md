@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-05-19
+
 ### Added
 
 - **ADR-0064 gRPC authorization foundation.** Added a checked

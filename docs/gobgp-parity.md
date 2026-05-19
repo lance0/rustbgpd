@@ -1,6 +1,6 @@
 # rustbgpd vs GoBGP Feature Parity
 
-Last updated: 2026-05-18 (post-v0.22.0 main, including the EventService unified stream + bounded session-event history, ADR-0061 FIB hardening, ADR-0062 static-neighbor TCP-AO startup support)
+Last updated: 2026-05-19 (post-v0.23.0 main, including ADR-0064 gRPC authorization slices 1-3, ADR-0062 static-neighbor TCP-AO runtime + BIRD 3.2.1 interop, and the EVPN production-default flip)
 
 ## Address Families
 
