@@ -496,7 +496,7 @@ async fn run_tcp_listener(
         "starting gRPC TCP listener"
     );
     let audit_context = tcp_audit_context(
-        addr,
+        bound_addr,
         access_mode,
         max_tier,
         RuntimeAuthzConfig { enforcement, roles },
