@@ -90,8 +90,17 @@ jobs:
           sudo ip link add br-ci type bridge
           sudo ip link add vx-ci type vxlan id 4242 local 127.0.0.1 dstport 4789 nolearning
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
       - name: Build rustbgpd:dev
-        run: docker build -t rustbgpd:dev .
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   m36:
     name: M36 — EVPN VTEP receive FDB programming (FRR 10.3.1)

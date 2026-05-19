@@ -136,3 +136,16 @@ strip = "symbols"
 inherits = "release"
 strip = false
 debug = 1
+
+# Used by the `rustbgpd:dev` container image and any CI / dev / interop
+# context that wants release-shaped binaries (no debug_assertions, no
+# overflow checks) but does not need the smallest-binary LTO pass.
+# Drops fat-LTO and brings codegen-units back to the default so the
+# build parallelizes across crates and skips the serial whole-program
+# link. The 15 workspace crates plus ~300 deps compile dramatically
+# faster than `release` and run fine for our ~10 s interop smokes.
+[profile.ci]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = "symbols"

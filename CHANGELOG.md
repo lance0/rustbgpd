@@ -11,6 +11,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`rustbgpd:dev` container build ~7.6× faster on per-commit source changes.**
+  Added `[profile.ci]` (release-shaped without fat-LTO / single-codegen-unit)
+  for the interop / dev / CI container image; release-tagged binaries still
+  use `--release`. The Dockerfile is rewritten with `cargo-chef` so the
+  ~300-dep cook layer invalidates only on `Cargo.lock` changes, with BuildKit
+  cache mounts (`/usr/local/cargo/registry`, `/usr/local/cargo/git`,
+  `/build/target`) so cargo state survives across builds. `mold` is now the
+  linker. The `kernel-dataplane.yml` workflow's `Build rustbgpd:dev` step
+  moves from plain `docker build` to `docker/build-push-action@v7` with
+  `type=gha` cache backend matching the existing `interop.yml` pattern.
+  Measured wall-clock on lancebox: warm-cache no-source-change baseline
+  2m 15s → 0.7s (cache hit); source-only-change rebuild
+  2m 15s → 17.8s; first cold build 1m 03s.
+
 - **CI interop test lifecycle now bounded-retries transient failures.**
   Added `.github/actions/run-interop-test` composite action that wraps
   `destroy → deploy → run → destroy-on-exit` for every M-series interop
