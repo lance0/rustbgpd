@@ -92,7 +92,11 @@ slices have now shipped static-neighbor startup support:
   dependencies.
 - Runtime deletion of a configured TCP-AO neighbor is rejected until listener
   MKT deletion / key rotation support exists.
+- Protected M43 interop against BIRD 3.2.1 runs in the self-hosted
+  `kernel-dataplane` workflow on the current TCP-AO-capable runner. The
+  workflow keeps a `CONFIG_TCP_AO` probe so future runner kernels without the
+  feature skip M43 with a warning instead of failing unrelated dataplane gates.
 
 Still deferred: dynamic-neighbor wildcard MKTs, runtime key rotation / deletion
-on an already-listening socket, multi-key rollover, accepted-socket inspection,
-and protected BIRD 3.x interop smoke.
+on an already-listening socket, multi-key rollover, and accepted-socket
+inspection.
