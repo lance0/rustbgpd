@@ -53,10 +53,14 @@ grpc_mtls() {
 assert_allowed() {
     local desc=$1 who=$2 method=$3 data=${4:-}
     local out
+    # grpcurl exits non-zero on any RPC error (including the
+    # PermissionDenied we're checking for); `|| true` keeps the
+    # library's `set -e` from aborting the run on that expected
+    # non-zero status.
     if [ -n "$data" ]; then
-        out=$(grpc_mtls "$who" -d "$data" "$GRPC_ADDR" "$method")
+        out=$(grpc_mtls "$who" -d "$data" "$GRPC_ADDR" "$method") || true
     else
-        out=$(grpc_mtls "$who" "$GRPC_ADDR" "$method")
+        out=$(grpc_mtls "$who" "$GRPC_ADDR" "$method") || true
     fi
     if printf '%s' "$out" | grep -q "PermissionDenied"; then
         fail "$desc (expected allow, got PermissionDenied)"
@@ -70,10 +74,12 @@ assert_allowed() {
 assert_denied() {
     local desc=$1 who=$2 method=$3 data=${4:-}
     local out
+    # See assert_allowed: `|| true` absorbs grpcurl's expected
+    # non-zero exit so `set -e` doesn't abort the run.
     if [ -n "$data" ]; then
-        out=$(grpc_mtls "$who" -d "$data" "$GRPC_ADDR" "$method")
+        out=$(grpc_mtls "$who" -d "$data" "$GRPC_ADDR" "$method") || true
     else
-        out=$(grpc_mtls "$who" "$GRPC_ADDR" "$method")
+        out=$(grpc_mtls "$who" "$GRPC_ADDR" "$method") || true
     fi
     if printf '%s' "$out" | grep -q "PermissionDenied"; then
         ok "$desc"
@@ -136,7 +142,7 @@ main() {
     resolve_grpc_addr
     start_rustbgpd_mtls
 
-    local add_neighbor='{"address":"10.0.0.3","remote_asn":65003,"hold_time":90}'
+    local add_neighbor='{"config":{"address":"10.0.0.3","remote_asn":65003,"hold_time":90}}'
 
     # observer: sensitive_read allowed, mutating denied.
     assert_allowed "observer CAN ListReceivedRoutes (sensitive_read)" \
