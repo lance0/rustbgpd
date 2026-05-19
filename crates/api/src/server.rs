@@ -101,6 +101,11 @@ pub struct ListenerConfig {
     pub endpoint: ListenerEndpoint,
     pub access_mode: AccessMode,
     pub auth_token: Option<String>,
+    /// Optional stable principal label for audit records. mTLS
+    /// listeners ignore this until certificate principal extraction
+    /// lands; bearer-token and UDS listeners may use it to avoid
+    /// placeholder identities in `grpc_authz` logs.
+    pub principal: Option<String>,
     /// Optional native mTLS for TCP listeners. The server presents
     /// `cert_pem` and accepts client connections that present a
     /// certificate signed by `client_ca_pem`. Ignored on UDS
@@ -147,11 +152,15 @@ fn tcp_audit_context(
     access_mode: AccessMode,
     auth_enabled: bool,
     tls_enabled: bool,
+    configured_principal: Option<&str>,
 ) -> GrpcAuthAuditContext {
     let (authn, principal) = if tls_enabled {
         (GrpcAuthnKind::Mtls, "mtls-unresolved".to_string())
     } else if auth_enabled {
-        (GrpcAuthnKind::BearerToken, "bearer-token".to_string())
+        (
+            GrpcAuthnKind::BearerToken,
+            configured_principal.unwrap_or("bearer-token").to_string(),
+        )
     } else {
         (GrpcAuthnKind::None, "unauthenticated".to_string())
     };
@@ -167,8 +176,18 @@ fn uds_audit_context(
     path: &Path,
     access_mode: AccessMode,
     auth_enabled: bool,
+    configured_principal: Option<&str>,
 ) -> GrpcAuthAuditContext {
-    let (authn, principal) = if auth_enabled {
+    let (authn, principal) = if let Some(principal) = configured_principal {
+        (
+            if auth_enabled {
+                GrpcAuthnKind::BearerToken
+            } else {
+                GrpcAuthnKind::Uds
+            },
+            principal.to_string(),
+        )
+    } else if auth_enabled {
         (GrpcAuthnKind::BearerToken, "bearer-token".to_string())
     } else {
         (GrpcAuthnKind::Uds, format!("uds:{}", path.display()))
@@ -329,14 +348,22 @@ async fn run_listener(
     let evpn_fdb_nexthop_snapshot = config.evpn_fdb_nexthop_snapshot;
     let blackhole_discard_snapshot = config.blackhole_discard_snapshot;
     let fib_route_snapshot = config.fib_route_snapshot;
+    let ListenerConfig {
+        endpoint,
+        access_mode,
+        auth_token,
+        principal,
+        tls,
+    } = listener;
 
-    match listener.endpoint {
+    match endpoint {
         ListenerEndpoint::Tcp(addr) => {
             run_tcp_listener(
                 addr,
-                listener.access_mode,
-                listener.auth_token,
-                listener.tls,
+                access_mode,
+                auth_token,
+                principal,
+                tls,
                 rib_tx,
                 rib_query_tx,
                 peer_mgr_tx,
@@ -366,8 +393,9 @@ async fn run_listener(
             run_uds_listener(
                 path,
                 mode,
-                listener.access_mode,
-                listener.auth_token,
+                access_mode,
+                auth_token,
+                principal,
                 rib_tx,
                 rib_query_tx,
                 peer_mgr_tx,
@@ -405,6 +433,7 @@ async fn run_tcp_listener(
     addr: SocketAddr,
     access_mode: AccessMode,
     auth_token: Option<String>,
+    principal: Option<String>,
     tls: Option<TlsParams>,
     rib_tx: mpsc::Sender<RibUpdate>,
     rib_query_tx: mpsc::Sender<RibUpdate>,
@@ -436,7 +465,13 @@ async fn run_tcp_listener(
         tls_enabled = tls.is_some(),
         "starting gRPC TCP listener"
     );
-    let audit_context = tcp_audit_context(addr, access_mode, auth_token.is_some(), tls.is_some());
+    let audit_context = tcp_audit_context(
+        addr,
+        access_mode,
+        auth_token.is_some(),
+        tls.is_some(),
+        principal.as_deref(),
+    );
     let interceptor = AuthInterceptor::new(auth_token);
     let mut builder = Server::builder();
     if let Some(tls) = tls {
@@ -536,6 +571,7 @@ async fn run_uds_listener(
     mode: u32,
     access_mode: AccessMode,
     auth_token: Option<String>,
+    principal: Option<String>,
     rib_tx: mpsc::Sender<RibUpdate>,
     rib_query_tx: mpsc::Sender<RibUpdate>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
@@ -561,7 +597,7 @@ async fn run_uds_listener(
 ) -> Result<(), String> {
     let auth_enabled = auth_token.is_some();
     let uds_listener = bind_uds_listener(&path, mode)?;
-    let audit_context = uds_audit_context(&path, access_mode, auth_enabled);
+    let audit_context = uds_audit_context(&path, access_mode, auth_enabled, principal.as_deref());
     info!(
         path = %path.display(),
         access_mode = ?access_mode,
@@ -749,5 +785,43 @@ mod tests {
             .insert("authorization", "Bearer wrong".parse().unwrap());
         let err = interceptor.call(request).unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn tcp_audit_context_uses_configured_bearer_principal() {
+        let context = tcp_audit_context(
+            "127.0.0.1:50051".parse().unwrap(),
+            AccessMode::ReadWrite,
+            true,
+            false,
+            Some("automation.example"),
+        );
+        assert_eq!(context.authn(), GrpcAuthnKind::BearerToken);
+        assert_eq!(context.principal(), "automation.example");
+    }
+
+    #[test]
+    fn tcp_audit_context_keeps_mtls_unresolved_until_cert_extraction() {
+        let context = tcp_audit_context(
+            "127.0.0.1:50051".parse().unwrap(),
+            AccessMode::ReadWrite,
+            true,
+            true,
+            Some("automation.example"),
+        );
+        assert_eq!(context.authn(), GrpcAuthnKind::Mtls);
+        assert_eq!(context.principal(), "mtls-unresolved");
+    }
+
+    #[test]
+    fn uds_audit_context_uses_configured_principal() {
+        let context = uds_audit_context(
+            Path::new("/run/rustbgpd/grpc.sock"),
+            AccessMode::ReadWrite,
+            false,
+            Some("local-admin"),
+        );
+        assert_eq!(context.authn(), GrpcAuthnKind::Uds);
+        assert_eq!(context.principal(), "local-admin");
     }
 }

@@ -25,15 +25,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ADR-0064 tier matrix, emits structured `grpc_authz` log records, and records
   `bgp_grpc_authz_decisions_total{tier,result,authn,access_mode}` without
   changing authorization behavior. Existing mTLS, bearer-token, Unix-socket,
-  and `access_mode` checks remain unchanged. Full principal extraction,
-  `[security.grpc.roles]`, listener `max_tier`, and deny-by-tier enforcement
-  remain follow-up ADR-0064 slices.
+  and `access_mode` checks remain unchanged. Full mTLS principal extraction,
+  listener `max_tier`, and deny-by-tier enforcement remain follow-up ADR-0064
+  slices.
 
 - **ADR-0064 external-audit packet.** Added
   `docs/adr/0064-threat-model.md`, a repository-grounded gRPC management-plane
   threat model covering assets, trust boundaries, attacker capabilities, abuse
   paths, residual risks, external review evidence, and concrete follow-up issues
   for the remaining authorization/enforcement slices.
+
+- **ADR-0064 gRPC roles config and audit principals.** Added staged
+  `[security.grpc]` configuration with `enforcement = "legacy"` and
+  `[security.grpc.roles]` principal-to-role mappings (`observer`,
+  `automation`, `operator`). Bearer-token TCP and UDS listeners can now set
+  explicit `principal` labels so audit-only `grpc_authz` records use stable
+  operator-controlled identities. `enforcement = "tier"` remains reserved and
+  is rejected until the deny-by-tier enforcement slice lands; existing mTLS,
+  bearer-token, UDS, and listener `access_mode` behavior is unchanged.
 
 - **Filtered general FIB status queries.** `RibService.ListFibRoutes` now
   accepts optional `table_name`, `state`, `reason`, exact prefix, and

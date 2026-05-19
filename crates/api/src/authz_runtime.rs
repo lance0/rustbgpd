@@ -67,6 +67,16 @@ impl GrpcAuthAuditContext {
             principal: principal.into(),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn authn(&self) -> GrpcAuthnKind {
+        self.authn
+    }
+
+    #[cfg(test)]
+    pub(crate) fn principal(&self) -> &str {
+        &self.principal
+    }
 }
 
 /// Result of an audit-only tier lookup.

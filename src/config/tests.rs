@@ -315,6 +315,7 @@ fn grpc_listeners_default_to_uds() {
             mode: 0o600,
             access_mode: GrpcAccessMode::ReadWrite,
             token_file: None,
+            principal: None,
         }]
     );
 }
@@ -332,6 +333,7 @@ fn grpc_tcp_listener_parses_when_enabled() {
             addr: "127.0.0.1:50051".parse().unwrap(),
             access_mode: GrpcAccessMode::ReadWrite,
             token_file: None,
+            principal: None,
             tls: None,
         }]
     );
@@ -350,7 +352,144 @@ fn grpc_listener_access_mode_parses() {
             addr: "127.0.0.1:50051".parse().unwrap(),
             access_mode: GrpcAccessMode::ReadOnly,
             token_file: None,
+            principal: None,
             tls: None,
+        }]
+    );
+}
+
+#[test]
+fn grpc_security_roles_parse_with_legacy_default() {
+    let toml_str = format!(
+        "{}\n[security.grpc.roles]\n\"observer-readonly\" = \"observer\"\n\"automation.example\" = \"automation\"\n\"operator.example\" = \"operator\"\n",
+        valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+    assert_eq!(
+        config.security.grpc.enforcement,
+        GrpcEnforcementConfig::Legacy
+    );
+    assert_eq!(
+        config.security.grpc.roles["observer-readonly"],
+        GrpcRoleConfig::Observer
+    );
+    assert_eq!(
+        config.security.grpc.roles["automation.example"],
+        GrpcRoleConfig::Automation
+    );
+    assert_eq!(
+        config.security.grpc.roles["operator.example"],
+        GrpcRoleConfig::Operator
+    );
+}
+
+#[test]
+fn grpc_security_tier_enforcement_rejected_until_runtime_slice() {
+    let toml_str = format!(
+        "{}\n[security.grpc]\nenforcement = \"tier\"\n",
+        valid_toml()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    let ConfigError::InvalidGrpcConfig { reason } = err else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(
+        reason.contains("not implemented yet"),
+        "got unexpected reason: {reason}"
+    );
+}
+
+#[test]
+fn grpc_security_empty_role_principal_rejected() {
+    let toml_str = format!(
+        "{}\n[security.grpc.roles]\n\"   \" = \"observer\"\n",
+        valid_toml()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    let ConfigError::InvalidGrpcConfig { reason } = err else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(
+        reason.contains("principal keys must not be empty"),
+        "got unexpected reason: {reason}"
+    );
+}
+
+#[test]
+fn grpc_tcp_principal_requires_bearer_token_without_mtls() {
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\nprincipal = \"automation.example\"\n",
+        valid_toml()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    let ConfigError::InvalidGrpcConfig { reason } = err else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(
+        reason.contains("requires grpc_tcp.token_file"),
+        "got unexpected reason: {reason}"
+    );
+}
+
+#[test]
+fn grpc_tcp_bearer_principal_parses() {
+    let token_file = NamedTempFile::new().unwrap();
+    fs::write(token_file.path(), "secret").unwrap();
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntoken_file = {:?}\nprincipal = \"automation.example\"\n",
+        valid_toml(),
+        token_file.path()
+    );
+    let config = parse(&toml_str).unwrap();
+    assert_eq!(
+        config.grpc_listeners(),
+        vec![GrpcListener::Tcp {
+            addr: "127.0.0.1:50051".parse().unwrap(),
+            access_mode: GrpcAccessMode::ReadWrite,
+            token_file: Some(token_file.path().to_path_buf()),
+            principal: Some("automation.example".to_string()),
+            tls: None,
+        }]
+    );
+}
+
+#[test]
+fn grpc_tcp_principal_rejected_with_mtls() {
+    let cert = write_pem(STUB_CERT);
+    let key = write_pem(STUB_KEY);
+    let ca = write_pem(STUB_CERT);
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\nprincipal = \"automation.example\"\ntls_cert_file = {:?}\ntls_key_file = {:?}\ntls_client_ca_file = {:?}\n",
+        valid_toml(),
+        cert.path(),
+        key.path(),
+        ca.path(),
+    );
+    let err = parse(&toml_str).unwrap_err();
+    let ConfigError::InvalidGrpcConfig { reason } = err else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(
+        reason.contains("non-mTLS bearer-token listeners"),
+        "got unexpected reason: {reason}"
+    );
+}
+
+#[test]
+fn grpc_uds_principal_parses() {
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nprincipal = \"local-admin\"\n",
+        valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+    assert_eq!(
+        config.grpc_listeners(),
+        vec![GrpcListener::Uds {
+            path: PathBuf::from("/tmp/rustbgpd-test.sock"),
+            mode: 0o600,
+            access_mode: GrpcAccessMode::ReadWrite,
+            token_file: None,
+            principal: Some("local-admin".to_string()),
         }]
     );
 }
