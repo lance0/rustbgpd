@@ -12,6 +12,11 @@ pub(super) const BGP_PORT: u16 = 179;
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub global: Global,
+    /// Security policy and authorization configuration. Empty by
+    /// default so existing deployments keep legacy listener-level
+    /// authorization until operators opt into later ADR-0064 slices.
+    #[serde(default)]
+    pub security: SecurityConfig,
     #[serde(default)]
     pub neighbors: Vec<Neighbor>,
     #[serde(default)]
@@ -67,6 +72,42 @@ pub struct Config {
     /// Path of the config file (populated by `Config::load`, not serialized).
     #[serde(skip)]
     pub file_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SecurityConfig {
+    #[serde(default)]
+    pub grpc: GrpcSecurityConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct GrpcSecurityConfig {
+    #[serde(default)]
+    pub enforcement: GrpcEnforcementConfig,
+    #[serde(default)]
+    pub roles: HashMap<String, GrpcRoleConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GrpcEnforcementConfig {
+    /// Preserve existing listener-level authorization. Tier decisions
+    /// are audit-only until the ADR-0064 enforcement slice lands.
+    #[default]
+    Legacy,
+    /// Parsed for forward compatibility, but rejected by validation
+    /// until deny-by-tier enforcement is implemented.
+    Tier,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrpcRoleConfig {
+    Observer,
+    Automation,
+    Operator,
 }
 
 /// Prefix-based dynamic neighbor range. Inbound connections from IPs
@@ -256,6 +297,10 @@ pub struct GrpcTcpListenerConfig {
     pub address: Option<String>,
     pub access_mode: Option<GrpcAccessModeConfig>,
     pub token_file: Option<String>,
+    /// Stable audit principal label for non-mTLS bearer-token
+    /// listeners. Native mTLS principal extraction is a later
+    /// ADR-0064 slice and continues to report `mtls-unresolved`.
+    pub principal: Option<String>,
     /// Server certificate (PEM file path). Required to enable mTLS.
     pub tls_cert_file: Option<String>,
     /// Server private key (PEM file path). Required when `tls_cert_file`
@@ -278,6 +323,10 @@ pub struct GrpcUdsListenerConfig {
     pub mode: u32,
     pub access_mode: Option<GrpcAccessModeConfig>,
     pub token_file: Option<String>,
+    /// Stable audit principal label for this Unix-domain-socket
+    /// listener. Filesystem permissions authenticate the socket, but
+    /// this gives audit logs an operator-controlled identity.
+    pub principal: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

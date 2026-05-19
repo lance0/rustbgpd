@@ -164,6 +164,7 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                 addr,
                 access_mode,
                 token_file,
+                principal,
                 tls,
             } => {
                 let tls_params = tls
@@ -182,6 +183,7 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                     endpoint: ListenerEndpoint::Tcp(addr),
                     access_mode: access_mode.into(),
                     auth_token: token_file.as_deref().map(load_grpc_token).transpose()?,
+                    principal,
                     tls: tls_params,
                 })
             }
@@ -190,10 +192,12 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                 mode,
                 access_mode,
                 token_file,
+                principal,
             } => Ok(GrpcListenerConfig {
                 endpoint: ListenerEndpoint::Uds { path, mode },
                 access_mode: access_mode.into(),
                 auth_token: token_file.as_deref().map(load_grpc_token).transpose()?,
+                principal,
                 tls: None,
             }),
         })
@@ -1810,6 +1814,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
                 install_blackhole_discard: false,
                 allow_blackhole_broad_prefixes: false,
             },
+            security: crate::config::SecurityConfig::default(),
             neighbors: vec![
                 crate::config::Neighbor {
                     address: "10.0.0.2".to_string(),

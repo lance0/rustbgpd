@@ -4,7 +4,10 @@ use std::path::Path;
 use super::parse::{
     parse_families, parse_named_policy, parse_neighbor_set, parse_policy, resolve_chain,
 };
-use super::{Config, ConfigError, DEFAULT_HOLD_TIME, PeerGroupConfig, TcpAoConfig};
+use super::{
+    Config, ConfigError, DEFAULT_HOLD_TIME, GrpcEnforcementConfig, PeerGroupConfig, SecurityConfig,
+    TcpAoConfig,
+};
 
 impl Config {
     #[expect(clippy::too_many_lines)]
@@ -32,6 +35,8 @@ impl Config {
                 reason: "must not be empty".to_string(),
             });
         }
+
+        validate_grpc_security(&self.security)?;
 
         // Validate prometheus_addr is a valid SocketAddr (if configured)
         if let Some(ref addr) = self.global.telemetry.prometheus_addr {
@@ -92,6 +97,21 @@ impl Config {
                 validate_grpc_pem_file(key, "grpc_tcp.tls_key_file", PemKind::PrivateKey)?;
                 validate_grpc_pem_file(ca, "grpc_tcp.tls_client_ca_file", PemKind::Certificate)?;
             }
+            validate_grpc_principal(cfg.principal.as_deref(), "grpc_tcp.principal")?;
+            if cfg.principal.is_some() && tls_count == 3 {
+                return Err(ConfigError::InvalidGrpcConfig {
+                    reason: "grpc_tcp.principal is for non-mTLS bearer-token listeners; \
+                             mTLS principal extraction is tracked by ADR-0064 #166"
+                        .to_string(),
+                });
+            }
+            if cfg.principal.is_some() && cfg.token_file.is_none() {
+                return Err(ConfigError::InvalidGrpcConfig {
+                    reason: "grpc_tcp.principal requires grpc_tcp.token_file; unauthenticated \
+                             TCP listeners must not claim an authenticated principal"
+                        .to_string(),
+                });
+            }
         }
 
         if let Some(cfg) = uds {
@@ -108,6 +128,7 @@ impl Config {
                 });
             }
             validate_grpc_token_file(cfg.token_file.as_deref(), "grpc_uds.token_file")?;
+            validate_grpc_principal(cfg.principal.as_deref(), "grpc_uds.principal")?;
         }
 
         if (telemetry.grpc_tcp.is_some() || telemetry.grpc_uds.is_some())
@@ -880,6 +901,36 @@ fn validate_peer_group(
         peer_groups,
     )?;
 
+    Ok(())
+}
+
+fn validate_grpc_security(security: &SecurityConfig) -> Result<(), ConfigError> {
+    if security.grpc.enforcement == GrpcEnforcementConfig::Tier {
+        return Err(ConfigError::InvalidGrpcConfig {
+            reason: "security.grpc.enforcement = \"tier\" is not implemented yet; \
+                     use \"legacy\" until the ADR-0064 enforcement slice lands"
+                .to_string(),
+        });
+    }
+
+    for principal in security.grpc.roles.keys() {
+        if principal.trim().is_empty() {
+            return Err(ConfigError::InvalidGrpcConfig {
+                reason: "security.grpc.roles principal keys must not be empty".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_grpc_principal(principal: Option<&str>, field_name: &str) -> Result<(), ConfigError> {
+    if let Some(principal) = principal
+        && principal.trim().is_empty()
+    {
+        return Err(ConfigError::InvalidGrpcConfig {
+            reason: format!("{field_name} must not be empty"),
+        });
+    }
     Ok(())
 }
 

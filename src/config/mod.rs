@@ -111,6 +111,7 @@ impl Config {
                 mode: 0o600,
                 access_mode: GrpcAccessMode::ReadWrite,
                 token_file: None,
+                principal: None,
             }];
         }
 
@@ -143,6 +144,7 @@ impl Config {
                     .access_mode
                     .map_or(GrpcAccessMode::ReadWrite, Into::into),
                 token_file: cfg.token_file.as_ref().map(PathBuf::from),
+                principal: cfg.principal.clone(),
                 tls,
             });
         }
@@ -158,6 +160,7 @@ impl Config {
                     .access_mode
                     .map_or(GrpcAccessMode::ReadWrite, Into::into),
                 token_file: cfg.token_file.as_ref().map(PathBuf::from),
+                principal: cfg.principal.clone(),
             });
         }
         listeners
@@ -902,6 +905,7 @@ pub enum GrpcListener {
         addr: SocketAddr,
         access_mode: GrpcAccessMode,
         token_file: Option<PathBuf>,
+        principal: Option<String>,
         tls: Option<GrpcTlsPaths>,
     },
     Uds {
@@ -909,6 +913,7 @@ pub enum GrpcListener {
         mode: u32,
         access_mode: GrpcAccessMode,
         token_file: Option<PathBuf>,
+        principal: Option<String>,
     },
 }
 
