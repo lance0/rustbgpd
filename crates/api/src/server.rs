@@ -14,6 +14,7 @@ use tonic::transport::Server;
 use tonic::{Request, Status};
 use tracing::{error, info, warn};
 
+use crate::authz::AuthTier;
 use crate::authz_runtime::{GrpcAuthAuditContext, GrpcAuthAuditLayer, GrpcAuthnKind};
 use crate::config_service::ConfigService;
 use crate::control_service::{ControlService, MrtTriggerTx};
@@ -100,6 +101,8 @@ pub struct ServeConfig {
 pub struct ListenerConfig {
     pub endpoint: ListenerEndpoint,
     pub access_mode: AccessMode,
+    /// Effective ADR-0064 listener method-tier ceiling.
+    pub max_tier: AuthTier,
     pub auth_token: Option<String>,
     /// Optional stable principal label for audit records. mTLS
     /// listeners ignore this until certificate principal extraction
@@ -150,6 +153,7 @@ pub enum ListenerEndpoint {
 fn tcp_audit_context(
     addr: SocketAddr,
     access_mode: AccessMode,
+    max_tier: AuthTier,
     auth_enabled: bool,
     tls_enabled: bool,
     configured_principal: Option<&str>,
@@ -167,6 +171,7 @@ fn tcp_audit_context(
     GrpcAuthAuditContext::new(
         format!("tcp://{addr}"),
         access_mode.as_str(),
+        max_tier,
         authn,
         principal,
     )
@@ -175,6 +180,7 @@ fn tcp_audit_context(
 fn uds_audit_context(
     path: &Path,
     access_mode: AccessMode,
+    max_tier: AuthTier,
     auth_enabled: bool,
     configured_principal: Option<&str>,
 ) -> GrpcAuthAuditContext {
@@ -195,6 +201,7 @@ fn uds_audit_context(
     GrpcAuthAuditContext::new(
         format!("unix://{}", path.display()),
         access_mode.as_str(),
+        max_tier,
         authn,
         principal,
     )
@@ -351,6 +358,7 @@ async fn run_listener(
     let ListenerConfig {
         endpoint,
         access_mode,
+        max_tier,
         auth_token,
         principal,
         tls,
@@ -361,6 +369,7 @@ async fn run_listener(
             run_tcp_listener(
                 addr,
                 access_mode,
+                max_tier,
                 auth_token,
                 principal,
                 tls,
@@ -394,6 +403,7 @@ async fn run_listener(
                 path,
                 mode,
                 access_mode,
+                max_tier,
                 auth_token,
                 principal,
                 rib_tx,
@@ -432,6 +442,7 @@ async fn run_listener(
 async fn run_tcp_listener(
     addr: SocketAddr,
     access_mode: AccessMode,
+    max_tier: AuthTier,
     auth_token: Option<String>,
     principal: Option<String>,
     tls: Option<TlsParams>,
@@ -468,6 +479,7 @@ async fn run_tcp_listener(
     let audit_context = tcp_audit_context(
         addr,
         access_mode,
+        max_tier,
         auth_token.is_some(),
         tls.is_some(),
         principal.as_deref(),
@@ -565,11 +577,16 @@ async fn run_tcp_listener(
         .map_err(|e| format!("TCP listener {addr} failed: {e}"))
 }
 
-#[expect(clippy::too_many_arguments, reason = "startup wiring for one listener")]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "startup wiring for one listener"
+)]
 async fn run_uds_listener(
     path: PathBuf,
     mode: u32,
     access_mode: AccessMode,
+    max_tier: AuthTier,
     auth_token: Option<String>,
     principal: Option<String>,
     rib_tx: mpsc::Sender<RibUpdate>,
@@ -597,7 +614,13 @@ async fn run_uds_listener(
 ) -> Result<(), String> {
     let auth_enabled = auth_token.is_some();
     let uds_listener = bind_uds_listener(&path, mode)?;
-    let audit_context = uds_audit_context(&path, access_mode, auth_enabled, principal.as_deref());
+    let audit_context = uds_audit_context(
+        &path,
+        access_mode,
+        max_tier,
+        auth_enabled,
+        principal.as_deref(),
+    );
     info!(
         path = %path.display(),
         access_mode = ?access_mode,
@@ -792,12 +815,14 @@ mod tests {
         let context = tcp_audit_context(
             "127.0.0.1:50051".parse().unwrap(),
             AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
             true,
             false,
             Some("automation.example"),
         );
         assert_eq!(context.authn(), GrpcAuthnKind::BearerToken);
         assert_eq!(context.principal(), "automation.example");
+        assert_eq!(context.max_tier(), AuthTier::OperatorOnly);
     }
 
     #[test]
@@ -805,12 +830,14 @@ mod tests {
         let context = tcp_audit_context(
             "127.0.0.1:50051".parse().unwrap(),
             AccessMode::ReadWrite,
+            AuthTier::Mutating,
             true,
             true,
             Some("automation.example"),
         );
         assert_eq!(context.authn(), GrpcAuthnKind::Mtls);
         assert_eq!(context.principal(), "mtls-unresolved");
+        assert_eq!(context.max_tier(), AuthTier::Mutating);
     }
 
     #[test]
@@ -818,10 +845,12 @@ mod tests {
         let context = uds_audit_context(
             Path::new("/run/rustbgpd/grpc.sock"),
             AccessMode::ReadWrite,
+            AuthTier::SensitiveRead,
             false,
             Some("local-admin"),
         );
         assert_eq!(context.authn(), GrpcAuthnKind::Uds);
         assert_eq!(context.principal(), "local-admin");
+        assert_eq!(context.max_tier(), AuthTier::SensitiveRead);
     }
 }

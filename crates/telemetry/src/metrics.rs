@@ -248,7 +248,7 @@ impl BgpMetrics {
         let grpc_authz_decisions = IntCounterVec::new(
             Opts::new(
                 "bgp_grpc_authz_decisions_total",
-                "Audit-only ADR-0064 gRPC authorization tier decisions by bounded listener and decision labels.",
+                "ADR-0064 gRPC authorization tier decisions by bounded listener and decision labels.",
             ),
             &["tier", "result", "authn", "access_mode"],
         )
@@ -954,7 +954,7 @@ impl BgpMetrics {
         }
     }
 
-    /// Record an ADR-0064 audit-only gRPC authorization decision.
+    /// Record an ADR-0064 gRPC authorization decision.
     ///
     /// Labels are deliberately bounded: method path, listener address,
     /// and principal are emitted in structured logs by `rustbgpd-api`

@@ -49,7 +49,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::config::{Config, GrpcAccessMode, GrpcListener};
+use crate::config::{Config, GrpcAccessMode, GrpcListener, GrpcMaxTier};
 use crate::config_persister::{ConfigMutation, ConfigPersister};
 use crate::peer_manager::PeerManager;
 use crate::reload::{ReloadedConfig, apply_reload_outcome, reload_config, run_config_bridge};
@@ -79,6 +79,15 @@ impl From<GrpcAccessMode> for GrpcServerAccessMode {
             GrpcAccessMode::ReadOnly => Self::ReadOnly,
             GrpcAccessMode::ReadWrite => Self::ReadWrite,
         }
+    }
+}
+
+const fn grpc_max_tier_to_auth_tier(value: GrpcMaxTier) -> rustbgpd_api::authz::AuthTier {
+    match value {
+        GrpcMaxTier::Read => rustbgpd_api::authz::AuthTier::Read,
+        GrpcMaxTier::SensitiveRead => rustbgpd_api::authz::AuthTier::SensitiveRead,
+        GrpcMaxTier::Mutating => rustbgpd_api::authz::AuthTier::Mutating,
+        GrpcMaxTier::OperatorOnly => rustbgpd_api::authz::AuthTier::OperatorOnly,
     }
 }
 
@@ -163,6 +172,7 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
             GrpcListener::Tcp {
                 addr,
                 access_mode,
+                max_tier,
                 token_file,
                 principal,
                 tls,
@@ -182,6 +192,7 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                 Ok(GrpcListenerConfig {
                     endpoint: ListenerEndpoint::Tcp(addr),
                     access_mode: access_mode.into(),
+                    max_tier: grpc_max_tier_to_auth_tier(max_tier),
                     auth_token: token_file.as_deref().map(load_grpc_token).transpose()?,
                     principal,
                     tls: tls_params,
@@ -191,11 +202,13 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                 path,
                 mode,
                 access_mode,
+                max_tier,
                 token_file,
                 principal,
             } => Ok(GrpcListenerConfig {
                 endpoint: ListenerEndpoint::Uds { path, mode },
                 access_mode: access_mode.into(),
+                max_tier: grpc_max_tier_to_auth_tier(max_tier),
                 auth_token: token_file.as_deref().map(load_grpc_token).transpose()?,
                 principal,
                 tls: None,

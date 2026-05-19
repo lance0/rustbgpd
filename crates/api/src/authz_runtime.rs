@@ -1,15 +1,19 @@
 //! Runtime ADR-0064 audit layer for gRPC method-tier decisions.
 //!
-//! This layer is intentionally audit-only: it records the method tier
-//! that would feed future tier enforcement, then forwards every request
-//! to the existing tonic services. Bearer-token authentication and
-//! listener `AccessMode` checks remain in `server.rs` and the service
-//! handlers.
+//! This layer records the method tier that feeds ADR-0064 authorization,
+//! enforces the per-listener method-tier cap, then forwards permitted
+//! requests to the existing tonic services. Bearer-token authentication
+//! and listener `AccessMode` checks remain in `server.rs` and the
+//! service handlers.
 
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use rustbgpd_telemetry::BgpMetrics;
+use tonic::Status;
+use tonic::body::Body;
 use tonic::codegen::http;
 use tower::{Layer, Service};
 use tracing::{info, warn};
@@ -47,6 +51,7 @@ impl GrpcAuthnKind {
 pub struct GrpcAuthAuditContext {
     listener: String,
     access_mode: &'static str,
+    max_tier: AuthTier,
     authn: GrpcAuthnKind,
     principal: String,
 }
@@ -57,12 +62,14 @@ impl GrpcAuthAuditContext {
     pub fn new(
         listener: impl Into<String>,
         access_mode: &'static str,
+        max_tier: AuthTier,
         authn: GrpcAuthnKind,
         principal: impl Into<String>,
     ) -> Self {
         Self {
             listener: listener.into(),
             access_mode,
+            max_tier,
             authn,
             principal: principal.into(),
         }
@@ -77,20 +84,25 @@ impl GrpcAuthAuditContext {
     pub(crate) fn principal(&self) -> &str {
         &self.principal
     }
+
+    #[cfg(test)]
+    pub(crate) fn max_tier(&self) -> AuthTier {
+        self.max_tier
+    }
 }
 
-/// Result of an audit-only tier lookup.
+/// Result of a method-tier lookup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GrpcAuthAuditDecision {
     /// Authorization tier assigned to the method.
     pub tier: AuthTier,
     /// Whether the method path exists in the checked matrix.
     pub known_method: bool,
-    /// Stable result label. Slice 2a never denies requests.
+    /// Stable default result label before listener-cap enforcement is applied.
     pub result: &'static str,
 }
 
-/// Compute the audit-only decision for a gRPC HTTP/2 path.
+/// Compute the method-tier decision for a gRPC HTTP/2 path.
 #[must_use]
 pub fn audit_decision_for_path(path: &str) -> GrpcAuthAuditDecision {
     if let Some(method) = method_authz(path) {
@@ -108,7 +120,8 @@ pub fn audit_decision_for_path(path: &str) -> GrpcAuthAuditDecision {
     }
 }
 
-/// Tower layer that records ADR-0064 runtime decisions.
+/// Tower layer that records ADR-0064 runtime decisions and enforces
+/// the listener's method-tier ceiling.
 #[derive(Clone)]
 pub struct GrpcAuthAuditLayer {
     context: GrpcAuthAuditContext,
@@ -135,7 +148,7 @@ impl<S> Layer<S> for GrpcAuthAuditLayer {
     }
 }
 
-/// Audit-only service wrapper.
+/// Audit and listener-cap service wrapper.
 #[derive(Clone)]
 pub struct GrpcAuthAuditService<S> {
     inner: S,
@@ -145,12 +158,13 @@ pub struct GrpcAuthAuditService<S> {
 
 impl<S, B> Service<http::Request<B>> for GrpcAuthAuditService<S>
 where
-    S: Service<http::Request<B>> + Send + 'static,
+    S: Service<http::Request<B>, Response = http::Response<Body>> + Send + 'static,
     S::Future: Send + 'static,
+    S::Error: Send + 'static,
 {
-    type Response = S::Response;
+    type Response = http::Response<Body>;
     type Error = S::Error;
-    type Future = S::Future;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
@@ -158,16 +172,33 @@ where
 
     fn call(&mut self, req: http::Request<B>) -> Self::Future {
         let path = req.uri().path();
-        record_audit_decision(path, &self.context, &self.metrics);
-        self.inner.call(req)
+        let decision = audit_decision_for_path(path);
+        if decision.tier > self.context.max_tier {
+            record_audit_decision(path, &self.context, &self.metrics, "listener_tier_denied");
+            let max_tier = self.context.max_tier.as_str();
+            let tier = decision.tier.as_str();
+            let response = Status::permission_denied(format!(
+                "listener max_tier {max_tier} does not permit {tier} RPC {path}"
+            ))
+            .into_http::<Body>();
+            return Box::pin(async move { Ok(response) });
+        }
+        record_audit_decision(path, &self.context, &self.metrics, decision.result);
+        let fut = self.inner.call(req);
+        Box::pin(fut)
     }
 }
 
-fn record_audit_decision(path: &str, context: &GrpcAuthAuditContext, metrics: &BgpMetrics) {
+fn record_audit_decision(
+    path: &str,
+    context: &GrpcAuthAuditContext,
+    metrics: &BgpMetrics,
+    result: &'static str,
+) {
     let decision = audit_decision_for_path(path);
     metrics.record_grpc_authz_decision(
         decision.tier.as_str(),
-        decision.result,
+        result,
         context.authn.as_str(),
         context.access_mode,
     );
@@ -176,9 +207,9 @@ fn record_audit_decision(path: &str, context: &GrpcAuthAuditContext, metrics: &B
     let method_name = method.map_or("unknown", |m| m.method);
     let known_method = decision.known_method;
     let tier = decision.tier.as_str();
-    let result = decision.result;
     let listener = context.listener.as_str();
     let access_mode = context.access_mode;
+    let max_tier = context.max_tier.as_str();
     let authn = context.authn.as_str();
     let principal = context.principal.as_str();
 
@@ -193,6 +224,7 @@ fn record_audit_decision(path: &str, context: &GrpcAuthAuditContext, metrics: &B
             result,
             listener,
             access_mode,
+            max_tier,
             authn,
             principal,
             "gRPC authorization audit decision"
@@ -208,6 +240,7 @@ fn record_audit_decision(path: &str, context: &GrpcAuthAuditContext, metrics: &B
             result,
             listener,
             access_mode,
+            max_tier,
             authn,
             principal,
             "gRPC authorization audit decision"
@@ -281,6 +314,7 @@ mod tests {
         let context = GrpcAuthAuditContext::new(
             "tcp://127.0.0.1:50051",
             "read_write",
+            AuthTier::OperatorOnly,
             GrpcAuthnKind::BearerToken,
             "bearer-token",
         );
@@ -300,5 +334,53 @@ mod tests {
         assert!(text.contains("result=\"audit_forward\""));
         assert!(text.contains("authn=\"bearer_token\""));
         assert!(text.contains("access_mode=\"read_write\""));
+    }
+
+    #[tokio::test]
+    async fn audit_layer_denies_method_above_listener_cap() {
+        let metrics = BgpMetrics::new();
+        let context = GrpcAuthAuditContext::new(
+            "tcp://127.0.0.1:50051",
+            "read_write",
+            AuthTier::SensitiveRead,
+            GrpcAuthnKind::BearerToken,
+            "bearer-token",
+        );
+        let layer = GrpcAuthAuditLayer::new(context, metrics.clone());
+        let mut service = layer.layer(EchoService);
+        let request = Request::builder()
+            .uri("/rustbgpd.v1.NeighborService/AddNeighbor")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+        let status = tonic::Status::from_header_map(response.headers()).unwrap();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+
+        let text = gather_text(&metrics);
+        assert!(text.contains("tier=\"mutating\""));
+        assert!(text.contains("result=\"listener_tier_denied\""));
+    }
+
+    #[tokio::test]
+    async fn audit_layer_denies_unknown_path_below_operator_cap() {
+        let metrics = BgpMetrics::new();
+        let context = GrpcAuthAuditContext::new(
+            "tcp://127.0.0.1:50051",
+            "read_write",
+            AuthTier::Mutating,
+            GrpcAuthnKind::BearerToken,
+            "bearer-token",
+        );
+        let layer = GrpcAuthAuditLayer::new(context, metrics);
+        let mut service = layer.layer(EchoService);
+        let request = Request::builder()
+            .uri("/rustbgpd.v1.Unknown/Nope")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+        let status = tonic::Status::from_header_map(response.headers()).unwrap();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
     }
 }
