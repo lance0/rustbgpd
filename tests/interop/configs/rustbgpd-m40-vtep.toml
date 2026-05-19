@@ -42,3 +42,6 @@ remote_asn = 65000
 description = "pe-c-es1"
 hold_time = 180
 families = ["l2vpn_evpn"]
+
+[security.grpc]
+enforcement = "legacy"

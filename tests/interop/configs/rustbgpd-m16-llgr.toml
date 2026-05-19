@@ -19,3 +19,6 @@ graceful_restart = true
 gr_restart_time = 15
 gr_stale_routes_time = 20
 llgr_stale_time = 60
+
+[security.grpc]
+enforcement = "legacy"

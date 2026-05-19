@@ -17,3 +17,6 @@ description = "frr-m18-extnexthop"
 hold_time = 90
 families = ["ipv4_unicast", "ipv6_unicast"]
 local_ipv6_nexthop = "fd00::1"
+
+[security.grpc]
+enforcement = "legacy"

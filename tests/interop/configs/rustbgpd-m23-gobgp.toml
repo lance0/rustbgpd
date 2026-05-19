@@ -15,3 +15,6 @@ address = "10.0.0.2"
 remote_asn = 65002
 description = "gobgp-m23"
 hold_time = 90
+
+[security.grpc]
+enforcement = "legacy"

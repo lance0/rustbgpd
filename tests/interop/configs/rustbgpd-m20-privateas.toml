@@ -40,3 +40,6 @@ remote_asn = 65004
 description = "frr-replace"
 hold_time = 90
 remove_private_as = "replace"
+
+[security.grpc]
+enforcement = "legacy"

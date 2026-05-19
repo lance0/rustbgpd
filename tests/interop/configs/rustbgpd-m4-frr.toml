@@ -76,3 +76,6 @@ hold_time = 90
 
 # FRR-09 (AS 65018) — NOT configured, added dynamically
 # FRR-10 (AS 65019) — NOT configured, added dynamically
+
+[security.grpc]
+enforcement = "legacy"

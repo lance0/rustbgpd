@@ -52,3 +52,6 @@ router_mac = "02:00:00:00:01:01"
 vrf_device = "vrf1"
 l3vxlan_device = "l3vxlan100"
 table_id = 100
+
+[security.grpc]
+enforcement = "legacy"

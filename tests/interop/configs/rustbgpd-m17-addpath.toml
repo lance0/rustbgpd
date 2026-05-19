@@ -35,3 +35,6 @@ hold_time = 90
 receive = true
 send = true
 send_max = 4
+
+[security.grpc]
+enforcement = "legacy"

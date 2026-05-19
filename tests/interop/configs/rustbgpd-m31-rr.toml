@@ -35,3 +35,6 @@ description = "vtep-c"
 hold_time = 180
 families = ["l2vpn_evpn"]
 route_reflector_client = true
+
+[security.grpc]
+enforcement = "legacy"

@@ -16,3 +16,6 @@ remote_asn = 65043
 description = "bird3-tcp-ao"
 hold_time = 90
 tcp_ao = { key = "interop-secret-m43", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }
+
+[security.grpc]
+enforcement = "legacy"

@@ -17,3 +17,6 @@ description = "frr-m26-cease"
 hold_time = 90
 # Low limit: FRR advertises 3 prefixes, so this triggers Cease/1
 max_prefixes = 2
+
+[security.grpc]
+enforcement = "legacy"
