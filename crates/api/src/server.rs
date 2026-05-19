@@ -6,10 +6,13 @@ use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tokio::net::UnixListener;
+use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
-use tokio_stream::wrappers::UnixListenerStream;
+use tokio_stream::{
+    StreamExt,
+    wrappers::{TcpListenerStream, UnixListenerStream},
+};
 use tonic::service::Interceptor;
 use tonic::transport::Server;
 use tonic::{Request, Status};
@@ -18,6 +21,7 @@ use tracing::{error, info, warn};
 use crate::authz::{AuthEnforcement, AuthTier, PrincipalRole};
 use crate::authz_runtime::{BearerAuthSecret, GrpcAuthAuditContext, GrpcAuthnKind, GrpcAuthzLayer};
 use crate::config_service::ConfigService;
+use crate::connect_info::RustbgpdTcpStream;
 use crate::control_service::{ControlService, MrtTriggerTx};
 use crate::event_service::{DataplaneEventBroadcaster, EventService, dataplane_event_broadcaster};
 use crate::evpn_service::{EvpnService, OriginatedLocalMacCountFn};
@@ -479,15 +483,20 @@ async fn run_tcp_listener(
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
 ) -> Result<(), String> {
+    let tcp_listener = TcpListener::bind(addr)
+        .await
+        .map_err(|e| format!("failed to bind gRPC TCP listener {addr}: {e}"))?;
+    let bound_addr = tcp_listener.local_addr().unwrap_or(addr);
     info!(
-        %addr,
+        %bound_addr,
+        requested_addr = %addr,
         access_mode = ?access_mode,
         auth_enabled = auth_token.is_some(),
         tls_enabled = tls.is_some(),
         "starting gRPC TCP listener"
     );
     let audit_context = tcp_audit_context(
-        addr,
+        bound_addr,
         access_mode,
         max_tier,
         RuntimeAuthzConfig { enforcement, roles },
@@ -508,6 +517,8 @@ async fn run_tcp_listener(
             .map_err(|e| format!("TCP listener {addr} TLS config invalid: {e}"))?;
     }
     let mut builder = builder.layer(GrpcAuthzLayer::new(audit_context, metrics.clone()));
+    let incoming =
+        TcpListenerStream::new(tcp_listener).map(|accepted| accepted.map(RustbgpdTcpStream::new));
     builder
         .add_service(RibServiceServer::with_interceptor(
             RibService::with_status_snapshots_and_metrics(
@@ -583,9 +594,9 @@ async fn run_tcp_listener(
             ),
             interceptor,
         ))
-        .serve_with_shutdown(addr, await_shutdown(shutdown_rx))
+        .serve_with_incoming_shutdown(incoming, await_shutdown(shutdown_rx))
         .await
-        .map_err(|e| format!("TCP listener {addr} failed: {e}"))
+        .map_err(|e| format!("TCP listener {bound_addr} failed: {e}"))
 }
 
 #[expect(
