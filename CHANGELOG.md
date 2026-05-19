@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.24.0] — 2026-05-19
+
 ### Changed
 
 - **BREAKING — `[security.grpc].enforcement` now defaults to `"tier"`.** The
@@ -18,7 +20,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Existing deployments that have not staged a `[security.grpc.roles]` block
   will fail validation at startup with a message pointing at the migration
   checklist in `docs/CONFIGURATION.md` AND the legacy escape hatch
-  (`[security.grpc] enforcement = "legacy"`). The migration checklist has
+  (`security.grpc.enforcement = "legacy"`). The migration checklist has
   shipped since v0.24-prep so operators have had the upgrade path documented
   with concrete `--check` validation steps. The opt-out remains supported
   indefinitely — `enforcement = "legacy"` continues to honor explicit

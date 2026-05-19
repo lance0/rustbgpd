@@ -296,9 +296,9 @@ establishment.
 
 ### Results
 
-Benchmarks run at v0.4.2; the RIB hot-path has been unchanged through v0.23.0
+Benchmarks run at v0.4.2; the RIB hot-path has been unchanged through v0.24.0
 in ways that would invalidate these numbers, but the runs themselves have not
-been re-executed against current main. Fresh runs against the v0.23.0 main and
+been re-executed against current main. Fresh runs against the v0.24.0 main and
 under EVPN VTEP / IRB modes are tracked as follow-up work; treat the numbers
 below as directional rather than current.
 
