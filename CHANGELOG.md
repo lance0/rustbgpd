@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0064 opt-in gRPC role enforcement.** `security.grpc.enforcement =
+  "tier"` is now accepted when every enabled listener has an authenticated
+  principal source and `[security.grpc.roles]` maps principals to `observer`,
+  `automation`, or `operator`. Tier mode enforces role ceilings before handlers
+  run: unmapped principals get `PERMISSION_DENIED` with
+  `principal_unmapped`, and below-tier roles get `role_tier_denied`. Legacy
+  remains the default until the dedicated migration/default-flip slice.
+
 - **ADR-0064 mTLS audit principal extraction.** Native gRPC mTLS listeners now
   derive the `grpc_authz` audit principal from the validated client
   certificate (`rustbgpd:` URI SAN, then email SAN, then Subject CN) instead of

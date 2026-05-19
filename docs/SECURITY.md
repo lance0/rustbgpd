@@ -55,7 +55,8 @@ Preferred posture:
   per-method tiers (`read`, `sensitive_read`, `mutating`,
   `operator_only`). The runtime now emits `grpc_authz` decision logs and
   `bgp_grpc_authz_decisions_total`; listener `max_tier` caps are enforced,
-  while per-principal role enforcement is still deferred. The
+  and opt-in `security.grpc.enforcement = "tier"` enforces per-principal role
+  ceilings. The
   external-review packet in `docs/adr/0064-threat-model.md` summarizes
   the trust boundaries, abuse paths, evidence checklist, and residual
   risks for that migration.
@@ -65,8 +66,8 @@ Preferred posture:
   client certificate (`rustbgpd:` URI SAN, then email SAN, then Subject CN);
   unsafe or overlong cert values fall back to `mtls-unresolved` rather than
   entering structured logs verbatim.
-  These roles are configuration-only until ADR-0064 deny-by-tier enforcement
-  lands.
+  In legacy mode these roles are audit context only; in tier mode they
+  authorize or deny calls by method tier.
 - Listener `max_tier` caps are enforced now and should be used to bound remote
   TCP listeners to the smallest required method tier. `access_mode =
   "read_only"` remains a compatibility ceiling equivalent to
@@ -271,14 +272,13 @@ needed by rustbgpd.
 The following security improvements are intentionally deferred and tracked in
 the roadmap:
 
-- ADR-0064 runtime enforcement for the checked gRPC method-tier matrix
+- ADR-0064 default enforcement flip for the checked gRPC method-tier matrix
   (`read`, `sensitive_read`, `mutating`, `operator_only`). Runtime
   method-tier decision logs/metrics, staged principal/role config, enforced
-  listener tier caps, and the `docs/adr/0064-threat-model.md` audit packet are
-  present. mTLS certificate principal extraction (URI SAN → email SAN →
-  Subject CN) and result-aware audit records with masked credential-bearing
-  request summaries are present. Per-principal role enforcement is still
-  audit/deferred; role-based deny-by-tier enforcement and durable
+  listener tier caps, mTLS certificate principal extraction (URI SAN →
+  email SAN → Subject CN), opt-in role enforcement, and result-aware audit
+  records with masked credential-bearing request summaries are present. The
+  production default still remains `legacy`; the default flip and durable
   audit-sink / retention guidance remain deferred.
 - TCP-AO (RFC 5925) dynamic-neighbor support, runtime key rotation,
   multi-key rollover, and accepted-socket inspection for BGP session
@@ -286,12 +286,10 @@ the roadmap:
 
 ## Current gaps
 
-- Authorization is still listener-wide at runtime (`read_only` vs
-  `read_write`). ADR-0064 classifies every RPC and emits runtime tier
-  decisions. Explicit non-mTLS listener principals and
-  `[security.grpc.roles]` can be configured for audit identity, and listener
-  `max_tier` caps deny methods above the listener ceiling, but per-principal
-  role enforcement is not active yet.
+- Authorization defaults to legacy listener-wide behavior (`read_only` vs
+  `read_write`) plus listener `max_tier` caps. Operators can opt into
+  per-principal role enforcement with `security.grpc.enforcement = "tier"`.
+  The default flip to tier mode remains a future migration slice.
 - TCP-AO currently supports static-neighbor startup keys only; dynamic
   neighbors, live key rotation, and multi-key rollover remain follow-up work.
   Protected static-neighbor interop is covered by M43 against BIRD 3.2.1 on

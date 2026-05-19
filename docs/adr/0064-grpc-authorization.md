@@ -210,13 +210,15 @@ enforcement = "legacy"  # default until the enforcement-flip slice
 - `legacy` — preserves role authorization behavior. Listener
   `max_tier` caps still deny methods above the listener ceiling, but
   principal roles are not used to authorize or deny calls.
-- `tier` — full per-principal enforcement in the later enforcement
-  slice.
+- `tier` — opt-in per-principal enforcement. The authenticated
+  principal must be present in `[security.grpc.roles]`, and the role's
+  ceiling must be at least the requested method tier.
 
 The shipped slice 1 matrix has no `[security.grpc]` config and no
 runtime authorization/logging behavior change. Slice 2 introduces the
 legacy audit runtime mode; Slice 4 adds listener tier caps while
-keeping `legacy` as the default. The later enforcement-flip slice
+keeping `legacy` as the default. The opt-in enforcement slice accepts
+`tier` and applies deny-by-role decisions; the later default-flip slice
 defaults to `tier` and documents the migration in `CHANGELOG.md` and
 `KNOWN_ISSUES.md`.
 Inventory question 6 answered.
@@ -323,11 +325,12 @@ review/rollback unit.
    `max_tier` are configured, the effective cap is the stricter one.
    Listener cap enforcement is active in all modes including
    `legacy`.
-5. **Enforcement flip.** Use the runtime layer from slice 2 plus the
+5. **Enforcement + default flip.** Use the runtime layer from slice 2 plus the
    identity/role/listener-cap config from slices 3–4 to deny
-   unauthorized RPCs. Default `enforcement = "tier"`. Update
-   `CHANGELOG.md`, `KNOWN_ISSUES.md`, and
-   `docs/SECURITY.md` migration notes.
+   unauthorized RPCs. Ship opt-in `enforcement = "tier"` first with
+   `legacy` still the default, then flip the default to `tier` in a
+   dedicated migration/default-flip slice. Update `CHANGELOG.md`,
+   `KNOWN_ISSUES.md`, and `docs/SECURITY.md` migration notes.
 6. **Audit log hardening.** First add result-aware audit records and
    explicit masking for the current credential ingress
    (`candidate_toml`, peer-group `md5_password`, and TCP-AO keys embedded in
@@ -342,9 +345,9 @@ review/rollback unit.
 Slices 1–5 are the v1.0 blocker; slice 6 is hardening that should
 land in the same release window; slice 7 is the gate the external
 review pulls against. Slices 1–4 can ship under `legacy` enforcement
-without breaking any existing operator. Slice 5 is the breaking
-moment and gets its own release window's worth of operator
-communication.
+without breaking any existing operator. Slice 5 now has two phases:
+opt-in `tier` enforcement first, then the breaking default flip in its
+own migration window.
 
 ## Open questions deferred to follow-up
 
@@ -375,10 +378,11 @@ listener principal labels for bearer-token TCP and UDS audit identity.
 Slice 4a adds enforced per-listener `max_tier` caps while preserving
 `access_mode` as a compatibility ceiling. Slice 3b adds audit-only native mTLS
 certificate principal extraction (`rustbgpd:` URI SAN, then email SAN, then
-Subject CN). Slice 6a adds result-aware audit records and credential-masked
-request summaries for `DiffRuntimeConfig` and `SetPeerGroup`. Later slices
-implement per-principal role enforcement, the default enforcement flip,
-durable audit-sink guidance, and optional proto credential markers.
+Subject CN). Slice 5a adds opt-in per-principal role enforcement while leaving
+`legacy` as the default. Slice 6a adds result-aware audit records and
+credential-masked request summaries for `DiffRuntimeConfig` and `SetPeerGroup`.
+Later slices implement the default enforcement flip, durable audit-sink
+guidance, and optional proto credential markers.
 
 | Slice | Status |
 |-------|--------|
@@ -386,6 +390,6 @@ durable audit-sink guidance, and optional proto credential markers.
 | 2. Audit-only runtime path | Implemented by the runtime audit-layer PR |
 | 3. Identity + roles | Partial: roles config + bearer/UDS principals + mTLS audit principal extraction |
 | 4. Listener tier cap | Partial: `max_tier` listener cap enforced; role/default flip deferred |
-| 5. Enforcement flip | Not started |
+| 5. Enforcement + default flip | Partial: opt-in `tier` role enforcement implemented; default flip deferred |
 | 6. Audit log hardening | Partial: result-aware records + explicit credential masking table |
 | 7. External-review prep | Not started |

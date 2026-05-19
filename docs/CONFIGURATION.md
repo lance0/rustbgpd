@@ -282,23 +282,40 @@ principal falls back to `mtls-unresolved`.
 
 ### `[security.grpc]`
 
-ADR-0064 per-method authorization is staged behind a legacy mode. The current
-release parses role configuration and uses listener `principal` labels for
-audit records. Listener `max_tier` caps are enforced in legacy mode, but
-principal role mapping still does **not** authorize or deny calls yet.
+ADR-0064 per-method authorization ships with a compatibility default. Legacy
+mode preserves existing listener-wide behavior while still enforcing listener
+`max_tier` caps. Opt-in tier mode also enforces `[security.grpc.roles]` for the
+authenticated principal before the handler runs. The project will flip the
+default in a later migration slice; until then operators can stage and test
+`tier` explicitly.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `enforcement` | string | no | `"legacy"` | ADR-0064 enforcement mode. `"legacy"` preserves existing listener `access_mode` behavior. `"tier"` is reserved and rejected until the enforcement slice lands |
+| `enforcement` | string | no | `"legacy"` | ADR-0064 enforcement mode. `"legacy"` preserves existing listener `access_mode` behavior. `"tier"` enables per-principal role enforcement in addition to listener `max_tier` caps |
 
 `[security.grpc.roles]` maps an authenticated principal string to one of the
 built-in roles:
 
-| Role | Future max tier |
-|------|-----------------|
+| Role | Max tier in `enforcement = "tier"` |
+|------|------------------------------------|
 | `observer` | `sensitive_read` |
 | `automation` | `mutating` |
 | `operator` | `operator_only` |
+
+When `enforcement = "tier"` is configured:
+
+- `[security.grpc.roles]` must contain at least one principal mapping.
+- Bearer-token TCP listeners must set both `token_file` and an explicit
+  `principal`; the token value itself is never used as an identity. That
+  principal must have a matching `[security.grpc.roles]` entry.
+- UDS listeners must set an explicit `principal`; filesystem permissions
+  authenticate access but do not identify the client role. That principal must
+  have a matching `[security.grpc.roles]` entry.
+- Native mTLS TCP listeners derive the principal from the verified client
+  certificate and do not set `grpc_tcp.principal`.
+- Unauthenticated TCP listeners are rejected at config load.
+- Requests from principals absent from `[security.grpc.roles]` fail closed with
+  `PERMISSION_DENIED`.
 
 ```toml
 [security.grpc]
@@ -1836,7 +1853,7 @@ starting:
 | `grpc_*.token_file` must exist, be readable, and contain a non-empty token when configured | `invalid gRPC config` |
 | `grpc_*.principal` must not be empty when configured | `invalid gRPC config` |
 | `grpc_tcp.principal` requires `grpc_tcp.token_file` and is rejected on mTLS listeners because mTLS principals are derived from client certificates | `invalid gRPC config` |
-| `security.grpc.enforcement = "tier"` is reserved and rejected until ADR-0064 deny-by-tier enforcement lands | `invalid gRPC config` |
+| `security.grpc.enforcement = "tier"` requires at least one role mapping and every enabled listener must have mTLS or an explicit principal | `invalid gRPC config` |
 | `[security.grpc.roles]` principal keys must not be empty; role values must be `observer`, `automation`, or `operator` | `invalid gRPC config` / TOML parse error |
 | If `grpc_tcp`/`grpc_uds` tables are present, at least one listener must be enabled | `invalid gRPC config` |
 | `hold_time` must be 0 (disabled) or >= 3 seconds | `invalid hold_time` |
