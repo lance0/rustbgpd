@@ -92,11 +92,53 @@ impl WatchEventsFilter {
             || (self.categories.is_empty()
                 && !self.event_types.is_empty()
                 && dataplane_type_allowed);
-        dataplane_selected
-            && self.peer.is_none()
-            && self.afi.is_none()
-            && self.prefix.is_none()
-            && dataplane_type_allowed
+        dataplane_selected && dataplane_type_allowed
+    }
+
+    pub(super) fn matches_dataplane_bgp_event(&self, event: &proto::BgpEvent) -> bool {
+        if !self.wants_dataplane_events()
+            || event.category != proto::EventCategory::Dataplane as i32
+        {
+            return false;
+        }
+        let Ok(event_type) = proto::BgpEventType::try_from(event.event_type) else {
+            return false;
+        };
+        if !dataplane_bgp_event_type_allowed(event_type) {
+            return false;
+        }
+        if !self.event_types.is_empty() && !self.event_types.contains(&event.event_type) {
+            return false;
+        }
+
+        let has_route_filters = self.peer.is_some() || self.afi.is_some() || self.prefix.is_some();
+        if has_route_filters && !dataplane_bgp_event_type_has_route(event_type) {
+            return false;
+        }
+
+        if let Some(peer) = self.peer
+            && event.peer_address.parse::<IpAddr>().ok() != Some(peer)
+        {
+            return false;
+        }
+        if let Some(afi) = self.afi {
+            match (afi, event.afi_safi) {
+                (Afi::Ipv4, value) if value == proto::AddressFamily::Ipv4Unicast as i32 => {}
+                (Afi::Ipv6, value) if value == proto::AddressFamily::Ipv6Unicast as i32 => {}
+                _ => return false,
+            }
+        }
+        if let Some(prefix) = self.prefix {
+            let event_prefix =
+                parse_route_event_prefix_filter(&event.prefix, event.prefix_length, self.afi)
+                    .ok()
+                    .flatten();
+            if event_prefix != Some(prefix) {
+                return false;
+            }
+        }
+
+        true
     }
 
     pub(super) fn wants_evpn_events(&self) -> bool {
@@ -223,10 +265,8 @@ impl WatchEventsFilter {
     fn event_types_match_dataplane_category(&self) -> bool {
         self.event_types.is_empty()
             || self.event_types.iter().any(|event_type| {
-                matches!(
-                    proto::BgpEventType::try_from(*event_type),
-                    Ok(proto::BgpEventType::DataplaneStatusChanged)
-                )
+                proto::BgpEventType::try_from(*event_type)
+                    .is_ok_and(dataplane_bgp_event_type_allowed)
             })
     }
 
@@ -242,6 +282,26 @@ impl WatchEventsFilter {
                 )
             })
     }
+}
+
+fn dataplane_bgp_event_type_allowed(event_type: proto::BgpEventType) -> bool {
+    matches!(
+        event_type,
+        proto::BgpEventType::DataplaneStatusChanged
+            | proto::BgpEventType::DataplaneRouteInstalled
+            | proto::BgpEventType::DataplaneRouteWithdrawn
+            | proto::BgpEventType::DataplaneRouteFailed
+            | proto::BgpEventType::StreamLagged
+    )
+}
+
+fn dataplane_bgp_event_type_has_route(event_type: proto::BgpEventType) -> bool {
+    matches!(
+        event_type,
+        proto::BgpEventType::DataplaneRouteInstalled
+            | proto::BgpEventType::DataplaneRouteWithdrawn
+            | proto::BgpEventType::DataplaneRouteFailed
+    )
 }
 
 pub(super) struct SessionEventHistoryFilter {
@@ -303,6 +363,9 @@ fn bgp_event_type_to_session_event_type(
         | proto::BgpEventType::NotificationReceived
         | proto::BgpEventType::PolicyChanged
         | proto::BgpEventType::DataplaneStatusChanged
+        | proto::BgpEventType::DataplaneRouteInstalled
+        | proto::BgpEventType::DataplaneRouteWithdrawn
+        | proto::BgpEventType::DataplaneRouteFailed
         | proto::BgpEventType::StreamLagged => None,
     }
 }
@@ -348,6 +411,9 @@ fn parse_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<i32>, Status>
             | proto::BgpEventType::NotificationReceived
             | proto::BgpEventType::PolicyChanged
             | proto::BgpEventType::DataplaneStatusChanged
+            | proto::BgpEventType::DataplaneRouteInstalled
+            | proto::BgpEventType::DataplaneRouteWithdrawn
+            | proto::BgpEventType::DataplaneRouteFailed
             | proto::BgpEventType::EvpnRouteAdded
             | proto::BgpEventType::EvpnRouteWithdrawn
             | proto::BgpEventType::EvpnRouteBestChanged
@@ -408,6 +474,9 @@ fn parse_policy_event_type_filter(event_types: &[i32]) -> Result<(), Status> {
             | proto::BgpEventType::NotificationSent
             | proto::BgpEventType::NotificationReceived
             | proto::BgpEventType::DataplaneStatusChanged
+            | proto::BgpEventType::DataplaneRouteInstalled
+            | proto::BgpEventType::DataplaneRouteWithdrawn
+            | proto::BgpEventType::DataplaneRouteFailed
             | proto::BgpEventType::EvpnRouteAdded
             | proto::BgpEventType::EvpnRouteWithdrawn
             | proto::BgpEventType::EvpnRouteBestChanged
@@ -453,6 +522,9 @@ fn parse_evpn_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<RouteEve
             | proto::BgpEventType::NotificationReceived
             | proto::BgpEventType::PolicyChanged
             | proto::BgpEventType::DataplaneStatusChanged
+            | proto::BgpEventType::DataplaneRouteInstalled
+            | proto::BgpEventType::DataplaneRouteWithdrawn
+            | proto::BgpEventType::DataplaneRouteFailed
             | proto::BgpEventType::StreamLagged => {
                 return Err(Status::invalid_argument(
                     "ListEvpnEvents only supports EVPN event types",

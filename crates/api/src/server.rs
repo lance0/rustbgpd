@@ -99,6 +99,10 @@ pub struct ServeConfig {
     /// install state. Returns an empty list when no `[[fib_tables]]`
     /// are configured or before the actor's first reconcile pass.
     pub fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
+    /// Live ADR-0061 per-route FIB dataplane event source. This is
+    /// separate from the aggregate dataplane poller so route events
+    /// are not delayed by snapshot polling.
+    pub dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
 }
 
 /// Resolved gRPC listener configuration.
@@ -334,7 +338,11 @@ pub async fn serve(
     }
 }
 
-#[expect(clippy::too_many_arguments, reason = "startup wiring for one listener")]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "startup wiring for one listener"
+)]
 async fn run_listener(
     listener: ListenerConfig,
     rib_tx: mpsc::Sender<RibUpdate>,
@@ -361,6 +369,7 @@ async fn run_listener(
     let evpn_fdb_nexthop_snapshot = config.evpn_fdb_nexthop_snapshot;
     let blackhole_discard_snapshot = config.blackhole_discard_snapshot;
     let fib_route_snapshot = config.fib_route_snapshot;
+    let dataplane_route_events = config.dataplane_route_events;
     let ListenerConfig {
         endpoint,
         access_mode,
@@ -401,6 +410,7 @@ async fn run_listener(
                 evpn_fdb_nexthop_snapshot,
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
+                dataplane_route_events,
                 dataplane_events,
                 shutdown_rx,
                 rpc_shutdown_tx,
@@ -436,6 +446,7 @@ async fn run_listener(
                 evpn_fdb_nexthop_snapshot,
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
+                dataplane_route_events,
                 dataplane_events,
                 shutdown_rx,
                 rpc_shutdown_tx,
@@ -478,6 +489,7 @@ async fn run_tcp_listener(
     evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
+    dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     dataplane_events: DataplaneEventBroadcaster,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
@@ -536,6 +548,7 @@ async fn run_tcp_listener(
                 blackhole_discard_snapshot.clone(),
                 fib_route_snapshot.clone(),
                 dataplane_events,
+                dataplane_route_events,
                 metrics.clone(),
             ),
             interceptor.clone(),
@@ -631,6 +644,7 @@ async fn run_uds_listener(
     evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
+    dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     dataplane_events: DataplaneEventBroadcaster,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
@@ -671,6 +685,7 @@ async fn run_uds_listener(
                 blackhole_discard_snapshot.clone(),
                 fib_route_snapshot.clone(),
                 dataplane_events,
+                dataplane_route_events,
                 metrics.clone(),
             ),
             interceptor.clone(),

@@ -471,6 +471,7 @@ through one RPC shape.
 | Recent EVPN route timeline | `EventService.ListEvpnEvents` / `rustbgpctl events evpn` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
 | RFC 7999 discard programming | `ListBlackholeDiscards` / `rustbgpctl rib blackholes` | Snapshot | Current reconcile snapshot only |
 | ADR-0061 general Linux FIB programming | `ListFibRoutes` / `rustbgpctl rib fib` | Snapshot | Current reconcile snapshot plus persisted owned-state semantics |
+| ADR-0061 FIB route apply outcomes | `EventService.WatchEvents` with `EVENT_CATEGORY_DATAPLANE` and `BGP_EVENT_TYPE_DATAPLANE_ROUTE_*` / `rustbgpctl events watch --category dataplane` | Streaming event feed | Live-only; no history API |
 | EVPN L2/L3 dataplane readiness | `EvpnService` (`ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`) / `rustbgpctl evpn ...` | Snapshot | Latest daemon or dataplane report snapshot |
 | Alerting / counters | Prometheus `/metrics` | Cumulative counters and gauges | Process lifetime, scrape-dependent |
 
@@ -737,8 +738,9 @@ does not delete that replacement on a later withdraw.
 
 Unified typed live event stream. Current categories are route events, session
 events (peer lifecycle plus BGP NOTIFICATION sent/received metadata), policy
-mutation summary events, EVPN route best-path events, and dataplane status-row
-summary changes for the daemon-owned FIB / BLACKHOLE discard reconcilers.
+mutation summary events, EVPN route best-path events, dataplane status-row
+summary changes for the daemon-owned FIB / BLACKHOLE discard reconcilers, and
+live ADR-0061 per-route FIB apply outcomes.
 
 | RPC | Description |
 |-----|-------------|
@@ -789,6 +791,11 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"categories": ["EVENT_CATEGORY_DATAPLANE"], "event_types": ["BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED"]}' \
   localhost:50051 rustbgpd.v1.EventService/WatchEvents
 
+# Watch per-route FIB install failures for one prefix
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"categories": ["EVENT_CATEGORY_DATAPLANE"], "event_types": ["BGP_EVENT_TYPE_DATAPLANE_ROUTE_FAILED"], "prefix": "203.0.113.0", "prefix_length": 24}' \
+  localhost:50051 rustbgpd.v1.EventService/WatchEvents
+
 # Watch EVPN route best-path changes for one peer
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"categories": ["EVENT_CATEGORY_EVPN"], "event_types": ["BGP_EVENT_TYPE_EVPN_ROUTE_ADDED", "BGP_EVENT_TYPE_EVPN_ROUTE_WITHDRAWN", "BGP_EVENT_TYPE_EVPN_ROUTE_BEST_CHANGED"], "neighbor_address": "10.0.0.2"}' \
@@ -816,10 +823,12 @@ session events are sourced from the peer manager's session broadcast and cover
 both lifecycle transitions and metadata-only BGP NOTIFICATION sent/received
 events; policy events are sourced from the peer manager after a runtime policy
 / neighbor-set / peer-group / chain mutation is accepted and are also retained
-in the bounded `ListPolicyEvents` process-local history ring; dataplane events
-are status-row count changes from the existing `ListFibRoutes` and
-`ListBlackholeDiscards` snapshots, not per-route or per-MAC dataplane streams.
-EVPN events are sourced from the RIB's EVPN best-path broadcast and are also
+in the bounded `ListPolicyEvents` process-local history ring; dataplane summary
+events are status-row count changes from the existing `ListFibRoutes` and
+`ListBlackholeDiscards` snapshots. ADR-0061 per-route FIB dataplane events are
+emitted directly by the FIB runtime when a route is installed, withdrawn, or
+fails to apply, and are live-only and not replayed by `ListFibRoutes`. EVPN
+events are sourced from the RIB's EVPN best-path broadcast and are also
 retained in a bounded `ListEvpnEvents` process-local history ring.
 The FIB `rejected` count reflects surfaced status rows; high-cardinality
 `route_limit_exceeded` rows are sampled in `ListFibRoutes`, so this is not a
@@ -837,10 +846,11 @@ handling. If a subscriber falls behind either bounded broadcast, the stream
 emits a `stream_lagged` warning event with the source category and missed
 count; lag warnings are delivered for subscribed source categories even when
 the request's event-type filter is otherwise restrictive. Prefix and family
-filters are unicast-route-only: session, policy, EVPN, and dataplane events do
-not match requests that set `prefix` or `afi_safi`. Peer filters match route,
-session, and EVPN events; they do not match peerless dataplane summary events.
-`BgpEvent` repeats common fields such as peer,
+filters match unicast route events and per-route FIB dataplane events; session,
+policy, EVPN, and peerless dataplane summary events do not match requests that
+set `prefix` or `afi_safi`. Peer filters match route, session, EVPN, and
+per-route FIB dataplane events; they do not match peerless dataplane summary
+events. `BgpEvent` repeats common fields such as peer,
 prefix, type, and severity at the top level even when the payload also carries
 them so category-agnostic clients can render or filter events without unpacking
 the `oneof`.
@@ -931,6 +941,9 @@ Dataplane event types:
 | Type | Meaning |
 |------|---------|
 | `BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED` | FIB / BLACKHOLE installed, rejected, or failed status-row count changed |
+| `BGP_EVENT_TYPE_DATAPLANE_ROUTE_INSTALLED` | ADR-0061 FIB runtime successfully installed or replaced one route |
+| `BGP_EVENT_TYPE_DATAPLANE_ROUTE_WITHDRAWN` | ADR-0061 FIB runtime successfully removed one owned route |
+| `BGP_EVENT_TYPE_DATAPLANE_ROUTE_FAILED` | ADR-0061 FIB runtime failed to apply one route operation; severity is `WARNING` |
 
 ---
 

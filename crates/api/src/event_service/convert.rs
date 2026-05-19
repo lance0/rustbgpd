@@ -30,6 +30,9 @@ pub(crate) fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto
             | proto::BgpEventType::NotificationReceived
             | proto::BgpEventType::PolicyChanged
             | proto::BgpEventType::DataplaneStatusChanged
+            | proto::BgpEventType::DataplaneRouteInstalled
+            | proto::BgpEventType::DataplaneRouteWithdrawn
+            | proto::BgpEventType::DataplaneRouteFailed
             | proto::BgpEventType::EvpnRouteAdded
             | proto::BgpEventType::EvpnRouteWithdrawn
             | proto::BgpEventType::EvpnRouteBestChanged
@@ -268,10 +271,10 @@ pub(crate) fn stream_lag_bgp_event(
     let source = match source_category {
         proto::EventCategory::Route => "route",
         proto::EventCategory::Session => "session",
+        proto::EventCategory::Policy => "policy",
+        proto::EventCategory::Dataplane => "dataplane",
         proto::EventCategory::Evpn => "evpn",
-        proto::EventCategory::Policy
-        | proto::EventCategory::Dataplane
-        | proto::EventCategory::Unspecified => "unknown",
+        proto::EventCategory::Unspecified => "unknown",
     };
     let summary = format!("{source} event stream lagged; missed {missed_count} event(s)");
     proto::BgpEvent {
