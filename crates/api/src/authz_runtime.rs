@@ -19,7 +19,7 @@ use tonic::codegen::http;
 use tower::{Layer, Service};
 use tracing::{info, warn};
 
-use crate::authz::{AuthTier, method_authz};
+use crate::authz::{AuthTier, GrpcMethodAuthz, method_authz};
 
 /// Bounded set of listener authentication surfaces for audit labels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -168,10 +168,21 @@ pub struct GrpcAuthAuditDecision {
     pub result: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GrpcAuthAuditLookup {
+    decision: GrpcAuthAuditDecision,
+    method: Option<&'static GrpcMethodAuthz>,
+}
+
 /// Compute the method-tier decision for a gRPC HTTP/2 path.
 #[must_use]
 pub fn audit_decision_for_path(path: &str) -> GrpcAuthAuditDecision {
-    if let Some(method) = method_authz(path) {
+    audit_lookup_for_path(path).decision
+}
+
+fn audit_lookup_for_path(path: &str) -> GrpcAuthAuditLookup {
+    let method = method_authz(path);
+    let decision = if let Some(method) = method {
         GrpcAuthAuditDecision {
             tier: method.tier,
             known_method: true,
@@ -183,30 +194,31 @@ pub fn audit_decision_for_path(path: &str) -> GrpcAuthAuditDecision {
             known_method: false,
             result: "unknown_audit_forward",
         }
-    }
+    };
+    GrpcAuthAuditLookup { decision, method }
 }
 
 /// Tower layer that records ADR-0064 runtime decisions and enforces
 /// the listener's method-tier ceiling.
 #[derive(Clone)]
-pub struct GrpcAuthAuditLayer {
+pub struct GrpcAuthzLayer {
     context: GrpcAuthAuditContext,
     metrics: BgpMetrics,
 }
 
-impl GrpcAuthAuditLayer {
-    /// Create a new audit layer for one listener.
+impl GrpcAuthzLayer {
+    /// Create a new authorization/audit layer for one listener.
     #[must_use]
     pub fn new(context: GrpcAuthAuditContext, metrics: BgpMetrics) -> Self {
         Self { context, metrics }
     }
 }
 
-impl<S> Layer<S> for GrpcAuthAuditLayer {
-    type Service = GrpcAuthAuditService<S>;
+impl<S> Layer<S> for GrpcAuthzLayer {
+    type Service = GrpcAuthzService<S>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        GrpcAuthAuditService {
+        GrpcAuthzService {
             inner,
             context: self.context.clone(),
             metrics: self.metrics.clone(),
@@ -216,13 +228,13 @@ impl<S> Layer<S> for GrpcAuthAuditLayer {
 
 /// Audit and listener-cap service wrapper.
 #[derive(Clone)]
-pub struct GrpcAuthAuditService<S> {
+pub struct GrpcAuthzService<S> {
     inner: S,
     context: GrpcAuthAuditContext,
     metrics: BgpMetrics,
 }
 
-impl<S, B> Service<http::Request<B>> for GrpcAuthAuditService<S>
+impl<S, B> Service<http::Request<B>> for GrpcAuthzService<S>
 where
     S: Service<http::Request<B>, Response = http::Response<Body>> + Send + 'static,
     S::Future: Send + 'static,
@@ -238,18 +250,25 @@ where
 
     fn call(&mut self, req: http::Request<B>) -> Self::Future {
         let path = req.uri().path();
-        let decision = audit_decision_for_path(path);
+        let lookup = audit_lookup_for_path(path);
+        let decision = lookup.decision;
         if decision.tier > self.context.max_tier {
             // This layer wraps tonic's per-service interceptors. For an
             // over-cap bearer-token request, authenticate first so
             // invalid callers still receive UNAUTHENTICATED instead of
             // learning listener tier details via PERMISSION_DENIED.
             if let Some(status) = self.context.bearer_auth_error(req.headers()) {
-                record_audit_decision(path, &self.context, &self.metrics, "authn_failed");
+                record_audit_decision(path, &lookup, &self.context, &self.metrics, "authn_failed");
                 let response = status.into_http::<Body>();
                 return Box::pin(async move { Ok(response) });
             }
-            record_audit_decision(path, &self.context, &self.metrics, "listener_tier_denied");
+            record_audit_decision(
+                path,
+                &lookup,
+                &self.context,
+                &self.metrics,
+                "listener_tier_denied",
+            );
             let max_tier = self.context.max_tier.as_str();
             let tier = decision.tier.as_str();
             let response = Status::permission_denied(format!(
@@ -258,7 +277,7 @@ where
             .into_http::<Body>();
             return Box::pin(async move { Ok(response) });
         }
-        record_audit_decision(path, &self.context, &self.metrics, decision.result);
+        record_audit_decision(path, &lookup, &self.context, &self.metrics, decision.result);
         let fut = self.inner.call(req);
         Box::pin(fut)
     }
@@ -277,18 +296,19 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 fn record_audit_decision(
     path: &str,
+    lookup: &GrpcAuthAuditLookup,
     context: &GrpcAuthAuditContext,
     metrics: &BgpMetrics,
     result: &'static str,
 ) {
-    let decision = audit_decision_for_path(path);
+    let decision = lookup.decision;
     metrics.record_grpc_authz_decision(
         decision.tier.as_str(),
         result,
         context.authn.as_str(),
         context.access_mode,
     );
-    let method = method_authz(path);
+    let method = lookup.method;
     let service = method.map_or("unknown", |m| m.service);
     let method_name = method.map_or("unknown", |m| m.method);
     let known_method = decision.known_method;
@@ -334,10 +354,9 @@ fn record_audit_decision(
     }
 }
 
-impl<S> fmt::Debug for GrpcAuthAuditService<S> {
+impl<S> fmt::Debug for GrpcAuthzService<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("GrpcAuthAuditService")
-            .finish_non_exhaustive()
+        f.debug_struct("GrpcAuthzService").finish_non_exhaustive()
     }
 }
 
@@ -404,7 +423,7 @@ mod tests {
             GrpcAuthnKind::BearerToken,
             "bearer-token",
         );
-        let layer = GrpcAuthAuditLayer::new(context, metrics.clone());
+        let layer = GrpcAuthzLayer::new(context, metrics.clone());
         let mut service = layer.layer(EchoService);
         let request = Request::builder()
             .uri("/rustbgpd.v1.ControlService/GetHealth")
@@ -432,7 +451,7 @@ mod tests {
             GrpcAuthnKind::BearerToken,
             "bearer-token",
         );
-        let layer = GrpcAuthAuditLayer::new(context, metrics.clone());
+        let layer = GrpcAuthzLayer::new(context, metrics.clone());
         let mut service = layer.layer(EchoService);
         let request = Request::builder()
             .uri("/rustbgpd.v1.NeighborService/AddNeighbor")
@@ -458,7 +477,7 @@ mod tests {
             GrpcAuthnKind::BearerToken,
             "bearer-token",
         );
-        let layer = GrpcAuthAuditLayer::new(context, metrics);
+        let layer = GrpcAuthzLayer::new(context, metrics);
         let mut service = layer.layer(EchoService);
         let request = Request::builder()
             .uri("/rustbgpd.v1.Unknown/Nope")
@@ -481,7 +500,7 @@ mod tests {
             "bearer-token",
         )
         .with_bearer_token(Some("secret"));
-        let layer = GrpcAuthAuditLayer::new(context, metrics.clone());
+        let layer = GrpcAuthzLayer::new(context, metrics.clone());
         let mut service = layer.layer(EchoService);
         let request = Request::builder()
             .uri("/rustbgpd.v1.NeighborService/AddNeighbor")
@@ -508,7 +527,7 @@ mod tests {
             "bearer-token",
         )
         .with_bearer_token(Some("secret"));
-        let layer = GrpcAuthAuditLayer::new(context, metrics.clone());
+        let layer = GrpcAuthzLayer::new(context, metrics.clone());
         let mut service = layer.layer(EchoService);
         let request = Request::builder()
             .uri("/rustbgpd.v1.NeighborService/AddNeighbor")

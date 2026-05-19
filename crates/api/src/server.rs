@@ -15,9 +15,7 @@ use tonic::{Request, Status};
 use tracing::{error, info, warn};
 
 use crate::authz::AuthTier;
-use crate::authz_runtime::{
-    BearerAuthSecret, GrpcAuthAuditContext, GrpcAuthAuditLayer, GrpcAuthnKind,
-};
+use crate::authz_runtime::{BearerAuthSecret, GrpcAuthAuditContext, GrpcAuthnKind, GrpcAuthzLayer};
 use crate::config_service::ConfigService;
 use crate::control_service::{ControlService, MrtTriggerTx};
 use crate::event_service::{DataplaneEventBroadcaster, EventService, dataplane_event_broadcaster};
@@ -480,7 +478,7 @@ async fn run_tcp_listener(
             .tls_config(tls_cfg)
             .map_err(|e| format!("TCP listener {addr} TLS config invalid: {e}"))?;
     }
-    let mut builder = builder.layer(GrpcAuthAuditLayer::new(audit_context, metrics.clone()));
+    let mut builder = builder.layer(GrpcAuthzLayer::new(audit_context, metrics.clone()));
     builder
         .add_service(RibServiceServer::with_interceptor(
             RibService::with_status_snapshots_and_metrics(
@@ -613,7 +611,7 @@ async fn run_uds_listener(
     );
     let interceptor = AuthInterceptor::new(auth_token.as_deref());
     let result = Server::builder()
-        .layer(GrpcAuthAuditLayer::new(audit_context, metrics.clone()))
+        .layer(GrpcAuthzLayer::new(audit_context, metrics.clone()))
         .add_service(RibServiceServer::with_interceptor(
             RibService::with_status_snapshots_and_metrics(
                 rib_query_tx.clone(),

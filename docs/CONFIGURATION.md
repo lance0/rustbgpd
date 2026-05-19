@@ -253,7 +253,9 @@ plane writes.
 
 **ADR-0064 listener tier caps:** `max_tier` is a per-listener ceiling based on
 the checked gRPC method-tier matrix. Calls whose method tier is higher than the
-effective listener cap return `PERMISSION_DENIED` before the handler runs. The
+effective listener cap return `PERMISSION_DENIED` before the handler runs, after
+bearer-token listeners first authenticate the request so missing or invalid
+tokens still return `UNAUTHENTICATED` without exposing tier-cap details. The
 field is backwards-compatible with `access_mode`: omitting `max_tier` preserves
 the existing `access_mode` behavior, `read_only` implies `sensitive_read`, and
 `read_write` implies `operator_only`. When both fields are set, the effective
