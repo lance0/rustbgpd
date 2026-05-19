@@ -71,6 +71,13 @@ Preferred posture:
   TCP listeners to the smallest required method tier. `access_mode =
   "read_only"` remains a compatibility ceiling equivalent to
   `sensitive_read`.
+- gRPC `grpc_authz` audit records are result-aware for forwarded calls and use
+  bounded result labels such as `handler_ok`, `handler_invalid_argument`, and
+  `listener_tier_denied`. Credential-bearing request summaries are masked:
+  `DiffRuntimeConfigRequest.candidate_toml` is never logged verbatim, and
+  `SetPeerGroup` records only MD5 state (`set_redacted`, `preserve`, or
+  `clear`) rather than secret material. TCP-AO keys embedded in candidate TOML
+  are covered by the same `candidate_toml=<redacted>` summary.
 - Peer-group read RPCs redact `md5_password` rather than echoing stored
   secret material; they expose only the non-secret `has_md5_password`
   presence flag. The write path preserves an omitted redacted MD5 value by
@@ -268,8 +275,11 @@ the roadmap:
   (`read`, `sensitive_read`, `mutating`, `operator_only`). Runtime
   method-tier decision logs/metrics, staged principal/role config, enforced
   listener tier caps, and the `docs/adr/0064-threat-model.md` audit packet are
-  present. Per-principal role enforcement is still audit/deferred;
-  role-based deny-by-tier enforcement and audit-log hardening remain deferred.
+  present. mTLS certificate principal extraction (URI SAN → email SAN →
+  Subject CN) and result-aware audit records with masked credential-bearing
+  request summaries are present. Per-principal role enforcement is still
+  audit/deferred; role-based deny-by-tier enforcement and durable
+  audit-sink / retention guidance remain deferred.
 - TCP-AO (RFC 5925) dynamic-neighbor support, runtime key rotation,
   multi-key rollover, and accepted-socket inspection for BGP session
   protection

@@ -5,6 +5,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
+use crate::audit::{set_peer_group_summary, set_request_summary};
 use crate::neighbor_service::{
     family_to_string, parse_families_proto, parse_remove_private_as_proto,
 };
@@ -269,6 +270,18 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
         if let Some(status) = read_only_rejection(self.access_mode) {
             return Err(status);
         }
+        let summary = {
+            let req = request.get_ref();
+            let definition = req.definition.as_ref();
+            set_peer_group_summary(
+                &req.name,
+                definition
+                    .and_then(|definition| definition.md5_password.as_ref())
+                    .is_some(),
+                definition.and_then(|definition| definition.has_md5_password),
+            )
+        };
+        set_request_summary(&request, summary);
         let req = request.into_inner();
         if req.name.trim().is_empty() {
             return Err(Status::invalid_argument("name is required"));
@@ -452,6 +465,7 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::GrpcAuditHandle;
     use crate::peer_types::NamedPeerGroupSnapshot;
     use crate::proto::peer_group_service_server::PeerGroupService as PeerGroupServiceRpc;
     use tokio::sync::mpsc::error::TryRecvError;
@@ -573,6 +587,49 @@ mod tests {
             }
             _ => panic!("unexpected config event"),
         }
+    }
+
+    #[tokio::test]
+    async fn set_peer_group_audit_summary_redacts_md5_password() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, None);
+        let audit_handle = GrpcAuditHandle::default();
+        let mut request = Request::new(proto::SetPeerGroupRequest {
+            name: "rs-clients".into(),
+            definition: Some(proto::PeerGroupDefinition {
+                md5_password: Some("super-secret".into()),
+                families: vec!["ipv6_unicast".into()],
+                ..Default::default()
+            }),
+        });
+        request.extensions_mut().insert(audit_handle.clone());
+
+        let task =
+            tokio::spawn(async move { PeerGroupServiceRpc::set_peer_group(&svc, request).await });
+
+        let command = peer_rx.recv().await.expect("expected SetPeerGroup command");
+        match command {
+            PeerManagerCommand::SetPeerGroup {
+                definition, reply, ..
+            } => {
+                assert_eq!(definition.md5_password.as_deref(), Some("super-secret"));
+                reply
+                    .send(Ok(()))
+                    .expect("service dropped SetPeerGroup reply");
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        task.await
+            .expect("SetPeerGroup task panicked")
+            .expect("SetPeerGroup failed");
+
+        let summary = audit_handle.summary().expect("audit summary missing");
+        assert_eq!(
+            summary.as_str(),
+            "name=rs-clients md5_password=set_redacted"
+        );
+        assert!(!summary.as_str().contains("super-secret"));
     }
 
     #[tokio::test]

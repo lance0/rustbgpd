@@ -18,6 +18,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   caps still enforce the current boundary, while per-principal deny-by-tier
   enforcement and the default flip remain deferred.
 
+- **ADR-0064 gRPC audit-log hardening.** Forwarded gRPC calls now emit
+  result-aware `grpc_authz` audit outcomes such as `handler_ok` and
+  `handler_invalid_argument` instead of only pre-handler `audit_forward`.
+  Credential-bearing request summaries are masked before logging:
+  `DiffRuntimeConfigRequest.candidate_toml` is summarized as redacted metadata
+  (covering embedded `md5_password` and `tcp_ao.key` values), and
+  `SetPeerGroup` records only MD5 state (`set_redacted`, `preserve`, or
+  `clear`) without secret material. Durable audit sinks, retention, and proto
+  credential-field annotations remain follow-up ADR-0064 slices.
+
 ## [0.23.0] — 2026-05-19
 
 ### Added

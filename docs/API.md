@@ -81,10 +81,14 @@ ADR-0064. The runtime records tier decisions for every RPC via structured
 `grpc_authz` logs and
 `bgp_grpc_authz_decisions_total{tier,result,authn,access_mode}`. Listener
 `max_tier` caps are enforced now; role-to-tier enforcement remains deferred.
-`result="audit_forward"` means the request stayed within the listener tier cap,
-`result="listener_tier_denied"` means the method was rejected before the
-handler ran, and `result="authn_failed"` means an over-cap bearer-token request
-failed authentication before tier details were disclosed.
+Forwarded calls emit result-aware labels such as `result="handler_ok"` or
+`result="handler_invalid_argument"` after the handler returns. Rejected calls use
+bounded pre-handler labels: `result="listener_tier_denied"` means the method was
+rejected before the handler ran, and `result="authn_failed"` means an over-cap
+bearer-token request failed authentication before tier details were disclosed.
+Credential-bearing request summaries are masked before entering `grpc_authz`
+logs; `DiffRuntimeConfigRequest.candidate_toml` is always summarized as
+redacted metadata, and `SetPeerGroup` logs MD5 state without the MD5 value.
 Operators can now predeclare `[security.grpc.roles]` and set explicit
 listener `principal` labels for bearer-token TCP and UDS listeners; those
 labels improve audit identity only and do not yet authorize or deny calls.
@@ -168,7 +172,9 @@ and receive only the same redacted diff buckets used by
 plain-text `human_text` rendering, and `diff_json` using the
 `rustbgpd --diff --json` schema. Secret-bearing fields such as
 neighbor `md5_password` and `tcp_ao.key` material are redacted in both
-renderings.
+renderings. The corresponding `grpc_authz` request summary never logs
+`candidate_toml` content; it records only redacted metadata such as the request
+body size.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
