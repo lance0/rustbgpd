@@ -1530,6 +1530,11 @@ table_id = 5001
     /// kernel-enforcement opt-in. Otherwise a reload would advance
     /// `current`, the actor would still be on its startup state, and
     /// the next reload would stop reporting drift.
+    ///
+    /// Drives the diff by flipping `apply_bum_enforcement` from
+    /// explicit `false` (operator opt-out) to the v0.23.0 default
+    /// `true`, which is the upgrade-path scenario operators on the
+    /// older posture hit after the production-default flip.
     #[tokio::test]
     async fn reload_pins_ethernet_segments_and_bum_enforcement_to_startup_snapshot() {
         let path = unique_temp_path("reload-evpn-gate8-pin");
@@ -1537,6 +1542,8 @@ table_id = 5001
         std::fs::write(
             &path,
             r#"
+apply_bum_enforcement = false
+
 [global]
 asn = 65001
 router_id = "10.0.0.1"
@@ -1558,7 +1565,10 @@ local_vtep_ip = "10.0.0.1"
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
         assert!(initial.ethernet_segments.is_empty());
-        assert!(!initial.apply_bum_enforcement);
+        assert!(
+            !initial.apply_bum_enforcement,
+            "explicit `apply_bum_enforcement = false` must override the v0.23.0 default"
+        );
 
         std::fs::write(
             &path,
@@ -2644,11 +2654,19 @@ peer_group = "secure"
 
     #[tokio::test]
     async fn reload_pin_apply_bum_preserves_desired_toml_for_later_persistence() {
-        let new_toml = format!("apply_bum_enforcement = true\n{}", baseline_toml());
+        // Default is now true (v0.23.0 production-default flip); drive
+        // the diff by opting out on the new side instead.
+        let new_toml = format!("apply_bum_enforcement = false\n{}", baseline_toml());
         let (runtime, disk) = reload_then_persist_policy_after_desired_refresh(&new_toml).await;
 
-        assert!(!runtime.apply_bum_enforcement);
-        assert!(disk.apply_bum_enforcement);
+        assert!(
+            runtime.apply_bum_enforcement,
+            "runtime must stay pinned to the live startup value (default true)"
+        );
+        assert!(
+            !disk.apply_bum_enforcement,
+            "desired/disk snapshot must reflect the new explicit opt-out"
+        );
     }
 
     #[tokio::test]

@@ -484,7 +484,8 @@ so this was an origination-only change with no wire bump:
   with the allocated label and `single_active = false`
   (Gate 8 default is all-active). Peers can wire the label into
   their split-horizon filter tables; rustbgpd's dataplane-side drops
-  are now opt-in through `apply_bum_enforcement`.
+  are now the production default via `apply_bum_enforcement` (true
+  since v0.23.0).
 - **Type 1 EAD-per-EVI**: unchanged (carries no ESI Label per
   RFC 7432 §14).
 
@@ -505,8 +506,10 @@ Shipped pieces:
 2. **Dataplane split-horizon kernel primitive** — when
    `apply_bum_enforcement = true`, the Linux dataplane applies the
    validated BUM-suppression primitive for Non-DF CE-facing ports.
-   The Docker netns harness is PR-CI gated; the default remains
-   `false` until longer soak proves the primitive under churn.
+   The Docker netns harness is PR-CI gated; the default flipped to
+   `true` in v0.23.0 after the Gate 8b 24 h MAC-churn soak
+   (2026-05-16) and the M37 local-origination 24 h MAC-churn soak
+   (2026-05-19) both passed clean.
 3. **Per-ESI label allocator** — `EsiLabelAllocator` assigns stable
    labels per ESI, avoids deterministic synthesizer collisions, and
    threads the allocated label through both the EAD-per-ES NLRI MPLS
@@ -539,11 +542,13 @@ Concrete remaining slices:
    process-restart harness at
    `tests/soak/run-gate8b-mac-churn-soak.sh`. 69 complete flip cycles,
    ~478 K FDB ops, PE1 RSS plateau 17.23–18.93 MB (slope envelope
-   0.08 MB/h), 0 FATAL / WARN / drift events. This unblocks the
-   production-default flip of `apply_bum_enforcement` and
-   `apply_aliasing_ecmp` to `true`; the flip itself is deferred
-   to a separate release decision so operators can opt in
-   explicitly first.
+   0.08 MB/h), 0 FATAL / WARN / drift events. Combined with the M37
+   local-origination 24 h MAC-churn soak ([`docs/soak-m37-local-origination-churn-24h.md`](soak-m37-local-origination-churn-24h.md),
+   PASSED 2026-05-19; 17 174 churn cycles, 430 400 inject == 430 400
+   withdraw, after-warmup RSS slope 0.184 MB/h, 10/10 gates green),
+   this cleared the gating evidence for flipping the
+   `apply_bum_enforcement` default to `true`. The flip shipped in
+   v0.23.0.
 2. **Local DF-election ES-Import RT filtering** — rustbgpd applies
    the ES-Import RT it originates in Gate 8b prep at the local Type 4
    candidate projection boundary. Remote Type 4 routes with a missing
@@ -556,12 +561,15 @@ periodic `RTM_GETNEXTHOP` drift recovery, IPv6 alias members)
 shipped in v0.20.0 — PRs #91 / #92 / #93 — and is no longer on
 the remaining-slices list.
 
-**Operator note:** multi-homing enforcement is no longer merely
-observable. The MAC-churn 24 h soak unblocks the production-default
-flip for `apply_bum_enforcement` and `apply_aliasing_ecmp`, but the
-defaults still ship as `false` so operators opt in explicitly. Flip
-to `true` once your deployment is comfortable with the alpha posture
-documented in this file.
+**Operator note:** multi-homing enforcement is the production
+default since v0.23.0. Both `apply_bum_enforcement` and
+`apply_aliasing_ecmp` ship as `true` out of the box; new deployments
+get kernel BUM-suppression on Non-DF CE-facing ports and FDB nexthop
+groups for multi-homed Type 2 routes without additional config.
+Operators who need the prior observe-only / single-dst posture can
+still opt out explicitly with `apply_bum_enforcement = false` and/or
+`apply_aliasing_ecmp = false` on the relevant `[[evpn_instances]]`
+entry.
 
 ---
 

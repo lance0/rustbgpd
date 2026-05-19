@@ -61,13 +61,19 @@ pub struct Config {
     pub fib_tables: Vec<FibTableConfig>,
     /// Apply Gate 8b BUM-suppression filters to the kernel
     /// (per-port `IFLA_BRPORT_*_FLOOD` triplet on CE-facing bridge
-    /// ports). Default `false` — observe-only behavior preserved.
-    /// Operators flip this to `true` once a privileged-runner soak
-    /// validates kernel enforcement on their environment. The
-    /// resolved enforcement plan is always reported via
-    /// `DataplaneReport.bum_enforcement` regardless of this flag, so
-    /// observability does not depend on the flip.
-    #[serde(default)]
+    /// ports). **Default `true` since v0.23.0** — kernel enforcement
+    /// is the production posture after the Gate 8b MAC-churn 24h soak
+    /// (2026-05-16, postmortem `docs/soak-gate8b-mac-churn-24h.md`)
+    /// and the M37 local-origination 24h soak (2026-05-19,
+    /// postmortem `docs/soak-m37-local-origination-churn-24h.md`)
+    /// both passed clean. Operators who need the prior observe-only
+    /// behavior can still opt out explicitly with
+    /// `apply_bum_enforcement = false`; the deserializer honors
+    /// explicit values unchanged. The resolved enforcement plan is
+    /// always reported via `DataplaneReport.bum_enforcement`
+    /// regardless of this flag, so observability does not depend on
+    /// the flip.
+    #[serde(default = "default_enabled")]
     pub apply_bum_enforcement: bool,
     /// Path of the config file (populated by `Config::load`, not serialized).
     #[serde(skip)]

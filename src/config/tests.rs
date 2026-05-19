@@ -5102,9 +5102,41 @@ table_id = 5000
 }
 
 #[test]
+fn apply_bum_enforcement_default_is_true() {
+    // Pinned by the v0.23.0 production-default flip after the
+    // Gate 8b 24h MAC-churn soak (2026-05-16, postmortem
+    // `docs/soak-gate8b-mac-churn-24h.md`) and the M37
+    // local-origination 24h soak (2026-05-19, postmortem
+    // `docs/soak-m37-local-origination-churn-24h.md`) both passed
+    // clean. If this regresses to `false` without a deliberate
+    // schema change, the production posture has silently rolled back.
+    let config = parse(valid_toml()).unwrap();
+    assert!(
+        config.apply_bum_enforcement,
+        "apply_bum_enforcement default flipped to true in v0.23.0; \
+         regression would silently restore observe-only behavior"
+    );
+}
+
+#[test]
+fn apply_bum_enforcement_honors_explicit_false() {
+    // Operators who need the prior observe-only posture must still
+    // be able to opt out explicitly after the default flip.
+    let toml = format!("apply_bum_enforcement = false\n{}", valid_toml());
+    let config = parse(&toml).unwrap();
+    assert!(
+        !config.apply_bum_enforcement,
+        "explicit `apply_bum_enforcement = false` must be honored \
+         after the v0.23.0 default flip"
+    );
+}
+
+#[test]
 fn apply_bum_enforcement_diff_marks_restart_required() {
+    // Default is now true, so the diff has to be driven by an
+    // explicit opt-out on the new side.
     let old = parse(valid_toml()).unwrap();
-    let new_toml = format!("apply_bum_enforcement = true\n{}", valid_toml());
+    let new_toml = format!("apply_bum_enforcement = false\n{}", valid_toml());
     let new = parse(&new_toml).unwrap();
     let diff = diff_config(&old, &new);
     assert!(diff.apply_bum_enforcement_changed);

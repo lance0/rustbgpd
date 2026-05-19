@@ -318,7 +318,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | **Runtime** | Rust 1.92+ (workspace MSRV — Tokio rolling-6-month policy), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | EVPN duplicate-MAC remote-route processing / dataplane loop-protection / production-default multi-homing enforcement / RFC 9135 overlay-index IRB, VPNv4/v6, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
+| **Not yet supported** | EVPN duplicate-MAC remote-route processing / dataplane loop-protection / RFC 9135 overlay-index IRB, VPNv4/v6, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
 | **Tests** | Workspace test suite, fuzz targets, 42 automated interop scripts primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (16 interop tests gated on every PR; privileged kernel dataplane smokes run locally) |
 
 ## Documentation

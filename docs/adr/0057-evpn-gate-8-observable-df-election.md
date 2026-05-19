@@ -160,12 +160,14 @@ how route refresh, RPKI, and BMP all landed.
 
 ### Negative / risks
 
-- **Split-horizon black hole window — mitigated by Gate 8b opt-in
+- **Split-horizon black hole window — mitigated by Gate 8b
   enforcement.** A Gate 8-only two-PE multihoming setup duplicates
   BUM toward the CE. Gate 8b adds the kernel primitive behind
-  `apply_bum_enforcement`, still default-`false` until the 24 h churn
-  soak closes. Single-homed deployments and route-reflector
-  deployments are unaffected.
+  `apply_bum_enforcement`, which defaults to `true` since v0.23.0
+  after the Gate 8b 24 h MAC-churn soak (2026-05-16) and the M37
+  local-origination 24 h MAC-churn soak (2026-05-19) both passed.
+  Single-homed deployments and route-reflector deployments are
+  unaffected.
 - **Interop with strict ES-Import RT importers — closed in the
   Gate 8b prep follow-up.** Type 4 ES routes now carry the
   auto-derived ES-Import RT extcomm (high-order 6 octets of the
