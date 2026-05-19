@@ -83,6 +83,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **EVPN production-default flip — `apply_bum_enforcement` now defaults to
+  `true`.** The `[global].apply_bum_enforcement` field previously defaulted to
+  `false` (observe-only). With both gating soaks PASS — Gate 8b 24h MAC-churn
+  (2026-05-16, postmortem `docs/soak-gate8b-mac-churn-24h.md`) and M37
+  local-origination 24h MAC-churn (2026-05-19, postmortem
+  `docs/soak-m37-local-origination-churn-24h.md`) — the default flips to `true`,
+  so new and upgraded deployments program the kernel BUM-suppression triplet
+  (`IFLA_BRPORT_*_FLOOD`) on CE-facing bridge ports out of the box. Operators
+  who need the prior observe-only posture must opt out explicitly with
+  `apply_bum_enforcement = false`; the deserializer continues to honor explicit
+  values unchanged. Restart-required (matches the prior behavior of the field).
+  `apply_aliasing_ecmp` already defaulted to `true` (since ADR-0059 slice 3.5,
+  PR #91); no schema change there, but the same soak evidence now backs both
+  production defaults. See ROADMAP P1 "EVPN production-default decision point"
+  (now complete).
+
 - **TCP-AO edits are restart-required on SIGHUP.** Static-neighbor
   `tcp_ao` additions, removals, or key changes are pinned to the live startup
   snapshot during reload and reported through `--diff` / config-diff JSON as

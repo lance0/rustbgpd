@@ -604,11 +604,11 @@ thousands of VTEPs, and gives you structured observability.
   RFC 8584 §3 algorithm negotiation, and the Prometheus
   `evpn_df_role` surface. Gate 8b follow-ups now add ESI Label /
   ES-Import RT origination, DF-role-aware Type 2 ESI attachment,
-  opt-in kernel BUM-port enforcement via `apply_bum_enforcement`
-  (RFC 7432 §8.5), RFC 7432 §14 aliasing receive-side projection,
-  and RFC 7432 §8.4 receive-side EAD-per-ES mass-withdraw
-  filtering. This is alpha: leave enforcement disabled in
-  production until the churn soak closes.
+  kernel BUM-port enforcement via `apply_bum_enforcement` (RFC 7432
+  §8.5, default `true` since v0.23.0 after both the Gate 8b 24 h
+  MAC-churn soak and the M37 local-origination 24 h MAC-churn soak
+  passed clean), RFC 7432 §14 aliasing receive-side projection, and
+  RFC 7432 §8.4 receive-side EAD-per-ES mass-withdraw filtering.
 - **VXLAN data plane** — kernel VXLAN interfaces + bridge setup is the
   VTEP's job.
 - **IRB / L3VNI / Type 5 dataplane** — Gate 9 symmetric
@@ -678,8 +678,9 @@ measurement path.
   validated by M38. **Gate 8b multi-homing enforcement alpha**
   followed with ESI-aware Type 2 origination, RFC 7432 §14 aliasing
   receive-side projection, RFC 7432 §8.4 mass-withdraw filtering,
-  and opt-in kernel BUM-port enforcement (RFC 7432 §8.5) gated
-  behind `apply_bum_enforcement`. **Gate 9 symmetric Interface-less
+  and kernel BUM-port enforcement (RFC 7432 §8.5) via
+  `apply_bum_enforcement` (default `true` since v0.23.0).
+  **Gate 9 symmetric Interface-less
   IRB shipped end-to-end in v0.18.0**: `[[evpn_ip_vrfs]]` config
   schema, IP-VRF readiness probe, Type 5 origination + remote
   import + L3 FIB programming through the transactional
@@ -785,9 +786,9 @@ Be honest about where rustbgpd isn't the right tool:
   + Type 1/4 origination) shipped in Gate 8 (v0.17.0, ADR-0057),
   validated by M38. **Gate 8b alpha enforcement** then landed:
   ESI-aware Type 2 origination, RFC 7432 §14 aliasing receive-side
-  projection, RFC 7432 §8.4 mass-withdraw filtering, and opt-in
-  kernel BUM-port enforcement (RFC 7432 §8.5) behind
-  `apply_bum_enforcement`. **Gate 9 symmetric Interface-less IRB
+  projection, RFC 7432 §8.4 mass-withdraw filtering, and kernel
+  BUM-port enforcement (RFC 7432 §8.5) via `apply_bum_enforcement`
+  (default `true` since v0.23.0). **Gate 9 symmetric Interface-less IRB
   shipped end-to-end in v0.18.0**: `[[evpn_ip_vrfs]]`, IP-VRF
   readiness probe, Type 5 origination + remote import + L3 FIB
   programming through the transactional `L3OwnedState` model,

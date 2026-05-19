@@ -338,15 +338,17 @@ window), at least one full flip cycle observed.
 
 ## When to run Gate 8b soak
 
-- **Before flipping the `apply_bum_enforcement` default to `true`**
-  (currently `false` for safety).
 - **After any change to** `crates/evpn/src/df_election.rs`,
   `crates/evpn/src/origination_es.rs`, `src/evpn_segment.rs`,
   `src/evpn_dataplane.rs`, `crates/evpn-linux/src/bum_filter.rs`,
   `crates/evpn-linux/src/linux/bum_filter.rs`, or
   `crates/evpn-linux/src/reconcile.rs`.
-- **Before tagging the first release that ships Gate 8b
-  enforcement on by default.**
+- **As a regression check** before any release that touches the
+  Gate 8b enforcement path. The `apply_bum_enforcement` default
+  already flipped to `true` in v0.23.0 after the 2026-05-16 Gate 8b
+  24 h MAC-churn soak and the 2026-05-19 M37 local-origination 24 h
+  MAC-churn soak both passed; future runs of this soak are guarding
+  the production default, not gating its initial flip.
 
 ---
 
@@ -363,9 +365,12 @@ so the soak exercises:
 - the ADR-0059 drift-recovery counters under realistic timing
 
 The base Gate 8b soak validated steady memory under DF-flip churn
-only (no FDB churn). This variant is the alpha-checklist exit
-condition for relaxing `apply_bum_enforcement` and
-`apply_aliasing_ecmp` to production defaults.
+only (no FDB churn). This variant was the alpha-checklist exit
+condition for the production-default flip of `apply_bum_enforcement`
+and `apply_aliasing_ecmp` to `true`; it PASSED 2026-05-16 (postmortem
+`docs/soak-gate8b-mac-churn-24h.md`) and the flip shipped in v0.23.0.
+Future runs guard the production default rather than gate its
+initial flip.
 
 ## Topology
 
@@ -496,10 +501,11 @@ CSV inspection.
 
 ## When to run
 
-- **Before flipping `apply_bum_enforcement` and/or
-  `apply_aliasing_ecmp` to production defaults** — this is the
-  alpha-checklist exit condition (`docs/evpn-alpha-soak.md`,
-  "remaining multi-homing enforcement work").
+- **As a regression guard** for the production defaults of
+  `apply_bum_enforcement` and `apply_aliasing_ecmp` (`true` since
+  v0.23.0; gating evidence: Gate 8b 24 h MAC-churn 2026-05-16 +
+  M37 local-origination 24 h MAC-churn 2026-05-19). See
+  `docs/evpn-alpha-soak.md`.
 - **After any change to** the local-MAC origination / withdraw
   path (`crates/evpn-linux/src/reconcile.rs`,
   `src/evpn_originator.rs`,
