@@ -662,6 +662,37 @@ fn grpc_tcp_bearer_principal_parses() {
 }
 
 #[test]
+fn grpc_security_tier_accepts_bearer_tcp_with_principal_role() {
+    let token_file = NamedTempFile::new().unwrap();
+    fs::write(token_file.path(), "secret").unwrap();
+    let toml_str = format!(
+        "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"automation.example\" = \"automation\"\n\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntoken_file = {:?}\nprincipal = \"automation.example\"\nmax_tier = \"mutating\"\n",
+        valid_toml(),
+        token_file.path()
+    );
+    let config = parse(&toml_str).unwrap();
+    assert_eq!(
+        config.security.grpc.enforcement,
+        GrpcEnforcementConfig::Tier
+    );
+    assert_eq!(
+        config.security.grpc.roles["automation.example"],
+        GrpcRoleConfig::Automation
+    );
+    assert_eq!(
+        config.grpc_listeners(),
+        vec![GrpcListener::Tcp {
+            addr: "127.0.0.1:50051".parse().unwrap(),
+            access_mode: GrpcAccessMode::ReadWrite,
+            max_tier: GrpcMaxTier::Mutating,
+            token_file: Some(token_file.path().to_path_buf()),
+            principal: Some("automation.example".to_string()),
+            tls: None,
+        }]
+    );
+}
+
+#[test]
 fn grpc_tcp_principal_rejected_with_mtls() {
     let cert = write_pem(STUB_CERT);
     let key = write_pem(STUB_KEY);

@@ -61,6 +61,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `principal_unmapped`, and below-tier roles get `role_tier_denied`. Legacy
   remains the default until the dedicated migration/default-flip slice.
 
+- **ADR-0064 tier-enforcement migration guidance.** Configuration, API,
+  security, roadmap, and ADR docs now spell out the safe staging path for the
+  future default flip: declare `[security.grpc.roles]`, add explicit principals
+  for UDS and bearer-token listeners, validate with `rustbgpd --check`, opt
+  into `enforcement = "tier"`, then monitor `grpc_authz` denial labels. Config
+  tests now include a positive bearer-token tier-mode example with a mapped
+  principal and listener `max_tier`.
+
 - **ADR-0064 mTLS audit principal extraction.** Native gRPC mTLS listeners now
   derive the `grpc_authz` audit principal from the validated client
   certificate (`rustbgpd:` URI SAN, then email SAN, then Subject CN) instead of

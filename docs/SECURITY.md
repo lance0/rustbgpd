@@ -278,8 +278,11 @@ the roadmap:
   listener tier caps, mTLS certificate principal extraction (URI SAN →
   email SAN → Subject CN), opt-in role enforcement, and result-aware audit
   records with masked credential-bearing request summaries are present. The
-  production default still remains `legacy`; the default flip and durable
-  audit-sink / retention guidance remain deferred.
+  migration path is documented: stage `[security.grpc.roles]`, add explicit
+  principals for UDS and bearer-token listeners, validate the candidate config
+  with `rustbgpd --check`, then opt into `enforcement = "tier"`. The production
+  default still remains `legacy`; the final default flip and durable audit-sink
+  / retention guidance remain deferred.
 - TCP-AO (RFC 5925) dynamic-neighbor support, runtime key rotation,
   multi-key rollover, and accepted-socket inspection for BGP session
   protection
@@ -289,7 +292,9 @@ the roadmap:
 - Authorization defaults to legacy listener-wide behavior (`read_only` vs
   `read_write`) plus listener `max_tier` caps. Operators can opt into
   per-principal role enforcement with `security.grpc.enforcement = "tier"`.
-  The default flip to tier mode remains a future migration slice.
+  The default flip to tier mode remains a future migration slice; configs that
+  rely on the implicit UDS listener must declare `[global.telemetry.grpc_uds]`
+  with a `principal` before they can run under tier enforcement.
 - TCP-AO currently supports static-neighbor startup keys only; dynamic
   neighbors, live key rotation, and multi-key rollover remain follow-up work.
   Protected static-neighbor interop is covered by M43 against BIRD 3.2.1 on
