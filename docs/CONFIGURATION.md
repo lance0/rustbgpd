@@ -210,6 +210,7 @@ configured, rustbgpd enables this listener by default at
 | `mode`       | u32    | no       | `0o600` | Filesystem mode applied to the socket after bind |
 | `access_mode` | string | no      | `"read_write"` | Listener authorization mode: `"read_write"` or `"read_only"` |
 | `token_file` | string | no       | --      | Optional bearer token file for listener auth |
+| `principal`  | string | no       | --      | Stable ADR-0064 audit principal label for this UDS listener |
 
 ### `[global.telemetry.grpc_tcp]`
 
@@ -222,6 +223,7 @@ container/network exposure.
 | `address`    | string | yes*     | --      | `host:port` bind address (`required when enabled = true`) |
 | `access_mode` | string | no      | `"read_write"` | Listener authorization mode: `"read_write"` or `"read_only"` |
 | `token_file` | string | no       | --      | Optional bearer token file for listener auth |
+| `principal`  | string | no       | --      | Stable ADR-0064 audit principal label for non-mTLS bearer-token listeners |
 | `tls_cert_file` | string | no   | --      | PEM-encoded server certificate (mTLS — requires the two siblings below) |
 | `tls_key_file`  | string | no   | --      | PEM-encoded server private key |
 | `tls_client_ca_file` | string | no | --   | PEM-encoded CA bundle that must sign every client certificate |
@@ -254,6 +256,43 @@ requires a daemon restart. In orchestrated environments where secrets are
 mounted after config files, ensure the token file is available before starting
 the daemon.
 
+**ADR-0064 audit principals:** `principal` gives the audit-only
+`grpc_authz` log line a stable operator-controlled identity. On UDS listeners
+it labels the listener identity established by filesystem permissions and/or
+the optional token. On TCP listeners it is accepted only when `token_file` is
+configured and native mTLS is not configured; mTLS certificate principal
+extraction is a later ADR-0064 slice and continues to report
+`mtls-unresolved`.
+
+### `[security.grpc]`
+
+ADR-0064 per-method authorization is staged behind a legacy mode. The current
+release parses role configuration and uses listener `principal` labels for
+audit records, but it does **not** deny by role or method tier yet.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enforcement` | string | no | `"legacy"` | ADR-0064 enforcement mode. `"legacy"` preserves existing listener `access_mode` behavior. `"tier"` is reserved and rejected until the enforcement slice lands |
+
+`[security.grpc.roles]` maps an authenticated principal string to one of the
+built-in roles:
+
+| Role | Future max tier |
+|------|-----------------|
+| `observer` | `sensitive_read` |
+| `automation` | `mutating` |
+| `operator` | `operator_only` |
+
+```toml
+[security.grpc]
+enforcement = "legacy"
+
+[security.grpc.roles]
+"observer-readonly" = "observer"
+"automation.example" = "automation"
+"operator.example" = "operator"
+```
+
 ```toml
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
@@ -263,11 +302,13 @@ log_format = "json"
 path = "/var/lib/rustbgpd/grpc.sock"
 mode = 0o660
 access_mode = "read_write"
+principal = "local-admin"
 
 [global.telemetry.grpc_tcp]
 address = "127.0.0.1:50051"
 access_mode = "read_only"
 # token_file = "/etc/rustbgpd/grpc.token"
+# principal = "observer-readonly"
 ```
 
 ---
@@ -1774,6 +1815,10 @@ starting:
 | `grpc_uds.mode` must be <= `0o777` | `invalid gRPC config` |
 | `grpc_*.access_mode` must be `read_only` or `read_write` | `invalid gRPC config` |
 | `grpc_*.token_file` must exist, be readable, and contain a non-empty token when configured | `invalid gRPC config` |
+| `grpc_*.principal` must not be empty when configured | `invalid gRPC config` |
+| `grpc_tcp.principal` requires `grpc_tcp.token_file` and is rejected on mTLS listeners until cert principal extraction lands | `invalid gRPC config` |
+| `security.grpc.enforcement = "tier"` is reserved and rejected until ADR-0064 deny-by-tier enforcement lands | `invalid gRPC config` |
+| `[security.grpc.roles]` principal keys must not be empty; role values must be `observer`, `automation`, or `operator` | `invalid gRPC config` / TOML parse error |
 | If `grpc_tcp`/`grpc_uds` tables are present, at least one listener must be enabled | `invalid gRPC config` |
 | `hold_time` must be 0 (disabled) or >= 3 seconds | `invalid hold_time` |
 | `families` entries must be `"ipv4_unicast"`, `"ipv6_unicast"`, `"ipv4_flowspec"`, or `"ipv6_flowspec"` | `unsupported address family` |

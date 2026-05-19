@@ -59,6 +59,10 @@ Preferred posture:
   external-review packet in `docs/adr/0064-threat-model.md` summarizes
   the trust boundaries, abuse paths, evidence checklist, and residual
   risks for that migration.
+- `[security.grpc.roles]` and listener `principal` labels can be staged now so
+  audit records use stable operator-controlled identities on bearer-token TCP
+  and UDS listeners. These roles are configuration-only until ADR-0064
+  deny-by-tier enforcement lands.
 - Peer-group read RPCs redact `md5_password` rather than echoing stored
   secret material; they expose only the non-secret `has_md5_password`
   presence flag. The write path preserves an omitted redacted MD5 value by
@@ -254,10 +258,10 @@ the roadmap:
 
 - ADR-0064 runtime enforcement for the checked gRPC method-tier matrix
   (`read`, `sensitive_read`, `mutating`, `operator_only`). Audit-only
-  method-tier decision logs, metrics, and the
-  `docs/adr/0064-threat-model.md` audit packet are present; principal
-  roles, listener tier caps, deny-by-tier enforcement, and audit-log
-  hardening remain deferred.
+  method-tier decision logs, metrics, staged principal/role config, and
+  the `docs/adr/0064-threat-model.md` audit packet are present; mTLS
+  certificate principal extraction, listener tier caps, deny-by-tier
+  enforcement, and audit-log hardening remain deferred.
 - TCP-AO (RFC 5925) dynamic-neighbor support, runtime key rotation,
   multi-key rollover, and accepted-socket inspection for BGP session
   protection
@@ -266,7 +270,9 @@ the roadmap:
 
 - Authorization is still listener-wide at runtime (`read_only` vs
   `read_write`). ADR-0064 classifies every RPC and emits audit-only
-  runtime decisions, but per-RPC / per-role enforcement is not active yet.
+  runtime decisions. Explicit non-mTLS listener principals and
+  `[security.grpc.roles]` can be configured for audit identity, but
+  per-RPC / per-role enforcement is not active yet.
 - TCP-AO currently supports static-neighbor startup keys only; dynamic
   neighbors, live key rotation, and multi-key rollover remain follow-up work.
   Protected static-neighbor interop is covered by M43 against BIRD 3.2.1 on

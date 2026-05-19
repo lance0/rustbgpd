@@ -365,15 +365,17 @@ Slice 1 is implemented by the ADR-0064 foundation PR: checked method
 matrix plus inventory/ADR correction. Slice 2 is implemented by the
 audit-only runtime layer: method-path lookup, structured `grpc_authz`
 decision logs, and bounded-cardinality metrics with no authorization
-behavior change. Later slices implement real principal extraction,
-roles, listener tier caps, runtime enforcement, and result/request
-audit-log hardening.
+behavior change. Slice 3a adds staged `[security.grpc.roles]`,
+`enforcement = "legacy"`, and explicit non-mTLS listener principal
+labels for bearer-token TCP and UDS audit identity. Later slices
+implement mTLS certificate principal extraction, listener tier caps,
+runtime enforcement, and result/request audit-log hardening.
 
 | Slice | Status |
 |-------|--------|
 | 1. Foundation | Implemented by the checked method-matrix PR |
 | 2. Audit-only runtime path | Implemented by the runtime audit-layer PR |
-| 3. Identity + roles | Not started |
+| 3. Identity + roles | Partial: roles config + non-mTLS audit principals |
 | 4. Listener tier cap | Not started |
 | 5. Enforcement flip | Not started |
 | 6. Audit log hardening | Not started |

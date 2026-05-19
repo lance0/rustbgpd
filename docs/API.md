@@ -85,6 +85,9 @@ ADR-0064 slices add principal extraction, role mapping, listener tier caps, and
 deny-by-tier enforcement. In this audit-only slice, `result="audit_forward"`
 means the request continued to the existing bearer-token / mTLS / UDS /
 `access_mode` checks rather than being permitted by a new tier engine.
+Operators can now predeclare `[security.grpc.roles]` and set explicit
+listener `principal` labels for bearer-token TCP and UDS listeners; those
+labels improve audit identity only and do not yet authorize or deny calls.
 `docs/adr/0064-threat-model.md` is the external-review packet for this surface:
 it maps trust boundaries, abuse paths, residual risks, and the evidence an
 auditor should collect.
