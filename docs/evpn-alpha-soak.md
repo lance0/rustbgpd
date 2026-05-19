@@ -44,25 +44,20 @@ none of them block the current release on their own.
   via `rustbgpctl evpn instances` without scraping logs. Human output
   renders `originated-local-macs=N`; JSON and gRPC expose
   `originated_local_macs_count`.
-- [ ] **24 h MAC-churn soak** of M37 with a synthetic MAC churn
-  driver (`bridge fdb add` + `bridge fdb del` at ~10 Hz on a few
-  thousand MACs). The finite local helper still lives at
-  `tests/interop/scripts/test-m37-evpn-local-origination-churn.sh`
-  for quick smoke checks. The 24 h harness lives at
-  `tests/soak/run-m37-local-origination-churn-soak.sh` and writes
-  `samples.csv`, daemon/consumer logs, `churn.log`, and `run.json`
-  under `tests/soak/runs/m37-local-origination-<UTC>/`. The remaining
-  work is to run the full harness and publish
-  `docs/soak-m37-local-origination-churn-24h.md` with RSS slope,
-  counter, and Type 2 visibility results. The goal is to confirm RSS
-  stays flat under the originator's
-  `BTreeMap<MacAddress, LocalMacOriginationState>` retention model
-  (entries are kept after Aged so the seq ratchet survives — we want
-  to verify that doesn't compound badly under heavy churn). Separate
-  from the Gate 8b BUM-state 24 h soak under "remaining multi-homing
-  enforcement work" below, which exercises DF flips rather than
-  origination churn. Tracked in
-  <https://github.com/lance0/rustbgpd/issues/134>.
+- [x] **24 h MAC-churn soak** of M37 — **PASS, 2026-05-19**. Run
+  ID `m37-local-origination-20260518T015056Z`; postmortem at
+  `docs/soak-m37-local-origination-churn-24h.md`. 1 437 samples /
+  17 174 churn cycles / 430 400 inject == 430 400 withdraw / 10-of-10
+  gates green. PE RSS plateau 19.13 → 23.53 MB, after-warmup
+  cumulative slope 0.184 MB/h, clean drain to
+  `local_fdb_count=0` and `frr_type2_count=0` at terminal. The
+  originator's `BTreeMap<MacAddress, LocalMacOriginationState>`
+  retention model behaved as designed (no unbounded growth, all
+  entries released on drain). Closes
+  <https://github.com/lance0/rustbgpd/issues/134>. Combined with the
+  Gate 8b MAC-churn soak (2026-05-16), this clears the gating
+  evidence for flipping `apply_bum_enforcement` and
+  `apply_aliasing_ecmp` defaults to `true` (ROADMAP P1).
 
 ## Convergence + correctness slices
 

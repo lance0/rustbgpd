@@ -1,0 +1,14 @@
+{
+  "run_id": "20260518T015056Z",
+  "git_head": "413b6776b3d8793a8ed1f7cf05f77e3b4a2361bb",
+  "soak_seconds": 86400,
+  "sample_interval_sec": 60,
+  "churn_interval_sec": 5,
+  "churn_batch": 25,
+  "mac_pool_size": 4096,
+  "live_target_macs": 1024,
+  "warmup_sec": 300,
+  "rustbgpd_container": "clab-m37-soak-rustbgpd",
+  "consumer_container": "clab-m37-soak-consumer",
+  "topology": "/home/lance/projects/rustbgpd/tests/interop/m37-soak.clab.yml"
+}

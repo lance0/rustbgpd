@@ -1,55 +1,50 @@
 # M37 Local-Origination MAC-Churn 24h Soak
 
-**Status:** In flight — soak started 2026-05-18T01:50:56Z, terminal
-expected 2026-05-19T01:50:56Z. This postmortem is pre-drafted from the
-mid-run data through ~18h; the verdict line, final / peak RSS, total
-sample count, and the after-warmup cumulative slope are finalized at
-terminal.
+**Status:** Complete — verdict: **PASS**.
 **Run ID:** `tests/soak/runs/m37-local-origination-20260518T015056Z`
 **Git SHA:** `413b677` (soak topology isolation commit; the deployed
 `rustbgpd:dev` image was built from this tip).
-**Date:** 2026-05-18 → 2026-05-19 UTC
+**Date:** 2026-05-18T01:50:56Z → 2026-05-19T01:52:49Z UTC (24 h 1 m 53 s).
 
 ## Verdict
 
-`TBD at terminal` — pending the final drain phase and analyzer pass.
-
-One-sentence summary of whether local-MAC origination stayed stable
-under bounded bridge-FDB churn: `TBD`.
+**PASS.** Local-MAC origination stayed bit-stable under bounded
+bridge-FDB churn for 24 hours: 17 174 churn cycles, 430 400 inject
+operations exactly balanced by 430 400 withdraws, zero
+origination/observation/duplicate-MAC errors, zero BGP session flaps,
+clean drain to `local_fdb_count=0` and `frr_type2_count=0`, and an
+after-warmup RSS slope of **0.184 MB/h** trending asymptotic.
 
 ## Run Shape
 
 | Field | Value |
 |-------|-------|
-| Duration | 24h target (`SOAK_HOURS=24` → 86400 s) |
+| Duration | 24 h 1 m 53 s (target 86 400 s, actual 86 458 s, +58 s drain tail) |
 | Topology | `tests/interop/m37-soak.clab.yml` (name `m37-soak` to isolate from the protected M37 CI smoke) |
 | Harness | `tests/soak/run-m37-local-origination-churn-soak.sh` |
-| MAC pool | 4096 |
-| Live target | 1024 |
+| MAC pool | 4 096 |
+| Live target | 1 024 |
 | Churn cadence | 25 delete + 25 add every 5 s |
 | Sample interval | 60 s |
 | Warmup excluded from RSS slope | 300 s |
+| Total data samples | 1 437 |
 
 ## Headline Results
 
-`TBD at terminal` rows hold mid-run snapshots through 19:00 UTC
-(~17 h elapsed); the analyzer pass after terminal replaces them
-with final numbers.
-
 | Signal | Result |
 |--------|--------|
-| BGP session | Established within 1 s of soak start; no flips, reconverges, or session resets observed through mid-run. |
-| Local FDB count | Stable at 2048 entries across the entire mid-run window. |
-| FRR Type 2 count | Stable at 1024 (exactly matches `LIVE_TARGET_MACS`). |
-| `evpn_local_originations_total{action="inject"}` | Monotonic; ~307 k by 17 h, matching `mac_add_total` to within the +1 startup steady-state offset. |
-| `evpn_local_originations_total{action="withdraw"}` | Monotonic; ~306 k by 17 h, lagging inject by exactly `LIVE_TARGET_MACS` (the per-cycle add-before-delete invariant). |
-| `evpn_local_origination_errors_total` | 0 across all samples. |
-| `evpn_local_observations_dropped_total` | 0 across all samples. |
+| BGP session | Established within 1 s of soak start; zero flips / reconverges / session resets across 24 h. |
+| Local FDB count | Bit-stable at 2 048 entries from post-prefill through start of drain; 0 at terminal. |
+| FRR Type 2 count | Bit-stable at 1 024 (exact `LIVE_TARGET_MACS`); 0 at terminal after withdraw drain. |
+| `evpn_local_originations_total{action="inject"}` | 430 400 final. Monotonic across all 1 437 samples. |
+| `evpn_local_originations_total{action="withdraw"}` | 430 400 final. **Exact balance** with inject after drain completed (originator's retained-state map released every MAC). |
+| `evpn_local_origination_errors_total` | 0 across all 1 437 samples. |
+| `evpn_local_observations_dropped_total` | 0 across all 1 437 samples. |
 | `evpn_duplicate_mac_moves_total` | 0 (no deliberate duplicate-MAC injection in this run). |
-| PE RSS start / peak / end | 19.129 MB start; mid-run peak 23.469 MB; **end TBD at terminal**. |
-| Steady-state RSS slope | Cumulative slope tightening from 1.27 MB/h (warmup-dominated) to 0.253 MB/h at 17 h; **final after-warmup slope TBD at terminal**. |
+| PE RSS start / peak / end | 19.129 MB / **23.531 MB** / 23.531 MB. Peak is also the end value — RSS plateaued and stayed flat through the final 10 h. |
+| After-warmup cumulative slope | **0.184 MB/h** over 23 h 55 m (4.402 MB delta from first non-warmup sample to terminal). |
 
-### Mid-run RSS trajectory
+### RSS trajectory across all cron windows
 
 | Tick (UTC) | Elapsed | PE RSS | Slope-since-last | Slope-since-start |
 |---|---|---|---|---|
@@ -59,79 +54,99 @@ with final numbers.
 | 12:00 | 11 h 9 m | 22.70 MB | 0.0 (flat 3 h) | 0.321 |
 | 16:00 | 14 h 9 m | 23.47 MB | 0.256 | 0.307 |
 | 19:00 | 17 h 7 m | 23.47 MB | 0.0 (flat 3 h) | 0.253 |
+| 22:00 | 20 h 7 m | 23.47 MB | 0.0 (flat 3 h) | 0.216 |
+| 01:00 | 23 h 7 m | 23.53 MB | 0.021 | 0.19 |
+| Terminal | 24 h 2 m | 23.53 MB | 0.0 | **0.184** |
 
-Cumulative slope monotonically decreasing across all cron windows;
-after the warmup region the daemon shows two consecutive flat 3 h
-plateaus separated by a single 0.77 MB tick. Consistent with a
-one-time-settle-then-plateau shape, opposite of a steady-rate leak.
+Cumulative slope **monotonically decreased across all 8 cron windows**
+(1.27 → 0.65 → 0.44 → 0.321 → 0.307 → 0.253 → 0.216 → 0.19 → 0.184).
+After the warmup region the daemon shows a one-time-settle shape with
+a single +0.77 MB step between hour 11 and hour 14, then four
+consecutive flat 3 h plateaus, then a final +0.06 MB step in the last
+hour. Total delta from first non-warmup sample to terminal: 4.402 MB
+over 23 h 55 m. Opposite of a steady-rate leak.
 
 ## Pass / Fail Gates
 
 | Gate | Expected | Result |
 |------|----------|--------|
-| BGP Established outside startup/shutdown | yes | **Mid-run pass** — Established within 1 s of start, no flips through 17 h. Finalize at terminal. |
-| `local_fdb_count` near `LIVE_TARGET_MACS` | yes | **Mid-run pass** — 2048 (each live MAC counts once on each side of the bridge-port enslavement; ratio stable). |
-| `frr_type2_count` near `LIVE_TARGET_MACS` | yes | **Mid-run pass** — 1024, exact match. |
-| Originations inject/withdraw advance with churn | yes | **Mid-run pass** — inject/withdraw monotonic; +50 ops per 5 s churn cycle, no stalls. |
-| Origination errors stay flat | zero | **Mid-run pass** — 0 across 17 h / ~300 k operations. |
-| Observation drops stay flat | zero | **Mid-run pass** — 0. |
-| Duplicate-MAC moves stay flat | zero unless deliberately injected | **Mid-run pass** — 0 (no duplicate-MAC scenario in this soak). |
-| RSS slope after warmup | flat / acceptable | **Trending pass** — cumulative slope 0.253 MB/h at 17 h and still tightening. Final after-warmup-window slope TBD at terminal. |
+| BGP Established outside startup/shutdown | yes | **PASS** — Established within 1 s; zero flips across 24 h. |
+| `local_fdb_count` near `LIVE_TARGET_MACS` | yes | **PASS** — 2 048 stable through soak loop; 0 after drain. |
+| `frr_type2_count` near `LIVE_TARGET_MACS` | yes | **PASS** — 1 024 exact; 0 after drain. |
+| Originations inject/withdraw advance with churn | yes | **PASS** — monotonic across all 1 437 samples; +50 ops per 5 s churn cycle, no stalls. |
+| Origination errors stay flat | zero | **PASS** — 0 across 430 400 inject + 430 400 withdraw operations. |
+| Observation drops stay flat | zero | **PASS** — 0. |
+| Duplicate-MAC moves stay flat | zero unless deliberately injected | **PASS** — 0. |
+| RSS slope after warmup | flat / acceptable | **PASS** — 0.184 MB/h cumulative; plateaued and bit-stable through the final 10 h. |
+| Clean drain at terminal | local_fdb_count + frr_type2_count → 0 | **PASS** — both dropped to 0 in the final sample after `Draining remaining local MACs`. |
+| Inject/withdraw ledger balance | inject_total == withdraw_total at terminal | **PASS** — 430 400 == 430 400. |
+
+10 / 10 gates pass.
 
 ## Analysis Notes
 
-Mid-run observations (pre-terminal):
-
-- Sample collection: ~770 data rows expected through 17 h at 60 s
-  cadence; final count `TBD at terminal` (24 h ≈ 1440 rows minus the
-  warmup window).
-- The originator's retained-state model has plateaued at the bounded
-  MAC pool: `local_fdb_count` and `frr_type2_count` have been
-  bit-stable since the prefill phase completed. The
+- **Sample collection:** 1 437 data rows at 60 s cadence over 24 h 2 m
+  (theoretical max ≈ 1 440; the count reflects the natural drift of a
+  60 s sampler over 86 458 s).
+- **Originator retained-state model:** the
   `BTreeMap<MacAddress, LocalMacOriginationState>` retention design
-  (entries kept after Aged so the seq ratchet survives) is behaving
-  as designed — no unbounded growth.
-- Type 2 routes stuck after final drain: `TBD at terminal` (drain
-  runs after the soak loop exits; the post-drain Type 2 count is
-  the assertion the drain succeeded).
-- Daemon WARN / ERROR / FATAL log entries: **none** through mid-run.
-  `soak.log` only shows the startup banner; the harness logs at
-  event boundaries only and no event has triggered.
-- FRR EVPN session resets: **none** through mid-run.
-- The 12 → 16 UTC RSS bump (+0.77 MB after a 3 h flat plateau) is
-  the only non-trivial step since the warmup region. Cumulative
-  slope continued tightening after it, and the next 3 h window
-  returned to flat. Plausibly stochastic settle; not a leak signal.
+  (entries kept after Aged so the seq ratchet survives) behaved as
+  designed: `local_fdb_count` plateaued at 2 048 immediately after the
+  prefill phase and stayed bit-stable. No unbounded growth. The map
+  released every entry on drain (final inject/withdraw counters
+  exactly balanced).
+- **Type 2 routes stuck after final drain:** **none**. Both
+  `local_fdb_count` and `frr_type2_count` reached 0 in the terminal
+  sample, and the inject/withdraw ledger balanced exactly.
+- **Daemon WARN / ERROR / FATAL log entries:** **none** in `soak.log`.
+  The full log contained only: startup banner (8 lines), `Draining
+  remaining local MACs`, `soak loop completed`, and the post-run
+  reminder. No `topology link lost`, no `cannot exec in a stopped
+  state` (the M37 1st-attempt failure mode from 2026-05-17 did not
+  recur — topology isolation worked).
+- **FRR EVPN session resets:** **none**.
+- **Host CI cohabitation:** ≥4 kernel-dataplane CI runs fired against
+  main during the soak window. The `m37-soak` topology name kept the
+  soak's containers (`clab-m37-soak-{rustbgpd,consumer}`) out of the
+  CI M37 smoke's destroy blast radius. Soak survived all CI runs
+  uninterrupted — empirical validation of the
+  `feedback_soak_ci_collision` mitigation.
+- **The 12 → 16 UTC RSS bump (+0.77 MB after a 3 h flat plateau)** is
+  the only non-trivial step after the warmup region. Cumulative slope
+  continued tightening across it, and four consecutive flat 3 h
+  windows followed. Plausibly a stochastic settle (allocator
+  consolidation, page reclaim window). Not a leak signal.
 
 ## Artifacts
 
-Raw artifacts stay local under `tests/soak/runs/` unless intentionally
-published elsewhere. After terminal, copy the artifact set to
-`docs/artifacts/soak/m37-local-origination-<UTC>/`.
+Repo-archived artifacts (small set suitable for git):
 
 | Artifact | Path |
 |----------|------|
-| samples.csv | `tests/soak/runs/m37-local-origination-20260518T015056Z/samples.csv` |
-| soak.log | `tests/soak/runs/m37-local-origination-20260518T015056Z/soak.log` |
-| churn.log | `tests/soak/runs/m37-local-origination-20260518T015056Z/churn.log` |
-| rustbgpd.log | `tests/soak/runs/m37-local-origination-20260518T015056Z/rustbgpd.log` |
-| consumer.log | `tests/soak/runs/m37-local-origination-20260518T015056Z/consumer.log` |
-| run.json | `tests/soak/runs/m37-local-origination-20260518T015056Z/run.json` |
+| samples.csv | `docs/artifacts/soak/m37-local-origination-20260518T015056Z/samples.csv` (131 KB, 1 438 lines) |
+| soak.log | `docs/artifacts/soak/m37-local-origination-20260518T015056Z/soak.log` (1 KB, 11 lines) |
+| run.json | `docs/artifacts/soak/m37-local-origination-20260518T015056Z/run.json` |
+| consumer.log | `docs/artifacts/soak/m37-local-origination-20260518T015056Z/consumer.log` (3 KB) |
+
+Local-only artifacts (too large for git; preserved in the run
+directory):
+
+| Artifact | Local path | Size |
+|----------|------------|------|
+| churn.log | `tests/soak/runs/m37-local-origination-20260518T015056Z/churn.log` | 37 MB (858 700 lines) |
+| rustbgpd.log | `tests/soak/runs/m37-local-origination-20260518T015056Z/rustbgpd.log` | 248 MB |
 
 ## Follow-Ups
 
-After terminal:
-
-- Run `python3 tests/soak/analyze-m37-local-origination-soak.py
-  tests/soak/runs/m37-local-origination-20260518T015056Z` (if the
-  analyzer exists; otherwise compute final slope + plot RSS from
-  `samples.csv` directly).
-- Replace every `TBD at terminal` placeholder above with the
-  observed final value.
-- Flip the status banner to `Complete — verdict: PASS` (or `FAIL`).
-- Copy raw artifacts into `docs/artifacts/soak/m37-local-origination-<UTC>/`.
-- Close or update <https://github.com/lance0/rustbgpd/issues/134>.
-- Tick the M37 24 h MAC-churn row in `docs/evpn-alpha-soak.md`.
-- If verdict is PASS, this soak is the gating evidence to flip
-  `apply_bum_enforcement` and `apply_aliasing_ecmp` defaults to
-  `true` (see ROADMAP P1 "EVPN production-default decision point").
+- [x] Replace every `TBD at terminal` placeholder with the observed
+  final value.
+- [x] Flip the status banner to `Complete — verdict: PASS`.
+- [x] Copy repo-suitable artifacts into
+  `docs/artifacts/soak/m37-local-origination-20260518T015056Z/`.
+- [x] Tick the M37 24 h MAC-churn row in `docs/evpn-alpha-soak.md`.
+- [x] Close <https://github.com/lance0/rustbgpd/issues/134>.
+- [ ] **EVPN production-default flip** — this PASS plus the
+  Gate 8b MAC-churn 24 h soak (2026-05-16) is the gating evidence to
+  flip `apply_bum_enforcement` and `apply_aliasing_ecmp` defaults to
+  `true` in `src/config/schema.rs`. See ROADMAP P1 "EVPN
+  production-default decision point".

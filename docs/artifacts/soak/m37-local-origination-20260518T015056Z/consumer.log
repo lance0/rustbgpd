@@ -1,0 +1,35 @@
+2026/05/18 01:50:31 WATCHFRR: [YDG3W-JND95] FD Limit set: 1048576 is stupidly large.  Is this what you intended?  Consider using --limit-fds also limiting size to 100000
+2026/05/18 01:50:31 WATCHFRR: [T83RR-8SM5G] watchfrr 10.3.1_git starting: vty@0
+2026/05/18 01:50:31 WATCHFRR: [ZCJ3S-SPH5S] zebra state -> down : initial connection attempt failed
+2026/05/18 01:50:31 WATCHFRR: [ZCJ3S-SPH5S] mgmtd state -> down : initial connection attempt failed
+2026/05/18 01:50:31 WATCHFRR: [ZCJ3S-SPH5S] bgpd state -> down : initial connection attempt failed
+2026/05/18 01:50:31 WATCHFRR: [ZCJ3S-SPH5S] staticd state -> down : initial connection attempt failed
+2026/05/18 01:50:31 WATCHFRR: [YFT0P-5Q5YX] Forked background command [pid 12]: /usr/lib/frr/watchfrr.sh restart all
+2026/05/18 01:50:31 ZEBRA: [YDG3W-JND95] FD Limit set: 1048576 is stupidly large.  Is this what you intended?  Consider using --limit-fds also limiting size to 100000
+2026/05/18 01:50:31 ZEBRA: [NNACN-54BDA][EC 4043309110] Disabling MPLS support (no kernel support)
+2026/05/18 01:50:31 ZEBRA: [YDG3W-JND95] FD Limit set: 1048576 is stupidly large.  Is this what you intended?  Consider using --limit-fds also limiting size to 100000
+2026/05/18 01:50:31 ZEBRA: [YDG3W-JND95] FD Limit set: 1048576 is stupidly large.  Is this what you intended?  Consider using --limit-fds also limiting size to 100000
+2026/05/18 01:50:31 MGMTD: [YDG3W-JND95] FD Limit set: 1048576 is stupidly large.  Is this what you intended?  Consider using --limit-fds also limiting size to 100000
+2026/05/18 01:50:31 BGP: [YDG3W-JND95] FD Limit set: 1048576 is stupidly large.  Is this what you intended?  Consider using --limit-fds also limiting size to 100000
+2026/05/18 01:50:31 BGP: [YDG3W-JND95] FD Limit set: 1048576 is stupidly large.  Is this what you intended?  Consider using --limit-fds also limiting size to 100000
+2026/05/18 01:50:31 BGP: [YDG3W-JND95] FD Limit set: 1048576 is stupidly large.  Is this what you intended?  Consider using --limit-fds also limiting size to 100000
+2026/05/18 01:50:32 STATIC: [YDG3W-JND95] FD Limit set: 1048576 is stupidly large.  Is this what you intended?  Consider using --limit-fds also limiting size to 100000
+% Can't open configuration file /etc/frr/vtysh.conf due to 'No such file or directory'.
+Configuration file[/etc/frr/frr.conf] processing failure: 11
+[61|mgmtd] sending configuration
+[62|zebra] sending configuration
+[68|bgpd] sending configuration
+[76|watchfrr] sending configuration
+[62|zebra] done
+[61|mgmtd] done
+[78|staticd] sending configuration
+Waiting for children to finish applying config...
+[68|bgpd] done
+2026/05/18 01:50:32 WATCHFRR: [VTVCM-Y2NW3] Configuration Read in Took: 00:00:00
+[76|watchfrr] done
+[78|staticd] done
+2026/05/18 01:50:32 WATCHFRR: [QDG3Y-BY5TN] zebra state -> up : connect succeeded
+2026/05/18 01:50:32 WATCHFRR: [QDG3Y-BY5TN] mgmtd state -> up : connect succeeded
+2026/05/18 01:50:32 WATCHFRR: [QDG3Y-BY5TN] bgpd state -> up : connect succeeded
+2026/05/18 01:50:32 WATCHFRR: [QDG3Y-BY5TN] staticd state -> up : connect succeeded
+2026/05/18 01:50:32 WATCHFRR: [KWE5Q-QNGFC] all daemons up, doing startup-complete notify

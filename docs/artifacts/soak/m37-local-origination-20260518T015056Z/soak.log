@@ -1,0 +1,12 @@
+[2026-05-18T01:50:56Z] M37 local-origination MAC-churn soak starting
+[2026-05-18T01:50:56Z]   duration: 86400s
+[2026-05-18T01:50:56Z]   sample:   60s
+[2026-05-18T01:50:56Z]   churn:    25 del + 25 add every 5s
+[2026-05-18T01:50:56Z]   pool:     4096, live target: 1024
+[2026-05-18T01:50:56Z]   output:   /home/lance/projects/rustbgpd/tests/soak/runs/m37-local-origination-20260518T015056Z
+[2026-05-18T01:50:56Z] Waiting for M37 L2VPN/EVPN session to reach Established...
+[2026-05-18T01:50:56Z] BGP session established after 1s
+[2026-05-18T01:50:56Z] Prefilling 1024 local MACs on veth100a
+[2026-05-19T01:51:53Z] Draining remaining local MACs from veth100a
+[2026-05-19T01:52:49Z] soak loop completed; final samples in /home/lance/projects/rustbgpd/tests/soak/runs/m37-local-origination-20260518T015056Z/samples.csv
+[2026-05-19T01:52:49Z] Run a postmortem from /home/lance/projects/rustbgpd/tests/soak/runs/m37-local-origination-20260518T015056Z before closing issue #134.
