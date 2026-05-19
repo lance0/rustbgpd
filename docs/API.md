@@ -75,10 +75,12 @@ per-user roles: every client accepted by that listener gets the same read-only
 surface. Use a separate `read_write` listener for automation that needs to
 mutate daemon state.
 
-`docs/grpc-method-inventory.md` and `crates/api/src/authz.rs` classify every
-RPC into `read`, `sensitive_read`, `mutating`, or `operator_only` for
-ADR-0064. The runtime records tier decisions for every RPC via structured
-`grpc_authz` logs and
+`docs/grpc-method-inventory.md`, `docs/grpc-method-inventory.json`, and
+`crates/api/src/authz.rs` classify every RPC into `read`, `sensitive_read`,
+`mutating`, or `operator_only` for ADR-0064. The JSON file is the
+machine-readable export for auditors and generated clients; the Rust `authz`
+tests verify it against the source-of-truth matrix. The runtime records tier
+decisions for every RPC via structured `grpc_authz` logs and
 `bgp_grpc_authz_decisions_total{tier,result,authn,access_mode}`. Listener
 `max_tier` caps are enforced in all modes. When
 `[security.grpc].enforcement = "tier"` is enabled, the same runtime layer also

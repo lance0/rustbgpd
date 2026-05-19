@@ -2443,6 +2443,7 @@ dependencies = [
  "rustbgpd-telemetry",
  "rustbgpd-transport",
  "rustbgpd-wire",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",

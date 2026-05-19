@@ -532,8 +532,10 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{AuthTier, METHODS, method_authz, method_count_by_tier};
+    use serde_json::json;
 
     const PROTO: &str = include_str!("../../../proto/rustbgpd.proto");
+    const INVENTORY_JSON: &str = include_str!("../../../docs/grpc-method-inventory.json");
 
     fn proto_package_from(proto: &str) -> String {
         proto
@@ -581,6 +583,35 @@ mod tests {
 
     fn proto_methods() -> BTreeSet<String> {
         proto_methods_from(PROTO)
+    }
+
+    fn expected_inventory_json() -> serde_json::Value {
+        let methods = METHODS
+            .iter()
+            .map(|method| {
+                json!({
+                    "service": method.service,
+                    "method": method.method,
+                    "path": method.path,
+                    "tier": method.tier.as_str(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        json!({
+            "schema_version": 1,
+            "package": "rustbgpd.v1",
+            "source": "crates/api/src/authz.rs",
+            "proto": "proto/rustbgpd.proto",
+            "method_count": METHODS.len(),
+            "tier_counts": {
+                "read": method_count_by_tier(AuthTier::Read),
+                "sensitive_read": method_count_by_tier(AuthTier::SensitiveRead),
+                "mutating": method_count_by_tier(AuthTier::Mutating),
+                "operator_only": method_count_by_tier(AuthTier::OperatorOnly),
+            },
+            "methods": methods,
+        })
     }
 
     fn brace_delta(line: &str) -> i32 {
@@ -644,6 +675,13 @@ mod tests {
         assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 33);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 15);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 18);
+    }
+
+    #[test]
+    fn machine_readable_inventory_matches_method_matrix() {
+        let actual = serde_json::from_str::<serde_json::Value>(INVENTORY_JSON)
+            .expect("docs/grpc-method-inventory.json must be valid JSON");
+        assert_eq!(actual, expected_inventory_json());
     }
 
     #[test]

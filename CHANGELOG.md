@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0064 machine-readable method-tier inventory.**
+  `docs/grpc-method-inventory.json` now exports the checked 66-RPC gRPC
+  authorization matrix for auditors and generated clients. The API `authz`
+  tests verify the JSON artifact against `crates/api/src/authz.rs`, while the
+  existing proto coverage test still fails if a new RPC lacks a tier assignment.
+
 - **ADR-0064 opt-in gRPC role enforcement.** `security.grpc.enforcement =
   "tier"` is now accepted when every enabled listener has an authenticated
   principal source and `[security.grpc.roles]` maps principals to `observer`,

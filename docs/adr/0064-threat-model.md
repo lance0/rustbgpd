@@ -94,7 +94,7 @@ Open questions that could change risk ranking:
 | Bearer interceptor | Per-call token check for listeners with `token_file` | `crates/api/src/server.rs::AuthInterceptor` |
 | Service handlers | Implement Global, Config, Neighbor, Policy, PeerGroup, RIB, Event, Injection, Control, and EVPN RPCs | `proto/rustbgpd.proto`, `crates/api/src/*_service.rs` |
 | Access mode guard | Per-service mutating RPC rejection on read-only listeners | `crates/api/src/server.rs::read_only_rejection` |
-| Method-tier matrix | Static ADR-0064 classification for all 66 RPCs | `crates/api/src/authz.rs`, `docs/grpc-method-inventory.md` |
+| Method-tier matrix | Static ADR-0064 classification for all 66 RPCs | `crates/api/src/authz.rs`, `docs/grpc-method-inventory.md`, `docs/grpc-method-inventory.json` |
 | Audit runtime layer | Audit-only method-tier lookup, structured logs, bounded metric | `crates/api/src/authz_runtime.rs`, `crates/telemetry/src/metrics.rs` |
 | Core actors | PeerManager, RIB, dataplane, config persistence, and shutdown actors behind RPC handlers | `src/main.rs`, `src/peer_manager.rs`, `crates/rib/src/manager` |
 
@@ -306,6 +306,7 @@ External reviewers should be able to verify:
 | `src/config/validation.rs` | Listener and secret-file validation boundary | TM-002, TM-003, TM-006 |
 | `proto/rustbgpd.proto` | Public API contract and credential-bearing fields | TM-005, TM-008 |
 | `docs/grpc-method-inventory.md` | Human-auditable classification and rationale | TM-008 |
+| `docs/grpc-method-inventory.json` | Machine-readable method-tier export | TM-008 |
 
 ## Residual risks and follow-up issues
 
@@ -327,9 +328,8 @@ Additional filed follow-ups:
   retention guidance for production deployments.
 - [#169](https://github.com/lance0/rustbgpd/issues/169) — stream/query
   resource-abuse guardrails or documented limits.
-- [#170](https://github.com/lance0/rustbgpd/issues/170) — proto method-tier
-  annotations or machine-readable inventory export for external client
-  generators and auditors.
+- `docs/grpc-method-inventory.json` — machine-readable method-tier export for
+  external client generators and auditors.
 
 ## Quality check
 
