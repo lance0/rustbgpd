@@ -314,6 +314,7 @@ fn grpc_listeners_default_to_uds() {
             path: PathBuf::from("/var/lib/rustbgpd/grpc.sock"),
             mode: 0o600,
             access_mode: GrpcAccessMode::ReadWrite,
+            max_tier: GrpcMaxTier::OperatorOnly,
             token_file: None,
             principal: None,
         }]
@@ -332,6 +333,7 @@ fn grpc_tcp_listener_parses_when_enabled() {
         vec![GrpcListener::Tcp {
             addr: "127.0.0.1:50051".parse().unwrap(),
             access_mode: GrpcAccessMode::ReadWrite,
+            max_tier: GrpcMaxTier::OperatorOnly,
             token_file: None,
             principal: None,
             tls: None,
@@ -351,9 +353,70 @@ fn grpc_listener_access_mode_parses() {
         vec![GrpcListener::Tcp {
             addr: "127.0.0.1:50051".parse().unwrap(),
             access_mode: GrpcAccessMode::ReadOnly,
+            max_tier: GrpcMaxTier::SensitiveRead,
             token_file: None,
             principal: None,
             tls: None,
+        }]
+    );
+}
+
+#[test]
+fn grpc_listener_max_tier_parses() {
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\nmax_tier = \"mutating\"\n",
+        valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+    assert_eq!(
+        config.grpc_listeners(),
+        vec![GrpcListener::Tcp {
+            addr: "127.0.0.1:50051".parse().unwrap(),
+            access_mode: GrpcAccessMode::ReadWrite,
+            max_tier: GrpcMaxTier::Mutating,
+            token_file: None,
+            principal: None,
+            tls: None,
+        }]
+    );
+}
+
+#[test]
+fn grpc_listener_access_mode_read_only_caps_max_tier() {
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\naccess_mode = \"read_only\"\nmax_tier = \"operator_only\"\n",
+        valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+    assert_eq!(
+        config.grpc_listeners(),
+        vec![GrpcListener::Tcp {
+            addr: "127.0.0.1:50051".parse().unwrap(),
+            access_mode: GrpcAccessMode::ReadOnly,
+            max_tier: GrpcMaxTier::SensitiveRead,
+            token_file: None,
+            principal: None,
+            tls: None,
+        }]
+    );
+}
+
+#[test]
+fn grpc_listener_max_tier_can_be_stricter_than_access_mode() {
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nmax_tier = \"read\"\n",
+        valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+    assert_eq!(
+        config.grpc_listeners(),
+        vec![GrpcListener::Uds {
+            path: PathBuf::from("/tmp/rustbgpd-test.sock"),
+            mode: 0o600,
+            access_mode: GrpcAccessMode::ReadWrite,
+            max_tier: GrpcMaxTier::Read,
+            token_file: None,
+            principal: None,
         }]
     );
 }
@@ -446,6 +509,7 @@ fn grpc_tcp_bearer_principal_parses() {
         vec![GrpcListener::Tcp {
             addr: "127.0.0.1:50051".parse().unwrap(),
             access_mode: GrpcAccessMode::ReadWrite,
+            max_tier: GrpcMaxTier::OperatorOnly,
             token_file: Some(token_file.path().to_path_buf()),
             principal: Some("automation.example".to_string()),
             tls: None,
@@ -488,6 +552,7 @@ fn grpc_uds_principal_parses() {
             path: PathBuf::from("/tmp/rustbgpd-test.sock"),
             mode: 0o600,
             access_mode: GrpcAccessMode::ReadWrite,
+            max_tier: GrpcMaxTier::OperatorOnly,
             token_file: None,
             principal: Some("local-admin".to_string()),
         }]

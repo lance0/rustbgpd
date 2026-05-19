@@ -44,6 +44,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is rejected until the deny-by-tier enforcement slice lands; existing mTLS,
   bearer-token, UDS, and listener `access_mode` behavior is unchanged.
 
+- **ADR-0064 gRPC listener tier caps.** Added `max_tier` to TCP and UDS gRPC
+  listeners and enforce it in the existing method-path Tower layer. Existing
+  configs preserve their old behavior when `max_tier` is omitted:
+  `access_mode = "read_only"` maps to a `sensitive_read` ceiling, and
+  `read_write` maps to `operator_only`. When both fields are present, the
+  effective cap is the stricter one, so `access_mode` cannot be weakened by
+  `max_tier`. Role-based deny-by-tier enforcement and the default flip remain
+  deferred.
+
 - **Filtered general FIB status queries.** `RibService.ListFibRoutes` now
   accepts optional `table_name`, `state`, `reason`, exact prefix, and
   peer-address filters, and `rustbgpctl rib fib` exposes the same filters via

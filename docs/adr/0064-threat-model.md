@@ -6,8 +6,8 @@
 and per-method tier enforcement for rustbgpd v1.0 readiness.
 
 This packet is written for security reviewers. It consolidates the current
-gRPC security posture, the ADR-0064 method-tier model, shipped audit-only
-runtime evidence, and the remaining enforcement gaps.
+gRPC security posture, the ADR-0064 method-tier model, shipped runtime
+evidence, enforced listener tier caps, and the remaining enforcement gaps.
 
 External context:
 
@@ -27,10 +27,11 @@ External context:
 The highest-risk area is the privileged gRPC management surface. rustbgpd
 already has safe listener defaults, optional bearer-token auth, native mTLS,
 UDS permissions, read-only listener mode, a checked 66-RPC method-tier matrix,
-and audit-only runtime tier telemetry. The remaining v1.0 security work is to
-turn that matrix into real principal-aware enforcement: extract principals,
-assign roles, cap listeners by tier, deny over-tier calls, and harden audit
-records so credential-bearing inputs are masked and outcomes are captured.
+runtime tier telemetry, and enforced listener `max_tier` caps. The remaining
+v1.0 security work is to turn that matrix into real principal-aware
+enforcement: extract mTLS principals, assign roles, deny over-role calls, and
+harden audit records so credential-bearing inputs are masked and outcomes are
+captured.
 
 ## Scope and assumptions
 
@@ -42,7 +43,7 @@ In scope:
 - Current listener-level authentication/authorization controls:
   UDS permissions, bearer-token interceptor, mTLS server setup, and
   `access_mode`.
-- ADR-0064 method-tier inventory and runtime audit-only layer:
+- ADR-0064 method-tier inventory and runtime tier-decision layer:
   `docs/grpc-method-inventory.md`, `crates/api/src/authz.rs`,
   `crates/api/src/authz_runtime.rs`, and
   `crates/telemetry/src/metrics.rs`.
@@ -298,8 +299,8 @@ External reviewers should be able to verify:
 
 Already filed:
 
-- [#164](https://github.com/lance0/rustbgpd/issues/164) — add listener
-  `max_tier` and deny-by-tier enforcement.
+- [#164](https://github.com/lance0/rustbgpd/issues/164) — complete
+  deny-by-tier enforcement after the listener `max_tier` sub-scope.
 - [#165](https://github.com/lance0/rustbgpd/issues/165) — add explicit
   bearer-token / UDS principals and gRPC roles.
 - [#166](https://github.com/lance0/rustbgpd/issues/166) — implement mTLS

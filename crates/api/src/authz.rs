@@ -1,9 +1,10 @@
 //! Static gRPC authorization inventory.
 //!
 //! ADR-0064 uses this table as the code-level source of truth for
-//! method risk tiers. The table is not enforced yet; current runtime
-//! authorization is still the listener-level `AccessMode` check in
-//! `server.rs`.
+//! method risk tiers. Runtime authorization currently enforces
+//! listener-level `AccessMode` checks in `server.rs` plus per-listener
+//! `max_tier` ceilings in `authz_runtime.rs`; per-principal role
+//! enforcement is still deferred.
 
 /// Authorization tier assigned to one gRPC method.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

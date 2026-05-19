@@ -93,8 +93,8 @@ pub struct GrpcSecurityConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GrpcEnforcementConfig {
-    /// Preserve existing listener-level authorization. Tier decisions
-    /// are audit-only until the ADR-0064 enforcement slice lands.
+    /// Preserve existing role authorization behavior. Listener
+    /// `max_tier` caps still apply in this mode.
     #[default]
     Legacy,
     /// Parsed for forward compatibility, but rejected by validation
@@ -296,6 +296,10 @@ pub struct GrpcTcpListenerConfig {
     pub enabled: bool,
     pub address: Option<String>,
     pub access_mode: Option<GrpcAccessModeConfig>,
+    /// ADR-0064 per-method listener ceiling. When omitted, the
+    /// listener preserves the compatibility cap implied by
+    /// `access_mode`.
+    pub max_tier: Option<GrpcMaxTierConfig>,
     pub token_file: Option<String>,
     /// Stable audit principal label for non-mTLS bearer-token
     /// listeners. Native mTLS principal extraction is a later
@@ -322,6 +326,10 @@ pub struct GrpcUdsListenerConfig {
     #[serde(default = "default_grpc_uds_mode")]
     pub mode: u32,
     pub access_mode: Option<GrpcAccessModeConfig>,
+    /// ADR-0064 per-method listener ceiling. When omitted, the
+    /// listener preserves the compatibility cap implied by
+    /// `access_mode`.
+    pub max_tier: Option<GrpcMaxTierConfig>,
     pub token_file: Option<String>,
     /// Stable audit principal label for this Unix-domain-socket
     /// listener. Filesystem permissions authenticate the socket, but
@@ -334,6 +342,15 @@ pub struct GrpcUdsListenerConfig {
 pub enum GrpcAccessModeConfig {
     ReadOnly,
     ReadWrite,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrpcMaxTierConfig {
+    Read,
+    SensitiveRead,
+    Mutating,
+    OperatorOnly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

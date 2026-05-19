@@ -14,7 +14,8 @@ use tonic::transport::Server;
 use tonic::{Request, Status};
 use tracing::{error, info, warn};
 
-use crate::authz_runtime::{GrpcAuthAuditContext, GrpcAuthAuditLayer, GrpcAuthnKind};
+use crate::authz::AuthTier;
+use crate::authz_runtime::{BearerAuthSecret, GrpcAuthAuditContext, GrpcAuthnKind, GrpcAuthzLayer};
 use crate::config_service::ConfigService;
 use crate::control_service::{ControlService, MrtTriggerTx};
 use crate::event_service::{DataplaneEventBroadcaster, EventService, dataplane_event_broadcaster};
@@ -100,6 +101,8 @@ pub struct ServeConfig {
 pub struct ListenerConfig {
     pub endpoint: ListenerEndpoint,
     pub access_mode: AccessMode,
+    /// Effective ADR-0064 listener method-tier ceiling.
+    pub max_tier: AuthTier,
     pub auth_token: Option<String>,
     /// Optional stable principal label for audit records. mTLS
     /// listeners ignore this until certificate principal extraction
@@ -150,10 +153,12 @@ pub enum ListenerEndpoint {
 fn tcp_audit_context(
     addr: SocketAddr,
     access_mode: AccessMode,
-    auth_enabled: bool,
+    max_tier: AuthTier,
+    auth_token: Option<&str>,
     tls_enabled: bool,
     configured_principal: Option<&str>,
 ) -> GrpcAuthAuditContext {
+    let auth_enabled = auth_token.is_some();
     let (authn, principal) = if tls_enabled {
         (GrpcAuthnKind::Mtls, "mtls-unresolved".to_string())
     } else if auth_enabled {
@@ -167,17 +172,21 @@ fn tcp_audit_context(
     GrpcAuthAuditContext::new(
         format!("tcp://{addr}"),
         access_mode.as_str(),
+        max_tier,
         authn,
         principal,
     )
+    .with_bearer_token(auth_token)
 }
 
 fn uds_audit_context(
     path: &Path,
     access_mode: AccessMode,
-    auth_enabled: bool,
+    max_tier: AuthTier,
+    auth_token: Option<&str>,
     configured_principal: Option<&str>,
 ) -> GrpcAuthAuditContext {
+    let auth_enabled = auth_token.is_some();
     let (authn, principal) = if let Some(principal) = configured_principal {
         (
             if auth_enabled {
@@ -195,20 +204,22 @@ fn uds_audit_context(
     GrpcAuthAuditContext::new(
         format!("unix://{}", path.display()),
         access_mode.as_str(),
+        max_tier,
         authn,
         principal,
     )
+    .with_bearer_token(auth_token)
 }
 
 #[derive(Clone, Debug)]
 struct AuthInterceptor {
-    expected_header: Option<Arc<String>>,
+    bearer_auth: Option<BearerAuthSecret>,
 }
 
 impl AuthInterceptor {
-    fn new(token: Option<String>) -> Self {
-        let expected_header = token.map(|token| Arc::new(format!("Bearer {token}")));
-        Self { expected_header }
+    fn new(token: Option<&str>) -> Self {
+        let bearer_auth = token.map(BearerAuthSecret::from_token);
+        Self { bearer_auth }
     }
 }
 
@@ -224,34 +235,12 @@ pub(crate) fn read_only_rejection(access_mode: AccessMode) -> Option<Status> {
 
 impl Interceptor for AuthInterceptor {
     fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
-        let Some(expected) = self.expected_header.as_ref() else {
+        let Some(bearer_auth) = self.bearer_auth.as_ref() else {
             return Ok(request);
         };
-
-        let value = request
-            .metadata()
-            .get("authorization")
-            .ok_or_else(|| Status::unauthenticated("missing authorization metadata"))?;
-        let actual = value
-            .to_str()
-            .map_err(|_| Status::unauthenticated("authorization metadata must be ASCII"))?;
-        if constant_time_eq(actual.as_bytes(), expected.as_bytes()) {
-            Ok(request)
-        } else {
-            Err(Status::unauthenticated("invalid bearer token"))
-        }
+        bearer_auth.authenticate_metadata(request.metadata())?;
+        Ok(request)
     }
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let max_len = a.len().max(b.len());
-    let mut diff = a.len() ^ b.len();
-    for idx in 0..max_len {
-        let lhs = a.get(idx).copied().unwrap_or(0);
-        let rhs = b.get(idx).copied().unwrap_or(0);
-        diff |= usize::from(lhs ^ rhs);
-    }
-    diff == 0
 }
 
 /// Start all configured gRPC listeners. Runs until the shutdown signal fires
@@ -351,6 +340,7 @@ async fn run_listener(
     let ListenerConfig {
         endpoint,
         access_mode,
+        max_tier,
         auth_token,
         principal,
         tls,
@@ -361,6 +351,7 @@ async fn run_listener(
             run_tcp_listener(
                 addr,
                 access_mode,
+                max_tier,
                 auth_token,
                 principal,
                 tls,
@@ -394,6 +385,7 @@ async fn run_listener(
                 path,
                 mode,
                 access_mode,
+                max_tier,
                 auth_token,
                 principal,
                 rib_tx,
@@ -432,6 +424,7 @@ async fn run_listener(
 async fn run_tcp_listener(
     addr: SocketAddr,
     access_mode: AccessMode,
+    max_tier: AuthTier,
     auth_token: Option<String>,
     principal: Option<String>,
     tls: Option<TlsParams>,
@@ -468,11 +461,12 @@ async fn run_tcp_listener(
     let audit_context = tcp_audit_context(
         addr,
         access_mode,
-        auth_token.is_some(),
+        max_tier,
+        auth_token.as_deref(),
         tls.is_some(),
         principal.as_deref(),
     );
-    let interceptor = AuthInterceptor::new(auth_token);
+    let interceptor = AuthInterceptor::new(auth_token.as_deref());
     let mut builder = Server::builder();
     if let Some(tls) = tls {
         let identity = tonic::transport::Identity::from_pem(&tls.cert_pem, &tls.key_pem);
@@ -484,7 +478,7 @@ async fn run_tcp_listener(
             .tls_config(tls_cfg)
             .map_err(|e| format!("TCP listener {addr} TLS config invalid: {e}"))?;
     }
-    let mut builder = builder.layer(GrpcAuthAuditLayer::new(audit_context, metrics.clone()));
+    let mut builder = builder.layer(GrpcAuthzLayer::new(audit_context, metrics.clone()));
     builder
         .add_service(RibServiceServer::with_interceptor(
             RibService::with_status_snapshots_and_metrics(
@@ -565,11 +559,16 @@ async fn run_tcp_listener(
         .map_err(|e| format!("TCP listener {addr} failed: {e}"))
 }
 
-#[expect(clippy::too_many_arguments, reason = "startup wiring for one listener")]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "startup wiring for one listener"
+)]
 async fn run_uds_listener(
     path: PathBuf,
     mode: u32,
     access_mode: AccessMode,
+    max_tier: AuthTier,
     auth_token: Option<String>,
     principal: Option<String>,
     rib_tx: mpsc::Sender<RibUpdate>,
@@ -595,18 +594,24 @@ async fn run_uds_listener(
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
 ) -> Result<(), String> {
-    let auth_enabled = auth_token.is_some();
     let uds_listener = bind_uds_listener(&path, mode)?;
-    let audit_context = uds_audit_context(&path, access_mode, auth_enabled, principal.as_deref());
+    let auth_enabled = auth_token.is_some();
+    let audit_context = uds_audit_context(
+        &path,
+        access_mode,
+        max_tier,
+        auth_token.as_deref(),
+        principal.as_deref(),
+    );
     info!(
         path = %path.display(),
         access_mode = ?access_mode,
         auth_enabled,
         "starting gRPC UDS listener"
     );
-    let interceptor = AuthInterceptor::new(auth_token);
+    let interceptor = AuthInterceptor::new(auth_token.as_deref());
     let result = Server::builder()
-        .layer(GrpcAuthAuditLayer::new(audit_context, metrics.clone()))
+        .layer(GrpcAuthzLayer::new(audit_context, metrics.clone()))
         .add_service(RibServiceServer::with_interceptor(
             RibService::with_status_snapshots_and_metrics(
                 rib_query_tx.clone(),
@@ -761,14 +766,14 @@ mod tests {
 
     #[test]
     fn auth_interceptor_rejects_missing_token() {
-        let mut interceptor = AuthInterceptor::new(Some("secret".to_string()));
+        let mut interceptor = AuthInterceptor::new(Some("secret"));
         let err = interceptor.call(Request::new(())).unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 
     #[test]
     fn auth_interceptor_accepts_matching_token() {
-        let mut interceptor = AuthInterceptor::new(Some("secret".to_string()));
+        let mut interceptor = AuthInterceptor::new(Some("secret"));
         let mut request = Request::new(());
         request
             .metadata_mut()
@@ -778,7 +783,7 @@ mod tests {
 
     #[test]
     fn auth_interceptor_rejects_wrong_token() {
-        let mut interceptor = AuthInterceptor::new(Some("secret".to_string()));
+        let mut interceptor = AuthInterceptor::new(Some("secret"));
         let mut request = Request::new(());
         request
             .metadata_mut()
@@ -792,12 +797,14 @@ mod tests {
         let context = tcp_audit_context(
             "127.0.0.1:50051".parse().unwrap(),
             AccessMode::ReadWrite,
-            true,
+            AuthTier::OperatorOnly,
+            Some("secret"),
             false,
             Some("automation.example"),
         );
         assert_eq!(context.authn(), GrpcAuthnKind::BearerToken);
         assert_eq!(context.principal(), "automation.example");
+        assert_eq!(context.max_tier(), AuthTier::OperatorOnly);
     }
 
     #[test]
@@ -805,12 +812,14 @@ mod tests {
         let context = tcp_audit_context(
             "127.0.0.1:50051".parse().unwrap(),
             AccessMode::ReadWrite,
-            true,
+            AuthTier::Mutating,
+            Some("secret"),
             true,
             Some("automation.example"),
         );
         assert_eq!(context.authn(), GrpcAuthnKind::Mtls);
         assert_eq!(context.principal(), "mtls-unresolved");
+        assert_eq!(context.max_tier(), AuthTier::Mutating);
     }
 
     #[test]
@@ -818,10 +827,12 @@ mod tests {
         let context = uds_audit_context(
             Path::new("/run/rustbgpd/grpc.sock"),
             AccessMode::ReadWrite,
-            false,
+            AuthTier::SensitiveRead,
+            None,
             Some("local-admin"),
         );
         assert_eq!(context.authn(), GrpcAuthnKind::Uds);
         assert_eq!(context.principal(), "local-admin");
+        assert_eq!(context.max_tier(), AuthTier::SensitiveRead);
     }
 }
