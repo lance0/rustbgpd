@@ -328,8 +328,12 @@ Additional filed follow-ups:
   retention guidance for production deployments.
 - [#169](https://github.com/lance0/rustbgpd/issues/169) — stream/query
   resource-abuse guardrails or documented limits.
+
+Completed in the ADR-0064 method-tier inventory tranche:
+
 - `docs/grpc-method-inventory.json` — machine-readable method-tier export for
-  external client generators and auditors.
+  external client generators and auditors, drift-checked against
+  `crates/api/src/authz.rs`.
 
 ## Quality check
 
