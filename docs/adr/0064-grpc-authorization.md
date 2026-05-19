@@ -301,7 +301,9 @@ review/rollback unit.
 
 1. **Foundation.** Add the `AuthTier` enum and static method matrix in
    `crates/api/src/authz.rs`; tests parse `proto/rustbgpd.proto` and
-   require all 66 methods to have an inventory-assigned tier.
+   require all 66 methods to have an inventory-assigned tier. Export the same
+   source-of-truth matrix as `docs/grpc-method-inventory.json` for auditors and
+   generated clients, with tests that fail on JSON drift.
    `UNIMPLEMENTED` defaults to `operator_only`. Correct this ADR and
    the inventory to match shipped listener-level `access_mode`
    behavior. No runtime enforcement change.
@@ -369,10 +371,11 @@ own migration window.
 
 ## Implementation status
 
-Slice 1 is implemented by the ADR-0064 foundation PR: checked method
-matrix plus inventory/ADR correction. Slice 2 is implemented by the
-runtime tier-decision layer: method-path lookup, structured `grpc_authz`
-decision logs, and bounded-cardinality metrics. Slice 3a adds staged
+Slice 1 is implemented by the ADR-0064 foundation PR and follow-up JSON export:
+checked method matrix, Markdown inventory/ADR correction, and the
+machine-readable `docs/grpc-method-inventory.json` artifact. Slice 2 is
+implemented by the runtime tier-decision layer: method-path lookup, structured
+`grpc_authz` decision logs, and bounded-cardinality metrics. Slice 3a adds staged
 `[security.grpc.roles]`, `enforcement = "legacy"`, and explicit non-mTLS
 listener principal labels for bearer-token TCP and UDS audit identity.
 Slice 4a adds enforced per-listener `max_tier` caps while preserving
@@ -386,7 +389,7 @@ guidance, and optional proto credential markers.
 
 | Slice | Status |
 |-------|--------|
-| 1. Foundation | Implemented by the checked method-matrix PR |
+| 1. Foundation | Implemented by the checked method-matrix PR + machine-readable JSON export |
 | 2. Audit-only runtime path | Implemented by the runtime audit-layer PR |
 | 3. Identity + roles | Partial: roles config + bearer/UDS principals + mTLS audit principal extraction |
 | 4. Listener tier cap | Partial: `max_tier` listener cap enforced; role/default flip deferred |

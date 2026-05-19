@@ -3,6 +3,7 @@
 **Status:** Accepted. Input artifact for ADR-0064 (gRPC authorization)
 and mirrored in `crates/api/src/authz.rs`.
 **Source:** `proto/rustbgpd.proto`.
+**Machine-readable export:** `docs/grpc-method-inventory.json`.
 **Maintenance:** Re-derive whenever an RPC is added, renamed, or
 removed; the ADR's enforcement model assumes every method has a tier
 assignment.
@@ -29,6 +30,9 @@ For external review, read this inventory together with
 `docs/adr/0064-threat-model.md`. The threat model explains the
 management-plane assets, trust boundaries, abuse paths, current controls,
 and residual enforcement gaps behind the tier assignments.
+Auditors and generated-client authors can consume the same classification from
+`docs/grpc-method-inventory.json`; CI checks that JSON artifact against the
+Rust source-of-truth table.
 
 ## Classification scheme
 
@@ -252,10 +256,11 @@ specific method if the model warrants it.
 ## Code matrix
 
 `crates/api/src/authz.rs` contains the same 66-method classification
-as a static Rust table. Its tests parse `proto/rustbgpd.proto` and
-fail if a new RPC is added without a tier assignment, making this
-document and ADR-0064 reviewable against code instead of a hand-counted
-spreadsheet alone.
+as a static Rust table. `docs/grpc-method-inventory.json` is the
+machine-readable export for auditors, tooling, and generated clients. The
+`authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added
+without a tier assignment; they also parse the JSON export and fail if it drifts
+from `crates/api/src/authz.rs`.
 
 ## Maintenance
 
@@ -264,7 +269,10 @@ When adding a new RPC:
 1. Add the row to the appropriate per-service table.
 2. Pick the tier defensively (higher when in doubt; the ADR will
    negotiate down if warranted).
-3. Bump the totals.
-4. Open a follow-up review-PR against ADR-0064 if the new RPC
+3. Add the corresponding row to `docs/grpc-method-inventory.json` and bump
+   `method_count` / `tier_counts`.
+4. Run `cargo test -p rustbgpd-api authz --no-fail-fast`; this verifies proto
+   coverage and JSON drift.
+5. Open a follow-up review-PR against ADR-0064 if the new RPC
    doesn't fit cleanly in one tier — that signals the model needs an
    extension, not just a row addition.
