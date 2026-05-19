@@ -35,6 +35,7 @@ mod peer_manager;
 mod policy_admin;
 mod reload;
 
+use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::process;
@@ -49,7 +50,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::config::{Config, GrpcAccessMode, GrpcListener, GrpcMaxTier};
+use crate::config::{
+    Config, GrpcAccessMode, GrpcEnforcementConfig, GrpcListener, GrpcMaxTier, GrpcRoleConfig,
+};
 use crate::config_persister::{ConfigMutation, ConfigPersister};
 use crate::peer_manager::PeerManager;
 use crate::reload::{ReloadedConfig, apply_reload_outcome, reload_config, run_config_bridge};
@@ -89,6 +92,33 @@ const fn grpc_max_tier_to_auth_tier(value: GrpcMaxTier) -> rustbgpd_api::authz::
         GrpcMaxTier::Mutating => rustbgpd_api::authz::AuthTier::Mutating,
         GrpcMaxTier::OperatorOnly => rustbgpd_api::authz::AuthTier::OperatorOnly,
     }
+}
+
+const fn grpc_enforcement_to_auth_enforcement(
+    value: GrpcEnforcementConfig,
+) -> rustbgpd_api::authz::AuthEnforcement {
+    match value {
+        GrpcEnforcementConfig::Legacy => rustbgpd_api::authz::AuthEnforcement::Legacy,
+        GrpcEnforcementConfig::Tier => rustbgpd_api::authz::AuthEnforcement::Tier,
+    }
+}
+
+const fn grpc_role_to_principal_role(value: GrpcRoleConfig) -> rustbgpd_api::authz::PrincipalRole {
+    match value {
+        GrpcRoleConfig::Observer => rustbgpd_api::authz::PrincipalRole::Observer,
+        GrpcRoleConfig::Automation => rustbgpd_api::authz::PrincipalRole::Automation,
+        GrpcRoleConfig::Operator => rustbgpd_api::authz::PrincipalRole::Operator,
+    }
+}
+
+fn grpc_principal_roles(config: &Config) -> BTreeMap<String, rustbgpd_api::authz::PrincipalRole> {
+    config
+        .security
+        .grpc
+        .roles
+        .iter()
+        .map(|(principal, role)| (principal.clone(), grpc_role_to_principal_role(*role)))
+        .collect()
 }
 
 fn max_gr_restart_time_secs(config: &Config) -> Option<u64> {
@@ -165,6 +195,8 @@ fn load_grpc_pem(path: &Path, label: &str) -> Result<Vec<u8>, String> {
 }
 
 fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, String> {
+    let enforcement = grpc_enforcement_to_auth_enforcement(config.security.grpc.enforcement);
+    let roles = Arc::new(grpc_principal_roles(config));
     config
         .grpc_listeners()
         .into_iter()
@@ -193,6 +225,8 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                     endpoint: ListenerEndpoint::Tcp(addr),
                     access_mode: access_mode.into(),
                     max_tier: grpc_max_tier_to_auth_tier(max_tier),
+                    enforcement,
+                    roles: Arc::clone(&roles),
                     auth_token: token_file.as_deref().map(load_grpc_token).transpose()?,
                     principal,
                     tls: tls_params,
@@ -209,6 +243,8 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                 endpoint: ListenerEndpoint::Uds { path, mode },
                 access_mode: access_mode.into(),
                 max_tier: grpc_max_tier_to_auth_tier(max_tier),
+                enforcement,
+                roles: Arc::clone(&roles),
                 auth_token: token_file.as_deref().map(load_grpc_token).transpose()?,
                 principal,
                 tls: None,

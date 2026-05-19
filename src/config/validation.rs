@@ -139,6 +139,7 @@ impl Config {
                 reason: "at least one gRPC listener must be enabled".to_string(),
             });
         }
+        validate_grpc_tier_enforcement(self)?;
 
         // Validate MRT config if present
         if let Some(ref mrt) = self.mrt {
@@ -905,22 +906,98 @@ fn validate_peer_group(
 }
 
 fn validate_grpc_security(security: &SecurityConfig) -> Result<(), ConfigError> {
-    if security.grpc.enforcement == GrpcEnforcementConfig::Tier {
-        return Err(ConfigError::InvalidGrpcConfig {
-            reason: "security.grpc.enforcement = \"tier\" is not implemented yet; \
-                     use \"legacy\" until the ADR-0064 enforcement slice lands"
-                .to_string(),
-        });
-    }
-
     for principal in security.grpc.roles.keys() {
         if principal.trim().is_empty() {
             return Err(ConfigError::InvalidGrpcConfig {
                 reason: "security.grpc.roles principal keys must not be empty".to_string(),
             });
         }
+        if principal == "mtls-unresolved" {
+            return Err(ConfigError::InvalidGrpcConfig {
+                reason: "security.grpc.roles must not map reserved principal \
+                         \"mtls-unresolved\""
+                    .to_string(),
+            });
+        }
     }
     Ok(())
+}
+
+fn validate_grpc_tier_enforcement(config: &Config) -> Result<(), ConfigError> {
+    if config.security.grpc.enforcement != GrpcEnforcementConfig::Tier {
+        return Ok(());
+    }
+    if config.security.grpc.roles.is_empty() {
+        return Err(ConfigError::InvalidGrpcConfig {
+            reason: "security.grpc.enforcement = \"tier\" requires at least one \
+                     [security.grpc.roles] entry"
+                .to_string(),
+        });
+    }
+
+    let telemetry = &config.global.telemetry;
+    let tcp = telemetry.grpc_tcp.as_ref().filter(|cfg| cfg.enabled);
+    let uds = telemetry.grpc_uds.as_ref().filter(|cfg| cfg.enabled);
+    if tcp.is_none() && uds.is_none() {
+        return Err(ConfigError::InvalidGrpcConfig {
+            reason: "security.grpc.enforcement = \"tier\" requires an explicit \
+                     gRPC listener with mTLS or a configured principal; the \
+                     implicit UDS listener has no role identity"
+                .to_string(),
+        });
+    }
+
+    if let Some(cfg) = tcp {
+        let mtls_enabled = cfg.tls_cert_file.is_some()
+            && cfg.tls_key_file.is_some()
+            && cfg.tls_client_ca_file.is_some();
+        if !mtls_enabled && cfg.principal.is_none() {
+            if cfg.token_file.is_some() {
+                return Err(ConfigError::InvalidGrpcConfig {
+                    reason: "security.grpc.enforcement = \"tier\" requires \
+                             grpc_tcp.principal for bearer-token TCP listeners"
+                        .to_string(),
+                });
+            }
+            return Err(ConfigError::InvalidGrpcConfig {
+                reason: "security.grpc.enforcement = \"tier\" rejects \
+                         unauthenticated TCP listeners; configure native mTLS \
+                         or grpc_tcp.token_file plus grpc_tcp.principal"
+                    .to_string(),
+            });
+        }
+        if let Some(principal) = cfg.principal.as_deref() {
+            validate_grpc_role_principal(config, principal, "grpc_tcp.principal")?;
+        }
+    }
+
+    if let Some(cfg) = uds {
+        let Some(principal) = cfg.principal.as_deref() else {
+            return Err(ConfigError::InvalidGrpcConfig {
+                reason: "security.grpc.enforcement = \"tier\" requires \
+                         grpc_uds.principal for UDS listeners"
+                    .to_string(),
+            });
+        };
+        validate_grpc_role_principal(config, principal, "grpc_uds.principal")?;
+    }
+    Ok(())
+}
+
+fn validate_grpc_role_principal(
+    config: &Config,
+    principal: &str,
+    field_name: &str,
+) -> Result<(), ConfigError> {
+    if config.security.grpc.roles.contains_key(principal) {
+        return Ok(());
+    }
+    Err(ConfigError::InvalidGrpcConfig {
+        reason: format!(
+            "security.grpc.enforcement = \"tier\" requires {field_name} \
+             principal {principal:?} to be present in [security.grpc.roles]"
+        ),
+    })
 }
 
 fn validate_grpc_principal(principal: Option<&str>, field_name: &str) -> Result<(), ConfigError> {
