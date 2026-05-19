@@ -281,7 +281,7 @@ via gRPC `GetMetrics` and `GetHealth` RPCs.
 
 | Metric | What it tells you |
 |--------|-------------------|
-| `bgp_event_stream_lagged_total{service,source}` | Events skipped because a live stream subscriber fell behind the bounded broadcast channel. `service` is `watch_events`, `watch_route_events`, or `watch_routes`; `source` is `route`, `session`, or `dataplane` where applicable |
+| `bgp_event_stream_lagged_total{service,source}` | Events skipped because a live stream subscriber fell behind the bounded broadcast channel. `service` is `watch_events`, `watch_route_events`, or `watch_routes`; `source` is `route`, `session`, `evpn`, or `dataplane` where applicable |
 | `bgp_event_stream_subscribers{service,source}` | Current live stream subscriber count by service/source |
 | `bgp_route_event_history_depth` | Current number of unicast route events retained for `ListRouteEvents` / `rustbgpctl events` history queries |
 | `bgp_route_event_history_capacity` | Fixed capacity of the bounded unicast route-event history ring |
@@ -598,8 +598,10 @@ rustbgpctl events watch --category session --type established,lost
 rustbgpctl events watch --category session --type notification_sent,notification_received
 rustbgpctl events watch --category policy --type policy_changed
 rustbgpctl events watch --category dataplane --type dataplane_status_changed
+rustbgpctl events watch --category evpn --type evpn_added,evpn_withdrawn,evpn_best_changed
 rustbgpctl events sessions --address 10.0.0.2 --type established,lost --limit 20
 rustbgpctl events policy --address 10.0.0.2 --type policy_changed --limit 20
+rustbgpctl events evpn --route-type 2 --rd 65000:100 --limit 20
 ```
 
 `events watch` tails the unified `EventService.WatchEvents` stream. The
@@ -607,27 +609,29 @@ live stream carries route add / withdraw / best-change events plus structured
 session lifecycle events (`state_changed`, `established`, `lost`,
 `peer_enabled`, `peer_disabled`), metadata-only BGP NOTIFICATION
 sent/received events (`notification_sent`, `notification_received`), opt-in
-policy mutation summaries (`policy_changed`), and dataplane status-row summary
-changes for the FIB / BLACKHOLE discard reconcilers
-(`dataplane_status_changed`). Prefix and family filters are route-only; use
+policy mutation summaries (`policy_changed`), EVPN route best-path events
+(`evpn_added`, `evpn_withdrawn`, `evpn_best_changed`), and dataplane status-row
+summary changes for the FIB / BLACKHOLE discard reconcilers
+(`dataplane_status_changed`). Prefix and family filters are unicast-route-only; use
 `--category session` with peer and type filters when watching session events,
 or `--category policy` to watch policy / neighbor-set / peer-group / chain
-mutations accepted by the runtime. Dataplane summary events are peerless and
-do not match `--address`, `--family`, or `--prefix`. FIB rejected counts
+mutations accepted by the runtime, or `--category evpn` when watching EVPN route
+changes. Dataplane summary events are peerless and do not match `--address`,
+`--family`, or `--prefix`. FIB rejected counts
 reflect surfaced status rows; sampled `route_limit_exceeded` rows are not a
 global suppressed-route total. Policy events describe runtime apply success;
 config-file persistence is separate. Session state-change events use a bounded
 observability channel separate from the lossless TCP collision-coordination
 path, so a saturated watch stream can miss lifecycle events without blocking
-BGP collision handling. If the client falls behind a bounded route or session
-source stream, `events watch` prints a `stream_lagged` warning with the missed
+BGP collision handling. If the client falls behind a bounded route, session,
+EVPN, or dataplane source stream, `events watch` prints a `stream_lagged` warning with the missed
 count; treat subsequent output as a live tail after a gap. Use `--backfill N`
 to print recent matching route history before the live tail starts. Backfill
-is route-history only; session, policy, and dataplane events are not backfilled
+is route-history only; session, policy, EVPN, and dataplane events are not backfilled
 through the live stream command.
 Backfilled route events use the same output shape as live route events, but
 the command still prints a history block followed by the live tail rather than
-merging the two by wall-clock timestamp. EVPN events remain follow-up work.
+merging the two by wall-clock timestamp.
 For recent route history without a live tail, use
 `rustbgpctl events --prefix <PREFIX>`. For recent session lifecycle history,
 use `rustbgpctl events sessions`; it reads the peer manager's bounded
@@ -641,6 +645,11 @@ process-local history from the peer manager. `--address` matches only
 peer-scoped policy events, so global policy and peer-group changes disappear
 from an address-filtered query. `rustbgpctl events policy --limit 0` requests
 the full bounded in-memory window.
+For recent EVPN route history, use `rustbgpctl events evpn`; it reads the RIB's
+bounded 4096-event process-local EVPN route-event history. `--address` matches
+both the current and previous best-path peer, `--route-type` accepts route types
+1 through 5, and `--rd` uses the same Route Distinguisher display format as
+`rustbgpctl evpn`.
 
 ### Pick the right observability surface
 
@@ -648,18 +657,19 @@ Use the narrowest surface for the question you are asking:
 
 | Question | Command / RPC | Notes |
 |----------|---------------|-------|
-| "What is changing right now?" | `rustbgpctl events watch` / `EventService.WatchEvents` | Live route, session, policy, and dataplane-summary stream. No replay after reconnect. |
+| "What is changing right now?" | `rustbgpctl events watch` / `EventService.WatchEvents` | Live route, session, policy, EVPN route, and dataplane-summary stream. No replay after reconnect. |
 | "What just changed for this prefix?" | `rustbgpctl events --prefix 203.0.113.0/24` / `ListRouteEvents` | Exact-prefix route history from the bounded in-memory RIB ring. |
 | "What policy changed recently?" | `rustbgpctl events policy` / `ListPolicyEvents` | Recent policy / neighbor-set / peer-group / chain mutation summaries from the bounded peer-manager ring. |
+| "What EVPN route changed recently?" | `rustbgpctl events evpn --route-type 2 --rd 65000:100` / `ListEvpnEvents` | Recent EVPN route add / withdraw / best-change history from the bounded RIB ring. |
 | "What routes does the general FIB runtime own or reject?" | `rustbgpctl rib fib` / `ListFibRoutes` | Snapshot of ADR-0061 configured-table route ownership. |
 | "What BLACKHOLE discards are installed or rejected?" | `rustbgpctl rib blackholes` / `ListBlackholeDiscards` | Snapshot of RFC 7999 discard programming. |
 | "Are EVPN L2/L3 dataplane pieces ready?" | `rustbgpctl evpn instances`, `rustbgpctl evpn nexthops`, `rustbgpctl evpn vrfs` | Snapshot of resolved EVPN config and latest dataplane reports. |
 | "Do I need alerting over time?" | Prometheus `/metrics` | Use counters/gauges for alerting; pair with CLI/RPC snapshots for row-level detail. |
 
 Streams answer "what happened while I was connected." Snapshot RPCs answer
-"what does the daemon currently believe or own." Bounded route, session, and
-policy history rings answer recent after-the-fact timeline questions. Dataplane
-and EVPN histories remain roadmap items.
+"what does the daemon currently believe or own." Bounded route, session,
+policy, and EVPN history rings answer recent after-the-fact timeline questions.
+Per-route/per-MAC dataplane histories remain roadmap items.
 
 ### Check health
 

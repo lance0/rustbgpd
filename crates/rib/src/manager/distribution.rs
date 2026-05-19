@@ -1842,7 +1842,7 @@ impl RibManager {
                 };
                 let previous_peer = previous_best.as_ref().map(|r| r.peer);
                 let peer = new_best.as_ref().map(|r| r.peer);
-                let _ = self.evpn_events_tx.send(crate::event::EvpnRouteEvent {
+                self.publish_evpn_route_event(crate::event::EvpnRouteEvent {
                     event_type,
                     key: *key,
                     best: new_best,

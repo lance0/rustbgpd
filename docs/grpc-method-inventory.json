@@ -3,10 +3,10 @@
   "package": "rustbgpd.v1",
   "source": "crates/api/src/authz.rs",
   "proto": "proto/rustbgpd.proto",
-  "method_count": 67,
+  "method_count": 68,
   "tier_counts": {
     "read": 0,
-    "sensitive_read": 34,
+    "sensitive_read": 35,
     "mutating": 15,
     "operator_only": 18
   },
@@ -62,6 +62,7 @@
     { "service": "rustbgpd.v1.RibService", "method": "ListFlowSpecRoutes", "path": "/rustbgpd.v1.RibService/ListFlowSpecRoutes", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "ListEvpnRoutes", "path": "/rustbgpd.v1.RibService/ListEvpnRoutes", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EventService", "method": "WatchEvents", "path": "/rustbgpd.v1.EventService/WatchEvents", "tier": "sensitive_read" },
+    { "service": "rustbgpd.v1.EventService", "method": "ListEvpnEvents", "path": "/rustbgpd.v1.EventService/ListEvpnEvents", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EventService", "method": "ListSessionEvents", "path": "/rustbgpd.v1.EventService/ListSessionEvents", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EventService", "method": "ListPolicyEvents", "path": "/rustbgpd.v1.EventService/ListPolicyEvents", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.InjectionService", "method": "AddPath", "path": "/rustbgpd.v1.InjectionService/AddPath", "tier": "operator_only" },

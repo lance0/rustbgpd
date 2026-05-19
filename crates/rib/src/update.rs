@@ -282,6 +282,22 @@ pub enum RibUpdate {
         /// Response channel carrying the broadcast receiver.
         reply: oneshot::Sender<broadcast::Receiver<EvpnRouteEvent>>,
     },
+    /// Query recent EVPN best-path change events from the bounded in-memory history.
+    QueryEvpnRouteEventHistory {
+        /// Optional peer filter. Matches both the current and previous best-path peer.
+        peer: Option<IpAddr>,
+        /// Optional EVPN route type filter. `None` = all route types.
+        route_type: Option<u8>,
+        /// Optional Route Distinguisher filter. `None` = all RDs.
+        rd: Option<rustbgpd_wire::RouteDistinguisher>,
+        /// Optional event type filter. Empty = all EVPN event types.
+        event_types: std::collections::BTreeSet<crate::event::RouteEventType>,
+        /// Maximum events to return from the recent window. 0 = manager default.
+        limit: usize,
+        /// Response channel carrying events ordered oldest-to-newest within
+        /// the selected recent window.
+        reply: oneshot::Sender<Vec<EvpnRouteEvent>>,
+    },
     /// End-of-RIB marker received from a peer for a given address family.
     EndOfRib {
         /// The peer that sent the `EoR`.
