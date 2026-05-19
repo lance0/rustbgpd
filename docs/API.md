@@ -82,8 +82,9 @@ ADR-0064. The runtime records tier decisions for every RPC via structured
 `bgp_grpc_authz_decisions_total{tier,result,authn,access_mode}`. Listener
 `max_tier` caps are enforced now; role-to-tier enforcement remains deferred.
 `result="audit_forward"` means the request stayed within the listener tier cap,
-while `result="listener_tier_denied"` means the method was rejected before the
-handler ran.
+`result="listener_tier_denied"` means the method was rejected before the
+handler ran, and `result="authn_failed"` means an over-cap bearer-token request
+failed authentication before tier details were disclosed.
 Operators can now predeclare `[security.grpc.roles]` and set explicit
 listener `principal` labels for bearer-token TCP and UDS listeners; those
 labels improve audit identity only and do not yet authorize or deny calls.

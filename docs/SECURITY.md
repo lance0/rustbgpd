@@ -261,11 +261,12 @@ The following security improvements are intentionally deferred and tracked in
 the roadmap:
 
 - ADR-0064 runtime enforcement for the checked gRPC method-tier matrix
-  (`read`, `sensitive_read`, `mutating`, `operator_only`). Audit-only
-  method-tier decision logs, metrics, staged principal/role config, listener
-  tier caps, and the `docs/adr/0064-threat-model.md` audit packet are present;
-  mTLS certificate principal extraction, role-based deny-by-tier enforcement,
-  and audit-log hardening remain deferred.
+  (`read`, `sensitive_read`, `mutating`, `operator_only`). Runtime
+  method-tier decision logs/metrics, staged principal/role config, enforced
+  listener tier caps, and the `docs/adr/0064-threat-model.md` audit packet are
+  present. Per-principal role enforcement is still audit/deferred; mTLS
+  certificate principal extraction, role-based deny-by-tier enforcement, and
+  audit-log hardening remain deferred.
 - TCP-AO (RFC 5925) dynamic-neighbor support, runtime key rotation,
   multi-key rollover, and accepted-socket inspection for BGP session
   protection

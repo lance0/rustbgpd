@@ -15,7 +15,9 @@ use tonic::{Request, Status};
 use tracing::{error, info, warn};
 
 use crate::authz::AuthTier;
-use crate::authz_runtime::{GrpcAuthAuditContext, GrpcAuthAuditLayer, GrpcAuthnKind};
+use crate::authz_runtime::{
+    BearerAuthSecret, GrpcAuthAuditContext, GrpcAuthAuditLayer, GrpcAuthnKind,
+};
 use crate::config_service::ConfigService;
 use crate::control_service::{ControlService, MrtTriggerTx};
 use crate::event_service::{DataplaneEventBroadcaster, EventService, dataplane_event_broadcaster};
@@ -213,13 +215,13 @@ fn uds_audit_context(
 
 #[derive(Clone, Debug)]
 struct AuthInterceptor {
-    expected_header: Option<Arc<String>>,
+    bearer_auth: Option<BearerAuthSecret>,
 }
 
 impl AuthInterceptor {
-    fn new(token: Option<String>) -> Self {
-        let expected_header = token.map(|token| Arc::new(format!("Bearer {token}")));
-        Self { expected_header }
+    fn new(token: Option<&str>) -> Self {
+        let bearer_auth = token.map(BearerAuthSecret::from_token);
+        Self { bearer_auth }
     }
 }
 
@@ -235,34 +237,12 @@ pub(crate) fn read_only_rejection(access_mode: AccessMode) -> Option<Status> {
 
 impl Interceptor for AuthInterceptor {
     fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
-        let Some(expected) = self.expected_header.as_ref() else {
+        let Some(bearer_auth) = self.bearer_auth.as_ref() else {
             return Ok(request);
         };
-
-        let value = request
-            .metadata()
-            .get("authorization")
-            .ok_or_else(|| Status::unauthenticated("missing authorization metadata"))?;
-        let actual = value
-            .to_str()
-            .map_err(|_| Status::unauthenticated("authorization metadata must be ASCII"))?;
-        if constant_time_eq(actual.as_bytes(), expected.as_bytes()) {
-            Ok(request)
-        } else {
-            Err(Status::unauthenticated("invalid bearer token"))
-        }
+        bearer_auth.authenticate_metadata(request.metadata())?;
+        Ok(request)
     }
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let max_len = a.len().max(b.len());
-    let mut diff = a.len() ^ b.len();
-    for idx in 0..max_len {
-        let lhs = a.get(idx).copied().unwrap_or(0);
-        let rhs = b.get(idx).copied().unwrap_or(0);
-        diff |= usize::from(lhs ^ rhs);
-    }
-    diff == 0
 }
 
 /// Start all configured gRPC listeners. Runs until the shutdown signal fires
@@ -488,7 +468,7 @@ async fn run_tcp_listener(
         tls.is_some(),
         principal.as_deref(),
     );
-    let interceptor = AuthInterceptor::new(auth_token);
+    let interceptor = AuthInterceptor::new(auth_token.as_deref());
     let mut builder = Server::builder();
     if let Some(tls) = tls {
         let identity = tonic::transport::Identity::from_pem(&tls.cert_pem, &tls.key_pem);
@@ -631,7 +611,7 @@ async fn run_uds_listener(
         auth_enabled,
         "starting gRPC UDS listener"
     );
-    let interceptor = AuthInterceptor::new(auth_token);
+    let interceptor = AuthInterceptor::new(auth_token.as_deref());
     let result = Server::builder()
         .layer(GrpcAuthAuditLayer::new(audit_context, metrics.clone()))
         .add_service(RibServiceServer::with_interceptor(
@@ -788,14 +768,14 @@ mod tests {
 
     #[test]
     fn auth_interceptor_rejects_missing_token() {
-        let mut interceptor = AuthInterceptor::new(Some("secret".to_string()));
+        let mut interceptor = AuthInterceptor::new(Some("secret"));
         let err = interceptor.call(Request::new(())).unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 
     #[test]
     fn auth_interceptor_accepts_matching_token() {
-        let mut interceptor = AuthInterceptor::new(Some("secret".to_string()));
+        let mut interceptor = AuthInterceptor::new(Some("secret"));
         let mut request = Request::new(());
         request
             .metadata_mut()
@@ -805,7 +785,7 @@ mod tests {
 
     #[test]
     fn auth_interceptor_rejects_wrong_token() {
-        let mut interceptor = AuthInterceptor::new(Some("secret".to_string()));
+        let mut interceptor = AuthInterceptor::new(Some("secret"));
         let mut request = Request::new(());
         request
             .metadata_mut()

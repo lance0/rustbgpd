@@ -55,7 +55,7 @@ pub struct GrpcAuthAuditContext {
     max_tier: AuthTier,
     authn: GrpcAuthnKind,
     principal: String,
-    expected_bearer_header: Option<Arc<String>>,
+    expected_bearer_header: Option<BearerAuthSecret>,
 }
 
 impl GrpcAuthAuditContext {
@@ -80,7 +80,7 @@ impl GrpcAuthAuditContext {
 
     #[must_use]
     pub fn with_bearer_token(mut self, token: Option<&str>) -> Self {
-        self.expected_bearer_header = token.map(|token| Arc::new(format!("Bearer {token}")));
+        self.expected_bearer_header = token.map(BearerAuthSecret::from_token);
         self
     }
 
@@ -101,19 +101,59 @@ impl GrpcAuthAuditContext {
 
     fn bearer_auth_error(&self, headers: &http::HeaderMap) -> Option<Status> {
         let expected = self.expected_bearer_header.as_ref()?;
+        expected.auth_error_from_http_headers(headers)
+    }
+}
+
+/// Redacted bearer-token verifier shared by the audit layer and tonic interceptor.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct BearerAuthSecret {
+    expected_header: Arc<String>,
+}
+
+impl BearerAuthSecret {
+    pub(crate) fn from_token(token: &str) -> Self {
+        Self {
+            expected_header: Arc::new(format!("Bearer {token}")),
+        }
+    }
+
+    pub(crate) fn authenticate_metadata(
+        &self,
+        metadata: &tonic::metadata::MetadataMap,
+    ) -> Result<(), Status> {
+        let value = metadata
+            .get("authorization")
+            .ok_or_else(|| Status::unauthenticated("missing authorization metadata"))?;
+        let actual = value
+            .to_str()
+            .map_err(|_| Status::unauthenticated("authorization metadata must be ASCII"))?;
+        self.authenticate_str(actual)
+    }
+
+    fn auth_error_from_http_headers(&self, headers: &http::HeaderMap) -> Option<Status> {
         let Some(value) = headers.get("authorization") else {
             return Some(Status::unauthenticated("missing authorization metadata"));
         };
-        let Ok(actual) = value.to_str() else {
-            return Some(Status::unauthenticated(
-                "authorization metadata must be ASCII",
-            ));
-        };
-        if constant_time_eq(actual.as_bytes(), expected.as_bytes()) {
-            None
+        let actual = value
+            .to_str()
+            .map_err(|_| Status::unauthenticated("authorization metadata must be ASCII"))
+            .and_then(|actual| self.authenticate_str(actual));
+        actual.err()
+    }
+
+    fn authenticate_str(&self, actual: &str) -> Result<(), Status> {
+        if constant_time_eq(actual.as_bytes(), self.expected_header.as_bytes()) {
+            Ok(())
         } else {
-            Some(Status::unauthenticated("invalid bearer token"))
+            Err(Status::unauthenticated("invalid bearer token"))
         }
+    }
+}
+
+impl fmt::Debug for BearerAuthSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("BearerAuthSecret(<redacted>)")
     }
 }
 
@@ -205,6 +245,7 @@ where
             // invalid callers still receive UNAUTHENTICATED instead of
             // learning listener tier details via PERMISSION_DENIED.
             if let Some(status) = self.context.bearer_auth_error(req.headers()) {
+                record_audit_decision(path, &self.context, &self.metrics, "authn_failed");
                 let response = status.into_http::<Body>();
                 return Box::pin(async move { Ok(response) });
             }
@@ -452,6 +493,52 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
 
         let text = gather_text(&metrics);
+        assert!(text.contains("result=\"authn_failed\""));
         assert!(!text.contains("listener_tier_denied"));
+    }
+
+    #[tokio::test]
+    async fn audit_layer_denies_over_cap_request_after_valid_bearer_token() {
+        let metrics = BgpMetrics::new();
+        let context = GrpcAuthAuditContext::new(
+            "tcp://127.0.0.1:50051",
+            "read_write",
+            AuthTier::SensitiveRead,
+            GrpcAuthnKind::BearerToken,
+            "bearer-token",
+        )
+        .with_bearer_token(Some("secret"));
+        let layer = GrpcAuthAuditLayer::new(context, metrics.clone());
+        let mut service = layer.layer(EchoService);
+        let request = Request::builder()
+            .uri("/rustbgpd.v1.NeighborService/AddNeighbor")
+            .header("authorization", "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+        let status = tonic::Status::from_header_map(response.headers()).unwrap();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+
+        let text = gather_text(&metrics);
+        assert!(text.contains("result=\"listener_tier_denied\""));
+        assert!(!text.contains("result=\"authn_failed\""));
+    }
+
+    #[test]
+    fn audit_context_debug_redacts_bearer_secret() {
+        let context = GrpcAuthAuditContext::new(
+            "tcp://127.0.0.1:50051",
+            "read_write",
+            AuthTier::SensitiveRead,
+            GrpcAuthnKind::BearerToken,
+            "bearer-token",
+        )
+        .with_bearer_token(Some("secret"));
+
+        let rendered = format!("{context:?}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("secret"));
+        assert!(!rendered.contains("Bearer secret"));
     }
 }
