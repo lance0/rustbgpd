@@ -54,7 +54,7 @@ prost = "0.14"
 prometheus = "0.14"
 socket2 = { version = "0.6", features = ["all"] }
 tokio-stream = { version = "0.1", features = ["sync", "net"] }
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 axum = "0.8"
 tower = "0.5"
 libc = "0.2"

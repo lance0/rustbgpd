@@ -91,7 +91,8 @@ fn rustbgpd_uri_san(names: &[GeneralName<'_>], scan: &mut PrincipalScan) -> Opti
     for name in names {
         let candidate = match name {
             GeneralName::URI(uri)
-                if uri_scheme(uri).is_some_and(|scheme| scheme == RUSTBGPD_URI_SCHEME) =>
+                if uri_scheme(uri)
+                    .is_some_and(|scheme| scheme.eq_ignore_ascii_case(RUSTBGPD_URI_SCHEME)) =>
             {
                 Some(*uri)
             }
@@ -182,6 +183,22 @@ mod tests {
         assert_eq!(
             principal_from_der(&der).unwrap(),
             "rustbgpd://operator/alice"
+        );
+    }
+
+    #[test]
+    fn principal_matches_rustbgpd_uri_scheme_case_insensitively() {
+        let der = cert_with_sans(
+            vec![
+                SanType::URI("RustBgPd://operator/alice".try_into().unwrap()),
+                SanType::Rfc822Name("alice@example.com".try_into().unwrap()),
+            ],
+            "alice-cn",
+        );
+
+        assert_eq!(
+            principal_from_der(&der).unwrap(),
+            "RustBgPd://operator/alice"
         );
     }
 
