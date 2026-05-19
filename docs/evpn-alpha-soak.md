@@ -107,10 +107,16 @@ none of them block the current release on their own.
   Linux FDB / NHG reconciliation stops programming forwarding state for
   a quarantined remote MAC while Loc-RIB, RR reflection, and
   `ListEvpnRoutes` remain visible.
-- [ ] **Duplicate-MAC full remote-route processing / loop-protection
-  completion.** Full RFC "stop processing" behavior, BGP
-  route-processing suppression semantics, kernel drop / filter
-  primitives, and an optional manual clear API remain follow-up scope.
+- [x] **Duplicate-MAC remote route-processing suppression.** During an
+  active `suppress_local` quarantine, EVPN Type 2 MAC-only and MAC+IP
+  best-path changes still refresh the originator's remote contender
+  caches, but no longer drive `on_remote_changed` /
+  `on_remote_ip_changed` route-processing callbacks. This preserves
+  Loc-RIB, RR reflection, and `ListEvpnRoutes` visibility while keeping
+  local Type 2 originations suppressed until timed recovery.
+- [ ] **Duplicate-MAC full loop-protection completion.** Explicit
+  kernel drop / filter primitives and an optional manual clear API
+  remain follow-up scope.
 - [x] **Sticky MAC anti-spoof config schema.** Closed by ADR-0056
   — `[[evpn_instances]].sticky_macs` lists MACs to mark with the
   RFC 7432 §15.4 sticky bit on origination. **Not** a static FDB:

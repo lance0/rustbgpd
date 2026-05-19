@@ -634,6 +634,22 @@ fn duplicate_mac_is_quarantined(
         .is_quarantined(DuplicateMacKey::new(vni, mac), Instant::now())
 }
 
+fn remote_route_processing_suppressed(
+    state: &OriginatorState,
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+) -> bool {
+    if !duplicate_mac_is_quarantined(state, vni, mac) {
+        return false;
+    }
+    debug!(
+        ?vni,
+        ?mac,
+        "EVPN duplicate-MAC quarantine suppresses remote route-processing diff"
+    );
+    true
+}
+
 fn publish_duplicate_mac_quarantines(
     tx: &watch::Sender<Arc<BTreeSet<DuplicateMacKey>>>,
     active: &BTreeSet<DuplicateMacKey>,
@@ -1372,6 +1388,7 @@ async fn repoll_rib(
 ) -> Result<(), RibQueryError> {
     let routes = query_evpn_routes(rib_tx).await?;
     let (new_mac_view, new_mac_ip_view) = build_remote_views(instances, &routes);
+    let mut suppressed_remote_diffs: BTreeSet<(EvpnInstanceId, MacAddress)> = BTreeSet::new();
 
     // --- MAC-only contender diff ---
     let mut mac_affected: Vec<(EvpnInstanceId, MacAddress)> = Vec::new();
@@ -1389,19 +1406,8 @@ async fn repoll_rib(
         let Some(inst) = instances.get(vni) else {
             continue;
         };
-        if duplicate_mac_is_quarantined(state, vni, mac) {
-            suppress_local_originations_for_mac(
-                vni,
-                mac,
-                state,
-                inst,
-                None,
-                rib_tx,
-                metrics,
-                originated_local_mac_counts,
-                vni_to_esi,
-            )
-            .await;
+        if remote_route_processing_suppressed(state, vni, mac) {
+            suppressed_remote_diffs.insert((vni, mac));
             continue;
         }
         let view_present = new_mac_view.contains_key(&(vni, mac));
@@ -1448,19 +1454,8 @@ async fn repoll_rib(
         let Some(inst) = instances.get(vni) else {
             continue;
         };
-        if duplicate_mac_is_quarantined(state, vni, mac) {
-            suppress_local_originations_for_mac(
-                vni,
-                mac,
-                state,
-                inst,
-                None,
-                rib_tx,
-                metrics,
-                originated_local_mac_counts,
-                vni_to_esi,
-            )
-            .await;
+        if remote_route_processing_suppressed(state, vni, mac) {
+            suppressed_remote_diffs.insert((vni, mac));
             continue;
         }
         let view_present = new_mac_ip_view.contains_key(&(vni, mac, ip));
@@ -1483,6 +1478,24 @@ async fn repoll_rib(
             mac,
             state,
             inst,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+            vni_to_esi,
+        )
+        .await;
+    }
+
+    for (vni, mac) in suppressed_remote_diffs {
+        let Some(inst) = instances.get(vni) else {
+            continue;
+        };
+        suppress_local_originations_for_mac(
+            vni,
+            mac,
+            state,
+            inst,
+            None,
             rib_tx,
             metrics,
             originated_local_mac_counts,
@@ -2143,12 +2156,23 @@ mod tests {
         seq: Option<u32>,
         sticky: bool,
     ) -> EvpnRibRoute {
+        evpn_macip_route_with_ip(v, m, None, next_hop, seq, sticky)
+    }
+
+    fn evpn_macip_route_with_ip(
+        v: u32,
+        m: u8,
+        ip: Option<&str>,
+        next_hop: &str,
+        seq: Option<u32>,
+        sticky: bool,
+    ) -> EvpnRibRoute {
         let macip = EvpnMacIp {
             rd: rd(65000, v),
             esi: EthernetSegmentIdentifier::ZERO,
             ethernet_tag: EthernetTagId(0),
             mac: mac(m),
-            ip: None,
+            ip: ip.map(ipa),
             label1: MplsLabel::new(v),
             label2: None,
         };
@@ -2604,6 +2628,210 @@ mod tests {
             "recovery should replay every still-live MAC+IP binding without a MAC-only route"
         );
         assert_quarantine_metric(&metrics, 100, 0xAA, 0);
+    }
+
+    #[tokio::test]
+    async fn duplicate_mac_quarantine_suppresses_remote_mac_repoll_processing() {
+        let instances = instance_table_with(suppress_local_instance(100));
+        let route_a = evpn_macip_route(100, 0xAA, "10.0.0.2", Some(5), false);
+        let route_b = evpn_macip_route(100, 0xAA, "10.0.0.3", Some(9), false);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (log, routes_tx, _responder) =
+            rib_capture_dynamic_query_responder(rib_rx, vec![route_a.clone()]);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = originator_state(&instances);
+
+        observe_test(
+            LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+        let inst = instances.get(vni(100)).unwrap();
+        assert!(record_duplicate_mac_move(
+            &metrics,
+            &mut state,
+            inst,
+            vni(100),
+            mac(0xAA)
+        ));
+        log.lock().await.clear();
+
+        repoll_rib(
+            &instances,
+            &rib_tx,
+            &mut state,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            log.lock().await.clone(),
+            vec![RibAction::Withdraw(macip_key_with(100, 0xAA, None))],
+            "first quarantined remote diff must only enforce local suppression"
+        );
+        let view = state
+            .remote_mac_view
+            .get(&(vni(100), mac(0xAA)))
+            .expect("remote cache still updates while processing is suppressed");
+        assert_eq!(view.next_hop, ipa("10.0.0.2"));
+
+        log.lock().await.clear();
+        routes_tx.send_replace(vec![route_b]);
+        repoll_rib(
+            &instances,
+            &rib_tx,
+            &mut state,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            log.lock().await.is_empty(),
+            "remote MAC changes during quarantine must not reprocess originator state"
+        );
+        let view = state
+            .remote_mac_view
+            .get(&(vni(100), mac(0xAA)))
+            .expect("remote cache tracks the latest remote winner");
+        assert_eq!(view.next_hop, ipa("10.0.0.3"));
+        assert_eq!(view.mobility_sequence, Some(9));
+
+        routes_tx.send_replace(vec![]);
+        repoll_rib(
+            &instances,
+            &rib_tx,
+            &mut state,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            log.lock().await.is_empty(),
+            "remote MAC withdrawals during quarantine must not re-inject local routes"
+        );
+        assert!(
+            !state.remote_mac_view.contains_key(&(vni(100), mac(0xAA))),
+            "remote cache still reflects the withdrawn route"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_mac_quarantine_suppresses_remote_mac_ip_repoll_processing() {
+        let instances = instance_table_with(suppress_local_instance(100));
+        let route_a =
+            evpn_macip_route_with_ip(100, 0xAA, Some("192.0.2.10"), "10.0.0.2", Some(5), false);
+        let route_b =
+            evpn_macip_route_with_ip(100, 0xAA, Some("192.0.2.10"), "10.0.0.3", Some(9), false);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (log, routes_tx, _responder) =
+            rib_capture_dynamic_query_responder(rib_rx, vec![route_a.clone()]);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = originator_state(&instances);
+
+        observe_test(
+            LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+        observe_test(
+            LocalMacObservation::IpAdded {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ip: ipa("192.0.2.10"),
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+        let inst = instances.get(vni(100)).unwrap();
+        assert!(record_duplicate_mac_move(
+            &metrics,
+            &mut state,
+            inst,
+            vni(100),
+            mac(0xAA)
+        ));
+        log.lock().await.clear();
+
+        repoll_rib(
+            &instances,
+            &rib_tx,
+            &mut state,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            log.lock().await.clone(),
+            vec![RibAction::Withdraw(macip_key_with(
+                100,
+                0xAA,
+                Some("192.0.2.10")
+            ))],
+            "first quarantined remote MAC+IP diff must only enforce local suppression"
+        );
+        let view = state
+            .remote_mac_ip_view
+            .get(&(vni(100), mac(0xAA), ipa("192.0.2.10")))
+            .expect("remote MAC+IP cache still updates while processing is suppressed");
+        assert_eq!(view.next_hop, ipa("10.0.0.2"));
+
+        log.lock().await.clear();
+        routes_tx.send_replace(vec![route_b]);
+        repoll_rib(
+            &instances,
+            &rib_tx,
+            &mut state,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            log.lock().await.is_empty(),
+            "remote MAC+IP changes during quarantine must not reprocess originator state"
+        );
+        let view = state
+            .remote_mac_ip_view
+            .get(&(vni(100), mac(0xAA), ipa("192.0.2.10")))
+            .expect("remote MAC+IP cache tracks the latest remote winner");
+        assert_eq!(view.next_hop, ipa("10.0.0.3"));
+        assert_eq!(view.mobility_sequence, Some(9));
     }
 
     #[test]
@@ -3084,6 +3312,37 @@ mod tests {
         })
     }
 
+    /// Build a mutable `QueryEvpnRoutes` responder that also records
+    /// Inject/Withdraw actions. Tests use this to drive consecutive
+    /// full-RIB projections without restarting originator state.
+    fn rib_capture_dynamic_query_responder(
+        mut rib_rx: mpsc::Receiver<RibUpdate>,
+        routes: Vec<EvpnRibRoute>,
+    ) -> RibDynamicResponder {
+        let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let log_clone = log.clone();
+        let (routes_tx, routes_rx) = watch::channel(routes);
+        let join = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                match msg {
+                    RibUpdate::QueryEvpnRoutes { reply } => {
+                        let _ = reply.send(routes_rx.borrow().clone());
+                    }
+                    RibUpdate::InjectEvpn { route, reply } => {
+                        log_clone.lock().await.push(RibAction::Inject(route.key()));
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { key, reply } => {
+                        log_clone.lock().await.push(RibAction::Withdraw(key));
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        (log, routes_tx, join)
+    }
+
     /// Gate 7c: a Type 2 event triggers a `repoll_rib` round-trip and
     /// the resulting full projection populates `remote_view`. Sub-
     /// second wakeup, full projection — neither half is short-cut.
@@ -3455,10 +3714,7 @@ mod tests {
     /// handle; the responder ack's every Inject/Withdraw with `Ok(())`.
     fn rib_capture_responder(
         mut rib_rx: mpsc::Receiver<RibUpdate>,
-    ) -> (
-        Arc<tokio::sync::Mutex<Vec<RibAction>>>,
-        tokio::task::JoinHandle<()>,
-    ) {
+    ) -> (RibActionLog, tokio::task::JoinHandle<()>) {
         let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let log_clone = log.clone();
         let join = tokio::spawn(async move {
@@ -3487,6 +3743,13 @@ mod tests {
         Inject(EvpnRouteKey),
         Withdraw(EvpnRouteKey),
     }
+
+    type RibActionLog = Arc<tokio::sync::Mutex<Vec<RibAction>>>;
+    type RibDynamicResponder = (
+        RibActionLog,
+        watch::Sender<Vec<EvpnRibRoute>>,
+        tokio::task::JoinHandle<()>,
+    );
 
     fn macip_key_with(rd_v: u32, mac_b: u8, ip_str: Option<&str>) -> EvpnRouteKey {
         EvpnRouteKey::MacIp {
