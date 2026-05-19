@@ -98,9 +98,16 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
         "dataplane_status_changed" | "dataplane_changed" => {
             Ok(BgpEventType::DataplaneStatusChanged as i32)
         }
+        "dataplane_route_installed" | "fib_installed" => {
+            Ok(BgpEventType::DataplaneRouteInstalled as i32)
+        }
+        "dataplane_route_withdrawn" | "fib_withdrawn" => {
+            Ok(BgpEventType::DataplaneRouteWithdrawn as i32)
+        }
+        "dataplane_route_failed" | "fib_failed" => Ok(BgpEventType::DataplaneRouteFailed as i32),
         "stream_lagged" | "lagged" => Ok(BgpEventType::StreamLagged as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported event type {other:?}; expected added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, dataplane_status_changed, or stream_lagged"
+            "unsupported event type {other:?}; expected added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, dataplane_status_changed, dataplane_route_installed, dataplane_route_withdrawn, dataplane_route_failed, or stream_lagged"
         ))),
     }
 }
@@ -150,6 +157,15 @@ fn bgp_event_type_is_route(event_type: i32) -> bool {
     )
 }
 
+fn bgp_event_type_is_dataplane_route(event_type: i32) -> bool {
+    matches!(
+        BgpEventType::try_from(event_type),
+        Ok(BgpEventType::DataplaneRouteInstalled)
+            | Ok(BgpEventType::DataplaneRouteWithdrawn)
+            | Ok(BgpEventType::DataplaneRouteFailed)
+    )
+}
+
 fn validate_route_only_filters(
     categories: &[i32],
     event_types: &[i32],
@@ -160,9 +176,19 @@ fn validate_route_only_filters(
         categories.is_empty() || categories.contains(&(EventCategory::Route as i32));
     let route_type_selected =
         event_types.is_empty() || event_types.iter().copied().any(bgp_event_type_is_route);
-    if !(route_category_selected && route_type_selected) && (family.is_some() || prefix.is_some()) {
+    let dataplane_category_selected =
+        categories.is_empty() || categories.contains(&(EventCategory::Dataplane as i32));
+    let dataplane_type_selected = event_types.is_empty()
+        || event_types
+            .iter()
+            .copied()
+            .any(bgp_event_type_is_dataplane_route);
+    if !((route_category_selected && route_type_selected)
+        || (dataplane_category_selected && dataplane_type_selected))
+        && (family.is_some() || prefix.is_some())
+    {
         return Err(CliError::Argument(
-            "--family and --prefix are route-only filters; remove them or select a route category/type"
+            "--family and --prefix require route or dataplane route events; remove them or select a compatible category/type"
                 .into(),
         ));
     }
@@ -183,6 +209,9 @@ fn bgp_event_type_json_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::NotificationReceived) => "notification_received",
         Ok(BgpEventType::PolicyChanged) => "policy_changed",
         Ok(BgpEventType::DataplaneStatusChanged) => "dataplane_status_changed",
+        Ok(BgpEventType::DataplaneRouteInstalled) => "dataplane_route_installed",
+        Ok(BgpEventType::DataplaneRouteWithdrawn) => "dataplane_route_withdrawn",
+        Ok(BgpEventType::DataplaneRouteFailed) => "dataplane_route_failed",
         Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
@@ -202,6 +231,9 @@ fn bgp_event_type_display_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::NotificationReceived) => "notification_received",
         Ok(BgpEventType::PolicyChanged) => "policy_changed",
         Ok(BgpEventType::DataplaneStatusChanged) => "dataplane_status_changed",
+        Ok(BgpEventType::DataplaneRouteInstalled) => "dataplane_route_installed",
+        Ok(BgpEventType::DataplaneRouteWithdrawn) => "dataplane_route_withdrawn",
+        Ok(BgpEventType::DataplaneRouteFailed) => "dataplane_route_failed",
         Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
@@ -337,6 +369,35 @@ fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
         object.insert(
             "failed".to_string(),
             serde_json::Value::from(dataplane.failed),
+        );
+    }
+    if let Some(crate::proto::bgp_event::Payload::DataplaneRoute(route)) = event.payload.as_ref()
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert(
+            "source".to_string(),
+            serde_json::Value::String(route.source.clone()),
+        );
+        object.insert(
+            "action".to_string(),
+            serde_json::Value::String(route.action.clone()),
+        );
+        object.insert(
+            "table_name".to_string(),
+            serde_json::Value::String(route.table_name.clone()),
+        );
+        object.insert(
+            "table_id".to_string(),
+            serde_json::Value::from(route.table_id),
+        );
+        object.insert("metric".to_string(), serde_json::Value::from(route.metric));
+        object.insert(
+            "next_hop".to_string(),
+            serde_json::Value::String(route.next_hop.clone()),
+        );
+        object.insert(
+            "reason".to_string(),
+            serde_json::Value::String(route.reason.clone()),
         );
     }
     if let Some(crate::proto::bgp_event::Payload::StreamLag(lag)) = event.payload.as_ref()
@@ -541,15 +602,15 @@ fn validate_event_filter_categories(
 
     let wants_route = categories.contains(&(EventCategory::Route as i32));
     let wants_session = categories.contains(&(EventCategory::Session as i32));
-    if !wants_route && (family.is_some() || prefix.is_some()) {
+    let wants_dataplane = categories.contains(&(EventCategory::Dataplane as i32));
+    if !wants_route && !wants_dataplane && (family.is_some() || prefix.is_some()) {
         return Err(CliError::Argument(
-            "--family and --prefix require --category route because they are route-only filters"
-                .into(),
+            "--family and --prefix require --category route or --category dataplane".into(),
         ));
     }
-    if !wants_route && !wants_session && neighbor.is_some() {
+    if !wants_route && !wants_session && !wants_dataplane && neighbor.is_some() {
         return Err(CliError::Argument(
-            "--address requires --category route or --category session because dataplane events are peerless"
+            "--address requires --category route, --category session, or --category dataplane"
                 .into(),
         ));
     }
@@ -905,6 +966,14 @@ mod tests {
             parse_bgp_event_type("dataplane_changed").unwrap(),
             BgpEventType::DataplaneStatusChanged as i32
         );
+        assert_eq!(
+            parse_bgp_event_type("dataplane_route_installed").unwrap(),
+            BgpEventType::DataplaneRouteInstalled as i32
+        );
+        assert_eq!(
+            parse_bgp_event_type("fib_failed").unwrap(),
+            BgpEventType::DataplaneRouteFailed as i32
+        );
         assert!(parse_bgp_event_type("policy_filtered").is_err());
     }
 
@@ -1184,11 +1253,8 @@ mod tests {
     }
 
     #[test]
-    fn event_filter_rejects_route_only_filters_without_route_category() {
-        let categories = vec![
-            EventCategory::Session as i32,
-            EventCategory::Dataplane as i32,
-        ];
+    fn event_filter_rejects_route_filters_without_route_or_dataplane_category() {
+        let categories = vec![EventCategory::Session as i32, EventCategory::Policy as i32];
         let err = validate_event_filter_categories(
             &categories,
             &None,
@@ -1196,7 +1262,7 @@ mod tests {
             &None,
         )
         .unwrap_err();
-        assert!(format!("{err}").contains("--category route"));
+        assert!(format!("{err}").contains("--category route or --category dataplane"));
 
         let err = validate_event_filter_categories(
             &categories,
@@ -1205,7 +1271,7 @@ mod tests {
             &Some("203.0.113.0/24".to_string()),
         )
         .unwrap_err();
-        assert!(format!("{err}").contains("--category route"));
+        assert!(format!("{err}").contains("--category route or --category dataplane"));
     }
 
     #[test]
@@ -1219,16 +1285,10 @@ mod tests {
     }
 
     #[test]
-    fn event_filter_rejects_peer_for_dataplane_only_category() {
+    fn event_filter_allows_peer_for_dataplane_route_events() {
         let categories = vec![EventCategory::Dataplane as i32];
-        let err = validate_event_filter_categories(
-            &categories,
-            &Some("10.0.0.1".to_string()),
-            None,
-            &None,
-        )
-        .unwrap_err();
-        assert!(format!("{err}").contains("peerless"));
+        validate_event_filter_categories(&categories, &Some("10.0.0.1".to_string()), None, &None)
+            .unwrap();
     }
 
     #[test]
@@ -1262,11 +1322,55 @@ mod tests {
     }
 
     #[test]
+    fn json_bgp_event_dataplane_route_includes_route_fields() {
+        let event = BgpEvent {
+            timestamp: "1".to_string(),
+            category: EventCategory::Dataplane as i32,
+            event_type: BgpEventType::DataplaneRouteFailed as i32,
+            severity: 2,
+            peer_address: "10.0.0.1".to_string(),
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+            afi_safi: AddressFamily::Ipv4Unicast as i32,
+            summary: "dataplane fib route failed 203.0.113.0/24".to_string(),
+            payload: Some(crate::proto::bgp_event::Payload::DataplaneRoute(
+                crate::proto::DataplaneRouteEvent {
+                    source: "fib".to_string(),
+                    action: "failed".to_string(),
+                    table_name: "blue".to_string(),
+                    table_id: 100,
+                    metric: 20,
+                    prefix: "203.0.113.0".to_string(),
+                    prefix_length: 24,
+                    next_hop: "192.0.2.1".to_string(),
+                    peer_address: "10.0.0.1".to_string(),
+                    timestamp: "1".to_string(),
+                    reason: "install_failed:permission denied".to_string(),
+                },
+            )),
+            ..Default::default()
+        };
+
+        let value = json_bgp_event(&event);
+        assert_eq!(value["category"], "dataplane");
+        assert_eq!(value["event_type"], "dataplane_route_failed");
+        assert_eq!(value["prefix"], "203.0.113.0/24");
+        assert_eq!(value["afi_safi"], "ipv4_unicast");
+        assert_eq!(value["source"], "fib");
+        assert_eq!(value["action"], "failed");
+        assert_eq!(value["table_name"], "blue");
+        assert_eq!(value["table_id"], 100);
+        assert_eq!(value["metric"], 20);
+        assert_eq!(value["next_hop"], "192.0.2.1");
+        assert_eq!(value["reason"], "install_failed:permission denied");
+    }
+
+    #[test]
     fn route_only_filters_reject_policy_only_category() {
         let categories = vec![EventCategory::Policy as i32];
         let err = validate_route_only_filters(&categories, &[], None, Some("203.0.113.0/24"))
             .unwrap_err();
-        assert!(err.to_string().contains("route-only filters"));
+        assert!(err.to_string().contains("route or dataplane route events"));
     }
 
     #[test]
@@ -1280,7 +1384,7 @@ mod tests {
         let event_types = vec![BgpEventType::PolicyChanged as i32];
         let err = validate_route_only_filters(&[], &event_types, None, Some("203.0.113.0/24"))
             .unwrap_err();
-        assert!(err.to_string().contains("route-only filters"));
+        assert!(err.to_string().contains("route or dataplane route events"));
     }
 
     #[test]

@@ -533,7 +533,8 @@ enum EventsAction {
         /// Event type filter: added, withdrawn, best_changed,
         /// state_changed, established, lost, peer_enabled, peer_disabled,
         /// notification_sent, notification_received, policy_changed,
-        /// dataplane_status_changed
+        /// dataplane_status_changed, dataplane_route_installed,
+        /// dataplane_route_withdrawn, dataplane_route_failed
         #[arg(long = "type", value_delimiter = ',')]
         event_types: Vec<String>,
 
