@@ -39,6 +39,7 @@ const DATAPLANE_EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::
 const DATAPLANE_EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
 pub(crate) type DataplaneEventBroadcaster = Arc<Mutex<Option<broadcast::Sender<proto::BgpEvent>>>>;
+pub(crate) type DataplaneRouteEventBroadcaster = Option<broadcast::Sender<proto::BgpEvent>>;
 
 #[must_use]
 pub(crate) fn dataplane_event_broadcaster() -> DataplaneEventBroadcaster {
@@ -53,6 +54,7 @@ pub struct EventService {
     blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
     fib_route_snapshot: FibRouteSnapshotFn,
     dataplane_events: DataplaneEventBroadcaster,
+    dataplane_route_events: DataplaneRouteEventBroadcaster,
     metrics: BgpMetrics,
 }
 
@@ -101,6 +103,7 @@ impl EventService {
             blackhole_discard_snapshot,
             fib_route_snapshot,
             dataplane_events,
+            None,
             BgpMetrics::new(),
         )
     }
@@ -112,6 +115,7 @@ impl EventService {
         blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
         fib_route_snapshot: FibRouteSnapshotFn,
         dataplane_events: DataplaneEventBroadcaster,
+        dataplane_route_events: DataplaneRouteEventBroadcaster,
         metrics: BgpMetrics,
     ) -> Self {
         Self {
@@ -120,6 +124,7 @@ impl EventService {
             blackhole_discard_snapshot,
             fib_route_snapshot,
             dataplane_events,
+            dataplane_route_events,
             metrics,
         }
     }
@@ -301,11 +306,16 @@ impl proto::event_service_server::EventService for EventService {
         let dataplane_stream: Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send>> =
             if filter.wants_dataplane_events() {
                 let broadcast_rx = self.subscribe_dataplane_events();
+                let dataplane_route_rx = self
+                    .dataplane_route_events
+                    .as_ref()
+                    .map(tokio::sync::broadcast::Sender::subscribe);
+                let dataplane_filter = filter.clone();
                 let dataplane_metrics = self.metrics.clone();
                 let dataplane_subscriber_guard =
                     dataplane_metrics.event_stream_subscriber_guard("watch_events", "dataplane");
-                Box::pin(BroadcastStream::new(broadcast_rx).filter_map(
-                    move |result| match result {
+                let aggregate_stream =
+                    BroadcastStream::new(broadcast_rx).filter_map(move |result| match result {
                         Err(BroadcastStreamRecvError::Lagged(missed)) => {
                             let _subscriber_guard = &dataplane_subscriber_guard;
                             dataplane_metrics.record_event_stream_lagged(
@@ -321,10 +331,52 @@ impl proto::event_service_server::EventService for EventService {
                         }
                         Ok(event) => {
                             let _subscriber_guard = &dataplane_subscriber_guard;
-                            Some(Ok(event))
+                            if dataplane_filter.matches_dataplane_bgp_event(&event) {
+                                Some(Ok(event))
+                            } else {
+                                None
+                            }
                         }
-                    },
-                ))
+                    });
+                let route_stream: Pin<
+                    Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send>,
+                > = if let Some(dataplane_route_rx) = dataplane_route_rx {
+                    let dataplane_filter = filter.clone();
+                    let dataplane_route_metrics = self.metrics.clone();
+                    let dataplane_route_subscriber_guard = dataplane_route_metrics
+                        .event_stream_subscriber_guard("watch_events", "dataplane_route");
+                    Box::pin(BroadcastStream::new(dataplane_route_rx).filter_map(
+                        move |result| match result {
+                            Err(BroadcastStreamRecvError::Lagged(missed)) => {
+                                let _subscriber_guard = &dataplane_route_subscriber_guard;
+                                dataplane_route_metrics.record_event_stream_lagged(
+                                    "watch_events",
+                                    "dataplane_route",
+                                    missed,
+                                );
+                                debug!(
+                                    missed,
+                                    "WatchEvents dataplane route subscriber lagged, emitting missed-event signal"
+                                );
+                                Some(Ok(stream_lag_bgp_event(
+                                    proto::EventCategory::Dataplane,
+                                    missed,
+                                )))
+                            }
+                            Ok(event) => {
+                                let _subscriber_guard = &dataplane_route_subscriber_guard;
+                                if dataplane_filter.matches_dataplane_bgp_event(&event) {
+                                    Some(Ok(event))
+                                } else {
+                                    None
+                                }
+                            }
+                        },
+                    ))
+                } else {
+                    Box::pin(tokio_stream::empty())
+                };
+                Box::pin(aggregate_stream.merge(route_stream))
             } else {
                 Box::pin(tokio_stream::empty())
             };
@@ -612,6 +664,51 @@ mod tests {
         }
     }
 
+    fn dataplane_route_event(
+        event_type: proto::BgpEventType,
+        prefix: &str,
+        prefix_length: u32,
+        peer_address: &str,
+    ) -> proto::BgpEvent {
+        let action = match event_type {
+            proto::BgpEventType::DataplaneRouteInstalled => "installed",
+            proto::BgpEventType::DataplaneRouteWithdrawn => "withdrawn",
+            proto::BgpEventType::DataplaneRouteFailed => "failed",
+            _ => "unknown",
+        };
+        proto::BgpEvent {
+            timestamp: "123".to_string(),
+            category: proto::EventCategory::Dataplane as i32,
+            event_type: event_type as i32,
+            severity: proto::EventSeverity::Info as i32,
+            peer_address: peer_address.to_string(),
+            previous_peer_address: String::new(),
+            prefix: prefix.to_string(),
+            prefix_length,
+            afi_safi: if prefix.contains(':') {
+                proto::AddressFamily::Ipv6Unicast as i32
+            } else {
+                proto::AddressFamily::Ipv4Unicast as i32
+            },
+            summary: format!("dataplane fib route {action} {prefix}/{prefix_length}"),
+            payload: Some(proto::bgp_event::Payload::DataplaneRoute(
+                proto::DataplaneRouteEvent {
+                    source: "fib".to_string(),
+                    action: action.to_string(),
+                    table_name: "blue".to_string(),
+                    table_id: 100,
+                    metric: 20,
+                    prefix: prefix.to_string(),
+                    prefix_length,
+                    next_hop: "192.0.2.1".to_string(),
+                    peer_address: peer_address.to_string(),
+                    timestamp: "123".to_string(),
+                    reason: action.to_string(),
+                },
+            )),
+        }
+    }
+
     fn blackhole_status(state: proto::BlackholeDiscardState) -> proto::BlackholeDiscard {
         proto::BlackholeDiscard {
             prefix: "198.51.100.1".to_string(),
@@ -838,6 +935,76 @@ mod tests {
         assert_eq!(payload.source, "fib");
         assert_eq!(payload.installed, 1);
         assert_eq!(payload.failed, 1);
+    }
+
+    #[tokio::test]
+    async fn dataplane_route_events_filter_by_type_peer_and_prefix() {
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
+        let (route_tx, _) = broadcast::channel(16);
+        let service = EventService::with_dataplane_snapshots_broadcaster_and_metrics(
+            rib_tx,
+            peer_tx,
+            Arc::new(Vec::new),
+            Arc::new(Vec::new),
+            dataplane_event_broadcaster(),
+            Some(route_tx.clone()),
+            BgpMetrics::new(),
+        );
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Dataplane as i32],
+                event_types: vec![proto::BgpEventType::DataplaneRouteInstalled as i32],
+                neighbor_address: "10.0.0.1".to_string(),
+                afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
+                prefix: "203.0.113.0".to_string(),
+                prefix_length: 24,
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        route_tx
+            .send(dataplane_route_event(
+                proto::BgpEventType::DataplaneRouteWithdrawn,
+                "203.0.113.0",
+                24,
+                "10.0.0.1",
+            ))
+            .unwrap();
+        route_tx
+            .send(dataplane_route_event(
+                proto::BgpEventType::DataplaneRouteInstalled,
+                "203.0.113.0",
+                24,
+                "10.0.0.2",
+            ))
+            .unwrap();
+        route_tx
+            .send(dataplane_route_event(
+                proto::BgpEventType::DataplaneRouteInstalled,
+                "203.0.113.0",
+                24,
+                "10.0.0.1",
+            ))
+            .unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            event.event_type,
+            proto::BgpEventType::DataplaneRouteInstalled as i32
+        );
+        assert_eq!(event.peer_address, "10.0.0.1");
+        assert_eq!(event.prefix, "203.0.113.0");
+        let Some(proto::bgp_event::Payload::DataplaneRoute(payload)) = event.payload else {
+            panic!("expected dataplane route payload");
+        };
+        assert_eq!(payload.source, "fib");
+        assert_eq!(payload.table_name, "blue");
     }
 
     #[test]
@@ -1411,6 +1578,7 @@ mod tests {
             Arc::new(Vec::new),
             Arc::new(Vec::new),
             dataplane_event_broadcaster(),
+            None,
             metrics.clone(),
         );
         let response = service
@@ -1450,6 +1618,7 @@ mod tests {
             Arc::new(Vec::new),
             Arc::new(Vec::new),
             dataplane_event_broadcaster(),
+            None,
             metrics.clone(),
         );
         let response = service

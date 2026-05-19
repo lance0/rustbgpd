@@ -73,6 +73,27 @@ pub enum FibRuntimeState {
     Failed,
 }
 
+/// Per-route FIB dataplane outcome emitted by the reconciler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FibRuntimeEvent {
+    pub kind: FibRuntimeEventKind,
+    pub table_name: String,
+    pub table_id: u32,
+    pub metric: u32,
+    pub prefix: Prefix,
+    pub next_hop: Option<IpAddr>,
+    pub peer: Option<IpAddr>,
+    pub timestamp: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FibRuntimeEventKind {
+    Installed,
+    Withdrawn,
+    Failed,
+}
+
 /// Join handle wrapper used by main shutdown.
 pub struct FibRuntimeHandle {
     shutdown: CancellationToken,
@@ -108,6 +129,7 @@ pub fn spawn(
     rib_query_tx: mpsc::Sender<RibUpdate>,
     metrics: BgpMetrics,
     status_tx: watch::Sender<Vec<FibRuntimeStatus>>,
+    event_tx: broadcast::Sender<FibRuntimeEvent>,
     shutdown: CancellationToken,
 ) -> Option<FibRuntimeHandle> {
     if !config.enabled() {
@@ -124,6 +146,7 @@ pub fn spawn(
                 fib,
                 metrics,
                 status_tx,
+                event_tx,
                 shutdown,
             )),
             Err(e) => {
@@ -136,13 +159,17 @@ pub fn spawn(
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (rib_tx, rib_query_tx, status_tx, shutdown);
+        let _ = (rib_tx, rib_query_tx, status_tx, event_tx, shutdown);
         metrics.record_fib_kernel_failure("unsupported_platform");
         warn!("general FIB install requested, but kernel route programming is Linux-only");
         None
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "testable actor startup wiring includes event and status channels"
+)]
 fn spawn_with_fib<F>(
     config: FibRuntimeConfig,
     rib_tx: mpsc::Sender<RibUpdate>,
@@ -150,6 +177,7 @@ fn spawn_with_fib<F>(
     fib: F,
     metrics: BgpMetrics,
     status_tx: watch::Sender<Vec<FibRuntimeStatus>>,
+    event_tx: broadcast::Sender<FibRuntimeEvent>,
     shutdown: CancellationToken,
 ) -> FibRuntimeHandle
 where
@@ -164,6 +192,7 @@ where
             fib,
             metrics,
             status_tx,
+            event_tx,
             task_shutdown,
         )
         .await;
@@ -171,6 +200,10 @@ where
     FibRuntimeHandle { shutdown, task }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "actor loop owns resolved runtime channels and shutdown handles"
+)]
 async fn run_loop<F>(
     config: FibRuntimeConfig,
     rib_tx: mpsc::Sender<RibUpdate>,
@@ -178,6 +211,7 @@ async fn run_loop<F>(
     mut fib: F,
     metrics: BgpMetrics,
     status_tx: watch::Sender<Vec<FibRuntimeStatus>>,
+    event_tx: broadcast::Sender<FibRuntimeEvent>,
     shutdown: CancellationToken,
 ) where
     F: UnicastFib,
@@ -190,12 +224,13 @@ async fn run_loop<F>(
     let mut route_event_dirty = false;
 
     let mut route_events = subscribe_route_events(&rib_tx).await;
-    reconcile_once(
+    reconcile_once_with_events(
         &config,
         &rib_query_tx,
         &mut fib,
         &metrics,
         &status_tx,
+        &event_tx,
         &mut owned,
         &shutdown,
     )
@@ -205,28 +240,38 @@ async fn run_loop<F>(
         tokio::select! {
             biased;
             () = shutdown.cancelled() => {
-                drain_owned(&config, &mut fib, &metrics, &status_tx, &mut owned).await;
+                drain_owned_with_events(
+                    &config,
+                    &mut fib,
+                    &metrics,
+                    &status_tx,
+                    &event_tx,
+                    &mut owned,
+                )
+                .await;
                 return;
             }
             _ = interval.tick() => {
-                reconcile_once(
+                reconcile_once_with_events(
                     &config,
                     &rib_query_tx,
                     &mut fib,
                     &metrics,
                     &status_tx,
+                    &event_tx,
                     &mut owned,
                     &shutdown,
                 ).await;
             }
             () = &mut event_debounce, if route_event_dirty => {
                 route_event_dirty = false;
-                reconcile_once(
+                reconcile_once_with_events(
                     &config,
                     &rib_query_tx,
                     &mut fib,
                     &metrics,
                     &status_tx,
+                    &event_tx,
                     &mut owned,
                     &shutdown,
                 ).await;
@@ -334,12 +379,17 @@ async fn query_peer_groups(
     }
 }
 
-async fn reconcile_once<F>(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "single reconcile pass needs snapshots, metrics, status, events, and cancellation"
+)]
+async fn reconcile_once_with_events<F>(
     config: &FibRuntimeConfig,
     rib_query_tx: &mpsc::Sender<RibUpdate>,
     fib: &mut F,
     metrics: &BgpMetrics,
     status_tx: &watch::Sender<Vec<FibRuntimeStatus>>,
+    event_tx: &broadcast::Sender<FibRuntimeEvent>,
     owned: &mut FibOwnedState,
     shutdown: &CancellationToken,
 ) where
@@ -395,7 +445,7 @@ async fn reconcile_once<F>(
         metrics.record_fib_route_rejected(drop_reason(drop));
     }
     let before_owned = owned.clone();
-    let (failures, failed_keys) = apply_plan(fib, metrics, owned, &plan, shutdown).await;
+    let (failures, failed_keys) = apply_plan(fib, metrics, owned, &plan, event_tx, shutdown).await;
     if *owned != before_owned {
         persist_owned_state(config, owned);
     }
@@ -404,11 +454,42 @@ async fn reconcile_once<F>(
     status_tx.send_replace(statuses);
 }
 
+#[cfg(test)]
+async fn reconcile_once<F>(
+    config: &FibRuntimeConfig,
+    rib_query_tx: &mpsc::Sender<RibUpdate>,
+    fib: &mut F,
+    metrics: &BgpMetrics,
+    status_tx: &watch::Sender<Vec<FibRuntimeStatus>>,
+    owned: &mut FibOwnedState,
+    shutdown: &CancellationToken,
+) where
+    F: UnicastFib,
+{
+    let (event_tx, _) = broadcast::channel(16);
+    reconcile_once_with_events(
+        config,
+        rib_query_tx,
+        fib,
+        metrics,
+        status_tx,
+        &event_tx,
+        owned,
+        shutdown,
+    )
+    .await;
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps success/failure handling for one FIB diff plan in one place"
+)]
 async fn apply_plan<F>(
     fib: &mut F,
     metrics: &BgpMetrics,
     owned: &mut FibOwnedState,
     plan: &FibPlan,
+    event_tx: &broadcast::Sender<FibRuntimeEvent>,
     shutdown: &CancellationToken,
 ) -> (Vec<FibRuntimeStatus>, BTreeSet<FibRouteKey>)
 where
@@ -452,6 +533,12 @@ where
                 match op {
                     FibOp::Add(route) => {
                         metrics.record_fib_route_installed();
+                        emit_fib_event(
+                            event_tx,
+                            FibRuntimeEventKind::Installed,
+                            route,
+                            "installed",
+                        );
                         info!(
                             table = %route.table_name,
                             table_id = route.key.table_id,
@@ -465,6 +552,12 @@ where
                     FibOp::Forget(_) => unreachable!("forget handled before kernel apply"),
                     FibOp::Replace { desired, .. } => {
                         metrics.record_fib_route_installed();
+                        emit_fib_event(
+                            event_tx,
+                            FibRuntimeEventKind::Installed,
+                            desired,
+                            "replaced",
+                        );
                         info!(
                             table = %desired.table_name,
                             table_id = desired.key.table_id,
@@ -476,6 +569,12 @@ where
                     }
                     FibOp::Remove(route) => {
                         metrics.record_fib_route_withdrawn();
+                        emit_fib_event(
+                            event_tx,
+                            FibRuntimeEventKind::Withdrawn,
+                            route,
+                            "withdrawn",
+                        );
                         info!(
                             table = %route.table_name,
                             table_id = route.key.table_id,
@@ -492,6 +591,12 @@ where
                 metrics.record_fib_kernel_failure(action);
                 warn!(action, error = %e, "failed to apply general FIB route op");
                 failed_keys.insert(op_route(op).key);
+                emit_fib_event(
+                    event_tx,
+                    FibRuntimeEventKind::Failed,
+                    op_route(op),
+                    format!("{action}_failed:{e}"),
+                );
                 failures.push(status_for_route(
                     op_route(op),
                     FibRuntimeState::Failed,
@@ -503,11 +608,12 @@ where
     (failures, failed_keys)
 }
 
-async fn drain_owned<F>(
+async fn drain_owned_with_events<F>(
     config: &FibRuntimeConfig,
     fib: &mut F,
     metrics: &BgpMetrics,
     status_tx: &watch::Sender<Vec<FibRuntimeStatus>>,
+    event_tx: &broadcast::Sender<FibRuntimeEvent>,
     owned: &mut FibOwnedState,
 ) where
     F: UnicastFib,
@@ -550,6 +656,12 @@ async fn drain_owned<F>(
         match fib.apply(&op).await {
             Ok(()) => {
                 metrics.record_fib_route_withdrawn();
+                emit_fib_event(
+                    event_tx,
+                    FibRuntimeEventKind::Withdrawn,
+                    &route,
+                    "shutdown_drain",
+                );
                 record_fib_success(owned, &op);
             }
             Err(e) => {
@@ -569,6 +681,39 @@ async fn drain_owned<F>(
         persist_owned_state(config, owned);
     }
     status_tx.send_replace(Vec::new());
+}
+
+#[cfg(test)]
+async fn drain_owned<F>(
+    config: &FibRuntimeConfig,
+    fib: &mut F,
+    metrics: &BgpMetrics,
+    status_tx: &watch::Sender<Vec<FibRuntimeStatus>>,
+    owned: &mut FibOwnedState,
+) where
+    F: UnicastFib,
+{
+    let (event_tx, _) = broadcast::channel(16);
+    drain_owned_with_events(config, fib, metrics, status_tx, &event_tx, owned).await;
+}
+
+fn emit_fib_event(
+    event_tx: &broadcast::Sender<FibRuntimeEvent>,
+    kind: FibRuntimeEventKind,
+    route: &FibRoute,
+    reason: impl Into<String>,
+) {
+    let _ = event_tx.send(FibRuntimeEvent {
+        kind,
+        table_name: route.table_name.clone(),
+        table_id: route.key.table_id,
+        metric: route.key.metric,
+        prefix: route.key.prefix,
+        next_hop: Some(route.target.next_hop),
+        peer: Some(route.peer),
+        timestamp: rustbgpd_rib::event::unix_timestamp_now(),
+        reason: reason.into(),
+    });
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1789,6 +1934,32 @@ mod tests {
         status_rx.borrow().clone()
     }
 
+    async fn reconcile_for_test_with_events(
+        routes: Vec<Route>,
+        fib: &mut FakeFib,
+        owned: &mut FibOwnedState,
+    ) -> (Vec<FibRuntimeStatus>, Vec<FibRuntimeEvent>) {
+        let rib_tx = rib_with_routes(routes);
+        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let (event_tx, mut event_rx) = broadcast::channel(16);
+        reconcile_once_with_events(
+            &config(),
+            &rib_tx,
+            fib,
+            &metrics(),
+            &status_tx,
+            &event_tx,
+            owned,
+            &CancellationToken::new(),
+        )
+        .await;
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+        (status_rx.borrow().clone(), events)
+    }
+
     async fn reconcile_config_for_test(
         config: FibRuntimeConfig,
         rib_tx: mpsc::Sender<RibUpdate>,
@@ -1825,6 +1996,7 @@ mod tests {
         let (rib_tx, _rx) = mpsc::channel(1);
         let (rib_query_tx, _query_rx) = mpsc::channel(1);
         let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (event_tx, _) = broadcast::channel(16);
         let handle = spawn(
             FibRuntimeConfig {
                 tables: vec![],
@@ -1834,6 +2006,7 @@ mod tests {
             rib_query_tx,
             metrics(),
             status_tx,
+            event_tx,
             CancellationToken::new(),
         );
         assert!(handle.is_none());
@@ -1852,6 +2025,29 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Installed);
         assert_eq!(statuses[0].reason, "owned");
+    }
+
+    #[tokio::test]
+    async fn successful_install_publishes_dataplane_route_event() {
+        let mut fib = FakeFib::default();
+        let mut owned = FibOwnedState::default();
+
+        let (_statuses, events) = reconcile_for_test_with_events(
+            vec![route(v4(24), ip("192.0.2.1"))],
+            &mut fib,
+            &mut owned,
+        )
+        .await;
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, FibRuntimeEventKind::Installed);
+        assert_eq!(events[0].table_name, "edge");
+        assert_eq!(events[0].table_id, 1000);
+        assert_eq!(events[0].metric, 200);
+        assert_eq!(events[0].prefix, v4(24));
+        assert_eq!(events[0].next_hop, Some(ip("192.0.2.1")));
+        assert_eq!(events[0].peer, Some(ip("198.51.100.1")));
+        assert_eq!(events[0].reason, "installed");
     }
 
     #[test]
@@ -1953,6 +2149,7 @@ mod tests {
         let (rib_tx, query_count, events_tx) =
             rib_with_events(vec![route(v4(24), ip("192.0.2.1"))]);
         let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (event_tx, _) = broadcast::channel(16);
         let shutdown = CancellationToken::new();
         let handle = spawn_with_fib(
             config(),
@@ -1961,6 +2158,7 @@ mod tests {
             FakeFib::default(),
             metrics(),
             status_tx,
+            event_tx,
             shutdown.clone(),
         );
 
@@ -1985,6 +2183,7 @@ mod tests {
         let (rib_tx, query_count, events_tx) =
             rib_with_events(vec![route(v4(24), ip("192.0.2.1"))]);
         let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (event_tx, _) = broadcast::channel(16);
         let shutdown = CancellationToken::new();
         let handle = spawn_with_fib(
             config(),
@@ -1993,6 +2192,7 @@ mod tests {
             FakeFib::default(),
             metrics(),
             status_tx,
+            event_tx,
             shutdown.clone(),
         );
 
@@ -2084,6 +2284,27 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Failed);
         assert!(statuses[0].reason.contains("install_failed"));
+    }
+
+    #[tokio::test]
+    async fn failed_install_publishes_dataplane_route_event() {
+        let mut fib = FakeFib {
+            fail_apply: vec!["permission denied".to_string()],
+            ..FakeFib::default()
+        };
+        let mut owned = FibOwnedState::default();
+
+        let (_statuses, events) = reconcile_for_test_with_events(
+            vec![route(v4(24), ip("192.0.2.1"))],
+            &mut fib,
+            &mut owned,
+        )
+        .await;
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, FibRuntimeEventKind::Failed);
+        assert_eq!(events[0].prefix, v4(24));
+        assert_eq!(events[0].reason, "install_failed:permission denied");
     }
 
     #[tokio::test]
@@ -2245,6 +2466,40 @@ mod tests {
         assert!(matches!(fib.applied.as_slice(), [FibOp::Remove(_)]));
         assert!(owned.routes.is_empty());
         assert!(statuses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn successful_withdraw_publishes_dataplane_route_event() {
+        let prefix = v4(24);
+        let route = FibRoute {
+            table_name: "edge".to_string(),
+            key: key(prefix),
+            target: FibRouteTarget {
+                next_hop: ip("192.0.2.1"),
+            },
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        };
+        let mut fib = FakeFib::default();
+        fib.kernel.routes.insert(
+            route.key,
+            FibKernelRoute {
+                target: route.target,
+                protocol: FibKernelProtocol::Bgp,
+            },
+        );
+        let mut owned = FibOwnedState {
+            routes: BTreeMap::from([(route.key, route)]),
+        };
+
+        let (_statuses, events) =
+            reconcile_for_test_with_events(Vec::new(), &mut fib, &mut owned).await;
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, FibRuntimeEventKind::Withdrawn);
+        assert_eq!(events[0].prefix, prefix);
+        assert_eq!(events[0].reason, "withdrawn");
     }
 
     #[tokio::test]

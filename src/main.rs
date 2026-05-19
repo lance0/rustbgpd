@@ -46,7 +46,7 @@ use rustbgpd_rib::{RibManager, RibUpdate};
 use rustbgpd_telemetry::{BgpMetrics, init_logging};
 use rustbgpd_transport::{BgpListener, ListenerSocketOptions, TcpAoListenerKey};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
@@ -92,6 +92,90 @@ const fn grpc_max_tier_to_auth_tier(value: GrpcMaxTier) -> rustbgpd_api::authz::
         GrpcMaxTier::Mutating => rustbgpd_api::authz::AuthTier::Mutating,
         GrpcMaxTier::OperatorOnly => rustbgpd_api::authz::AuthTier::OperatorOnly,
     }
+}
+
+fn fib_runtime_event_to_bgp_event(
+    event: fib_runtime::FibRuntimeEvent,
+) -> rustbgpd_api::proto::BgpEvent {
+    let (event_type, action, severity) = match event.kind {
+        fib_runtime::FibRuntimeEventKind::Installed => (
+            rustbgpd_api::proto::BgpEventType::DataplaneRouteInstalled,
+            "installed",
+            rustbgpd_api::proto::EventSeverity::Info,
+        ),
+        fib_runtime::FibRuntimeEventKind::Withdrawn => (
+            rustbgpd_api::proto::BgpEventType::DataplaneRouteWithdrawn,
+            "withdrawn",
+            rustbgpd_api::proto::EventSeverity::Info,
+        ),
+        fib_runtime::FibRuntimeEventKind::Failed => (
+            rustbgpd_api::proto::BgpEventType::DataplaneRouteFailed,
+            "failed",
+            rustbgpd_api::proto::EventSeverity::Warning,
+        ),
+    };
+    let prefix = event.prefix.addr_string();
+    let prefix_length = u32::from(event.prefix.prefix_len());
+    let next_hop = event.next_hop.map_or_else(String::new, |ip| ip.to_string());
+    let peer_address = event.peer.map_or_else(String::new, |ip| ip.to_string());
+    let afi_safi = match event.prefix {
+        rustbgpd_wire::Prefix::V4(_) => rustbgpd_api::proto::AddressFamily::Ipv4Unicast,
+        rustbgpd_wire::Prefix::V6(_) => rustbgpd_api::proto::AddressFamily::Ipv6Unicast,
+    } as i32;
+    let route = rustbgpd_api::proto::DataplaneRouteEvent {
+        source: "fib".to_string(),
+        action: action.to_string(),
+        table_name: event.table_name.clone(),
+        table_id: event.table_id,
+        metric: event.metric,
+        prefix: prefix.clone(),
+        prefix_length,
+        next_hop,
+        peer_address: peer_address.clone(),
+        timestamp: event.timestamp.clone(),
+        reason: event.reason.clone(),
+    };
+
+    rustbgpd_api::proto::BgpEvent {
+        timestamp: event.timestamp,
+        category: rustbgpd_api::proto::EventCategory::Dataplane as i32,
+        event_type: event_type as i32,
+        severity: severity as i32,
+        peer_address,
+        previous_peer_address: String::new(),
+        prefix: prefix.clone(),
+        prefix_length,
+        afi_safi,
+        summary: format!(
+            "dataplane fib route {action} {prefix}/{prefix_length}: {}",
+            event.reason
+        ),
+        payload: Some(rustbgpd_api::proto::bgp_event::Payload::DataplaneRoute(
+            route,
+        )),
+    }
+}
+
+fn spawn_fib_dataplane_event_bridge(
+    mut fib_events: broadcast::Receiver<fib_runtime::FibRuntimeEvent>,
+    bgp_events: broadcast::Sender<rustbgpd_api::proto::BgpEvent>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match fib_events.recv().await {
+                Ok(event) => {
+                    let _ = bgp_events.send(fib_runtime_event_to_bgp_event(event));
+                }
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    warn!(
+                        missed,
+                        "FIB dataplane event bridge lagged; dropping stale route events"
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }
 
 const fn grpc_enforcement_to_auth_enforcement(
@@ -1264,6 +1348,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // route-server / route-reflector deployments control-plane-only.
     let (fib_status_tx, fib_status_rx) =
         tokio::sync::watch::channel(Vec::<fib_runtime::FibRuntimeStatus>::new());
+    let (fib_event_tx, fib_event_rx) =
+        tokio::sync::broadcast::channel::<fib_runtime::FibRuntimeEvent>(4096);
+    let (fib_bgp_event_tx, _) =
+        tokio::sync::broadcast::channel::<rustbgpd_api::proto::BgpEvent>(4096);
+    let _fib_event_bridge_handle =
+        spawn_fib_dataplane_event_bridge(fib_event_rx, fib_bgp_event_tx.clone());
     let fib_runtime_shutdown = tokio_util::sync::CancellationToken::new();
     let fib_runtime_handle = fib_runtime::spawn(
         fib_runtime::FibRuntimeConfig {
@@ -1274,6 +1364,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         rib_query_tx.clone(),
         metrics.clone(),
         fib_status_tx,
+        fib_event_tx,
         fib_runtime_shutdown.clone(),
     );
 
@@ -1375,6 +1466,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                     .collect()
             })
         },
+        dataplane_route_events: Some(fib_bgp_event_tx),
     };
     let mut grpc_handle = tokio::spawn(async move {
         rustbgpd_api::server::serve(
