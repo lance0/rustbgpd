@@ -234,10 +234,13 @@ resolved.
   (or any future RFC extension) cause a hard decode error rather than
   being preserved or skipped. This breaks forward compatibility if a
   future RFC defines type 14+. Should switch to skip-unknown behavior.
-- **FlowSpec NLRI length encoding limited to 4095 bytes.** The FlowSpec
-  length prefix uses a 12-bit mask. Rules exceeding 4095 bytes get a
-  silently truncated length on the wire. Extremely unlikely in practice
-  (a single FlowSpec rule would need hundreds of match components).
+- **FlowSpec NLRI rule-length cap is enforced at encode time.** Rules
+  exceeding the on-wire 12-bit limit (`MAX_FLOWSPEC_NLRI_RULE_LEN = 4095`)
+  return `EncodeError::ValueOutOfRange` from
+  `try_encode_flowspec_nlri`; callers building rules locally are expected
+  to invoke `FlowSpecRule::validate_encoded_len` first. The prior
+  silent-truncation behavior is fixed in `rustbgpd-wire` 0.9.2; this
+  note is retained as documentation of the resulting hard cap.
 - **Add-Path explain only covers best path.** `ExplainAdvertisedRoute`
   operates on the single Loc-RIB best path. For Add-Path peers, non-best
   candidates that are actually advertised are invisible to explain.
@@ -288,7 +291,8 @@ resolved.
   snapshot to the startup value (so drift detection stays observable
   on every subsequent reload), and leaves the live state unchanged
   until restart. `rustbgpd --diff` surfaces the change under
-  Restart-required. Reload-time mutation lands with the kernel-
-  reconciliation slice (Gate 7b — see `docs/evpn-enablement.md`),
-  alongside `AddEvpnInstance` / `DeleteEvpnInstance` gRPC mutations
-  and the `ArcSwap`/`RwLock` swap surface they need.
+  Restart-required. Runtime mutation will land via the ADR-0063
+  command-driven EVPN coordinator (a single serialized owner of a
+  generationed runtime model — explicitly not `ArcSwap` /
+  `RwLock` / per-service locks), alongside `AddEvpnInstance` /
+  `DeleteEvpnInstance` gRPC mutations.
