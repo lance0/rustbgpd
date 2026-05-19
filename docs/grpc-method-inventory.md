@@ -133,13 +133,14 @@ shape itself does not raise the tier.
 | `ListFlowSpecRoutes` | `sensitive_read` | RFC 5575 flow-spec routes — discloses traffic filter installations. |
 | `ListEvpnRoutes` | `sensitive_read` | EVPN Type 1/2/3/4/5 routes — MAC/IP topology, multi-homing ES layout. |
 
-### EventService (3 RPCs)
+### EventService (4 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
-| `WatchEvents` (stream) | `sensitive_read` | Unified stream — route events, session lifecycle, NOTIFICATION metadata, policy mutation summaries, FIB / BLACKHOLE dataplane status. Discloses operational state in real time. |
+| `WatchEvents` (stream) | `sensitive_read` | Unified stream — route events, session lifecycle, NOTIFICATION metadata, policy mutation summaries, EVPN route changes, FIB / BLACKHOLE dataplane status. Discloses operational state in real time. |
 | `ListSessionEvents` | `sensitive_read` | Bounded session lifecycle history per peer. |
 | `ListPolicyEvents` | `sensitive_read` | Bounded policy mutation history. |
+| `ListEvpnEvents` | `sensitive_read` | Bounded EVPN route add / withdraw / best-change history. |
 
 ### InjectionService (6 RPCs)
 

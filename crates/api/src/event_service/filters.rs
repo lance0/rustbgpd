@@ -9,7 +9,7 @@ use crate::peer_types::{
 use crate::proto;
 use crate::rib_service::{parse_route_event_prefix_filter, route_event_afi_filter};
 use rustbgpd_rib::RouteEventType;
-use rustbgpd_wire::{Afi, Prefix};
+use rustbgpd_wire::{Afi, Prefix, RouteDistinguisher};
 
 #[derive(Clone)]
 pub(super) struct WatchEventsFilter {
@@ -99,6 +99,16 @@ impl WatchEventsFilter {
             && dataplane_type_allowed
     }
 
+    pub(super) fn wants_evpn_events(&self) -> bool {
+        let evpn_category_requested = self
+            .categories
+            .contains(&(proto::EventCategory::Evpn as i32));
+        let evpn_type_allowed = self.event_types_match_evpn_category();
+        let evpn_selected = evpn_category_requested
+            || (self.categories.is_empty() && !self.event_types.is_empty() && evpn_type_allowed);
+        evpn_selected && self.afi.is_none() && self.prefix.is_none() && evpn_type_allowed
+    }
+
     pub(super) fn matches_session_event(&self, event: &SessionEvent) -> bool {
         if !self.wants_session_events() {
             return false;
@@ -144,6 +154,27 @@ impl WatchEventsFilter {
             && event.peer != Some(peer)
         {
             return false;
+        }
+
+        true
+    }
+
+    pub(super) fn matches_evpn_event(&self, event: &rustbgpd_rib::EvpnRouteEvent) -> bool {
+        if !self.wants_evpn_events() {
+            return false;
+        }
+
+        let event_type = route_event_type_to_evpn_bgp_event_type(event.event_type);
+        if !self.event_types.is_empty() && !self.event_types.contains(&(event_type as i32)) {
+            return false;
+        }
+
+        if let Some(peer) = self.peer {
+            let matches_current = event.peer == Some(peer);
+            let matches_previous = event.previous_peer == Some(peer);
+            if !matches_current && !matches_previous {
+                return false;
+            }
         }
 
         true
@@ -198,6 +229,19 @@ impl WatchEventsFilter {
                 )
             })
     }
+
+    fn event_types_match_evpn_category(&self) -> bool {
+        self.event_types.is_empty()
+            || self.event_types.iter().any(|event_type| {
+                matches!(
+                    proto::BgpEventType::try_from(*event_type),
+                    Ok(proto::BgpEventType::EvpnRouteAdded
+                        | proto::BgpEventType::EvpnRouteWithdrawn
+                        | proto::BgpEventType::EvpnRouteBestChanged
+                        | proto::BgpEventType::StreamLagged)
+                )
+            })
+    }
 }
 
 pub(super) struct SessionEventHistoryFilter {
@@ -211,6 +255,14 @@ pub(super) struct PolicyEventHistoryFilter {
     pub(super) limit: usize,
 }
 
+pub(super) struct EvpnEventHistoryFilter {
+    pub(super) peer: Option<IpAddr>,
+    pub(super) event_types: BTreeSet<RouteEventType>,
+    pub(super) route_type: Option<u8>,
+    pub(super) rd: Option<RouteDistinguisher>,
+    pub(super) limit: usize,
+}
+
 pub(super) fn route_event_type_to_bgp_event_type(
     event_type: RouteEventType,
 ) -> proto::BgpEventType {
@@ -218,6 +270,16 @@ pub(super) fn route_event_type_to_bgp_event_type(
         RouteEventType::Added => proto::BgpEventType::RouteAdded,
         RouteEventType::Withdrawn => proto::BgpEventType::RouteWithdrawn,
         RouteEventType::BestChanged => proto::BgpEventType::RouteBestChanged,
+    }
+}
+
+pub(super) fn route_event_type_to_evpn_bgp_event_type(
+    event_type: RouteEventType,
+) -> proto::BgpEventType {
+    match event_type {
+        RouteEventType::Added => proto::BgpEventType::EvpnRouteAdded,
+        RouteEventType::Withdrawn => proto::BgpEventType::EvpnRouteWithdrawn,
+        RouteEventType::BestChanged => proto::BgpEventType::EvpnRouteBestChanged,
     }
 }
 
@@ -234,6 +296,9 @@ fn bgp_event_type_to_session_event_type(
         | proto::BgpEventType::RouteAdded
         | proto::BgpEventType::RouteWithdrawn
         | proto::BgpEventType::RouteBestChanged
+        | proto::BgpEventType::EvpnRouteAdded
+        | proto::BgpEventType::EvpnRouteWithdrawn
+        | proto::BgpEventType::EvpnRouteBestChanged
         | proto::BgpEventType::NotificationSent
         | proto::BgpEventType::NotificationReceived
         | proto::BgpEventType::PolicyChanged
@@ -251,7 +316,8 @@ fn parse_category_filter(categories: &[i32]) -> Result<BTreeSet<i32>, Status> {
             proto::EventCategory::Route
             | proto::EventCategory::Session
             | proto::EventCategory::Policy
-            | proto::EventCategory::Dataplane => {
+            | proto::EventCategory::Dataplane
+            | proto::EventCategory::Evpn => {
                 parsed.insert(category as i32);
             }
             proto::EventCategory::Unspecified => {
@@ -282,6 +348,9 @@ fn parse_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<i32>, Status>
             | proto::BgpEventType::NotificationReceived
             | proto::BgpEventType::PolicyChanged
             | proto::BgpEventType::DataplaneStatusChanged
+            | proto::BgpEventType::EvpnRouteAdded
+            | proto::BgpEventType::EvpnRouteWithdrawn
+            | proto::BgpEventType::EvpnRouteBestChanged
             | proto::BgpEventType::StreamLagged => {
                 parsed.insert(event_type as i32);
             }
@@ -339,6 +408,9 @@ fn parse_policy_event_type_filter(event_types: &[i32]) -> Result<(), Status> {
             | proto::BgpEventType::NotificationSent
             | proto::BgpEventType::NotificationReceived
             | proto::BgpEventType::DataplaneStatusChanged
+            | proto::BgpEventType::EvpnRouteAdded
+            | proto::BgpEventType::EvpnRouteWithdrawn
+            | proto::BgpEventType::EvpnRouteBestChanged
             | proto::BgpEventType::StreamLagged => {
                 return Err(Status::invalid_argument(
                     "ListPolicyEvents only supports policy event types",
@@ -347,6 +419,72 @@ fn parse_policy_event_type_filter(event_types: &[i32]) -> Result<(), Status> {
         }
     }
     Ok(())
+}
+
+fn parse_evpn_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<RouteEventType>, Status> {
+    let mut parsed = BTreeSet::new();
+    for event_type in event_types {
+        let event_type = proto::BgpEventType::try_from(*event_type)
+            .map_err(|_| Status::invalid_argument("unknown event type"))?;
+        match event_type {
+            proto::BgpEventType::EvpnRouteAdded => {
+                parsed.insert(RouteEventType::Added);
+            }
+            proto::BgpEventType::EvpnRouteWithdrawn => {
+                parsed.insert(RouteEventType::Withdrawn);
+            }
+            proto::BgpEventType::EvpnRouteBestChanged => {
+                parsed.insert(RouteEventType::BestChanged);
+            }
+            proto::BgpEventType::Unspecified => {
+                return Err(Status::invalid_argument(
+                    "BGP_EVENT_TYPE_UNSPECIFIED is not a valid filter",
+                ));
+            }
+            proto::BgpEventType::RouteAdded
+            | proto::BgpEventType::RouteWithdrawn
+            | proto::BgpEventType::RouteBestChanged
+            | proto::BgpEventType::SessionStateChanged
+            | proto::BgpEventType::SessionEstablished
+            | proto::BgpEventType::SessionLost
+            | proto::BgpEventType::PeerEnabled
+            | proto::BgpEventType::PeerDisabled
+            | proto::BgpEventType::NotificationSent
+            | proto::BgpEventType::NotificationReceived
+            | proto::BgpEventType::PolicyChanged
+            | proto::BgpEventType::DataplaneStatusChanged
+            | proto::BgpEventType::StreamLagged => {
+                return Err(Status::invalid_argument(
+                    "ListEvpnEvents only supports EVPN event types",
+                ));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_evpn_route_type_filter(route_type: u32) -> Result<Option<u8>, Status> {
+    if route_type == 0 {
+        return Ok(None);
+    }
+    let route_type = u8::try_from(route_type)
+        .map_err(|_| Status::invalid_argument("EVPN route_type_filter must be 1..=5"))?;
+    if (1..=5).contains(&route_type) {
+        Ok(Some(route_type))
+    } else {
+        Err(Status::invalid_argument(
+            "EVPN route_type_filter must be 1..=5",
+        ))
+    }
+}
+
+fn parse_evpn_rd_filter(rd: &str) -> Result<Option<RouteDistinguisher>, Status> {
+    if rd.is_empty() {
+        return Ok(None);
+    }
+    rd.parse::<RouteDistinguisher>()
+        .map(Some)
+        .map_err(|e| Status::invalid_argument(format!("invalid EVPN rd_filter: {e}")))
 }
 
 pub(super) fn session_lifecycle_event_type_to_bgp_event_type(
@@ -433,6 +571,29 @@ pub(super) fn parse_list_policy_events_filter(
 
     Ok(PolicyEventHistoryFilter {
         peer,
+        limit: req.limit as usize,
+    })
+}
+
+pub(super) fn parse_list_evpn_events_filter(
+    req: &proto::ListEvpnEventsRequest,
+) -> Result<EvpnEventHistoryFilter, Status> {
+    let event_types = parse_evpn_event_type_filter(&req.event_types)?;
+    let peer = if req.neighbor_address.is_empty() {
+        None
+    } else {
+        Some(
+            req.neighbor_address
+                .parse::<IpAddr>()
+                .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?,
+        )
+    };
+
+    Ok(EvpnEventHistoryFilter {
+        peer,
+        event_types,
+        route_type: parse_evpn_route_type_filter(req.route_type_filter)?,
+        rd: parse_evpn_rd_filter(&req.rd_filter)?,
         limit: req.limit as usize,
     })
 }

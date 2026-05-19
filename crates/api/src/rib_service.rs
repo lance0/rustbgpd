@@ -1325,7 +1325,7 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
 }
 
 #[expect(clippy::too_many_lines)]
-fn evpn_route_to_proto(route: &EvpnRibRoute) -> proto::EvpnRouteEntry {
+pub(crate) fn evpn_route_to_proto(route: &EvpnRibRoute) -> proto::EvpnRouteEntry {
     let mut as_path = Vec::new();
     let mut communities = Vec::new();
     let mut extended_communities = Vec::new();

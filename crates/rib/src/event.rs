@@ -6,7 +6,7 @@ use rustbgpd_wire::{EvpnRouteKey, Prefix};
 use crate::route::EvpnRibRoute;
 
 /// Type of route change event emitted by the RIB manager.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RouteEventType {
     /// A new best route was installed.
     Added,
@@ -77,6 +77,19 @@ pub struct EvpnRouteEvent {
     pub previous_peer: Option<IpAddr>,
     /// Unix epoch timestamp as a string.
     pub timestamp: String,
+}
+
+/// Return the RD embedded in an EVPN route key.
+#[must_use]
+pub const fn evpn_key_rd(key: &EvpnRouteKey) -> rustbgpd_wire::RouteDistinguisher {
+    match key {
+        EvpnRouteKey::EadPerEs { rd, .. }
+        | EvpnRouteKey::EadPerEvi { rd, .. }
+        | EvpnRouteKey::MacIp { rd, .. }
+        | EvpnRouteKey::Imet { rd, .. }
+        | EvpnRouteKey::Es { rd, .. }
+        | EvpnRouteKey::IpPrefix { rd, .. } => *rd,
+    }
 }
 
 /// Returns the current Unix epoch time as a string.

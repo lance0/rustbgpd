@@ -4,9 +4,9 @@ use crate::output::{self, JsonRouteEvent};
 use crate::proto::event_service_client::EventServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
-    AddressFamily, BgpEvent, BgpEventType, EventCategory, ListPolicyEventsRequest,
-    ListRouteEventsRequest, ListSessionEventsRequest, RouteEvent, RouteEventType, StreamLagEvent,
-    WatchEventsRequest, WatchRoutesRequest,
+    AddressFamily, BgpEvent, BgpEventType, EventCategory, EvpnRouteEntry, ListEvpnEventsRequest,
+    ListPolicyEventsRequest, ListRouteEventsRequest, ListSessionEventsRequest, RouteEvent,
+    RouteEventType, StreamLagEvent, WatchEventsRequest, WatchRoutesRequest,
 };
 use std::net::IpAddr;
 
@@ -98,9 +98,14 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
         "dataplane_status_changed" | "dataplane_changed" => {
             Ok(BgpEventType::DataplaneStatusChanged as i32)
         }
+        "evpn_added" | "evpn_route_added" => Ok(BgpEventType::EvpnRouteAdded as i32),
+        "evpn_withdrawn" | "evpn_route_withdrawn" => Ok(BgpEventType::EvpnRouteWithdrawn as i32),
+        "evpn_best_changed" | "evpn_route_best_changed" => {
+            Ok(BgpEventType::EvpnRouteBestChanged as i32)
+        }
         "stream_lagged" | "lagged" => Ok(BgpEventType::StreamLagged as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported event type {other:?}; expected added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, dataplane_status_changed, or stream_lagged"
+            "unsupported event type {other:?}; expected added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, dataplane_status_changed, evpn_added, evpn_withdrawn, evpn_best_changed, or stream_lagged"
         ))),
     }
 }
@@ -129,14 +134,27 @@ fn parse_policy_bgp_event_type(s: &str) -> Result<i32, CliError> {
     }
 }
 
+fn parse_evpn_bgp_event_type(s: &str) -> Result<i32, CliError> {
+    let event_type = parse_bgp_event_type(s)?;
+    match BgpEventType::try_from(event_type) {
+        Ok(BgpEventType::EvpnRouteAdded)
+        | Ok(BgpEventType::EvpnRouteWithdrawn)
+        | Ok(BgpEventType::EvpnRouteBestChanged) => Ok(event_type),
+        _ => Err(CliError::Argument(format!(
+            "unsupported EVPN event type {s:?}; expected evpn_added, evpn_withdrawn, or evpn_best_changed"
+        ))),
+    }
+}
+
 fn parse_event_category(s: &str) -> Result<i32, CliError> {
     match s {
         "route" => Ok(EventCategory::Route as i32),
         "session" => Ok(EventCategory::Session as i32),
         "policy" => Ok(EventCategory::Policy as i32),
         "dataplane" => Ok(EventCategory::Dataplane as i32),
+        "evpn" => Ok(EventCategory::Evpn as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported event category {other:?}; expected route, session, policy, or dataplane"
+            "unsupported event category {other:?}; expected route, session, policy, dataplane, or evpn"
         ))),
     }
 }
@@ -183,6 +201,9 @@ fn bgp_event_type_json_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::NotificationReceived) => "notification_received",
         Ok(BgpEventType::PolicyChanged) => "policy_changed",
         Ok(BgpEventType::DataplaneStatusChanged) => "dataplane_status_changed",
+        Ok(BgpEventType::EvpnRouteAdded) => "evpn_route_added",
+        Ok(BgpEventType::EvpnRouteWithdrawn) => "evpn_route_withdrawn",
+        Ok(BgpEventType::EvpnRouteBestChanged) => "evpn_route_best_changed",
         Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
@@ -202,9 +223,45 @@ fn bgp_event_type_display_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::NotificationReceived) => "notification_received",
         Ok(BgpEventType::PolicyChanged) => "policy_changed",
         Ok(BgpEventType::DataplaneStatusChanged) => "dataplane_status_changed",
+        Ok(BgpEventType::EvpnRouteAdded) => "evpn_added",
+        Ok(BgpEventType::EvpnRouteWithdrawn) => "evpn_withdrawn",
+        Ok(BgpEventType::EvpnRouteBestChanged) => "evpn_best_changed",
         Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
+}
+
+fn evpn_route_type_label(t: u32) -> &'static str {
+    match t {
+        1 => "ead",
+        2 => "mac-ip",
+        3 => "imet",
+        4 => "es",
+        5 => "ip-prefix",
+        _ => "unknown",
+    }
+}
+
+fn json_evpn_route_entry(route: &EvpnRouteEntry) -> serde_json::Value {
+    serde_json::json!({
+        "route_type": route.route_type,
+        "route_type_name": evpn_route_type_label(route.route_type),
+        "rd": route.rd,
+        "esi": route.esi,
+        "ethernet_tag": route.ethernet_tag,
+        "mac": route.mac,
+        "ip": route.ip,
+        "prefix": route.prefix,
+        "gateway": route.gateway,
+        "label": route.label,
+        "label2": route.label2,
+        "next_hop": route.next_hop,
+        "peer": route.peer_address,
+        "as_path": route.as_path,
+        "communities": route.communities,
+        "extended_communities": route.extended_communities,
+        "tunnel_type": route.tunnel_type,
+    })
 }
 
 fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
@@ -215,6 +272,7 @@ fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
             Ok(EventCategory::Session) => "session",
             Ok(EventCategory::Policy) => "policy",
             Ok(EventCategory::Dataplane) => "dataplane",
+            Ok(EventCategory::Evpn) => "evpn",
             _ => "unknown",
         },
         "event_type": bgp_event_type_json_label(event.event_type),
@@ -339,6 +397,39 @@ fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
             serde_json::Value::from(dataplane.failed),
         );
     }
+    if let Some(crate::proto::bgp_event::Payload::Evpn(evpn)) = event.payload.as_ref()
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert(
+            "route_type".to_string(),
+            serde_json::Value::Number(evpn.route_type.into()),
+        );
+        object.insert(
+            "route_type_name".to_string(),
+            serde_json::Value::String(evpn_route_type_label(evpn.route_type).to_string()),
+        );
+        object.insert("rd".to_string(), serde_json::Value::String(evpn.rd.clone()));
+        object.insert(
+            "route_key".to_string(),
+            serde_json::Value::String(evpn.route_key.clone()),
+        );
+        object.insert(
+            "reason".to_string(),
+            serde_json::Value::String(evpn.reason.clone()),
+        );
+        object.insert(
+            "route".to_string(),
+            evpn.route
+                .as_ref()
+                .map_or(serde_json::Value::Null, json_evpn_route_entry),
+        );
+        object.insert(
+            "previous_route".to_string(),
+            evpn.previous_route
+                .as_ref()
+                .map_or(serde_json::Value::Null, json_evpn_route_entry),
+        );
+    }
     if let Some(crate::proto::bgp_event::Payload::StreamLag(lag)) = event.payload.as_ref()
         && let Some(object) = value.as_object_mut()
     {
@@ -350,6 +441,7 @@ fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
                     Ok(EventCategory::Session) => "session",
                     Ok(EventCategory::Policy) => "policy",
                     Ok(EventCategory::Dataplane) => "dataplane",
+                    Ok(EventCategory::Evpn) => "evpn",
                     _ => "unknown",
                 }
                 .to_string(),
@@ -541,15 +633,16 @@ fn validate_event_filter_categories(
 
     let wants_route = categories.contains(&(EventCategory::Route as i32));
     let wants_session = categories.contains(&(EventCategory::Session as i32));
+    let wants_evpn = categories.contains(&(EventCategory::Evpn as i32));
     if !wants_route && (family.is_some() || prefix.is_some()) {
         return Err(CliError::Argument(
             "--family and --prefix require --category route because they are route-only filters"
                 .into(),
         ));
     }
-    if !wants_route && !wants_session && neighbor.is_some() {
+    if !wants_route && !wants_session && !wants_evpn && neighbor.is_some() {
         return Err(CliError::Argument(
-            "--address requires --category route or --category session because dataplane events are peerless"
+            "--address requires --category route, --category session, or --category evpn because dataplane events are peerless"
                 .into(),
         ));
     }
@@ -756,6 +849,39 @@ pub async fn policy_history(
     Ok(())
 }
 
+pub async fn evpn_history(
+    connection: Connection,
+    neighbor: Option<String>,
+    route_type: Option<u32>,
+    rd: Option<String>,
+    event_types: Vec<String>,
+    limit: u32,
+    json: bool,
+) -> Result<(), CliError> {
+    let event_types = event_types
+        .iter()
+        .map(String::as_str)
+        .map(parse_evpn_bgp_event_type)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut client =
+        EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let response = client
+        .list_evpn_events(ListEvpnEventsRequest {
+            neighbor_address: neighbor.unwrap_or_default(),
+            event_types,
+            limit,
+            route_type_filter: route_type.unwrap_or(0),
+            rd_filter: rd.unwrap_or_default(),
+        })
+        .await?
+        .into_inner();
+
+    for event in response.events {
+        print_bgp_event(&event, json);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -885,6 +1011,10 @@ mod tests {
             bgp_event_type_display_label(BgpEventType::PolicyChanged as i32),
             "policy_changed"
         );
+        assert_eq!(
+            bgp_event_type_display_label(BgpEventType::EvpnRouteAdded as i32),
+            "evpn_added"
+        );
     }
 
     #[test]
@@ -905,7 +1035,21 @@ mod tests {
             parse_bgp_event_type("dataplane_changed").unwrap(),
             BgpEventType::DataplaneStatusChanged as i32
         );
+        assert_eq!(
+            parse_bgp_event_type("evpn_best_changed").unwrap(),
+            BgpEventType::EvpnRouteBestChanged as i32
+        );
         assert!(parse_bgp_event_type("policy_filtered").is_err());
+    }
+
+    #[test]
+    fn parse_evpn_bgp_event_type_accepts_only_evpn_route_events() {
+        assert_eq!(
+            parse_evpn_bgp_event_type("evpn_added").unwrap(),
+            BgpEventType::EvpnRouteAdded as i32
+        );
+        assert!(parse_evpn_bgp_event_type("added").is_err());
+        assert!(parse_evpn_bgp_event_type("dataplane_changed").is_err());
     }
 
     #[test]
@@ -936,7 +1080,11 @@ mod tests {
             parse_event_category("dataplane").unwrap(),
             EventCategory::Dataplane as i32
         );
-        assert!(parse_event_category("evpn").is_err());
+        assert_eq!(
+            parse_event_category("evpn").unwrap(),
+            EventCategory::Evpn as i32
+        );
+        assert!(parse_event_category("bmp").is_err());
     }
 
     #[test]
@@ -1219,6 +1367,13 @@ mod tests {
     }
 
     #[test]
+    fn event_filter_allows_peer_for_evpn_category() {
+        let categories = vec![EventCategory::Evpn as i32];
+        validate_event_filter_categories(&categories, &Some("10.0.0.1".to_string()), None, &None)
+            .unwrap();
+    }
+
+    #[test]
     fn event_filter_rejects_peer_for_dataplane_only_category() {
         let categories = vec![EventCategory::Dataplane as i32];
         let err = validate_event_filter_categories(
@@ -1259,6 +1414,54 @@ mod tests {
         assert_eq!(value["rejected"], 1);
         assert_eq!(value["failed"], 1);
         assert!(value["afi_safi"].is_null());
+    }
+
+    #[test]
+    fn json_bgp_event_evpn_includes_route_key_and_payloads() {
+        let event = BgpEvent {
+            timestamp: "1".to_string(),
+            category: EventCategory::Evpn as i32,
+            event_type: BgpEventType::EvpnRouteBestChanged as i32,
+            severity: 1,
+            peer_address: "10.0.0.2".to_string(),
+            previous_peer_address: "10.0.0.3".to_string(),
+            afi_safi: AddressFamily::L2vpnEvpn as i32,
+            summary: "EVPN route best changed mac".to_string(),
+            payload: Some(crate::proto::bgp_event::Payload::Evpn(
+                crate::proto::EvpnRouteEvent {
+                    event_type: BgpEventType::EvpnRouteBestChanged as i32,
+                    peer_address: "10.0.0.2".to_string(),
+                    previous_peer_address: "10.0.0.3".to_string(),
+                    timestamp: "1".to_string(),
+                    route_type: 2,
+                    rd: "65000:100".to_string(),
+                    route_key: "type=2 rd=65000:100 mac=aa:bb:cc:dd:ee:ff".to_string(),
+                    route: Some(EvpnRouteEntry {
+                        route_type: 2,
+                        rd: "65000:100".to_string(),
+                        mac: "aa:bb:cc:dd:ee:ff".to_string(),
+                        peer_address: "10.0.0.2".to_string(),
+                        ..Default::default()
+                    }),
+                    previous_route: None,
+                    reason: "EVPN route best changed mac".to_string(),
+                },
+            )),
+            ..Default::default()
+        };
+
+        let value = json_bgp_event(&event);
+        assert_eq!(value["category"], "evpn");
+        assert_eq!(value["event_type"], "evpn_route_best_changed");
+        assert_eq!(value["route_type"], 2);
+        assert_eq!(value["route_type_name"], "mac-ip");
+        assert_eq!(value["rd"], "65000:100");
+        assert_eq!(
+            value["route_key"],
+            "type=2 rd=65000:100 mac=aa:bb:cc:dd:ee:ff"
+        );
+        assert_eq!(value["route"]["mac"], "aa:bb:cc:dd:ee:ff");
+        assert!(value["previous_route"].is_null());
     }
 
     #[test]

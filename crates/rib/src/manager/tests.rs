@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9581,6 +9582,28 @@ async fn subscribe_evpn_events(
     reply_rx.await.unwrap()
 }
 
+async fn query_evpn_event_history(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: Option<IpAddr>,
+    route_type: Option<u8>,
+    rd: Option<RouteDistinguisher>,
+    event_types: BTreeSet<RouteEventType>,
+    limit: usize,
+) -> Vec<crate::event::EvpnRouteEvent> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryEvpnRouteEventHistory {
+        peer,
+        route_type,
+        rd,
+        event_types,
+        limit,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx.await.unwrap()
+}
+
 #[tokio::test]
 async fn evpn_route_event_added_on_new_best() {
     let (tx, rx) = mpsc::channel(64);
@@ -9619,6 +9642,138 @@ async fn evpn_route_event_added_on_new_best() {
     assert_eq!(event.peer, Some(peer));
     assert!(event.previous_peer.is_none());
     assert!(event.best.is_some(), "Added must carry a best path");
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn evpn_event_history_records_events_without_subscriber() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(peer_addr);
+    let route = make_evpn_macip(
+        peer_addr,
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x77],
+        Some(0),
+        false,
+    );
+    let key = route.key();
+    tx.send(RibUpdate::RoutesReceived {
+        peer,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![route],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let history = query_evpn_event_history(&tx, None, Some(2), None, BTreeSet::new(), 10).await;
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].event_type, RouteEventType::Added);
+    assert_eq!(history[0].key, key);
+    assert_eq!(history[0].peer, Some(peer));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn evpn_event_history_filters_peer_rd_type_and_limit() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let mac = [0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x02];
+    let peer1_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer2_addr = Ipv4Addr::new(10, 0, 0, 2);
+    let peer1 = IpAddr::V4(peer1_addr);
+    let peer2 = IpAddr::V4(peer2_addr);
+    let route1 = make_evpn_macip(peer1_addr, mac, Some(0), false);
+    let rd = crate::event::evpn_key_rd(&route1.key());
+
+    tx.send(RibUpdate::RoutesReceived {
+        peer: peer1,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![route1],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        peer: peer2,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![make_evpn_macip(peer2_addr, mac, Some(1), false)],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let mut event_types = BTreeSet::new();
+    event_types.insert(RouteEventType::BestChanged);
+    let history =
+        query_evpn_event_history(&tx, Some(peer1), Some(2), Some(rd), event_types, 1).await;
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].event_type, RouteEventType::BestChanged);
+    assert_eq!(history[0].peer, Some(peer2));
+    assert_eq!(history[0].previous_peer, Some(peer1));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn evpn_event_history_capacity_evicts_oldest_event() {
+    let (tx, rx) = mpsc::channel(256);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(peer_addr);
+    for index in 0..=EVPN_ROUTE_EVENT_HISTORY_CAPACITY {
+        let index_bytes = u32::try_from(index)
+            .expect("test history capacity fits in u32")
+            .to_be_bytes();
+        let mac = [
+            0x02,
+            0x00,
+            0x00,
+            index_bytes[1],
+            index_bytes[2],
+            index_bytes[3],
+        ];
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![make_evpn_macip(peer_addr, mac, Some(0), false)],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    let history = query_evpn_event_history(&tx, None, Some(2), None, BTreeSet::new(), 0).await;
+    assert_eq!(history.len(), EVPN_ROUTE_EVENT_HISTORY_CAPACITY);
+    assert_eq!(history[0].key.route_type(), 2);
+    let rustbgpd_wire::EvpnRouteKey::MacIp { mac: first_mac, .. } = history[0].key else {
+        panic!("expected Type 2 key");
+    };
+    assert_eq!(first_mac.octets(), [0x02, 0x00, 0x00, 0, 0, 1]);
 
     drop(tx);
     handle.await.unwrap();

@@ -21,7 +21,7 @@ use tracing::{debug, warn};
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
 use crate::best_path::best_path_cmp_with_reason;
-use crate::event::RouteEvent;
+use crate::event::{RouteEvent, RouteEventType};
 use crate::loc_rib::LocRib;
 use crate::update::{
     BestPathCandidate, ExplainAdvertisedRoute, ExplainBestPath, MrtPeerEntry, MrtSnapshotData,
@@ -123,6 +123,10 @@ pub struct RibManager {
     /// originator) need an `EvpnRouteKey`-shaped event with the full
     /// new best path attached. ADR-0055 §5 — Gate 7c.
     evpn_events_tx: broadcast::Sender<crate::event::EvpnRouteEvent>,
+    /// Bounded recent EVPN best-path event history for after-the-fact
+    /// operator timeline queries. Live streaming still uses
+    /// `evpn_events_tx`.
+    evpn_route_event_history: VecDeque<crate::event::EvpnRouteEvent>,
     metrics: BgpMetrics,
     rx: mpsc::Receiver<RibUpdate>,
     /// Priority channel for read-only queries (gRPC).
@@ -134,6 +138,7 @@ pub struct RibManager {
 const ROUTES_RECEIVED_CHUNK_SIZE: usize = 1024;
 const QUERY_BUDGET_PER_CHUNK: usize = 8;
 const ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
+const EVPN_ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
 
 enum PendingRouteChunk {
     Withdrawn(Vec<(Prefix, u32)>),
@@ -354,6 +359,7 @@ impl RibManager {
             route_event_history: VecDeque::with_capacity(ROUTE_EVENT_HISTORY_CAPACITY),
             next_route_event_id: 1,
             evpn_events_tx,
+            evpn_route_event_history: VecDeque::with_capacity(EVPN_ROUTE_EVENT_HISTORY_CAPACITY),
             metrics,
             rx,
             query_rx,
@@ -517,6 +523,23 @@ impl RibManager {
             }
             RibUpdate::SubscribeEvpnRouteEvents { reply } => {
                 self.handle_subscribe_evpn_route_events(reply);
+            }
+            RibUpdate::QueryEvpnRouteEventHistory {
+                peer,
+                route_type,
+                rd,
+                event_types,
+                limit,
+                reply,
+            } => {
+                self.handle_query_evpn_route_event_history(
+                    peer,
+                    route_type,
+                    rd,
+                    &event_types,
+                    limit,
+                    reply,
+                );
             }
             RibUpdate::QueryLocRibCount { reply } => self.handle_query_loc_rib_count(reply),
             RibUpdate::QueryAdvertisedCount { peer, reply } => {
@@ -947,6 +970,49 @@ impl RibManager {
     ) {
         let rx = self.evpn_events_tx.subscribe();
         let _ = reply.send(rx);
+    }
+
+    fn publish_evpn_route_event(&mut self, event: crate::event::EvpnRouteEvent) {
+        if self.evpn_route_event_history.len() == EVPN_ROUTE_EVENT_HISTORY_CAPACITY {
+            self.evpn_route_event_history.pop_front();
+        }
+        self.evpn_route_event_history.push_back(event.clone());
+        let _ = self.evpn_events_tx.send(event);
+    }
+
+    fn handle_query_evpn_route_event_history(
+        &mut self,
+        peer: Option<IpAddr>,
+        route_type: Option<u8>,
+        rd: Option<rustbgpd_wire::RouteDistinguisher>,
+        event_types: &std::collections::BTreeSet<RouteEventType>,
+        limit: usize,
+        reply: tokio::sync::oneshot::Sender<Vec<crate::event::EvpnRouteEvent>>,
+    ) {
+        let limit = if limit == 0 {
+            EVPN_ROUTE_EVENT_HISTORY_CAPACITY
+        } else {
+            limit.min(EVPN_ROUTE_EVENT_HISTORY_CAPACITY)
+        };
+
+        let mut events: Vec<crate::event::EvpnRouteEvent> = self
+            .evpn_route_event_history
+            .iter()
+            .rev()
+            .filter(|event| {
+                route_type.is_none_or(|route_type| event.key.route_type() == route_type)
+            })
+            .filter(|event| rd.is_none_or(|rd| crate::event::evpn_key_rd(&event.key) == rd))
+            .filter(|event| event_types.is_empty() || event_types.contains(&event.event_type))
+            .filter(|event| match peer {
+                Some(peer) => event.peer == Some(peer) || event.previous_peer == Some(peer),
+                None => true,
+            })
+            .take(limit)
+            .cloned()
+            .collect();
+        events.reverse();
+        let _ = reply.send(events);
     }
 
     fn handle_query_loc_rib_count(&mut self, reply: tokio::sync::oneshot::Sender<usize>) {
