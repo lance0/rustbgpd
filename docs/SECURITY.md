@@ -279,10 +279,10 @@ the roadmap:
   email SAN → Subject CN), opt-in role enforcement, and result-aware audit
   records with masked credential-bearing request summaries are present. The
   migration path is documented: stage `[security.grpc.roles]`, add explicit
-  principals for UDS and bearer-token listeners, validate with `rustbgpd
-  --check`, then opt into `enforcement = "tier"`. The production default still
-  remains `legacy`; the final default flip and durable audit-sink / retention
-  guidance remain deferred.
+  principals for UDS and bearer-token listeners, validate the candidate config
+  with `rustbgpd --check`, then opt into `enforcement = "tier"`. The production
+  default still remains `legacy`; the final default flip and durable audit-sink
+  / retention guidance remain deferred.
 - TCP-AO (RFC 5925) dynamic-neighbor support, runtime key rotation,
   multi-key rollover, and accepted-socket inspection for BGP session
   protection
