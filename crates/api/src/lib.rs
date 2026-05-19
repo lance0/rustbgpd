@@ -10,6 +10,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod authz;
+pub mod authz_principal;
 pub mod authz_runtime;
 mod config_service;
 mod control_service;

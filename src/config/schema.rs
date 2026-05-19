@@ -308,8 +308,8 @@ pub struct GrpcTcpListenerConfig {
     pub max_tier: Option<GrpcMaxTierConfig>,
     pub token_file: Option<String>,
     /// Stable audit principal label for non-mTLS bearer-token
-    /// listeners. Native mTLS principal extraction is a later
-    /// ADR-0064 slice and continues to report `mtls-unresolved`.
+    /// listeners. Native mTLS listeners derive the audit principal
+    /// from the client certificate instead.
     pub principal: Option<String>,
     /// Server certificate (PEM file path). Required to enable mTLS.
     pub tls_cert_file: Option<String>,

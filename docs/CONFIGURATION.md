@@ -273,9 +273,12 @@ the daemon.
 `grpc_authz` log line a stable operator-controlled identity. On UDS listeners
 it labels the listener identity established by filesystem permissions and/or
 the optional token. On TCP listeners it is accepted only when `token_file` is
-configured and native mTLS is not configured; mTLS certificate principal
-extraction is a later ADR-0064 slice and continues to report
-`mtls-unresolved`.
+configured and native mTLS is not configured. Native mTLS listeners derive the
+audit principal from the peer certificate in ADR-0064 order: first `rustbgpd:`
+URI SAN, then email SAN, then Subject CN. If a validated client certificate has
+none of those fields, or if the selected value is too long or contains embedded
+control characters, the request remains allowed in legacy mode and the audit
+principal falls back to `mtls-unresolved`.
 
 ### `[security.grpc]`
 
@@ -1832,7 +1835,7 @@ starting:
 | `grpc_*.max_tier` must be `read`, `sensitive_read`, `mutating`, or `operator_only` | TOML parse error |
 | `grpc_*.token_file` must exist, be readable, and contain a non-empty token when configured | `invalid gRPC config` |
 | `grpc_*.principal` must not be empty when configured | `invalid gRPC config` |
-| `grpc_tcp.principal` requires `grpc_tcp.token_file` and is rejected on mTLS listeners until cert principal extraction lands | `invalid gRPC config` |
+| `grpc_tcp.principal` requires `grpc_tcp.token_file` and is rejected on mTLS listeners because mTLS principals are derived from client certificates | `invalid gRPC config` |
 | `security.grpc.enforcement = "tier"` is reserved and rejected until ADR-0064 deny-by-tier enforcement lands | `invalid gRPC config` |
 | `[security.grpc.roles]` principal keys must not be empty; role values must be `observer`, `automation`, or `operator` | `invalid gRPC config` / TOML parse error |
 | If `grpc_tcp`/`grpc_uds` tables are present, at least one listener must be enabled | `invalid gRPC config` |

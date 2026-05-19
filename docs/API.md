@@ -88,6 +88,12 @@ failed authentication before tier details were disclosed.
 Operators can now predeclare `[security.grpc.roles]` and set explicit
 listener `principal` labels for bearer-token TCP and UDS listeners; those
 labels improve audit identity only and do not yet authorize or deny calls.
+Native mTLS listeners derive the audit principal from the client certificate
+using ADR-0064 precedence: `rustbgpd:` URI SAN, then email SAN, then Subject
+CN. A validated cert without those fields falls back to `mtls-unresolved` while
+legacy mode remains active. Extracted principal values must fit the bounded
+audit label form and must not contain embedded control characters; unsupported
+values also fall back to `mtls-unresolved`.
 `docs/adr/0064-threat-model.md` is the external-review packet for this surface:
 it maps trust boundaries, abuse paths, residual risks, and the evidence an
 auditor should collect.
