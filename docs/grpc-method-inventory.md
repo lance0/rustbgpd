@@ -162,10 +162,11 @@ shape itself does not raise the tier.
 | `GetMetrics` | `sensitive_read` | Returns Prometheus-shaped counters; volumetric metadata leaks RIB size, peer count, churn rate. |
 | `TriggerMrtDump` | `operator_only` | Writes a TABLE_DUMP_V2 snapshot to disk. Disk-I/O burst, potentially very large; also exposes RIB content to whoever can read the dump file later. |
 
-### EvpnService (5 RPCs)
+### EvpnService (6 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
+| `GetEvpnRuntime` | `sensitive_read` | ADR-0063 committed runtime generation, lifecycle, mutation state, and EVPN table counts. Exposes topology size and no mutating surface. |
 | `ListEvpnInstances` | `sensitive_read` | Per-VNI state — VTEP addresses, RT/RD, originated MAC counts. |
 | `ListEvpnNexthops` | `sensitive_read` | ADR-0059 FDB nexthop groups — exposes multi-homing topology, ES layout, drift-recovery status. |
 | `ListIpVrfs` | `sensitive_read` | Gate 9 IP-VRF table. |
@@ -177,10 +178,10 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 35 | 50.7% |
-| `mutating` | 16 | 23.2% |
-| `operator_only` | 18 | 26.1% |
-| **Total** | **69** | **100%** |
+| `sensitive_read` | 36 | 51.4% |
+| `mutating` | 16 | 22.9% |
+| `operator_only` | 18 | 25.7% |
+| **Total** | **70** | **100%** |
 
 (Counts treat `SetGracefulShutdown` as one RPC even though it appears once in `NeighborService`.)
 

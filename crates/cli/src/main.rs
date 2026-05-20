@@ -727,6 +727,8 @@ enum EvpnAction {
         #[arg(long)]
         mac: String,
     },
+    /// Show the committed ADR-0063 EVPN runtime generation.
+    Runtime,
     /// List local EVPN instances configured on this VTEP. Empty when
     /// the daemon is acting purely as an EVPN route reflector.
     Instances,
@@ -1367,6 +1369,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             Some(EvpnAction::ClearDuplicateMac { vni, mac }) => {
                 commands::evpn::clear_duplicate_mac(connection, vni, mac, json).await
             }
+            Some(EvpnAction::Runtime) => commands::evpn::runtime(connection, json).await,
             Some(EvpnAction::Instances) => commands::evpn::list_instances(connection, json).await,
             Some(EvpnAction::Nexthops) => commands::evpn::list_nexthops(connection, json).await,
             Some(EvpnAction::Vrfs { name }) => match name {
@@ -1892,6 +1895,18 @@ mod tests {
         } else {
             panic!("expected Evpn ClearDuplicateMac command");
         }
+    }
+
+    #[test]
+    fn test_parse_evpn_runtime() {
+        let cli = Cli::try_parse_from(["rustbgpctl", "evpn", "runtime"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Evpn {
+                action: Some(EvpnAction::Runtime),
+                ..
+            }
+        ));
     }
 
     #[test]

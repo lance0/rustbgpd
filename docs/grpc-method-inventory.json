@@ -3,10 +3,10 @@
   "package": "rustbgpd.v1",
   "source": "crates/api/src/authz.rs",
   "proto": "proto/rustbgpd.proto",
-  "method_count": 69,
+  "method_count": 70,
   "tier_counts": {
     "read": 0,
-    "sensitive_read": 35,
+    "sensitive_read": 36,
     "mutating": 16,
     "operator_only": 18
   },
@@ -75,6 +75,7 @@
     { "service": "rustbgpd.v1.ControlService", "method": "GetHealth", "path": "/rustbgpd.v1.ControlService/GetHealth", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.ControlService", "method": "GetMetrics", "path": "/rustbgpd.v1.ControlService/GetMetrics", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.ControlService", "method": "TriggerMrtDump", "path": "/rustbgpd.v1.ControlService/TriggerMrtDump", "tier": "operator_only" },
+    { "service": "rustbgpd.v1.EvpnService", "method": "GetEvpnRuntime", "path": "/rustbgpd.v1.EvpnService/GetEvpnRuntime", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EvpnService", "method": "ListEvpnInstances", "path": "/rustbgpd.v1.EvpnService/ListEvpnInstances", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EvpnService", "method": "ListEvpnNexthops", "path": "/rustbgpd.v1.EvpnService/ListEvpnNexthops", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EvpnService", "method": "ListIpVrfs", "path": "/rustbgpd.v1.EvpnService/ListIpVrfs", "tier": "sensitive_read" },
