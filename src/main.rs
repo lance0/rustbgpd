@@ -498,6 +498,11 @@ fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) 
     eprintln!();
 }
 
+fn fatal_startup_error(message: &'static str, error: impl std::fmt::Display) -> ! {
+    error!(error = %error, "{message}");
+    process::exit(1);
+}
+
 #[expect(clippy::too_many_lines)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -611,7 +616,8 @@ fn main() {
     #[cfg(not(feature = "dhat-heap"))]
     let profiler: Option<()> = None;
 
-    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    let rt = tokio::runtime::Runtime::new()
+        .unwrap_or_else(|e| fatal_startup_error("failed to create tokio runtime", e));
     rt.block_on(run(config, profiler));
 }
 
@@ -705,11 +711,14 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
 
     // Startup banner — human-friendly topology summary on stderr.
     print_startup_banner(&config, &grpc_listeners);
-    let router_id: Ipv4Addr = config
-        .global
-        .router_id
-        .parse()
-        .expect("validated in Config::load");
+    let router_id: Ipv4Addr = config.global.router_id.parse().unwrap_or_else(|e| {
+        error!(
+            router_id = %config.global.router_id,
+            error = %e,
+            "invalid router-id after configuration validation"
+        );
+        process::exit(1);
+    });
 
     // Spawn metrics HTTP server (if configured)
     if let Some(prometheus_addr) = config.prometheus_addr() {
@@ -1010,25 +1019,26 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // Resolve declared EVPN instances once at startup and hand the
     // gRPC layer a shared `Arc`. The validation pass at config load
     // already proved this resolution succeeds, so a second failure
-    // here would be a programming error rather than operator input —
-    // but we still surface it as a daemon-fatal `expect` to avoid
-    // silently dropping instances if a future code path skips
-    // validation.
-    let evpn_instances = std::sync::Arc::new(
-        config
-            .resolve_evpn_instances()
-            .expect("EVPN instances re-resolve cleanly after Config::validate"),
-    );
+    // here would be a programming error rather than operator input,
+    // but we still surface it as a daemon-fatal diagnostic to avoid
+    // silently dropping instances if a future code path skips validation.
+    let evpn_instances = std::sync::Arc::new(config.resolve_evpn_instances().unwrap_or_else(|e| {
+        fatal_startup_error(
+            "EVPN instances failed to re-resolve after configuration validation",
+            e,
+        );
+    }));
 
-    // Gate 9 IP-VRFs (`[[evpn_ip_vrfs]]`). Same expect-after-validate
+    // Gate 9 IP-VRFs (`[[evpn_ip_vrfs]]`). Same fatal-after-validate
     // pattern as `evpn_instances`. Empty for any deployment without
     // Gate 9 config; the dataplane short-circuits `probe_ip_vrfs` when
     // empty so L2-only and RR-only deployments incur zero added cost.
-    let evpn_ip_vrfs = std::sync::Arc::new(
-        config
-            .resolve_evpn_ip_vrfs()
-            .expect("EVPN IP-VRFs re-resolve cleanly after Config::validate"),
-    );
+    let evpn_ip_vrfs = std::sync::Arc::new(config.resolve_evpn_ip_vrfs().unwrap_or_else(|e| {
+        fatal_startup_error(
+            "EVPN IP-VRFs failed to re-resolve after configuration validation",
+            e,
+        );
+    }));
 
     let (evpn_duplicate_mac_quarantine_tx, evpn_duplicate_mac_quarantine_rx) =
         tokio::sync::watch::channel(std::sync::Arc::new(std::collections::BTreeSet::<
@@ -1071,9 +1081,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // multi-homed VNIs (Gate 8b ESI-aware MAC origination). The
     // same resolved table is consumed by `evpn_segment::spawn`
     // below.
-    let ethernet_segments = config
-        .resolve_ethernet_segments()
-        .expect("validated in Config::load");
+    let ethernet_segments = config.resolve_ethernet_segments().unwrap_or_else(|e| {
+        fatal_startup_error(
+            "Ethernet segments failed to re-resolve after configuration validation",
+            e,
+        );
+    });
     let vni_to_esi: std::sync::Arc<
         std::collections::BTreeMap<
             rustbgpd_evpn::EvpnInstanceId,
@@ -1586,9 +1599,9 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
 
     // Signal handlers (unix-only, which is our target)
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("failed to register SIGTERM handler");
+        .unwrap_or_else(|e| fatal_startup_error("failed to register SIGTERM handler", e));
     let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        .expect("failed to register SIGHUP handler");
+        .unwrap_or_else(|e| fatal_startup_error("failed to register SIGHUP handler", e));
 
     // Wait for shutdown signal: SIGINT, SIGTERM, Shutdown RPC, unexpected gRPC exit, or SIGHUP
     //
