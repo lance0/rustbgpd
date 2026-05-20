@@ -453,6 +453,18 @@ impl Default for SupervisorIntentState {
     }
 }
 
+impl SupervisorIntentState {
+    fn has_cached_projection_for(
+        &self,
+        instances: &EvpnInstanceTable,
+        ip_vrfs: &IpVrfTable,
+    ) -> bool {
+        self.generation > 0
+            && instances == self.last_instances.as_ref()
+            && ip_vrfs == self.last_ip_vrfs.as_ref()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn publish_dataplane_intent(
     rib_tx: &mpsc::Sender<RibUpdate>,
@@ -508,30 +520,22 @@ async fn publish_dataplane_intent(
 
 fn publish_cached_dataplane_intent(
     intent_tx: &watch::Sender<Arc<DataplaneIntent>>,
-    instances: Arc<EvpnInstanceTable>,
-    ip_vrfs: Arc<IpVrfTable>,
     bum_enforcement: BumEnforcementTable,
     state: &mut SupervisorIntentState,
 ) -> bool {
-    if state.generation > 0
-        && instances.as_ref() == state.last_instances.as_ref()
-        && ip_vrfs.as_ref() == state.last_ip_vrfs.as_ref()
-        && bum_enforcement == state.last_bum_enforcement
-    {
+    if state.generation > 0 && bum_enforcement == state.last_bum_enforcement {
         return true;
     }
 
     state.generation = state.generation.saturating_add(1);
-    state.last_instances = instances.clone();
-    state.last_ip_vrfs = ip_vrfs.clone();
     state.last_bum_enforcement = bum_enforcement.clone();
 
     let intent = Arc::new(DataplaneIntent {
         generation: state.generation,
-        instances,
+        instances: state.last_instances.clone(),
         remote_macs: Arc::new(state.last_table.clone()),
         bum_enforcement: Arc::new(bum_enforcement),
-        ip_vrfs,
+        ip_vrfs: state.last_ip_vrfs.clone(),
         remote_ip_prefixes: Arc::new(state.last_ip_prefixes.clone()),
     });
     if intent_tx.send(intent).is_err() {
@@ -606,14 +610,31 @@ async fn supervisor_loop(
                 let bum_enforcement = bum_enforcement_rx.borrow_and_update().as_ref().clone();
                 let instances = instances_rx.borrow().clone();
                 let ip_vrfs = ip_vrfs_rx.borrow().clone();
-                if !publish_cached_dataplane_intent(
-                    &intent_tx,
-                    instances,
-                    ip_vrfs,
-                    bum_enforcement,
-                    &mut state,
-                ) {
-                    return;
+                if state.has_cached_projection_for(instances.as_ref(), ip_vrfs.as_ref()) {
+                    if !publish_cached_dataplane_intent(
+                        &intent_tx,
+                        bum_enforcement,
+                        &mut state,
+                    ) {
+                        return;
+                    }
+                } else {
+                    let quarantined = duplicate_mac_quarantine_rx.borrow().clone();
+                    match publish_dataplane_intent(
+                        &rib_tx,
+                        &intent_tx,
+                        instances,
+                        ip_vrfs,
+                        bum_enforcement,
+                        quarantined.as_ref(),
+                        &mut state,
+                    ).await {
+                        Ok(true) => {}
+                        Ok(false) => return,
+                        Err(e) => {
+                            warn!(error = %e, "EVPN dataplane supervisor: RIB query failed");
+                        },
+                    }
                 }
             }
             changed = duplicate_mac_quarantine_rx.changed(), if duplicate_mac_quarantine_updates_open => {
@@ -1633,6 +1654,36 @@ mod tests {
 
         shutdown.cancel();
         let _ = tokio::time::timeout(Duration::from_millis(200), join).await;
+    }
+
+    #[test]
+    fn cached_bum_republish_uses_cached_effective_tables() {
+        let cached_instances = Arc::new(local_instance_table(100, Some("br100")));
+        let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let mut state = SupervisorIntentState {
+            generation: 1,
+            last_instances: cached_instances.clone(),
+            last_ip_vrfs: Arc::new(IpVrfTable::new()),
+            last_table: RemoteMacTable::new(),
+            last_ip_prefixes: RemoteIpPrefixTable::new(),
+            last_bum_enforcement: BumEnforcementTable::new(),
+        };
+        let mut table = BumEnforcementTable::new();
+        let esi = EthernetSegmentIdentifier::new([9; 10]);
+        table.insert(esi, vni(100), DfRole::NonDf, "br100".to_string());
+
+        assert!(publish_cached_dataplane_intent(
+            &intent_tx, table, &mut state
+        ));
+
+        let updated = intent_rx.borrow_and_update().clone();
+        assert_eq!(
+            updated.instances.as_ref(),
+            cached_instances.as_ref(),
+            "cached BUM republish must use the effective tables that produced the cached projection"
+        );
+        assert_eq!(updated.ip_vrfs.len(), 0);
+        assert_eq!(updated.generation, 2);
     }
 
     #[tokio::test]
