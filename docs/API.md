@@ -132,7 +132,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
 | `RibService` | All RPCs | None |
 | `EventService` | All RPCs | None |
-| `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`, `GetIpVrf` | `ClearDuplicateMacQuarantine` |
+| `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`, `GetIpVrf` | `ClearDuplicateMacQuarantine`, `ApplyEvpnRuntime` |
 | `InjectionService` | None | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` |
 | `ControlService` | `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
 
@@ -1246,18 +1246,22 @@ future runtime mutation semantics.
 | `ListIpVrfs`        | List configured IP-VRFs / L3VNI tenants (name, l3vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, router_mac, optional `evpn_instance` link, readiness state, originated_routes_count, installed_routes_count) — Gate 9 / ADR-0058 |
 | `GetIpVrf`          | Detail view of a single IP-VRF including the seven readiness predicates (`not_ready_reasons`) when `readiness_state != Ready` |
 | `ClearDuplicateMacQuarantine` | Clear one RFC 7432 §15.1 duplicate-MAC local-origin quarantine by `(vni, mac)`. Returns `cleared=false` when no active quarantine exists; read-only listeners reject it. |
+| `ApplyEvpnRuntime` | Validate or apply a full candidate EVPN runtime model through the ADR-0063 coordinator. `validate_only=true` returns the plan without mutation; no-op applies succeed; non-noop applies fail closed until actor convergence commands exist. |
 
-Instance mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) is still
-out of scope. `GetEvpnRuntime` exposes the startup generation as a
-read-only foundation for ADR-0063: generation `1`, lifecycle `active`,
-and mutation state `disabled` mean the daemon is running the committed
-startup EVPN model and no live EVPN config mutation coordinator is active
-yet. Runtime mutation is not just a shared-table swap: delete and redefine
-must coordinate IMET, MAC-only/MAC+IP/SVI Type 2 originators, DF/ES state,
-Type 5/IP-VRF state, and Linux owned dataplane state. ADR-0063 therefore
-requires a single command-driven EVPN runtime coordinator with
-validation-first model updates and explicit drain/replay semantics before
-any mutating instance API is added. Tracked in
+Instance mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) remains out
+of scope. `GetEvpnRuntime` now reports the daemon-owned ADR-0063
+coordinator generation. At startup this is generation `1`, lifecycle
+`active`, and mutation state `idle` when the coordinator is available.
+`ApplyEvpnRuntime` accepts a full candidate rustbgpd TOML document so the
+daemon can reuse the normal config parser, validator, and EVPN table
+resolution. Because that TOML may contain unrelated credentials, audit
+logs record only its byte length and mode. Runtime mutation is not a
+shared-table swap: delete and redefine must coordinate IMET,
+MAC-only/MAC+IP/SVI Type 2 originators, DF/ES state, Type 5/IP-VRF
+state, and Linux owned dataplane state. Until those actor convergence
+commands exist, non-noop applies return `FAILED_PRECONDITION` without
+advancing the generation; `GetEvpnRuntime` surfaces the failed
+coordinator state. Tracked in
 [issue #210](https://github.com/lance0/rustbgpd/issues/210).
 
 Operators configure instances via the `[[evpn_instances]]` TOML
@@ -1376,6 +1380,28 @@ Or via CLI:
 rustbgpctl evpn clear-duplicate-mac --vni 100 --mac aa:bb:cc:dd:ee:ff
 rustbgpctl evpn clear-duplicate-mac --vni 100 --mac aa:bb:cc:dd:ee:ff --json
 ```
+
+### Apply EVPN runtime candidate
+
+Validates a full candidate rustbgpd TOML document against the committed
+EVPN runtime model and returns a plan summary. Use `validate_only=true`
+to inspect added/deleted/redefined/unchanged EVPN instances, IP-VRFs,
+and Ethernet Segments without changing the committed generation.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d @ localhost:50051 rustbgpd.v1.EvpnService/ApplyEvpnRuntime <<'JSON'
+{
+  "candidate_toml": "[global]\nasn = 65000\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n[global.telemetry]\nlog_format = \"json\"\n\n[security.grpc]\nenforcement = \"legacy\"\n\n[[evpn_instances]]\nvni = 100\nrd = \"65000:100\"\nroute_targets = [\"65000:100\"]\nlocal_vtep_ip = \"10.0.0.1\"\n",
+  "validate_only": true
+}
+JSON
+```
+
+For this slice, a non-`validate_only` request succeeds only when the
+candidate is a no-op against the committed model. Any non-noop request is
+rejected before publication with `FAILED_PRECONDITION`, leaving the prior
+generation committed.
 
 ---
 

@@ -3,16 +3,12 @@
 //! This service exposes the daemon's resolved
 //! [`rustbgpd_evpn::EvpnInstanceTable`] so operators and SDN
 //! controllers can confirm which local EVIs are installed without
-//! parsing TOML themselves. It remains *intentionally read-only*:
-//! kernel reconciliation and local Type 2/3 origination consume the
-//! same resolved table through daemon-owned actors, while runtime EVI
-//! mutation is still a follow-on phase.
-//!
-//! The service holds an `Arc<EvpnInstanceTable>` rather than building
-//! a fresh table per call so the gRPC layer never re-parses config
-//! state. The same `Arc` is the unit other phases will swap atomically
-//! on SIGHUP / gRPC mutation. The duplicate-MAC clear operation is a
-//! bounded actor command; it does not mutate the resolved tables.
+//! parsing TOML themselves. Read methods are backed by the
+//! daemon-owned ADR-0063 runtime model provider. Bounded controls go
+//! through daemon-owned hooks: duplicate-MAC clear targets one
+//! quarantine key, and `ApplyEvpnRuntime` validates full candidate
+//! TOML through the coordinator while non-noop mutations fail closed
+//! until actor convergence commands exist.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -21,11 +17,13 @@ use std::sync::Arc;
 
 use rustbgpd_evpn::ip_vrf::{IpVrfId, IpVrfNotReady, IpVrfStatus, IpVrfTable};
 use rustbgpd_evpn::{
-    EvpnInstanceId, EvpnInstanceTable, EvpnRuntimeLifecycle, EvpnRuntimeMutationState,
-    EvpnRuntimeSnapshot, FdbNexthopDataplaneStatus, IpVrfDataplaneStatus, MacAddress,
+    EvpnInstanceId, EvpnInstanceTable, EvpnRuntimeLifecycle, EvpnRuntimeModel,
+    EvpnRuntimeMutationState, EvpnRuntimePlan, EvpnRuntimeSnapshot, FdbNexthopDataplaneStatus,
+    IpVrfDataplaneStatus, MacAddress,
 };
 use tonic::{Request, Response, Status};
 
+use crate::audit::{apply_evpn_runtime_summary, set_request_summary};
 use crate::proto;
 use crate::server::{AccessMode, read_only_rejection};
 
@@ -56,8 +54,34 @@ pub type IpVrfStatusSnapshotFn = Arc<dyn Fn() -> Vec<IpVrfDataplaneStatus> + Sen
 /// tests can inject a deterministic value.
 pub type FdbNexthopSnapshotFn = Arc<dyn Fn() -> FdbNexthopDataplaneStatus + Send + Sync + 'static>;
 
-/// Read-side hook for the current ADR-0063 EVPN runtime generation.
-pub type EvpnRuntimeSnapshotFn = Arc<dyn Fn() -> EvpnRuntimeSnapshot + Send + Sync + 'static>;
+/// Read-side hook for the current ADR-0063 EVPN runtime model.
+pub type EvpnRuntimeModelFn = Arc<dyn Fn() -> EvpnRuntimeModel + Send + Sync + 'static>;
+
+pub type EvpnRuntimeApplyFuture = Pin<
+    Box<dyn Future<Output = Result<proto::ApplyEvpnRuntimeResponse, EvpnRuntimeApplyError>> + Send>,
+>;
+pub type EvpnRuntimeApplyFn =
+    Arc<dyn Fn(proto::ApplyEvpnRuntimeRequest) -> EvpnRuntimeApplyFuture + Send + Sync + 'static>;
+
+/// Error returned by the daemon EVPN runtime apply hook.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvpnRuntimeApplyError {
+    InvalidArgument(String),
+    FailedPrecondition(String),
+    Unavailable(String),
+    Internal(String),
+}
+
+impl EvpnRuntimeApplyError {
+    fn into_status(self) -> Status {
+        match self {
+            Self::InvalidArgument(message) => Status::invalid_argument(message),
+            Self::FailedPrecondition(message) => Status::failed_precondition(message),
+            Self::Unavailable(message) => Status::unavailable(message),
+            Self::Internal(message) => Status::internal(message),
+        }
+    }
+}
 
 /// Outcome returned by the daemon duplicate-MAC control hook.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,14 +104,13 @@ pub type DuplicateMacClearFn =
 /// EVPN service backed by shared resolved tables and optional actor controls.
 pub struct EvpnService {
     access_mode: AccessMode,
-    instances: Arc<EvpnInstanceTable>,
-    ip_vrfs: Arc<IpVrfTable>,
     originated_local_mac_count: OriginatedLocalMacCountFn,
     ip_vrf_status_snapshot: IpVrfStatusSnapshotFn,
     originated_ip_vrf_route_count: OriginatedIpVrfRouteCountFn,
     installed_ip_vrf_route_count: InstalledIpVrfRouteCountFn,
     fdb_nexthop_snapshot: FdbNexthopSnapshotFn,
-    runtime_snapshot: EvpnRuntimeSnapshotFn,
+    runtime_model: EvpnRuntimeModelFn,
+    runtime_apply: Option<EvpnRuntimeApplyFn>,
     duplicate_mac_clear: Option<DuplicateMacClearFn>,
 }
 
@@ -98,17 +121,16 @@ impl EvpnService {
     #[must_use]
     pub fn new(instances: Arc<EvpnInstanceTable>) -> Self {
         let ip_vrfs = Arc::new(IpVrfTable::new());
-        let runtime_snapshot = startup_runtime_snapshot_fn(&instances, &ip_vrfs);
+        let runtime_model = startup_runtime_model_fn(instances, ip_vrfs);
         Self {
             access_mode: AccessMode::ReadWrite,
-            instances,
-            ip_vrfs,
             originated_local_mac_count: Arc::new(|_| 0),
             ip_vrf_status_snapshot: Arc::new(Vec::new),
             originated_ip_vrf_route_count: Arc::new(|_| 0),
             installed_ip_vrf_route_count: Arc::new(|_| 0),
             fdb_nexthop_snapshot: Arc::new(FdbNexthopDataplaneStatus::default),
-            runtime_snapshot,
+            runtime_model,
+            runtime_apply: None,
             duplicate_mac_clear: None,
         }
     }
@@ -123,17 +145,16 @@ impl EvpnService {
         originated_local_mac_count: OriginatedLocalMacCountFn,
     ) -> Self {
         let ip_vrfs = Arc::new(IpVrfTable::new());
-        let runtime_snapshot = startup_runtime_snapshot_fn(&instances, &ip_vrfs);
+        let runtime_model = startup_runtime_model_fn(instances, ip_vrfs);
         Self {
             access_mode: AccessMode::ReadWrite,
-            instances,
-            ip_vrfs,
             originated_local_mac_count,
             ip_vrf_status_snapshot: Arc::new(Vec::new),
             originated_ip_vrf_route_count: Arc::new(|_| 0),
             installed_ip_vrf_route_count: Arc::new(|_| 0),
             fdb_nexthop_snapshot: Arc::new(FdbNexthopDataplaneStatus::default),
-            runtime_snapshot,
+            runtime_model,
+            runtime_apply: None,
             duplicate_mac_clear: None,
         }
     }
@@ -185,16 +206,15 @@ impl EvpnService {
         access_mode: AccessMode,
         duplicate_mac_clear: Option<DuplicateMacClearFn>,
     ) -> Self {
-        let runtime_snapshot = startup_runtime_snapshot_fn(&instances, &ip_vrfs);
+        let runtime_model = startup_runtime_model_fn(instances, ip_vrfs);
         Self::with_full_surface_runtime_and_duplicate_mac_control(
-            instances,
-            ip_vrfs,
             originated_local_mac_count,
             ip_vrf_status_snapshot,
             originated_ip_vrf_route_count,
             installed_ip_vrf_route_count,
             fdb_nexthop_snapshot,
-            runtime_snapshot,
+            runtime_model,
+            None,
             access_mode,
             duplicate_mac_clear,
         )
@@ -205,27 +225,25 @@ impl EvpnService {
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn with_full_surface_runtime_and_duplicate_mac_control(
-        instances: Arc<EvpnInstanceTable>,
-        ip_vrfs: Arc<IpVrfTable>,
         originated_local_mac_count: OriginatedLocalMacCountFn,
         ip_vrf_status_snapshot: IpVrfStatusSnapshotFn,
         originated_ip_vrf_route_count: OriginatedIpVrfRouteCountFn,
         installed_ip_vrf_route_count: InstalledIpVrfRouteCountFn,
         fdb_nexthop_snapshot: FdbNexthopSnapshotFn,
-        runtime_snapshot: EvpnRuntimeSnapshotFn,
+        runtime_model: EvpnRuntimeModelFn,
+        runtime_apply: Option<EvpnRuntimeApplyFn>,
         access_mode: AccessMode,
         duplicate_mac_clear: Option<DuplicateMacClearFn>,
     ) -> Self {
         Self {
             access_mode,
-            instances,
-            ip_vrfs,
             originated_local_mac_count,
             ip_vrf_status_snapshot,
             originated_ip_vrf_route_count,
             installed_ip_vrf_route_count,
             fdb_nexthop_snapshot,
-            runtime_snapshot,
+            runtime_model,
+            runtime_apply,
             duplicate_mac_clear,
         }
     }
@@ -237,7 +255,8 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
         &self,
         _request: Request<proto::GetEvpnRuntimeRequest>,
     ) -> Result<Response<proto::EvpnRuntimeState>, Status> {
-        let snapshot = (self.runtime_snapshot)();
+        let model = (self.runtime_model)();
+        let snapshot = model.snapshot();
         Ok(Response::new(runtime_snapshot_to_proto(&snapshot)))
     }
 
@@ -245,8 +264,9 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
         &self,
         _request: Request<proto::ListEvpnInstancesRequest>,
     ) -> Result<Response<proto::ListEvpnInstancesResponse>, Status> {
-        let instances = self
-            .instances
+        let model = (self.runtime_model)();
+        let instances = model
+            .instances()
             .sorted()
             .into_iter()
             .map(|inst| proto::EvpnInstanceState {
@@ -302,8 +322,9 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
     ) -> Result<Response<proto::ListIpVrfsResponse>, Status> {
         let snapshot = (self.ip_vrf_status_snapshot)();
         let by_id = snapshot_index(&snapshot);
-        let ip_vrfs: Vec<proto::IpVrfState> = self
-            .ip_vrfs
+        let model = (self.runtime_model)();
+        let ip_vrfs: Vec<proto::IpVrfState> = model
+            .ip_vrfs()
             .iter()
             .map(|vrf| {
                 let originated = (self.originated_ip_vrf_route_count)(vrf.id.as_u32());
@@ -319,8 +340,9 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
         request: Request<proto::GetIpVrfRequest>,
     ) -> Result<Response<proto::IpVrfState>, Status> {
         let name = request.into_inner().name;
-        let vrf = self
-            .ip_vrfs
+        let model = (self.runtime_model)();
+        let vrf = model
+            .ip_vrfs()
             .get(&name)
             .ok_or_else(|| Status::not_found(format!("no IP-VRF named {name:?}")))?;
         let snapshot = (self.ip_vrf_status_snapshot)();
@@ -360,17 +382,42 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
             message,
         }))
     }
+
+    async fn apply_evpn_runtime(
+        &self,
+        request: Request<proto::ApplyEvpnRuntimeRequest>,
+    ) -> Result<Response<proto::ApplyEvpnRuntimeResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        set_request_summary(
+            &request,
+            apply_evpn_runtime_summary(
+                &request.get_ref().candidate_toml,
+                request.get_ref().validate_only,
+            ),
+        );
+        let apply = self
+            .runtime_apply
+            .as_ref()
+            .ok_or_else(|| Status::unavailable("EVPN runtime apply control is unavailable"))?;
+        apply(request.into_inner())
+            .await
+            .map(Response::new)
+            .map_err(EvpnRuntimeApplyError::into_status)
+    }
 }
 
-fn startup_runtime_snapshot_fn(
-    instances: &Arc<EvpnInstanceTable>,
-    ip_vrfs: &Arc<IpVrfTable>,
-) -> EvpnRuntimeSnapshotFn {
-    let snapshot = EvpnRuntimeSnapshot::startup_from_tables(instances, ip_vrfs, &[]);
-    Arc::new(move || snapshot.clone())
+fn startup_runtime_model_fn(
+    instances: Arc<EvpnInstanceTable>,
+    ip_vrfs: Arc<IpVrfTable>,
+) -> EvpnRuntimeModelFn {
+    let model = EvpnRuntimeModel::startup(instances, ip_vrfs, Vec::new());
+    Arc::new(move || model.clone())
 }
 
-fn runtime_snapshot_to_proto(snapshot: &EvpnRuntimeSnapshot) -> proto::EvpnRuntimeState {
+#[must_use]
+pub fn runtime_snapshot_to_proto(snapshot: &EvpnRuntimeSnapshot) -> proto::EvpnRuntimeState {
     proto::EvpnRuntimeState {
         generation: snapshot.generation.as_u64(),
         lifecycle: match snapshot.lifecycle {
@@ -402,6 +449,43 @@ fn runtime_snapshot_to_proto(snapshot: &EvpnRuntimeSnapshot) -> proto::EvpnRunti
         )
         .unwrap_or(u32::MAX),
         message: snapshot.message.to_string(),
+    }
+}
+
+#[must_use]
+pub fn runtime_plan_to_proto(plan: &EvpnRuntimePlan) -> proto::EvpnRuntimePlanSummary {
+    proto::EvpnRuntimePlanSummary {
+        current_generation: plan.current_generation.as_u64(),
+        proposed_generation: plan.proposed_generation.as_u64(),
+        evpn_instances: Some(change_set_to_proto(&plan.evpn_instances)),
+        evpn_ip_vrfs: Some(change_set_to_proto(&plan.ip_vrfs)),
+        ethernet_segments: Some(change_set_to_proto(&plan.ethernet_segments)),
+    }
+}
+
+#[must_use]
+pub fn runtime_apply_outcome_to_proto(outcome: rustbgpd_evpn::EvpnRuntimeApplyOutcome) -> i32 {
+    match outcome {
+        rustbgpd_evpn::EvpnRuntimeApplyOutcome::Noop => {
+            proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyNoop as i32
+        }
+        rustbgpd_evpn::EvpnRuntimeApplyOutcome::Committed => {
+            proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyCommitted as i32
+        }
+    }
+}
+
+fn change_set_to_proto<K>(
+    set: &rustbgpd_evpn::EvpnRuntimeChangeSet<K>,
+) -> proto::EvpnRuntimeChangeSummary
+where
+    K: ToString,
+{
+    proto::EvpnRuntimeChangeSummary {
+        added: set.added.iter().map(ToString::to_string).collect(),
+        deleted: set.deleted.iter().map(ToString::to_string).collect(),
+        redefined: set.redefined.iter().map(ToString::to_string).collect(),
+        unchanged: set.unchanged.iter().map(ToString::to_string).collect(),
     }
 }
 
@@ -512,10 +596,7 @@ fn format_not_ready_reason(reason: &IpVrfNotReady) -> String {
 mod tests {
     use super::*;
     use proto::evpn_service_server::EvpnService as _;
-    use rustbgpd_evpn::{
-        EvpnInstance, EvpnInstanceId, EvpnRuntimeGeneration, EvpnRuntimeLifecycle,
-        EvpnRuntimeMutationState, RouteTarget,
-    };
+    use rustbgpd_evpn::{EvpnInstance, EvpnInstanceId, RouteTarget};
     use rustbgpd_wire::RouteDistinguisher;
     use std::net::IpAddr;
 
@@ -571,6 +652,25 @@ mod tests {
             let result = result.clone();
             Box::pin(async move { result }) as DuplicateMacClearFuture
         })
+    }
+
+    fn service_with_runtime_apply(
+        access_mode: crate::server::AccessMode,
+        runtime_apply: Option<EvpnRuntimeApplyFn>,
+    ) -> EvpnService {
+        EvpnService::with_full_surface_runtime_and_duplicate_mac_control(
+            Arc::new(|_| 0),
+            Arc::new(Vec::new),
+            Arc::new(|_| 0),
+            Arc::new(|_| 0),
+            Arc::new(FdbNexthopDataplaneStatus::default),
+            Arc::new(|| {
+                EvpnRuntimeModel::startup(EvpnInstanceTable::new(), IpVrfTable::new(), Vec::new())
+            }),
+            runtime_apply,
+            access_mode,
+            None,
+        )
     }
 
     #[tokio::test]
@@ -653,25 +753,18 @@ mod tests {
 
     #[tokio::test]
     async fn get_evpn_runtime_surfaces_committed_generation() {
-        let snapshot = EvpnRuntimeSnapshot {
-            generation: EvpnRuntimeGeneration::STARTUP,
-            lifecycle: EvpnRuntimeLifecycle::Active,
-            mutation_state: EvpnRuntimeMutationState::Disabled,
-            evpn_instances_count: 2,
-            evpn_ip_vrfs_count: 1,
-            ethernet_segments_count: 1,
-            ethernet_segment_member_vnis_count: 2,
-            message: "startup snapshot active; runtime EVPN mutation disabled",
-        };
+        let mut table = EvpnInstanceTable::new();
+        install(&mut table, 100, "65000:100", "10.0.0.1");
+        install(&mut table, 200, "65000:200", "10.0.0.2");
+        let model = EvpnRuntimeModel::startup(table, IpVrfTable::new(), Vec::new());
         let svc = EvpnService::with_full_surface_runtime_and_duplicate_mac_control(
-            Arc::new(EvpnInstanceTable::new()),
-            Arc::new(IpVrfTable::new()),
             Arc::new(|_| 0),
             Arc::new(Vec::new),
             Arc::new(|_| 0),
             Arc::new(|_| 0),
             Arc::new(FdbNexthopDataplaneStatus::default),
-            Arc::new(move || snapshot.clone()),
+            Arc::new(move || model.clone()),
+            None,
             crate::server::AccessMode::ReadWrite,
             None,
         );
@@ -689,13 +782,40 @@ mod tests {
             proto::EvpnRuntimeMutationState::EvpnRuntimeMutationDisabled as i32
         );
         assert_eq!(resp.evpn_instances_count, 2);
-        assert_eq!(resp.evpn_ip_vrfs_count, 1);
-        assert_eq!(resp.ethernet_segments_count, 1);
-        assert_eq!(resp.ethernet_segment_member_vnis_count, 2);
+        assert_eq!(resp.evpn_ip_vrfs_count, 0);
+        assert_eq!(resp.ethernet_segments_count, 0);
+        assert_eq!(resp.ethernet_segment_member_vnis_count, 0);
         assert_eq!(
             resp.message,
             "startup snapshot active; runtime EVPN mutation disabled"
         );
+    }
+
+    #[tokio::test]
+    async fn list_evpn_instances_reads_runtime_model_provider() {
+        let mut live_table = EvpnInstanceTable::new();
+        install(&mut live_table, 100, "65000:100", "10.0.0.1");
+        let live_model = EvpnRuntimeModel::startup(live_table, IpVrfTable::new(), Vec::new());
+        let svc = EvpnService::with_full_surface_runtime_and_duplicate_mac_control(
+            Arc::new(|_| 0),
+            Arc::new(Vec::new),
+            Arc::new(|_| 0),
+            Arc::new(|_| 0),
+            Arc::new(FdbNexthopDataplaneStatus::default),
+            Arc::new(move || live_model.clone()),
+            None,
+            crate::server::AccessMode::ReadWrite,
+            None,
+        );
+
+        let resp = svc
+            .list_evpn_instances(Request::new(proto::ListEvpnInstancesRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.instances.len(), 1);
+        assert_eq!(resp.instances[0].vni, 100);
     }
 
     #[tokio::test]
@@ -902,6 +1022,78 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::Unavailable);
     }
 
+    #[tokio::test]
+    async fn apply_evpn_runtime_rejects_read_only_listener() {
+        let apply: EvpnRuntimeApplyFn = Arc::new(|_| {
+            Box::pin(async {
+                Ok(proto::ApplyEvpnRuntimeResponse {
+                    outcome: proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyValidated as i32,
+                    runtime: None,
+                    plan: None,
+                    message: "unexpected".to_string(),
+                })
+            }) as EvpnRuntimeApplyFuture
+        });
+        let svc = service_with_runtime_apply(crate::server::AccessMode::ReadOnly, Some(apply));
+
+        let err = svc
+            .apply_evpn_runtime(Request::new(proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: "candidate".to_string(),
+                validate_only: true,
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn apply_evpn_runtime_requires_control_hook() {
+        let svc = service_with_runtime_apply(crate::server::AccessMode::ReadWrite, None);
+
+        let err = svc
+            .apply_evpn_runtime(Request::new(proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: "candidate".to_string(),
+                validate_only: true,
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn apply_evpn_runtime_forwards_to_control_hook() {
+        let apply: EvpnRuntimeApplyFn = Arc::new(|request| {
+            assert_eq!(request.candidate_toml, "candidate");
+            assert!(request.validate_only);
+            Box::pin(async {
+                Ok(proto::ApplyEvpnRuntimeResponse {
+                    outcome: proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyValidated as i32,
+                    runtime: None,
+                    plan: None,
+                    message: "validated".to_string(),
+                })
+            }) as EvpnRuntimeApplyFuture
+        });
+        let svc = service_with_runtime_apply(crate::server::AccessMode::ReadWrite, Some(apply));
+
+        let resp = svc
+            .apply_evpn_runtime(Request::new(proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: "candidate".to_string(),
+                validate_only: true,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(
+            resp.outcome,
+            proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyValidated as i32
+        );
+        assert_eq!(resp.message, "validated");
+    }
+
     // -- Gate 9 IP-VRF surface --------------------------------------
 
     use rustbgpd_evpn::IpVrfDataplaneStatus;
@@ -936,6 +1128,41 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_ip_vrfs_reads_runtime_model_provider() {
+        let mut live_vrfs = IpVrfTable::new();
+        install_vrf(
+            &mut live_vrfs,
+            "blue",
+            5000,
+            "65000:5000",
+            "10.0.0.1",
+            [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+        );
+        let live_model = EvpnRuntimeModel::startup(EvpnInstanceTable::new(), live_vrfs, Vec::new());
+        let svc = EvpnService::with_full_surface_runtime_and_duplicate_mac_control(
+            Arc::new(|_| 0),
+            Arc::new(Vec::new),
+            Arc::new(|_| 0),
+            Arc::new(|_| 0),
+            Arc::new(FdbNexthopDataplaneStatus::default),
+            Arc::new(move || live_model.clone()),
+            None,
+            crate::server::AccessMode::ReadWrite,
+            None,
+        );
+
+        let resp = svc
+            .list_ip_vrfs(Request::new(proto::ListIpVrfsRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.ip_vrfs.len(), 1);
+        assert_eq!(resp.ip_vrfs[0].name, "blue");
+        assert_eq!(resp.ip_vrfs[0].vni, 5000);
     }
 
     #[tokio::test]

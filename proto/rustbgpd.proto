@@ -1521,6 +1521,13 @@ service EvpnService {
   // not clear all VNIs and does not mutate the resolved EVPN
   // instance table.
   rpc ClearDuplicateMacQuarantine(ClearDuplicateMacQuarantineRequest) returns (ClearDuplicateMacQuarantineResponse);
+  // ADR-0063 — validate or apply a full candidate EVPN runtime model
+  // through the coordinator. The request carries full candidate TOML
+  // so the daemon can reuse the config layer's validation and table
+  // resolution. Until actor convergence commands exist, non-noop
+  // apply attempts fail closed without advancing generation; use
+  // validate_only to inspect the plan safely.
+  rpc ApplyEvpnRuntime(ApplyEvpnRuntimeRequest) returns (ApplyEvpnRuntimeResponse);
 }
 
 message GetEvpnRuntimeRequest {}
@@ -1628,6 +1635,44 @@ message ClearDuplicateMacQuarantineResponse {
   bool cleared = 1;
   // Operator-facing summary of the result.
   string message = 2;
+}
+
+message ApplyEvpnRuntimeRequest {
+  // Full candidate rustbgpd TOML. This may contain credentials in
+  // unrelated sections and must be redacted from audit logs.
+  string candidate_toml = 1;
+  // When true, validate and plan the candidate without attempting to
+  // advance the committed EVPN runtime generation.
+  bool validate_only = 2;
+}
+
+message ApplyEvpnRuntimeResponse {
+  EvpnRuntimeApplyOutcome outcome = 1;
+  EvpnRuntimeState runtime = 2;
+  EvpnRuntimePlanSummary plan = 3;
+  string message = 4;
+}
+
+enum EvpnRuntimeApplyOutcome {
+  EVPN_RUNTIME_APPLY_UNKNOWN = 0;
+  EVPN_RUNTIME_APPLY_VALIDATED = 1;
+  EVPN_RUNTIME_APPLY_NOOP = 2;
+  EVPN_RUNTIME_APPLY_COMMITTED = 3;
+}
+
+message EvpnRuntimePlanSummary {
+  uint64 current_generation = 1;
+  uint64 proposed_generation = 2;
+  EvpnRuntimeChangeSummary evpn_instances = 3;
+  EvpnRuntimeChangeSummary evpn_ip_vrfs = 4;
+  EvpnRuntimeChangeSummary ethernet_segments = 5;
+}
+
+message EvpnRuntimeChangeSummary {
+  repeated string added = 1;
+  repeated string deleted = 2;
+  repeated string redefined = 3;
+  repeated string unchanged = 4;
 }
 
 // One installed IP-VRF (Gate 9, ADR-0058). Joins the resolved

@@ -537,6 +537,12 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
         "/rustbgpd.v1.EvpnService/ClearDuplicateMacQuarantine",
         AuthTier::Mutating,
     ),
+    method(
+        "rustbgpd.v1.EvpnService",
+        "ApplyEvpnRuntime",
+        "/rustbgpd.v1.EvpnService/ApplyEvpnRuntime",
+        AuthTier::Mutating,
+    ),
 ];
 
 /// Find authorization metadata by full tonic method path.
@@ -657,7 +663,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 70);
+        assert_eq!(METHODS.len(), 71);
     }
 
     #[test]
@@ -699,7 +705,7 @@ mod tests {
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 0);
         assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 36);
-        assert_eq!(method_count_by_tier(AuthTier::Mutating), 16);
+        assert_eq!(method_count_by_tier(AuthTier::Mutating), 17);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 18);
     }
 
@@ -730,6 +736,10 @@ mod tests {
         );
         assert_eq!(
             method_authz("/rustbgpd.v1.EvpnService/ClearDuplicateMacQuarantine").map(|m| m.tier),
+            Some(AuthTier::Mutating)
+        );
+        assert_eq!(
+            method_authz("/rustbgpd.v1.EvpnService/ApplyEvpnRuntime").map(|m| m.tier),
             Some(AuthTier::Mutating)
         );
         assert_eq!(

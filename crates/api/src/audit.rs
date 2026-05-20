@@ -87,6 +87,19 @@ pub(crate) fn diff_runtime_config_summary(candidate_toml: &str) -> GrpcRequestSu
     ))
 }
 
+/// Summary for `ApplyEvpnRuntime`. Candidate TOML has the same
+/// credential risk as `DiffRuntimeConfig`, so log only size and mode.
+pub(crate) fn apply_evpn_runtime_summary(
+    candidate_toml: &str,
+    validate_only: bool,
+) -> GrpcRequestSummary {
+    debug_assert!(CREDENTIAL_MASK_TABLE.contains(&"ApplyEvpnRuntimeRequest.candidate_toml"));
+    GrpcRequestSummary::new(format!(
+        "candidate_toml={REDACTED} candidate_toml_bytes={} validate_only={validate_only}",
+        candidate_toml.len()
+    ))
+}
+
 /// Summary for `SetPeerGroup`. Peer-group name is safe after bounding;
 /// MD5 material is represented only as state.
 pub(crate) fn set_peer_group_summary(
@@ -112,6 +125,7 @@ pub(crate) fn set_peer_group_summary(
 /// Explicit credential fields covered by this audit-summary layer.
 pub(crate) const CREDENTIAL_MASK_TABLE: &[&str] = &[
     "DiffRuntimeConfigRequest.candidate_toml",
+    "ApplyEvpnRuntimeRequest.candidate_toml",
     "PeerGroupDefinition.md5_password",
     "candidate_toml:tcp_ao.key",
 ];
@@ -142,6 +156,19 @@ mod tests {
     }
 
     #[test]
+    fn apply_evpn_runtime_summary_redacts_candidate_toml() {
+        let summary = apply_evpn_runtime_summary(
+            "md5_password = \"secret\"\ntcp_ao = { key = \"ao-secret\" }\n",
+            true,
+        );
+        assert!(summary.as_str().contains("candidate_toml=<redacted>"));
+        assert!(summary.as_str().contains("candidate_toml_bytes="));
+        assert!(summary.as_str().contains("validate_only=true"));
+        assert!(!summary.as_str().contains("secret"));
+        assert!(!summary.as_str().contains("ao-secret"));
+    }
+
+    #[test]
     fn set_peer_group_summary_never_contains_md5_secret() {
         let summary = set_peer_group_summary("rs-clients", true, None);
         assert_eq!(
@@ -154,6 +181,7 @@ mod tests {
     #[test]
     fn credential_mask_table_lists_current_secret_ingress() {
         assert!(CREDENTIAL_MASK_TABLE.contains(&"DiffRuntimeConfigRequest.candidate_toml"));
+        assert!(CREDENTIAL_MASK_TABLE.contains(&"ApplyEvpnRuntimeRequest.candidate_toml"));
         assert!(CREDENTIAL_MASK_TABLE.contains(&"PeerGroupDefinition.md5_password"));
         assert!(CREDENTIAL_MASK_TABLE.contains(&"candidate_toml:tcp_ao.key"));
     }
