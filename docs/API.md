@@ -1260,9 +1260,10 @@ shared-table swap: delete and redefine must coordinate IMET,
 MAC-only/MAC+IP/SVI Type 2 originators, DF/ES state, Type 5/IP-VRF
 state, and Linux owned dataplane state. Until those actor convergence
 commands exist, non-noop applies return `FAILED_PRECONDITION` without
-advancing the generation; `GetEvpnRuntime` surfaces the failed
-coordinator state. Tracked in
-[issue #210](https://github.com/lance0/rustbgpd/issues/210).
+advancing the generation and without degrading the committed model — an
+unsupported mutation is a capability gap, not an operational failure, so
+`GetEvpnRuntime` continues to report the healthy committed generation.
+Tracked in [issue #210](https://github.com/lance0/rustbgpd/issues/210).
 
 Operators configure instances via the `[[evpn_instances]]` TOML
 block; SIGHUP that edits any instance is restart-required (see

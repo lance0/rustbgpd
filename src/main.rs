@@ -126,33 +126,21 @@ fn evpn_runtime_candidate_from_toml(
     ))
 }
 
-struct UnsupportedEvpnRuntimeConverger;
-
-impl rustbgpd_evpn::EvpnRuntimeConverger for UnsupportedEvpnRuntimeConverger {
-    fn converge(
-        &mut self,
-        _current: &rustbgpd_evpn::EvpnRuntimeModel,
-        _candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
-        _plan: &rustbgpd_evpn::EvpnRuntimePlan,
-    ) -> Result<(), rustbgpd_evpn::EvpnRuntimeConvergeError> {
-        Err(rustbgpd_evpn::EvpnRuntimeConvergeError::new(
-            "daemon actor convergence is not wired for runtime EVPN mutations",
-        ))
-    }
-}
-
 fn apply_evpn_runtime_request(
     request: &proto::ApplyEvpnRuntimeRequest,
     coordinator: &Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
 ) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
     let candidate = evpn_runtime_candidate_from_toml(&request.candidate_toml)?;
-    let mut coordinator = coordinator.lock().map_err(|_| {
+    let coordinator = coordinator.lock().map_err(|_| {
         GrpcEvpnRuntimeApplyError::Internal("EVPN runtime coordinator lock poisoned".to_string())
     })?;
 
+    // Planning is pure: it previews the next generation without mutating
+    // the committed model or the coordinator's lifecycle/mutation state.
+    let plan = coordinator.plan_candidate(&candidate);
+    let snapshot = coordinator.snapshot();
+
     if request.validate_only {
-        let plan = coordinator.plan_candidate(&candidate);
-        let snapshot = coordinator.snapshot();
         return Ok(proto::ApplyEvpnRuntimeResponse {
             outcome: proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyValidated as i32,
             runtime: Some(runtime_snapshot_to_proto(&snapshot)),
@@ -161,34 +149,28 @@ fn apply_evpn_runtime_request(
         });
     }
 
-    let mut converger = UnsupportedEvpnRuntimeConverger;
-    match coordinator.apply_candidate(candidate, &mut converger) {
-        Ok(report) => {
-            let snapshot = coordinator.snapshot();
-            let message = match report.outcome {
-                rustbgpd_evpn::EvpnRuntimeApplyOutcome::Noop => {
-                    "candidate EVPN runtime model matches the committed generation; no changes applied"
-                }
-                rustbgpd_evpn::EvpnRuntimeApplyOutcome::Committed => {
-                    "candidate EVPN runtime model committed"
-                }
-            };
-            Ok(proto::ApplyEvpnRuntimeResponse {
-                outcome: runtime_apply_outcome_to_proto(report.outcome),
-                runtime: Some(runtime_snapshot_to_proto(&snapshot)),
-                plan: Some(runtime_plan_to_proto(&report.plan)),
-                message: message.to_string(),
-            })
-        }
-        Err(err) => {
-            let generation = coordinator.snapshot().generation.as_u64();
-            Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(format!(
-                "non-noop EVPN runtime mutations require daemon actor convergence wiring; \
-                 generation {generation} remains committed: {}",
-                err.converge_error().message()
-            )))
-        }
+    if plan.is_noop() {
+        return Ok(proto::ApplyEvpnRuntimeResponse {
+            outcome: runtime_apply_outcome_to_proto(rustbgpd_evpn::EvpnRuntimeApplyOutcome::Noop),
+            runtime: Some(runtime_snapshot_to_proto(&snapshot)),
+            plan: Some(runtime_plan_to_proto(&plan)),
+            message:
+                "candidate EVPN runtime model matches the committed generation; no changes applied"
+                    .to_string(),
+        });
     }
+
+    // A non-noop mutation needs daemon actor convergence (drain/replay of
+    // IMET, Type 2, Type 5/IP-VRF, DF/ES, and Linux owned state) before a
+    // new generation can publish. That backend is not wired yet, so fail
+    // closed WITHOUT driving the coordinator into a degraded state: an
+    // unsupported mutation is a capability gap, not an operational
+    // failure, and the committed generation stays fully healthy.
+    Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(format!(
+        "non-noop EVPN runtime mutations require daemon actor convergence wiring (tracked in #210); \
+         generation {} remains committed",
+        snapshot.generation.as_u64()
+    )))
 }
 
 fn fib_runtime_event_to_bgp_event(
@@ -2160,7 +2142,7 @@ local_vtep_ip = "10.0.0.1"
     }
 
     #[tokio::test]
-    async fn apply_evpn_runtime_non_noop_fails_closed_and_marks_runtime_failed() {
+    async fn apply_evpn_runtime_non_noop_fails_closed_without_degrading_runtime() {
         let coordinator = empty_evpn_runtime_coordinator();
 
         let error = apply_evpn_runtime_request(
@@ -2176,15 +2158,19 @@ local_vtep_ip = "10.0.0.1"
             error,
             GrpcEvpnRuntimeApplyError::FailedPrecondition(_)
         ));
+        // A non-noop apply with no convergence backend is a capability gap,
+        // not an operational failure: the committed generation stays healthy
+        // (Active/Idle) so `GetEvpnRuntime` never reports a misleading
+        // degraded state from a fail-closed probe.
         let snapshot = coordinator.lock().unwrap().snapshot();
         assert_eq!(snapshot.generation.as_u64(), 1);
         assert_eq!(
             snapshot.lifecycle,
-            rustbgpd_evpn::EvpnRuntimeLifecycle::Degraded
+            rustbgpd_evpn::EvpnRuntimeLifecycle::Active
         );
         assert_eq!(
             snapshot.mutation_state,
-            rustbgpd_evpn::EvpnRuntimeMutationState::Failed
+            rustbgpd_evpn::EvpnRuntimeMutationState::Idle
         );
     }
 
