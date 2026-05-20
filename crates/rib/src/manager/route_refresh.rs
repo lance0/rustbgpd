@@ -248,7 +248,7 @@ impl RibManager {
         // re-advertises the current export set for this family rather than
         // diffing against what was already sent.
         let refresh_view = AdjRibOut::new(peer);
-        let mut policy_filtered_by_prefix: Vec<(Prefix, Vec<PolicyFilteredRouteKey>)> = Vec::new();
+        let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> = HashSet::new();
 
         if safi == Safi::FlowSpec {
             let flow_rules: HashSet<FlowSpecRule> = self
@@ -331,7 +331,7 @@ impl RibManager {
                         &mut policy_filtered,
                         false, // route refresh re-emits all anyway via empty refresh_view
                     );
-                    policy_filtered_by_prefix.push((*prefix, policy_filtered));
+                    current_policy_filtered_routes.extend(policy_filtered);
                 } else {
                     let mut policy_filtered = Vec::new();
                     Self::distribute_single_best_prefix(
@@ -353,7 +353,7 @@ impl RibManager {
                         &mut policy_filtered,
                         false,
                     );
-                    policy_filtered_by_prefix.push((*prefix, policy_filtered));
+                    current_policy_filtered_routes.extend(policy_filtered);
                 }
             }
         }
@@ -380,9 +380,11 @@ impl RibManager {
                 self.dirty_peers.insert(peer);
                 return;
             }
-            for (prefix, policy_filtered) in policy_filtered_by_prefix {
-                self.update_policy_filtered_routes_for_prefix(peer, prefix, &policy_filtered);
-            }
+            self.update_policy_filtered_routes_for_prefixes(
+                peer,
+                &all_prefixes,
+                &current_policy_filtered_routes,
+            );
             self.pending_refresh
                 .entry(peer)
                 .or_default()

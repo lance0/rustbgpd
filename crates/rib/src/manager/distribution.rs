@@ -1528,8 +1528,8 @@ impl RibManager {
             let mut fs_withdraw = Vec::new();
             let mut evpn_announce = Vec::new();
             let mut evpn_withdraw = Vec::new();
-            let mut policy_filtered_by_prefix: Vec<(Prefix, Vec<PolicyFilteredRouteKey>)> =
-                Vec::new();
+            let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> =
+                HashSet::new();
 
             // Resolve export policy, sendable families, and RR state before
             // borrowing rib_out (which holds a &mut to self.adj_ribs_out).
@@ -1587,7 +1587,7 @@ impl RibManager {
                         &mut policy_filtered,
                         is_force,
                     );
-                    policy_filtered_by_prefix.push((*prefix, policy_filtered));
+                    current_policy_filtered_routes.extend(policy_filtered);
                 } else {
                     let mut policy_filtered = Vec::new();
                     Self::distribute_single_best_prefix(
@@ -1609,7 +1609,7 @@ impl RibManager {
                         &mut policy_filtered,
                         is_force,
                     );
-                    policy_filtered_by_prefix.push((*prefix, policy_filtered));
+                    current_policy_filtered_routes.extend(policy_filtered);
                 }
             }
 
@@ -1688,13 +1688,11 @@ impl RibManager {
                     evpn_announce,
                     evpn_withdraw,
                 ) {
-                    for (prefix, policy_filtered) in &policy_filtered_by_prefix {
-                        self.update_policy_filtered_routes_for_prefix(
-                            peer,
-                            *prefix,
-                            policy_filtered,
-                        );
-                    }
+                    self.update_policy_filtered_routes_for_prefixes(
+                        peer,
+                        &effective_prefixes,
+                        &current_policy_filtered_routes,
+                    );
                     if resync {
                         info!(
                             %peer,
@@ -1726,9 +1724,11 @@ impl RibManager {
                     self.dirty_peers.insert(peer);
                 }
             } else {
-                for (prefix, policy_filtered) in &policy_filtered_by_prefix {
-                    self.update_policy_filtered_routes_for_prefix(peer, *prefix, policy_filtered);
-                }
+                self.update_policy_filtered_routes_for_prefixes(
+                    peer,
+                    &effective_prefixes,
+                    &current_policy_filtered_routes,
+                );
                 if resync {
                     // Resync triggered but no diff — already in sync.
                     debug!(%peer, "outbound routes unchanged after resync");

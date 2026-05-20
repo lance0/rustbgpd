@@ -938,18 +938,17 @@ impl RibManager {
         let _ = self.route_events_tx.send(event);
     }
 
-    pub(super) fn update_policy_filtered_routes_for_prefix(
+    pub(super) fn update_policy_filtered_routes_for_prefixes(
         &mut self,
         target_peer: IpAddr,
-        prefix: Prefix,
-        current: &[PolicyFilteredRouteKey],
+        prefixes: &HashSet<Prefix>,
+        current: &HashSet<PolicyFilteredRouteKey>,
     ) {
-        let current = current.iter().copied().collect::<HashSet<_>>();
         let previous = self
             .policy_filtered_routes
             .iter()
             .copied()
-            .filter(|key| key.target_peer == target_peer && key.prefix == prefix)
+            .filter(|key| key.target_peer == target_peer && prefixes.contains(&key.prefix))
             .collect::<Vec<_>>();
 
         for key in previous {
@@ -958,7 +957,7 @@ impl RibManager {
             }
         }
 
-        for key in current {
+        for key in current.iter().copied() {
             if self.policy_filtered_routes.insert(key) {
                 self.publish_route_event(RouteEvent {
                     event_id: 0,

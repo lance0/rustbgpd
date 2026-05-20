@@ -1194,7 +1194,11 @@ mod tests {
             parse_bgp_event_type("evpn_best_changed").unwrap(),
             BgpEventType::EvpnRouteBestChanged as i32
         );
-        assert!(parse_bgp_event_type("policy_filtered").is_err());
+        assert_eq!(
+            parse_bgp_event_type("policy_filtered").unwrap(),
+            BgpEventType::RoutePolicyFiltered as i32
+        );
+        assert!(parse_bgp_event_type("not_an_event").is_err());
     }
 
     #[test]

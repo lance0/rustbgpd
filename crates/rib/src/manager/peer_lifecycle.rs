@@ -156,7 +156,7 @@ impl RibManager {
         let mut fs_withdraw = Vec::new();
         let mut evpn_announce = Vec::new();
         let mut evpn_withdraw = Vec::new();
-        let mut policy_filtered_by_prefix: Vec<(Prefix, Vec<PolicyFilteredRouteKey>)> = Vec::new();
+        let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> = HashSet::new();
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
@@ -211,7 +211,7 @@ impl RibManager {
                     &mut policy_filtered,
                     false, // initial dump — equality check is correct
                 );
-                policy_filtered_by_prefix.push((*prefix, policy_filtered));
+                current_policy_filtered_routes.extend(policy_filtered);
             } else {
                 let mut policy_filtered = Vec::new();
                 Self::distribute_single_best_prefix(
@@ -233,7 +233,7 @@ impl RibManager {
                     &mut policy_filtered,
                     false, // initial dump — equality check is correct
                 );
-                policy_filtered_by_prefix.push((*prefix, policy_filtered));
+                current_policy_filtered_routes.extend(policy_filtered);
             }
         }
 
@@ -325,9 +325,11 @@ impl RibManager {
             self.dirty_peers.insert(peer);
             return;
         }
-        for (prefix, policy_filtered) in policy_filtered_by_prefix {
-            self.update_policy_filtered_routes_for_prefix(peer, prefix, &policy_filtered);
-        }
+        self.update_policy_filtered_routes_for_prefixes(
+            peer,
+            &all_prefixes,
+            &current_policy_filtered_routes,
+        );
 
         // Send End-of-RIB markers for all sendable families
         if !eor_families.is_empty()
