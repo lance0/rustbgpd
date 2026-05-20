@@ -114,7 +114,7 @@ pub struct RibManager {
     /// Currently surfaced unicast export-policy denials. This keeps
     /// route-level policy-filtered events transition-based instead of
     /// re-emitting on every dirty or forced outbound resync.
-    policy_filtered_routes: HashSet<PolicyFilteredRouteKey>,
+    policy_filtered_routes: HashMap<IpAddr, HashSet<PolicyFilteredRouteKey>>,
     /// Bounded recent route-event history for after-the-fact operator
     /// timeline queries. Live streaming still uses `route_events_tx`.
     route_event_history: VecDeque<RouteEvent>,
@@ -368,7 +368,7 @@ impl RibManager {
             vrp_table: None,
             aspa_table: None,
             route_events_tx,
-            policy_filtered_routes: HashSet::new(),
+            policy_filtered_routes: HashMap::new(),
             route_event_history: VecDeque::with_capacity(ROUTE_EVENT_HISTORY_CAPACITY),
             next_route_event_id: 1,
             evpn_events_tx,
@@ -944,39 +944,47 @@ impl RibManager {
         prefixes: &HashSet<Prefix>,
         current: &HashSet<PolicyFilteredRouteKey>,
     ) {
-        let previous = self
-            .policy_filtered_routes
+        let peer_routes = self.policy_filtered_routes.entry(target_peer).or_default();
+        let previous = peer_routes
             .iter()
             .copied()
-            .filter(|key| key.target_peer == target_peer && prefixes.contains(&key.prefix))
+            .filter(|key| prefixes.contains(&key.prefix))
             .collect::<Vec<_>>();
 
         for key in previous {
             if !current.contains(&key) {
-                self.policy_filtered_routes.remove(&key);
+                peer_routes.remove(&key);
             }
         }
 
+        let mut newly_filtered = Vec::new();
         for key in current.iter().copied() {
-            if self.policy_filtered_routes.insert(key) {
-                self.publish_route_event(RouteEvent {
-                    event_id: 0,
-                    event_type: RouteEventType::PolicyFiltered,
-                    prefix: key.prefix,
-                    peer: Some(key.source_peer),
-                    previous_peer: None,
-                    target_peer: Some(key.target_peer),
-                    timestamp: crate::event::unix_timestamp_now(),
-                    path_id: key.path_id,
-                    reason: "policy_denied".to_string(),
-                });
+            if peer_routes.insert(key) {
+                newly_filtered.push(key);
             }
+        }
+
+        if peer_routes.is_empty() {
+            self.policy_filtered_routes.remove(&target_peer);
+        }
+
+        for key in newly_filtered {
+            self.publish_route_event(RouteEvent {
+                event_id: 0,
+                event_type: RouteEventType::PolicyFiltered,
+                prefix: key.prefix,
+                peer: Some(key.source_peer),
+                previous_peer: None,
+                target_peer: Some(key.target_peer),
+                timestamp: crate::event::unix_timestamp_now(),
+                path_id: key.path_id,
+                reason: "policy_denied".to_string(),
+            });
         }
     }
 
     pub(super) fn clear_policy_filtered_routes_for_peer(&mut self, target_peer: IpAddr) {
-        self.policy_filtered_routes
-            .retain(|key| key.target_peer != target_peer);
+        self.policy_filtered_routes.remove(&target_peer);
     }
 
     fn handle_query_route_event_history(

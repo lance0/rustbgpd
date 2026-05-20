@@ -1728,6 +1728,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn watch_route_events_filter_matches_policy_filtered_target_peer() {
+        let metrics = BgpMetrics::new();
+        let (svc, events_tx) = make_watch_routes_service(metrics);
+
+        let response = svc
+            .watch_route_events(Request::new(proto::WatchRoutesRequest {
+                neighbor_address: "192.0.2.1".to_string(),
+                afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        events_tx
+            .send(rustbgpd_rib::RouteEvent {
+                event_id: 0,
+                event_type: RouteEventType::PolicyFiltered,
+                prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 3, 0, 0), 24)),
+                peer: Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))),
+                previous_peer: None,
+                target_peer: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
+                timestamp: "123".to_string(),
+                path_id: 0,
+                reason: "policy_denied".to_string(),
+            })
+            .unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            event.event_type,
+            proto::BgpEventType::RoutePolicyFiltered as i32
+        );
+        assert_eq!(event.peer_address, "198.51.100.1");
+        assert_eq!(event.target_peer_address, "192.0.2.1");
+        match event.payload {
+            Some(proto::bgp_event::Payload::Route(route)) => {
+                assert_eq!(route.reason, "policy_denied");
+            }
+            other => panic!("expected route payload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn watch_route_events_lagged_subscriber_emits_signal() {
         let metrics = BgpMetrics::new();
         let (svc, events_tx) = make_watch_routes_service(metrics.clone());
