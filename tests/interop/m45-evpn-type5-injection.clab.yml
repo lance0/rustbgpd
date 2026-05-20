@@ -1,0 +1,66 @@
+# Containerlab topology: rustbgpd EVPN VTEP ↔ FRR receiver
+# (M45 — controller-injected Type 5 IP Prefix Route, RFC 9136)
+#
+# Validates the *injection* direction of the EVPN Type 5 API added in
+# PR #204: rustbgpd accepts an `InjectionService.AddEvpnRoute` Type 5
+# request over gRPC, advertises the resulting pure/interface-less Type
+# 5 NLRI over an iBGP L2VPN/EVPN session, and a real FRR 10.x peer
+# accepts it into its global BGP EVPN RIB. Withdrawal via
+# `DeleteEvpnRoute` removes it.
+#
+# This is a pure control-plane smoke — it deliberately does NOT set up
+# a kernel VRF / L3VNI / VXLAN on the FRR side. The injected Type 5
+# lands in FRR's `show bgp l2vpn evpn` table (received, not VRF-
+# imported), which is sufficient to prove the over-the-wire NLRI
+# encoding and is the mirror of M30b's decode-direction check. Skipping
+# the kernel VRF keeps the test runnable on the hosted CI runner, which
+# lacks the `vrf` kernel module that the M30b / M39 dataplane tests
+# need. Kernel install of a received Type 5 is already covered by M39.
+#
+# Topology:
+#   rustbgpd (10.0.0.1, AS 65000) — injects Type 5 via gRPC
+#     └── iBGP L2VPN/EVPN ────── FRR (10.0.0.2, AS 65000) — receiver
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m45-evpn-type5-injection.clab.yml
+#   bash tests/interop/scripts/test-m45-evpn-type5-injection.sh
+#   containerlab destroy -t tests/interop/m45-evpn-type5-injection.clab.yml
+
+name: m45-evpn-type5-injection
+
+mgmt:
+  network: clab-mgmt
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m45-injector.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m45-receiver.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.0.0.0/24
+# rustbgpd: 10.0.0.1, AS 65000 — Type 5 injector
+# FRR:      10.0.0.2, AS 65000 — iBGP L2VPN/EVPN receiver
+# Injected: 198.51.100.0/24 as Type 5, RD 65000:5000, RT 65000:100,
+#           L3VNI 100, Router MAC 02:00:00:00:50:00, next-hop 10.0.0.1

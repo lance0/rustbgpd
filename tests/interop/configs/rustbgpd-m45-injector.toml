@@ -1,0 +1,29 @@
+# M45 interop: rustbgpd as an EVPN VTEP that originates a
+# controller-injected Type 5 (IP Prefix) route toward a single FRR
+# peer. Plain iBGP L2VPN/EVPN peer (no RR role needed — locally
+# originated routes are advertised to the peer regardless).
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "frr-receiver"
+hold_time = 180
+families = ["l2vpn_evpn"]
+
+# AddEvpnRoute / DeleteEvpnRoute are operator_only under the ADR-0064
+# default tier enforcement; the interop driver calls them over a
+# plaintext gRPC channel with no mTLS principal, so opt this listener
+# back to legacy (audit-only) enforcement for the smoke.
+[security.grpc]
+enforcement = "legacy"
