@@ -575,8 +575,9 @@ entry.
 
 ### Gate 9 — Symmetric IRB (RFC 9135), adjacent standards
 
-Status: end-to-end shipped in v0.18.0 · auto-derived RTs +
-overlay-index IRB (full RFC 9135) remain follow-ups
+Status: end-to-end shipped in v0.18.0 · auto-derived RTs are now
+available as an explicit config opt-in · overlay-index IRB (full RFC
+9135) remains a follow-up
 
 Unlocks: L3 routing between EVPN tenants on the same VTEP under the
 RFC 9136 §4.4.2 symmetric Interface-less IRB model (matches FRR's
@@ -601,6 +602,11 @@ Shipped pieces (v0.18.0):
   gateway, RT extcomms, BGP Encap = VXLAN, Router MAC extcomm)
   and RT-keyed import with Router MAC enforcement / self-origin
   filtering.
+- RFC 8365 §5.1.2.1 auto-derived Route Targets for both
+  `[[evpn_instances]]` and `[[evpn_ip_vrfs]]` via
+  `auto_derive_route_target = true`. The derived VXLAN RT uses the
+  2-octet `[global].asn`, domain-id 0, and the configured VNI/L3VNI
+  as the service id; 4-octet-AS deployments keep explicit RTs.
 - Linux `ip_vrf::dump_ip_vrf_observations` (VRF + L3 VXLAN
   rtnetlink dumps), `Dataplane::probe_ip_vrfs` trait method +
   Linux implementation, `IpVrfTable` plumbed through
@@ -613,7 +619,6 @@ Shipped pieces (v0.18.0):
 
 Still ahead:
 
-- Auto-derived Route Targets (RFC 8365 §5.1.2.1).
 - Overlay-index IRB (RFC 9135 overlay-index model — Gate 9 ships
   the Interface-less variant only).
 - Extend the protected self-hosted `kernel-dataplane` workflow beyond

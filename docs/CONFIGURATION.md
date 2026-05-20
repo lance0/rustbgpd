@@ -1558,6 +1558,7 @@ default — RR-only deployments leave it empty.
 vni = 100
 rd = "10.0.0.1:100"
 route_targets = ["65000:100"]
+auto_derive_route_target = false        # derive RFC 8365 VXLAN RT from [global].asn + VNI when true
 local_vtep_ip = "10.0.0.1"
 bridge = "br100"                       # Linux bridge name (optional — RR-only deployments omit)
 advertise_svi_mac = false              # originate Type 2 for the bridge's own MAC (RFC 9135 §6.1)
@@ -1573,7 +1574,8 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
 |-----------------------|----------|----------|---------|-------------|
 | `vni`                 | u32      | yes      | --      | 24-bit VNI (RFC 8365 §5) |
 | `rd`                  | string   | yes      | --      | Route Distinguisher in RFC 4364 form (`asn:value`, `ipv4:value`, or 4-octet AS variants) |
-| `route_targets`       | string[] | yes      | --      | One or more EVPN Route Targets in the same encodings |
+| `route_targets`       | string[] | yes*     | `[]`    | One or more EVPN Route Targets in the same encodings. Required unless `auto_derive_route_target = true` |
+| `auto_derive_route_target` | bool | no | `false` | Append the RFC 8365 §5.1.2.1 VXLAN auto-derived Route Target using `[global].asn` and `vni` (`2-octet AS only`) |
 | `local_vtep_ip`       | string   | yes      | --      | Source IP for VXLAN encap on this VTEP |
 | `bridge`              | string   | no       | --      | Linux bridge name for kernel reconciliation. Omit for RR-only deployments. Must be a non-VLAN-aware bridge with the VXLAN port carrying `nolearning` |
 | `advertise_svi_mac`   | bool     | no       | `false` | Originate a Type 2 route for the bridge's own MAC (RFC 9135 §6.1). Requires `bridge` to be set |
@@ -1589,6 +1591,12 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
 - `bridge` (when set) must reference a Linux bridge created out of
   band; rustbgpd does not create/delete netdevs (ADR-0054 §4).
 - `advertise_svi_mac = true` requires `bridge` non-empty.
+- `route_targets` may be omitted or empty only when
+  `auto_derive_route_target = true`; otherwise at least one explicit RT is
+  required.
+- `auto_derive_route_target = true` requires `[global].asn <= 65535`. RFC
+  8365 §5.1.2.1 does not define an auto-derived VXLAN RT for 4-octet ASNs,
+  so those deployments must configure `route_targets` manually.
 - `ip_vrf` (when set) must name an `[[evpn_ip_vrfs]]` entry declared
   in the same config.
 - `duplicate_mac_detection.window_seconds`, `threshold`, and
@@ -1597,6 +1605,12 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
   31,536,000 seconds (365 days).
 - Same VNI must not appear in multiple `[[ethernet_segments]]`
   `member_vnis` lists until per-port learned disambiguation is plumbed.
+
+For VXLAN, the auto-derived RT is encoded as a 2-octet-AS Route Target with
+local-admin value `0x10000000 | vni`. For example, `[global].asn = 65000` and
+`vni = 100` derives `65000:268435556`. Explicit `route_targets` are preserved;
+when auto-derive is also enabled, the derived RT is appended and duplicates are
+deduped during config resolution.
 
 ### Duplicate-MAC Detection And Local Suppression
 
@@ -1721,6 +1735,7 @@ name = "tenant-blue"               # operator-facing handle
 vni = 5000                         # L3VNI (1..=16_777_215)
 rd = "65000:5000"                  # Route Distinguisher
 route_targets = ["65000:5000"]     # bidirectional RTs (non-empty)
+auto_derive_route_target = false   # derive RFC 8365 VXLAN RT from [global].asn + L3VNI when true
 local_vtep_ip = "10.0.0.1"         # VXLAN source IP for outbound Type 5
 router_mac = "02:00:00:00:00:01"   # Router MAC ext-community value
 vrf_device = "vrf-blue"            # Linux VRF device (observe-only)
@@ -1743,7 +1758,8 @@ ip_vrf = "tenant-blue"             # optional — empty means L2-only
 | `name`           | string    | yes      | --      | Operator handle; `^[a-zA-Z][a-zA-Z0-9_-]*$`, unique across `[[evpn_ip_vrfs]]` |
 | `vni`            | u32       | yes      | --      | L3VNI in `1..=16_777_215`; must not collide with any `[[evpn_instances]]` VNI |
 | `rd`             | string    | yes      | --      | Route Distinguisher (`asn:value` or `ipv4:value`) |
-| `route_targets`  | [string]  | yes      | --      | Bidirectional RTs (non-empty); applied to import and export |
+| `route_targets`  | [string]  | yes*     | `[]`    | Bidirectional RTs applied to import and export. Required unless `auto_derive_route_target = true` |
+| `auto_derive_route_target` | bool | no | `false` | Append the RFC 8365 §5.1.2.1 VXLAN auto-derived Route Target using `[global].asn` and the L3VNI (`2-octet AS only`) |
 | `local_vtep_ip`  | string    | yes      | --      | Unicast VTEP source IP for outbound Type 5 `NEXT_HOP` |
 | `router_mac`     | string    | yes      | --      | Unicast non-zero MAC (`aa:bb:cc:dd:ee:ff`) advertised via the RFC 9135 §4.2 / RFC 9136 Router MAC extended community |
 | `vrf_device`     | string    | yes      | --      | Linux VRF device name (operator-managed, observe-only) |
@@ -1781,7 +1797,10 @@ the transition once per state change rather than every pass.
 - `name` matches `^[a-zA-Z][a-zA-Z0-9_-]*$` and is unique across `[[evpn_ip_vrfs]]`.
 - `vni` is in `1..=16_777_215` and does not collide with any `[[evpn_instances]]` VNI.
 - `rd` parses as `asn:value` or `ipv4:value`.
-- `route_targets` is non-empty and every entry parses.
+- `route_targets` is non-empty and every entry parses unless
+  `auto_derive_route_target = true`.
+- `auto_derive_route_target = true` requires `[global].asn <= 65535`; 4-octet
+  ASNs must configure `route_targets` manually.
 - `local_vtep_ip` is a valid unicast IP (rejects unspecified / multicast / loopback).
 - `router_mac` is a unicast non-zero MAC.
 - `vrf_device` and `l3vxlan_device` are non-blank.
