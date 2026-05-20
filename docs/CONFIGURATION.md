@@ -1612,6 +1612,17 @@ local-admin value `0x10000000 | vni`. For example, `[global].asn = 65000` and
 when auto-derive is also enabled, the derived RT is appended and duplicates are
 deduped during config resolution.
 
+**Cross-vendor interop caveat.** This is the RFC 8365 §5.1.2.1 *opaque*
+encoding (the `0x10000000 | vni` form, e.g. `65000:268435556`). FRR's
+**default** `route-target both auto` instead derives the simpler `<asn>:<vni>`
+value (e.g. `65000:100`), which is a different RT and will **not** match — a
+mixed deployment silently fails to import each other's routes. To interop
+auto-derived RTs with an FRR peer, run FRR in RFC 8365 mode (under
+`address-family l2vpn evpn`: `autort rfc8365-compatible`). For
+rustbgpd-to-rustbgpd fabrics no extra configuration is needed since both ends
+derive the same value. When peering with a vendor whose auto-RT form you are
+unsure of, configure `route_targets` explicitly on both ends instead.
+
 ### Duplicate-MAC Detection And Local Suppression
 
 RFC 7432 §15.1 describes duplicate-MAC detection as `N` mobility

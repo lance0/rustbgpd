@@ -607,7 +607,11 @@ Shipped pieces (v0.18.0):
   `[[evpn_instances]]` and `[[evpn_ip_vrfs]]` via
   `auto_derive_route_target = true`. The derived VXLAN RT uses the
   2-octet `[global].asn`, domain-id 0, and the configured VNI/L3VNI
-  as the service id; 4-octet-AS deployments keep explicit RTs.
+  as the service id; 4-octet-AS deployments keep explicit RTs. This is
+  the RFC 8365 opaque form (`0x10000000 | vni`), which differs from
+  FRR's default `route-target both auto` (`<asn>:<vni>`); cross-vendor
+  interop requires FRR's `autort rfc8365-compatible` mode (see
+  `docs/CONFIGURATION.md`).
 - RFC 9135 §9.2 overlay-index Type 5 detection on the receive path:
   non-zero Type 5 Gateway Address routes are explicitly classified and
   dropped rather than being treated as Interface-less Type 5. Full
