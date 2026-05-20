@@ -100,6 +100,17 @@ pub enum RouteTargetParseError {
     },
 }
 
+/// Errors returned by [`RouteTarget::auto_derived_vxlan`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RouteTargetAutoDeriveError {
+    /// RFC 8365 §5.1.2.1 only defines auto-derived RTs for 2-octet ASNs.
+    #[error("RFC 8365 auto-derived VXLAN Route Targets require a 2-octet AS number; got {asn}")]
+    FourOctetAsn { asn: u32 },
+    /// The service-id field is the 24-bit VNI and zero is not a valid local VNI.
+    #[error("VNI {vni} is outside the RFC 8365 auto-derived RT range 1..=16777215")]
+    InvalidVni { vni: u32 },
+}
+
 impl FromStr for RouteTarget {
     type Err = RouteTargetParseError;
 
@@ -170,6 +181,37 @@ impl FromStr for RouteTarget {
 }
 
 impl RouteTarget {
+    /// Build the RFC 8365 §5.1.2.1 auto-derived VXLAN Route Target.
+    ///
+    /// The global administrator is the local 2-octet AS number. The local
+    /// administrator packs `A=0` (auto-derived), `Type=1` (VXLAN),
+    /// `D-ID=0`, and the 24-bit VNI service-id:
+    ///
+    /// ```text
+    /// value = 0x10000000 | vni
+    /// ```
+    ///
+    /// RFC 8365 explicitly requires manual RT configuration for 4-octet
+    /// ASNs because the 3-octet VNI cannot fit in that RT layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RouteTargetAutoDeriveError::FourOctetAsn`] when `asn` is
+    /// outside the 2-octet range, or
+    /// [`RouteTargetAutoDeriveError::InvalidVni`] when `vni` is outside the
+    /// 24-bit VXLAN VNI range.
+    pub fn auto_derived_vxlan(asn: u32, vni: u32) -> Result<Self, RouteTargetAutoDeriveError> {
+        let asn =
+            u16::try_from(asn).map_err(|_| RouteTargetAutoDeriveError::FourOctetAsn { asn })?;
+        if !(1..=0x00ff_ffff).contains(&vni) {
+            return Err(RouteTargetAutoDeriveError::InvalidVni { vni });
+        }
+        Ok(Self::TwoOctetAs {
+            asn,
+            value: 0x1000_0000 | vni,
+        })
+    }
+
     /// Encode into the 8-byte wire form of a Route Target Extended
     /// Community (RFC 4360 §3 / RFC 5668 §2). The first byte is the
     /// **type** (selects the administrator format), the second byte
@@ -315,6 +357,48 @@ mod tests {
             }
         );
         assert_eq!(rt.to_string(), "4200000000:200");
+    }
+
+    #[test]
+    fn derives_vxlan_route_target() {
+        assert_eq!(
+            RouteTarget::auto_derived_vxlan(65000, 100).unwrap(),
+            RouteTarget::TwoOctetAs {
+                asn: 65000,
+                value: 0x1000_0000 | 0x0000_0064,
+            }
+        );
+    }
+
+    #[test]
+    fn derives_vxlan_route_target_for_max_vni() {
+        assert_eq!(
+            RouteTarget::auto_derived_vxlan(65535, 0x00ff_ffff).unwrap(),
+            RouteTarget::TwoOctetAs {
+                asn: 65535,
+                value: 0x10ff_ffff,
+            }
+        );
+    }
+
+    #[test]
+    fn auto_derived_vxlan_rejects_four_octet_asn() {
+        assert_eq!(
+            RouteTarget::auto_derived_vxlan(65536, 100).unwrap_err(),
+            RouteTargetAutoDeriveError::FourOctetAsn { asn: 65536 }
+        );
+    }
+
+    #[test]
+    fn auto_derived_vxlan_rejects_invalid_vni() {
+        assert_eq!(
+            RouteTarget::auto_derived_vxlan(65000, 0).unwrap_err(),
+            RouteTargetAutoDeriveError::InvalidVni { vni: 0 }
+        );
+        assert_eq!(
+            RouteTarget::auto_derived_vxlan(65000, 0x0100_0000).unwrap_err(),
+            RouteTargetAutoDeriveError::InvalidVni { vni: 0x0100_0000 }
+        );
     }
 
     #[test]
