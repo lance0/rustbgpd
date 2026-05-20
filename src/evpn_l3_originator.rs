@@ -194,6 +194,11 @@ pub struct SpawnConfig {
     pub shutdown: CancellationToken,
 }
 
+struct EffectiveIpVrfModelWatch {
+    rx: watch::Receiver<Arc<IpVrfTable>>,
+    _tx_keepalive: watch::Sender<Arc<IpVrfTable>>,
+}
+
 /// Spawn the Type 5 originator. Returns `None` when no
 /// `[[evpn_ip_vrfs]]` are configured (the originator has nothing to
 /// do in that case).
@@ -210,8 +215,11 @@ pub fn spawn(cfg: SpawnConfig) -> Option<EvpnL3OriginatorHandle> {
     }
     let shutdown = cfg.shutdown.clone();
     let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(cfg.ip_vrfs.clone());
-    let ip_vrfs_tx_keepalive = ip_vrfs_tx.clone();
-    let join = tokio::spawn(originator_loop(cfg, ip_vrfs_rx, ip_vrfs_tx_keepalive));
+    let model_watch = EffectiveIpVrfModelWatch {
+        rx: ip_vrfs_rx,
+        _tx_keepalive: ip_vrfs_tx.clone(),
+    };
+    let join = tokio::spawn(originator_loop(cfg, model_watch));
     Some(EvpnL3OriginatorHandle {
         shutdown,
         ip_vrfs_tx,
@@ -219,15 +227,11 @@ pub fn spawn(cfg: SpawnConfig) -> Option<EvpnL3OriginatorHandle> {
     })
 }
 
-async fn originator_loop(
-    mut cfg: SpawnConfig,
-    mut ip_vrfs_rx: watch::Receiver<Arc<IpVrfTable>>,
-    _ip_vrfs_tx_keepalive: watch::Sender<Arc<IpVrfTable>>,
-) {
+async fn originator_loop(mut cfg: SpawnConfig, mut ip_vrf_model: EffectiveIpVrfModelWatch) {
     // (IpVrfId, prefix) -> EvpnRouteKey we used for the inject (so the
     // matching withdraw uses the same key).
     let mut originated: BTreeMap<(IpVrfId, EvpnIpPrefixValue), EvpnRouteKey> = BTreeMap::new();
-    let mut ip_vrfs = ip_vrfs_rx.borrow().clone();
+    let mut ip_vrfs = ip_vrf_model.rx.borrow().clone();
     let mut vrf_names = vrf_name_lookup(ip_vrfs.as_ref());
 
     // Pre-populate the originated-routes Prometheus gauge at 0 for
@@ -268,13 +272,13 @@ async fn originator_loop(
                 }
                 reconcile(&mut originated, &mut cfg, ip_vrfs.as_ref(), &vrf_names).await;
             }
-            res = ip_vrfs_rx.changed() => {
+            res = ip_vrf_model.rx.changed() => {
                 if res.is_err() {
                     debug!("L3 originator: IP-VRF model watch closed; draining");
                     drain_all(&mut originated, &cfg, &vrf_names).await;
                     return;
                 }
-                ip_vrfs = ip_vrfs_rx.borrow().clone();
+                ip_vrfs = ip_vrf_model.rx.borrow().clone();
                 merge_vrf_names(&mut vrf_names, ip_vrfs.as_ref());
                 publish_all_originated_gauges(&cfg, ip_vrfs.as_ref());
                 reconcile(&mut originated, &mut cfg, ip_vrfs.as_ref(), &vrf_names).await;
