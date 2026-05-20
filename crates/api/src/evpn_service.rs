@@ -291,12 +291,12 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
         let req = request.into_inner();
         let vni = EvpnInstanceId::new(req.vni)
             .map_err(|err| Status::invalid_argument(format!("invalid VNI: {err}")))?;
-        let mac = parse_mac(&req.mac)?;
+        let mac = MacAddress::new(crate::injection_service::parse_mac(&req.mac)?);
         let clear = self.duplicate_mac_clear.as_ref().ok_or_else(|| {
-            Status::failed_precondition("EVPN duplicate-MAC clear control is unavailable")
+            Status::unavailable("EVPN duplicate-MAC clear control is unavailable")
         })?;
         let outcome = clear(vni, mac).await.map_err(|err| match err {
-            DuplicateMacClearError::Unavailable(message) => Status::failed_precondition(message),
+            DuplicateMacClearError::Unavailable(message) => Status::unavailable(message),
             DuplicateMacClearError::NotFound(message) => Status::not_found(message),
         })?;
         let message = if outcome.cleared {
@@ -309,26 +309,6 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
             message,
         }))
     }
-}
-
-fn parse_mac(s: &str) -> Result<MacAddress, Status> {
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 6 {
-        return Err(Status::invalid_argument(
-            "mac must use six colon-separated hex octets",
-        ));
-    }
-    let mut out = [0u8; 6];
-    for (i, part) in parts.iter().enumerate() {
-        if part.len() != 2 {
-            return Err(Status::invalid_argument(
-                "mac must use two hex digits per octet",
-            ));
-        }
-        out[i] = u8::from_str_radix(part, 16)
-            .map_err(|_| Status::invalid_argument("mac contains a non-hex octet"))?;
-    }
-    Ok(MacAddress::new(out))
 }
 
 /// Build an `IpVrfId → &IpVrfDataplaneStatus` index from the per-call
@@ -664,7 +644,7 @@ mod tests {
             ))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(err.code(), tonic::Code::Unavailable);
     }
 
     #[tokio::test]
@@ -775,7 +755,7 @@ mod tests {
             ))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(err.code(), tonic::Code::Unavailable);
     }
 
     // -- Gate 9 IP-VRF surface --------------------------------------

@@ -492,6 +492,22 @@ async fn originator_loop(
                 ).await;
                 return;
             }
+            cmd = command_rx.recv(), if command_rx_open => match cmd {
+                Some(cmd) => {
+                    handle_originator_command(
+                        cmd,
+                        &mut state,
+                        &runtime.instances,
+                        &runtime.rib_tx,
+                        &runtime.metrics,
+                        &runtime.originated_local_mac_counts,
+                        &runtime.vni_to_esi,
+                    ).await;
+                }
+                None => {
+                    command_rx_open = false;
+                }
+            },
             obs = local_mac_rx.recv(), if local_mac_rx_open => {
                 let Some(obs) = obs else {
                     debug!("local-mac channel closed; originator idle");
@@ -510,22 +526,6 @@ async fn originator_loop(
                     &runtime.vni_to_esi,
                 ).await;
             }
-            cmd = command_rx.recv(), if command_rx_open => match cmd {
-                Some(cmd) => {
-                    handle_originator_command(
-                        cmd,
-                        &mut state,
-                        &runtime.instances,
-                        &runtime.rib_tx,
-                        &runtime.metrics,
-                        &runtime.originated_local_mac_counts,
-                        &runtime.vni_to_esi,
-                    ).await;
-                }
-                None => {
-                    command_rx_open = false;
-                }
-            },
             event = recv_evpn_event(&mut evpn_event_rx) => match event {
                 Ok(ev) => {
                     handle_evpn_event(

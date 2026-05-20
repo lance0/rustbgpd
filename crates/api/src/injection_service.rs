@@ -872,7 +872,7 @@ fn parse_rd(s: &str) -> Result<RouteDistinguisher, Status> {
     }
 }
 
-fn parse_mac(s: &str) -> Result<[u8; 6], Status> {
+pub(crate) fn parse_mac(s: &str) -> Result<[u8; 6], Status> {
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() != 6 {
         return Err(Status::invalid_argument(format!(
