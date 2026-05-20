@@ -169,7 +169,10 @@ impl EvpnImetController {
         debug_assert!(matches!(route.route, EvpnRoute::Imet(_)));
         let key = route.key();
         let outcome = inject_imet_route(route, instance.id, rib_tx).await;
-        if matches!(outcome, ImetOriginateOutcome::Originated { .. }) {
+        if matches!(
+            outcome,
+            ImetOriginateOutcome::Originated { .. } | ImetOriginateOutcome::ReplyDropped { .. }
+        ) {
             self.originated.insert(instance.id, key);
         }
         outcome
@@ -196,7 +199,8 @@ impl EvpnImetController {
     /// Originate one Type 3 IMET route per instance.
     ///
     /// Per-instance failures are logged and do not abort later instances.
-    /// Returns the accepted or already-originated route keys.
+    /// Returns the accepted, already-originated, or reply-unknown tracked
+    /// route keys.
     pub async fn originate_all(
         &mut self,
         instances: impl IntoIterator<Item = EvpnInstance>,
@@ -206,10 +210,10 @@ impl EvpnImetController {
         for inst in instances {
             match self.originate_instance(inst, rib_tx).await {
                 ImetOriginateOutcome::Originated { key }
-                | ImetOriginateOutcome::AlreadyOriginated { key } => keys.push(key),
+                | ImetOriginateOutcome::AlreadyOriginated { key }
+                | ImetOriginateOutcome::ReplyDropped { key } => keys.push(key),
                 ImetOriginateOutcome::RibUnavailable { .. }
-                | ImetOriginateOutcome::Rejected { .. }
-                | ImetOriginateOutcome::ReplyDropped { .. } => {}
+                | ImetOriginateOutcome::Rejected { .. } => {}
             }
         }
         keys
@@ -572,6 +576,47 @@ mod tests {
 
         assert!(matches!(outcome, ImetOriginateOutcome::Rejected { .. }));
         assert!(controller.is_empty());
+    }
+
+    #[tokio::test]
+    async fn controller_tracks_reply_dropped_originates_for_shutdown_withdraw() {
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(8);
+        let responder = tokio::spawn(async move {
+            let mut saw_inject = false;
+            let mut saw_withdraw = false;
+            while let Some(msg) = rib_rx.recv().await {
+                match msg {
+                    RibUpdate::InjectEvpn { reply, .. } => {
+                        saw_inject = true;
+                        drop(reply);
+                    }
+                    RibUpdate::WithdrawEvpn { reply, .. } => {
+                        saw_withdraw = true;
+                        let _ = reply.send(Ok(()));
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            (saw_inject, saw_withdraw)
+        });
+
+        let mut controller = EvpnImetController::new();
+        let ImetOriginateOutcome::ReplyDropped { key } = controller
+            .originate_instance(local_instance(100), &rib_tx)
+            .await
+        else {
+            panic!("expected reply-dropped originate");
+        };
+        assert_eq!(controller.originated_key(vni(100)), Some(key));
+
+        let outcome = controller.withdraw_instance(vni(100), &rib_tx).await;
+        drop(rib_tx);
+        let observed = responder.await.unwrap();
+
+        assert_eq!(outcome, ImetWithdrawOutcome::Withdrawn { key });
+        assert!(controller.is_empty());
+        assert_eq!(observed, (true, true));
     }
 
     #[tokio::test]
