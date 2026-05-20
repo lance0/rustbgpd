@@ -23,6 +23,7 @@ async fn socket2_backed_listener_accepts_tcp_connections() {
 
     assert_eq!(accepted.peer_addr, IpAddr::from([127, 0, 0, 1]));
     assert_eq!(accepted.stream.local_addr().unwrap(), addr);
+    assert!(accepted.tcp_ao_info.is_none());
 
     drop(client);
     listener_task.abort();

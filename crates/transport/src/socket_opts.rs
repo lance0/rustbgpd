@@ -10,6 +10,8 @@ use std::io;
 #[cfg(target_os = "linux")]
 use std::net::IpAddr;
 use std::net::SocketAddr;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 
 #[cfg(target_os = "linux")]
 use crate::config::{TcpAoAlgorithm, TcpAoConfig};
@@ -147,6 +149,37 @@ struct TcpAoInfoOpt {
     pkt_dropped_icmp: u64,
 }
 
+/// Runtime TCP-AO socket state returned by Linux `getsockopt(TCP_AO_INFO)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors independent Linux TCP_AO_INFO flag bits"
+)]
+pub struct TcpAoInfoSnapshot {
+    /// Whether Linux reports a valid current key ID.
+    pub has_current_key: bool,
+    /// Whether Linux reports a valid `RNext` key ID.
+    pub has_rnext_key: bool,
+    /// Whether the socket requires TCP-AO for matching packets.
+    pub ao_required: bool,
+    /// Whether incoming ICMPs are accepted for this TCP-AO socket.
+    pub accept_icmps: bool,
+    /// Current TCP-AO `KeyID`.
+    pub current_key: u8,
+    /// `RNext` TCP-AO `KeyID`.
+    pub rnext_key: u8,
+    /// Verified TCP-AO segments.
+    pub pkt_good: u64,
+    /// Segments that failed TCP-AO verification.
+    pub pkt_bad: u64,
+    /// Segments whose TCP-AO `KeyID` did not match an MKT.
+    pub pkt_key_not_found: u64,
+    /// Segments that were missing a required TCP-AO signature.
+    pub pkt_ao_required: u64,
+    /// ICMPs dropped by TCP-AO policy.
+    pub pkt_dropped_icmp: u64,
+}
+
 /// Result of probing whether the running host supports Linux TCP-AO.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TcpAoSupport {
@@ -166,6 +199,14 @@ const TCP_AO_MAXKEYLEN: usize = 80;
 const TCP_AO_ADD_SET_CURRENT: u32 = 1 << 0;
 #[cfg(target_os = "linux")]
 const TCP_AO_ADD_SET_RNEXT: u32 = 1 << 1;
+#[cfg(target_os = "linux")]
+const TCP_AO_INFO_SET_CURRENT: u32 = 1 << 0;
+#[cfg(target_os = "linux")]
+const TCP_AO_INFO_SET_RNEXT: u32 = 1 << 1;
+#[cfg(target_os = "linux")]
+const TCP_AO_INFO_AO_REQUIRED: u32 = 1 << 2;
+#[cfg(target_os = "linux")]
+const TCP_AO_INFO_ACCEPT_ICMPS: u32 = 1 << 4;
 
 /// Add a TCP-AO key to a socket.
 ///
@@ -259,6 +300,58 @@ pub(crate) fn set_tcp_ao_key(socket: &Socket, key: &TcpAoKey<'_>) -> io::Result<
         Err(io::Error::last_os_error())
     } else {
         Ok(())
+    }
+}
+
+/// Inspect runtime TCP-AO socket state.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code, clippy::cast_possible_truncation)]
+pub(crate) fn get_tcp_ao_info(socket: &impl AsRawFd) -> io::Result<TcpAoInfoSnapshot> {
+    let mut info: TcpAoInfoOpt = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<TcpAoInfoOpt>() as libc::socklen_t;
+
+    let ret = unsafe {
+        libc::getsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            TCP_AO_INFO,
+            (&raw mut info).cast(),
+            &raw mut len,
+        )
+    };
+
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(TcpAoInfoSnapshot::from_raw(&info))
+}
+
+/// Inspect runtime TCP-AO socket state.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn get_tcp_ao_info<T>(_socket: &T) -> io::Result<TcpAoInfoSnapshot> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP-AO inspection is only supported on Linux",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+impl TcpAoInfoSnapshot {
+    fn from_raw(info: &TcpAoInfoOpt) -> Self {
+        Self {
+            has_current_key: info.flags & TCP_AO_INFO_SET_CURRENT != 0,
+            has_rnext_key: info.flags & TCP_AO_INFO_SET_RNEXT != 0,
+            ao_required: info.flags & TCP_AO_INFO_AO_REQUIRED != 0,
+            accept_icmps: info.flags & TCP_AO_INFO_ACCEPT_ICMPS != 0,
+            current_key: info.current_key,
+            rnext_key: info.rnext,
+            pkt_good: info.pkt_good,
+            pkt_bad: info.pkt_bad,
+            pkt_key_not_found: info.pkt_key_not_found,
+            pkt_ao_required: info.pkt_ao_required,
+            pkt_dropped_icmp: info.pkt_dropped_icmp,
+        }
     }
 }
 
@@ -482,6 +575,39 @@ mod tests {
         assert_eq!(TCP_AO_MAXKEYLEN, 80);
         assert_eq!(TCP_AO_ADD_SET_CURRENT, 1);
         assert_eq!(TCP_AO_ADD_SET_RNEXT, 2);
+        assert_eq!(TCP_AO_INFO_SET_CURRENT, 1);
+        assert_eq!(TCP_AO_INFO_SET_RNEXT, 2);
+        assert_eq!(TCP_AO_INFO_AO_REQUIRED, 4);
+        assert_eq!(TCP_AO_INFO_ACCEPT_ICMPS, 16);
+    }
+
+    #[test]
+    fn tcp_ao_info_snapshot_maps_raw_flags_and_counters() {
+        let raw = TcpAoInfoOpt {
+            flags: TCP_AO_INFO_SET_CURRENT | TCP_AO_INFO_SET_RNEXT | TCP_AO_INFO_ACCEPT_ICMPS,
+            reserved2: 0,
+            current_key: 7,
+            rnext: 9,
+            pkt_good: 11,
+            pkt_bad: 13,
+            pkt_key_not_found: 17,
+            pkt_ao_required: 19,
+            pkt_dropped_icmp: 23,
+        };
+
+        let snapshot = TcpAoInfoSnapshot::from_raw(&raw);
+
+        assert!(snapshot.has_current_key);
+        assert!(snapshot.has_rnext_key);
+        assert!(!snapshot.ao_required);
+        assert!(snapshot.accept_icmps);
+        assert_eq!(snapshot.current_key, 7);
+        assert_eq!(snapshot.rnext_key, 9);
+        assert_eq!(snapshot.pkt_good, 11);
+        assert_eq!(snapshot.pkt_bad, 13);
+        assert_eq!(snapshot.pkt_key_not_found, 17);
+        assert_eq!(snapshot.pkt_ao_required, 19);
+        assert_eq!(snapshot.pkt_dropped_icmp, 23);
     }
 
     #[test]

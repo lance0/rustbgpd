@@ -501,6 +501,35 @@ async fn create_and_connect(
         return Err(err);
     }
 
+    if config.tcp_ao.is_some() {
+        match crate::socket_opts::get_tcp_ao_info(&stream) {
+            Ok(info) => {
+                info!(
+                    peer = %peer_label,
+                    addr = %config.remote_addr,
+                    current_key = info.current_key,
+                    rnext_key = info.rnext_key,
+                    has_current_key = info.has_current_key,
+                    has_rnext_key = info.has_rnext_key,
+                    ao_required = info.ao_required,
+                    pkt_good = info.pkt_good,
+                    pkt_bad = info.pkt_bad,
+                    pkt_key_not_found = info.pkt_key_not_found,
+                    pkt_ao_required = info.pkt_ao_required,
+                    "TCP-AO active-open socket inspected"
+                );
+            }
+            Err(err) => {
+                warn!(
+                    peer = %peer_label,
+                    addr = %config.remote_addr,
+                    error = %err,
+                    "failed to inspect TCP-AO active-open socket"
+                );
+            }
+        }
+    }
+
     Ok(stream)
 }
 
