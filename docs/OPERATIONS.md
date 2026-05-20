@@ -472,8 +472,19 @@ mobility during planned host moves. Default `duplicate_mac_detection`
 behavior is detect-only. When an instance opts into
 `action = "suppress_local"`, active quarantine withdraws/suppresses only
 locally-originated Type 2 routes for that MAC and automatically retries
-after `recovery_seconds`; remote EVPN route visibility and dataplane
-receive-side processing are not filtered by this first action slice.
+after `recovery_seconds`; remote EVPN route visibility stays intact, while
+dataplane receive-side intent for the quarantined key is filtered out of
+the local FDB reconciler. After confirming the loop condition is gone, an
+operator can clear one active quarantine immediately:
+
+```bash
+rustbgpctl evpn clear-duplicate-mac --vni 100 --mac aa:bb:cc:dd:ee:ff
+```
+
+The clear path returns success with `cleared=false` if no active quarantine
+exists. When it clears an active key, the originator resets the active gauge
+to `0`, republishes the quarantine set, and replays still-live local MAC or
+MAC+IP state through the normal recovery path.
 `rustbgpctl evpn instances` also reports `originated-local-macs=N` per
 instance, and `rustbgpctl evpn instances --json` exposes the same value as
 `originated_local_macs_count`.
@@ -1013,6 +1024,7 @@ rustbgpctl evpn --route-type 2              # MAC/IP only
 rustbgpctl evpn --rd 65000:100              # filter by RD
 rustbgpctl evpn --peer 10.0.1.1             # filter by source peer
 rustbgpctl evpn diagnose                    # alpha VTEP summary
+rustbgpctl evpn clear-duplicate-mac --vni 100 --mac aa:bb:cc:dd:ee:ff
 ```
 
 `tunnel_type=8` in the output indicates the RFC 8365 VXLAN
