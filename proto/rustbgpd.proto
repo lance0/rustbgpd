@@ -1375,11 +1375,11 @@ message ListEvpnResponse {
   repeated EvpnRouteEntry routes = 1;
 }
 
-// Controller-injected EVPN route. Phase 1 supports Type 2 (MAC/IP)
-// and Type 3 (IMET); later phases extend to Type 5 IP-Prefix.
+// Controller-injected EVPN route. Supports Type 2 (MAC/IP), Type 3
+// (IMET), and pure/interface-less Type 5 (IP Prefix).
 message AddEvpnRouteRequest {
-  // RFC 7432 route type. Only 2 and 3 are accepted in Phase 1; other
-  // values return INVALID_ARGUMENT.
+  // EVPN route type. Only 2, 3, and 5 are accepted; other values
+  // return INVALID_ARGUMENT.
   uint32 route_type = 1;
   // Route Distinguisher, "asn:value" / "ip:value". Required.
   string rd = 2;
@@ -1390,7 +1390,8 @@ message AddEvpnRouteRequest {
   // Host IP (Type 2 optional, Type 3 required as originator_ip). Empty
   // for Type 2 means MAC-only (no IP advertised).
   string ip = 5;
-  // Primary label / VNI (Type 2). Required for Type 2.
+  // Primary label / VNI (Type 2 and Type 5). Required for Type 2 and
+  // Type 5.
   uint32 label = 6;
   // Secondary label for symmetric IRB (RFC 9135). 0 = absent.
   uint32 label2 = 7;
@@ -1407,18 +1408,29 @@ message AddEvpnRouteRequest {
   // is inverted (vs. "vxlan_encap") so proto3's default-false yields
   // the operationally correct behavior for clients that omit it.
   bool disable_vxlan_encap = 10;
+  // IP prefix address (Type 5 only), without slash length. Pair with
+  // `prefix_length`.
+  string prefix = 11;
+  // IP prefix length (Type 5 only). 0 is valid for default routes.
+  uint32 prefix_length = 12;
+  // Router MAC extended community value (Type 5 VXLAN only),
+  // "aa:bb:cc:dd:ee:ff". Required when `disable_vxlan_encap` is false.
+  string router_mac = 13;
 }
 
 message AddEvpnRouteResponse {}
 
 message DeleteEvpnRouteRequest {
-  // Identify the route to withdraw by its RFC 7432 key: route_type + RD
-  // + ethernet_tag + MAC (Type 2) or originator IP (Type 3).
+  // Identify the route to withdraw by its EVPN key: route_type + RD +
+  // ethernet_tag + MAC (Type 2), originator IP (Type 3), or IP prefix
+  // (Type 5).
   uint32 route_type = 1;
   string rd = 2;
   uint32 ethernet_tag = 3;
   string mac = 4;
   string ip = 5;
+  string prefix = 6;
+  uint32 prefix_length = 7;
 }
 
 message DeleteEvpnRouteResponse {}

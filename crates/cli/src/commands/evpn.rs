@@ -160,6 +160,9 @@ pub async fn add_mac_ip(
             next_hop,
             route_targets,
             disable_vxlan_encap,
+            prefix: String::new(),
+            prefix_length: 0,
+            router_mac: String::new(),
         })
         .await?;
     output::print_result(json, "add_evpn", "", "EVPN Type 2 route added");
@@ -191,9 +194,49 @@ pub async fn add_imet(
             next_hop,
             route_targets,
             disable_vxlan_encap,
+            prefix: String::new(),
+            prefix_length: 0,
+            router_mac: String::new(),
         })
         .await?;
     output::print_result(json, "add_evpn", "", "EVPN Type 3 route added");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn add_ip_prefix(
+    connection: Connection,
+    rd: String,
+    ethernet_tag: u32,
+    prefix: String,
+    label: u32,
+    next_hop: String,
+    router_mac: String,
+    route_targets: Vec<String>,
+    disable_vxlan_encap: bool,
+    json: bool,
+) -> Result<(), CliError> {
+    let (prefix, prefix_length) = output::parse_prefix(&prefix).map_err(CliError::Argument)?;
+    let mut client =
+        InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    client
+        .add_evpn_route(AddEvpnRouteRequest {
+            route_type: 5,
+            rd,
+            ethernet_tag,
+            mac: String::new(),
+            ip: String::new(),
+            label,
+            label2: 0,
+            next_hop,
+            route_targets,
+            disable_vxlan_encap,
+            prefix,
+            prefix_length,
+            router_mac,
+        })
+        .await?;
+    output::print_result(json, "add_evpn", "", "EVPN Type 5 route added");
     Ok(())
 }
 
@@ -214,6 +257,8 @@ pub async fn delete_mac_ip(
             ethernet_tag,
             mac,
             ip,
+            prefix: String::new(),
+            prefix_length: 0,
         })
         .await?;
     output::print_result(json, "delete_evpn", "", "EVPN Type 2 route deleted");
@@ -236,9 +281,36 @@ pub async fn delete_imet(
             ethernet_tag,
             mac: String::new(),
             ip,
+            prefix: String::new(),
+            prefix_length: 0,
         })
         .await?;
     output::print_result(json, "delete_evpn", "", "EVPN Type 3 route deleted");
+    Ok(())
+}
+
+pub async fn delete_ip_prefix(
+    connection: Connection,
+    rd: String,
+    ethernet_tag: u32,
+    prefix: String,
+    json: bool,
+) -> Result<(), CliError> {
+    let (prefix, prefix_length) = output::parse_prefix(&prefix).map_err(CliError::Argument)?;
+    let mut client =
+        InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    client
+        .delete_evpn_route(DeleteEvpnRouteRequest {
+            route_type: 5,
+            rd,
+            ethernet_tag,
+            mac: String::new(),
+            ip: String::new(),
+            prefix,
+            prefix_length,
+        })
+        .await?;
+    output::print_result(json, "delete_evpn", "", "EVPN Type 5 route deleted");
     Ok(())
 }
 

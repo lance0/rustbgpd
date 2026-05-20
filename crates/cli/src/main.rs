@@ -663,6 +663,29 @@ enum EvpnAction {
         #[arg(long)]
         no_vxlan_encap: bool,
     },
+    /// Inject a Type 5 IP Prefix route.
+    AddIpPrefix {
+        #[arg(long)]
+        rd: String,
+        #[arg(long, default_value_t = 0)]
+        ethernet_tag: u32,
+        /// IP prefix, e.g. "10.0.0.0/24" or "2001:db8::/48".
+        #[arg(long)]
+        prefix: String,
+        /// L3VNI for this IP-VRF.
+        #[arg(long)]
+        label: u32,
+        /// VTEP loopback IP (next-hop).
+        #[arg(long)]
+        next_hop: String,
+        /// Router MAC extended community value.
+        #[arg(long)]
+        router_mac: String,
+        #[arg(long, value_delimiter = ',')]
+        rt: Vec<String>,
+        #[arg(long)]
+        no_vxlan_encap: bool,
+    },
     /// Withdraw a Type 2 MAC/IP route by its key fields.
     DeleteMacIp {
         #[arg(long)]
@@ -682,6 +705,16 @@ enum EvpnAction {
         ethernet_tag: u32,
         #[arg(long)]
         ip: String,
+    },
+    /// Withdraw a Type 5 IP Prefix route by its key fields.
+    DeleteIpPrefix {
+        #[arg(long)]
+        rd: String,
+        #[arg(long, default_value_t = 0)]
+        ethernet_tag: u32,
+        /// IP prefix, e.g. "10.0.0.0/24" or "2001:db8::/48".
+        #[arg(long)]
+        prefix: String,
     },
     /// List local EVPN instances configured on this VTEP. Empty when
     /// the daemon is acting purely as an EVPN route reflector.
@@ -1268,6 +1301,30 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 )
                 .await
             }
+            Some(EvpnAction::AddIpPrefix {
+                rd,
+                ethernet_tag,
+                prefix,
+                label,
+                next_hop,
+                router_mac,
+                rt,
+                no_vxlan_encap,
+            }) => {
+                commands::evpn::add_ip_prefix(
+                    connection,
+                    rd,
+                    ethernet_tag,
+                    prefix,
+                    label,
+                    next_hop,
+                    router_mac,
+                    rt,
+                    no_vxlan_encap,
+                    json,
+                )
+                .await
+            }
             Some(EvpnAction::DeleteMacIp {
                 rd,
                 ethernet_tag,
@@ -1289,6 +1346,13 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 ethernet_tag,
                 ip,
             }) => commands::evpn::delete_imet(connection, rd, ethernet_tag, ip, json).await,
+            Some(EvpnAction::DeleteIpPrefix {
+                rd,
+                ethernet_tag,
+                prefix,
+            }) => {
+                commands::evpn::delete_ip_prefix(connection, rd, ethernet_tag, prefix, json).await
+            }
             Some(EvpnAction::Instances) => commands::evpn::list_instances(connection, json).await,
             Some(EvpnAction::Nexthops) => commands::evpn::list_nexthops(connection, json).await,
             Some(EvpnAction::Vrfs { name }) => match name {
@@ -1689,6 +1753,71 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn test_parse_evpn_add_ip_prefix() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "evpn",
+            "add-ip-prefix",
+            "--rd",
+            "65000:5000",
+            "--prefix",
+            "10.50.0.0/24",
+            "--label",
+            "5000",
+            "--next-hop",
+            "192.0.2.10",
+            "--router-mac",
+            "02:00:00:00:50:00",
+            "--rt",
+            "65000:5000",
+        ])
+        .unwrap();
+        if let Command::Evpn {
+            action:
+                Some(EvpnAction::AddIpPrefix {
+                    rd,
+                    prefix,
+                    label,
+                    router_mac,
+                    ..
+                }),
+            ..
+        } = cli.command
+        {
+            assert_eq!(rd, "65000:5000");
+            assert_eq!(prefix, "10.50.0.0/24");
+            assert_eq!(label, 5000);
+            assert_eq!(router_mac, "02:00:00:00:50:00");
+        } else {
+            panic!("expected Evpn AddIpPrefix command");
+        }
+    }
+
+    #[test]
+    fn test_parse_evpn_delete_ip_prefix() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "evpn",
+            "delete-ip-prefix",
+            "--rd",
+            "65000:5000",
+            "--prefix",
+            "10.50.0.0/24",
+        ])
+        .unwrap();
+        if let Command::Evpn {
+            action: Some(EvpnAction::DeleteIpPrefix { rd, prefix, .. }),
+            ..
+        } = cli.command
+        {
+            assert_eq!(rd, "65000:5000");
+            assert_eq!(prefix, "10.50.0.0/24");
+        } else {
+            panic!("expected Evpn DeleteIpPrefix command");
+        }
     }
 
     #[test]

@@ -1043,15 +1043,25 @@ rustbgpctl evpn add-mac-ip --rd 65000:100 \
 
 rustbgpctl evpn delete-mac-ip --rd 65000:100 \
   --mac 02:00:00:aa:bb:cc --ip 10.0.0.5
+
+rustbgpctl evpn add-ip-prefix --rd 65000:5000 \
+  --prefix 10.50.0.0/24 --label 5000 \
+  --next-hop 192.0.2.10 --router-mac 02:00:00:00:50:00 \
+  --rt 65000:5000
+
+rustbgpctl evpn delete-ip-prefix --rd 65000:5000 \
+  --prefix 10.50.0.0/24
 ```
 
 Two complementary origination paths exist:
 
-1. **gRPC injection (Phase 1, Gate 6):** `EvpnService.AddEvpnRoute` /
+1. **gRPC injection (Phase 1, Gate 6):** `InjectionService.AddEvpnRoute` /
    `DeleteEvpnRoute` (the `rustbgpctl evpn add-mac-ip / add-imet /
-   delete-*` commands above). The controller decides what to
-   originate; rustbgpd reflects + distributes. Type 2 (MAC/IP) and
-   Type 3 (IMET) are exposed; Type 5 IP-Prefix and Type 1/4
+   add-ip-prefix / delete-*` commands above). The controller decides
+   what to originate; rustbgpd reflects + distributes. Type 2
+   (MAC/IP), Type 3 (IMET), and pure/interface-less Type 5 (IP
+   Prefix) are exposed. Type 5 injection uses ESI=0 and Gateway IP=0;
+   overlay-index IRB via non-zero Gateway IP/ESI and Type 1/4
    multi-homing route injection are not exposed. Native Type 1/4
    origination is driven by `[[ethernet_segments]]`.
 2. **Kernel-driven origination (Phase 2, Gate 7b+1):** with
