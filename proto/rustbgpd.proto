@@ -1493,6 +1493,10 @@ message TriggerMrtDumpResponse {
 // ---------------------------------------------------------------------------
 
 service EvpnService {
+  // ADR-0063 — read the committed EVPN runtime generation. This is
+  // the foundation for future command-driven runtime mutation, but
+  // this RPC is read-only and does not mutate the startup snapshot.
+  rpc GetEvpnRuntime(GetEvpnRuntimeRequest) returns (EvpnRuntimeState);
   rpc ListEvpnInstances(ListEvpnInstancesRequest) returns (ListEvpnInstancesResponse);
   // ADR-0059 — list the FDB nexthop groups rustbgpd currently owns
   // in the Linux dataplane reconciler. The `groups` list is empty
@@ -1517,6 +1521,39 @@ service EvpnService {
   // not clear all VNIs and does not mutate the resolved EVPN
   // instance table.
   rpc ClearDuplicateMacQuarantine(ClearDuplicateMacQuarantineRequest) returns (ClearDuplicateMacQuarantineResponse);
+}
+
+message GetEvpnRuntimeRequest {}
+
+// Committed EVPN runtime generation summary (ADR-0063). Generation 1
+// is the startup snapshot. Future coordinator mutations will allocate
+// later generations only after validation succeeds and downstream
+// actors have a converge plan.
+message EvpnRuntimeState {
+  uint64 generation = 1;
+  EvpnRuntimeLifecycle lifecycle = 2;
+  EvpnRuntimeMutationState mutation_state = 3;
+  uint32 evpn_instances_count = 4;
+  uint32 evpn_ip_vrfs_count = 5;
+  uint32 ethernet_segments_count = 6;
+  uint32 ethernet_segment_member_vnis_count = 7;
+  string message = 8;
+}
+
+enum EvpnRuntimeLifecycle {
+  EVPN_RUNTIME_LIFECYCLE_UNKNOWN = 0;
+  EVPN_RUNTIME_LIFECYCLE_ACTIVE = 1;
+  EVPN_RUNTIME_LIFECYCLE_ACTIVATING = 2;
+  EVPN_RUNTIME_LIFECYCLE_DELETING = 3;
+  EVPN_RUNTIME_LIFECYCLE_DEGRADED = 4;
+}
+
+enum EvpnRuntimeMutationState {
+  EVPN_RUNTIME_MUTATION_UNKNOWN = 0;
+  EVPN_RUNTIME_MUTATION_DISABLED = 1;
+  EVPN_RUNTIME_MUTATION_IDLE = 2;
+  EVPN_RUNTIME_MUTATION_IN_PROGRESS = 3;
+  EVPN_RUNTIME_MUTATION_FAILED = 4;
 }
 
 message ListEvpnInstancesRequest {}

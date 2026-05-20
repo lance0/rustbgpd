@@ -1108,6 +1108,15 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         }
         std::sync::Arc::new(map)
     };
+    // ADR-0063 EVPN runtime coordinator foundation. The first slice
+    // publishes the startup generation as a read-only status surface;
+    // SIGHUP still pins EVPN table edits until a later coordinator
+    // can validate, drain/replay, and publish new generations.
+    let evpn_runtime_model = Arc::new(rustbgpd_evpn::EvpnRuntimeModel::startup(
+        evpn_instances.clone(),
+        evpn_ip_vrfs.clone(),
+        ethernet_segments.clone(),
+    ));
     let evpn_originator_handle = if let Some(handle) = evpn_dataplane_handle.as_mut() {
         evpn_originator::spawn_with_quarantine(
             evpn_originator::OriginatorConfig::default(),
@@ -1457,6 +1466,10 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         evpn_fdb_nexthop_snapshot: {
             let rx = evpn_fdb_nexthops_rx.clone();
             Arc::new(move || rx.borrow().clone())
+        },
+        evpn_runtime_snapshot: {
+            let model = evpn_runtime_model.clone();
+            Arc::new(move || model.snapshot())
         },
         evpn_duplicate_mac_clear,
         blackhole_discard_snapshot: {

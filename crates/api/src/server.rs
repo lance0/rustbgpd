@@ -24,7 +24,9 @@ use crate::config_service::ConfigService;
 use crate::connect_info::RustbgpdTcpStream;
 use crate::control_service::{ControlService, MrtTriggerTx};
 use crate::event_service::{DataplaneEventBroadcaster, EventService, dataplane_event_broadcaster};
-use crate::evpn_service::{DuplicateMacClearFn, EvpnService, OriginatedLocalMacCountFn};
+use crate::evpn_service::{
+    DuplicateMacClearFn, EvpnRuntimeSnapshotFn, EvpnService, OriginatedLocalMacCountFn,
+};
 use crate::global_service::GlobalService;
 use crate::injection_service::InjectionService;
 use crate::neighbor_service::NeighborService;
@@ -91,6 +93,10 @@ pub struct ServeConfig {
     /// state. Returns an empty summary when the dataplane actor is
     /// not running.
     pub evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
+    /// Live snapshot reader for the committed ADR-0063 EVPN runtime
+    /// generation. Generation 1 is the startup snapshot; mutation
+    /// remains disabled until a future coordinator slice.
+    pub evpn_runtime_snapshot: EvpnRuntimeSnapshotFn,
     /// Optional duplicate-MAC quarantine manual-clear hook. Present
     /// only when the EVPN originator actor is running.
     pub evpn_duplicate_mac_clear: Option<DuplicateMacClearFn>,
@@ -370,6 +376,7 @@ async fn run_listener(
     let evpn_originated_ip_vrf_route_count = config.evpn_originated_ip_vrf_route_count;
     let evpn_installed_ip_vrf_route_count = config.evpn_installed_ip_vrf_route_count;
     let evpn_fdb_nexthop_snapshot = config.evpn_fdb_nexthop_snapshot;
+    let evpn_runtime_snapshot = config.evpn_runtime_snapshot;
     let evpn_duplicate_mac_clear = config.evpn_duplicate_mac_clear;
     let blackhole_discard_snapshot = config.blackhole_discard_snapshot;
     let fib_route_snapshot = config.fib_route_snapshot;
@@ -412,6 +419,7 @@ async fn run_listener(
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
                 evpn_fdb_nexthop_snapshot,
+                evpn_runtime_snapshot,
                 evpn_duplicate_mac_clear,
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
@@ -449,6 +457,7 @@ async fn run_listener(
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
                 evpn_fdb_nexthop_snapshot,
+                evpn_runtime_snapshot,
                 evpn_duplicate_mac_clear,
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
@@ -493,6 +502,7 @@ async fn run_tcp_listener(
     evpn_originated_ip_vrf_route_count: crate::evpn_service::OriginatedIpVrfRouteCountFn,
     evpn_installed_ip_vrf_route_count: crate::evpn_service::InstalledIpVrfRouteCountFn,
     evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
+    evpn_runtime_snapshot: EvpnRuntimeSnapshotFn,
     evpn_duplicate_mac_clear: Option<DuplicateMacClearFn>,
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
@@ -591,7 +601,7 @@ async fn run_tcp_listener(
             interceptor.clone(),
         ))
         .add_service(EvpnServiceServer::with_interceptor(
-            EvpnService::with_full_surface_and_duplicate_mac_control(
+            EvpnService::with_full_surface_runtime_and_duplicate_mac_control(
                 evpn_instances,
                 evpn_ip_vrfs,
                 evpn_originated_local_mac_count,
@@ -599,6 +609,7 @@ async fn run_tcp_listener(
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
                 evpn_fdb_nexthop_snapshot,
+                evpn_runtime_snapshot,
                 access_mode,
                 evpn_duplicate_mac_clear,
             ),
@@ -651,6 +662,7 @@ async fn run_uds_listener(
     evpn_originated_ip_vrf_route_count: crate::evpn_service::OriginatedIpVrfRouteCountFn,
     evpn_installed_ip_vrf_route_count: crate::evpn_service::InstalledIpVrfRouteCountFn,
     evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
+    evpn_runtime_snapshot: EvpnRuntimeSnapshotFn,
     evpn_duplicate_mac_clear: Option<DuplicateMacClearFn>,
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
@@ -731,7 +743,7 @@ async fn run_uds_listener(
             interceptor.clone(),
         ))
         .add_service(EvpnServiceServer::with_interceptor(
-            EvpnService::with_full_surface_and_duplicate_mac_control(
+            EvpnService::with_full_surface_runtime_and_duplicate_mac_control(
                 evpn_instances,
                 evpn_ip_vrfs,
                 evpn_originated_local_mac_count,
@@ -739,6 +751,7 @@ async fn run_uds_listener(
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
                 evpn_fdb_nexthop_snapshot,
+                evpn_runtime_snapshot,
                 access_mode,
                 evpn_duplicate_mac_clear,
             ),

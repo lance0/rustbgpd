@@ -104,6 +104,7 @@ pub mod origination_es;
 pub mod origination_macip;
 pub mod projection;
 pub mod route_target;
+pub mod runtime;
 pub mod segment;
 
 pub use aliasing::{AliasEadPerEvi, AliasIndex, alias_resolved_next_hops, group_members};
@@ -141,6 +142,10 @@ pub use projection::{
     project_evpn_routes_with_aliases,
 };
 pub use route_target::{RouteTarget, RouteTargetParseError};
+pub use runtime::{
+    EvpnRuntimeCandidate, EvpnRuntimeChangeSet, EvpnRuntimeGeneration, EvpnRuntimeLifecycle,
+    EvpnRuntimeModel, EvpnRuntimeMutationState, EvpnRuntimePlan, EvpnRuntimeSnapshot,
+};
 pub use segment::{DfAlgorithm, DfRole, EthernetSegment};
 
 // Re-export the wire `RouteDistinguisher` so consumers of this crate

@@ -7,6 +7,7 @@ use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddEvpnRouteRequest, ClearDuplicateMacQuarantineRequest, DeleteEvpnRouteRequest,
+    EvpnRuntimeLifecycle, EvpnRuntimeMutationState, EvpnRuntimeState, GetEvpnRuntimeRequest,
     GetIpVrfRequest, IpVrfReadinessState, IpVrfState, ListEvpnInstancesRequest,
     ListEvpnNexthopsRequest, ListEvpnRequest, ListIpVrfsRequest, MetricsRequest,
 };
@@ -388,6 +389,39 @@ pub async fn clear_duplicate_mac(
     Ok(())
 }
 
+/// Read the committed ADR-0063 EVPN runtime generation.
+pub async fn runtime(connection: Connection, json: bool) -> Result<(), CliError> {
+    let mut client =
+        EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let state = client
+        .get_evpn_runtime(GetEvpnRuntimeRequest {})
+        .await?
+        .into_inner();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&runtime_to_json(&state))
+                .expect("failed to serialize EVPN runtime state as JSON")
+        );
+    } else {
+        println!(
+            "EVPN runtime generation={} lifecycle={} mutation={} l2-instances={} ip-vrfs={} ethernet-segments={} es-member-vnis={}",
+            state.generation,
+            runtime_lifecycle_label(state.lifecycle),
+            runtime_mutation_label(state.mutation_state),
+            state.evpn_instances_count,
+            state.evpn_ip_vrfs_count,
+            state.ethernet_segments_count,
+            state.ethernet_segment_member_vnis_count,
+        );
+        if !state.message.is_empty() {
+            println!("{}", state.message);
+        }
+    }
+    Ok(())
+}
+
 /// List local EVPN instances (Phase 2 VTEP foundation).
 ///
 /// Read-only. Surfaces the daemon's resolved `EvpnInstanceTable` —
@@ -536,6 +570,39 @@ fn fdb_nexthops_to_json(resp: &crate::proto::ListEvpnNexthopsResponse) -> serde_
         "pending_delete_count": resp.pending_delete_count,
         "drift_recovery_disabled": resp.drift_recovery_disabled,
     })
+}
+
+fn runtime_to_json(state: &EvpnRuntimeState) -> serde_json::Value {
+    serde_json::json!({
+        "generation": state.generation,
+        "lifecycle": runtime_lifecycle_label(state.lifecycle),
+        "mutation_state": runtime_mutation_label(state.mutation_state),
+        "evpn_instances_count": state.evpn_instances_count,
+        "evpn_ip_vrfs_count": state.evpn_ip_vrfs_count,
+        "ethernet_segments_count": state.ethernet_segments_count,
+        "ethernet_segment_member_vnis_count": state.ethernet_segment_member_vnis_count,
+        "message": state.message,
+    })
+}
+
+fn runtime_lifecycle_label(state: i32) -> &'static str {
+    match EvpnRuntimeLifecycle::try_from(state) {
+        Ok(EvpnRuntimeLifecycle::Active) => "active",
+        Ok(EvpnRuntimeLifecycle::Activating) => "activating",
+        Ok(EvpnRuntimeLifecycle::Deleting) => "deleting",
+        Ok(EvpnRuntimeLifecycle::Degraded) => "degraded",
+        Ok(EvpnRuntimeLifecycle::Unknown) | Err(_) => "unknown",
+    }
+}
+
+fn runtime_mutation_label(state: i32) -> &'static str {
+    match EvpnRuntimeMutationState::try_from(state) {
+        Ok(EvpnRuntimeMutationState::EvpnRuntimeMutationDisabled) => "disabled",
+        Ok(EvpnRuntimeMutationState::EvpnRuntimeMutationIdle) => "idle",
+        Ok(EvpnRuntimeMutationState::EvpnRuntimeMutationInProgress) => "in-progress",
+        Ok(EvpnRuntimeMutationState::EvpnRuntimeMutationFailed) => "failed",
+        Ok(EvpnRuntimeMutationState::EvpnRuntimeMutationUnknown) | Err(_) => "unknown",
+    }
 }
 
 /// List configured IP-VRFs and their readiness (Gate 9, ADR-0058).
@@ -1030,6 +1097,20 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             .await
             .unwrap();
         super::diagnose(connection, true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_command_runs_against_mock_service() {
+        let server = crate::test_support::spawn_mock_server(None).await;
+        let connection = crate::connection::connect(&server.addr, None)
+            .await
+            .unwrap();
+        super::runtime(connection, false).await.unwrap();
+
+        let connection = crate::connection::connect(&server.addr, None)
+            .await
+            .unwrap();
+        super::runtime(connection, true).await.unwrap();
     }
 
     #[tokio::test]

@@ -21,7 +21,8 @@ use std::sync::Arc;
 
 use rustbgpd_evpn::ip_vrf::{IpVrfId, IpVrfNotReady, IpVrfStatus, IpVrfTable};
 use rustbgpd_evpn::{
-    EvpnInstanceId, EvpnInstanceTable, FdbNexthopDataplaneStatus, IpVrfDataplaneStatus, MacAddress,
+    EvpnInstanceId, EvpnInstanceTable, EvpnRuntimeLifecycle, EvpnRuntimeMutationState,
+    EvpnRuntimeSnapshot, FdbNexthopDataplaneStatus, IpVrfDataplaneStatus, MacAddress,
 };
 use tonic::{Request, Response, Status};
 
@@ -55,6 +56,9 @@ pub type IpVrfStatusSnapshotFn = Arc<dyn Fn() -> Vec<IpVrfDataplaneStatus> + Sen
 /// tests can inject a deterministic value.
 pub type FdbNexthopSnapshotFn = Arc<dyn Fn() -> FdbNexthopDataplaneStatus + Send + Sync + 'static>;
 
+/// Read-side hook for the current ADR-0063 EVPN runtime generation.
+pub type EvpnRuntimeSnapshotFn = Arc<dyn Fn() -> EvpnRuntimeSnapshot + Send + Sync + 'static>;
+
 /// Outcome returned by the daemon duplicate-MAC control hook.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuplicateMacClearOutcome {
@@ -83,6 +87,7 @@ pub struct EvpnService {
     originated_ip_vrf_route_count: OriginatedIpVrfRouteCountFn,
     installed_ip_vrf_route_count: InstalledIpVrfRouteCountFn,
     fdb_nexthop_snapshot: FdbNexthopSnapshotFn,
+    runtime_snapshot: EvpnRuntimeSnapshotFn,
     duplicate_mac_clear: Option<DuplicateMacClearFn>,
 }
 
@@ -92,15 +97,18 @@ impl EvpnService {
     /// count and IP-VRF readiness closures default to "unknown".
     #[must_use]
     pub fn new(instances: Arc<EvpnInstanceTable>) -> Self {
+        let ip_vrfs = Arc::new(IpVrfTable::new());
+        let runtime_snapshot = startup_runtime_snapshot_fn(&instances, &ip_vrfs);
         Self {
             access_mode: AccessMode::ReadWrite,
             instances,
-            ip_vrfs: Arc::new(IpVrfTable::new()),
+            ip_vrfs,
             originated_local_mac_count: Arc::new(|_| 0),
             ip_vrf_status_snapshot: Arc::new(Vec::new),
             originated_ip_vrf_route_count: Arc::new(|_| 0),
             installed_ip_vrf_route_count: Arc::new(|_| 0),
             fdb_nexthop_snapshot: Arc::new(FdbNexthopDataplaneStatus::default),
+            runtime_snapshot,
             duplicate_mac_clear: None,
         }
     }
@@ -114,15 +122,18 @@ impl EvpnService {
         instances: Arc<EvpnInstanceTable>,
         originated_local_mac_count: OriginatedLocalMacCountFn,
     ) -> Self {
+        let ip_vrfs = Arc::new(IpVrfTable::new());
+        let runtime_snapshot = startup_runtime_snapshot_fn(&instances, &ip_vrfs);
         Self {
             access_mode: AccessMode::ReadWrite,
             instances,
-            ip_vrfs: Arc::new(IpVrfTable::new()),
+            ip_vrfs,
             originated_local_mac_count,
             ip_vrf_status_snapshot: Arc::new(Vec::new),
             originated_ip_vrf_route_count: Arc::new(|_| 0),
             installed_ip_vrf_route_count: Arc::new(|_| 0),
             fdb_nexthop_snapshot: Arc::new(FdbNexthopDataplaneStatus::default),
+            runtime_snapshot,
             duplicate_mac_clear: None,
         }
     }
@@ -174,6 +185,37 @@ impl EvpnService {
         access_mode: AccessMode,
         duplicate_mac_clear: Option<DuplicateMacClearFn>,
     ) -> Self {
+        let runtime_snapshot = startup_runtime_snapshot_fn(&instances, &ip_vrfs);
+        Self::with_full_surface_runtime_and_duplicate_mac_control(
+            instances,
+            ip_vrfs,
+            originated_local_mac_count,
+            ip_vrf_status_snapshot,
+            originated_ip_vrf_route_count,
+            installed_ip_vrf_route_count,
+            fdb_nexthop_snapshot,
+            runtime_snapshot,
+            access_mode,
+            duplicate_mac_clear,
+        )
+    }
+
+    /// Construct a service exposing the full EVPN surface and an
+    /// explicit ADR-0063 runtime snapshot provider.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn with_full_surface_runtime_and_duplicate_mac_control(
+        instances: Arc<EvpnInstanceTable>,
+        ip_vrfs: Arc<IpVrfTable>,
+        originated_local_mac_count: OriginatedLocalMacCountFn,
+        ip_vrf_status_snapshot: IpVrfStatusSnapshotFn,
+        originated_ip_vrf_route_count: OriginatedIpVrfRouteCountFn,
+        installed_ip_vrf_route_count: InstalledIpVrfRouteCountFn,
+        fdb_nexthop_snapshot: FdbNexthopSnapshotFn,
+        runtime_snapshot: EvpnRuntimeSnapshotFn,
+        access_mode: AccessMode,
+        duplicate_mac_clear: Option<DuplicateMacClearFn>,
+    ) -> Self {
         Self {
             access_mode,
             instances,
@@ -183,6 +225,7 @@ impl EvpnService {
             originated_ip_vrf_route_count,
             installed_ip_vrf_route_count,
             fdb_nexthop_snapshot,
+            runtime_snapshot,
             duplicate_mac_clear,
         }
     }
@@ -190,6 +233,14 @@ impl EvpnService {
 
 #[tonic::async_trait]
 impl proto::evpn_service_server::EvpnService for EvpnService {
+    async fn get_evpn_runtime(
+        &self,
+        _request: Request<proto::GetEvpnRuntimeRequest>,
+    ) -> Result<Response<proto::EvpnRuntimeState>, Status> {
+        let snapshot = (self.runtime_snapshot)();
+        Ok(Response::new(runtime_snapshot_to_proto(&snapshot)))
+    }
+
     async fn list_evpn_instances(
         &self,
         _request: Request<proto::ListEvpnInstancesRequest>,
@@ -311,6 +362,49 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
     }
 }
 
+fn startup_runtime_snapshot_fn(
+    instances: &Arc<EvpnInstanceTable>,
+    ip_vrfs: &Arc<IpVrfTable>,
+) -> EvpnRuntimeSnapshotFn {
+    let snapshot = EvpnRuntimeSnapshot::startup_from_tables(instances, ip_vrfs, &[]);
+    Arc::new(move || snapshot.clone())
+}
+
+fn runtime_snapshot_to_proto(snapshot: &EvpnRuntimeSnapshot) -> proto::EvpnRuntimeState {
+    proto::EvpnRuntimeState {
+        generation: snapshot.generation.as_u64(),
+        lifecycle: match snapshot.lifecycle {
+            EvpnRuntimeLifecycle::Active => proto::EvpnRuntimeLifecycle::Active as i32,
+            EvpnRuntimeLifecycle::Activating => proto::EvpnRuntimeLifecycle::Activating as i32,
+            EvpnRuntimeLifecycle::Deleting => proto::EvpnRuntimeLifecycle::Deleting as i32,
+            EvpnRuntimeLifecycle::Degraded => proto::EvpnRuntimeLifecycle::Degraded as i32,
+        },
+        mutation_state: match snapshot.mutation_state {
+            EvpnRuntimeMutationState::Disabled => {
+                proto::EvpnRuntimeMutationState::EvpnRuntimeMutationDisabled as i32
+            }
+            EvpnRuntimeMutationState::Idle => {
+                proto::EvpnRuntimeMutationState::EvpnRuntimeMutationIdle as i32
+            }
+            EvpnRuntimeMutationState::InProgress => {
+                proto::EvpnRuntimeMutationState::EvpnRuntimeMutationInProgress as i32
+            }
+            EvpnRuntimeMutationState::Failed => {
+                proto::EvpnRuntimeMutationState::EvpnRuntimeMutationFailed as i32
+            }
+        },
+        evpn_instances_count: u32::try_from(snapshot.evpn_instances_count).unwrap_or(u32::MAX),
+        evpn_ip_vrfs_count: u32::try_from(snapshot.evpn_ip_vrfs_count).unwrap_or(u32::MAX),
+        ethernet_segments_count: u32::try_from(snapshot.ethernet_segments_count)
+            .unwrap_or(u32::MAX),
+        ethernet_segment_member_vnis_count: u32::try_from(
+            snapshot.ethernet_segment_member_vnis_count,
+        )
+        .unwrap_or(u32::MAX),
+        message: snapshot.message.to_string(),
+    }
+}
+
 /// Build an `IpVrfId → &IpVrfDataplaneStatus` index from the per-call
 /// snapshot Vec so `ListIpVrfs` joins config rows with status rows
 /// in O(N) instead of O(N²). `GetIpVrf` doesn't need it (single
@@ -418,7 +512,10 @@ fn format_not_ready_reason(reason: &IpVrfNotReady) -> String {
 mod tests {
     use super::*;
     use proto::evpn_service_server::EvpnService as _;
-    use rustbgpd_evpn::{EvpnInstance, EvpnInstanceId, RouteTarget};
+    use rustbgpd_evpn::{
+        EvpnInstance, EvpnInstanceId, EvpnRuntimeGeneration, EvpnRuntimeLifecycle,
+        EvpnRuntimeMutationState, RouteTarget,
+    };
     use rustbgpd_wire::RouteDistinguisher;
     use std::net::IpAddr;
 
@@ -552,6 +649,53 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_eq!(resp.instances[0].originated_local_macs_count, 7);
+    }
+
+    #[tokio::test]
+    async fn get_evpn_runtime_surfaces_committed_generation() {
+        let snapshot = EvpnRuntimeSnapshot {
+            generation: EvpnRuntimeGeneration::STARTUP,
+            lifecycle: EvpnRuntimeLifecycle::Active,
+            mutation_state: EvpnRuntimeMutationState::Disabled,
+            evpn_instances_count: 2,
+            evpn_ip_vrfs_count: 1,
+            ethernet_segments_count: 1,
+            ethernet_segment_member_vnis_count: 2,
+            message: "startup snapshot active; runtime EVPN mutation disabled",
+        };
+        let svc = EvpnService::with_full_surface_runtime_and_duplicate_mac_control(
+            Arc::new(EvpnInstanceTable::new()),
+            Arc::new(IpVrfTable::new()),
+            Arc::new(|_| 0),
+            Arc::new(Vec::new),
+            Arc::new(|_| 0),
+            Arc::new(|_| 0),
+            Arc::new(FdbNexthopDataplaneStatus::default),
+            Arc::new(move || snapshot.clone()),
+            crate::server::AccessMode::ReadWrite,
+            None,
+        );
+
+        let resp = svc
+            .get_evpn_runtime(Request::new(proto::GetEvpnRuntimeRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.generation, 1);
+        assert_eq!(resp.lifecycle, proto::EvpnRuntimeLifecycle::Active as i32);
+        assert_eq!(
+            resp.mutation_state,
+            proto::EvpnRuntimeMutationState::EvpnRuntimeMutationDisabled as i32
+        );
+        assert_eq!(resp.evpn_instances_count, 2);
+        assert_eq!(resp.evpn_ip_vrfs_count, 1);
+        assert_eq!(resp.ethernet_segments_count, 1);
+        assert_eq!(resp.ethernet_segment_member_vnis_count, 2);
+        assert_eq!(
+            resp.message,
+            "startup snapshot active; runtime EVPN mutation disabled"
+        );
     }
 
     #[tokio::test]

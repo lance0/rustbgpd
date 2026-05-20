@@ -152,9 +152,9 @@ fields.
 `[global.telemetry.grpc_tcp]` and `[global.telemetry.grpc_uds]`
 listener config (including any TLS / mTLS field), `[rpki]`, `[bmp]`,
 `[mrt]`, `[[evpn_instances]]` (Phase-2 VTEP foundation — gRPC
-`EvpnService` shares an `Arc<EvpnInstanceTable>` built once at
-startup; ADR-0063 requires a future command-driven coordinator before
-reload-time mutation can safely land),
+`EvpnService.GetEvpnRuntime` exposes the committed startup generation
+and confirms live mutation is still disabled; ADR-0063 requires a future
+command-driven coordinator before reload-time mutation can safely land),
 `[[ethernet_segments]]` (Gate 8 segment orchestrator snapshot),
 `[[evpn_ip_vrfs]]` (Gate 9 IP-VRF foundation — pinned
 `Arc<IpVrfTable>` consumed by the readiness probe),
@@ -687,7 +687,7 @@ Use the narrowest surface for the question you are asking:
 | "What EVPN route changed recently?" | `rustbgpctl events evpn --route-type 2 --rd 65000:100` / `ListEvpnEvents` | Recent EVPN route add / withdraw / best-change history from the bounded RIB ring. |
 | "What routes does the general FIB runtime own or reject?" | `rustbgpctl rib fib` / `ListFibRoutes` | Snapshot of ADR-0061 configured-table route ownership. |
 | "What BLACKHOLE discards are installed or rejected?" | `rustbgpctl rib blackholes` / `ListBlackholeDiscards` | Snapshot of RFC 7999 discard programming. |
-| "Are EVPN L2/L3 dataplane pieces ready?" | `rustbgpctl evpn instances`, `rustbgpctl evpn nexthops`, `rustbgpctl evpn vrfs` | Snapshot of resolved EVPN config and latest dataplane reports. |
+| "Are EVPN L2/L3 dataplane pieces ready?" | `rustbgpctl evpn runtime`, `rustbgpctl evpn instances`, `rustbgpctl evpn nexthops`, `rustbgpctl evpn vrfs` | Snapshot of the committed EVPN runtime generation, resolved EVPN config, and latest dataplane reports. |
 | "Do I need alerting over time?" | Prometheus `/metrics` | Use counters/gauges for alerting; pair with CLI/RPC snapshots for row-level detail. |
 
 Streams answer "what happened while I was connected." Snapshot RPCs answer
@@ -992,10 +992,10 @@ session machinery:
 > (slices 1-4, M40 FRR-validated); **slice 3.5 hardening**
 > (PRs #91 / #92 / #93) added the `apply_aliasing_ecmp`
 > per-instance off-switch, periodic `RTM_GETNEXTHOP` drift
-> recovery, and homogeneous IPv6 alias members. Still ahead:
-> MAC-churn variant of the Gate 8b 24h soak before flipping
-> `apply_bum_enforcement` default to `true`; RFC 9135 overlay-
-> index IRB; auto-derived RTs. See
+> recovery, and homogeneous IPv6 alias members. Production-default
+> multi-homing enforcement and auto-derived RTs have since shipped.
+> Still ahead: ADR-0063 live EVPN runtime mutation, RFC 9135 overlay-
+> index IRB, and deeper cross-vendor/scale validation. See
 > [`evpn-enablement.md`](evpn-enablement.md) for the gate ladder,
 > [`evpn-alpha-soak.md`](evpn-alpha-soak.md) for the residual
 > alpha-confidence checklist, and
@@ -1024,6 +1024,7 @@ rustbgpctl evpn --route-type 2              # MAC/IP only
 rustbgpctl evpn --rd 65000:100              # filter by RD
 rustbgpctl evpn --peer 10.0.1.1             # filter by source peer
 rustbgpctl evpn diagnose                    # alpha VTEP summary
+rustbgpctl evpn runtime                     # committed EVPN generation / mutation state
 rustbgpctl evpn clear-duplicate-mac --vni 100 --mac aa:bb:cc:dd:ee:ff
 ```
 

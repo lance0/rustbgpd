@@ -490,6 +490,23 @@ struct MockEvpnService;
 
 #[tonic::async_trait]
 impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
+    async fn get_evpn_runtime(
+        &self,
+        _request: Request<server_proto::GetEvpnRuntimeRequest>,
+    ) -> Result<Response<server_proto::EvpnRuntimeState>, Status> {
+        Ok(Response::new(server_proto::EvpnRuntimeState {
+            generation: 1,
+            lifecycle: server_proto::EvpnRuntimeLifecycle::Active as i32,
+            mutation_state: server_proto::EvpnRuntimeMutationState::EvpnRuntimeMutationDisabled
+                as i32,
+            evpn_instances_count: 1,
+            evpn_ip_vrfs_count: 0,
+            ethernet_segments_count: 0,
+            ethernet_segment_member_vnis_count: 0,
+            message: "startup snapshot active; runtime EVPN mutation disabled".to_string(),
+        }))
+    }
+
     async fn list_evpn_instances(
         &self,
         _request: Request<server_proto::ListEvpnInstancesRequest>,

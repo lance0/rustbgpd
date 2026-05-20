@@ -132,7 +132,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
 | `RibService` | All RPCs | None |
 | `EventService` | All RPCs | None |
-| `EvpnService` | `ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`, `GetIpVrf` | `ClearDuplicateMacQuarantine` |
+| `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`, `GetIpVrf` | `ClearDuplicateMacQuarantine` |
 | `InjectionService` | None | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` |
 | `ControlService` | `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
 
@@ -1240,6 +1240,7 @@ future runtime mutation semantics.
 
 | RPC | Description |
 |-----|-------------|
+| `GetEvpnRuntime` | Return the committed EVPN runtime generation, lifecycle, mutation state, configured EVI/IP-VRF/ES counts, and a concise status message |
 | `ListEvpnInstances` | List configured local EVPN instances sorted by VNI (vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, optional bridge, advertise_svi_mac flag, originated_local_macs_count) |
 | `ListEvpnNexthops`  | List Linux dataplane reconciler-owned ADR-0059 FDB nexthop groups (per-VNI groups with ESI / Ethernet Tag / kernel group ID, per-VTEP member nexthop IDs + gateways, MAC refs) plus top-level orphan-NH count, pending-delete count, and the `drift_recovery_disabled` latch — read-only operator visibility |
 | `ListIpVrfs`        | List configured IP-VRFs / L3VNI tenants (name, l3vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, router_mac, optional `evpn_instance` link, readiness state, originated_routes_count, installed_routes_count) — Gate 9 / ADR-0058 |
@@ -1247,17 +1248,35 @@ future runtime mutation semantics.
 | `ClearDuplicateMacQuarantine` | Clear one RFC 7432 §15.1 duplicate-MAC local-origin quarantine by `(vni, mac)`. Returns `cleared=false` when no active quarantine exists; read-only listeners reject it. |
 
 Instance mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) is still
-out of scope. Runtime mutation is not just a shared-table swap: delete
-and redefine must coordinate IMET, MAC-only/MAC+IP/SVI Type 2 originators,
-DF/ES state, Type 5/IP-VRF state, and Linux owned dataplane state. ADR-0063
-therefore requires a single command-driven EVPN runtime coordinator
-with validation-first model updates and explicit drain/replay semantics
-before any mutating instance API is added. Tracked in
-[issue #133](https://github.com/lance0/rustbgpd/issues/133).
+out of scope. `GetEvpnRuntime` exposes the startup generation as a
+read-only foundation for ADR-0063: generation `1`, lifecycle `active`,
+and mutation state `disabled` mean the daemon is running the committed
+startup EVPN model and no live EVPN config mutation coordinator is active
+yet. Runtime mutation is not just a shared-table swap: delete and redefine
+must coordinate IMET, MAC-only/MAC+IP/SVI Type 2 originators, DF/ES state,
+Type 5/IP-VRF state, and Linux owned dataplane state. ADR-0063 therefore
+requires a single command-driven EVPN runtime coordinator with
+validation-first model updates and explicit drain/replay semantics before
+any mutating instance API is added. Tracked in
+[issue #210](https://github.com/lance0/rustbgpd/issues/210).
 
 Operators configure instances via the `[[evpn_instances]]` TOML
 block; SIGHUP that edits any instance is restart-required (see
 [KNOWN_ISSUES.md](../KNOWN_ISSUES.md)).
+
+### Get EVPN runtime status
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.EvpnService/GetEvpnRuntime
+```
+
+Or via CLI:
+
+```bash
+rustbgpctl evpn runtime           # human format
+rustbgpctl evpn runtime --json    # JSON output
+```
 
 ### List local EVPN instances
 
