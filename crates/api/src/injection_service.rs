@@ -1,4 +1,4 @@
-//! gRPC injection service — `AddPath` / `DeletePath` / `AddFlowSpec` / `DeleteFlowSpec`.
+//! gRPC injection service — unicast, `FlowSpec`, and EVPN route add/delete RPCs.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
