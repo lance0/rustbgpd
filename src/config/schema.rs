@@ -705,8 +705,10 @@ pub struct AsPathPrependConfig {
 ///   the wire crate's [`rustbgpd_wire::RouteDistinguisher`] textual
 ///   forms (`asn:val`, `ipv4:val`, 4-octet AS).
 /// - `route_targets` — bidirectional Route Target list (RFC 4360 / RFC 5668).
-///   Required, non-empty; each entry parses through
-///   [`rustbgpd_evpn::RouteTarget`].
+///   Required and non-empty unless `auto_derive_route_target = true`; each
+///   entry parses through [`rustbgpd_evpn::RouteTarget`].
+/// - `auto_derive_route_target` — derive the RFC 8365 §5.1.2.1 VXLAN RT from
+///   `[global].asn` and `vni`. Off by default; requires a 2-octet AS.
 /// - `local_vtep_ip` — VXLAN tunnel source IP for this EVI. Required,
 ///   must be a unicast address (rejects unspecified / multicast /
 ///   loopback).
@@ -731,7 +733,11 @@ pub struct EvpnInstanceConfig {
     /// Route Distinguisher (RFC 4364 §4.2). Textual form: `asn:val` or `ipv4:val`.
     pub rd: String,
     /// Bidirectional Route Targets — each entry applies to both import and export.
+    #[serde(default)]
     pub route_targets: Vec<String>,
+    /// Derive the RFC 8365 §5.1.2.1 VXLAN Route Target from `[global].asn` and `vni`.
+    #[serde(default)]
+    pub auto_derive_route_target: bool,
     /// VXLAN tunnel source IP for this EVI.
     pub local_vtep_ip: String,
     /// Optional Linux bridge name this EVI is bound to. Reserved for
@@ -816,7 +822,13 @@ pub struct EvpnInstanceConfig {
 ///   L3VNI cannot share a number.
 /// - `rd` — Route Distinguisher (`asn:value` or `ipv4:value`).
 /// - `route_targets` — bidirectional RTs applied to both import
-///   and export. Tenant identity on the wire.
+///   and export. Tenant identity on the wire. Required and non-empty unless
+///   `auto_derive_route_target = true`.
+/// - `auto_derive_route_target` — derive the L3VNI / IP-VRF RT as plain
+///   `AS:VNI` from `[global].asn` and the L3VNI (matching FRR's default
+///   tenant-VRF auto-RT — the RFC 8365 opaque form is MAC-VRF-only and
+///   would not import against FRR for L3VNIs). Off by default; requires a
+///   2-octet AS.
 /// - `local_vtep_ip` — VXLAN source IP for outbound Type 5
 ///   `NEXT_HOP`. Typically equals the per-`[[evpn_instances]]`
 ///   `local_vtep_ip`; explicitly carried so an operator with split
@@ -839,7 +851,12 @@ pub struct EvpnIpVrfConfig {
     /// Route Distinguisher (`asn:value` or `ipv4:value`).
     pub rd: String,
     /// Bidirectional Route Targets — applied to both import and export.
+    #[serde(default)]
     pub route_targets: Vec<String>,
+    /// Derive the L3VNI / IP-VRF Route Target as `AS:VNI` from `[global].asn`
+    /// and L3VNI (FRR-compatible tenant-VRF auto-RT, not the RFC 8365 form).
+    #[serde(default)]
+    pub auto_derive_route_target: bool,
     /// VXLAN tunnel source IP for outbound Type 5 `NEXT_HOP`.
     pub local_vtep_ip: String,
     /// Router MAC value (RFC 9135 §4.2 / RFC 9136 Router MAC ext-community).

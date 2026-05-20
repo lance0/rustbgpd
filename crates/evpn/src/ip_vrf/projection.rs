@@ -84,6 +84,10 @@ pub struct ProjectedIpPrefixRoute {
     /// Resolved next hop from `MP_REACH_NLRI` — the remote VTEP IP
     /// the dataplane will program as the FIB nexthop.
     pub next_hop: IpAddr,
+    /// Type 5 Gateway Address. The currently supported Interface-less
+    /// model requires this to be zero; non-zero values are RFC 9135
+    /// overlay-index routes and require recursive Type 2 resolution.
+    pub gateway: IpAddr,
     /// L3VNI from the route's MPLS label slot (RFC 8365: VXLAN VNI
     /// carried in the MPLS label field).
     pub l3vni: u32,
@@ -204,6 +208,15 @@ pub enum DropReason {
         prefix: EvpnIpPrefixValue,
         next_hop: IpAddr,
     },
+    /// The route uses RFC 9135 overlay-index semantics. Full support
+    /// requires recursively resolving the Type 5 Gateway Address
+    /// through a matching Type 2 MAC/IP route, so the Interface-less
+    /// projection deliberately drops it for now.
+    UnsupportedOverlayIndexGateway {
+        prefix: EvpnIpPrefixValue,
+        gateway: IpAddr,
+        next_hop: IpAddr,
+    },
     /// The route's `NEXT_HOP` matched one of our own IP-VRFs' VTEP IPs
     /// — reflected from a route reflector. The daemon would otherwise
     /// program a kernel route pointing at itself.
@@ -265,6 +278,23 @@ where
                 next_hop: route.next_hop,
                 vrf: vrf_name.clone(),
             });
+            continue;
+        }
+
+        // Non-zero gateway is the RFC 9135 §9.2 overlay-index model:
+        // the gateway is a TS IP that must be recursively resolved via
+        // a Type 2 MAC/IP route. The current projection supports only
+        // Interface-less Type 5, so fail closed with a specific reason
+        // instead of falling through to misleading Router MAC/L3VNI
+        // validation or installing a hybrid route as Interface-less.
+        if !route.gateway.is_unspecified() {
+            table
+                .drops
+                .push(DropReason::UnsupportedOverlayIndexGateway {
+                    prefix: route.prefix,
+                    gateway: route.gateway,
+                    next_hop: route.next_hop,
+                });
             continue;
         }
 
@@ -369,10 +399,15 @@ mod tests {
     }
 
     fn route(prefix: EvpnIpPrefixValue, nh: &str, rts: &[&str]) -> ProjectedIpPrefixRoute {
+        let gateway = match prefix {
+            EvpnIpPrefixValue::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            EvpnIpPrefixValue::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        };
         ProjectedIpPrefixRoute {
             rd: "65000:5000".parse().unwrap(),
             prefix,
             next_hop: nh.parse().unwrap(),
+            gateway,
             l3vni: 5000,
             route_targets: rts.iter().map(|s| rt(s)).collect(),
             router_mac: Some(mac()),
@@ -437,6 +472,45 @@ mod tests {
         assert!(matches!(
             table.drops()[0],
             DropReason::MissingRouterMac { .. }
+        ));
+    }
+
+    #[test]
+    fn nonzero_v4_gateway_drops_as_unsupported_overlay_index() {
+        let vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.2", &["65000:5000"]);
+        r.gateway = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10));
+        let table = project_ip_prefix_routes(&vrfs, vec![r]);
+        assert!(table.is_empty());
+        assert!(matches!(
+            table.drops()[0],
+            DropReason::UnsupportedOverlayIndexGateway {
+                gateway: IpAddr::V4(gateway),
+                ..
+            } if gateway == Ipv4Addr::new(10, 0, 0, 10)
+        ));
+    }
+
+    #[test]
+    fn nonzero_v6_gateway_drops_as_unsupported_overlay_index() {
+        let vrfs = one_vrf("blue", 5000, "2001:db8::1", &["65000:5000"]);
+        let mut r = route(
+            v6(
+                [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                32,
+            ),
+            "2001:db8::2",
+            &["65000:5000"],
+        );
+        r.gateway = IpAddr::V6("2001:db8::10".parse().unwrap());
+        let table = project_ip_prefix_routes(&vrfs, vec![r]);
+        assert!(table.is_empty());
+        assert!(matches!(
+            table.drops()[0],
+            DropReason::UnsupportedOverlayIndexGateway {
+                gateway: IpAddr::V6(gateway),
+                ..
+            } if gateway == "2001:db8::10".parse::<Ipv6Addr>().unwrap()
         ));
     }
 

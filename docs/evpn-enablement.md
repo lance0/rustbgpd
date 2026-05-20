@@ -575,8 +575,10 @@ entry.
 
 ### Gate 9 — Symmetric IRB (RFC 9135), adjacent standards
 
-Status: end-to-end shipped in v0.18.0 · auto-derived RTs +
-overlay-index IRB (full RFC 9135) remain follow-ups
+Status: end-to-end shipped in v0.18.0 · auto-derived RTs are now
+available as an explicit config opt-in · overlay-index Type 5 is
+detected and fail-closed, while full recursive resolution remains a
+follow-up
 
 Unlocks: L3 routing between EVPN tenants on the same VTEP under the
 RFC 9136 §4.4.2 symmetric Interface-less IRB model (matches FRR's
@@ -601,6 +603,22 @@ Shipped pieces (v0.18.0):
   gateway, RT extcomms, BGP Encap = VXLAN, Router MAC extcomm)
   and RT-keyed import with Router MAC enforcement / self-origin
   filtering.
+- Auto-derived Route Targets for both `[[evpn_instances]]` and
+  `[[evpn_ip_vrfs]]` via `auto_derive_route_target = true` (2-octet AS
+  only; 4-octet-AS deployments keep explicit RTs). The derived form
+  differs by VNI scope to match the de-facto vendor wire forms:
+  - **L2VNI / MAC-VRF** uses the RFC 8365 §5.1.2.1 opaque form
+    (`AS:0x10000000|vni`), which matches FRR only with `autort
+    rfc8365-compatible` (FRR's default L2VNI autort is `AS:VNI`).
+  - **L3VNI / IP-VRF** uses plain `AS:VNI`, matching FRR's default
+    tenant-VRF auto-RT with no extra knob (validated by the M39b
+    cross-vendor interop smoke).
+  See `docs/CONFIGURATION.md` for the full interop matrix.
+- RFC 9135 §9.2 overlay-index Type 5 detection on the receive path:
+  non-zero Type 5 Gateway Address routes are explicitly classified and
+  dropped rather than being treated as Interface-less Type 5. Full
+  recursive resolution through matching Type 2 MAC/IP state remains a
+  follow-up.
 - Linux `ip_vrf::dump_ip_vrf_observations` (VRF + L3 VXLAN
   rtnetlink dumps), `Dataplane::probe_ip_vrfs` trait method +
   Linux implementation, `IpVrfTable` plumbed through
@@ -613,9 +631,9 @@ Shipped pieces (v0.18.0):
 
 Still ahead:
 
-- Auto-derived Route Targets (RFC 8365 §5.1.2.1).
-- Overlay-index IRB (RFC 9135 overlay-index model — Gate 9 ships
-  the Interface-less variant only).
+- Overlay-index IRB recursive resolution (RFC 9135 §9.2): resolve
+  non-zero Type 5 Gateway Address through matching Type 2 MAC/IP
+  state, then add local origination / API surfaces.
 - Extend the protected self-hosted `kernel-dataplane` workflow beyond
   M39 / M40 / M42 to cover the earlier VTEP / DF-election smokes
   (M36 / M37 / M37+IP / M38) or explicitly keep those reviewer-run

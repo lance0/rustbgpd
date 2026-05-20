@@ -4343,6 +4343,82 @@ local_vtep_ip = "10.0.0.100"
 }
 
 #[test]
+fn evpn_instance_auto_derives_route_target() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+auto_derive_route_target = true
+local_vtep_ip = "10.0.0.100"
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    let table = config.resolve_evpn_instances().unwrap();
+    let inst = table.sorted()[0];
+    assert_eq!(
+        inst.route_targets
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec!["65000:268435556"]
+    );
+}
+
+#[test]
+fn evpn_instance_auto_derives_and_preserves_explicit_route_targets() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100", "65000:268435556"]
+auto_derive_route_target = true
+local_vtep_ip = "10.0.0.100"
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    let table = config.resolve_evpn_instances().unwrap();
+    let inst = table.sorted()[0];
+    assert_eq!(
+        inst.route_targets
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec!["65000:100", "65000:268435556"],
+        "explicit RTs are preserved and the derived RT is deduped"
+    );
+}
+
+#[test]
+fn evpn_instance_auto_derive_rejects_four_octet_asn() {
+    let toml = r#"
+[global]
+asn = 4200000000
+router_id = "10.0.0.100"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+auto_derive_route_target = true
+local_vtep_ip = "10.0.0.100"
+"#;
+    let err = parse(toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("auto_derive_route_target")
+            && msg.contains("2-octet AS")
+            && msg.contains("route_targets manually"),
+        "msg must explain the 4-octet ASN limitation: {msg}"
+    );
+}
+
+#[test]
 fn evpn_instance_full_parses() {
     let toml = evpn_toml_with(
         r#"
@@ -4465,6 +4541,25 @@ fn evpn_instance_rejects_empty_route_targets() {
 vni = 100
 rd = "10.0.0.100:100"
 route_targets = []
+local_vtep_ip = "10.0.0.100"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        matches!(err, ConfigError::InvalidEvpnInstance { .. }),
+        "got {msg}"
+    );
+    assert!(msg.contains("route_targets"));
+}
+
+#[test]
+fn evpn_instance_rejects_missing_route_targets_without_auto_derive() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
 local_vtep_ip = "10.0.0.100"
 "#,
     );
@@ -5903,6 +5998,124 @@ table_id = 5000
     assert_eq!(vrf.vrf_device, "vrf-blue");
     assert_eq!(vrf.l3vxlan_device, "vni5000");
     assert_eq!(vrf.table_id, 5000);
+}
+
+#[test]
+fn evpn_ip_vrf_auto_derives_route_target() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+auto_derive_route_target = true
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    let table = config.resolve_evpn_ip_vrfs().unwrap();
+    let vrf = table.get("tenant-blue").unwrap();
+    // L3VNI / IP-VRF auto-RT is plain AS:VNI (matches FRR's default
+    // tenant-VRF auto-RT), not the RFC 8365 opaque L2VNI form.
+    assert_eq!(
+        vrf.route_targets
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec!["65000:5000"]
+    );
+}
+
+#[test]
+fn evpn_ip_vrf_auto_derives_and_preserves_explicit_route_targets() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:9999"]
+auto_derive_route_target = true
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    let table = config.resolve_evpn_ip_vrfs().unwrap();
+    let vrf = table.get("tenant-blue").unwrap();
+    // Explicit RT (65000:9999) and the derived AS:VNI RT (65000:5000)
+    // both present; config resolution sorts the RT list.
+    assert_eq!(
+        vrf.route_targets
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec!["65000:5000", "65000:9999"]
+    );
+}
+
+#[test]
+fn evpn_ip_vrf_auto_derive_rejects_four_octet_asn() {
+    let toml = r#"
+[global]
+asn = 4200000000
+router_id = "10.0.0.100"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+auto_derive_route_target = true
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#;
+    let err = parse(toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("auto_derive_route_target")
+            && msg.contains("2-octet AS")
+            && msg.contains("route_targets manually"),
+        "msg must explain the 4-octet ASN limitation: {msg}"
+    );
+}
+
+#[test]
+fn evpn_ip_vrf_rejects_missing_route_targets_without_auto_derive() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        matches!(err, ConfigError::InvalidEvpnIpVrf { .. }),
+        "got {msg}"
+    );
+    assert!(msg.contains("route_targets"));
 }
 
 #[test]

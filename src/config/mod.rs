@@ -710,7 +710,7 @@ impl Config {
     pub fn resolve_evpn_instances(&self) -> Result<EvpnInstanceTable, ConfigError> {
         let mut table = EvpnInstanceTable::new();
         for cfg in &self.evpn_instances {
-            let inst = parse_evpn_instance(cfg)?;
+            let inst = parse_evpn_instance(cfg, self.global.asn)?;
             table
                 .insert(inst)
                 .map_err(|e| ConfigError::InvalidEvpnInstance {
@@ -807,7 +807,7 @@ impl Config {
         // collides with one.
         let l2_vnis: BTreeSet<u32> = self.evpn_instances.iter().map(|c| c.vni).collect();
         for cfg in &self.evpn_ip_vrfs {
-            let vrf = parse_evpn_ip_vrf(cfg)?;
+            let vrf = parse_evpn_ip_vrf(cfg, self.global.asn)?;
             if l2_vnis.contains(&vrf.id.as_u32()) {
                 return Err(ConfigError::InvalidEvpnIpVrf {
                     reason: format!(
@@ -2378,7 +2378,10 @@ impl From<GrpcMaxTierConfig> for GrpcMaxTier {
 /// SIGHUP reconcile) where the config has already passed `validate`,
 /// so the second pass is cheap and protects against misuse if a caller
 /// ever skips validation.
-fn parse_evpn_instance(cfg: &EvpnInstanceConfig) -> Result<EvpnInstance, ConfigError> {
+fn parse_evpn_instance(
+    cfg: &EvpnInstanceConfig,
+    local_asn: u32,
+) -> Result<EvpnInstance, ConfigError> {
     let id = EvpnInstanceId::new(cfg.vni).map_err(|e| ConfigError::InvalidEvpnInstance {
         reason: format!("vni {}: {e}", cfg.vni),
     })?;
@@ -2390,12 +2393,8 @@ fn parse_evpn_instance(cfg: &EvpnInstanceConfig) -> Result<EvpnInstance, ConfigE
                 reason: format!("vni {}: invalid rd {:?}: {e}", cfg.vni, cfg.rd),
             })?;
 
-    if cfg.route_targets.is_empty() {
-        return Err(ConfigError::InvalidEvpnInstance {
-            reason: format!("vni {}: route_targets must not be empty", cfg.vni),
-        });
-    }
-    let mut rts: Vec<RouteTarget> = Vec::with_capacity(cfg.route_targets.len());
+    let mut rts: Vec<RouteTarget> =
+        Vec::with_capacity(cfg.route_targets.len() + usize::from(cfg.auto_derive_route_target));
     for raw in &cfg.route_targets {
         let rt = raw
             .parse::<RouteTarget>()
@@ -2403,6 +2402,23 @@ fn parse_evpn_instance(cfg: &EvpnInstanceConfig) -> Result<EvpnInstance, ConfigE
                 reason: format!("vni {}: invalid route_target {:?}: {e}", cfg.vni, raw),
             })?;
         rts.push(rt);
+    }
+    if cfg.auto_derive_route_target {
+        // L2VNI / MAC-VRF: RFC 8365 §5.1.2.1 opaque VXLAN RT.
+        let rt = RouteTarget::auto_derived_vxlan_l2_rfc8365(local_asn, cfg.vni).map_err(|e| {
+            ConfigError::InvalidEvpnInstance {
+                reason: format!(
+                    "vni {}: cannot auto_derive_route_target: {e}; disable auto_derive_route_target or configure route_targets manually",
+                    cfg.vni
+                ),
+            }
+        })?;
+        rts.push(rt);
+    }
+    if rts.is_empty() {
+        return Err(ConfigError::InvalidEvpnInstance {
+            reason: format!("vni {}: route_targets must not be empty", cfg.vni),
+        });
     }
 
     let local_vtep_ip =
@@ -2595,7 +2611,7 @@ fn parse_ethernet_segment(
 /// device-name shape, and table id; uniqueness across
 /// `[[evpn_ip_vrfs]]` and L3↔L2 VNI overlap are checked at the
 /// table-build level in `resolve_evpn_ip_vrfs`.
-fn parse_evpn_ip_vrf(cfg: &EvpnIpVrfConfig) -> Result<IpVrf, ConfigError> {
+fn parse_evpn_ip_vrf(cfg: &EvpnIpVrfConfig, local_asn: u32) -> Result<IpVrf, ConfigError> {
     if cfg.name.trim().is_empty() {
         return Err(ConfigError::InvalidEvpnIpVrf {
             reason: format!("evpn_ip_vrfs[vni={}]: name must not be empty", cfg.vni),
@@ -2630,12 +2646,8 @@ fn parse_evpn_ip_vrf(cfg: &EvpnIpVrfConfig) -> Result<IpVrf, ConfigError> {
             reason: format!("name {:?}: invalid rd {:?}: {e}", cfg.name, cfg.rd),
         })?;
 
-    if cfg.route_targets.is_empty() {
-        return Err(ConfigError::InvalidEvpnIpVrf {
-            reason: format!("name {:?}: route_targets must not be empty", cfg.name),
-        });
-    }
-    let mut rts: Vec<RouteTarget> = Vec::with_capacity(cfg.route_targets.len());
+    let mut rts: Vec<RouteTarget> =
+        Vec::with_capacity(cfg.route_targets.len() + usize::from(cfg.auto_derive_route_target));
     for raw in &cfg.route_targets {
         let rt = raw
             .parse::<RouteTarget>()
@@ -2643,6 +2655,25 @@ fn parse_evpn_ip_vrf(cfg: &EvpnIpVrfConfig) -> Result<IpVrf, ConfigError> {
                 reason: format!("name {:?}: invalid route_target {:?}: {e}", cfg.name, raw),
             })?;
         rts.push(rt);
+    }
+    if cfg.auto_derive_route_target {
+        // L3VNI / IP-VRF: plain AS:VNI to match FRR's default tenant-VRF
+        // auto-RT (the RFC 8365 opaque form is MAC-VRF-only and FRR does
+        // not use it for L3VNIs, so it would not import cross-vendor).
+        let rt = RouteTarget::auto_derived_ip_vrf_as_vni(local_asn, cfg.vni).map_err(|e| {
+            ConfigError::InvalidEvpnIpVrf {
+                reason: format!(
+                    "name {:?}: cannot auto_derive_route_target: {e}; disable auto_derive_route_target or configure route_targets manually",
+                    cfg.name
+                ),
+            }
+        })?;
+        rts.push(rt);
+    }
+    if rts.is_empty() {
+        return Err(ConfigError::InvalidEvpnIpVrf {
+            reason: format!("name {:?}: route_targets must not be empty", cfg.name),
+        });
     }
 
     let local_vtep_ip =

@@ -100,6 +100,22 @@ pub enum RouteTargetParseError {
     },
 }
 
+/// Errors returned by the auto-derived Route Target constructors
+/// ([`RouteTarget::auto_derived_vxlan_l2_rfc8365`] and
+/// [`RouteTarget::auto_derived_ip_vrf_as_vni`]).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RouteTargetAutoDeriveError {
+    /// Auto-derivation packs the VNI into a 2-octet-AS Route Target, so a
+    /// 4-octet AS has no room — configure `route_targets` explicitly.
+    #[error(
+        "auto-derived Route Targets require a 2-octet AS number; got {asn} — configure route_targets explicitly for 4-octet AS deployments"
+    )]
+    FourOctetAsn { asn: u32 },
+    /// The service-id field is the 24-bit VNI and zero is not a valid local VNI.
+    #[error("VNI {vni} is outside the auto-derived RT range 1..=16777215")]
+    InvalidVni { vni: u32 },
+}
+
 impl FromStr for RouteTarget {
     type Err = RouteTargetParseError;
 
@@ -170,6 +186,79 @@ impl FromStr for RouteTarget {
 }
 
 impl RouteTarget {
+    /// Build the RFC 8365 §5.1.2.1 auto-derived **L2VNI / MAC-VRF** VXLAN
+    /// Route Target.
+    ///
+    /// The global administrator is the local 2-octet AS number. The local
+    /// administrator packs `A=0` (auto-derived), `Type=1` (VXLAN),
+    /// `D-ID=0`, and the 24-bit VNI service-id:
+    ///
+    /// ```text
+    /// value = 0x10000000 | vni
+    /// ```
+    ///
+    /// This is the form FRR emits for L2VNIs **only** when configured with
+    /// `autort rfc8365-compatible`; FRR's default L2VNI autort is `AS:VNI`.
+    /// For the L3VNI / IP-VRF auto-RT — which FRR derives as `AS:VNI`
+    /// regardless of `autort` — use [`Self::auto_derived_ip_vrf_as_vni`].
+    ///
+    /// RFC 8365 requires manual RT configuration for 4-octet ASNs because
+    /// the 3-octet VNI cannot fit in that RT layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RouteTargetAutoDeriveError::FourOctetAsn`] when `asn` is
+    /// outside the 2-octet range, or
+    /// [`RouteTargetAutoDeriveError::InvalidVni`] when `vni` is outside the
+    /// 24-bit VXLAN VNI range.
+    pub fn auto_derived_vxlan_l2_rfc8365(
+        asn: u32,
+        vni: u32,
+    ) -> Result<Self, RouteTargetAutoDeriveError> {
+        let asn =
+            u16::try_from(asn).map_err(|_| RouteTargetAutoDeriveError::FourOctetAsn { asn })?;
+        if !(1..=0x00ff_ffff).contains(&vni) {
+            return Err(RouteTargetAutoDeriveError::InvalidVni { vni });
+        }
+        Ok(Self::TwoOctetAs {
+            asn,
+            value: 0x1000_0000 | vni,
+        })
+    }
+
+    /// Build the auto-derived **L3VNI / IP-VRF** Route Target as `AS:VNI`.
+    ///
+    /// Unlike the L2VNI MAC-VRF auto-RT (RFC 8365 §5.1.2.1 opaque form),
+    /// the de-facto vendor convention for the tenant-VRF L3VNI auto-RT is a
+    /// plain `AS:VNI` 2-octet-AS Route Target — FRR derives this for the
+    /// tenant VRF regardless of the `autort rfc8365-compatible` knob (which
+    /// is MAC-VRF-only), and Cumulus/NVIDIA follow the same convention. We
+    /// match it so `auto_derive_route_target` on `[[evpn_ip_vrfs]]`
+    /// actually imports against a default FRR L3VNI peer.
+    ///
+    /// ```text
+    /// value = vni
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RouteTargetAutoDeriveError::FourOctetAsn`] when `asn` is
+    /// outside the 2-octet range (the 24-bit VNI does not fit a 4-octet-AS
+    /// RT's 2-octet local administrator), or
+    /// [`RouteTargetAutoDeriveError::InvalidVni`] when `vni` is outside the
+    /// 24-bit VNI range.
+    pub fn auto_derived_ip_vrf_as_vni(
+        asn: u32,
+        vni: u32,
+    ) -> Result<Self, RouteTargetAutoDeriveError> {
+        let asn =
+            u16::try_from(asn).map_err(|_| RouteTargetAutoDeriveError::FourOctetAsn { asn })?;
+        if !(1..=0x00ff_ffff).contains(&vni) {
+            return Err(RouteTargetAutoDeriveError::InvalidVni { vni });
+        }
+        Ok(Self::TwoOctetAs { asn, value: vni })
+    }
+
     /// Encode into the 8-byte wire form of a Route Target Extended
     /// Community (RFC 4360 §3 / RFC 5668 §2). The first byte is the
     /// **type** (selects the administrator format), the second byte
@@ -315,6 +404,87 @@ mod tests {
             }
         );
         assert_eq!(rt.to_string(), "4200000000:200");
+    }
+
+    #[test]
+    fn derives_l2_rfc8365_vxlan_route_target() {
+        // L2VNI MAC-VRF: RFC 8365 §5.1.2.1 opaque form (0x10000000 | vni).
+        // AS 65000 / VNI 100 -> 65000:268435556.
+        let rt = RouteTarget::auto_derived_vxlan_l2_rfc8365(65000, 100).unwrap();
+        assert_eq!(
+            rt,
+            RouteTarget::TwoOctetAs {
+                asn: 65000,
+                value: 0x1000_0000 | 0x0000_0064,
+            }
+        );
+        assert_eq!(rt.to_string(), "65000:268435556");
+    }
+
+    #[test]
+    fn derives_l2_rfc8365_route_target_for_max_vni() {
+        assert_eq!(
+            RouteTarget::auto_derived_vxlan_l2_rfc8365(65535, 0x00ff_ffff).unwrap(),
+            RouteTarget::TwoOctetAs {
+                asn: 65535,
+                value: 0x10ff_ffff,
+            }
+        );
+    }
+
+    #[test]
+    fn derives_ip_vrf_as_vni_route_target() {
+        // L3VNI / IP-VRF: plain AS:VNI, matching FRR's default tenant-VRF
+        // auto-RT. AS 65000 / VNI 100 -> 65000:100.
+        let rt = RouteTarget::auto_derived_ip_vrf_as_vni(65000, 100).unwrap();
+        assert_eq!(
+            rt,
+            RouteTarget::TwoOctetAs {
+                asn: 65000,
+                value: 100
+            }
+        );
+        assert_eq!(rt.to_string(), "65000:100");
+    }
+
+    #[test]
+    fn derives_ip_vrf_as_vni_route_target_for_max_vni() {
+        assert_eq!(
+            RouteTarget::auto_derived_ip_vrf_as_vni(65535, 0x00ff_ffff).unwrap(),
+            RouteTarget::TwoOctetAs {
+                asn: 65535,
+                value: 0x00ff_ffff,
+            }
+        );
+    }
+
+    #[test]
+    fn auto_derived_route_targets_reject_four_octet_asn() {
+        assert_eq!(
+            RouteTarget::auto_derived_vxlan_l2_rfc8365(65536, 100).unwrap_err(),
+            RouteTargetAutoDeriveError::FourOctetAsn { asn: 65536 }
+        );
+        assert_eq!(
+            RouteTarget::auto_derived_ip_vrf_as_vni(65536, 100).unwrap_err(),
+            RouteTargetAutoDeriveError::FourOctetAsn { asn: 65536 }
+        );
+    }
+
+    #[test]
+    fn auto_derived_route_targets_reject_invalid_vni() {
+        for ctor in [
+            RouteTarget::auto_derived_vxlan_l2_rfc8365,
+            RouteTarget::auto_derived_ip_vrf_as_vni,
+        ] {
+            assert_eq!(
+                ctor(65000, 0).unwrap_err(),
+                RouteTargetAutoDeriveError::InvalidVni { vni: 0 }
+            );
+            assert_eq!(
+                ctor(65000, 0x0100_0000).unwrap_err(),
+                RouteTargetAutoDeriveError::InvalidVni { vni: 0x0100_0000 }
+            );
+        }
     }
 
     #[test]

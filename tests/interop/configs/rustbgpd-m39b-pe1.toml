@@ -1,0 +1,47 @@
+# M39b PE1 (rustbgpd) — auto-derived Route Target cross-vendor smoke.
+#
+# Same shape as the M39 symmetric-IRB PE1, but the IP-VRF omits an
+# explicit `route_targets` and instead opts into the auto-derived RT
+# (`auto_derive_route_target = true`). For an L3VNI / IP-VRF the derived
+# form is plain `AS:VNI` — for `[global].asn = 65000` and L3VNI 100 →
+# `65000:100` — matching FRR's default tenant-VRF auto-RT, so the Type 5
+# routes import across the session with no extra FRR knob. (The RFC 8365
+# opaque form is MAC-VRF/L2VNI-only; FRR does not use it for L3VNIs.)
+#
+# The operator-managed VRF + L3VXLAN devices are created by
+# start-rustbgpd-m39-pe1.sh before the daemon boots (reused as-is).
+
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "pe2"
+hold_time = 180
+families = ["l2vpn_evpn"]
+
+[[evpn_ip_vrfs]]
+name = "vrf1"
+vni = 100
+rd = "65000:100"
+# No explicit route_targets — derive the RFC 8365 §5.1.2.1 VXLAN RT
+# from [global].asn (65000) + L3VNI (100).
+auto_derive_route_target = true
+local_vtep_ip = "10.0.0.1"
+router_mac = "02:00:00:00:01:01"
+vrf_device = "vrf1"
+l3vxlan_device = "l3vxlan100"
+table_id = 100
+
+[security.grpc]
+enforcement = "legacy"
