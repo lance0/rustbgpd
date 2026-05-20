@@ -220,8 +220,9 @@ impl EvpnService {
         )
     }
 
-    /// Construct a service exposing the full EVPN surface and an
-    /// explicit ADR-0063 runtime snapshot provider.
+    /// Construct a service exposing the full EVPN surface with an
+    /// explicit ADR-0063 runtime model provider and optional apply
+    /// hook.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn with_full_surface_runtime_and_duplicate_mac_control(

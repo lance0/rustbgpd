@@ -149,9 +149,9 @@ fn apply_evpn_runtime_request(
     let mut coordinator = coordinator.lock().map_err(|_| {
         GrpcEvpnRuntimeApplyError::Internal("EVPN runtime coordinator lock poisoned".to_string())
     })?;
-    let plan = coordinator.plan_candidate(&candidate);
 
     if request.validate_only {
+        let plan = coordinator.plan_candidate(&candidate);
         let snapshot = coordinator.snapshot();
         return Ok(proto::ApplyEvpnRuntimeResponse {
             outcome: proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyValidated as i32,
