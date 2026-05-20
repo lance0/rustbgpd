@@ -211,7 +211,7 @@ pub async fn add_ip_prefix(
     prefix: String,
     label: u32,
     next_hop: String,
-    router_mac: String,
+    router_mac: Option<String>,
     route_targets: Vec<String>,
     disable_vxlan_encap: bool,
     json: bool,
@@ -233,7 +233,7 @@ pub async fn add_ip_prefix(
             disable_vxlan_encap,
             prefix,
             prefix_length,
-            router_mac,
+            router_mac: router_mac.unwrap_or_default(),
         })
         .await?;
     output::print_result(json, "add_evpn", "", "EVPN Type 5 route added");

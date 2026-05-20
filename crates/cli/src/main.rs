@@ -678,9 +678,9 @@ enum EvpnAction {
         /// VTEP loopback IP (next-hop).
         #[arg(long)]
         next_hop: String,
-        /// Router MAC extended community value.
+        /// Router MAC extended community value. Required unless --no-vxlan-encap is set.
         #[arg(long)]
-        router_mac: String,
+        router_mac: Option<String>,
         #[arg(long, value_delimiter = ',')]
         rt: Vec<String>,
         #[arg(long)]
@@ -1790,7 +1790,43 @@ mod tests {
             assert_eq!(rd, "65000:5000");
             assert_eq!(prefix, "10.50.0.0/24");
             assert_eq!(label, 5000);
-            assert_eq!(router_mac, "02:00:00:00:50:00");
+            assert_eq!(router_mac.as_deref(), Some("02:00:00:00:50:00"));
+        } else {
+            panic!("expected Evpn AddIpPrefix command");
+        }
+    }
+
+    #[test]
+    fn test_parse_evpn_add_ip_prefix_without_router_mac_for_no_vxlan() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "evpn",
+            "add-ip-prefix",
+            "--rd",
+            "65000:5000",
+            "--prefix",
+            "10.50.0.0/24",
+            "--label",
+            "5000",
+            "--next-hop",
+            "192.0.2.10",
+            "--rt",
+            "65000:5000",
+            "--no-vxlan-encap",
+        ])
+        .unwrap();
+        if let Command::Evpn {
+            action:
+                Some(EvpnAction::AddIpPrefix {
+                    router_mac,
+                    no_vxlan_encap,
+                    ..
+                }),
+            ..
+        } = cli.command
+        {
+            assert!(router_mac.is_none());
+            assert!(no_vxlan_encap);
         } else {
             panic!("expected Evpn AddIpPrefix command");
         }

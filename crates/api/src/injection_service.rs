@@ -481,6 +481,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
 
         let key = match req.route_type {
             2 => {
+                reject_delete_type5_only_fields(&req, 2)?;
                 let mac = parse_mac(&req.mac)?;
                 EvpnRouteKey::MacIp {
                     rd,
@@ -490,6 +491,12 @@ impl proto::injection_service_server::InjectionService for InjectionService {
                 }
             }
             3 => {
+                reject_delete_type5_only_fields(&req, 3)?;
+                if !req.mac.is_empty() {
+                    return Err(Status::invalid_argument(
+                        "mac is Type 2 only; must be empty for Type 3 IMET withdrawal",
+                    ));
+                }
                 let ip = parse_ip_required(&req.ip, "ip (originator_ip)")?;
                 EvpnRouteKey::Imet {
                     rd,
@@ -498,6 +505,16 @@ impl proto::injection_service_server::InjectionService for InjectionService {
                 }
             }
             5 => {
+                if !req.mac.is_empty() {
+                    return Err(Status::invalid_argument(
+                        "mac is Type 2 only; must be empty for Type 5 IP Prefix withdrawal",
+                    ));
+                }
+                if !req.ip.is_empty() {
+                    return Err(Status::invalid_argument(
+                        "ip is Type 2/3 only; must be empty for Type 5 IP Prefix withdrawal",
+                    ));
+                }
                 let prefix = parse_evpn_ip_prefix(&req.prefix, req.prefix_length)?;
                 EvpnRouteKey::IpPrefix {
                     rd,
@@ -917,6 +934,25 @@ fn reject_type5_only_fields(
     if !req.router_mac.is_empty() {
         return Err(Status::invalid_argument(format!(
             "router_mac is Type 5 only; must be empty for Type {route_type}"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject Type-5-only withdrawal key fields on Type 2/3 deletes so stale
+/// controller payload fields cannot hide a mismatched route identity.
+fn reject_delete_type5_only_fields(
+    req: &proto::DeleteEvpnRouteRequest,
+    route_type: u32,
+) -> Result<(), Status> {
+    if !req.prefix.is_empty() {
+        return Err(Status::invalid_argument(format!(
+            "prefix is Type 5 only; must be empty for Type {route_type} withdrawal"
+        )));
+    }
+    if req.prefix_length != 0 {
+        return Err(Status::invalid_argument(format!(
+            "prefix_length is Type 5 only; must be 0 for Type {route_type} withdrawal"
         )));
     }
     Ok(())
@@ -1811,6 +1847,50 @@ mod tests {
                 ..
             } if p.addr == Ipv4Addr::new(10, 50, 0, 0) && p.len == 24
         ));
+    }
+
+    #[tokio::test]
+    async fn delete_evpn_rejects_cross_type_key_fields() {
+        let svc = make_service();
+
+        let type2_with_prefix = Request::new(proto::DeleteEvpnRouteRequest {
+            route_type: 2,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: "02:00:00:aa:bb:cc".into(),
+            ip: String::new(),
+            prefix: "10.50.0.0".into(),
+            prefix_length: 24,
+        });
+        let err = svc.delete_evpn_route(type2_with_prefix).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("prefix"));
+
+        let type3_with_mac = Request::new(proto::DeleteEvpnRouteRequest {
+            route_type: 3,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: "02:00:00:aa:bb:cc".into(),
+            ip: "192.0.2.10".into(),
+            prefix: String::new(),
+            prefix_length: 0,
+        });
+        let err = svc.delete_evpn_route(type3_with_mac).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("mac"));
+
+        let type5_with_ip = Request::new(proto::DeleteEvpnRouteRequest {
+            route_type: 5,
+            rd: "65000:5000".into(),
+            ethernet_tag: 0,
+            mac: String::new(),
+            ip: "192.0.2.10".into(),
+            prefix: "10.50.0.0".into(),
+            prefix_length: 24,
+        });
+        let err = svc.delete_evpn_route(type5_with_ip).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("ip"));
     }
 
     #[tokio::test]
