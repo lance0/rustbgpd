@@ -776,6 +776,11 @@ message ListFibRoutesRequest {
   uint32 prefix_length = 5;
   // Optional source peer-address filter. Empty = all peers.
   string peer_address = 6;
+  // Optional page size. 0 preserves legacy behavior and returns the full
+  // filtered snapshot.
+  uint32 page_size = 7;
+  // Decimal offset returned by next_page_token. Requires page_size > 0.
+  string page_token = 8;
 }
 
 enum FibRouteState {
@@ -809,6 +814,10 @@ message FibRouteStatus {
 
 message ListFibRoutesResponse {
   repeated FibRouteStatus routes = 1;
+  // Decimal offset for the next page when explicit pagination is active.
+  string next_page_token = 2;
+  // Number of rows after filtering and before pagination.
+  uint64 total_count = 3;
 }
 
 message ListRouteEventsRequest {

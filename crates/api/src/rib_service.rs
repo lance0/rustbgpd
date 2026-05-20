@@ -416,6 +416,84 @@ impl FibRouteFilters {
     }
 }
 
+struct FibRoutePageParams {
+    offset: usize,
+    page_size: usize,
+}
+
+fn parse_fib_page_params(
+    req: &proto::ListFibRoutesRequest,
+) -> Result<Option<FibRoutePageParams>, &'static str> {
+    if req.page_size == 0 {
+        if req.page_token.is_empty() {
+            return Ok(None);
+        }
+        return Err("page_token requires page_size");
+    }
+
+    let offset: usize = if req.page_token.is_empty() {
+        0
+    } else {
+        req.page_token.parse().map_err(|_| "invalid page_token")?
+    };
+
+    Ok(Some(FibRoutePageParams {
+        offset,
+        page_size: req.page_size as usize,
+    }))
+}
+
+fn sort_fib_routes(routes: &mut [proto::FibRouteStatus]) {
+    routes.sort_by(|a, b| {
+        a.table_name
+            .cmp(&b.table_name)
+            .then_with(|| a.table_id.cmp(&b.table_id))
+            .then_with(|| a.metric.cmp(&b.metric))
+            .then_with(|| a.prefix.cmp(&b.prefix))
+            .then_with(|| a.prefix_length.cmp(&b.prefix_length))
+            .then_with(|| a.next_hop.cmp(&b.next_hop))
+            .then_with(|| a.peer_address.cmp(&b.peer_address))
+            .then_with(|| a.state.cmp(&b.state))
+            .then_with(|| a.reason.cmp(&b.reason))
+    });
+}
+
+fn build_fib_response(
+    routes: Vec<proto::FibRouteStatus>,
+    page: Option<FibRoutePageParams>,
+) -> proto::ListFibRoutesResponse {
+    let total_count = u64::try_from(routes.len()).unwrap_or(u64::MAX);
+    let Some(page) = page else {
+        return proto::ListFibRoutesResponse {
+            routes,
+            next_page_token: String::new(),
+            total_count,
+        };
+    };
+
+    let routes_len = routes.len();
+    let page_routes: Vec<proto::FibRouteStatus> = routes
+        .into_iter()
+        .skip(page.offset)
+        .take(page.page_size)
+        .collect();
+    let next_offset = page
+        .offset
+        .checked_add(page_routes.len())
+        .unwrap_or(routes_len);
+    let next_page_token = if next_offset < routes_len {
+        next_offset.to_string()
+    } else {
+        String::new()
+    };
+
+    proto::ListFibRoutesResponse {
+        routes: page_routes,
+        next_page_token,
+        total_count,
+    }
+}
+
 fn prefix_parts(prefix: Prefix) -> (String, u32) {
     match prefix {
         Prefix::V4(prefix) => (prefix.addr.to_string(), u32::from(prefix.len)),
@@ -904,12 +982,22 @@ impl proto::rib_service_server::RibService for RibService {
         &self,
         request: Request<proto::ListFibRoutesRequest>,
     ) -> Result<Response<proto::ListFibRoutesResponse>, Status> {
-        let filters = FibRouteFilters::from_request(&request.into_inner())?;
-        let routes = (self.fib_route_snapshot)()
+        let req = request.into_inner();
+        let filters = FibRouteFilters::from_request(&req)?;
+        let page = parse_fib_page_params(&req).map_err(Status::invalid_argument)?;
+        let mut routes: Vec<proto::FibRouteStatus> = (self.fib_route_snapshot)()
             .into_iter()
             .filter(|route| filters.matches(route))
             .collect();
-        Ok(Response::new(proto::ListFibRoutesResponse { routes }))
+        if page.is_some() {
+            sort_fib_routes(&mut routes);
+        }
+        if let Some(page) = page.as_ref()
+            && page.offset > routes.len()
+        {
+            return Err(Status::invalid_argument("page_token is out of range"));
+        }
+        Ok(Response::new(build_fib_response(routes, page)))
     }
 
     async fn list_route_events(
@@ -2062,6 +2150,7 @@ mod tests {
                 prefix: "203.0.113.0".to_string(),
                 prefix_length: 24,
                 peer_address: "198.51.100.2".to_string(),
+                ..Default::default()
             }))
             .await
             .unwrap()
@@ -2070,6 +2159,114 @@ mod tests {
         assert_eq!(resp.routes.len(), 1);
         assert_eq!(resp.routes[0].peer_address, "198.51.100.2");
         assert_eq!(resp.routes[0].state, proto::FibRouteState::Rejected as i32);
+    }
+
+    #[tokio::test]
+    async fn list_fib_routes_paginates_filtered_snapshot_deterministically() {
+        let (tx, _rx) = mpsc::channel(16);
+        let svc = RibService::with_status_snapshots(
+            tx,
+            Arc::new(Vec::new),
+            Arc::new(|| {
+                vec![
+                    fib_status(
+                        "edge",
+                        "203.0.113.0",
+                        24,
+                        "198.51.100.3",
+                        proto::FibRouteState::Installed,
+                        "owned",
+                    ),
+                    fib_status(
+                        "backup",
+                        "2001:db8::",
+                        64,
+                        "2001:db8::1",
+                        proto::FibRouteState::Installed,
+                        "owned",
+                    ),
+                    fib_status(
+                        "edge",
+                        "203.0.113.0",
+                        24,
+                        "198.51.100.1",
+                        proto::FibRouteState::Installed,
+                        "owned",
+                    ),
+                ]
+            }),
+        );
+
+        let first = svc
+            .list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+                table_name: "edge".to_string(),
+                page_size: 1,
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(first.total_count, 2);
+        assert_eq!(first.next_page_token, "1");
+        assert_eq!(first.routes.len(), 1);
+        assert_eq!(first.routes[0].peer_address, "198.51.100.1");
+
+        let second = svc
+            .list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+                table_name: "edge".to_string(),
+                page_size: 1,
+                page_token: first.next_page_token,
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(second.total_count, 2);
+        assert!(second.next_page_token.is_empty());
+        assert_eq!(second.routes.len(), 1);
+        assert_eq!(second.routes[0].peer_address, "198.51.100.3");
+    }
+
+    #[tokio::test]
+    async fn list_fib_routes_unpaged_preserves_snapshot_order() {
+        let (tx, _rx) = mpsc::channel(16);
+        let svc = RibService::with_status_snapshots(
+            tx,
+            Arc::new(Vec::new),
+            Arc::new(|| {
+                vec![
+                    fib_status(
+                        "edge",
+                        "203.0.113.0",
+                        24,
+                        "198.51.100.3",
+                        proto::FibRouteState::Installed,
+                        "owned",
+                    ),
+                    fib_status(
+                        "edge",
+                        "203.0.113.0",
+                        24,
+                        "198.51.100.1",
+                        proto::FibRouteState::Installed,
+                        "owned",
+                    ),
+                ]
+            }),
+        );
+
+        let resp = svc
+            .list_fib_routes(Request::new(proto::ListFibRoutesRequest::default()))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.total_count, 2);
+        assert!(resp.next_page_token.is_empty());
+        assert_eq!(resp.routes[0].peer_address, "198.51.100.3");
+        assert_eq!(resp.routes[1].peer_address, "198.51.100.1");
     }
 
     #[tokio::test]
@@ -2107,6 +2304,38 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("invalid fib route state"));
+
+        let err = svc
+            .list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+                page_token: "1".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("page_size"));
+
+        let err = svc
+            .list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+                page_size: 1,
+                page_token: "not-a-token".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("page_token"));
+
+        let err = svc
+            .list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+                page_size: 1,
+                page_token: "1".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("out of range"));
     }
 
     #[tokio::test]

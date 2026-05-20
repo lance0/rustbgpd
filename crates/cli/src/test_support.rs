@@ -659,6 +659,8 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
     ) -> Result<Response<server_proto::ListFibRoutesResponse>, Status> {
         Ok(Response::new(server_proto::ListFibRoutesResponse {
             routes: vec![],
+            next_page_token: String::new(),
+            total_count: 0,
         }))
     }
 
