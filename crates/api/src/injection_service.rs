@@ -1673,6 +1673,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_evpn_rejects_type5_only_fields_on_type2_and_type3() {
+        let svc = make_service();
+
+        let type2_with_prefix = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 2,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: "02:00:00:aa:bb:cc".into(),
+            ip: String::new(),
+            label: 100,
+            label2: 0,
+            next_hop: "10.0.0.2".into(),
+            route_targets: vec![],
+            disable_vxlan_encap: false,
+            prefix: "10.50.0.0".into(),
+            prefix_length: 24,
+            router_mac: String::new(),
+        });
+        let err = svc.add_evpn_route(type2_with_prefix).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("prefix"));
+
+        let type2_with_router_mac = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 2,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: "02:00:00:aa:bb:cc".into(),
+            ip: String::new(),
+            label: 100,
+            label2: 0,
+            next_hop: "10.0.0.2".into(),
+            route_targets: vec![],
+            disable_vxlan_encap: false,
+            prefix: String::new(),
+            prefix_length: 0,
+            router_mac: "02:00:00:00:50:00".into(),
+        });
+        let err = svc.add_evpn_route(type2_with_router_mac).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("router_mac"));
+
+        let type3_with_prefix = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 3,
+            rd: "65000:300".into(),
+            ethernet_tag: 0,
+            mac: String::new(),
+            ip: "10.0.0.3".into(),
+            label: 0,
+            label2: 0,
+            next_hop: "10.0.0.3".into(),
+            route_targets: vec![],
+            disable_vxlan_encap: false,
+            prefix: "10.50.0.0".into(),
+            prefix_length: 24,
+            router_mac: String::new(),
+        });
+        let err = svc.add_evpn_route(type3_with_prefix).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("prefix"));
+    }
+
+    #[tokio::test]
     async fn add_evpn_type5_reaches_rib_channel() {
         let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
         let svc = InjectionService::new(tx, AccessMode::ReadWrite);

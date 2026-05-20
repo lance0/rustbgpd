@@ -1062,8 +1062,8 @@ Two complementary origination paths exist:
    (MAC/IP), Type 3 (IMET), and pure/interface-less Type 5 (IP
    Prefix) are exposed. Type 5 injection uses ESI=0 and Gateway IP=0;
    `--router-mac` is required for the default VXLAN encapsulation path
-   and should be omitted when `--no-vxlan-encap` is set.
-   overlay-index IRB via non-zero Gateway IP/ESI and Type 1/4
+   and should be omitted when `--no-vxlan-encap` is set. Overlay-index
+   IRB via non-zero Gateway IP/ESI and Type 1/4
    multi-homing route injection are not exposed. Native Type 1/4
    origination is driven by `[[ethernet_segments]]`.
 2. **Kernel-driven origination (Phase 2, Gate 7b+1):** with

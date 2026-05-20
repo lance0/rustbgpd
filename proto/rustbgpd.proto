@@ -1423,8 +1423,8 @@ message AddEvpnRouteResponse {}
 
 message DeleteEvpnRouteRequest {
   // Identify the route to withdraw by its EVPN key: route_type + RD +
-  // ethernet_tag + MAC (Type 2), originator IP (Type 3), or IP prefix
-  // (Type 5).
+  // ethernet_tag + MAC + optional IP (Type 2), originator IP (Type 3),
+  // or IP prefix (Type 5).
   uint32 route_type = 1;
   string rd = 2;
   uint32 ethernet_tag = 3;
