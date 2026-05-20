@@ -25,7 +25,8 @@ use crate::connect_info::RustbgpdTcpStream;
 use crate::control_service::{ControlService, MrtTriggerTx};
 use crate::event_service::{DataplaneEventBroadcaster, EventService, dataplane_event_broadcaster};
 use crate::evpn_service::{
-    DuplicateMacClearFn, EvpnRuntimeSnapshotFn, EvpnService, OriginatedLocalMacCountFn,
+    DuplicateMacClearFn, EvpnRuntimeApplyFn, EvpnRuntimeModelFn, EvpnService,
+    OriginatedLocalMacCountFn,
 };
 use crate::global_service::GlobalService;
 use crate::injection_service::InjectionService;
@@ -44,7 +45,6 @@ use crate::proto::peer_group_service_server::PeerGroupServiceServer;
 use crate::proto::policy_service_server::PolicyServiceServer;
 use crate::proto::rib_service_server::RibServiceServer;
 use crate::rib_service::RibService;
-use rustbgpd_evpn::EvpnInstanceTable;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 
@@ -63,19 +63,9 @@ pub struct ServeConfig {
     pub start_time: tokio::time::Instant,
     /// Optional MRT dump trigger channel (None if MRT not configured).
     pub mrt_trigger_tx: Option<MrtTriggerTx>,
-    /// Resolved local EVPN instance table — empty in RR-only deployments.
-    /// Shared across listeners so all gRPC endpoints see the same
-    /// snapshot. Mutation lands in a follow-up phase; today the
-    /// table is built once at daemon start from `[[evpn_instances]]`
-    /// and not swapped at runtime.
-    pub evpn_instances: Arc<EvpnInstanceTable>,
     /// Live count provider for locally-originated Type 2 MAC routes
     /// accepted by the RIB, keyed by VNI.
     pub evpn_originated_local_mac_count: OriginatedLocalMacCountFn,
-    /// Resolved Gate 9 IP-VRF table — empty when no
-    /// `[[evpn_ip_vrfs]]` are configured. Shared across listeners
-    /// the same way `evpn_instances` is.
-    pub evpn_ip_vrfs: Arc<rustbgpd_evpn::ip_vrf::IpVrfTable>,
     /// Live snapshot reader for the most recent
     /// `DataplaneReport.ip_vrf_status` rows. Returns an empty Vec
     /// when no IP-VRFs are configured or before the reconcile
@@ -93,10 +83,13 @@ pub struct ServeConfig {
     /// state. Returns an empty summary when the dataplane actor is
     /// not running.
     pub evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
-    /// Live snapshot reader for the committed ADR-0063 EVPN runtime
-    /// generation. Generation 1 is the startup snapshot; mutation
-    /// remains disabled until a future coordinator slice.
-    pub evpn_runtime_snapshot: EvpnRuntimeSnapshotFn,
+    /// Live model reader for the committed ADR-0063 EVPN runtime
+    /// generation. Generation 1 is the startup snapshot; later
+    /// coordinator slices publish newer committed models here.
+    pub evpn_runtime_model: EvpnRuntimeModelFn,
+    /// Optional EVPN runtime apply hook. Present only on the daemon
+    /// path that owns the ADR-0063 coordinator.
+    pub evpn_runtime_apply: Option<EvpnRuntimeApplyFn>,
     /// Optional duplicate-MAC quarantine manual-clear hook. Present
     /// only when the EVPN originator actor is running.
     pub evpn_duplicate_mac_clear: Option<DuplicateMacClearFn>,
@@ -369,14 +362,13 @@ async fn run_listener(
     let metrics = config.metrics;
     let start_time = config.start_time;
     let mrt_trigger_tx = config.mrt_trigger_tx;
-    let evpn_instances = config.evpn_instances;
     let evpn_originated_local_mac_count = config.evpn_originated_local_mac_count;
-    let evpn_ip_vrfs = config.evpn_ip_vrfs;
     let evpn_ip_vrf_status_snapshot = config.evpn_ip_vrf_status_snapshot;
     let evpn_originated_ip_vrf_route_count = config.evpn_originated_ip_vrf_route_count;
     let evpn_installed_ip_vrf_route_count = config.evpn_installed_ip_vrf_route_count;
     let evpn_fdb_nexthop_snapshot = config.evpn_fdb_nexthop_snapshot;
-    let evpn_runtime_snapshot = config.evpn_runtime_snapshot;
+    let evpn_runtime_model = config.evpn_runtime_model;
+    let evpn_runtime_apply = config.evpn_runtime_apply;
     let evpn_duplicate_mac_clear = config.evpn_duplicate_mac_clear;
     let blackhole_discard_snapshot = config.blackhole_discard_snapshot;
     let fib_route_snapshot = config.fib_route_snapshot;
@@ -412,14 +404,13 @@ async fn run_listener(
                 metrics,
                 start_time,
                 mrt_trigger_tx,
-                evpn_instances,
                 evpn_originated_local_mac_count,
-                evpn_ip_vrfs,
                 evpn_ip_vrf_status_snapshot,
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
                 evpn_fdb_nexthop_snapshot,
-                evpn_runtime_snapshot,
+                evpn_runtime_model,
+                evpn_runtime_apply,
                 evpn_duplicate_mac_clear,
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
@@ -450,14 +441,13 @@ async fn run_listener(
                 metrics,
                 start_time,
                 mrt_trigger_tx,
-                evpn_instances,
                 evpn_originated_local_mac_count,
-                evpn_ip_vrfs,
                 evpn_ip_vrf_status_snapshot,
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
                 evpn_fdb_nexthop_snapshot,
-                evpn_runtime_snapshot,
+                evpn_runtime_model,
+                evpn_runtime_apply,
                 evpn_duplicate_mac_clear,
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
@@ -495,14 +485,13 @@ async fn run_tcp_listener(
     metrics: BgpMetrics,
     start_time: tokio::time::Instant,
     mrt_trigger_tx: Option<MrtTriggerTx>,
-    evpn_instances: Arc<EvpnInstanceTable>,
     evpn_originated_local_mac_count: OriginatedLocalMacCountFn,
-    evpn_ip_vrfs: Arc<rustbgpd_evpn::ip_vrf::IpVrfTable>,
     evpn_ip_vrf_status_snapshot: crate::evpn_service::IpVrfStatusSnapshotFn,
     evpn_originated_ip_vrf_route_count: crate::evpn_service::OriginatedIpVrfRouteCountFn,
     evpn_installed_ip_vrf_route_count: crate::evpn_service::InstalledIpVrfRouteCountFn,
     evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
-    evpn_runtime_snapshot: EvpnRuntimeSnapshotFn,
+    evpn_runtime_model: EvpnRuntimeModelFn,
+    evpn_runtime_apply: Option<EvpnRuntimeApplyFn>,
     evpn_duplicate_mac_clear: Option<DuplicateMacClearFn>,
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
@@ -602,14 +591,13 @@ async fn run_tcp_listener(
         ))
         .add_service(EvpnServiceServer::with_interceptor(
             EvpnService::with_full_surface_runtime_and_duplicate_mac_control(
-                evpn_instances,
-                evpn_ip_vrfs,
                 evpn_originated_local_mac_count,
                 evpn_ip_vrf_status_snapshot,
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
                 evpn_fdb_nexthop_snapshot,
-                evpn_runtime_snapshot,
+                evpn_runtime_model,
+                evpn_runtime_apply,
                 access_mode,
                 evpn_duplicate_mac_clear,
             ),
@@ -655,14 +643,13 @@ async fn run_uds_listener(
     metrics: BgpMetrics,
     start_time: tokio::time::Instant,
     mrt_trigger_tx: Option<MrtTriggerTx>,
-    evpn_instances: Arc<EvpnInstanceTable>,
     evpn_originated_local_mac_count: OriginatedLocalMacCountFn,
-    evpn_ip_vrfs: Arc<rustbgpd_evpn::ip_vrf::IpVrfTable>,
     evpn_ip_vrf_status_snapshot: crate::evpn_service::IpVrfStatusSnapshotFn,
     evpn_originated_ip_vrf_route_count: crate::evpn_service::OriginatedIpVrfRouteCountFn,
     evpn_installed_ip_vrf_route_count: crate::evpn_service::InstalledIpVrfRouteCountFn,
     evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
-    evpn_runtime_snapshot: EvpnRuntimeSnapshotFn,
+    evpn_runtime_model: EvpnRuntimeModelFn,
+    evpn_runtime_apply: Option<EvpnRuntimeApplyFn>,
     evpn_duplicate_mac_clear: Option<DuplicateMacClearFn>,
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
@@ -744,14 +731,13 @@ async fn run_uds_listener(
         ))
         .add_service(EvpnServiceServer::with_interceptor(
             EvpnService::with_full_surface_runtime_and_duplicate_mac_control(
-                evpn_instances,
-                evpn_ip_vrfs,
                 evpn_originated_local_mac_count,
                 evpn_ip_vrf_status_snapshot,
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
                 evpn_fdb_nexthop_snapshot,
-                evpn_runtime_snapshot,
+                evpn_runtime_model,
+                evpn_runtime_apply,
                 access_mode,
                 evpn_duplicate_mac_clear,
             ),

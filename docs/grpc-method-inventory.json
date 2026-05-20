@@ -3,11 +3,11 @@
   "package": "rustbgpd.v1",
   "source": "crates/api/src/authz.rs",
   "proto": "proto/rustbgpd.proto",
-  "method_count": 70,
+  "method_count": 71,
   "tier_counts": {
     "read": 0,
     "sensitive_read": 36,
-    "mutating": 16,
+    "mutating": 17,
     "operator_only": 18
   },
   "methods": [
@@ -80,6 +80,7 @@
     { "service": "rustbgpd.v1.EvpnService", "method": "ListEvpnNexthops", "path": "/rustbgpd.v1.EvpnService/ListEvpnNexthops", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EvpnService", "method": "ListIpVrfs", "path": "/rustbgpd.v1.EvpnService/ListIpVrfs", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EvpnService", "method": "GetIpVrf", "path": "/rustbgpd.v1.EvpnService/GetIpVrf", "tier": "sensitive_read" },
-    { "service": "rustbgpd.v1.EvpnService", "method": "ClearDuplicateMacQuarantine", "path": "/rustbgpd.v1.EvpnService/ClearDuplicateMacQuarantine", "tier": "mutating" }
+    { "service": "rustbgpd.v1.EvpnService", "method": "ClearDuplicateMacQuarantine", "path": "/rustbgpd.v1.EvpnService/ClearDuplicateMacQuarantine", "tier": "mutating" },
+    { "service": "rustbgpd.v1.EvpnService", "method": "ApplyEvpnRuntime", "path": "/rustbgpd.v1.EvpnService/ApplyEvpnRuntime", "tier": "mutating" }
   ]
 }

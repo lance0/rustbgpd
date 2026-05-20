@@ -39,7 +39,7 @@ use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::process;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH};
 
 use rustbgpd_rib::{RibManager, RibUpdate};
@@ -56,7 +56,12 @@ use crate::config::{
 use crate::config_persister::{ConfigMutation, ConfigPersister};
 use crate::peer_manager::PeerManager;
 use crate::reload::{ReloadedConfig, apply_reload_outcome, reload_config, run_config_bridge};
+use rustbgpd_api::evpn_service::{
+    EvpnRuntimeApplyError as GrpcEvpnRuntimeApplyError, runtime_apply_outcome_to_proto,
+    runtime_plan_to_proto, runtime_snapshot_to_proto,
+};
 use rustbgpd_api::peer_types::{PeerManagerCommand, PeerManagerNeighborConfig};
+use rustbgpd_api::proto;
 use rustbgpd_api::server::{
     AccessMode as GrpcServerAccessMode, ListenerConfig as GrpcListenerConfig, ListenerEndpoint,
     ServeConfig,
@@ -92,6 +97,80 @@ const fn grpc_max_tier_to_auth_tier(value: GrpcMaxTier) -> rustbgpd_api::authz::
         GrpcMaxTier::Mutating => rustbgpd_api::authz::AuthTier::Mutating,
         GrpcMaxTier::OperatorOnly => rustbgpd_api::authz::AuthTier::OperatorOnly,
     }
+}
+
+fn evpn_runtime_candidate_from_toml(
+    candidate_toml: &str,
+) -> Result<rustbgpd_evpn::EvpnRuntimeCandidate, GrpcEvpnRuntimeApplyError> {
+    if candidate_toml.trim().is_empty() {
+        return Err(GrpcEvpnRuntimeApplyError::InvalidArgument(
+            "candidate_toml must contain a full rustbgpd config".to_string(),
+        ));
+    }
+    let candidate =
+        Config::load_toml_with_diagnostics(candidate_toml, "candidate EVPN runtime config")
+            .map_err(GrpcEvpnRuntimeApplyError::InvalidArgument)?;
+    let instances = candidate
+        .resolve_evpn_instances()
+        .map_err(|err| GrpcEvpnRuntimeApplyError::InvalidArgument(err.to_string()))?;
+    let ip_vrfs = candidate
+        .resolve_evpn_ip_vrfs()
+        .map_err(|err| GrpcEvpnRuntimeApplyError::InvalidArgument(err.to_string()))?;
+    let ethernet_segments = candidate
+        .resolve_ethernet_segments()
+        .map_err(|err| GrpcEvpnRuntimeApplyError::InvalidArgument(err.to_string()))?;
+    Ok(rustbgpd_evpn::EvpnRuntimeCandidate::new(
+        instances,
+        ip_vrfs,
+        ethernet_segments,
+    ))
+}
+
+fn apply_evpn_runtime_request(
+    request: &proto::ApplyEvpnRuntimeRequest,
+    coordinator: &Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
+) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
+    let candidate = evpn_runtime_candidate_from_toml(&request.candidate_toml)?;
+    let coordinator = coordinator.lock().map_err(|_| {
+        GrpcEvpnRuntimeApplyError::Internal("EVPN runtime coordinator lock poisoned".to_string())
+    })?;
+
+    // Planning is pure: it previews the next generation without mutating
+    // the committed model or the coordinator's lifecycle/mutation state.
+    let plan = coordinator.plan_candidate(&candidate);
+    let snapshot = coordinator.snapshot();
+
+    if request.validate_only {
+        return Ok(proto::ApplyEvpnRuntimeResponse {
+            outcome: proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyValidated as i32,
+            runtime: Some(runtime_snapshot_to_proto(&snapshot)),
+            plan: Some(runtime_plan_to_proto(&plan)),
+            message: "candidate EVPN runtime model validated; generation not advanced".to_string(),
+        });
+    }
+
+    if plan.is_noop() {
+        return Ok(proto::ApplyEvpnRuntimeResponse {
+            outcome: runtime_apply_outcome_to_proto(rustbgpd_evpn::EvpnRuntimeApplyOutcome::Noop),
+            runtime: Some(runtime_snapshot_to_proto(&snapshot)),
+            plan: Some(runtime_plan_to_proto(&plan)),
+            message:
+                "candidate EVPN runtime model matches the committed generation; no changes applied"
+                    .to_string(),
+        });
+    }
+
+    // A non-noop mutation needs daemon actor convergence (drain/replay of
+    // IMET, Type 2, Type 5/IP-VRF, DF/ES, and Linux owned state) before a
+    // new generation can publish. That backend is not wired yet, so fail
+    // closed WITHOUT driving the coordinator into a degraded state: an
+    // unsupported mutation is a capability gap, not an operational
+    // failure, and the committed generation stays fully healthy.
+    Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(format!(
+        "non-noop EVPN runtime mutations require daemon actor convergence wiring (tracked in #210); \
+         generation {} remains committed",
+        snapshot.generation.as_u64()
+    )))
 }
 
 fn fib_runtime_event_to_bgp_event(
@@ -1108,15 +1187,17 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         }
         std::sync::Arc::new(map)
     };
-    // ADR-0063 EVPN runtime coordinator foundation. The first slice
-    // publishes the startup generation as a read-only status surface;
-    // SIGHUP still pins EVPN table edits until a later coordinator
-    // can validate, drain/replay, and publish new generations.
-    let evpn_runtime_model = Arc::new(rustbgpd_evpn::EvpnRuntimeModel::startup(
-        evpn_instances.clone(),
-        evpn_ip_vrfs.clone(),
-        ethernet_segments.clone(),
-    ));
+    // ADR-0063 EVPN runtime coordinator. The public API can validate
+    // candidates and commit no-op generations through this handle.
+    // Non-noop mutations still fail closed until daemon actors expose
+    // the required convergence commands; SIGHUP remains
+    // restart-required for EVPN edits.
+    let evpn_runtime_coordinator =
+        Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+            evpn_instances.clone(),
+            evpn_ip_vrfs.clone(),
+            ethernet_segments.clone(),
+        )));
     let evpn_originator_handle = if let Some(handle) = evpn_dataplane_handle.as_mut() {
         evpn_originator::spawn_with_quarantine(
             evpn_originator::OriginatorConfig::default(),
@@ -1436,14 +1517,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         metrics: metrics.clone(),
         start_time,
         mrt_trigger_tx,
-        evpn_instances,
         evpn_originated_local_mac_count: {
             let counts = evpn_originated_local_mac_counts.clone();
             Arc::new(move |vni| {
                 rustbgpd_evpn::EvpnInstanceId::new(vni).map_or(0, |id| counts.count(id))
             })
         },
-        evpn_ip_vrfs: evpn_ip_vrfs.clone(),
         evpn_ip_vrf_status_snapshot: {
             // `borrow()` on a watch receiver is lock-free (internal
             // seqlock); cloning the Vec releases the borrow before
@@ -1467,9 +1546,21 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             let rx = evpn_fdb_nexthops_rx.clone();
             Arc::new(move || rx.borrow().clone())
         },
-        evpn_runtime_snapshot: {
-            let model = evpn_runtime_model.clone();
-            Arc::new(move || model.snapshot())
+        evpn_runtime_model: {
+            let coordinator = evpn_runtime_coordinator.clone();
+            Arc::new(move || match coordinator.lock() {
+                Ok(guard) => guard.model().clone(),
+                Err(poisoned) => poisoned.into_inner().model().clone(),
+            })
+        },
+        evpn_runtime_apply: {
+            let coordinator = evpn_runtime_coordinator.clone();
+            Some(Arc::new(move |request| {
+                let coordinator = coordinator.clone();
+                Box::pin(async move { apply_evpn_runtime_request(&request, coordinator.as_ref()) })
+                    as rustbgpd_api::evpn_service::EvpnRuntimeApplyFuture
+            })
+                as rustbgpd_api::evpn_service::EvpnRuntimeApplyFn)
         },
         evpn_duplicate_mac_clear,
         blackhole_discard_snapshot: {
@@ -1958,6 +2049,129 @@ remote_asn = 65002
 tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }}
 "#
         )
+    }
+
+    fn minimal_runtime_candidate_toml() -> &'static str {
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+"#
+    }
+
+    fn l2vni_runtime_candidate_toml() -> &'static str {
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+"#
+    }
+
+    fn empty_evpn_runtime_coordinator() -> Arc<Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>> {
+        Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+            rustbgpd_evpn::EvpnInstanceTable::new(),
+            rustbgpd_evpn::IpVrfTable::new(),
+            Vec::new(),
+        )))
+    }
+
+    #[tokio::test]
+    async fn apply_evpn_runtime_validate_only_plans_without_advancing() {
+        let coordinator = empty_evpn_runtime_coordinator();
+
+        let response = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: l2vni_runtime_candidate_toml().to_string(),
+                validate_only: true,
+            },
+            coordinator.as_ref(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            response.outcome,
+            proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyValidated as i32
+        );
+        let plan = response.plan.unwrap();
+        assert_eq!(plan.current_generation, 1);
+        assert_eq!(plan.proposed_generation, 2);
+        assert_eq!(plan.evpn_instances.unwrap().added, vec!["100"]);
+        assert_eq!(response.runtime.unwrap().generation, 1);
+        assert_eq!(coordinator.lock().unwrap().model().generation().as_u64(), 1);
+    }
+
+    #[tokio::test]
+    async fn apply_evpn_runtime_noop_succeeds_without_generation_advance() {
+        let coordinator = empty_evpn_runtime_coordinator();
+
+        let response = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: minimal_runtime_candidate_toml().to_string(),
+                validate_only: false,
+            },
+            coordinator.as_ref(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            response.outcome,
+            proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyNoop as i32
+        );
+        assert_eq!(response.runtime.unwrap().generation, 1);
+        assert_eq!(coordinator.lock().unwrap().model().generation().as_u64(), 1);
+    }
+
+    #[tokio::test]
+    async fn apply_evpn_runtime_non_noop_fails_closed_without_degrading_runtime() {
+        let coordinator = empty_evpn_runtime_coordinator();
+
+        let error = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: l2vni_runtime_candidate_toml().to_string(),
+                validate_only: false,
+            },
+            coordinator.as_ref(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            GrpcEvpnRuntimeApplyError::FailedPrecondition(_)
+        ));
+        // A non-noop apply with no convergence backend is a capability gap,
+        // not an operational failure: the committed generation stays healthy
+        // (Active/Idle) so `GetEvpnRuntime` never reports a misleading
+        // degraded state from a fail-closed probe.
+        let snapshot = coordinator.lock().unwrap().snapshot();
+        assert_eq!(snapshot.generation.as_u64(), 1);
+        assert_eq!(
+            snapshot.lifecycle,
+            rustbgpd_evpn::EvpnRuntimeLifecycle::Active
+        );
+        assert_eq!(
+            snapshot.mutation_state,
+            rustbgpd_evpn::EvpnRuntimeMutationState::Idle
+        );
     }
 
     #[test]

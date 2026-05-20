@@ -162,7 +162,7 @@ shape itself does not raise the tier.
 | `GetMetrics` | `sensitive_read` | Returns Prometheus-shaped counters; volumetric metadata leaks RIB size, peer count, churn rate. |
 | `TriggerMrtDump` | `operator_only` | Writes a TABLE_DUMP_V2 snapshot to disk. Disk-I/O burst, potentially very large; also exposes RIB content to whoever can read the dump file later. |
 
-### EvpnService (6 RPCs)
+### EvpnService (7 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -172,16 +172,17 @@ shape itself does not raise the tier.
 | `ListIpVrfs` | `sensitive_read` | Gate 9 IP-VRF table. |
 | `GetIpVrf` | `sensitive_read` | Single-VRF detail. |
 | `ClearDuplicateMacQuarantine` | `mutating` | Clears one local duplicate-MAC suppression key and may replay still-live local MAC state. Reversible, per-`(VNI, MAC)` scope; not a route-injection primitive and not a clear-all. |
+| `ApplyEvpnRuntime` | `mutating` | ADR-0063 full-candidate EVPN runtime validation/apply entry point. `validate_only` and no-op applies are bounded; non-noop applies currently fail closed until daemon actor convergence commands exist. Request TOML can contain credentials and must be audit-redacted. |
 
 ## Totals
 
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 36 | 51.4% |
-| `mutating` | 16 | 22.9% |
-| `operator_only` | 18 | 25.7% |
-| **Total** | **70** | **100%** |
+| `sensitive_read` | 36 | 50.7% |
+| `mutating` | 17 | 23.9% |
+| `operator_only` | 18 | 25.4% |
+| **Total** | **71** | **100%** |
 
 (Counts treat `SetGracefulShutdown` as one RPC even though it appears once in `NeighborService`.)
 

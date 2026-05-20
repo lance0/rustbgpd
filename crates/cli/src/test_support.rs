@@ -580,6 +580,13 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
             },
         ))
     }
+
+    async fn apply_evpn_runtime(
+        &self,
+        _request: Request<server_proto::ApplyEvpnRuntimeRequest>,
+    ) -> Result<Response<server_proto::ApplyEvpnRuntimeResponse>, Status> {
+        Err(Status::unimplemented("not in mock"))
+    }
 }
 
 #[tonic::async_trait]
