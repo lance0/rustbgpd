@@ -1,5 +1,6 @@
 //! BGP inbound TCP listener.
 
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 
 use crate::config::TcpAoConfig;
@@ -44,7 +45,7 @@ pub struct ListenerSocketOptions {
 pub struct BgpListener {
     listener: TcpListener,
     accept_tx: mpsc::Sender<AcceptedConnection>,
-    tcp_ao_peers: Vec<IpAddr>,
+    tcp_ao_peers: HashSet<IpAddr>,
 }
 
 impl BgpListener {
@@ -144,10 +145,12 @@ impl BgpListener {
                     has_current_key = info.has_current_key,
                     has_rnext_key = info.has_rnext_key,
                     ao_required = info.ao_required,
+                    accept_icmps = info.accept_icmps,
                     pkt_good = info.pkt_good,
                     pkt_bad = info.pkt_bad,
                     pkt_key_not_found = info.pkt_key_not_found,
                     pkt_ao_required = info.pkt_ao_required,
+                    pkt_dropped_icmp = info.pkt_dropped_icmp,
                     "TCP-AO accepted socket inspected"
                 );
                 Some(info)

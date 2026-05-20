@@ -1,10 +1,11 @@
 //! Platform-specific socket options for BGP sessions.
 //!
 //! TCP MD5 authentication (RFC 2385) and GTSM / TTL security (RFC 5082)
-//! require raw `setsockopt` calls that are only available on Linux.
+//! require raw socket options that are only available on Linux. TCP-AO
+//! (RFC 5925) uses the same boundary for `setsockopt` and `getsockopt`.
 //!
 //! These are the only `unsafe` blocks in the project — they exist because
-//! there is no safe Rust API for `TCP_MD5SIG` or `IP_MINTTL`.
+//! there is no safe Rust API for `TCP_MD5SIG`, `IP_MINTTL`, or TCP-AO.
 
 use std::io;
 #[cfg(target_os = "linux")]
@@ -322,6 +323,20 @@ pub(crate) fn get_tcp_ao_info(socket: &impl AsRawFd) -> io::Result<TcpAoInfoSnap
 
     if ret < 0 {
         return Err(io::Error::last_os_error());
+    }
+
+    let returned_len = usize::try_from(len).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "TCP-AO info length does not fit usize",
+        )
+    })?;
+    let expected_len = std::mem::size_of::<TcpAoInfoOpt>();
+    if returned_len < expected_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("short TCP-AO info response: {returned_len} < {expected_len}"),
+        ));
     }
 
     Ok(TcpAoInfoSnapshot::from_raw(&info))

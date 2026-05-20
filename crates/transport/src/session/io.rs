@@ -512,10 +512,12 @@ async fn create_and_connect(
                     has_current_key = info.has_current_key,
                     has_rnext_key = info.has_rnext_key,
                     ao_required = info.ao_required,
+                    accept_icmps = info.accept_icmps,
                     pkt_good = info.pkt_good,
                     pkt_bad = info.pkt_bad,
                     pkt_key_not_found = info.pkt_key_not_found,
                     pkt_ao_required = info.pkt_ao_required,
+                    pkt_dropped_icmp = info.pkt_dropped_icmp,
                     "TCP-AO active-open socket inspected"
                 );
             }
