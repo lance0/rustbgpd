@@ -603,15 +603,17 @@ Shipped pieces (v0.18.0):
   gateway, RT extcomms, BGP Encap = VXLAN, Router MAC extcomm)
   and RT-keyed import with Router MAC enforcement / self-origin
   filtering.
-- RFC 8365 §5.1.2.1 auto-derived Route Targets for both
-  `[[evpn_instances]]` and `[[evpn_ip_vrfs]]` via
-  `auto_derive_route_target = true`. The derived VXLAN RT uses the
-  2-octet `[global].asn`, domain-id 0, and the configured VNI/L3VNI
-  as the service id; 4-octet-AS deployments keep explicit RTs. This is
-  the RFC 8365 opaque form (`0x10000000 | vni`), which differs from
-  FRR's default `route-target both auto` (`<asn>:<vni>`); cross-vendor
-  interop requires FRR's `autort rfc8365-compatible` mode (see
-  `docs/CONFIGURATION.md`).
+- Auto-derived Route Targets for both `[[evpn_instances]]` and
+  `[[evpn_ip_vrfs]]` via `auto_derive_route_target = true` (2-octet AS
+  only; 4-octet-AS deployments keep explicit RTs). The derived form
+  differs by VNI scope to match the de-facto vendor wire forms:
+  - **L2VNI / MAC-VRF** uses the RFC 8365 §5.1.2.1 opaque form
+    (`AS:0x10000000|vni`), which matches FRR only with `autort
+    rfc8365-compatible` (FRR's default L2VNI autort is `AS:VNI`).
+  - **L3VNI / IP-VRF** uses plain `AS:VNI`, matching FRR's default
+    tenant-VRF auto-RT with no extra knob (validated by the M39b
+    cross-vendor interop smoke).
+  See `docs/CONFIGURATION.md` for the full interop matrix.
 - RFC 9135 §9.2 overlay-index Type 5 detection on the receive path:
   non-zero Type 5 Gateway Address routes are explicitly classified and
   dropped rather than being treated as Interface-less Type 5. Full

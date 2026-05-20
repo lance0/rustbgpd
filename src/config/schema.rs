@@ -824,8 +824,11 @@ pub struct EvpnInstanceConfig {
 /// - `route_targets` — bidirectional RTs applied to both import
 ///   and export. Tenant identity on the wire. Required and non-empty unless
 ///   `auto_derive_route_target = true`.
-/// - `auto_derive_route_target` — derive the RFC 8365 §5.1.2.1 VXLAN RT from
-///   `[global].asn` and the L3VNI. Off by default; requires a 2-octet AS.
+/// - `auto_derive_route_target` — derive the L3VNI / IP-VRF RT as plain
+///   `AS:VNI` from `[global].asn` and the L3VNI (matching FRR's default
+///   tenant-VRF auto-RT — the RFC 8365 opaque form is MAC-VRF-only and
+///   would not import against FRR for L3VNIs). Off by default; requires a
+///   2-octet AS.
 /// - `local_vtep_ip` — VXLAN source IP for outbound Type 5
 ///   `NEXT_HOP`. Typically equals the per-`[[evpn_instances]]`
 ///   `local_vtep_ip`; explicitly carried so an operator with split
@@ -850,7 +853,8 @@ pub struct EvpnIpVrfConfig {
     /// Bidirectional Route Targets — applied to both import and export.
     #[serde(default)]
     pub route_targets: Vec<String>,
-    /// Derive the RFC 8365 §5.1.2.1 VXLAN Route Target from `[global].asn` and L3VNI.
+    /// Derive the L3VNI / IP-VRF Route Target as `AS:VNI` from `[global].asn`
+    /// and L3VNI (FRR-compatible tenant-VRF auto-RT, not the RFC 8365 form).
     #[serde(default)]
     pub auto_derive_route_target: bool,
     /// VXLAN tunnel source IP for outbound Type 5 `NEXT_HOP`.

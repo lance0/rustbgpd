@@ -1,0 +1,76 @@
+# Containerlab topology: rustbgpd PE1 ↔ FRR PE2, EVPN Type 5 with
+# RFC 8365 §5.1.2.1 auto-derived Route Targets (M39b)
+#
+# Cross-vendor proof for the auto-derived RT feature: both PEs derive
+# their import/export RT instead of configuring it explicitly.
+#   - rustbgpd PE1: `[[evpn_ip_vrfs]].auto_derive_route_target = true`
+#   - FRR PE2:      `route-target both auto`
+#
+# For an L3VNI / IP-VRF both must land on the plain `AS:VNI` form
+# (65000:100 for AS 65000 / VNI 100) — FRR's default tenant-VRF auto-RT,
+# which rustbgpd matches — or the Type 5 routes fail to import across the
+# session. The smoke asserts the bidirectional import actually happens
+# via the derived RT. (The RFC 8365 opaque form is L2VNI/MAC-VRF-only;
+# FRR does not use it for L3VNIs, so this test deliberately does NOT set
+# `autort rfc8365-compatible`.)
+#
+# Reuses the M39 kernel topology (VRF + L3VXLAN + tenant dummy) and
+# start scripts unchanged; only the RT configuration differs. Like
+# M39 this is a manual / protected-runner smoke — it needs the kernel
+# `vrf` module and CAP_NET_ADMIN, so it does NOT run on the hosted CI
+# runner.
+#
+# Topology:
+#   PE1 (rustbgpd)              PE2 (FRR 10.3.1)
+#   10.0.0.1, AS 65000          10.0.0.2, AS 65000
+#       └─── iBGP L2VPN/EVPN ────────┘
+#   vrf1 / L3VNI 100              vrf1 / L3VNI 100
+#   lo-vrf1: 192.0.2.1/24        lo-vrf1: 198.51.100.1/24
+#   auto-derived RT (AS:VNI)    route-target both auto (AS:VNI)
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m39b-evpn-auto-rt-frr.clab.yml
+#   bash tests/interop/scripts/test-m39b-evpn-auto-rt-frr.sh
+#   containerlab destroy -t tests/interop/m39b-evpn-auto-rt-frr.clab.yml
+
+name: m39b-evpn-auto-rt-frr
+
+topology:
+  nodes:
+    pe1:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m39b-pe1.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-m39-pe1.sh:/usr/local/bin/start-rustbgpd-m39-pe1.sh:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug
+
+    pe2:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m39b-pe2.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep-l3.sh:/usr/local/bin/start-frr-vtep-l3.sh:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-vtep-l3.sh 10.0.0.2 100 vrf1 198.51.100.1/24
+      env:
+        VTEP_LOOPBACK: 10.0.0.2
+        VTEP_VNI: "100"
+        TENANT_VRF: vrf1
+        TENANT_PREFIX: 198.51.100.1/24
+
+  links:
+    - endpoints: ["pe1:eth1", "pe2:eth1"]
+
+# Underlay: 10.0.0.0/24. L3VNI 100 bound to vrf1 on both PEs.
+# PE1 originates 192.0.2.0/24; PE2 originates 198.51.100.0/24.
+# Auto-derived L3VNI RT (both directions): 65000:100 (AS:VNI).

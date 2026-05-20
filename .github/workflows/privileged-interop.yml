@@ -18,6 +18,7 @@ on:
           - m37-ip
           - m38
           - m39
+          - m39b
           - m40
           - all
 
@@ -107,6 +108,13 @@ jobs:
           sudo containerlab deploy -t tests/interop/m39-evpn-type5-symmetric-irb.clab.yml
           CLEANUP=1 bash tests/interop/scripts/test-m39-evpn-type5-symmetric-irb.sh
 
+      - name: Run M39b auto-derived Route Target smoke
+        if: inputs.suite == 'm39b' || inputs.suite == 'all'
+        run: |
+          set -euo pipefail
+          sudo containerlab deploy -t tests/interop/m39b-evpn-auto-rt-frr.clab.yml
+          CLEANUP=1 bash tests/interop/scripts/test-m39b-evpn-auto-rt-frr.sh
+
       - name: Run M40 aliasing ECMP smoke
         if: inputs.suite == 'm40' || inputs.suite == 'all'
         run: |
@@ -124,6 +132,7 @@ jobs:
             tests/interop/m37-evpn-mac-ip-origination.clab.yml \
             tests/interop/m38-evpn-df-election.clab.yml \
             tests/interop/m39-evpn-type5-symmetric-irb.clab.yml \
+            tests/interop/m39b-evpn-auto-rt-frr.clab.yml \
             tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml
           do
             sudo containerlab destroy -t "$topo" --cleanup >/dev/null 2>&1

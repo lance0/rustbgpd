@@ -190,6 +190,23 @@ jobs:
           topology: tests/interop/m39-evpn-type5-symmetric-irb.clab.yml
           script: tests/interop/scripts/test-m39-evpn-type5-symmetric-irb.sh
 
+  m39b:
+    name: M39b — EVPN auto-derived Route Targets cross-vendor (FRR 10.3.1)
+    runs-on: [self-hosted, linux, kernel-dataplane]
+    needs: build-image
+    environment:
+      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run M39b (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M39b
+          topology: tests/interop/m39b-evpn-auto-rt-frr.clab.yml
+          script: tests/interop/scripts/test-m39b-evpn-auto-rt-frr.sh
+
   m40:
     name: M40 — ADR-0059 aliasing dataplane ECMP (FRR EVPN-MH 10.3.1)
     runs-on: [self-hosted, linux, kernel-dataplane]

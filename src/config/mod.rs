@@ -2404,7 +2404,8 @@ fn parse_evpn_instance(
         rts.push(rt);
     }
     if cfg.auto_derive_route_target {
-        let rt = RouteTarget::auto_derived_vxlan(local_asn, cfg.vni).map_err(|e| {
+        // L2VNI / MAC-VRF: RFC 8365 §5.1.2.1 opaque VXLAN RT.
+        let rt = RouteTarget::auto_derived_vxlan_l2_rfc8365(local_asn, cfg.vni).map_err(|e| {
             ConfigError::InvalidEvpnInstance {
                 reason: format!(
                     "vni {}: cannot auto_derive_route_target: {e}; disable auto_derive_route_target or configure route_targets manually",
@@ -2656,7 +2657,10 @@ fn parse_evpn_ip_vrf(cfg: &EvpnIpVrfConfig, local_asn: u32) -> Result<IpVrf, Con
         rts.push(rt);
     }
     if cfg.auto_derive_route_target {
-        let rt = RouteTarget::auto_derived_vxlan(local_asn, cfg.vni).map_err(|e| {
+        // L3VNI / IP-VRF: plain AS:VNI to match FRR's default tenant-VRF
+        // auto-RT (the RFC 8365 opaque form is MAC-VRF-only and FRR does
+        // not use it for L3VNIs, so it would not import cross-vendor).
+        let rt = RouteTarget::auto_derived_ip_vrf_as_vni(local_asn, cfg.vni).map_err(|e| {
             ConfigError::InvalidEvpnIpVrf {
                 reason: format!(
                     "name {:?}: cannot auto_derive_route_target: {e}; disable auto_derive_route_target or configure route_targets manually",

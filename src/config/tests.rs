@@ -6019,12 +6019,14 @@ table_id = 5000
     let config = parse(&toml).unwrap();
     let table = config.resolve_evpn_ip_vrfs().unwrap();
     let vrf = table.get("tenant-blue").unwrap();
+    // L3VNI / IP-VRF auto-RT is plain AS:VNI (matches FRR's default
+    // tenant-VRF auto-RT), not the RFC 8365 opaque L2VNI form.
     assert_eq!(
         vrf.route_targets
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>(),
-        vec!["65000:268440456"]
+        vec!["65000:5000"]
     );
 }
 
@@ -6036,7 +6038,7 @@ fn evpn_ip_vrf_auto_derives_and_preserves_explicit_route_targets() {
 name = "tenant-blue"
 vni = 5000
 rd = "65000:5000"
-route_targets = ["65000:5000"]
+route_targets = ["65000:9999"]
 auto_derive_route_target = true
 local_vtep_ip = "10.0.0.100"
 router_mac = "02:00:00:00:00:01"
@@ -6048,12 +6050,14 @@ table_id = 5000
     let config = parse(&toml).unwrap();
     let table = config.resolve_evpn_ip_vrfs().unwrap();
     let vrf = table.get("tenant-blue").unwrap();
+    // Explicit RT (65000:9999) and the derived AS:VNI RT (65000:5000)
+    // both present; config resolution sorts the RT list.
     assert_eq!(
         vrf.route_targets
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>(),
-        vec!["65000:5000", "65000:268440456"]
+        vec!["65000:5000", "65000:9999"]
     );
 }
 

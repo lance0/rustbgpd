@@ -1606,22 +1606,30 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
 - Same VNI must not appear in multiple `[[ethernet_segments]]`
   `member_vnis` lists until per-port learned disambiguation is plumbed.
 
-For VXLAN, the auto-derived RT is encoded as a 2-octet-AS Route Target with
-local-admin value `0x10000000 | vni`. For example, `[global].asn = 65000` and
-`vni = 100` derives `65000:268435556`. Explicit `route_targets` are preserved;
-when auto-derive is also enabled, the derived RT is appended and duplicates are
-deduped during config resolution.
+The auto-derived RT form depends on the VNI's scope:
 
-**Cross-vendor interop caveat.** This is the RFC 8365 §5.1.2.1 *opaque*
-encoding (the `0x10000000 | vni` form, e.g. `65000:268435556`). FRR's
-**default** `route-target both auto` instead derives the simpler `<asn>:<vni>`
-value (e.g. `65000:100`), which is a different RT and will **not** match — a
-mixed deployment silently fails to import each other's routes. To interop
-auto-derived RTs with an FRR peer, run FRR in RFC 8365 mode (under
-`address-family l2vpn evpn`: `autort rfc8365-compatible`). For
-rustbgpd-to-rustbgpd fabrics no extra configuration is needed since both ends
-derive the same value. When peering with a vendor whose auto-RT form you are
-unsure of, configure `route_targets` explicitly on both ends instead.
+- **L2VNI / MAC-VRF** (`[[evpn_instances]]`): the RFC 8365 §5.1.2.1 *opaque*
+  2-octet-AS RT with local-admin value `0x10000000 | vni`. For example
+  `[global].asn = 65000`, `vni = 100` → `65000:268435556`.
+- **L3VNI / IP-VRF** (`[[evpn_ip_vrfs]]`): a plain `AS:VNI` 2-octet-AS RT.
+  For example `[global].asn = 65000`, `vni = 100` → `65000:100`.
+
+Explicit `route_targets` are preserved; when auto-derive is also enabled the
+derived RT is appended and duplicates are deduped during config resolution.
+
+**Cross-vendor interop.** The two forms exist because that is what FRR (and
+Cumulus/NVIDIA) actually put on the wire:
+
+- For the **L3VNI / IP-VRF** RT, FRR's tenant-VRF auto-RT is `AS:VNI`
+  regardless of any knob, so rustbgpd's `AS:VNI` form imports against a
+  default FRR L3VNI peer with no extra configuration. (Validated by the
+  M39b interop smoke.)
+- For the **L2VNI / MAC-VRF** RT, rustbgpd uses the RFC 8365 opaque form,
+  which matches FRR **only** when FRR is configured with `autort
+  rfc8365-compatible` (under `address-family l2vpn evpn`). FRR's *default*
+  L2VNI autort is `AS:VNI`, which would not match. rustbgpd-to-rustbgpd
+  fabrics always agree. When peering an L2VNI with a vendor whose auto-RT
+  form you are unsure of, configure `route_targets` explicitly on both ends.
 
 ### Duplicate-MAC Detection And Local Suppression
 
@@ -1746,7 +1754,7 @@ name = "tenant-blue"               # operator-facing handle
 vni = 5000                         # L3VNI (1..=16_777_215)
 rd = "65000:5000"                  # Route Distinguisher
 route_targets = ["65000:5000"]     # bidirectional RTs (non-empty)
-auto_derive_route_target = false   # derive RFC 8365 VXLAN RT from [global].asn + L3VNI when true
+auto_derive_route_target = false   # derive AS:VNI RT from [global].asn + L3VNI when true (FRR-compatible)
 local_vtep_ip = "10.0.0.1"         # VXLAN source IP for outbound Type 5
 router_mac = "02:00:00:00:00:01"   # Router MAC ext-community value
 vrf_device = "vrf-blue"            # Linux VRF device (observe-only)
@@ -1770,7 +1778,7 @@ ip_vrf = "tenant-blue"             # optional — empty means L2-only
 | `vni`            | u32       | yes      | --      | L3VNI in `1..=16_777_215`; must not collide with any `[[evpn_instances]]` VNI |
 | `rd`             | string    | yes      | --      | Route Distinguisher (`asn:value` or `ipv4:value`) |
 | `route_targets`  | [string]  | yes*     | `[]`    | Bidirectional RTs applied to import and export. Required unless `auto_derive_route_target = true` |
-| `auto_derive_route_target` | bool | no | `false` | Append the RFC 8365 §5.1.2.1 VXLAN auto-derived Route Target using `[global].asn` and the L3VNI (`2-octet AS only`) |
+| `auto_derive_route_target` | bool | no | `false` | Append the auto-derived L3VNI RT as plain `AS:VNI` from `[global].asn` and the L3VNI — matches FRR's default tenant-VRF auto-RT (`2-octet AS only`) |
 | `local_vtep_ip`  | string    | yes      | --      | Unicast VTEP source IP for outbound Type 5 `NEXT_HOP` |
 | `router_mac`     | string    | yes      | --      | Unicast non-zero MAC (`aa:bb:cc:dd:ee:ff`) advertised via the RFC 9135 §4.2 / RFC 9136 Router MAC extended community |
 | `vrf_device`     | string    | yes      | --      | Linux VRF device name (operator-managed, observe-only) |
