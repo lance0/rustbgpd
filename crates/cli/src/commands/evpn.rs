@@ -221,6 +221,7 @@ pub async fn add_ip_prefix(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned);
+    validate_ip_prefix_ethernet_tag(ethernet_tag)?;
     validate_add_ip_prefix_args(router_mac.as_deref(), &route_targets, disable_vxlan_encap)?;
     let (prefix, prefix_length) = output::parse_prefix(&prefix).map_err(CliError::Argument)?;
     let mut client =
@@ -243,6 +244,15 @@ pub async fn add_ip_prefix(
         })
         .await?;
     output::print_result(json, "add_evpn", "", "EVPN Type 5 route added");
+    Ok(())
+}
+
+fn validate_ip_prefix_ethernet_tag(ethernet_tag: u32) -> Result<(), CliError> {
+    if ethernet_tag != 0 {
+        return Err(CliError::Argument(
+            "EVPN Type 5 pure/interface-less injection requires --ethernet-tag 0".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -324,6 +334,7 @@ pub async fn delete_ip_prefix(
     prefix: String,
     json: bool,
 ) -> Result<(), CliError> {
+    validate_ip_prefix_ethernet_tag(ethernet_tag)?;
     let (prefix, prefix_length) = output::parse_prefix(&prefix).map_err(CliError::Argument)?;
     let mut client =
         InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -1078,5 +1089,12 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
 
         super::validate_add_ip_prefix_args(None, &rt, true).unwrap();
         super::validate_add_ip_prefix_args(Some("02:00:00:00:50:00"), &rt, false).unwrap();
+    }
+
+    #[test]
+    fn ip_prefix_args_reject_nonzero_ethernet_tag() {
+        let err = super::validate_ip_prefix_ethernet_tag(100).unwrap_err();
+        assert!(err.to_string().contains("--ethernet-tag 0"));
+        super::validate_ip_prefix_ethernet_tag(0).unwrap();
     }
 }

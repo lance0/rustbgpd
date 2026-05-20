@@ -1134,13 +1134,13 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 
 Type 5 injection is intentionally pure/interface-less in this slice:
 ESI and Gateway IP are encoded as zero, `label` carries the L3VNI in
-the RFC 8365 VXLAN label slot, and `next_hop` is the VTEP loopback.
-The prefix and next-hop must use the same IP family. `router_mac` is
-required when VXLAN encapsulation is enabled (the default) and is
-advertised as the RFC 9135 Router MAC extended community. Omit it when
-`disable_vxlan_encap` is true. At least one `route_targets` entry is
-required for Type 5 injection. Overlay-index
-IRB via non-zero Gateway IP or ESI is not exposed yet.
+the RFC 8365 VXLAN label slot, `ethernet_tag` must be 0, and
+`next_hop` is the VTEP loopback. The prefix and next-hop must use the
+same IP family. `router_mac` is required when VXLAN encapsulation is
+enabled (the default) and is advertised as the RFC 9135 Router MAC
+extended community. Omit it when `disable_vxlan_encap` is true. At
+least one `route_targets` entry is required for Type 5 injection.
+Overlay-index IRB via non-zero Gateway IP or ESI is not exposed yet.
 
 ### Withdraw an EVPN route
 
@@ -1158,10 +1158,11 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 
 The withdrawal key (route type + RD + ethernet tag + MAC + IP for
 Type 2; route type + RD + ethernet tag + originator IP for Type 3;
-route type + RD + ethernet tag + prefix/prefix length for Type 5)
-matches the EVPN route identity. Requests that include key fields from
-another route type are rejected with `INVALID_ARGUMENT`. Returns
-`NOT_FOUND` if no such route was previously injected.
+route type + RD + prefix/prefix length for Type 5 in this
+pure/interface-less slice, where `ethernet_tag` must be 0) matches the
+EVPN route identity. Requests that include key fields from another
+route type are rejected with `INVALID_ARGUMENT`. Returns `NOT_FOUND`
+if no such route was previously injected.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \

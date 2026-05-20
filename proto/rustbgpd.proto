@@ -1383,7 +1383,8 @@ message AddEvpnRouteRequest {
   uint32 route_type = 1;
   // Route Distinguisher, "asn:value" / "ip:value". Required.
   string rd = 2;
-  // Ethernet Tag ID (decimal). Default 0.
+  // Ethernet Tag ID (decimal). Default 0. Must be 0 for pure/interface-less
+  // Type 5 injection.
   uint32 ethernet_tag = 3;
   // MAC address "aa:bb:cc:dd:ee:ff" (Type 2 only). Required for Type 2.
   string mac = 4;
@@ -1427,6 +1428,8 @@ message DeleteEvpnRouteRequest {
   // or IP prefix (Type 5).
   uint32 route_type = 1;
   string rd = 2;
+  // Ethernet Tag ID (decimal). Must be 0 for pure/interface-less Type 5
+  // withdrawals.
   uint32 ethernet_tag = 3;
   string mac = 4;
   string ip = 5;

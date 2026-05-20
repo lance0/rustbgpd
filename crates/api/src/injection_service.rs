@@ -505,6 +505,11 @@ impl proto::injection_service_server::InjectionService for InjectionService {
                 }
             }
             5 => {
+                if req.ethernet_tag != 0 {
+                    return Err(Status::invalid_argument(
+                        "ethernet_tag must be 0 for pure/interface-less Type 5 IP Prefix withdrawal",
+                    ));
+                }
                 if !req.mac.is_empty() {
                     return Err(Status::invalid_argument(
                         "mac is Type 2 only; must be empty for Type 5 IP Prefix withdrawal",
@@ -1042,6 +1047,11 @@ fn build_type5(
     rd: RouteDistinguisher,
     next_hop: IpAddr,
 ) -> Result<(EvpnRoute, Vec<PathAttribute>), Status> {
+    if req.ethernet_tag != 0 {
+        return Err(Status::invalid_argument(
+            "ethernet_tag must be 0 for pure/interface-less Type 5 IP Prefix",
+        ));
+    }
     if !req.mac.is_empty() {
         return Err(Status::invalid_argument(
             "mac is Type 2 only; must be empty for Type 5 IP Prefix",
@@ -1902,6 +1912,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_evpn_type5_rejects_nonzero_ethernet_tag() {
+        let svc = make_service();
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 5,
+            rd: "65000:5000".into(),
+            ethernet_tag: 100,
+            mac: String::new(),
+            ip: String::new(),
+            label: 5000,
+            label2: 0,
+            next_hop: "192.0.2.10".into(),
+            route_targets: vec!["65000:5000".into()],
+            disable_vxlan_encap: false,
+            prefix: "10.50.0.0".into(),
+            prefix_length: 24,
+            router_mac: "02:00:00:00:50:00".into(),
+        });
+        let err = svc.add_evpn_route(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("ethernet_tag"));
+    }
+
+    #[tokio::test]
     async fn add_evpn_type5_rejects_zero_l3vni() {
         let svc = make_service();
         let req = Request::new(proto::AddEvpnRouteRequest {
@@ -1982,6 +2015,23 @@ mod tests {
                 ..
             } if p.addr == Ipv4Addr::new(10, 50, 0, 0) && p.len == 24
         ));
+    }
+
+    #[tokio::test]
+    async fn delete_evpn_type5_rejects_nonzero_ethernet_tag() {
+        let svc = make_service();
+        let req = Request::new(proto::DeleteEvpnRouteRequest {
+            route_type: 5,
+            rd: "65000:5000".into(),
+            ethernet_tag: 100,
+            mac: String::new(),
+            ip: String::new(),
+            prefix: "10.50.0.0".into(),
+            prefix_length: 24,
+        });
+        let err = svc.delete_evpn_route(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("ethernet_tag"));
     }
 
     #[tokio::test]

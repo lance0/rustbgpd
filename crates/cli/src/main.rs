@@ -667,6 +667,7 @@ enum EvpnAction {
     AddIpPrefix {
         #[arg(long)]
         rd: String,
+        /// Ethernet Tag ID. Must be 0 for this pure/interface-less Type 5 slice.
         #[arg(long, default_value_t = 0)]
         ethernet_tag: u32,
         /// IP prefix, e.g. "10.0.0.0/24" or "2001:db8::/48".
@@ -710,6 +711,7 @@ enum EvpnAction {
     DeleteIpPrefix {
         #[arg(long)]
         rd: String,
+        /// Ethernet Tag ID. Must be 0 for this pure/interface-less Type 5 slice.
         #[arg(long, default_value_t = 0)]
         ethernet_tag: u32,
         /// IP prefix, e.g. "10.0.0.0/24" or "2001:db8::/48".
