@@ -6,9 +6,9 @@ use crate::proto::evpn_service_client::EvpnServiceClient;
 use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
-    AddEvpnRouteRequest, DeleteEvpnRouteRequest, GetIpVrfRequest, IpVrfReadinessState, IpVrfState,
-    ListEvpnInstancesRequest, ListEvpnNexthopsRequest, ListEvpnRequest, ListIpVrfsRequest,
-    MetricsRequest,
+    AddEvpnRouteRequest, ClearDuplicateMacQuarantineRequest, DeleteEvpnRouteRequest,
+    GetIpVrfRequest, IpVrfReadinessState, IpVrfState, ListEvpnInstancesRequest,
+    ListEvpnNexthopsRequest, ListEvpnRequest, ListIpVrfsRequest, MetricsRequest,
 };
 
 const EVPN_DIAGNOSE_METRIC_PREFIXES: &[&str] = &[
@@ -350,6 +350,41 @@ pub async fn delete_ip_prefix(
         })
         .await?;
     output::print_result(json, "delete_evpn", "", "EVPN Type 5 route deleted");
+    Ok(())
+}
+
+/// Clear one RFC 7432 duplicate-MAC local-origin quarantine.
+pub async fn clear_duplicate_mac(
+    connection: Connection,
+    vni: u32,
+    mac: String,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut client =
+        EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .clear_duplicate_mac_quarantine(ClearDuplicateMacQuarantineRequest {
+            vni,
+            mac: mac.clone(),
+        })
+        .await?
+        .into_inner();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "vni": vni,
+                "mac": mac,
+                "cleared": resp.cleared,
+                "message": resp.message,
+            }))
+            .expect("failed to serialize duplicate-MAC clear result as JSON")
+        );
+    } else if resp.cleared {
+        println!("EVPN duplicate-MAC quarantine cleared: {mac} on VNI {vni}");
+    } else {
+        println!("No active EVPN duplicate-MAC quarantine: {mac} on VNI {vni}");
+    }
     Ok(())
 }
 
@@ -1009,6 +1044,24 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             .await
             .unwrap();
         super::list_nexthops(connection, true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clear_duplicate_mac_command_runs_against_mock_service() {
+        let server = crate::test_support::spawn_mock_server(None).await;
+        let connection = crate::connection::connect(&server.addr, None)
+            .await
+            .unwrap();
+        super::clear_duplicate_mac(connection, 100, "aa:bb:cc:dd:ee:ff".to_string(), false)
+            .await
+            .unwrap();
+
+        let connection = crate::connection::connect(&server.addr, None)
+            .await
+            .unwrap();
+        super::clear_duplicate_mac(connection, 100, "aa:bb:cc:dd:ee:ff".to_string(), true)
+            .await
+            .unwrap();
     }
 
     #[test]

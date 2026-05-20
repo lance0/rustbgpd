@@ -718,6 +718,15 @@ enum EvpnAction {
         #[arg(long)]
         prefix: String,
     },
+    /// Clear one duplicate-MAC local-origin quarantine.
+    ClearDuplicateMac {
+        /// L2VNI containing the quarantined MAC.
+        #[arg(long)]
+        vni: u32,
+        /// MAC address "aa:bb:cc:dd:ee:ff".
+        #[arg(long)]
+        mac: String,
+    },
     /// List local EVPN instances configured on this VTEP. Empty when
     /// the daemon is acting purely as an EVPN route reflector.
     Instances,
@@ -1355,6 +1364,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }) => {
                 commands::evpn::delete_ip_prefix(connection, rd, ethernet_tag, prefix, json).await
             }
+            Some(EvpnAction::ClearDuplicateMac { vni, mac }) => {
+                commands::evpn::clear_duplicate_mac(connection, vni, mac, json).await
+            }
             Some(EvpnAction::Instances) => commands::evpn::list_instances(connection, json).await,
             Some(EvpnAction::Nexthops) => commands::evpn::list_nexthops(connection, json).await,
             Some(EvpnAction::Vrfs { name }) => match name {
@@ -1855,6 +1867,30 @@ mod tests {
             assert_eq!(prefix, "10.50.0.0/24");
         } else {
             panic!("expected Evpn DeleteIpPrefix command");
+        }
+    }
+
+    #[test]
+    fn test_parse_evpn_clear_duplicate_mac() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "evpn",
+            "clear-duplicate-mac",
+            "--vni",
+            "100",
+            "--mac",
+            "aa:bb:cc:dd:ee:ff",
+        ])
+        .unwrap();
+        if let Command::Evpn {
+            action: Some(EvpnAction::ClearDuplicateMac { vni, mac }),
+            ..
+        } = cli.command
+        {
+            assert_eq!(vni, 100);
+            assert_eq!(mac, "aa:bb:cc:dd:ee:ff");
+        } else {
+            panic!("expected Evpn ClearDuplicateMac command");
         }
     }
 

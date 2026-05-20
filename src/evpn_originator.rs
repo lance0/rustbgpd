@@ -113,14 +113,75 @@ impl Default for OriginatorConfig {
 pub struct EvpnOriginatorHandle {
     pub(crate) shutdown: CancellationToken,
     pub(crate) join: tokio::task::JoinHandle<()>,
+    control: EvpnOriginatorControl,
 }
 
 impl EvpnOriginatorHandle {
+    /// Cloneable command path for bounded operator control RPCs.
+    #[must_use]
+    pub fn control(&self) -> EvpnOriginatorControl {
+        self.control.clone()
+    }
+
     /// Cancel the actor and wait for it to drain.
     pub async fn shutdown(self) {
         self.shutdown.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(5), self.join).await;
     }
+}
+
+/// Cloneable command handle for the EVPN originator actor.
+#[derive(Clone)]
+pub struct EvpnOriginatorControl {
+    command_tx: mpsc::Sender<OriginatorCommand>,
+}
+
+impl std::fmt::Debug for EvpnOriginatorControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EvpnOriginatorControl")
+            .finish_non_exhaustive()
+    }
+}
+
+impl EvpnOriginatorControl {
+    /// Clear one duplicate-MAC quarantine through the actor.
+    pub async fn clear_duplicate_mac_quarantine(
+        &self,
+        key: DuplicateMacKey,
+    ) -> Result<ClearDuplicateMacQuarantineResult, EvpnOriginatorControlError> {
+        let (reply, rx) = oneshot::channel();
+        self.command_tx
+            .send(OriginatorCommand::ClearDuplicateMacQuarantine { key, reply })
+            .await
+            .map_err(|_| EvpnOriginatorControlError::Closed)?;
+        rx.await
+            .map_err(|_| EvpnOriginatorControlError::ReplyDropped)
+    }
+}
+
+/// Result of a manual duplicate-MAC quarantine clear request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClearDuplicateMacQuarantineResult {
+    /// An active quarantine was cleared and live local state replayed.
+    Cleared,
+    /// No active quarantine existed for the key.
+    NotActive,
+    /// The originator is running, but this VNI is not configured.
+    UnknownVni,
+}
+
+/// Error returned when the originator control channel cannot complete a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvpnOriginatorControlError {
+    Closed,
+    ReplyDropped,
+}
+
+enum OriginatorCommand {
+    ClearDuplicateMacQuarantine {
+        key: DuplicateMacKey,
+        reply: oneshot::Sender<ClearDuplicateMacQuarantineResult>,
+    },
 }
 
 /// Per-MAC set of outstanding `EvpnRouteKey`s — one MAC may be
@@ -258,6 +319,8 @@ pub fn spawn_with_quarantine(
     let local_mac_rx = local_mac_rx?;
 
     let state = OriginatorState::new(evpn_instances, duplicate_mac_quarantine_tx);
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let control = EvpnOriginatorControl { command_tx };
 
     let shutdown = daemon_shutdown;
     let runtime = OriginatorRuntime {
@@ -268,9 +331,19 @@ pub fn spawn_with_quarantine(
         shutdown: shutdown.clone(),
         vni_to_esi,
     };
-    let join = tokio::spawn(originator_loop(config, runtime, local_mac_rx, state));
+    let join = tokio::spawn(originator_loop(
+        config,
+        runtime,
+        local_mac_rx,
+        command_rx,
+        state,
+    ));
 
-    Some(EvpnOriginatorHandle { shutdown, join })
+    Some(EvpnOriginatorHandle {
+        shutdown,
+        join,
+        control,
+    })
 }
 
 /// Cached snapshot of the best-path *non-self* remote Type 2 view per
@@ -385,10 +458,13 @@ async fn originator_loop(
     config: OriginatorConfig,
     runtime: OriginatorRuntime,
     mut local_mac_rx: mpsc::Receiver<LocalMacObservation>,
+    mut command_rx: mpsc::Receiver<OriginatorCommand>,
     mut state: OriginatorState,
 ) {
     let mut poll_tick = tokio::time::interval(config.poll_interval);
     poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut local_mac_rx_open = true;
+    let mut command_rx_open = true;
 
     // Subscribe to the RIB's EVPN best-path broadcast. A failure here
     // is non-fatal: the 5 s poll fallback is the same convergence
@@ -416,21 +492,13 @@ async fn originator_loop(
                 ).await;
                 return;
             }
-            obs = local_mac_rx.recv() => {
+            obs = local_mac_rx.recv(), if local_mac_rx_open => {
                 let Some(obs) = obs else {
                     debug!("local-mac channel closed; originator idle");
-                    // Don't exit — RIB polls still useful for telemetry / future
-                    // observation reconnect. Park indefinitely on the other arms.
-                    park_until_shutdown(&runtime.shutdown).await;
-                    drain_to_withdraws(
-                        &mut state,
-                        &runtime.instances,
-                        &runtime.rib_tx,
-                        &runtime.metrics,
-                        &runtime.originated_local_mac_counts,
-                        &runtime.vni_to_esi,
-                    ).await;
-                    return;
+                    // Don't exit — RIB polls and operator control still matter
+                    // for telemetry and already-learned quarantine state.
+                    local_mac_rx_open = false;
+                    continue;
                 };
                 handle_observation(
                     &obs,
@@ -442,6 +510,22 @@ async fn originator_loop(
                     &runtime.vni_to_esi,
                 ).await;
             }
+            cmd = command_rx.recv(), if command_rx_open => match cmd {
+                Some(cmd) => {
+                    handle_originator_command(
+                        cmd,
+                        &mut state,
+                        &runtime.instances,
+                        &runtime.rib_tx,
+                        &runtime.metrics,
+                        &runtime.originated_local_mac_counts,
+                        &runtime.vni_to_esi,
+                    ).await;
+                }
+                None => {
+                    command_rx_open = false;
+                }
+            },
             event = recv_evpn_event(&mut evpn_event_rx) => match event {
                 Ok(ev) => {
                     handle_evpn_event(
@@ -525,8 +609,31 @@ async fn recv_evpn_event(
     }
 }
 
-async fn park_until_shutdown(shutdown: &CancellationToken) {
-    shutdown.cancelled().await;
+#[allow(clippy::too_many_arguments)]
+async fn handle_originator_command(
+    command: OriginatorCommand,
+    state: &mut OriginatorState,
+    instances: &EvpnInstanceTable,
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    originated_local_mac_counts: &OriginatedLocalMacCounts,
+    vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+) {
+    match command {
+        OriginatorCommand::ClearDuplicateMacQuarantine { key, reply } => {
+            let result = clear_duplicate_mac_quarantine(
+                key,
+                state,
+                instances,
+                rib_tx,
+                metrics,
+                originated_local_mac_counts,
+                vni_to_esi,
+            )
+            .await;
+            let _ = reply.send(result);
+        }
+    }
 }
 
 /// Dispatch a single observation from the kernel observation feed.
@@ -872,6 +979,54 @@ async fn recover_duplicate_macs(
         )
         .await;
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn clear_duplicate_mac_quarantine(
+    key: DuplicateMacKey,
+    state: &mut OriginatorState,
+    instances: &EvpnInstanceTable,
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    originated_local_mac_counts: &OriginatedLocalMacCounts,
+    vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+) -> ClearDuplicateMacQuarantineResult {
+    if instances.get(key.vni).is_none() {
+        return ClearDuplicateMacQuarantineResult::UnknownVni;
+    }
+
+    let was_active = state.active_duplicate_mac_quarantines.contains(&key);
+    let had_state = state.duplicate_mac_detector.clear(key);
+    if !was_active {
+        if had_state {
+            debug!(
+                vni = ?key.vni,
+                mac = ?key.mac,
+                "EVPN duplicate-MAC manual clear removed inactive move-window state"
+            );
+        }
+        return ClearDuplicateMacQuarantineResult::NotActive;
+    }
+
+    metrics.set_evpn_duplicate_mac_quarantine_active(key.vni.as_u32(), &key.mac.to_string(), false);
+    set_duplicate_mac_quarantine_active(state, key, false);
+    info!(
+        vni = ?key.vni,
+        mac = ?key.mac,
+        "EVPN duplicate-MAC local-origin suppression manually cleared"
+    );
+    replay_local_mac_after_recovery(
+        key.vni,
+        key.mac,
+        state,
+        instances,
+        rib_tx,
+        metrics,
+        originated_local_mac_counts,
+        vni_to_esi,
+    )
+    .await;
+    ClearDuplicateMacQuarantineResult::Cleared
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2149,6 +2304,32 @@ mod tests {
         assert!(!rx.borrow().contains(&key));
     }
 
+    #[tokio::test]
+    async fn originator_control_round_trips_clear_command() {
+        let (command_tx, mut command_rx) = mpsc::channel(1);
+        let control = EvpnOriginatorControl { command_tx };
+        let key = DuplicateMacKey::new(vni(100), mac(0xAA));
+        let pending =
+            tokio::spawn(async move { control.clear_duplicate_mac_quarantine(key).await });
+
+        let Some(OriginatorCommand::ClearDuplicateMacQuarantine {
+            key: received,
+            reply,
+        }) = command_rx.recv().await
+        else {
+            panic!("expected clear command");
+        };
+        assert_eq!(received, key);
+        reply
+            .send(ClearDuplicateMacQuarantineResult::Cleared)
+            .unwrap();
+
+        assert_eq!(
+            pending.await.unwrap().unwrap(),
+            ClearDuplicateMacQuarantineResult::Cleared
+        );
+    }
+
     fn evpn_macip_route(
         v: u32,
         m: u8,
@@ -2525,6 +2706,129 @@ mod tests {
             "recovery should replay the still-local MAC once suppression expires"
         );
         assert_quarantine_metric(&metrics, 100, 0xAA, 0);
+    }
+
+    #[tokio::test]
+    async fn duplicate_mac_manual_clear_replays_local_route_and_resets_metric() {
+        let instances = instance_table_with(suppress_local_instance(100));
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (log, _responder) = rib_capture_responder(rib_rx);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let (quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+        let mut state = OriginatorState::new(&instances, quarantine_tx);
+
+        observe_test(
+            LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+        state.remote_mac_view.insert(
+            (vni(100), mac(0xAA)),
+            RemoteMacView {
+                mac: mac(0xAA),
+                mobility_sequence: Some(3),
+                sticky: false,
+                next_hop: ipa("10.0.0.2"),
+            },
+        );
+        observe_test(
+            LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        let key = DuplicateMacKey::new(vni(100), mac(0xAA));
+        assert!(quarantine_rx.borrow().contains(&key));
+        let result = clear_duplicate_mac_quarantine(
+            key,
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
+
+        assert_eq!(result, ClearDuplicateMacQuarantineResult::Cleared);
+        assert!(!quarantine_rx.borrow().contains(&key));
+        let actions = log.lock().await.clone();
+        assert_eq!(
+            actions,
+            vec![
+                RibAction::Inject(macip_key_with(100, 0xAA, None)),
+                RibAction::Withdraw(macip_key_with(100, 0xAA, None)),
+                RibAction::Inject(macip_key_with(100, 0xAA, None)),
+            ],
+            "manual clear should replay the still-local MAC immediately"
+        );
+        assert_quarantine_metric(&metrics, 100, 0xAA, 0);
+    }
+
+    #[tokio::test]
+    async fn duplicate_mac_manual_clear_inactive_returns_not_active_and_clears_window() {
+        let inst = local_instance(100);
+        let instances = instance_table_with(inst.clone());
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = originator_state(&instances);
+        let key = DuplicateMacKey::new(vni(100), mac(0xAA));
+
+        assert!(!record_duplicate_mac_move(
+            &metrics, &mut state, &inst, key.vni, key.mac
+        ));
+        let result = clear_duplicate_mac_quarantine(
+            key,
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
+
+        assert_eq!(result, ClearDuplicateMacQuarantineResult::NotActive);
+        assert!(!state.duplicate_mac_detector.clear(key));
+    }
+
+    #[tokio::test]
+    async fn duplicate_mac_manual_clear_unknown_vni_returns_unknown_vni() {
+        let instances = instance_table(100);
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = originator_state(&instances);
+        let result = clear_duplicate_mac_quarantine(
+            DuplicateMacKey::new(vni(200), mac(0xAA)),
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
+
+        assert_eq!(result, ClearDuplicateMacQuarantineResult::UnknownVni);
     }
 
     #[tokio::test]

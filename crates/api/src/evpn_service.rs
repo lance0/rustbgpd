@@ -1,4 +1,4 @@
-//! gRPC `EvpnService` — read-only view of local EVPN instances.
+//! gRPC `EvpnService` — local EVPN instance state and bounded controls.
 //!
 //! This service exposes the daemon's resolved
 //! [`rustbgpd_evpn::EvpnInstanceTable`] so operators and SDN
@@ -11,16 +11,22 @@
 //! The service holds an `Arc<EvpnInstanceTable>` rather than building
 //! a fresh table per call so the gRPC layer never re-parses config
 //! state. The same `Arc` is the unit other phases will swap atomically
-//! on SIGHUP / gRPC mutation.
+//! on SIGHUP / gRPC mutation. The duplicate-MAC clear operation is a
+//! bounded actor command; it does not mutate the resolved tables.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use rustbgpd_evpn::ip_vrf::{IpVrfId, IpVrfNotReady, IpVrfStatus, IpVrfTable};
-use rustbgpd_evpn::{EvpnInstanceTable, FdbNexthopDataplaneStatus, IpVrfDataplaneStatus};
+use rustbgpd_evpn::{
+    EvpnInstanceId, EvpnInstanceTable, FdbNexthopDataplaneStatus, IpVrfDataplaneStatus, MacAddress,
+};
 use tonic::{Request, Response, Status};
 
 use crate::proto;
+use crate::server::{AccessMode, read_only_rejection};
 
 /// Read-side hook for per-instance local-MAC origination counts.
 pub type OriginatedLocalMacCountFn = Arc<dyn Fn(u32) -> u64 + Send + Sync + 'static>;
@@ -49,8 +55,27 @@ pub type IpVrfStatusSnapshotFn = Arc<dyn Fn() -> Vec<IpVrfDataplaneStatus> + Sen
 /// tests can inject a deterministic value.
 pub type FdbNexthopSnapshotFn = Arc<dyn Fn() -> FdbNexthopDataplaneStatus + Send + Sync + 'static>;
 
-/// Read-only EVPN service backed by shared resolved tables.
+/// Outcome returned by the daemon duplicate-MAC control hook.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateMacClearOutcome {
+    pub cleared: bool,
+}
+
+/// Error returned by the daemon duplicate-MAC control hook.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DuplicateMacClearError {
+    Unavailable(String),
+    NotFound(String),
+}
+
+pub type DuplicateMacClearFuture =
+    Pin<Box<dyn Future<Output = Result<DuplicateMacClearOutcome, DuplicateMacClearError>> + Send>>;
+pub type DuplicateMacClearFn =
+    Arc<dyn Fn(EvpnInstanceId, MacAddress) -> DuplicateMacClearFuture + Send + Sync + 'static>;
+
+/// EVPN service backed by shared resolved tables and optional actor controls.
 pub struct EvpnService {
+    access_mode: AccessMode,
     instances: Arc<EvpnInstanceTable>,
     ip_vrfs: Arc<IpVrfTable>,
     originated_local_mac_count: OriginatedLocalMacCountFn,
@@ -58,6 +83,7 @@ pub struct EvpnService {
     originated_ip_vrf_route_count: OriginatedIpVrfRouteCountFn,
     installed_ip_vrf_route_count: InstalledIpVrfRouteCountFn,
     fdb_nexthop_snapshot: FdbNexthopSnapshotFn,
+    duplicate_mac_clear: Option<DuplicateMacClearFn>,
 }
 
 impl EvpnService {
@@ -67,6 +93,7 @@ impl EvpnService {
     #[must_use]
     pub fn new(instances: Arc<EvpnInstanceTable>) -> Self {
         Self {
+            access_mode: AccessMode::ReadWrite,
             instances,
             ip_vrfs: Arc::new(IpVrfTable::new()),
             originated_local_mac_count: Arc::new(|_| 0),
@@ -74,6 +101,7 @@ impl EvpnService {
             originated_ip_vrf_route_count: Arc::new(|_| 0),
             installed_ip_vrf_route_count: Arc::new(|_| 0),
             fdb_nexthop_snapshot: Arc::new(FdbNexthopDataplaneStatus::default),
+            duplicate_mac_clear: None,
         }
     }
 
@@ -87,6 +115,7 @@ impl EvpnService {
         originated_local_mac_count: OriginatedLocalMacCountFn,
     ) -> Self {
         Self {
+            access_mode: AccessMode::ReadWrite,
             instances,
             ip_vrfs: Arc::new(IpVrfTable::new()),
             originated_local_mac_count,
@@ -94,6 +123,7 @@ impl EvpnService {
             originated_ip_vrf_route_count: Arc::new(|_| 0),
             installed_ip_vrf_route_count: Arc::new(|_| 0),
             fdb_nexthop_snapshot: Arc::new(FdbNexthopDataplaneStatus::default),
+            duplicate_mac_clear: None,
         }
     }
 
@@ -116,7 +146,7 @@ impl EvpnService {
         installed_ip_vrf_route_count: InstalledIpVrfRouteCountFn,
         fdb_nexthop_snapshot: FdbNexthopSnapshotFn,
     ) -> Self {
-        Self {
+        Self::with_full_surface_and_duplicate_mac_control(
             instances,
             ip_vrfs,
             originated_local_mac_count,
@@ -124,6 +154,36 @@ impl EvpnService {
             originated_ip_vrf_route_count,
             installed_ip_vrf_route_count,
             fdb_nexthop_snapshot,
+            AccessMode::ReadWrite,
+            None,
+        )
+    }
+
+    /// Construct a service exposing the full EVPN surface plus the
+    /// optional duplicate-MAC manual-clear control hook.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn with_full_surface_and_duplicate_mac_control(
+        instances: Arc<EvpnInstanceTable>,
+        ip_vrfs: Arc<IpVrfTable>,
+        originated_local_mac_count: OriginatedLocalMacCountFn,
+        ip_vrf_status_snapshot: IpVrfStatusSnapshotFn,
+        originated_ip_vrf_route_count: OriginatedIpVrfRouteCountFn,
+        installed_ip_vrf_route_count: InstalledIpVrfRouteCountFn,
+        fdb_nexthop_snapshot: FdbNexthopSnapshotFn,
+        access_mode: AccessMode,
+        duplicate_mac_clear: Option<DuplicateMacClearFn>,
+    ) -> Self {
+        Self {
+            access_mode,
+            instances,
+            ip_vrfs,
+            originated_local_mac_count,
+            ip_vrf_status_snapshot,
+            originated_ip_vrf_route_count,
+            installed_ip_vrf_route_count,
+            fdb_nexthop_snapshot,
+            duplicate_mac_clear,
         }
     }
 }
@@ -220,6 +280,55 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
             vrf, status, originated, installed,
         )))
     }
+
+    async fn clear_duplicate_mac_quarantine(
+        &self,
+        request: Request<proto::ClearDuplicateMacQuarantineRequest>,
+    ) -> Result<Response<proto::ClearDuplicateMacQuarantineResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        let req = request.into_inner();
+        let vni = EvpnInstanceId::new(req.vni)
+            .map_err(|err| Status::invalid_argument(format!("invalid VNI: {err}")))?;
+        let mac = parse_mac(&req.mac)?;
+        let clear = self.duplicate_mac_clear.as_ref().ok_or_else(|| {
+            Status::failed_precondition("EVPN duplicate-MAC clear control is unavailable")
+        })?;
+        let outcome = clear(vni, mac).await.map_err(|err| match err {
+            DuplicateMacClearError::Unavailable(message) => Status::failed_precondition(message),
+            DuplicateMacClearError::NotFound(message) => Status::not_found(message),
+        })?;
+        let message = if outcome.cleared {
+            format!("duplicate-MAC quarantine cleared for VNI {vni} MAC {mac}")
+        } else {
+            format!("no active duplicate-MAC quarantine for VNI {vni} MAC {mac}")
+        };
+        Ok(Response::new(proto::ClearDuplicateMacQuarantineResponse {
+            cleared: outcome.cleared,
+            message,
+        }))
+    }
+}
+
+fn parse_mac(s: &str) -> Result<MacAddress, Status> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 6 {
+        return Err(Status::invalid_argument(
+            "mac must use six colon-separated hex octets",
+        ));
+    }
+    let mut out = [0u8; 6];
+    for (i, part) in parts.iter().enumerate() {
+        if part.len() != 2 {
+            return Err(Status::invalid_argument(
+                "mac must use two hex digits per octet",
+            ));
+        }
+        out[i] = u8::from_str_radix(part, 16)
+            .map_err(|_| Status::invalid_argument("mac contains a non-hex octet"))?;
+    }
+    Ok(MacAddress::new(out))
 }
 
 /// Build an `IpVrfId → &IpVrfDataplaneStatus` index from the per-call
@@ -361,6 +470,32 @@ mod tests {
             .unwrap();
     }
 
+    fn service_with_duplicate_mac_clear(
+        access_mode: crate::server::AccessMode,
+        duplicate_mac_clear: Option<DuplicateMacClearFn>,
+    ) -> EvpnService {
+        EvpnService::with_full_surface_and_duplicate_mac_control(
+            Arc::new(EvpnInstanceTable::new()),
+            Arc::new(IpVrfTable::new()),
+            Arc::new(|_| 0),
+            Arc::new(Vec::new),
+            Arc::new(|_| 0),
+            Arc::new(|_| 0),
+            Arc::new(FdbNexthopDataplaneStatus::default),
+            access_mode,
+            duplicate_mac_clear,
+        )
+    }
+
+    fn fixed_duplicate_mac_clear(
+        result: Result<DuplicateMacClearOutcome, DuplicateMacClearError>,
+    ) -> DuplicateMacClearFn {
+        Arc::new(move |_, _| {
+            let result = result.clone();
+            Box::pin(async move { result }) as DuplicateMacClearFuture
+        })
+    }
+
     #[tokio::test]
     async fn list_returns_empty_when_no_instances() {
         let svc = EvpnService::new(Arc::new(EvpnInstanceTable::new()));
@@ -495,6 +630,152 @@ mod tests {
         assert_eq!(resp.orphan_nexthops_count, 2);
         assert_eq!(resp.pending_delete_count, 1);
         assert!(resp.drift_recovery_disabled);
+    }
+
+    #[tokio::test]
+    async fn clear_duplicate_mac_quarantine_rejects_read_only_listener() {
+        let svc = service_with_duplicate_mac_clear(
+            crate::server::AccessMode::ReadOnly,
+            Some(fixed_duplicate_mac_clear(Ok(DuplicateMacClearOutcome {
+                cleared: true,
+            }))),
+        );
+        let err = svc
+            .clear_duplicate_mac_quarantine(Request::new(
+                proto::ClearDuplicateMacQuarantineRequest {
+                    vni: 100,
+                    mac: "aa:bb:cc:dd:ee:ff".to_string(),
+                },
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn clear_duplicate_mac_quarantine_requires_control_hook() {
+        let svc = service_with_duplicate_mac_clear(crate::server::AccessMode::ReadWrite, None);
+        let err = svc
+            .clear_duplicate_mac_quarantine(Request::new(
+                proto::ClearDuplicateMacQuarantineRequest {
+                    vni: 100,
+                    mac: "aa:bb:cc:dd:ee:ff".to_string(),
+                },
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn clear_duplicate_mac_quarantine_maps_success_and_inactive() {
+        let clear: DuplicateMacClearFn = Arc::new(|vni, mac| {
+            assert_eq!(vni.as_u32(), 100);
+            assert_eq!(mac.to_string(), "aa:bb:cc:dd:ee:ff");
+            Box::pin(async move { Ok(DuplicateMacClearOutcome { cleared: true }) })
+                as DuplicateMacClearFuture
+        });
+        let svc =
+            service_with_duplicate_mac_clear(crate::server::AccessMode::ReadWrite, Some(clear));
+        let resp = svc
+            .clear_duplicate_mac_quarantine(Request::new(
+                proto::ClearDuplicateMacQuarantineRequest {
+                    vni: 100,
+                    mac: "aa:bb:cc:dd:ee:ff".to_string(),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.cleared);
+        assert!(resp.message.contains("cleared"));
+
+        let svc = service_with_duplicate_mac_clear(
+            crate::server::AccessMode::ReadWrite,
+            Some(fixed_duplicate_mac_clear(Ok(DuplicateMacClearOutcome {
+                cleared: false,
+            }))),
+        );
+        let resp = svc
+            .clear_duplicate_mac_quarantine(Request::new(
+                proto::ClearDuplicateMacQuarantineRequest {
+                    vni: 100,
+                    mac: "aa:bb:cc:dd:ee:ff".to_string(),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!resp.cleared);
+        assert!(resp.message.contains("no active"));
+    }
+
+    #[tokio::test]
+    async fn clear_duplicate_mac_quarantine_validates_request() {
+        let svc = service_with_duplicate_mac_clear(
+            crate::server::AccessMode::ReadWrite,
+            Some(fixed_duplicate_mac_clear(Ok(DuplicateMacClearOutcome {
+                cleared: true,
+            }))),
+        );
+        let bad_vni = svc
+            .clear_duplicate_mac_quarantine(Request::new(
+                proto::ClearDuplicateMacQuarantineRequest {
+                    vni: 0,
+                    mac: "aa:bb:cc:dd:ee:ff".to_string(),
+                },
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(bad_vni.code(), tonic::Code::InvalidArgument);
+
+        let bad_mac = svc
+            .clear_duplicate_mac_quarantine(Request::new(
+                proto::ClearDuplicateMacQuarantineRequest {
+                    vni: 100,
+                    mac: "aa:bb:cc".to_string(),
+                },
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(bad_mac.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn clear_duplicate_mac_quarantine_maps_control_errors() {
+        let svc = service_with_duplicate_mac_clear(
+            crate::server::AccessMode::ReadWrite,
+            Some(fixed_duplicate_mac_clear(Err(
+                DuplicateMacClearError::NotFound("missing VNI".to_string()),
+            ))),
+        );
+        let err = svc
+            .clear_duplicate_mac_quarantine(Request::new(
+                proto::ClearDuplicateMacQuarantineRequest {
+                    vni: 100,
+                    mac: "aa:bb:cc:dd:ee:ff".to_string(),
+                },
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+
+        let svc = service_with_duplicate_mac_clear(
+            crate::server::AccessMode::ReadWrite,
+            Some(fixed_duplicate_mac_clear(Err(
+                DuplicateMacClearError::Unavailable("control unavailable".to_string()),
+            ))),
+        );
+        let err = svc
+            .clear_duplicate_mac_quarantine(Request::new(
+                proto::ClearDuplicateMacQuarantineRequest {
+                    vni: 100,
+                    mac: "aa:bb:cc:dd:ee:ff".to_string(),
+                },
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     }
 
     // -- Gate 9 IP-VRF surface --------------------------------------

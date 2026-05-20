@@ -1386,6 +1386,40 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     let grpc_rib_tx = rib_tx.clone();
     let grpc_rib_query_tx = rib_query_tx;
     let grpc_peer_mgr_tx = peer_mgr_tx.clone();
+    let evpn_duplicate_mac_clear = evpn_originator_handle.as_ref().map(|handle| {
+        let control = handle.control();
+        Arc::new(move |vni, mac| {
+            let control = control.clone();
+            Box::pin(async move {
+                match control
+                    .clear_duplicate_mac_quarantine(rustbgpd_evpn::DuplicateMacKey::new(vni, mac))
+                    .await
+                {
+                    Ok(evpn_originator::ClearDuplicateMacQuarantineResult::Cleared) => {
+                        Ok(rustbgpd_api::evpn_service::DuplicateMacClearOutcome { cleared: true })
+                    }
+                    Ok(evpn_originator::ClearDuplicateMacQuarantineResult::NotActive) => {
+                        Ok(rustbgpd_api::evpn_service::DuplicateMacClearOutcome { cleared: false })
+                    }
+                    Ok(evpn_originator::ClearDuplicateMacQuarantineResult::UnknownVni) => Err(
+                        rustbgpd_api::evpn_service::DuplicateMacClearError::NotFound(format!(
+                            "no EVPN instance configured for VNI {vni}"
+                        )),
+                    ),
+                    Err(evpn_originator::EvpnOriginatorControlError::Closed) => Err(
+                        rustbgpd_api::evpn_service::DuplicateMacClearError::Unavailable(
+                            "EVPN originator control channel is closed".to_string(),
+                        ),
+                    ),
+                    Err(evpn_originator::EvpnOriginatorControlError::ReplyDropped) => Err(
+                        rustbgpd_api::evpn_service::DuplicateMacClearError::Unavailable(
+                            "EVPN originator control response channel dropped".to_string(),
+                        ),
+                    ),
+                }
+            }) as rustbgpd_api::evpn_service::DuplicateMacClearFuture
+        }) as rustbgpd_api::evpn_service::DuplicateMacClearFn
+    });
     let serve_config = ServeConfig {
         asn: config.global.asn,
         router_id: config.global.router_id.clone(),
@@ -1424,6 +1458,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             let rx = evpn_fdb_nexthops_rx.clone();
             Arc::new(move || rx.borrow().clone())
         },
+        evpn_duplicate_mac_clear,
         blackhole_discard_snapshot: {
             let rx = blackhole_status_rx.clone();
             Arc::new(move || {
