@@ -14,6 +14,8 @@ pub enum RouteEventType {
     Withdrawn,
     /// The best route changed to a different path.
     BestChanged,
+    /// A route was present but denied by export policy for a target peer.
+    PolicyFiltered,
 }
 
 /// A route change event published via broadcast channel.
@@ -29,10 +31,14 @@ pub struct RouteEvent {
     pub peer: Option<IpAddr>,
     /// The peer that previously held the best route, if any.
     pub previous_peer: Option<IpAddr>,
+    /// Outbound peer whose export policy filtered the route, if any.
+    pub target_peer: Option<IpAddr>,
     /// Unix epoch timestamp as a string.
     pub timestamp: String,
     /// Add-Path path identifier (RFC 7911). 0 = no Add-Path.
     pub path_id: u32,
+    /// Stable operator-facing reason, e.g. "`policy_denied`".
+    pub reason: String,
 }
 
 /// EVPN best-path change event published on the EVPN broadcast.

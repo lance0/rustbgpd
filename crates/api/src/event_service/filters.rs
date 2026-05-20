@@ -41,7 +41,8 @@ impl WatchEventsFilter {
         if let Some(peer) = self.peer {
             let matches_current = event.peer == Some(peer);
             let matches_previous = event.previous_peer == Some(peer);
-            if !matches_current && !matches_previous {
+            let matches_target = event.target_peer == Some(peer);
+            if !matches_current && !matches_previous && !matches_target {
                 return false;
             }
         }
@@ -230,6 +231,7 @@ impl WatchEventsFilter {
                     Ok(proto::BgpEventType::RouteAdded
                         | proto::BgpEventType::RouteWithdrawn
                         | proto::BgpEventType::RouteBestChanged
+                        | proto::BgpEventType::RoutePolicyFiltered
                         | proto::BgpEventType::StreamLagged)
                 )
             })
@@ -330,6 +332,7 @@ pub(super) fn route_event_type_to_bgp_event_type(
         RouteEventType::Added => proto::BgpEventType::RouteAdded,
         RouteEventType::Withdrawn => proto::BgpEventType::RouteWithdrawn,
         RouteEventType::BestChanged => proto::BgpEventType::RouteBestChanged,
+        RouteEventType::PolicyFiltered => proto::BgpEventType::RoutePolicyFiltered,
     }
 }
 
@@ -340,6 +343,7 @@ pub(super) fn route_event_type_to_evpn_bgp_event_type(
         RouteEventType::Added => proto::BgpEventType::EvpnRouteAdded,
         RouteEventType::Withdrawn => proto::BgpEventType::EvpnRouteWithdrawn,
         RouteEventType::BestChanged => proto::BgpEventType::EvpnRouteBestChanged,
+        RouteEventType::PolicyFiltered => proto::BgpEventType::Unspecified,
     }
 }
 
@@ -356,6 +360,7 @@ fn bgp_event_type_to_session_event_type(
         | proto::BgpEventType::RouteAdded
         | proto::BgpEventType::RouteWithdrawn
         | proto::BgpEventType::RouteBestChanged
+        | proto::BgpEventType::RoutePolicyFiltered
         | proto::BgpEventType::EvpnRouteAdded
         | proto::BgpEventType::EvpnRouteWithdrawn
         | proto::BgpEventType::EvpnRouteBestChanged
@@ -402,6 +407,7 @@ fn parse_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<i32>, Status>
             proto::BgpEventType::RouteAdded
             | proto::BgpEventType::RouteWithdrawn
             | proto::BgpEventType::RouteBestChanged
+            | proto::BgpEventType::RoutePolicyFiltered
             | proto::BgpEventType::SessionStateChanged
             | proto::BgpEventType::SessionEstablished
             | proto::BgpEventType::SessionLost
@@ -466,6 +472,7 @@ fn parse_policy_event_type_filter(event_types: &[i32]) -> Result<(), Status> {
             proto::BgpEventType::RouteAdded
             | proto::BgpEventType::RouteWithdrawn
             | proto::BgpEventType::RouteBestChanged
+            | proto::BgpEventType::RoutePolicyFiltered
             | proto::BgpEventType::SessionStateChanged
             | proto::BgpEventType::SessionEstablished
             | proto::BgpEventType::SessionLost
@@ -513,6 +520,7 @@ fn parse_evpn_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<RouteEve
             proto::BgpEventType::RouteAdded
             | proto::BgpEventType::RouteWithdrawn
             | proto::BgpEventType::RouteBestChanged
+            | proto::BgpEventType::RoutePolicyFiltered
             | proto::BgpEventType::SessionStateChanged
             | proto::BgpEventType::SessionEstablished
             | proto::BgpEventType::SessionLost

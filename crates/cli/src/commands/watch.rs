@@ -25,6 +25,7 @@ fn format_event_type(t: i32) -> &'static str {
         Ok(RouteEventType::Added) => "added",
         Ok(RouteEventType::Withdrawn) => "withdrawn",
         Ok(RouteEventType::BestChanged) => "best_changed",
+        Ok(RouteEventType::PolicyFiltered) => "policy_filtered",
         _ => "unknown",
     }
 }
@@ -36,11 +37,12 @@ fn json_event(event: &RouteEvent) -> JsonRouteEvent {
         prefix: format!("{}/{}", event.prefix, event.prefix_length),
         peer_address: event.peer_address.clone(),
         previous_peer_address: event.previous_peer_address.clone(),
+        target_peer_address: event.target_peer_address.clone(),
         afi_safi: output::format_family(event.afi_safi).to_string(),
         timestamp: event.timestamp.clone(),
         path_id: event.path_id,
         missed_count: 0,
-        reason: String::new(),
+        reason: event.reason.clone(),
     }
 }
 
@@ -70,13 +72,25 @@ fn print_event(event: &RouteEvent, json: bool) {
     } else {
         format!(" previous={}", event.previous_peer_address)
     };
+    let target_peer = if event.target_peer_address.is_empty() {
+        String::new()
+    } else {
+        format!(" target={}", event.target_peer_address)
+    };
+    let reason = if event.reason.is_empty() {
+        String::new()
+    } else {
+        format!(" reason={}", event.reason)
+    };
     println!(
-        "[{}] {} {} from {}{}{}{}",
+        "[{}] {} {} from {}{}{}{}{}{}",
         event.timestamp,
         output::colored_event_type(format_event_type(event.event_type)),
         prefix,
         event.peer_address,
         previous_peer,
+        target_peer,
+        reason,
         path_id_str,
         event_id_str,
     );
@@ -87,6 +101,7 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
         "added" | "route_added" => Ok(BgpEventType::RouteAdded as i32),
         "withdrawn" | "route_withdrawn" => Ok(BgpEventType::RouteWithdrawn as i32),
         "best_changed" | "route_best_changed" => Ok(BgpEventType::RouteBestChanged as i32),
+        "policy_filtered" | "route_policy_filtered" => Ok(BgpEventType::RoutePolicyFiltered as i32),
         "state_changed" | "session_state_changed" => Ok(BgpEventType::SessionStateChanged as i32),
         "established" | "session_established" => Ok(BgpEventType::SessionEstablished as i32),
         "lost" | "session_lost" => Ok(BgpEventType::SessionLost as i32),
@@ -112,7 +127,7 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
         }
         "stream_lagged" | "lagged" => Ok(BgpEventType::StreamLagged as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported event type {other:?}; expected added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, dataplane_status_changed, dataplane_route_installed, dataplane_route_withdrawn, dataplane_route_failed, evpn_added, evpn_withdrawn, evpn_best_changed, or stream_lagged"
+            "unsupported event type {other:?}; expected added, withdrawn, best_changed, policy_filtered, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, dataplane_status_changed, dataplane_route_installed, dataplane_route_withdrawn, dataplane_route_failed, evpn_added, evpn_withdrawn, evpn_best_changed, or stream_lagged"
         ))),
     }
 }
@@ -218,6 +233,7 @@ fn bgp_event_type_json_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::RouteAdded) => "route_added",
         Ok(BgpEventType::RouteWithdrawn) => "route_withdrawn",
         Ok(BgpEventType::RouteBestChanged) => "route_best_changed",
+        Ok(BgpEventType::RoutePolicyFiltered) => "route_policy_filtered",
         Ok(BgpEventType::SessionStateChanged) => "session_state_changed",
         Ok(BgpEventType::SessionEstablished) => "session_established",
         Ok(BgpEventType::SessionLost) => "session_lost",
@@ -243,6 +259,7 @@ fn bgp_event_type_display_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::RouteAdded) => "added",
         Ok(BgpEventType::RouteWithdrawn) => "withdrawn",
         Ok(BgpEventType::RouteBestChanged) => "best_changed",
+        Ok(BgpEventType::RoutePolicyFiltered) => "policy_filtered",
         Ok(BgpEventType::SessionStateChanged) => "state_changed",
         Ok(BgpEventType::SessionEstablished) => "established",
         Ok(BgpEventType::SessionLost) => "lost",
@@ -311,6 +328,7 @@ fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
         "severity": output::format_severity(event.severity),
         "peer_address": event.peer_address,
         "previous_peer_address": event.previous_peer_address,
+        "target_peer_address": event.target_peer_address,
         "prefix": if event.prefix.is_empty() {
             String::new()
         } else {
@@ -560,6 +578,7 @@ fn json_route_stream_lag_event(event: &BgpEvent, lag: &StreamLagEvent) -> JsonRo
         prefix: String::new(),
         peer_address: String::new(),
         previous_peer_address: String::new(),
+        target_peer_address: String::new(),
         afi_safi: output::format_family(event.afi_safi).to_string(),
         timestamp: event.timestamp.clone(),
         path_id: 0,
@@ -604,6 +623,7 @@ fn is_route_event_type(event_type: i32) -> bool {
         Ok(BgpEventType::RouteAdded)
             | Ok(BgpEventType::RouteWithdrawn)
             | Ok(BgpEventType::RouteBestChanged)
+            | Ok(BgpEventType::RoutePolicyFiltered)
     )
 }
 
@@ -612,6 +632,7 @@ fn route_event_type_to_bgp_event_type(event_type: i32) -> i32 {
         Ok(RouteEventType::Added) => BgpEventType::RouteAdded as i32,
         Ok(RouteEventType::Withdrawn) => BgpEventType::RouteWithdrawn as i32,
         Ok(RouteEventType::BestChanged) => BgpEventType::RouteBestChanged as i32,
+        Ok(RouteEventType::PolicyFiltered) => BgpEventType::RoutePolicyFiltered as i32,
         _ => BgpEventType::Unspecified as i32,
     }
 }
@@ -636,12 +657,21 @@ fn route_event_to_bgp_event(event: RouteEvent) -> BgpEvent {
         Ok(BgpEventType::RouteAdded) => "added",
         Ok(BgpEventType::RouteWithdrawn) => "withdrawn",
         Ok(BgpEventType::RouteBestChanged) => "best changed",
+        Ok(BgpEventType::RoutePolicyFiltered) => "policy filtered",
         _ => "changed",
     };
     let summary = format!(
         "route {event_label} {}/{}",
         event.prefix, event.prefix_length
     );
+    let summary = if event_type == BgpEventType::RoutePolicyFiltered as i32 {
+        format!(
+            "{summary} target={} reason={}",
+            event.target_peer_address, event.reason
+        )
+    } else {
+        summary
+    };
 
     BgpEvent {
         timestamp: event.timestamp.clone(),
@@ -654,6 +684,7 @@ fn route_event_to_bgp_event(event: RouteEvent) -> BgpEvent {
         prefix_length: event.prefix_length,
         afi_safi: event.afi_safi,
         summary,
+        target_peer_address: event.target_peer_address.clone(),
         payload: Some(crate::proto::bgp_event::Payload::Route(event)),
     }
 }
@@ -957,8 +988,10 @@ mod tests {
             afi_safi: AddressFamily::Ipv4Unicast as i32,
             timestamp: "1".to_string(),
             previous_peer_address: String::new(),
+            target_peer_address: String::new(),
             path_id: 0,
             event_id: 42,
+            reason: String::new(),
         };
 
         let value = serde_json::to_value(json_event(&event)).unwrap();
@@ -992,8 +1025,10 @@ mod tests {
             afi_safi: AddressFamily::Ipv4Unicast as i32,
             timestamp: "1".to_string(),
             previous_peer_address: "10.0.0.2".to_string(),
+            target_peer_address: String::new(),
             path_id: 0,
             event_id: 7,
+            reason: String::new(),
         };
 
         assert!(route_history_event_matches_types(
@@ -1016,8 +1051,10 @@ mod tests {
             afi_safi: AddressFamily::Ipv4Unicast as i32,
             timestamp: "1".to_string(),
             previous_peer_address: String::new(),
+            target_peer_address: String::new(),
             path_id: 0,
             event_id: 42,
+            reason: String::new(),
         };
 
         let event = route_event_to_bgp_event(event);
@@ -1026,6 +1063,53 @@ mod tests {
         assert_eq!(value["event_type"], "route_added");
         assert_eq!(value["summary"], "route added 203.0.113.0/24");
         assert_eq!(value["event_id"], 42);
+    }
+
+    #[test]
+    fn policy_filtered_route_event_json_includes_target_peer_and_reason() {
+        let event = RouteEvent {
+            event_type: RouteEventType::PolicyFiltered as i32,
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+            peer_address: "10.0.0.1".to_string(),
+            afi_safi: AddressFamily::Ipv4Unicast as i32,
+            timestamp: "1".to_string(),
+            previous_peer_address: String::new(),
+            target_peer_address: "10.0.0.2".to_string(),
+            path_id: 9,
+            event_id: 42,
+            reason: "policy_denied".to_string(),
+        };
+
+        let value = serde_json::to_value(json_event(&event)).unwrap();
+        assert_eq!(value["event_type"], "policy_filtered");
+        assert_eq!(value["peer_address"], "10.0.0.1");
+        assert_eq!(value["target_peer_address"], "10.0.0.2");
+        assert_eq!(value["reason"], "policy_denied");
+
+        let bgp_event = route_event_to_bgp_event(event);
+        let value = json_bgp_event(&bgp_event);
+        assert_eq!(value["event_type"], "route_policy_filtered");
+        assert_eq!(value["target_peer_address"], "10.0.0.2");
+        assert_eq!(
+            value["summary"],
+            "route policy filtered 203.0.113.0/24 target=10.0.0.2 reason=policy_denied"
+        );
+    }
+
+    #[test]
+    fn parse_policy_filtered_route_event_aliases() {
+        assert_eq!(
+            parse_bgp_event_type("policy_filtered").unwrap(),
+            BgpEventType::RoutePolicyFiltered as i32
+        );
+        assert_eq!(
+            parse_bgp_event_type("route_policy_filtered").unwrap(),
+            BgpEventType::RoutePolicyFiltered as i32
+        );
+        assert!(is_route_event_type(
+            BgpEventType::RoutePolicyFiltered as i32
+        ));
     }
 
     #[test]
@@ -1038,8 +1122,10 @@ mod tests {
             afi_safi: AddressFamily::Ipv4Unicast as i32,
             timestamp: "1".to_string(),
             previous_peer_address: String::new(),
+            target_peer_address: String::new(),
             path_id: 0,
             event_id: 42,
+            reason: String::new(),
         });
 
         assert!(format_bgp_event_line(&event).ends_with(" id=42"));
@@ -1108,7 +1194,11 @@ mod tests {
             parse_bgp_event_type("evpn_best_changed").unwrap(),
             BgpEventType::EvpnRouteBestChanged as i32
         );
-        assert!(parse_bgp_event_type("policy_filtered").is_err());
+        assert_eq!(
+            parse_bgp_event_type("policy_filtered").unwrap(),
+            BgpEventType::RoutePolicyFiltered as i32
+        );
+        assert!(parse_bgp_event_type("not_an_event").is_err());
     }
 
     #[test]
@@ -1185,7 +1275,9 @@ mod tests {
             afi_safi: AddressFamily::Ipv4Unicast as i32,
             timestamp: "123".to_string(),
             previous_peer_address: String::new(),
+            target_peer_address: String::new(),
             path_id: 0,
+            reason: String::new(),
         };
 
         let value = serde_json::to_value(json_event(&event)).unwrap();
@@ -1210,7 +1302,9 @@ mod tests {
             afi_safi: AddressFamily::Ipv6Unicast as i32,
             timestamp: "123".to_string(),
             previous_peer_address: "2001:db8::2".to_string(),
+            target_peer_address: String::new(),
             path_id: 17,
+            reason: String::new(),
         };
 
         let value = serde_json::to_value(json_event(&event)).unwrap();
@@ -1611,6 +1705,8 @@ mod tests {
             timestamp: "123".to_string(),
             path_id: 7,
             event_id: 0,
+            target_peer_address: String::new(),
+            reason: String::new(),
         };
 
         let value = serde_json::to_value(json_event(&event)).unwrap();

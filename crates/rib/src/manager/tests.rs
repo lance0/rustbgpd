@@ -1792,7 +1792,8 @@ async fn per_peer_export_policy() {
 }
 
 #[tokio::test]
-async fn replace_peer_export_policy_resyncs_outbound_state() {
+#[expect(clippy::too_many_lines)]
+async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filtered_event() {
     use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 
     let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
@@ -1863,7 +1864,7 @@ async fn replace_peer_export_policy_resyncs_outbound_state() {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::ReplacePeerExportPolicy {
         peer: target,
-        export_policy: deny_chain,
+        export_policy: deny_chain.clone(),
         reply: reply_tx,
     })
     .await
@@ -1873,6 +1874,49 @@ async fn replace_peer_export_policy_resyncs_outbound_state() {
     let update = out_rx.recv().await.unwrap();
     assert!(update.announce.is_empty());
     assert_eq!(update.withdraw, vec![(Prefix::V4(denied_prefix), 0)]);
+
+    let history = query_route_event_history(
+        &tx,
+        Some(target),
+        Some(Afi::Ipv4),
+        Some(Prefix::V4(denied_prefix)),
+        10,
+    )
+    .await;
+    let policy_filtered = history
+        .iter()
+        .filter(|event| event.event_type == RouteEventType::PolicyFiltered)
+        .collect::<Vec<_>>();
+    assert_eq!(policy_filtered.len(), 1);
+    assert_eq!(policy_filtered[0].peer, Some(source));
+    assert_eq!(policy_filtered[0].target_peer, Some(target));
+    assert_eq!(policy_filtered[0].reason, "policy_denied");
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer: target,
+        export_policy: deny_chain,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    assert_eq!(reply_rx.await.unwrap(), Ok(()));
+    let history = query_route_event_history(
+        &tx,
+        Some(target),
+        Some(Afi::Ipv4),
+        Some(Prefix::V4(denied_prefix)),
+        10,
+    )
+    .await;
+    assert_eq!(
+        history
+            .iter()
+            .filter(|event| event.event_type == RouteEventType::PolicyFiltered)
+            .count(),
+        1,
+        "unchanged policy denial should not emit duplicate route events"
+    );
 
     drop(tx);
     handle.await.unwrap();
@@ -7641,7 +7685,8 @@ async fn multipath_send_max_one_uses_path_id_one() {
 }
 
 #[tokio::test]
-async fn multipath_all_candidates_denied_by_export_policy() {
+#[expect(clippy::too_many_lines)]
+async fn multipath_policy_filtered_events_for_denied_candidates() {
     use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 
     // Deny all prefixes in 192.168.0.0/16
@@ -7750,6 +7795,17 @@ async fn multipath_all_candidates_denied_by_export_policy() {
         out_rx.try_recv().is_err(),
         "all candidates denied by export policy — nothing sent"
     );
+    let history = query_route_event_history(&tx, Some(target), Some(Afi::Ipv4), None, 10).await;
+    let policy_filtered = history
+        .iter()
+        .filter(|event| event.event_type == RouteEventType::PolicyFiltered)
+        .collect::<Vec<_>>();
+    assert_eq!(policy_filtered.len(), 2);
+    assert!(policy_filtered.iter().all(|event| {
+        event.target_peer == Some(target)
+            && event.prefix == Prefix::V4(prefix)
+            && event.reason == "policy_denied"
+    }));
 
     drop(tx);
     handle.await.unwrap();

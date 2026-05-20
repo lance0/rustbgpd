@@ -11,7 +11,7 @@ use super::helpers::{
     LOCAL_PEER, evpn_routes_equal, gauge_val, prefix_family, routes_equal,
     should_suppress_ibgp_inner, validate_route_aspa, validate_route_rpki,
 };
-use super::{PendingRouteChunk, PendingRoutesReceived, RibManager};
+use super::{PendingRouteChunk, PendingRoutesReceived, PolicyFilteredRouteKey, RibManager};
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
 use crate::event::{RouteEvent, RouteEventType};
@@ -688,8 +688,10 @@ impl RibManager {
                             prefix: *prefix,
                             peer: Some(best.peer),
                             previous_peer: None,
+                            target_peer: None,
                             timestamp: crate::event::unix_timestamp_now(),
                             path_id: best.path_id,
+                            reason: String::new(),
                         });
                     }
                     (Some((old_peer, old_path_id)), None) => {
@@ -700,8 +702,10 @@ impl RibManager {
                             prefix: *prefix,
                             peer: None,
                             previous_peer: Some(old_peer),
+                            target_peer: None,
                             timestamp: crate::event::unix_timestamp_now(),
                             path_id: old_path_id,
+                            reason: String::new(),
                         });
                     }
                     (Some((old_peer, _old_path_id)), Some(best)) => {
@@ -712,8 +716,10 @@ impl RibManager {
                             prefix: *prefix,
                             peer: Some(best.peer),
                             previous_peer: Some(old_peer),
+                            target_peer: None,
                             timestamp: crate::event::unix_timestamp_now(),
                             path_id: best.path_id,
+                            reason: String::new(),
                         });
                     }
                     (None, None) => {}
@@ -853,7 +859,7 @@ impl RibManager {
     /// Collects all candidates from all Adj-RIB-In entries, filters by
     /// split-horizon/iBGP/family/policy, sorts by best-path, takes top N,
     /// and diffs against `AdjRibOut` to produce announces and withdrawals.
-    #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(super) fn distribute_multipath_prefix(
         ribs: &HashMap<IpAddr, AdjRibIn>,
         rib_out: &AdjRibOut,
@@ -871,6 +877,7 @@ impl RibManager {
         announce: &mut Vec<crate::route::Route>,
         withdraw: &mut Vec<(Prefix, u32)>,
         nh_override_flags: &mut Vec<Option<rustbgpd_policy::NextHopAction>>,
+        policy_filtered: &mut Vec<PolicyFilteredRouteKey>,
         force: bool,
     ) {
         use crate::best_path::best_path_cmp;
@@ -951,6 +958,12 @@ impl RibManager {
             };
             let result = evaluate_chain(export_pol, &ctx);
             if result.action != PolicyAction::Permit {
+                policy_filtered.push(PolicyFilteredRouteKey {
+                    target_peer,
+                    source_peer: candidate.peer,
+                    prefix: *prefix,
+                    path_id: candidate.path_id,
+                });
                 continue;
             }
 
@@ -1010,6 +1023,7 @@ impl RibManager {
         announce: &mut Vec<crate::route::Route>,
         withdraw: &mut Vec<(Prefix, u32)>,
         nh_override_flags: &mut Vec<Option<rustbgpd_policy::NextHopAction>>,
+        policy_filtered: &mut Vec<PolicyFilteredRouteKey>,
         force: bool,
     ) {
         let existing_path_ids = rib_out.path_ids_for_prefix(prefix);
@@ -1077,6 +1091,12 @@ impl RibManager {
         };
         let result = evaluate_chain(export_pol, &ctx);
         if result.action != PolicyAction::Permit {
+            policy_filtered.push(PolicyFilteredRouteKey {
+                target_peer,
+                source_peer: best.peer,
+                prefix: *prefix,
+                path_id: best.path_id,
+            });
             for &path_id in existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
@@ -1484,6 +1504,7 @@ impl RibManager {
                 && effective_flowspec_rules.is_empty()
                 && effective_evpn_keys.is_empty()
             {
+                self.clear_policy_filtered_routes_for_peer(peer);
                 // Resync flags must clear here too — otherwise a
                 // force-only refresh on a peer with no exportable
                 // routes would leave `force_outbound_peers` populated,
@@ -1507,6 +1528,8 @@ impl RibManager {
             let mut fs_withdraw = Vec::new();
             let mut evpn_announce = Vec::new();
             let mut evpn_withdraw = Vec::new();
+            let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> =
+                HashSet::new();
 
             // Resolve export policy, sendable families, and RR state before
             // borrowing rib_out (which holds a &mut to self.adj_ribs_out).
@@ -1543,6 +1566,7 @@ impl RibManager {
                 };
                 if prefix_send_max > 0 {
                     // Multi-path: collect all candidates, filter, sort, diff
+                    let mut policy_filtered = Vec::new();
                     Self::distribute_multipath_prefix(
                         &self.ribs,
                         rib_out,
@@ -1560,9 +1584,12 @@ impl RibManager {
                         &mut announce,
                         &mut withdraw,
                         &mut nh_override_flags,
+                        &mut policy_filtered,
                         is_force,
                     );
+                    current_policy_filtered_routes.extend(policy_filtered);
                 } else {
+                    let mut policy_filtered = Vec::new();
                     Self::distribute_single_best_prefix(
                         loc_rib,
                         rib_out,
@@ -1579,8 +1606,10 @@ impl RibManager {
                         &mut announce,
                         &mut withdraw,
                         &mut nh_override_flags,
+                        &mut policy_filtered,
                         is_force,
                     );
+                    current_policy_filtered_routes.extend(policy_filtered);
                 }
             }
 
@@ -1659,6 +1688,11 @@ impl RibManager {
                     evpn_announce,
                     evpn_withdraw,
                 ) {
+                    self.update_policy_filtered_routes_for_prefixes(
+                        peer,
+                        &effective_prefixes,
+                        &current_policy_filtered_routes,
+                    );
                     if resync {
                         info!(
                             %peer,
@@ -1689,16 +1723,23 @@ impl RibManager {
                     self.metrics.record_outbound_route_drop(&peer.to_string());
                     self.dirty_peers.insert(peer);
                 }
-            } else if resync {
-                // Resync triggered but no diff — already in sync.
-                debug!(%peer, "outbound routes unchanged after resync");
-                if is_dirty {
-                    self.dirty_peers.remove(&peer);
-                    self.flush_pending_eor(peer);
-                    self.retry_pending_refresh(peer);
-                }
-                if is_force {
-                    self.force_outbound_peers.remove(&peer);
+            } else {
+                self.update_policy_filtered_routes_for_prefixes(
+                    peer,
+                    &effective_prefixes,
+                    &current_policy_filtered_routes,
+                );
+                if resync {
+                    // Resync triggered but no diff — already in sync.
+                    debug!(%peer, "outbound routes unchanged after resync");
+                    if is_dirty {
+                        self.dirty_peers.remove(&peer);
+                        self.flush_pending_eor(peer);
+                        self.retry_pending_refresh(peer);
+                    }
+                    if is_force {
+                        self.force_outbound_peers.remove(&peer);
+                    }
                 }
             }
         }

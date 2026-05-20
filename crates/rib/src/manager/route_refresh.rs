@@ -4,8 +4,8 @@ use std::net::IpAddr;
 use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
 use tracing::{debug, info, warn};
 
-use super::RibManager;
 use super::helpers::{ERR_REFRESH_TIMEOUT, gauge_val, prefix_family};
+use super::{PolicyFilteredRouteKey, RibManager};
 use crate::adj_rib_out::AdjRibOut;
 use crate::update::OutboundRouteUpdate;
 
@@ -248,6 +248,7 @@ impl RibManager {
         // re-advertises the current export set for this family rather than
         // diffing against what was already sent.
         let refresh_view = AdjRibOut::new(peer);
+        let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> = HashSet::new();
 
         if safi == Safi::FlowSpec {
             let flow_rules: HashSet<FlowSpecRule> = self
@@ -309,6 +310,7 @@ impl RibManager {
                     0
                 };
                 if prefix_send_max > 0 {
+                    let mut policy_filtered = Vec::new();
                     Self::distribute_multipath_prefix(
                         &self.ribs,
                         &refresh_view,
@@ -326,9 +328,12 @@ impl RibManager {
                         &mut announce,
                         &mut withdraw,
                         &mut nh_override_flags,
+                        &mut policy_filtered,
                         false, // route refresh re-emits all anyway via empty refresh_view
                     );
+                    current_policy_filtered_routes.extend(policy_filtered);
                 } else {
+                    let mut policy_filtered = Vec::new();
                     Self::distribute_single_best_prefix(
                         loc_rib,
                         &refresh_view,
@@ -345,8 +350,10 @@ impl RibManager {
                         &mut announce,
                         &mut withdraw,
                         &mut nh_override_flags,
+                        &mut policy_filtered,
                         false,
                     );
+                    current_policy_filtered_routes.extend(policy_filtered);
                 }
             }
         }
@@ -373,6 +380,11 @@ impl RibManager {
                 self.dirty_peers.insert(peer);
                 return;
             }
+            self.update_policy_filtered_routes_for_prefixes(
+                peer,
+                &all_prefixes,
+                &current_policy_filtered_routes,
+            );
             self.pending_refresh
                 .entry(peer)
                 .or_default()

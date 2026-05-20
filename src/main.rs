@@ -150,6 +150,7 @@ fn fib_runtime_event_to_bgp_event(
             "dataplane fib route {action} {prefix}/{prefix_length}: {}",
             event.reason
         ),
+        target_peer_address: String::new(),
         payload: Some(rustbgpd_api::proto::bgp_event::Payload::DataplaneRoute(
             route,
         )),

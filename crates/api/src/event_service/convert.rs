@@ -20,6 +20,7 @@ pub(crate) fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto
             proto::BgpEventType::RouteAdded => "added",
             proto::BgpEventType::RouteWithdrawn => "withdrawn",
             proto::BgpEventType::RouteBestChanged => "best changed",
+            proto::BgpEventType::RoutePolicyFiltered => "policy filtered",
             proto::BgpEventType::Unspecified
             | proto::BgpEventType::SessionStateChanged
             | proto::BgpEventType::SessionEstablished
@@ -41,6 +42,14 @@ pub(crate) fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto
         route.prefix,
         route.prefix_length
     );
+    let summary = if event_type == proto::BgpEventType::RoutePolicyFiltered {
+        format!(
+            "{summary} target={} reason={}",
+            route.target_peer_address, route.reason
+        )
+    } else {
+        summary
+    };
 
     proto::BgpEvent {
         timestamp: route.timestamp.clone(),
@@ -53,6 +62,7 @@ pub(crate) fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto
         prefix_length: route.prefix_length,
         afi_safi: route.afi_safi,
         summary,
+        target_peer_address: route.target_peer_address.clone(),
         payload: Some(proto::bgp_event::Payload::Route(route)),
     }
 }
@@ -99,6 +109,7 @@ pub(crate) fn evpn_event_to_bgp_event(event: rustbgpd_rib::EvpnRouteEvent) -> pr
         prefix_length: 0,
         afi_safi: proto::AddressFamily::L2vpnEvpn as i32,
         summary,
+        target_peer_address: String::new(),
         payload: Some(proto::bgp_event::Payload::Evpn(payload)),
     }
 }
@@ -188,6 +199,7 @@ fn session_lifecycle_event_to_bgp_event(event: SessionLifecycleEvent) -> proto::
         prefix_length: 0,
         afi_safi: proto::AddressFamily::Unspecified as i32,
         summary: event.reason,
+        target_peer_address: String::new(),
         payload: Some(proto::bgp_event::Payload::Session(session)),
     }
 }
@@ -223,6 +235,7 @@ fn session_notification_event_to_bgp_event(event: SessionNotificationEvent) -> p
         prefix_length: 0,
         afi_safi: proto::AddressFamily::Unspecified as i32,
         summary: event.reason,
+        target_peer_address: String::new(),
         payload: Some(proto::bgp_event::Payload::Notification(notification)),
     }
 }
@@ -260,6 +273,7 @@ pub(super) fn policy_event_to_bgp_event(event: PolicyEvent) -> proto::BgpEvent {
         prefix_length: 0,
         afi_safi: proto::AddressFamily::Unspecified as i32,
         summary: reason,
+        target_peer_address: String::new(),
         payload: Some(proto::bgp_event::Payload::Policy(policy)),
     }
 }
@@ -288,6 +302,7 @@ pub(crate) fn stream_lag_bgp_event(
         prefix_length: 0,
         afi_safi: proto::AddressFamily::Unspecified as i32,
         summary: summary.clone(),
+        target_peer_address: String::new(),
         payload: Some(proto::bgp_event::Payload::StreamLag(
             proto::StreamLagEvent {
                 source_category: source_category as i32,
@@ -326,6 +341,7 @@ pub(super) fn dataplane_summary_to_bgp_event(
             "dataplane {} status changed: installed={} rejected={} failed={}",
             summary.source, summary.installed, summary.rejected, summary.failed
         ),
+        target_peer_address: String::new(),
         payload: Some(proto::bgp_event::Payload::Dataplane(payload)),
     }
 }

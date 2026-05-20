@@ -541,8 +541,10 @@ mod tests {
             prefix,
             peer: Some(peer),
             previous_peer: None,
+            target_peer: None,
             timestamp: "123".to_string(),
             path_id: 7,
+            reason: String::new(),
         }
     }
 
@@ -896,6 +898,7 @@ mod tests {
                 proto::AddressFamily::Ipv4Unicast as i32
             },
             summary: format!("dataplane fib route {action} {prefix}/{prefix_length}"),
+            target_peer_address: String::new(),
             payload: Some(proto::bgp_event::Payload::DataplaneRoute(
                 proto::DataplaneRouteEvent {
                     source: "fib".to_string(),
@@ -962,8 +965,10 @@ mod tests {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
             peer: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
             previous_peer: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
+            target_peer: None,
             timestamp: "123".to_string(),
             path_id: 42,
+            reason: String::new(),
         };
 
         let bgp_event = route_event_to_bgp_event(event);
@@ -988,6 +993,36 @@ mod tests {
         assert_eq!(route.peer_address, bgp_event.peer_address);
         assert_eq!(route.previous_peer_address, bgp_event.previous_peer_address);
         assert_eq!(route.path_id, 42);
+    }
+
+    #[test]
+    fn policy_filtered_route_event_carries_target_peer() {
+        let event = RouteEvent {
+            event_id: 7,
+            event_type: RouteEventType::PolicyFiltered,
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+            peer: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+            previous_peer: None,
+            target_peer: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
+            timestamp: "123".to_string(),
+            path_id: 9,
+            reason: "policy_denied".to_string(),
+        };
+
+        let bgp_event = route_event_to_bgp_event(event);
+
+        assert_eq!(
+            bgp_event.event_type,
+            proto::BgpEventType::RoutePolicyFiltered as i32
+        );
+        assert_eq!(bgp_event.peer_address, "10.0.0.1");
+        assert_eq!(bgp_event.target_peer_address, "10.0.0.2");
+        assert!(bgp_event.summary.contains("policy_denied"));
+        let Some(proto::bgp_event::Payload::Route(route)) = bgp_event.payload else {
+            panic!("expected route payload");
+        };
+        assert_eq!(route.target_peer_address, "10.0.0.2");
+        assert_eq!(route.reason, "policy_denied");
     }
 
     #[test]
