@@ -1,16 +1,23 @@
 //! Generationed EVPN runtime model foundation (ADR-0063).
 //!
-//! This module intentionally models the committed runtime snapshot
-//! without adding mutation commands. The daemon still builds the
-//! model from startup-resolved tables and SIGHUP continues to pin
-//! EVPN edits as restart-required until a future coordinator can
-//! validate, drain, replay, and publish a new generation safely.
+//! This module models the committed runtime snapshot and the
+//! coordinator-owned commit gate for future mutation commands. The
+//! daemon still builds the public model from startup-resolved tables and
+//! SIGHUP continues to pin EVPN edits as restart-required until daemon
+//! actor convergence is wired through this coordinator.
 
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::ip_vrf::IpVrfTable;
 use crate::{EthernetSegment, EvpnInstanceTable};
 use rustbgpd_wire::EthernetSegmentIdentifier;
+use thiserror::Error;
+
+const STARTUP_DISABLED_MESSAGE: &str = "startup snapshot active; runtime EVPN mutation disabled";
+const COORDINATOR_IDLE_MESSAGE: &str = "runtime EVPN mutation coordinator idle";
+const COORDINATOR_IN_PROGRESS_MESSAGE: &str = "runtime EVPN mutation in progress";
+const COORDINATOR_COMMITTED_MESSAGE: &str = "runtime EVPN mutation committed";
+const COORDINATOR_FAILED_MESSAGE: &str = "runtime EVPN mutation failed";
 
 /// Generation number for the committed EVPN runtime model.
 ///
@@ -110,7 +117,8 @@ pub struct EvpnRuntimeModel {
     mutation_state: EvpnRuntimeMutationState,
     instances: Arc<EvpnInstanceTable>,
     ip_vrfs: Arc<IpVrfTable>,
-    ethernet_segments: Vec<EthernetSegment>,
+    ethernet_segments: Arc<Vec<EthernetSegment>>,
+    message: &'static str,
 }
 
 impl EvpnRuntimeModel {
@@ -128,7 +136,69 @@ impl EvpnRuntimeModel {
             mutation_state: EvpnRuntimeMutationState::Disabled,
             instances: instances.into(),
             ip_vrfs: ip_vrfs.into(),
-            ethernet_segments,
+            ethernet_segments: Arc::new(ethernet_segments),
+            message: STARTUP_DISABLED_MESSAGE,
+        }
+    }
+
+    /// Build the startup model for a daemon path that has enabled the
+    /// runtime mutation coordinator. The resolved tables are still the
+    /// startup generation, but mutation state is `idle` instead of
+    /// `disabled` so callers can distinguish a coordinator-backed model
+    /// from the read-only foundation surface.
+    #[must_use]
+    pub fn coordinator_startup<I, V>(
+        instances: I,
+        ip_vrfs: V,
+        ethernet_segments: Vec<EthernetSegment>,
+    ) -> Self
+    where
+        I: Into<Arc<EvpnInstanceTable>>,
+        V: Into<Arc<IpVrfTable>>,
+    {
+        Self {
+            generation: EvpnRuntimeGeneration::STARTUP,
+            lifecycle: EvpnRuntimeLifecycle::Active,
+            mutation_state: EvpnRuntimeMutationState::Idle,
+            instances: instances.into(),
+            ip_vrfs: ip_vrfs.into(),
+            ethernet_segments: Arc::new(ethernet_segments),
+            message: COORDINATOR_IDLE_MESSAGE,
+        }
+    }
+
+    fn from_candidate(
+        generation: EvpnRuntimeGeneration,
+        candidate: EvpnRuntimeCandidate,
+        lifecycle: EvpnRuntimeLifecycle,
+        mutation_state: EvpnRuntimeMutationState,
+        message: &'static str,
+    ) -> Self {
+        Self {
+            generation,
+            lifecycle,
+            mutation_state,
+            instances: Arc::new(candidate.instances),
+            ip_vrfs: Arc::new(candidate.ip_vrfs),
+            ethernet_segments: Arc::new(candidate.ethernet_segments),
+            message,
+        }
+    }
+
+    fn with_status(
+        &self,
+        lifecycle: EvpnRuntimeLifecycle,
+        mutation_state: EvpnRuntimeMutationState,
+        message: &'static str,
+    ) -> Self {
+        Self {
+            generation: self.generation,
+            lifecycle,
+            mutation_state,
+            instances: self.instances.clone(),
+            ip_vrfs: self.ip_vrfs.clone(),
+            ethernet_segments: self.ethernet_segments.clone(),
+            message,
         }
     }
 
@@ -165,7 +235,13 @@ impl EvpnRuntimeModel {
     /// Resolved Ethernet Segment bindings for the committed generation.
     #[must_use]
     pub fn ethernet_segments(&self) -> &[EthernetSegment] {
-        &self.ethernet_segments
+        self.ethernet_segments.as_slice()
+    }
+
+    /// Operator-facing runtime status message.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        self.message
     }
 
     /// Compact operator/API summary of the current committed model.
@@ -190,7 +266,7 @@ impl EvpnRuntimeModel {
             evpn_instances: plan_evpn_instances(self.instances(), candidate.instances()),
             ip_vrfs: plan_ip_vrfs(self.ip_vrfs(), candidate.ip_vrfs()),
             ethernet_segments: plan_ethernet_segments(
-                &self.ethernet_segments,
+                self.ethernet_segments.as_slice(),
                 candidate.ethernet_segments(),
             ),
         }
@@ -232,7 +308,7 @@ impl EvpnRuntimeCandidate {
         Self {
             instances: model.instances().clone(),
             ip_vrfs: model.ip_vrfs().clone(),
-            ethernet_segments: model.ethernet_segments.clone(),
+            ethernet_segments: model.ethernet_segments.as_ref().clone(),
         }
     }
 
@@ -252,6 +328,251 @@ impl EvpnRuntimeCandidate {
     #[must_use]
     pub fn ethernet_segments(&self) -> &[EthernetSegment] {
         &self.ethernet_segments
+    }
+}
+
+/// Accepts or rejects the convergence work required before a candidate
+/// model may become the committed EVPN runtime generation.
+///
+/// The first coordinator slice keeps this trait synchronous and domain
+/// local so tests can prove the commit gate without daemon actor wiring.
+/// Later daemon code can back the trait with command queues that drain
+/// and replay IMET, Type 2, Type 5, ES/DF, SVI, and dataplane state.
+pub trait EvpnRuntimeConverger {
+    /// Queue or perform all convergence required by `plan`.
+    ///
+    /// Returning `Ok(())` authorizes the coordinator to publish the
+    /// candidate as the next committed generation. Returning an error
+    /// leaves the previous generation committed.
+    ///
+    /// # Errors
+    /// Returns [`EvpnRuntimeConvergeError`] when downstream convergence
+    /// could not be queued safely.
+    fn converge(
+        &mut self,
+        current: &EvpnRuntimeModel,
+        candidate: &EvpnRuntimeCandidate,
+        plan: &EvpnRuntimePlan,
+    ) -> Result<(), EvpnRuntimeConvergeError>;
+}
+
+/// Convergence failure reported by a coordinator backend.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{message}")]
+pub struct EvpnRuntimeConvergeError {
+    message: String,
+}
+
+impl EvpnRuntimeConvergeError {
+    /// Build a convergence error with an operator-facing reason.
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// Operator-facing failure reason.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+/// Outcome of a coordinator apply attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvpnRuntimeApplyOutcome {
+    /// Candidate matched the committed model; no convergence or new
+    /// generation was needed.
+    Noop,
+    /// Candidate converged and became the committed runtime generation.
+    Committed,
+}
+
+impl EvpnRuntimeApplyOutcome {
+    /// Stable lowercase label for logs/docs/tests.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Noop => "noop",
+            Self::Committed => "committed",
+        }
+    }
+}
+
+/// Successful coordinator apply result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvpnRuntimeApplyReport {
+    /// Whether the candidate was a no-op or committed.
+    pub outcome: EvpnRuntimeApplyOutcome,
+    /// Plan used for the apply decision.
+    pub plan: EvpnRuntimePlan,
+    /// Committed generation after the apply attempt.
+    pub committed_generation: EvpnRuntimeGeneration,
+}
+
+/// Failed coordinator apply result. The prior runtime generation remains
+/// committed when this is returned.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("EVPN runtime convergence failed: {source}")]
+pub struct EvpnRuntimeApplyError {
+    plan: Box<EvpnRuntimePlan>,
+    #[source]
+    source: EvpnRuntimeConvergeError,
+}
+
+impl EvpnRuntimeApplyError {
+    fn new(plan: EvpnRuntimePlan, source: EvpnRuntimeConvergeError) -> Self {
+        Self {
+            plan: Box::new(plan),
+            source,
+        }
+    }
+
+    /// Plan that failed to converge.
+    #[must_use]
+    pub fn plan(&self) -> &EvpnRuntimePlan {
+        &self.plan
+    }
+
+    /// Convergence failure reason.
+    #[must_use]
+    pub const fn converge_error(&self) -> &EvpnRuntimeConvergeError {
+        &self.source
+    }
+}
+
+/// Coordinator-owned EVPN runtime model writer.
+///
+/// This type is the first ADR-0063 write boundary. It does not expose a
+/// public gRPC API and does not mutate daemon actors directly; instead,
+/// it proves the state-machine contract that later daemon wiring must
+/// use: plan a fully validated candidate, ask a convergence backend to
+/// queue all required drain/replay work, and only then publish the next
+/// committed generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvpnRuntimeCoordinator {
+    model: EvpnRuntimeModel,
+    last_failed_plan: Option<EvpnRuntimePlan>,
+    last_converge_error: Option<EvpnRuntimeConvergeError>,
+}
+
+impl EvpnRuntimeCoordinator {
+    /// Build a coordinator over startup-resolved EVPN runtime tables.
+    #[must_use]
+    pub fn new<I, V>(instances: I, ip_vrfs: V, ethernet_segments: Vec<EthernetSegment>) -> Self
+    where
+        I: Into<Arc<EvpnInstanceTable>>,
+        V: Into<Arc<IpVrfTable>>,
+    {
+        Self {
+            model: EvpnRuntimeModel::coordinator_startup(instances, ip_vrfs, ethernet_segments),
+            last_failed_plan: None,
+            last_converge_error: None,
+        }
+    }
+
+    /// Build a coordinator from an existing committed model, enabling
+    /// mutation state while preserving the model's generation and tables.
+    #[must_use]
+    pub fn from_model(model: &EvpnRuntimeModel) -> Self {
+        Self {
+            model: model.with_status(
+                EvpnRuntimeLifecycle::Active,
+                EvpnRuntimeMutationState::Idle,
+                COORDINATOR_IDLE_MESSAGE,
+            ),
+            last_failed_plan: None,
+            last_converge_error: None,
+        }
+    }
+
+    /// Current committed runtime model.
+    #[must_use]
+    pub const fn model(&self) -> &EvpnRuntimeModel {
+        &self.model
+    }
+
+    /// Current committed runtime snapshot.
+    #[must_use]
+    pub fn snapshot(&self) -> EvpnRuntimeSnapshot {
+        self.model.snapshot()
+    }
+
+    /// Plan a fully validated candidate against the committed model.
+    #[must_use]
+    pub fn plan_candidate(&self, candidate: &EvpnRuntimeCandidate) -> EvpnRuntimePlan {
+        self.model.plan_candidate(candidate)
+    }
+
+    /// Most recent plan that failed convergence, if any.
+    #[must_use]
+    pub const fn last_failed_plan(&self) -> Option<&EvpnRuntimePlan> {
+        self.last_failed_plan.as_ref()
+    }
+
+    /// Most recent convergence error, if any.
+    #[must_use]
+    pub const fn last_converge_error(&self) -> Option<&EvpnRuntimeConvergeError> {
+        self.last_converge_error.as_ref()
+    }
+
+    /// Apply a fully validated candidate through the convergence gate.
+    ///
+    /// # Errors
+    /// Returns [`EvpnRuntimeApplyError`] when the convergence backend
+    /// rejects the plan. In that case the previous generation remains
+    /// committed and the coordinator snapshot reports degraded/failed.
+    pub fn apply_candidate<C>(
+        &mut self,
+        candidate: EvpnRuntimeCandidate,
+        converger: &mut C,
+    ) -> Result<EvpnRuntimeApplyReport, EvpnRuntimeApplyError>
+    where
+        C: EvpnRuntimeConverger,
+    {
+        let current = self.model.clone();
+        let plan = current.plan_candidate(&candidate);
+        if plan.is_noop() {
+            return Ok(EvpnRuntimeApplyReport {
+                outcome: EvpnRuntimeApplyOutcome::Noop,
+                committed_generation: current.generation(),
+                plan,
+            });
+        }
+
+        self.model = current.with_status(
+            EvpnRuntimeLifecycle::Active,
+            EvpnRuntimeMutationState::InProgress,
+            COORDINATOR_IN_PROGRESS_MESSAGE,
+        );
+
+        if let Err(source) = converger.converge(&current, &candidate, &plan) {
+            self.model = current.with_status(
+                EvpnRuntimeLifecycle::Degraded,
+                EvpnRuntimeMutationState::Failed,
+                COORDINATOR_FAILED_MESSAGE,
+            );
+            self.last_failed_plan = Some(plan.clone());
+            self.last_converge_error = Some(source.clone());
+            return Err(EvpnRuntimeApplyError::new(plan, source));
+        }
+
+        let committed_generation = plan.proposed_generation;
+        self.model = EvpnRuntimeModel::from_candidate(
+            committed_generation,
+            candidate,
+            EvpnRuntimeLifecycle::Active,
+            EvpnRuntimeMutationState::Idle,
+            COORDINATOR_COMMITTED_MESSAGE,
+        );
+        self.last_failed_plan = None;
+        self.last_converge_error = None;
+        Ok(EvpnRuntimeApplyReport {
+            outcome: EvpnRuntimeApplyOutcome::Committed,
+            committed_generation,
+            plan,
+        })
     }
 }
 
@@ -350,7 +671,7 @@ impl EvpnRuntimeSnapshot {
                 .iter()
                 .map(|segment| segment.member_vnis.len())
                 .sum(),
-            message: "startup snapshot active; runtime EVPN mutation disabled",
+            message: model.message,
         }
     }
 
@@ -373,7 +694,7 @@ impl EvpnRuntimeSnapshot {
                 .iter()
                 .map(|segment| segment.member_vnis.len())
                 .sum(),
-            message: "startup snapshot active; runtime EVPN mutation disabled",
+            message: STARTUP_DISABLED_MESSAGE,
         }
     }
 }
@@ -641,5 +962,180 @@ mod tests {
         assert_eq!(plan.ethernet_segments.added, vec![esi_b]);
         assert!(plan.ethernet_segments.deleted.is_empty());
         assert_eq!(plan.ethernet_segments.redefined, vec![esi_a]);
+    }
+
+    #[derive(Default)]
+    struct RecordingConverger {
+        calls: usize,
+        fail: Option<EvpnRuntimeConvergeError>,
+        observed_current_generation: Vec<u64>,
+        observed_added_vnis: Vec<Vec<u32>>,
+        observed_candidate_counts: Vec<usize>,
+    }
+
+    impl EvpnRuntimeConverger for RecordingConverger {
+        fn converge(
+            &mut self,
+            current: &EvpnRuntimeModel,
+            candidate: &EvpnRuntimeCandidate,
+            plan: &EvpnRuntimePlan,
+        ) -> Result<(), EvpnRuntimeConvergeError> {
+            self.calls += 1;
+            self.observed_current_generation
+                .push(current.generation().as_u64());
+            self.observed_added_vnis
+                .push(plan.evpn_instances.added.clone());
+            self.observed_candidate_counts
+                .push(candidate.instances().len());
+            if let Some(error) = &self.fail {
+                return Err(error.clone());
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn coordinator_startup_enables_idle_mutation_state() {
+        let coordinator =
+            EvpnRuntimeCoordinator::new(EvpnInstanceTable::new(), IpVrfTable::new(), Vec::new());
+
+        let snapshot = coordinator.snapshot();
+
+        assert_eq!(snapshot.generation.as_u64(), 1);
+        assert_eq!(snapshot.lifecycle, EvpnRuntimeLifecycle::Active);
+        assert_eq!(snapshot.mutation_state, EvpnRuntimeMutationState::Idle);
+        assert_eq!(snapshot.message, COORDINATOR_IDLE_MESSAGE);
+    }
+
+    #[test]
+    fn coordinator_noop_candidate_does_not_call_converger_or_advance_generation() {
+        let mut coordinator = EvpnRuntimeCoordinator::new(
+            instance_table(vec![instance(100, "65000:100", "65000:100")]),
+            IpVrfTable::new(),
+            Vec::new(),
+        );
+        let candidate = EvpnRuntimeCandidate::from_model(coordinator.model());
+        let mut converger = RecordingConverger {
+            fail: Some(EvpnRuntimeConvergeError::new("should not be called")),
+            ..RecordingConverger::default()
+        };
+
+        let report = coordinator
+            .apply_candidate(candidate, &mut converger)
+            .expect("no-op candidate should not require convergence");
+
+        assert_eq!(report.outcome, EvpnRuntimeApplyOutcome::Noop);
+        assert_eq!(report.outcome.as_str(), "noop");
+        assert!(report.plan.is_noop());
+        assert_eq!(report.committed_generation.as_u64(), 1);
+        assert_eq!(coordinator.snapshot().generation.as_u64(), 1);
+        assert_eq!(
+            coordinator.snapshot().mutation_state,
+            EvpnRuntimeMutationState::Idle
+        );
+        assert!(coordinator.last_failed_plan().is_none());
+        assert!(coordinator.last_converge_error().is_none());
+        assert_eq!(converger.calls, 0);
+    }
+
+    #[test]
+    fn coordinator_commits_candidate_only_after_converger_accepts_plan() {
+        let mut coordinator = EvpnRuntimeCoordinator::new(
+            instance_table(vec![instance(100, "65000:100", "65000:100")]),
+            IpVrfTable::new(),
+            Vec::new(),
+        );
+        let candidate = EvpnRuntimeCandidate::new(
+            instance_table(vec![
+                instance(100, "65000:100", "65000:100"),
+                instance(200, "65000:200", "65000:200"),
+            ]),
+            IpVrfTable::new(),
+            Vec::new(),
+        );
+        let mut converger = RecordingConverger::default();
+
+        let report = coordinator
+            .apply_candidate(candidate, &mut converger)
+            .expect("accepted convergence should commit the candidate");
+
+        assert_eq!(report.outcome, EvpnRuntimeApplyOutcome::Committed);
+        assert_eq!(report.outcome.as_str(), "committed");
+        assert_eq!(report.committed_generation.as_u64(), 2);
+        assert_eq!(report.plan.evpn_instances.added, vec![200]);
+        assert_eq!(coordinator.model().generation().as_u64(), 2);
+        assert_eq!(coordinator.model().instances().len(), 2);
+        assert_eq!(
+            coordinator.snapshot().mutation_state,
+            EvpnRuntimeMutationState::Idle
+        );
+        assert_eq!(
+            coordinator.snapshot().message,
+            COORDINATOR_COMMITTED_MESSAGE
+        );
+        assert_eq!(converger.calls, 1);
+        assert_eq!(converger.observed_current_generation, vec![1]);
+        assert_eq!(converger.observed_added_vnis, vec![vec![200]]);
+        assert_eq!(converger.observed_candidate_counts, vec![2]);
+        assert!(coordinator.last_failed_plan().is_none());
+        assert!(coordinator.last_converge_error().is_none());
+    }
+
+    #[test]
+    fn coordinator_failure_keeps_prior_generation_and_surfaces_failed_state() {
+        let mut coordinator = EvpnRuntimeCoordinator::new(
+            instance_table(vec![instance(100, "65000:100", "65000:100")]),
+            IpVrfTable::new(),
+            Vec::new(),
+        );
+        let candidate = EvpnRuntimeCandidate::new(
+            instance_table(vec![
+                instance(100, "65000:100", "65000:100"),
+                instance(200, "65000:200", "65000:200"),
+            ]),
+            IpVrfTable::new(),
+            Vec::new(),
+        );
+        let mut converger = RecordingConverger {
+            fail: Some(EvpnRuntimeConvergeError::new("IMET command queue closed")),
+            ..RecordingConverger::default()
+        };
+
+        let error = coordinator
+            .apply_candidate(candidate, &mut converger)
+            .expect_err("failed convergence should reject the candidate");
+
+        assert_eq!(
+            error.converge_error().message(),
+            "IMET command queue closed"
+        );
+        assert_eq!(error.plan().evpn_instances.added, vec![200]);
+        assert_eq!(coordinator.model().generation().as_u64(), 1);
+        assert_eq!(coordinator.model().instances().len(), 1);
+        assert_eq!(
+            coordinator.snapshot().lifecycle,
+            EvpnRuntimeLifecycle::Degraded
+        );
+        assert_eq!(
+            coordinator.snapshot().mutation_state,
+            EvpnRuntimeMutationState::Failed
+        );
+        assert_eq!(coordinator.snapshot().message, COORDINATOR_FAILED_MESSAGE);
+        assert_eq!(
+            coordinator
+                .last_failed_plan()
+                .expect("failed plan retained")
+                .evpn_instances
+                .added,
+            vec![200]
+        );
+        assert_eq!(
+            coordinator
+                .last_converge_error()
+                .expect("converge error retained")
+                .message(),
+            "IMET command queue closed"
+        );
+        assert_eq!(converger.calls, 1);
     }
 }

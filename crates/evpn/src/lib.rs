@@ -143,8 +143,10 @@ pub use projection::{
 };
 pub use route_target::{RouteTarget, RouteTargetParseError};
 pub use runtime::{
-    EvpnRuntimeCandidate, EvpnRuntimeChangeSet, EvpnRuntimeGeneration, EvpnRuntimeLifecycle,
-    EvpnRuntimeModel, EvpnRuntimeMutationState, EvpnRuntimePlan, EvpnRuntimeSnapshot,
+    EvpnRuntimeApplyError, EvpnRuntimeApplyOutcome, EvpnRuntimeApplyReport, EvpnRuntimeCandidate,
+    EvpnRuntimeChangeSet, EvpnRuntimeConvergeError, EvpnRuntimeConverger, EvpnRuntimeCoordinator,
+    EvpnRuntimeGeneration, EvpnRuntimeLifecycle, EvpnRuntimeModel, EvpnRuntimeMutationState,
+    EvpnRuntimePlan, EvpnRuntimeSnapshot,
 };
 pub use segment::{DfAlgorithm, DfRole, EthernetSegment};
 
