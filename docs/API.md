@@ -1156,13 +1156,14 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.InjectionService/DeleteEvpnRoute
 ```
 
-The withdrawal key (route type + RD + ethernet tag + MAC + IP for
-Type 2; route type + RD + ethernet tag + originator IP for Type 3;
+The withdrawal key (route type + RD + ethernet tag + MAC + optional IP
+for Type 2; route type + RD + ethernet tag + originator IP for Type 3;
 route type + RD + prefix/prefix length for Type 5 in this
 pure/interface-less slice, where `ethernet_tag` must be 0) matches the
-EVPN route identity. Requests that include key fields from another
-route type are rejected with `INVALID_ARGUMENT`. Returns `NOT_FOUND`
-if no such route was previously injected.
+EVPN route identity. Omit `ip` when withdrawing a MAC-only Type 2 route
+or the key will not match. Requests that include key fields from
+another route type are rejected with `INVALID_ARGUMENT`. Returns
+`NOT_FOUND` if no such route was previously injected.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
