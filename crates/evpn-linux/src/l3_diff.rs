@@ -788,10 +788,15 @@ mod tests {
         vni: u32,
         rmac: MacAddress,
     ) -> ProjectedIpPrefixRoute {
+        let gateway = match prefix {
+            EvpnIpPrefixValue::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            EvpnIpPrefixValue::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+        };
         ProjectedIpPrefixRoute {
             rd: format!("65000:{vni}").parse().unwrap(),
             prefix,
             next_hop,
+            gateway,
             l3vni: vni,
             route_targets: vec![format!("65000:{vni}").parse().unwrap()],
             router_mac: Some(rmac),
