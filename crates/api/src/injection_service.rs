@@ -1749,6 +1749,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_evpn_type5_ipv6_reaches_rib_channel() {
+        let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
+        let svc = InjectionService::new(tx, AccessMode::ReadWrite);
+
+        let reply_task = tokio::spawn(async move {
+            let update = rx.recv().await.expect("service should send one RibUpdate");
+            match update {
+                RibUpdate::InjectEvpn { route, reply } => {
+                    assert_eq!(route.route.route_type(), 5);
+                    reply.send(Ok(())).ok();
+                    route
+                }
+                _ => panic!("expected InjectEvpn"),
+            }
+        });
+
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 5,
+            rd: "65000:5000".into(),
+            ethernet_tag: 0,
+            mac: String::new(),
+            ip: String::new(),
+            label: 5000,
+            label2: 0,
+            next_hop: "2001:db8::10".into(),
+            route_targets: vec!["65000:5000".into()],
+            disable_vxlan_encap: false,
+            prefix: "2001:db8:50::".into(),
+            prefix_length: 48,
+            router_mac: "02:00:00:00:50:00".into(),
+        });
+        svc.add_evpn_route(req).await.unwrap();
+        let route = reply_task.await.unwrap();
+
+        assert_eq!(route.next_hop, IpAddr::V6("2001:db8::10".parse().unwrap()));
+        let EvpnRoute::IpPrefix(t5) = route.route else {
+            panic!("expected Type 5 IP Prefix route");
+        };
+        assert_eq!(t5.gateway, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert!(
+            matches!(t5.prefix, EvpnIpPrefixValue::V6(p) if p.addr == "2001:db8:50::".parse::<Ipv6Addr>().unwrap() && p.len == 48)
+        );
+    }
+
+    #[tokio::test]
     async fn add_evpn_type5_requires_router_mac_for_vxlan() {
         let svc = make_service();
         let req = Request::new(proto::AddEvpnRouteRequest {

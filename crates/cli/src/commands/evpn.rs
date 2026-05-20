@@ -216,6 +216,11 @@ pub async fn add_ip_prefix(
     disable_vxlan_encap: bool,
     json: bool,
 ) -> Result<(), CliError> {
+    let router_mac = router_mac
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
     validate_add_ip_prefix_args(router_mac.as_deref(), &route_targets, disable_vxlan_encap)?;
     let (prefix, prefix_length) = output::parse_prefix(&prefix).map_err(CliError::Argument)?;
     let mut client =
@@ -246,6 +251,7 @@ fn validate_add_ip_prefix_args(
     route_targets: &[String],
     disable_vxlan_encap: bool,
 ) -> Result<(), CliError> {
+    let router_mac = router_mac.map(str::trim).filter(|s| !s.is_empty());
     if route_targets.is_empty() {
         return Err(CliError::Argument(
             "at least one --rt is required for EVPN Type 5 IP Prefix".into(),
@@ -1057,6 +1063,9 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
         let rt = vec!["65000:5000".to_string()];
 
         let err = super::validate_add_ip_prefix_args(None, &rt, false).unwrap_err();
+        assert!(err.to_string().contains("--router-mac"));
+
+        let err = super::validate_add_ip_prefix_args(Some("   "), &rt, false).unwrap_err();
         assert!(err.to_string().contains("--router-mac"));
 
         let err =
