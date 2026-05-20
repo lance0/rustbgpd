@@ -1258,7 +1258,7 @@ Type 5/IP-VRF state, and Linux owned dataplane state. ADR-0063 therefore
 requires a single command-driven EVPN runtime coordinator with
 validation-first model updates and explicit drain/replay semantics before
 any mutating instance API is added. Tracked in
-[issue #133](https://github.com/lance0/rustbgpd/issues/133).
+[issue #210](https://github.com/lance0/rustbgpd/issues/210).
 
 Operators configure instances via the `[[evpn_instances]]` TOML
 block; SIGHUP that edits any instance is restart-required (see

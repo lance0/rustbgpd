@@ -1113,8 +1113,8 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // SIGHUP still pins EVPN table edits until a later coordinator
     // can validate, drain/replay, and publish new generations.
     let evpn_runtime_model = Arc::new(rustbgpd_evpn::EvpnRuntimeModel::startup(
-        (*evpn_instances).clone(),
-        (*evpn_ip_vrfs).clone(),
+        evpn_instances.clone(),
+        evpn_ip_vrfs.clone(),
         ethernet_segments.clone(),
     ));
     let evpn_originator_handle = if let Some(handle) = evpn_dataplane_handle.as_mut() {

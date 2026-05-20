@@ -6,7 +6,7 @@
 //! EVPN edits as restart-required until a future coordinator can
 //! validate, drain, replay, and publish a new generation safely.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use crate::ip_vrf::IpVrfTable;
 use crate::{EthernetSegment, EvpnInstanceTable};
@@ -98,17 +98,18 @@ impl EvpnRuntimeMutationState {
 
 /// Immutable committed EVPN runtime model.
 ///
-/// This owns the resolved domain tables that a future coordinator
-/// will validate and publish. The first implementation only snapshots
-/// startup state; downstream actors still receive their existing
-/// table handles until mutation commands are implemented.
+/// This shares the resolved domain tables that startup already hands
+/// to downstream actors, so the read-only foundation does not keep a
+/// second deep copy of the L2/IP-VRF model for the daemon lifetime. A
+/// future coordinator will publish later generations only after
+/// validation and converge planning succeeds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvpnRuntimeModel {
     generation: EvpnRuntimeGeneration,
     lifecycle: EvpnRuntimeLifecycle,
     mutation_state: EvpnRuntimeMutationState,
-    instances: EvpnInstanceTable,
-    ip_vrfs: IpVrfTable,
+    instances: Arc<EvpnInstanceTable>,
+    ip_vrfs: Arc<IpVrfTable>,
     ethernet_segments: Vec<EthernetSegment>,
 }
 
@@ -116,17 +117,17 @@ impl EvpnRuntimeModel {
     /// Build the startup runtime model from already-resolved config
     /// tables.
     #[must_use]
-    pub fn startup(
-        instances: EvpnInstanceTable,
-        ip_vrfs: IpVrfTable,
-        ethernet_segments: Vec<EthernetSegment>,
-    ) -> Self {
+    pub fn startup<I, V>(instances: I, ip_vrfs: V, ethernet_segments: Vec<EthernetSegment>) -> Self
+    where
+        I: Into<Arc<EvpnInstanceTable>>,
+        V: Into<Arc<IpVrfTable>>,
+    {
         Self {
             generation: EvpnRuntimeGeneration::STARTUP,
             lifecycle: EvpnRuntimeLifecycle::Active,
             mutation_state: EvpnRuntimeMutationState::Disabled,
-            instances,
-            ip_vrfs,
+            instances: instances.into(),
+            ip_vrfs: ip_vrfs.into(),
             ethernet_segments,
         }
     }
@@ -151,14 +152,14 @@ impl EvpnRuntimeModel {
 
     /// Resolved L2 EVPN instance table for the committed generation.
     #[must_use]
-    pub const fn instances(&self) -> &EvpnInstanceTable {
-        &self.instances
+    pub fn instances(&self) -> &EvpnInstanceTable {
+        self.instances.as_ref()
     }
 
     /// Resolved IP-VRF table for the committed generation.
     #[must_use]
-    pub const fn ip_vrfs(&self) -> &IpVrfTable {
-        &self.ip_vrfs
+    pub fn ip_vrfs(&self) -> &IpVrfTable {
+        self.ip_vrfs.as_ref()
     }
 
     /// Resolved Ethernet Segment bindings for the committed generation.
@@ -186,8 +187,8 @@ impl EvpnRuntimeModel {
         EvpnRuntimePlan {
             current_generation: self.generation,
             proposed_generation: self.generation.next(),
-            evpn_instances: plan_evpn_instances(&self.instances, candidate.instances()),
-            ip_vrfs: plan_ip_vrfs(&self.ip_vrfs, candidate.ip_vrfs()),
+            evpn_instances: plan_evpn_instances(self.instances(), candidate.instances()),
+            ip_vrfs: plan_ip_vrfs(self.ip_vrfs(), candidate.ip_vrfs()),
             ethernet_segments: plan_ethernet_segments(
                 &self.ethernet_segments,
                 candidate.ethernet_segments(),
@@ -229,8 +230,8 @@ impl EvpnRuntimeCandidate {
     #[must_use]
     pub fn from_model(model: &EvpnRuntimeModel) -> Self {
         Self {
-            instances: model.instances.clone(),
-            ip_vrfs: model.ip_vrfs.clone(),
+            instances: model.instances().clone(),
+            ip_vrfs: model.ip_vrfs().clone(),
             ethernet_segments: model.ethernet_segments.clone(),
         }
     }
@@ -550,8 +551,8 @@ mod tests {
         let ip_vrfs = IpVrfTable::new();
         assert!(ip_vrfs.is_empty());
         // Exercise the concrete table type in this module without
-        // needing a full IP-VRF fixture. The runtime model stores it
-        // by value and reports through the same table API.
+        // needing a full IP-VRF fixture. The runtime model shares it
+        // and reports through the same table API.
         assert!(IpVrfId::new(5000).is_ok());
 
         let model =
