@@ -1217,14 +1217,15 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // EVPN Type 3 IMET origination (Gate 7b+1 phase F). One Type 3
     // per L2VNI announcing this VTEP's BGP-level VNI membership; not
     // conditioned on kernel readiness. Originated at startup, with
-    // the keys retained for shutdown-time withdraw. RR-only paths
-    // (empty `evpn_instances`) skip origination entirely — IMET
-    // requires a VTEP IP, which an RR doesn't have.
-    let evpn_imet_keys: Vec<rustbgpd_wire::EvpnRouteKey> = if evpn_instances.is_empty() {
-        Vec::new()
-    } else {
-        evpn_imet::originate_all(evpn_instances.iter().cloned().collect::<Vec<_>>(), &rib_tx).await
-    };
+    // controller-owned keys retained for shutdown-time withdraw.
+    // RR-only paths (empty `evpn_instances`) skip origination entirely
+    // — IMET requires a VTEP IP, which an RR doesn't have.
+    let mut evpn_imet_controller = evpn_imet::EvpnImetController::new();
+    if !evpn_instances.is_empty() {
+        evpn_imet_controller
+            .originate_all(evpn_instances.iter().cloned().collect::<Vec<_>>(), &rib_tx)
+            .await;
+    }
 
     // EVPN SVI-MAC origination (RFC 9135 §6.1) — gated on any
     // instance setting `advertise_svi_mac = true`. Subscribes to the
@@ -1930,12 +1931,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // so peers cleanly remove us from their ingress-replication
     // lists. Same ordering rationale as the Type 2 drain — must land
     // before peer sessions tear down.
-    if !evpn_imet_keys.is_empty() {
+    if !evpn_imet_controller.is_empty() {
         info!(
-            count = evpn_imet_keys.len(),
+            count = evpn_imet_controller.len(),
             "withdrawing EVPN Type 3 IMET routes"
         );
-        evpn_imet::withdraw_all(evpn_imet_keys, &rib_tx).await;
+        evpn_imet_controller.withdraw_all(&rib_tx).await;
     }
 
     let _ = peer_mgr_tx.send(PeerManagerCommand::Shutdown).await;
