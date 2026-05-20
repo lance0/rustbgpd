@@ -712,7 +712,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // Startup banner — human-friendly topology summary on stderr.
     print_startup_banner(&config, &grpc_listeners);
     let router_id: Ipv4Addr = config.global.router_id.parse().unwrap_or_else(|e| {
-        fatal_startup_error("invalid router-id after configuration validation", e);
+        error!(
+            router_id = %config.global.router_id,
+            error = %e,
+            "invalid router-id after configuration validation"
+        );
+        process::exit(1);
     });
 
     // Spawn metrics HTTP server (if configured)
