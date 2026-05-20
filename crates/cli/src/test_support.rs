@@ -551,6 +551,18 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
         let name = request.into_inner().name;
         Err(Status::not_found(format!("no IP-VRF named {name:?}")))
     }
+
+    async fn clear_duplicate_mac_quarantine(
+        &self,
+        _request: Request<server_proto::ClearDuplicateMacQuarantineRequest>,
+    ) -> Result<Response<server_proto::ClearDuplicateMacQuarantineResponse>, Status> {
+        Ok(Response::new(
+            server_proto::ClearDuplicateMacQuarantineResponse {
+                cleared: true,
+                message: "duplicate-MAC quarantine cleared".to_string(),
+            },
+        ))
+    }
 }
 
 #[tonic::async_trait]
