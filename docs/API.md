@@ -550,8 +550,10 @@ use `ListEvpnRoutes` and its EVPN-specific filters.
 
 The unicast route-listing RPCs `ListReceivedRoutes`, `ListBestRoutes`, and
 `ListAdvertisedRoutes` support pagination via `page_size` and `page_token`.
-Status RPCs such as `ListBlackholeDiscards` and `ListFibRoutes` return
-unfiltered snapshots. `ListFlowSpecRoutes` does not support pagination.
+`ListFibRoutes` also supports optional pagination; unlike the route-listing
+RPCs, `page_size = 0` preserves the legacy behavior and returns the full
+filtered FIB status snapshot. `ListBlackholeDiscards` and `ListFlowSpecRoutes`
+do not support pagination.
 
 ```bash
 # First page (2 routes)
@@ -699,6 +701,7 @@ rustbgpctl rib fib          # human table
 rustbgpctl rib fib --json   # JSON array for scripts
 rustbgpctl rib fib --table edge --state rejected --reason route_limit_exceeded
 rustbgpctl rib fib --prefix 203.0.113.0/24 --peer 198.51.100.2
+rustbgpctl rib fib --page-size 100
 ```
 
 Returns one row per desired route, daemon-owned route, or one-pass
@@ -719,7 +722,13 @@ longest-prefix or containment matching, so `203.0.113.0/24` does not match
 `203.0.113.128/25`. Empty strings and `FIB_ROUTE_STATE_UNSPECIFIED` mean "no
 filter"; for direct gRPC callers, `prefix_length` must be `0` when `prefix` is
 empty. `rustbgpctl rib fib` exposes the same filters as `--table`, `--state`,
-`--reason`, `--prefix`, and `--peer`.
+`--reason`, `--prefix`, and `--peer`. `page_size` and `page_token` enable
+optional pagination over the filtered status rows; `page_size = 0` keeps the
+legacy full-snapshot response, and `page_token` is valid only when
+`page_size > 0`. The response includes `next_page_token` and `total_count`;
+CLI JSON output remains a route array unless `--page-size` or `--page-token`
+is provided, in which case it emits an object with `routes`,
+`next_page_token`, and `total_count`.
 
 `table_id`, `metric`, `prefix`, `prefix_length`, and `next_hop` describe
 the route identity and forwarding value. The CLI human table renders

@@ -717,12 +717,16 @@ rustbgpctl rib fib
 rustbgpctl -j rib fib
 rustbgpctl rib fib --table edge --state rejected --reason route_limit_exceeded
 rustbgpctl rib fib --prefix 203.0.113.0/24 --peer 198.51.100.2
+rustbgpctl rib fib --page-size 100
 ```
 
 This reports only the ADR-0061 configured-table runtime, not the ordinary
 Loc-RIB. Rows are `installed`, `rejected`, or `failed`. The filters compose
 with AND semantics. The `--prefix` filter is exact prefix+length matching, not
-longest-prefix or containment matching.
+longest-prefix or containment matching. Use `--page-size` and the returned
+next-page token to page through large surfaced status snapshots. Pagination is
+over rows visible to `ListFibRoutes`; it does not add suppressed-route counts
+for sampled `route_limit_exceeded` rows.
 
 - `installed` / `owned`: rustbgpd owns the row and the kernel table matches
   the current best route.

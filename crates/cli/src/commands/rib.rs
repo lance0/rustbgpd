@@ -8,7 +8,7 @@ use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddPathRequest, BlackholeDiscardState, DeletePathRequest, ExplainAdvertisedRouteRequest,
     ExplainBestPathRequest, ExplainDecision, FibRouteState, ListBlackholeDiscardsRequest,
-    ListFibRoutesRequest, ListRoutesRequest,
+    ListFibRoutesRequest, ListFibRoutesResponse, ListRoutesRequest,
 };
 use serde::Serialize;
 
@@ -28,6 +28,8 @@ pub struct FibRouteFilterOpts {
     pub reason: Option<String>,
     pub prefix: Option<String>,
     pub peer: Option<String>,
+    pub page_size: Option<u32>,
+    pub page_token: Option<String>,
 }
 
 fn make_route_request(
@@ -94,6 +96,8 @@ fn make_fib_request(filters: &FibRouteFilterOpts) -> Result<ListFibRoutesRequest
         prefix,
         prefix_length,
         peer_address,
+        page_size: filters.page_size.unwrap_or(0),
+        page_token: filters.page_token.clone().unwrap_or_default(),
     })
 }
 
@@ -152,6 +156,13 @@ struct JsonFibRouteStatus {
     reason: String,
 }
 
+#[derive(Serialize)]
+struct JsonFibRoutePage {
+    routes: Vec<JsonFibRouteStatus>,
+    next_page_token: String,
+    total_count: u64,
+}
+
 fn print_blackhole_discards(discards: &[crate::proto::BlackholeDiscard], json: bool) {
     if json {
         let out: Vec<JsonBlackholeDiscard> =
@@ -178,15 +189,29 @@ fn print_blackhole_discards(discards: &[crate::proto::BlackholeDiscard], json: b
     }
 }
 
-fn print_fib_routes(routes: &[crate::proto::FibRouteStatus], json: bool) {
+fn print_fib_routes(resp: &ListFibRoutesResponse, json: bool, include_page_meta: bool) {
     if json {
-        let out: Vec<JsonFibRouteStatus> = routes.iter().map(fib_route_status_to_json).collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out)
-                .expect("failed to serialize general FIB route list as JSON")
-        );
-    } else if routes.is_empty() {
+        let routes: Vec<JsonFibRouteStatus> =
+            resp.routes.iter().map(fib_route_status_to_json).collect();
+        if include_page_meta {
+            let out = JsonFibRoutePage {
+                routes,
+                next_page_token: resp.next_page_token.clone(),
+                total_count: resp.total_count,
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&out)
+                    .expect("failed to serialize paginated general FIB route list as JSON")
+            );
+        } else {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&routes)
+                    .expect("failed to serialize general FIB route list as JSON")
+            );
+        }
+    } else if resp.routes.is_empty() {
         println!("No general FIB routes");
     } else {
         println!(
@@ -194,7 +219,7 @@ fn print_fib_routes(routes: &[crate::proto::FibRouteStatus], json: bool) {
             "Table", "Metric", "Prefix", "Next hop", "State"
         );
         println!("{}", "-".repeat(132));
-        for r in routes {
+        for r in &resp.routes {
             println!(
                 "{:<16} {:<10} {:<43} {:<39} {:<10} {}",
                 r.table_name,
@@ -204,6 +229,12 @@ fn print_fib_routes(routes: &[crate::proto::FibRouteStatus], json: bool) {
                 fib_state_label(r.state),
                 r.reason
             );
+        }
+    }
+    if include_page_meta && !json {
+        println!("Total matching rows: {}", resp.total_count);
+        if !resp.next_page_token.is_empty() {
+            println!("Next page token: {}", resp.next_page_token);
         }
     }
 }
@@ -623,7 +654,8 @@ pub async fn fib(
         .list_fib_routes(make_fib_request(&filters)?)
         .await?
         .into_inner();
-    print_fib_routes(&resp.routes, json);
+    let include_page_meta = filters.page_size.is_some() || filters.page_token.is_some();
+    print_fib_routes(&resp, json, include_page_meta);
     Ok(())
 }
 
@@ -794,6 +826,8 @@ mod tests {
                 reason: None,
                 prefix: None,
                 peer: None,
+                page_size: None,
+                page_token: None,
             },
             true,
         )
@@ -809,6 +843,8 @@ mod tests {
             reason: Some("route_limit_exceeded".to_string()),
             prefix: Some("203.0.113.0/24".to_string()),
             peer: Some("198.51.100.2".to_string()),
+            page_size: Some(50),
+            page_token: Some("100".to_string()),
         })
         .unwrap();
 
@@ -818,6 +854,25 @@ mod tests {
         assert_eq!(request.prefix, "203.0.113.0");
         assert_eq!(request.prefix_length, 24);
         assert_eq!(request.peer_address, "198.51.100.2");
+        assert_eq!(request.page_size, 50);
+        assert_eq!(request.page_token, "100");
+    }
+
+    #[test]
+    fn fib_request_defaults_to_unpaged_snapshot() {
+        let request = make_fib_request(&FibRouteFilterOpts {
+            table: None,
+            state: None,
+            reason: None,
+            prefix: None,
+            peer: None,
+            page_size: None,
+            page_token: None,
+        })
+        .unwrap();
+
+        assert_eq!(request.page_size, 0);
+        assert!(request.page_token.is_empty());
     }
 
     #[test]
@@ -828,6 +883,8 @@ mod tests {
             reason: None,
             prefix: None,
             peer: None,
+            page_size: None,
+            page_token: None,
         })
         .unwrap_err();
         assert!(err.to_string().contains("unsupported FIB route state"));
@@ -838,6 +895,8 @@ mod tests {
             reason: None,
             prefix: None,
             peer: Some("not-an-ip".to_string()),
+            page_size: None,
+            page_token: None,
         })
         .unwrap_err();
         assert!(err.to_string().contains("invalid --peer address"));
@@ -883,6 +942,20 @@ mod tests {
         assert_eq!(value["peer_address"], "198.51.100.1");
         assert_eq!(value["state"], "failed");
         assert_eq!(value["reason"], "install_failed:EPERM");
+    }
+
+    #[test]
+    fn fib_paginated_json_shape_includes_metadata() {
+        let out = JsonFibRoutePage {
+            routes: vec![],
+            next_page_token: "100".to_string(),
+            total_count: 250,
+        };
+
+        let value = serde_json::to_value(out).unwrap();
+        assert!(value["routes"].as_array().unwrap().is_empty());
+        assert_eq!(value["next_page_token"], "100");
+        assert_eq!(value["total_count"], 250);
     }
 
     /// Pre-existing `best_route` and per-candidate `route` keys
