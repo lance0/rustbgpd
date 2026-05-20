@@ -691,6 +691,7 @@ pub(crate) fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::Ro
         RouteEventType::Added => proto::RouteEventType::Added,
         RouteEventType::Withdrawn => proto::RouteEventType::Withdrawn,
         RouteEventType::BestChanged => proto::RouteEventType::BestChanged,
+        RouteEventType::PolicyFiltered => proto::RouteEventType::PolicyFiltered,
     };
 
     proto::RouteEvent {
@@ -711,6 +712,10 @@ pub(crate) fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::Ro
             .map_or_else(String::new, |p: IpAddr| p.to_string()),
         path_id: event.path_id,
         event_id: event.event_id,
+        target_peer_address: event
+            .target_peer
+            .map_or_else(String::new, |p: IpAddr| p.to_string()),
+        reason: event.reason,
     }
 }
 
@@ -730,7 +735,8 @@ fn route_event_matches_watch_filter(
     if let Some(filter_addr) = peer_filter {
         let matches_current = event.peer == Some(filter_addr);
         let matches_previous = event.previous_peer == Some(filter_addr);
-        if !matches_current && !matches_previous {
+        let matches_target = event.target_peer == Some(filter_addr);
+        if !matches_current && !matches_previous && !matches_target {
             return false;
         }
     }
@@ -1557,8 +1563,10 @@ mod tests {
             prefix,
             peer: Some(peer),
             previous_peer: None,
+            target_peer: None,
             timestamp: "123".to_string(),
             path_id: 0,
+            reason: String::new(),
         }
     }
 
@@ -1805,8 +1813,10 @@ mod tests {
                 prefix: Prefix::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24)),
                 peer: Some("192.0.2.1".parse().unwrap()),
                 previous_peer: Some("192.0.2.2".parse().unwrap()),
+                target_peer: None,
                 timestamp: "123".to_string(),
                 path_id: 99,
+                reason: String::new(),
             }])
             .unwrap();
 

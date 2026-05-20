@@ -111,6 +111,10 @@ pub struct RibManager {
     /// Current ASPA table for upstream path verification. `None` = no ASPA data.
     aspa_table: Option<Arc<rustbgpd_rpki::AspaTable>>,
     route_events_tx: broadcast::Sender<RouteEvent>,
+    /// Currently surfaced unicast export-policy denials. This keeps
+    /// route-level policy-filtered events transition-based instead of
+    /// re-emitting on every dirty or forced outbound resync.
+    policy_filtered_routes: HashSet<PolicyFilteredRouteKey>,
     /// Bounded recent route-event history for after-the-fact operator
     /// timeline queries. Live streaming still uses `route_events_tx`.
     route_event_history: VecDeque<RouteEvent>,
@@ -139,6 +143,14 @@ const ROUTES_RECEIVED_CHUNK_SIZE: usize = 1024;
 const QUERY_BUDGET_PER_CHUNK: usize = 8;
 const ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
 const EVPN_ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct PolicyFilteredRouteKey {
+    pub(super) target_peer: IpAddr,
+    pub(super) source_peer: IpAddr,
+    pub(super) prefix: Prefix,
+    pub(super) path_id: u32,
+}
 
 enum PendingRouteChunk {
     Withdrawn(Vec<(Prefix, u32)>),
@@ -356,6 +368,7 @@ impl RibManager {
             vrp_table: None,
             aspa_table: None,
             route_events_tx,
+            policy_filtered_routes: HashSet::new(),
             route_event_history: VecDeque::with_capacity(ROUTE_EVENT_HISTORY_CAPACITY),
             next_route_event_id: 1,
             evpn_events_tx,
@@ -925,6 +938,48 @@ impl RibManager {
         let _ = self.route_events_tx.send(event);
     }
 
+    pub(super) fn update_policy_filtered_routes_for_prefix(
+        &mut self,
+        target_peer: IpAddr,
+        prefix: Prefix,
+        current: &[PolicyFilteredRouteKey],
+    ) {
+        let current = current.iter().copied().collect::<HashSet<_>>();
+        let previous = self
+            .policy_filtered_routes
+            .iter()
+            .copied()
+            .filter(|key| key.target_peer == target_peer && key.prefix == prefix)
+            .collect::<Vec<_>>();
+
+        for key in previous {
+            if !current.contains(&key) {
+                self.policy_filtered_routes.remove(&key);
+            }
+        }
+
+        for key in current {
+            if self.policy_filtered_routes.insert(key) {
+                self.publish_route_event(RouteEvent {
+                    event_id: 0,
+                    event_type: RouteEventType::PolicyFiltered,
+                    prefix: key.prefix,
+                    peer: Some(key.source_peer),
+                    previous_peer: None,
+                    target_peer: Some(key.target_peer),
+                    timestamp: crate::event::unix_timestamp_now(),
+                    path_id: key.path_id,
+                    reason: "policy_denied".to_string(),
+                });
+            }
+        }
+    }
+
+    pub(super) fn clear_policy_filtered_routes_for_peer(&mut self, target_peer: IpAddr) {
+        self.policy_filtered_routes
+            .retain(|key| key.target_peer != target_peer);
+    }
+
     fn handle_query_route_event_history(
         &mut self,
         peer: Option<IpAddr>,
@@ -950,7 +1005,11 @@ impl RibManager {
                 None => true,
             })
             .filter(|event| match peer {
-                Some(peer) => event.peer == Some(peer) || event.previous_peer == Some(peer),
+                Some(peer) => {
+                    event.peer == Some(peer)
+                        || event.previous_peer == Some(peer)
+                        || event.target_peer == Some(peer)
+                }
                 None => true,
             })
             .filter(|event| match prefix {

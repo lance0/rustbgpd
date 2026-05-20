@@ -599,6 +599,7 @@ rustbgpctl events watch --category session --type notification_sent,notification
 rustbgpctl events watch --category policy --type policy_changed
 rustbgpctl events watch --category dataplane --type dataplane_status_changed
 rustbgpctl events watch --category dataplane --type dataplane_route_failed --prefix 203.0.113.0/24
+rustbgpctl events watch --prefix 203.0.113.0/24 --type policy_filtered
 rustbgpctl events watch --category evpn --type evpn_added,evpn_withdrawn,evpn_best_changed
 rustbgpctl events sessions --address 10.0.0.2 --type established,lost --limit 20
 rustbgpctl events policy --address 10.0.0.2 --type policy_changed --limit 20
@@ -606,8 +607,9 @@ rustbgpctl events evpn --route-type 2 --rd 65000:100 --limit 20
 ```
 
 `events watch` tails the unified `EventService.WatchEvents` stream. The
-live stream carries route add / withdraw / best-change events plus structured
-session lifecycle events (`state_changed`, `established`, `lost`,
+live stream carries route add / withdraw / best-change /
+export-policy-filtered events plus structured session lifecycle events
+(`state_changed`, `established`, `lost`,
 `peer_enabled`, `peer_disabled`), metadata-only BGP NOTIFICATION
 sent/received events (`notification_sent`, `notification_received`), opt-in
 policy mutation summaries (`policy_changed`), EVPN route best-path events
@@ -622,7 +624,11 @@ neighbor-set / peer-group / chain mutations accepted by the runtime, or
 `--category evpn` when watching EVPN route changes. Dataplane summary events are
 peerless and do not match `--address`, `--family`, or `--prefix`. FIB rejected
 counts reflect surfaced status rows; sampled `route_limit_exceeded` rows are not
-a global suppressed-route total. Policy events describe runtime apply success;
+a global suppressed-route total. Policy-filtered route events are target-peer
+scoped: `peer_address` remains the source route peer, `target_peer_address` is
+the outbound peer whose export policy denied the route, and `--address` matches
+either side for route history and live route filtering. Policy events describe
+runtime apply success;
 config-file persistence is separate. Session state-change events use a bounded
 observability channel separate from the lossless TCP collision-coordination
 path, so a saturated watch stream can miss lifecycle events without blocking
@@ -664,6 +670,7 @@ Use the narrowest surface for the question you are asking:
 |----------|---------------|-------|
 | "What is changing right now?" | `rustbgpctl events watch` / `EventService.WatchEvents` | Live route, session, policy, EVPN route, dataplane-summary, and per-route FIB dataplane stream. No replay after reconnect. |
 | "What just changed for this prefix?" | `rustbgpctl events --prefix 203.0.113.0/24` / `ListRouteEvents` | Exact-prefix route history from the bounded in-memory RIB ring. |
+| "Why did this prefix not reach a peer?" | `rustbgpctl events watch --address 10.0.0.2 --type policy_filtered --prefix 203.0.113.0/24` / `ListRouteEvents` | Export-policy denials where the peer is the denied outbound target. |
 | "Did FIB apply fail for this prefix?" | `rustbgpctl events watch --category dataplane --type dataplane_route_failed --prefix 203.0.113.0/24` / `EventService.WatchEvents` | Live ADR-0061 route apply outcome; no history API. |
 | "What policy changed recently?" | `rustbgpctl events policy` / `ListPolicyEvents` | Recent policy / neighbor-set / peer-group / chain mutation summaries from the bounded peer-manager ring. |
 | "What EVPN route changed recently?" | `rustbgpctl events evpn --route-type 2 --rd 65000:100` / `ListEvpnEvents` | Recent EVPN route add / withdraw / best-change history from the bounded RIB ring. |

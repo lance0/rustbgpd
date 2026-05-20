@@ -450,9 +450,9 @@ Query the routing information base and subscribe to real-time route changes.
 | `ListEvpnRoutes` | EVPN routes (RFC 7432) in Loc-RIB view, filterable by route type / peer / RD |
 | `ListBlackholeDiscards` | RFC 7999 BLACKHOLE kernel-discard install status when `[global] honor_blackhole = true` and `[global] install_blackhole_discard = true` |
 | `ListFibRoutes` | ADR-0061 general unicast Linux FIB route status for configured `[[fib_tables]]` |
-| `ListRouteEvents` | Recent unicast best-path event history from the bounded in-memory RIB ring |
-| `WatchRoutes` | Server-streaming: real-time route add/withdraw/best-change events |
-| `WatchRouteEvents` | Server-streaming: real-time route add/withdraw/best-change events wrapped as `BgpEvent`, including explicit lag warnings |
+| `ListRouteEvents` | Recent unicast route add / withdraw / best-change / export-policy-filtered event history from the bounded in-memory RIB ring |
+| `WatchRoutes` | Server-streaming: real-time route add / withdraw / best-change / export-policy-filtered events |
+| `WatchRouteEvents` | Server-streaming: real-time route add / withdraw / best-change / export-policy-filtered events wrapped as `BgpEvent`, including explicit lag warnings |
 
 ### Runtime observability surfaces
 
@@ -586,7 +586,10 @@ Both `WatchRoutes` and `WatchRouteEvents` use `WatchRoutesRequest`, which
 accepts an `afi_safi` field to filter the stream by address family.
 
 Event types: `ROUTE_EVENT_TYPE_ADDED`, `ROUTE_EVENT_TYPE_WITHDRAWN`,
-`ROUTE_EVENT_TYPE_BEST_CHANGED`.
+`ROUTE_EVENT_TYPE_BEST_CHANGED`, and `ROUTE_EVENT_TYPE_POLICY_FILTERED`.
+Policy-filtered events are route-level export-policy denials: `peer_address`
+is the source route peer, `target_peer_address` is the outbound peer whose
+export policy denied the route, and `reason` is currently `policy_denied`.
 
 Each `RouteEvent` carries an `event_id`, a monotonic process-local cursor that
 is assigned before the event is written to history and broadcast to live
@@ -622,11 +625,12 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.RibService/ListRouteEvents
 ```
 
-`ListRouteEvents` reads the same unicast best-path events that feed
+`ListRouteEvents` reads the same unicast route events that feed
 `WatchRoutes`, but from a bounded 4096-event in-memory ring. Peer filters
-match both `peer_address` and `previous_peer_address`, so a peer-scoped query
-includes withdraws and best-path moves away from that peer. Prefix filters are
-exact-match only and can be combined with peer, family, and limit filters. The
+match `peer_address`, `previous_peer_address`, and `target_peer_address`, so a
+peer-scoped query includes withdraws, best-path moves away from that peer, and
+routes filtered by that peer's export policy. Prefix filters are exact-match
+only and can be combined with peer, family, and limit filters. The
 filter does not do containment or longest-prefix matching, so a query for
 `203.0.113.0/16` will not return an event recorded for `203.0.113.0/24`.
 `event_id` values are monotonic within the running daemon and can be used by
@@ -818,7 +822,9 @@ streams by wall-clock timestamp.
 Filters compose
 AND-wise across category, type, peer, family, and exact prefix. Repeated
 category and type filters are OR-matched within their own dimension. Route
-events are sourced from the same structured RIB broadcast as `WatchRoutes`;
+events are sourced from the same structured RIB broadcast as `WatchRoutes`,
+including export-policy denial events (`route_policy_filtered`) for unicast
+routes present in Loc-RIB but filtered from an outbound peer;
 session events are sourced from the peer manager's session broadcast and cover
 both lifecycle transitions and metadata-only BGP NOTIFICATION sent/received
 events; policy events are sourced from the peer manager after a runtime policy
@@ -849,8 +855,9 @@ the request's event-type filter is otherwise restrictive. Prefix and family
 filters match unicast route events and per-route FIB dataplane events; session,
 policy, EVPN, and peerless dataplane summary events do not match requests that
 set `prefix` or `afi_safi`. Peer filters match route, session, EVPN, and
-per-route FIB dataplane events; they do not match peerless dataplane summary
-events. `BgpEvent` repeats common fields such as peer,
+per-route FIB dataplane events; route events also match `target_peer_address`
+for `route_policy_filtered`. Peer filters do not match peerless dataplane
+summary events. `BgpEvent` repeats common fields such as peer, target peer,
 prefix, type, and severity at the top level even when the payload also carries
 them so category-agnostic clients can render or filter events without unpacking
 the `oneof`.

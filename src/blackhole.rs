@@ -982,8 +982,10 @@ mod tests {
             prefix,
             peer: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
             previous_peer: None,
+            target_peer: None,
             timestamp: "0".to_string(),
             path_id: 0,
+            reason: String::new(),
         }
     }
 

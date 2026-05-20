@@ -6,13 +6,14 @@ use rustbgpd_wire::{EvpnRouteKey, FlowSpecRule, Prefix};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use super::RibManager;
 use super::helpers::prefix_family;
+use super::{PolicyFilteredRouteKey, RibManager};
 use crate::adj_rib_out::AdjRibOut;
 use crate::update::OutboundRouteUpdate;
 
 impl RibManager {
     pub(super) fn handle_peer_down(&mut self, peer: IpAddr) {
+        self.clear_policy_filtered_routes_for_peer(peer);
         if self.gr_peers.remove(&peer).is_some() {
             self.gr_stale_deadlines.remove(&peer);
             self.gr_stale_routes_time.remove(&peer);
@@ -155,6 +156,7 @@ impl RibManager {
         let mut fs_withdraw = Vec::new();
         let mut evpn_announce = Vec::new();
         let mut evpn_withdraw = Vec::new();
+        let mut policy_filtered_by_prefix: Vec<(Prefix, Vec<PolicyFilteredRouteKey>)> = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
@@ -188,6 +190,7 @@ impl RibManager {
                 0
             };
             if prefix_send_max > 0 {
+                let mut policy_filtered = Vec::new();
                 Self::distribute_multipath_prefix(
                     &self.ribs,
                     &initial_view,
@@ -205,9 +208,12 @@ impl RibManager {
                     &mut announce,
                     &mut withdraw,
                     &mut nh_override_flags,
+                    &mut policy_filtered,
                     false, // initial dump — equality check is correct
                 );
+                policy_filtered_by_prefix.push((*prefix, policy_filtered));
             } else {
+                let mut policy_filtered = Vec::new();
                 Self::distribute_single_best_prefix(
                     loc_rib,
                     &initial_view,
@@ -224,8 +230,10 @@ impl RibManager {
                     &mut announce,
                     &mut withdraw,
                     &mut nh_override_flags,
+                    &mut policy_filtered,
                     false, // initial dump — equality check is correct
                 );
+                policy_filtered_by_prefix.push((*prefix, policy_filtered));
             }
         }
 
@@ -289,13 +297,14 @@ impl RibManager {
             .cloned()
             .unwrap_or_default();
 
-        if (!announce.is_empty()
+        let has_outbound_diff = !announce.is_empty()
             || !withdraw.is_empty()
             || !fs_announce.is_empty()
             || !fs_withdraw.is_empty()
             || !evpn_announce.is_empty()
-            || !evpn_withdraw.is_empty())
-            && !self.try_send_and_commit_outbound_update(
+            || !evpn_withdraw.is_empty();
+        let sent = !has_outbound_diff
+            || self.try_send_and_commit_outbound_update(
                 peer,
                 nh_override_flags,
                 announce,
@@ -306,8 +315,8 @@ impl RibManager {
                 fs_withdraw,
                 evpn_announce,
                 evpn_withdraw,
-            )
-        {
+            );
+        if !sent {
             warn!(%peer, "outbound channel full or closed during initial dump — marking dirty");
             self.metrics.record_outbound_route_drop(&peer.to_string());
             for f in &eor_families {
@@ -315,6 +324,9 @@ impl RibManager {
             }
             self.dirty_peers.insert(peer);
             return;
+        }
+        for (prefix, policy_filtered) in policy_filtered_by_prefix {
+            self.update_policy_filtered_routes_for_prefix(peer, prefix, &policy_filtered);
         }
 
         // Send End-of-RIB markers for all sendable families

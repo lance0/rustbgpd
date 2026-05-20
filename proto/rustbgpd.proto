@@ -870,6 +870,7 @@ enum RouteEventType {
   ROUTE_EVENT_TYPE_ADDED = 1;
   ROUTE_EVENT_TYPE_WITHDRAWN = 2;
   ROUTE_EVENT_TYPE_BEST_CHANGED = 3;
+  ROUTE_EVENT_TYPE_POLICY_FILTERED = 4;
 }
 
 message RouteEvent {
@@ -885,6 +886,11 @@ message RouteEvent {
   uint32 path_id = 8;
   // Monotonic process-local route event identifier. Resets on daemon restart.
   uint64 event_id = 9;
+  // Outbound peer whose export policy filtered this route. Empty for
+  // source-peer best-path events.
+  string target_peer_address = 10;
+  // Stable operator-facing reason, e.g. "policy_denied".
+  string reason = 11;
 }
 
 enum EventCategory {
@@ -901,6 +907,7 @@ enum BgpEventType {
   BGP_EVENT_TYPE_ROUTE_ADDED = 1;
   BGP_EVENT_TYPE_ROUTE_WITHDRAWN = 2;
   BGP_EVENT_TYPE_ROUTE_BEST_CHANGED = 3;
+  BGP_EVENT_TYPE_ROUTE_POLICY_FILTERED = 4;
   BGP_EVENT_TYPE_SESSION_STATE_CHANGED = 10;
   BGP_EVENT_TYPE_SESSION_ESTABLISHED = 11;
   BGP_EVENT_TYPE_SESSION_LOST = 12;
@@ -1159,6 +1166,9 @@ message BgpEvent {
   uint32 prefix_length = 8;
   AddressFamily afi_safi = 9;
   string summary = 10;
+  // Outbound peer affected by target-scoped route events such as
+  // export-policy filtering. Empty for ordinary source-peer route events.
+  string target_peer_address = 19;
 
   oneof payload {
     RouteEvent route = 11;

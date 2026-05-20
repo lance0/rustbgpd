@@ -1738,8 +1738,10 @@ mod tests {
             prefix,
             peer: Some(ip("198.51.100.1")),
             previous_peer: None,
+            target_peer: None,
             timestamp: "0".to_string(),
             path_id: 0,
+            reason: String::new(),
         }
     }
 
