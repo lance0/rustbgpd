@@ -1069,12 +1069,17 @@ fn build_type5(
     }
     if req.route_targets.is_empty() {
         return Err(Status::invalid_argument(
-            "at least one route_target is required for Type 5 IP Prefix",
+            "at least one route_targets entry is required for Type 5 IP Prefix",
         ));
     }
     if !req.disable_vxlan_encap && req.router_mac.is_empty() {
         return Err(Status::invalid_argument(
             "router_mac is required for Type 5 VXLAN injection",
+        ));
+    }
+    if req.disable_vxlan_encap && !req.router_mac.is_empty() {
+        return Err(Status::invalid_argument(
+            "router_mac requires VXLAN encapsulation; omit router_mac when disable_vxlan_encap is true",
         ));
     }
 
@@ -1764,6 +1769,29 @@ mod tests {
         let err = svc.add_evpn_route(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("router_mac"));
+    }
+
+    #[tokio::test]
+    async fn add_evpn_type5_rejects_router_mac_without_vxlan() {
+        let svc = make_service();
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 5,
+            rd: "65000:5000".into(),
+            ethernet_tag: 0,
+            mac: String::new(),
+            ip: String::new(),
+            label: 5000,
+            label2: 0,
+            next_hop: "192.0.2.10".into(),
+            route_targets: vec!["65000:5000".into()],
+            disable_vxlan_encap: true,
+            prefix: "10.50.0.0".into(),
+            prefix_length: 24,
+            router_mac: "02:00:00:00:50:00".into(),
+        });
+        let err = svc.add_evpn_route(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("disable_vxlan_encap"));
     }
 
     #[tokio::test]

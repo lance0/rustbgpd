@@ -1138,7 +1138,8 @@ the RFC 8365 VXLAN label slot, and `next_hop` is the VTEP loopback.
 The prefix and next-hop must use the same IP family. `router_mac` is
 required when VXLAN encapsulation is enabled (the default) and is
 advertised as the RFC 9135 Router MAC extended community. Omit it when
-`disable_vxlan_encap` is true. Overlay-index
+`disable_vxlan_encap` is true. At least one `route_targets` entry is
+required for Type 5 injection. Overlay-index
 IRB via non-zero Gateway IP or ESI is not exposed yet.
 
 ### Withdraw an EVPN route

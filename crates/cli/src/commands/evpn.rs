@@ -216,6 +216,7 @@ pub async fn add_ip_prefix(
     disable_vxlan_encap: bool,
     json: bool,
 ) -> Result<(), CliError> {
+    validate_add_ip_prefix_args(router_mac.as_deref(), &route_targets, disable_vxlan_encap)?;
     let (prefix, prefix_length) = output::parse_prefix(&prefix).map_err(CliError::Argument)?;
     let mut client =
         InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -238,6 +239,27 @@ pub async fn add_ip_prefix(
         .await?;
     output::print_result(json, "add_evpn", "", "EVPN Type 5 route added");
     Ok(())
+}
+
+fn validate_add_ip_prefix_args(
+    router_mac: Option<&str>,
+    route_targets: &[String],
+    disable_vxlan_encap: bool,
+) -> Result<(), CliError> {
+    if route_targets.is_empty() {
+        return Err(CliError::Argument(
+            "at least one --rt is required for EVPN Type 5 IP Prefix".into(),
+        ));
+    }
+    match (disable_vxlan_encap, router_mac) {
+        (false, None) => Err(CliError::Argument(
+            "--router-mac is required unless --no-vxlan-encap is set".into(),
+        )),
+        (true, Some(_)) => Err(CliError::Argument(
+            "--router-mac cannot be used with --no-vxlan-encap".into(),
+        )),
+        _ => Ok(()),
+    }
 }
 
 pub async fn delete_mac_ip(
@@ -1028,5 +1050,24 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
         assert_eq!(value["readiness"], "ready");
         assert_eq!(value["originated_routes_count"], 3);
         assert_eq!(value["installed_routes_count"], 2);
+    }
+
+    #[test]
+    fn add_ip_prefix_args_require_route_target_and_router_mac_for_vxlan() {
+        let rt = vec!["65000:5000".to_string()];
+
+        let err = super::validate_add_ip_prefix_args(None, &rt, false).unwrap_err();
+        assert!(err.to_string().contains("--router-mac"));
+
+        let err =
+            super::validate_add_ip_prefix_args(Some("02:00:00:00:50:00"), &[], false).unwrap_err();
+        assert!(err.to_string().contains("--rt"));
+
+        let err =
+            super::validate_add_ip_prefix_args(Some("02:00:00:00:50:00"), &rt, true).unwrap_err();
+        assert!(err.to_string().contains("--no-vxlan-encap"));
+
+        super::validate_add_ip_prefix_args(None, &rt, true).unwrap();
+        super::validate_add_ip_prefix_args(Some("02:00:00:00:50:00"), &rt, false).unwrap();
     }
 }

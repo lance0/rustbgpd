@@ -1398,7 +1398,8 @@ message AddEvpnRouteRequest {
   // Next-hop (VTEP loopback). Required.
   string next_hop = 8;
   // Optional route targets as "asn:value" — encoded as extended
-  // communities on the advertised route.
+  // communities on the advertised route. Type 5 injection requires at
+  // least one route target.
   repeated string route_targets = 9;
   // Optional: when true, suppress the RFC 8365 §5.1.2 VXLAN
   // Encapsulation extended community (tunnel-type=8) on the
