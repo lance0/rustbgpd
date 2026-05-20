@@ -2407,7 +2407,7 @@ fn parse_evpn_instance(
         let rt = RouteTarget::auto_derived_vxlan(local_asn, cfg.vni).map_err(|e| {
             ConfigError::InvalidEvpnInstance {
                 reason: format!(
-                    "vni {}: cannot auto_derive_route_target: {e}; configure route_targets manually",
+                    "vni {}: cannot auto_derive_route_target: {e}; disable auto_derive_route_target or configure route_targets manually",
                     cfg.vni
                 ),
             }
@@ -2659,7 +2659,7 @@ fn parse_evpn_ip_vrf(cfg: &EvpnIpVrfConfig, local_asn: u32) -> Result<IpVrf, Con
         let rt = RouteTarget::auto_derived_vxlan(local_asn, cfg.vni).map_err(|e| {
             ConfigError::InvalidEvpnIpVrf {
                 reason: format!(
-                    "name {:?}: cannot auto_derive_route_target: {e}; configure route_targets manually",
+                    "name {:?}: cannot auto_derive_route_target: {e}; disable auto_derive_route_target or configure route_targets manually",
                     cfg.name
                 ),
             }
