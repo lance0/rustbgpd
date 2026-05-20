@@ -616,10 +616,8 @@ fn main() {
     #[cfg(not(feature = "dhat-heap"))]
     let profiler: Option<()> = None;
 
-    let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
-        eprintln!("error: failed to create tokio runtime: {e}");
-        process::exit(1);
-    });
+    let rt = tokio::runtime::Runtime::new()
+        .unwrap_or_else(|e| fatal_startup_error("failed to create tokio runtime", e));
     rt.block_on(run(config, profiler));
 }
 
