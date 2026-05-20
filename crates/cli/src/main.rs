@@ -447,6 +447,12 @@ enum RibAction {
         /// Source peer-address filter
         #[arg(long)]
         peer: Option<String>,
+        /// Maximum FIB status rows to return; omitted returns the full snapshot
+        #[arg(long)]
+        page_size: Option<u32>,
+        /// Page token returned by a previous paginated FIB status query
+        #[arg(long)]
+        page_token: Option<String>,
     },
     /// Inject a route
     Add {
@@ -889,6 +895,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     reason,
                     prefix: fib_prefix,
                     peer,
+                    page_size,
+                    page_token,
                 }) => {
                     reject_rib_status_filters(
                         "fib",
@@ -911,6 +919,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                             reason,
                             prefix: fib_prefix,
                             peer,
+                            page_size,
+                            page_token,
                         },
                         json,
                     )
@@ -1596,6 +1606,10 @@ mod tests {
             "203.0.113.0/24",
             "--peer",
             "198.51.100.2",
+            "--page-size",
+            "50",
+            "--page-token",
+            "100",
         ])
         .unwrap();
 
@@ -1607,6 +1621,8 @@ mod tests {
                     reason,
                     prefix,
                     peer,
+                    page_size,
+                    page_token,
                 }),
             ..
         } = cli.command
@@ -1616,6 +1632,8 @@ mod tests {
             assert_eq!(reason.as_deref(), Some("route_limit_exceeded"));
             assert_eq!(prefix.as_deref(), Some("203.0.113.0/24"));
             assert_eq!(peer.as_deref(), Some("198.51.100.2"));
+            assert_eq!(page_size, Some(50));
+            assert_eq!(page_token.as_deref(), Some("100"));
         } else {
             panic!("expected Rib Fib command");
         }

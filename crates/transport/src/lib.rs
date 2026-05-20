@@ -26,4 +26,4 @@ pub use handle::{
     SessionNotification, SessionNotificationDirection, SessionNotificationEvent, SessionRole,
 };
 pub use listener::{AcceptedConnection, BgpListener, ListenerSocketOptions, TcpAoListenerKey};
-pub use socket_opts::{TcpAoSupport, probe_tcp_ao_support};
+pub use socket_opts::{TcpAoInfoSnapshot, TcpAoSupport, probe_tcp_ao_support};

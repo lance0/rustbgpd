@@ -1,8 +1,10 @@
 //! BGP inbound TCP listener.
 
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 
 use crate::config::TcpAoConfig;
+use crate::socket_opts::TcpAoInfoSnapshot;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -17,6 +19,9 @@ pub struct AcceptedConnection {
     pub stream: TcpStream,
     /// IP address of the remote peer.
     pub peer_addr: IpAddr,
+    /// Runtime TCP-AO socket information when the peer matched a configured
+    /// listener MKT and Linux inspection succeeded.
+    pub tcp_ao_info: Option<TcpAoInfoSnapshot>,
 }
 
 /// TCP-AO key to install on the inbound listener socket.
@@ -40,6 +45,7 @@ pub struct ListenerSocketOptions {
 pub struct BgpListener {
     listener: TcpListener,
     accept_tx: mpsc::Sender<AcceptedConnection>,
+    tcp_ao_peers: HashSet<IpAddr>,
 }
 
 impl BgpListener {
@@ -68,6 +74,7 @@ impl BgpListener {
         options: ListenerSocketOptions,
     ) -> std::io::Result<Self> {
         let tcp_ao_keys = options.tcp_ao_keys.len();
+        let tcp_ao_peers = options.tcp_ao_keys.iter().map(|key| key.peer).collect();
         let listener = bind_socket2_listener(addr, &options)?;
         let bound_addr = listener.local_addr().unwrap_or(addr);
         info!(
@@ -79,6 +86,7 @@ impl BgpListener {
         Ok(Self {
             listener,
             accept_tx,
+            tcp_ao_peers,
         })
     }
 
@@ -101,9 +109,11 @@ impl BgpListener {
                 Ok((stream, peer_addr)) => {
                     let peer_ip = peer_addr.ip();
                     debug!(%peer_ip, "inbound TCP connection");
+                    let tcp_ao_info = self.inspect_tcp_ao_accept(&stream, peer_ip);
                     let conn = AcceptedConnection {
                         stream,
                         peer_addr: peer_ip,
+                        tcp_ao_info,
                     };
                     if self.accept_tx.send(conn).await.is_err() {
                         warn!("accept channel closed, listener shutting down");
@@ -113,6 +123,45 @@ impl BgpListener {
                 Err(e) => {
                     error!(error = %e, "BGP listener accept error");
                 }
+            }
+        }
+    }
+
+    fn inspect_tcp_ao_accept(
+        &self,
+        stream: &TcpStream,
+        peer_ip: IpAddr,
+    ) -> Option<TcpAoInfoSnapshot> {
+        if !self.tcp_ao_peers.contains(&peer_ip) {
+            return None;
+        }
+
+        match crate::socket_opts::get_tcp_ao_info(stream) {
+            Ok(info) => {
+                info!(
+                    peer = %peer_ip,
+                    current_key = info.current_key,
+                    rnext_key = info.rnext_key,
+                    has_current_key = info.has_current_key,
+                    has_rnext_key = info.has_rnext_key,
+                    ao_required = info.ao_required,
+                    accept_icmps = info.accept_icmps,
+                    pkt_good = info.pkt_good,
+                    pkt_bad = info.pkt_bad,
+                    pkt_key_not_found = info.pkt_key_not_found,
+                    pkt_ao_required = info.pkt_ao_required,
+                    pkt_dropped_icmp = info.pkt_dropped_icmp,
+                    "TCP-AO accepted socket inspected"
+                );
+                Some(info)
+            }
+            Err(err) => {
+                warn!(
+                    peer = %peer_ip,
+                    error = %err,
+                    "failed to inspect TCP-AO accepted socket"
+                );
+                None
             }
         }
     }
