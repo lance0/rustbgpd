@@ -70,6 +70,18 @@ fn parse_fib_state(s: &str) -> Result<i32, CliError> {
 }
 
 fn make_fib_request(filters: &FibRouteFilterOpts) -> Result<ListFibRoutesRequest, CliError> {
+    let page_size = filters.page_size.unwrap_or(0);
+    if filters
+        .page_token
+        .as_ref()
+        .is_some_and(|token| !token.is_empty())
+        && page_size == 0
+    {
+        return Err(CliError::Argument(
+            "--page-token requires --page-size greater than 0".to_string(),
+        ));
+    }
+
     let (prefix, prefix_length) = if let Some(prefix) = &filters.prefix {
         output::parse_prefix(prefix).map_err(CliError::Argument)?
     } else {
@@ -96,9 +108,13 @@ fn make_fib_request(filters: &FibRouteFilterOpts) -> Result<ListFibRoutesRequest
         prefix,
         prefix_length,
         peer_address,
-        page_size: filters.page_size.unwrap_or(0),
+        page_size,
         page_token: filters.page_token.clone().unwrap_or_default(),
     })
+}
+
+fn include_fib_page_meta(filters: &FibRouteFilterOpts) -> bool {
+    filters.page_size.is_some_and(|page_size| page_size > 0)
 }
 
 fn route_to_json(r: &crate::proto::Route) -> JsonRoute {
@@ -654,8 +670,7 @@ pub async fn fib(
         .list_fib_routes(make_fib_request(&filters)?)
         .await?
         .into_inner();
-    let include_page_meta = filters.page_size.is_some() || filters.page_token.is_some();
-    print_fib_routes(&resp, json, include_page_meta);
+    print_fib_routes(&resp, json, include_fib_page_meta(&filters));
     Ok(())
 }
 
@@ -873,6 +888,53 @@ mod tests {
 
         assert_eq!(request.page_size, 0);
         assert!(request.page_token.is_empty());
+    }
+
+    #[test]
+    fn fib_request_rejects_page_token_without_nonzero_page_size() {
+        let err = make_fib_request(&FibRouteFilterOpts {
+            table: None,
+            state: None,
+            reason: None,
+            prefix: None,
+            peer: None,
+            page_size: None,
+            page_token: Some("100".to_string()),
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("--page-size"));
+
+        let err = make_fib_request(&FibRouteFilterOpts {
+            table: None,
+            state: None,
+            reason: None,
+            prefix: None,
+            peer: None,
+            page_size: Some(0),
+            page_token: Some("100".to_string()),
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("--page-size"));
+    }
+
+    #[test]
+    fn fib_page_metadata_is_only_enabled_for_nonzero_page_size() {
+        let filters = FibRouteFilterOpts {
+            table: None,
+            state: None,
+            reason: None,
+            prefix: None,
+            peer: None,
+            page_size: Some(0),
+            page_token: None,
+        };
+        assert!(!include_fib_page_meta(&filters));
+
+        let filters = FibRouteFilterOpts {
+            page_size: Some(50),
+            ..filters
+        };
+        assert!(include_fib_page_meta(&filters));
     }
 
     #[test]

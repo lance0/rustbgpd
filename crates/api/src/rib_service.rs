@@ -471,14 +471,14 @@ fn build_fib_response(
         };
     };
 
+    let routes_len = routes.len();
     let page_routes: Vec<proto::FibRouteStatus> = routes
-        .iter()
+        .into_iter()
         .skip(page.offset)
         .take(page.page_size)
-        .cloned()
         .collect();
     let next_offset = page.offset + page_routes.len();
-    let next_page_token = if next_offset < routes.len() {
+    let next_page_token = if next_offset < routes_len {
         next_offset.to_string()
     } else {
         String::new()
