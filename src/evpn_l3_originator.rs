@@ -210,7 +210,8 @@ pub fn spawn(cfg: SpawnConfig) -> Option<EvpnL3OriginatorHandle> {
     }
     let shutdown = cfg.shutdown.clone();
     let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(cfg.ip_vrfs.clone());
-    let join = tokio::spawn(originator_loop(cfg, ip_vrfs_rx));
+    let ip_vrfs_tx_keepalive = ip_vrfs_tx.clone();
+    let join = tokio::spawn(originator_loop(cfg, ip_vrfs_rx, ip_vrfs_tx_keepalive));
     Some(EvpnL3OriginatorHandle {
         shutdown,
         ip_vrfs_tx,
@@ -218,11 +219,16 @@ pub fn spawn(cfg: SpawnConfig) -> Option<EvpnL3OriginatorHandle> {
     })
 }
 
-async fn originator_loop(mut cfg: SpawnConfig, mut ip_vrfs_rx: watch::Receiver<Arc<IpVrfTable>>) {
+async fn originator_loop(
+    mut cfg: SpawnConfig,
+    mut ip_vrfs_rx: watch::Receiver<Arc<IpVrfTable>>,
+    _ip_vrfs_tx_keepalive: watch::Sender<Arc<IpVrfTable>>,
+) {
     // (IpVrfId, prefix) -> EvpnRouteKey we used for the inject (so the
     // matching withdraw uses the same key).
     let mut originated: BTreeMap<(IpVrfId, EvpnIpPrefixValue), EvpnRouteKey> = BTreeMap::new();
     let mut ip_vrfs = ip_vrfs_rx.borrow().clone();
+    let mut vrf_names = vrf_name_lookup(ip_vrfs.as_ref());
 
     // Pre-populate the originated-routes Prometheus gauge at 0 for
     // every configured IP-VRF. Without this, a VRF that has yet to
@@ -236,41 +242,42 @@ async fn originator_loop(mut cfg: SpawnConfig, mut ip_vrfs_rx: watch::Receiver<A
     // Eagerly drive one reconcile so startup state aligns with whatever
     // the dataplane has already reported (the watch channels may already
     // carry a snapshot from the first reconcile pass).
-    reconcile(&mut originated, &mut cfg, ip_vrfs.as_ref()).await;
+    reconcile(&mut originated, &mut cfg, ip_vrfs.as_ref(), &vrf_names).await;
 
     loop {
         tokio::select! {
             biased;
             () = cfg.shutdown.cancelled() => {
                 debug!("EVPN L3 originator shutting down — draining {} routes", originated.len());
-                drain_all(&mut originated, &cfg, ip_vrfs.as_ref()).await;
+                drain_all(&mut originated, &cfg, &vrf_names).await;
                 return;
             }
             res = cfg.route_observations_rx.changed() => {
                 if res.is_err() {
                     debug!("L3 originator: observation watch closed; draining");
-                    drain_all(&mut originated, &cfg, ip_vrfs.as_ref()).await;
+                    drain_all(&mut originated, &cfg, &vrf_names).await;
                     return;
                 }
-                reconcile(&mut originated, &mut cfg, ip_vrfs.as_ref()).await;
+                reconcile(&mut originated, &mut cfg, ip_vrfs.as_ref(), &vrf_names).await;
             }
             res = cfg.ip_vrf_status_rx.changed() => {
                 if res.is_err() {
                     debug!("L3 originator: status watch closed; draining");
-                    drain_all(&mut originated, &cfg, ip_vrfs.as_ref()).await;
+                    drain_all(&mut originated, &cfg, &vrf_names).await;
                     return;
                 }
-                reconcile(&mut originated, &mut cfg, ip_vrfs.as_ref()).await;
+                reconcile(&mut originated, &mut cfg, ip_vrfs.as_ref(), &vrf_names).await;
             }
             res = ip_vrfs_rx.changed() => {
                 if res.is_err() {
                     debug!("L3 originator: IP-VRF model watch closed; draining");
-                    drain_all(&mut originated, &cfg, ip_vrfs.as_ref()).await;
+                    drain_all(&mut originated, &cfg, &vrf_names).await;
                     return;
                 }
                 ip_vrfs = ip_vrfs_rx.borrow().clone();
+                merge_vrf_names(&mut vrf_names, ip_vrfs.as_ref());
                 publish_all_originated_gauges(&cfg, ip_vrfs.as_ref());
-                reconcile(&mut originated, &mut cfg, ip_vrfs.as_ref()).await;
+                reconcile(&mut originated, &mut cfg, ip_vrfs.as_ref(), &vrf_names).await;
             }
         }
     }
@@ -280,15 +287,12 @@ async fn reconcile(
     originated: &mut BTreeMap<(IpVrfId, EvpnIpPrefixValue), EvpnRouteKey>,
     cfg: &mut SpawnConfig,
     ip_vrfs: &IpVrfTable,
+    vrf_names: &BTreeMap<IpVrfId, String>,
 ) {
     // Snapshot the watch values. Both `borrow()` calls are lock-free
     // seqlock reads — the clones release the borrow before any await.
     let observations = cfg.route_observations_rx.borrow().clone();
     let status_rows = cfg.ip_vrf_status_rx.borrow().clone();
-    // One-shot id→name lookup for the Prometheus gauge re-emit.
-    // Built once per reconcile pass; the inject/withdraw hot paths
-    // read it in O(1).
-    let vrf_names = vrf_name_lookup(ip_vrfs);
     let ready_vrfs: HashMap<IpVrfId, &IpVrf> = ip_vrfs
         .iter()
         .filter(|vrf| {
@@ -504,9 +508,8 @@ async fn withdraw_one(
 async fn drain_all(
     originated: &mut BTreeMap<(IpVrfId, EvpnIpPrefixValue), EvpnRouteKey>,
     cfg: &SpawnConfig,
-    ip_vrfs: &IpVrfTable,
+    vrf_names: &BTreeMap<IpVrfId, String>,
 ) {
-    let vrf_names = vrf_name_lookup(ip_vrfs);
     let snapshot: Vec<_> = originated.iter().map(|(k, v)| (*k, *v)).collect();
     for ((vrf_id, _prefix), key) in &snapshot {
         if withdraw_one(&cfg.rib_tx, *vrf_id, *key, &cfg.originated_counts).await
@@ -536,6 +539,12 @@ fn publish_originated_gauge(cfg: &SpawnConfig, vrf_id: IpVrfId, vrf_name: &str) 
 fn publish_all_originated_gauges(cfg: &SpawnConfig, ip_vrfs: &IpVrfTable) {
     for vrf in ip_vrfs.iter() {
         publish_originated_gauge(cfg, vrf.id, &vrf.name);
+    }
+}
+
+fn merge_vrf_names(names: &mut BTreeMap<IpVrfId, String>, ip_vrfs: &IpVrfTable) {
+    for vrf in ip_vrfs.iter() {
+        names.insert(vrf.id, vrf.name.clone());
     }
 }
 
@@ -769,7 +778,8 @@ mod tests {
             cfg: &mut SpawnConfig,
         ) -> BTreeMap<(IpVrfId, EvpnIpPrefixValue), EvpnRouteKey> {
             let ip_vrfs = cfg.ip_vrfs.clone();
-            reconcile(&mut originated, cfg, ip_vrfs.as_ref()).await;
+            let vrf_names = vrf_name_lookup(ip_vrfs.as_ref());
+            reconcile(&mut originated, cfg, ip_vrfs.as_ref(), &vrf_names).await;
             originated
         }
 
@@ -1007,12 +1017,13 @@ mod tests {
         let (obs_tx, obs_rx) = watch::channel(Arc::new(HashMap::new()));
         let (status_tx, status_rx) = watch::channel(Vec::<IpVrfDataplaneStatus>::new());
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(32);
+        let metrics = BgpMetrics::new();
         let handle = spawn(SpawnConfig {
             ip_vrfs: Arc::new(table),
             rib_tx,
             route_observations_rx: obs_rx,
             ip_vrf_status_rx: status_rx,
-            metrics: BgpMetrics::new(),
+            metrics: metrics.clone(),
             originated_counts: OriginatedIpVrfRouteCounts::default(),
             shutdown: CancellationToken::new(),
         })
@@ -1037,6 +1048,52 @@ mod tests {
         );
 
         handle.shutdown().await;
+        assert_eq!(
+            scrape_originated_gauge_from_metrics(&metrics, "vrf100"),
+            Some(0)
+        );
+        drop(obs_tx);
+        drop(status_tx);
+    }
+
+    #[tokio::test]
+    async fn dropping_handle_does_not_close_runtime_model_watch() {
+        let v = vrf(100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let predicted = predicted_key(&v, observation(100, [10, 1, 0, 0], 24).prefix);
+        let mut table = IpVrfTable::new();
+        table.insert(v).unwrap();
+        let (obs_tx, obs_rx) = watch::channel(Arc::new(HashMap::new()));
+        let (status_tx, status_rx) = watch::channel(Vec::<IpVrfDataplaneStatus>::new());
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(32);
+        let shutdown = CancellationToken::new();
+        let handle = spawn(SpawnConfig {
+            ip_vrfs: Arc::new(table),
+            rib_tx,
+            route_observations_rx: obs_rx,
+            ip_vrf_status_rx: status_rx,
+            metrics: BgpMetrics::new(),
+            originated_counts: OriginatedIpVrfRouteCounts::default(),
+            shutdown: shutdown.clone(),
+        })
+        .expect("non-empty IP-VRF table should spawn originator");
+
+        drop(handle);
+
+        status_tx.send_replace(vec![ready_status(100)]);
+        let mut obs_map = HashMap::new();
+        obs_map.insert(
+            IpVrfId::new(100).unwrap(),
+            vec![observation(100, [10, 1, 0, 0], 24)],
+        );
+        obs_tx.send_replace(Arc::new(obs_map));
+
+        assert_eq!(next_rib_call(&mut rib_rx).await, RibCall::Inject(predicted));
+
+        shutdown.cancel();
+        assert_eq!(
+            next_rib_call(&mut rib_rx).await,
+            RibCall::Withdraw(predicted)
+        );
         drop(obs_tx);
         drop(status_tx);
     }
@@ -1207,10 +1264,10 @@ mod tests {
     /// Helper: scrape the metrics registry and return one labeled
     /// value from `evpn_ip_vrf_originated_routes` (or `None` if the
     /// series hasn't been emitted yet).
-    fn scrape_originated_gauge(cfg: &SpawnConfig, vrf_name: &str) -> Option<i64> {
+    fn scrape_originated_gauge_from_metrics(metrics: &BgpMetrics, vrf_name: &str) -> Option<i64> {
         use prometheus::Encoder;
         let encoder = prometheus::TextEncoder::new();
-        let families = cfg.metrics.registry().gather();
+        let families = metrics.registry().gather();
         let mut buf = Vec::new();
         encoder.encode(&families, &mut buf).unwrap();
         let text = String::from_utf8(buf).unwrap();
@@ -1221,6 +1278,10 @@ mod tests {
             }
         }
         None
+    }
+
+    fn scrape_originated_gauge(cfg: &SpawnConfig, vrf_name: &str) -> Option<i64> {
+        scrape_originated_gauge_from_metrics(&cfg.metrics, vrf_name)
     }
 
     #[test]
