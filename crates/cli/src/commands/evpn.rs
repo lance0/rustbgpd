@@ -160,6 +160,9 @@ pub async fn add_mac_ip(
             next_hop,
             route_targets,
             disable_vxlan_encap,
+            prefix: String::new(),
+            prefix_length: 0,
+            router_mac: String::new(),
         })
         .await?;
     output::print_result(json, "add_evpn", "", "EVPN Type 2 route added");
@@ -191,10 +194,88 @@ pub async fn add_imet(
             next_hop,
             route_targets,
             disable_vxlan_encap,
+            prefix: String::new(),
+            prefix_length: 0,
+            router_mac: String::new(),
         })
         .await?;
     output::print_result(json, "add_evpn", "", "EVPN Type 3 route added");
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn add_ip_prefix(
+    connection: Connection,
+    rd: String,
+    ethernet_tag: u32,
+    prefix: String,
+    label: u32,
+    next_hop: String,
+    router_mac: Option<String>,
+    route_targets: Vec<String>,
+    disable_vxlan_encap: bool,
+    json: bool,
+) -> Result<(), CliError> {
+    let router_mac = router_mac
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
+    validate_ip_prefix_ethernet_tag(ethernet_tag)?;
+    validate_add_ip_prefix_args(router_mac.as_deref(), &route_targets, disable_vxlan_encap)?;
+    let (prefix, prefix_length) = output::parse_prefix(&prefix).map_err(CliError::Argument)?;
+    let mut client =
+        InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    client
+        .add_evpn_route(AddEvpnRouteRequest {
+            route_type: 5,
+            rd,
+            ethernet_tag,
+            mac: String::new(),
+            ip: String::new(),
+            label,
+            label2: 0,
+            next_hop,
+            route_targets,
+            disable_vxlan_encap,
+            prefix,
+            prefix_length,
+            router_mac: router_mac.unwrap_or_default(),
+        })
+        .await?;
+    output::print_result(json, "add_evpn", "", "EVPN Type 5 route added");
+    Ok(())
+}
+
+fn validate_ip_prefix_ethernet_tag(ethernet_tag: u32) -> Result<(), CliError> {
+    if ethernet_tag != 0 {
+        return Err(CliError::Argument(
+            "EVPN Type 5 pure/interface-less injection requires --ethernet-tag 0".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_add_ip_prefix_args(
+    router_mac: Option<&str>,
+    route_targets: &[String],
+    disable_vxlan_encap: bool,
+) -> Result<(), CliError> {
+    let router_mac = router_mac.map(str::trim).filter(|s| !s.is_empty());
+    if route_targets.is_empty() {
+        return Err(CliError::Argument(
+            "at least one --rt is required for EVPN Type 5 IP Prefix".into(),
+        ));
+    }
+    match (disable_vxlan_encap, router_mac) {
+        (false, None) => Err(CliError::Argument(
+            "--router-mac is required unless --no-vxlan-encap is set".into(),
+        )),
+        (true, Some(_)) => Err(CliError::Argument(
+            "--router-mac cannot be used with --no-vxlan-encap".into(),
+        )),
+        _ => Ok(()),
+    }
 }
 
 pub async fn delete_mac_ip(
@@ -214,6 +295,8 @@ pub async fn delete_mac_ip(
             ethernet_tag,
             mac,
             ip,
+            prefix: String::new(),
+            prefix_length: 0,
         })
         .await?;
     output::print_result(json, "delete_evpn", "", "EVPN Type 2 route deleted");
@@ -236,9 +319,37 @@ pub async fn delete_imet(
             ethernet_tag,
             mac: String::new(),
             ip,
+            prefix: String::new(),
+            prefix_length: 0,
         })
         .await?;
     output::print_result(json, "delete_evpn", "", "EVPN Type 3 route deleted");
+    Ok(())
+}
+
+pub async fn delete_ip_prefix(
+    connection: Connection,
+    rd: String,
+    ethernet_tag: u32,
+    prefix: String,
+    json: bool,
+) -> Result<(), CliError> {
+    validate_ip_prefix_ethernet_tag(ethernet_tag)?;
+    let (prefix, prefix_length) = output::parse_prefix(&prefix).map_err(CliError::Argument)?;
+    let mut client =
+        InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    client
+        .delete_evpn_route(DeleteEvpnRouteRequest {
+            route_type: 5,
+            rd,
+            ethernet_tag,
+            mac: String::new(),
+            ip: String::new(),
+            prefix,
+            prefix_length,
+        })
+        .await?;
+    output::print_result(json, "delete_evpn", "", "EVPN Type 5 route deleted");
     Ok(())
 }
 
@@ -956,5 +1067,34 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
         assert_eq!(value["readiness"], "ready");
         assert_eq!(value["originated_routes_count"], 3);
         assert_eq!(value["installed_routes_count"], 2);
+    }
+
+    #[test]
+    fn add_ip_prefix_args_require_route_target_and_router_mac_for_vxlan() {
+        let rt = vec!["65000:5000".to_string()];
+
+        let err = super::validate_add_ip_prefix_args(None, &rt, false).unwrap_err();
+        assert!(err.to_string().contains("--router-mac"));
+
+        let err = super::validate_add_ip_prefix_args(Some("   "), &rt, false).unwrap_err();
+        assert!(err.to_string().contains("--router-mac"));
+
+        let err =
+            super::validate_add_ip_prefix_args(Some("02:00:00:00:50:00"), &[], false).unwrap_err();
+        assert!(err.to_string().contains("--rt"));
+
+        let err =
+            super::validate_add_ip_prefix_args(Some("02:00:00:00:50:00"), &rt, true).unwrap_err();
+        assert!(err.to_string().contains("--no-vxlan-encap"));
+
+        super::validate_add_ip_prefix_args(None, &rt, true).unwrap();
+        super::validate_add_ip_prefix_args(Some("02:00:00:00:50:00"), &rt, false).unwrap();
+    }
+
+    #[test]
+    fn ip_prefix_args_reject_nonzero_ethernet_tag() {
+        let err = super::validate_ip_prefix_ethernet_tag(100).unwrap_err();
+        assert!(err.to_string().contains("--ethernet-tag 0"));
+        super::validate_ip_prefix_ethernet_tag(0).unwrap();
     }
 }
