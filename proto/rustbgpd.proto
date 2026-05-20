@@ -1480,15 +1480,16 @@ message TriggerMrtDumpResponse {
 // ---------------------------------------------------------------------------
 // EvpnService — Local EVPN instance state (Phase 2 VTEP alpha).
 //
-// Read-only in this slice. The daemon's local EVI/VNI state is the
+// Mostly read-only in this slice. The daemon's local EVI/VNI state is the
 // declarative `[[evpn_instances]]` config plus the runtime resolved
 // `EvpnInstanceTable`. Linux kernel reconciliation, Type 2/3 local
 // origination, and Gate 9 Type 5 / IP-VRF state consume the resolved
 // tables through daemon actors. Runtime instance mutation remains a
 // follow-up and must use the command-driven semantics in ADR-0063,
-// not a direct shared-table swap. Empty when the daemon is acting
-// purely as an EVPN route reflector — RR mode does not need local
-// instance state.
+// not a direct shared-table swap. The duplicate-MAC clear RPC is a
+// bounded actor command against local suppression state, not an
+// instance-table mutation. Empty when the daemon is acting purely as
+// an EVPN route reflector — RR mode does not need local instance state.
 // ---------------------------------------------------------------------------
 
 service EvpnService {
@@ -1510,6 +1511,12 @@ service EvpnService {
   // Gate 9 — fetch one IP-VRF by operator-facing `name`.
   // Returns `NotFound` when the name is not in the resolved table.
   rpc GetIpVrf(GetIpVrfRequest) returns (IpVrfState);
+  // RFC 7432 section 15.1 duplicate-MAC loop protection — manually
+  // clear local-origin suppression for one `(VNI, MAC)`. Returns
+  // `cleared = false` when no active quarantine exists. This does
+  // not clear all VNIs and does not mutate the resolved EVPN
+  // instance table.
+  rpc ClearDuplicateMacQuarantine(ClearDuplicateMacQuarantineRequest) returns (ClearDuplicateMacQuarantineResponse);
 }
 
 message ListEvpnInstancesRequest {}
@@ -1568,6 +1575,22 @@ message ListIpVrfsResponse {
 message GetIpVrfRequest {
   // Operator-facing handle (`name` field on `[[evpn_ip_vrfs]]`).
   string name = 1;
+}
+
+message ClearDuplicateMacQuarantineRequest {
+  // L2VNI for the duplicate-MAC key.
+  uint32 vni = 1;
+  // MAC address in canonical colon-hex form, e.g. `aa:bb:cc:dd:ee:ff`.
+  string mac = 2;
+}
+
+message ClearDuplicateMacQuarantineResponse {
+  // True when an active quarantine was cleared and live local state
+  // was replayed. False means the key was valid but no active
+  // quarantine existed.
+  bool cleared = 1;
+  // Operator-facing summary of the result.
+  string message = 2;
 }
 
 // One installed IP-VRF (Gate 9, ADR-0058). Joins the resolved

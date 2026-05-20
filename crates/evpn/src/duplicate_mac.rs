@@ -221,6 +221,13 @@ impl DuplicateMacDetector {
             expire_window(window, now)
         })
     }
+
+    /// Clear all duplicate-MAC detector state for one key.
+    ///
+    /// Returns true when a move window or active quarantine existed.
+    pub fn clear(&mut self, key: DuplicateMacKey) -> bool {
+        self.windows.remove(&key).is_some()
+    }
 }
 
 fn active_until(window: &DuplicateMacWindow, now: Instant) -> Option<Instant> {
@@ -352,6 +359,50 @@ mod tests {
         assert!(detector.windows.contains_key(&key()));
         assert!(detector.expire(now + Duration::from_secs(11)).is_empty());
         assert!(!detector.windows.contains_key(&key()));
+    }
+
+    #[test]
+    fn clear_removes_active_quarantine() {
+        let mut detector = DuplicateMacDetector::default();
+        let now = Instant::now();
+        let cfg = config(DuplicateMacAction::SuppressLocal);
+        assert!(matches!(
+            detector.record_move(key(), now, cfg),
+            DuplicateMacDecision::Recorded { .. }
+        ));
+        assert!(matches!(
+            detector.record_move(key(), now + Duration::from_secs(1), cfg),
+            DuplicateMacDecision::Recorded { .. }
+        ));
+        assert!(matches!(
+            detector.record_move(key(), now + Duration::from_secs(2), cfg),
+            DuplicateMacDecision::Quarantined { .. }
+        ));
+
+        assert!(detector.is_quarantined(key(), now + Duration::from_secs(3)));
+        assert!(detector.clear(key()));
+        assert!(!detector.is_quarantined(key(), now + Duration::from_secs(3)));
+        assert!(!detector.windows.contains_key(&key()));
+    }
+
+    #[test]
+    fn clear_removes_non_active_move_window() {
+        let mut detector = DuplicateMacDetector::default();
+        let now = Instant::now();
+        let cfg = config(DuplicateMacAction::DetectOnly);
+        assert_eq!(
+            detector.record_move(key(), now, cfg),
+            DuplicateMacDecision::Recorded { window_count: 1 }
+        );
+
+        assert!(detector.clear(key()));
+        assert!(!detector.windows.contains_key(&key()));
+    }
+
+    #[test]
+    fn clear_missing_key_returns_false() {
+        let mut detector = DuplicateMacDetector::default();
+        assert!(!detector.clear(key()));
     }
 
     #[test]

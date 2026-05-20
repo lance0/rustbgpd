@@ -132,7 +132,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
 | `RibService` | All RPCs | None |
 | `EventService` | All RPCs | None |
-| `EvpnService` | All RPCs | None |
+| `EvpnService` | `ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`, `GetIpVrf` | `ClearDuplicateMacQuarantine` |
 | `InjectionService` | None | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` |
 | `ControlService` | `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
 
@@ -1223,10 +1223,10 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 
 ## EvpnService
 
-Read-only view of local EVPN instances configured on this VTEP. Empty
-when the daemon is acting purely as an EVPN route reflector — RR mode
-does not declare local instances. The same `[[evpn_instances]]` table
-that this service exposes is the input to the Linux kernel
+Local EVPN state and bounded controls for this VTEP. Empty read
+responses are normal when the daemon is acting purely as an EVPN
+route reflector — RR mode does not declare local instances. The same
+`[[evpn_instances]]` table that this service exposes is the input to the Linux kernel
 reconciler (Gate 7b, ADR-0054 — programs remote-MAC FDB entries
 downward), the local-MAC originator + Type 3 IMET emitter (Gate 7b+1,
 ADR-0055 — emits Type 2 / Type 3 routes upward from kernel-learned
@@ -1244,14 +1244,15 @@ future runtime mutation semantics.
 | `ListEvpnNexthops`  | List Linux dataplane reconciler-owned ADR-0059 FDB nexthop groups (per-VNI groups with ESI / Ethernet Tag / kernel group ID, per-VTEP member nexthop IDs + gateways, MAC refs) plus top-level orphan-NH count, pending-delete count, and the `drift_recovery_disabled` latch — read-only operator visibility |
 | `ListIpVrfs`        | List configured IP-VRFs / L3VNI tenants (name, l3vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, router_mac, optional `evpn_instance` link, readiness state, originated_routes_count, installed_routes_count) — Gate 9 / ADR-0058 |
 | `GetIpVrf`          | Detail view of a single IP-VRF including the seven readiness predicates (`not_ready_reasons`) when `readiness_state != Ready` |
+| `ClearDuplicateMacQuarantine` | Clear one RFC 7432 §15.1 duplicate-MAC local-origin quarantine by `(vni, mac)`. Returns `cleared=false` when no active quarantine exists; read-only listeners reject it. |
 
-Mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) is still out of
-scope. Runtime mutation is not just a shared-table swap: delete and
-redefine must coordinate IMET, MAC-only/MAC+IP/SVI Type 2 originators,
+Instance mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) is still
+out of scope. Runtime mutation is not just a shared-table swap: delete
+and redefine must coordinate IMET, MAC-only/MAC+IP/SVI Type 2 originators,
 DF/ES state, Type 5/IP-VRF state, and Linux owned dataplane state. ADR-0063
 therefore requires a single command-driven EVPN runtime coordinator
 with validation-first model updates and explicit drain/replay semantics
-before any mutating API is added. Tracked in
+before any mutating instance API is added. Tracked in
 [issue #133](https://github.com/lance0/rustbgpd/issues/133).
 
 Operators configure instances via the `[[evpn_instances]]` TOML
@@ -1334,6 +1335,27 @@ ADR-0058 §3 predicate (e.g., `vrf_table_id_mismatch`,
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"name": "vrf1"}' \
   localhost:50051 rustbgpd.v1.EvpnService/GetIpVrf
+```
+
+### Clear duplicate-MAC quarantine
+
+Clears local-origin suppression for one `(VNI, MAC)` after an operator
+has confirmed the loop condition is gone. The RPC does not clear every
+quarantine and does not remove Loc-RIB/RR visibility; if the MAC is
+still locally present, the originator immediately replays the live
+MAC-only or MAC+IP state through the normal recovery path.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"vni": 100, "mac": "aa:bb:cc:dd:ee:ff"}' \
+  localhost:50051 rustbgpd.v1.EvpnService/ClearDuplicateMacQuarantine
+```
+
+Or via CLI:
+
+```bash
+rustbgpctl evpn clear-duplicate-mac --vni 100 --mac aa:bb:cc:dd:ee:ff
+rustbgpctl evpn clear-duplicate-mac --vni 100 --mac aa:bb:cc:dd:ee:ff --json
 ```
 
 ---

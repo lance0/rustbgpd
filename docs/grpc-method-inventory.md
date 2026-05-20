@@ -162,7 +162,7 @@ shape itself does not raise the tier.
 | `GetMetrics` | `sensitive_read` | Returns Prometheus-shaped counters; volumetric metadata leaks RIB size, peer count, churn rate. |
 | `TriggerMrtDump` | `operator_only` | Writes a TABLE_DUMP_V2 snapshot to disk. Disk-I/O burst, potentially very large; also exposes RIB content to whoever can read the dump file later. |
 
-### EvpnService (4 RPCs)
+### EvpnService (5 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -170,16 +170,17 @@ shape itself does not raise the tier.
 | `ListEvpnNexthops` | `sensitive_read` | ADR-0059 FDB nexthop groups — exposes multi-homing topology, ES layout, drift-recovery status. |
 | `ListIpVrfs` | `sensitive_read` | Gate 9 IP-VRF table. |
 | `GetIpVrf` | `sensitive_read` | Single-VRF detail. |
+| `ClearDuplicateMacQuarantine` | `mutating` | Clears one local duplicate-MAC suppression key and may replay still-live local MAC state. Reversible, per-`(VNI, MAC)` scope; not a route-injection primitive and not a clear-all. |
 
 ## Totals
 
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 33 | 50.0% |
-| `mutating` | 15 | 22.7% |
-| `operator_only` | 18 | 27.3% |
-| **Total** | **66** | **100%** |
+| `sensitive_read` | 35 | 50.7% |
+| `mutating` | 16 | 23.2% |
+| `operator_only` | 18 | 26.1% |
+| **Total** | **69** | **100%** |
 
 (Counts treat `SetGracefulShutdown` as one RPC even though it appears once in `NeighborService`.)
 
@@ -257,7 +258,7 @@ specific method if the model warrants it.
 
 ## Code matrix
 
-`crates/api/src/authz.rs` contains the same 66-method classification
+`crates/api/src/authz.rs` contains the same 69-method classification
 as a static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added
