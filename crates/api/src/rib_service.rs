@@ -477,7 +477,10 @@ fn build_fib_response(
         .skip(page.offset)
         .take(page.page_size)
         .collect();
-    let next_offset = page.offset + page_routes.len();
+    let next_offset = page
+        .offset
+        .checked_add(page_routes.len())
+        .unwrap_or(routes_len);
     let next_page_token = if next_offset < routes_len {
         next_offset.to_string()
     } else {
@@ -988,6 +991,11 @@ impl proto::rib_service_server::RibService for RibService {
             .collect();
         if page.is_some() {
             sort_fib_routes(&mut routes);
+        }
+        if let Some(page) = page.as_ref()
+            && page.offset > routes.len()
+        {
+            return Err(Status::invalid_argument("page_token is out of range"));
         }
         Ok(Response::new(build_fib_response(routes, page)))
     }
@@ -2317,6 +2325,17 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("page_token"));
+
+        let err = svc
+            .list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+                page_size: 1,
+                page_token: "1".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("out of range"));
     }
 
     #[tokio::test]

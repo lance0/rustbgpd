@@ -726,8 +726,8 @@ empty. `rustbgpctl rib fib` exposes the same filters as `--table`, `--state`,
 optional pagination over the filtered status rows; `page_size = 0` keeps the
 legacy full-snapshot response, and `page_token` is valid only when
 `page_size > 0`. The response includes `next_page_token` and `total_count`;
-CLI JSON output remains a route array unless `--page-size` or `--page-token`
-is provided, in which case it emits an object with `routes`,
+CLI JSON output remains a route array unless `--page-size` is greater than
+`0`, in which case it emits an object with `routes`,
 `next_page_token`, and `total_count`.
 
 `table_id`, `metric`, `prefix`, `prefix_length`, and `next_hop` describe

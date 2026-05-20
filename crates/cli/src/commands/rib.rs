@@ -228,7 +228,7 @@ fn print_fib_routes(resp: &ListFibRoutesResponse, json: bool, include_page_meta:
             );
         }
     } else if resp.routes.is_empty() {
-        println!("No general FIB routes");
+        println!("{}", empty_fib_routes_message(resp, include_page_meta));
     } else {
         println!(
             "{:<16} {:<10} {:<43} {:<39} {:<10} Reason",
@@ -252,6 +252,14 @@ fn print_fib_routes(resp: &ListFibRoutesResponse, json: bool, include_page_meta:
         if !resp.next_page_token.is_empty() {
             println!("Next page token: {}", resp.next_page_token);
         }
+    }
+}
+
+fn empty_fib_routes_message(resp: &ListFibRoutesResponse, include_page_meta: bool) -> &'static str {
+    if include_page_meta && resp.total_count > 0 {
+        "No general FIB routes on this page"
+    } else {
+        "No general FIB routes"
     }
 }
 
@@ -1018,6 +1026,24 @@ mod tests {
         assert!(value["routes"].as_array().unwrap().is_empty());
         assert_eq!(value["next_page_token"], "100");
         assert_eq!(value["total_count"], 250);
+    }
+
+    #[test]
+    fn paginated_empty_fib_page_uses_page_specific_message() {
+        let resp = ListFibRoutesResponse {
+            routes: vec![],
+            next_page_token: String::new(),
+            total_count: 250,
+        };
+
+        assert_eq!(
+            empty_fib_routes_message(&resp, true),
+            "No general FIB routes on this page"
+        );
+        assert_eq!(
+            empty_fib_routes_message(&resp, false),
+            "No general FIB routes"
+        );
     }
 
     /// Pre-existing `best_route` and per-candidate `route` keys
