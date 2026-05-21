@@ -41,7 +41,7 @@
 //! mass-withdraw on `AS_PATH` change, DF-role-aware MAC origination)
 //! remains Gate 8b — see ADR-0057.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -279,6 +279,21 @@ fn rebuild_segment_states(
     esi_label_allocator: &mut rustbgpd_evpn::EsiLabelAllocator,
     segments: Vec<EthernetSegment>,
 ) {
+    // Release labels for ESIs dropped by this snapshot so the allocator
+    // returns them to its free list and can reuse the label space across
+    // runtime add/remove churn. Persisting ESIs are left reserved —
+    // `reserve` is idempotent and returns their existing label below.
+    let next_esis: HashSet<EthernetSegmentIdentifier> =
+        segments.iter().map(|seg| seg.esi).collect();
+    let removed: Vec<EthernetSegmentIdentifier> = by_esi
+        .keys()
+        .copied()
+        .filter(|esi| !next_esis.contains(esi))
+        .collect();
+    for esi in removed {
+        esi_label_allocator.release(esi);
+    }
+
     by_esi.clear();
     for seg in segments {
         let Some(state) = build_segment_state(runtime, seg, esi_label_allocator) else {
@@ -1450,6 +1465,53 @@ mod tests {
 
         handle.shutdown().await;
         assert!(!control.is_open());
+    }
+
+    #[test]
+    fn rebuild_segment_states_releases_dropped_esi_labels() {
+        let mut t = EvpnInstanceTable::new();
+        t.insert(instance(100)).unwrap();
+        let instances = Arc::new(t);
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let runtime = SegmentRuntime {
+            instances,
+            rib_tx,
+            bum_enforcement_tx: None,
+            metrics: BgpMetrics::new(),
+            shutdown: CancellationToken::new(),
+        };
+        let mut by_esi: HashMap<EthernetSegmentIdentifier, SegmentState> = HashMap::new();
+        let mut alloc = rustbgpd_evpn::EsiLabelAllocator::new();
+
+        rebuild_segment_states(
+            &runtime,
+            &mut by_esi,
+            &mut alloc,
+            vec![segment(esi(0x21), &[100]), segment(esi(0x22), &[100])],
+        );
+        assert_eq!(alloc.len(), 2);
+        let label_a = alloc.get(esi(0x21)).expect("esi A reserved");
+
+        // Re-apply a snapshot that drops ESI B. The allocator must
+        // release B (so its label returns to the free list) while the
+        // persisting ESI A keeps its existing label.
+        rebuild_segment_states(
+            &runtime,
+            &mut by_esi,
+            &mut alloc,
+            vec![segment(esi(0x21), &[100])],
+        );
+        assert_eq!(alloc.len(), 1, "dropped ESI label must be released");
+        assert!(
+            alloc.get(esi(0x22)).is_none(),
+            "removed ESI must be released from the allocator"
+        );
+        assert_eq!(
+            alloc.get(esi(0x21)),
+            Some(label_a),
+            "persisting ESI must keep its existing label"
+        );
+        assert_eq!(by_esi.len(), 1);
     }
 
     #[test]
