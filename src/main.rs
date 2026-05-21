@@ -371,13 +371,44 @@ impl EvpnRuntimeActorConverger {
             ));
         }
 
+        // The added ES binds its member VNIs to a non-zero ESI, which the
+        // Type 2 originator stamps onto local MAC / MAC+IP routes.
+        // Republish the originator's runtime model (unchanged instances,
+        // new vni->esi map) so it drains the stale ESI=0 local routes for
+        // the member VNIs and re-originates them under the segment's ESI.
+        // RR / no-local-MAC deployments have no originator and are left
+        // untouched (the segment publish below still runs).
+        let republished_originator = if let Some(originator) = self.originator.as_ref() {
+            if !originator.is_open() {
+                return Err(DaemonEvpnRuntimeConvergeError::failed(
+                    "EVPN Type 2 originator runtime control is closed",
+                ));
+            }
+            if !originator.replace_runtime_model(
+                Arc::new(candidate.instances().clone()),
+                evpn_vni_to_esi_map(candidate.ethernet_segments()),
+            ) {
+                return Err(DaemonEvpnRuntimeConvergeError::failed(
+                    "EVPN Type 2 originator runtime model publish failed",
+                ));
+            }
+            true
+        } else {
+            false
+        };
+
         // Publish the complete candidate ES set: the segment actor's
         // change-detection and ESI-label-allocator release logic operate
         // on the full desired snapshot, mirroring the L2VNI/IP-VRF paths.
-        // Only the segment actor is touched, so a failed publish needs no
-        // rollback.
         let candidate_segments = Arc::new(candidate.ethernet_segments().to_vec());
         if !segment.replace_segments(candidate_segments) {
+            if republished_originator && let Some(originator) = self.originator.as_ref() {
+                // Roll the originator back to the committed vni->esi map.
+                let _ = originator.replace_runtime_model(
+                    Arc::new(current.instances().clone()),
+                    evpn_vni_to_esi_map(current.ethernet_segments()),
+                );
+            }
             return Err(DaemonEvpnRuntimeConvergeError::failed(
                 "EVPN segment runtime model publish failed",
             ));
@@ -2872,6 +2903,38 @@ table_id = 6000
         })
     }
 
+    // Like `runtime_converger_rib_responder` but also records withdraws,
+    // for tests that need to observe drains (e.g. ES-add re-stamping a
+    // member VNI's local MAC origination).
+    fn runtime_converger_rib_recorder(
+        mut rib_rx: mpsc::Receiver<RibUpdate>,
+        injects: Arc<tokio::sync::Mutex<Vec<rustbgpd_wire::EvpnRouteKey>>>,
+        withdraws: Arc<tokio::sync::Mutex<Vec<rustbgpd_wire::EvpnRouteKey>>>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let (events_tx, _) = broadcast::channel(16);
+            while let Some(msg) = rib_rx.recv().await {
+                match msg {
+                    RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                        let _ = reply.send(events_tx.subscribe());
+                    }
+                    RibUpdate::QueryEvpnRoutes { reply } => {
+                        let _ = reply.send(vec![]);
+                    }
+                    RibUpdate::InjectEvpn { route, reply } => {
+                        injects.lock().await.push(route.key());
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { key, reply } => {
+                        withdraws.lock().await.push(key);
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => {}
+                }
+            }
+        })
+    }
+
     #[tokio::test]
     async fn apply_evpn_runtime_validate_only_plans_without_advancing() {
         let coordinator = empty_evpn_runtime_coordinator();
@@ -3415,6 +3478,120 @@ table_id = 6000
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
+        segment_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_actor_converger_ethernet_segment_add_restamps_member_vni_local_macs() {
+        // Adding an ES over VNI 200 must republish the Type 2 originator's
+        // vni->esi map so its local MACs stop carrying ESI=0. The
+        // originator drains the member VNI's stale local routes on the map
+        // change — observe that drain (a MacIp withdraw) as proof the
+        // originator model was republished by the ES-add converger.
+        let current = runtime_model_from_candidate_toml(two_l2vni_one_es_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(two_l2vni_two_es_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        let current_instances = Arc::new(current.instances().clone());
+
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = runtime_converger_rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let (local_tx, local_rx) = mpsc::channel(8);
+        let originator_handle = evpn_originator::spawn(
+            evpn_originator::OriginatorConfig::default(),
+            &current_instances,
+            rib_tx.clone(),
+            Some(local_rx),
+            BgpMetrics::new(),
+            evpn_originator::OriginatedLocalMacCounts::default(),
+            tokio_util::sync::CancellationToken::new(),
+            evpn_vni_to_esi_map(current.ethernet_segments()),
+        )
+        .expect("originator should spawn for non-empty current model");
+        let segment_handle = evpn_segment::spawn(
+            &current_instances,
+            current.ethernet_segments().to_vec(),
+            rib_tx.clone(),
+            None,
+            BgpMetrics::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("segment actor should spawn for non-empty ES config");
+
+        // Learn a local MAC on the to-be-segment-bound VNI 200; the
+        // originator originates a MAC-only Type 2 (ESI 0 — VNI 200 has no
+        // segment yet).
+        local_tx
+            .send(rustbgpd_evpn::LocalMacObservation::Learned {
+                vni: rustbgpd_evpn::EvpnInstanceId::new(200).unwrap(),
+                mac: rustbgpd_evpn::MacAddress::new([0x02, 0, 0, 0, 0, 0xbb]),
+                ifindex: 20,
+            })
+            .await
+            .unwrap();
+        let mac_inject_deadline = StdInstant::now() + Duration::from_secs(2);
+        loop {
+            if injects
+                .lock()
+                .await
+                .iter()
+                .any(|key| matches!(key, rustbgpd_wire::EvpnRouteKey::MacIp { .. }))
+            {
+                break;
+            }
+            assert!(
+                StdInstant::now() < mac_inject_deadline,
+                "originator did not originate the VNI 200 local MAC"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(
+                tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()),
+            ),
+            dataplane: None,
+            originator: Some(originator_handle.runtime_control()),
+            svi: None,
+            l3_originator: None,
+            segment: Some(segment_handle.runtime_control()),
+            segment_known_vnis: Arc::new(std::collections::BTreeSet::from([
+                rustbgpd_evpn::EvpnInstanceId::new(100).unwrap(),
+                rustbgpd_evpn::EvpnInstanceId::new(200).unwrap(),
+            ])),
+        };
+
+        converger
+            .converge(&current, &candidate, &plan)
+            .await
+            .unwrap();
+
+        // The originator must drain VNI 200's now-stale ESI=0 local MAC
+        // (then re-originate under the segment's ESI). Seeing the MacIp
+        // withdraw proves the ES-add converger republished the originator
+        // runtime model — without that, the originator would keep
+        // advertising the member VNI with ESI 0.
+        let drain_deadline = StdInstant::now() + Duration::from_secs(2);
+        loop {
+            if withdraws
+                .lock()
+                .await
+                .iter()
+                .any(|key| matches!(key, rustbgpd_wire::EvpnRouteKey::MacIp { .. }))
+            {
+                break;
+            }
+            assert!(
+                StdInstant::now() < drain_deadline,
+                "ES add did not republish the originator model (no local MAC drain observed)"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        originator_handle.shutdown().await;
         segment_handle.shutdown().await;
     }
 
