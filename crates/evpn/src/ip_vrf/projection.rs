@@ -151,13 +151,17 @@ impl ProjectedIpPrefixRoute {
 pub struct RemoteIpPrefixEntry {
     /// Prefix to install in the IP-VRF's route table.
     pub prefix: EvpnIpPrefixValue,
-    /// Originator VTEP — the FIB nexthop, what the recursive lookup
-    /// terminates on after VXLAN encap.
+    /// The FIB nexthop — what the recursive lookup terminates on
+    /// after VXLAN encap. For interface-less Type 5 this is the Type 5
+    /// originator VTEP; for overlay-index Type 5 it is the resolved
+    /// Type 2 MAC/IP route's VTEP.
     pub next_hop: IpAddr,
     /// L3VNI to wrap encapsulated frames with.
     pub l3vni: u32,
     /// Inner destination MAC the kernel needs for the recursive
-    /// lookup. Pulled from the RFC 9135 Router MAC extcomm.
+    /// lookup. For interface-less Type 5 this is the RFC 9135 Router
+    /// MAC extcomm; for overlay-index Type 5 it is the MAC of the
+    /// resolved Type 2 MAC/IP route.
     pub router_mac: MacAddress,
 }
 
