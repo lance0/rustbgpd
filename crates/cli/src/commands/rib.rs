@@ -11,6 +11,7 @@ use crate::proto::{
     ListFibRoutesRequest, ListFibRoutesResponse, ListRoutesRequest,
 };
 use serde::Serialize;
+use std::collections::HashSet;
 
 /// Parsed route filter options from CLI flags.
 pub struct RouteFilterOpts {
@@ -174,7 +175,7 @@ struct JsonFibRouteStatus {
     sampling: Option<JsonFibRouteSamplingMetadata>,
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, Hash, PartialEq, Eq, Serialize)]
 struct JsonFibRouteSamplingMetadata {
     table_name: String,
     table_id: u32,
@@ -323,8 +324,9 @@ fn fib_sampling_metadata(
     routes: &[crate::proto::FibRouteStatus],
 ) -> Vec<JsonFibRouteSamplingMetadata> {
     let mut out = Vec::new();
+    let mut seen = HashSet::new();
     for sampling in routes.iter().filter_map(fib_route_sampling_metadata) {
-        if !out.contains(&sampling) {
+        if seen.insert(sampling.clone()) {
             out.push(sampling);
         }
     }
@@ -1110,6 +1112,33 @@ mod tests {
         assert_eq!(value["sampling"]["suppressed_rows"], 22);
         assert_eq!(value["sampling"]["total_rows"], 150);
         assert_eq!(value["sampling"]["complete"], false);
+    }
+
+    #[test]
+    fn fib_sampling_metadata_deduplicates_with_stable_order() {
+        let first = crate::proto::FibRouteStatus {
+            table_name: "edge".to_string(),
+            table_id: 1000,
+            metric: 200,
+            reason: "route_limit_exceeded".to_string(),
+            sampling_sampled_rows: 128,
+            sampling_suppressed_rows: 22,
+            sampling_total_rows: 150,
+            sampling_max_routes: 1,
+            sampling_sample_limit: 128,
+            sampling_complete: false,
+            ..Default::default()
+        };
+        let mut duplicate = first.clone();
+        duplicate.prefix = "203.0.113.1".to_string();
+        let mut second = first.clone();
+        second.table_name = "core".to_string();
+        second.table_id = 2000;
+
+        let sampling = fib_sampling_metadata(&[first, duplicate, second]);
+        assert_eq!(sampling.len(), 2);
+        assert_eq!(sampling[0].table_name, "edge");
+        assert_eq!(sampling[1].table_name, "core");
     }
 
     #[test]
