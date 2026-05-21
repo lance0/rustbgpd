@@ -443,7 +443,11 @@ impl EvpnRuntimeActorConverger {
             ));
         }
         if !l3_originator.replace_ip_vrfs(candidate_ip_vrfs) {
-            let _ = dataplane.replace_ip_vrfs(Arc::new(current.ip_vrfs().clone()));
+            if !dataplane.replace_ip_vrfs(Arc::new(current.ip_vrfs().clone())) {
+                return Err(DaemonEvpnRuntimeConvergeError::failed(
+                    "EVPN Type 5 originator runtime model publish failed and EVPN dataplane IP-VRF rollback failed; live dataplane state may require daemon restart",
+                ));
+            }
             return Err(DaemonEvpnRuntimeConvergeError::failed(
                 "EVPN Type 5 originator runtime model publish failed",
             ));
@@ -489,7 +493,11 @@ impl EvpnRuntimeActorConverger {
             ));
         }
         if !l3_originator.replace_ip_vrfs(candidate_ip_vrfs) {
-            let _ = dataplane.replace_ip_vrfs(Arc::new(current.ip_vrfs().clone()));
+            if !dataplane.replace_ip_vrfs(Arc::new(current.ip_vrfs().clone())) {
+                return Err(DaemonEvpnRuntimeConvergeError::failed(
+                    "EVPN Type 5 originator runtime model publish failed and EVPN dataplane IP-VRF rollback failed; live dataplane state may require daemon restart",
+                ));
+            }
             return Err(DaemonEvpnRuntimeConvergeError::failed(
                 "EVPN Type 5 originator runtime model publish failed",
             ));
