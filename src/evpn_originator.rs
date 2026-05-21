@@ -706,26 +706,49 @@ async fn recv_evpn_event(
     }
 }
 
+/// Per-VNI local MACs to replay after an ESI-map-only change.
+type LocalMacReplaySet = BTreeMap<EvpnInstanceId, BTreeSet<MacAddress>>;
+
 async fn apply_runtime_model(
     model: Arc<OriginatorRuntimeModel>,
     state: &mut OriginatorState,
     runtime: &mut OriginatorRuntime,
 ) {
-    let stale_vnis: Vec<EvpnInstanceId> = runtime
-        .instances
-        .iter()
-        .filter_map(|old| match model.instances.get(old.id) {
-            Some(next)
-                if next == old
-                    && runtime.vni_to_esi.get(&old.id) == model.vni_to_esi.get(&old.id) =>
-            {
-                None
+    // Classify currently-known VNIs against the candidate model:
+    //  - removed or redefined (instance gone / content changed): full
+    //    drain + state clear, the same as a delete.
+    //  - ESI-map changed only (instance identical, vni_to_esi differs):
+    //    drain the stale routes but preserve and replay the cached local
+    //    MAC/IP state so it re-originates under the new ESI instead of
+    //    disappearing until the next kernel local-MAC event.
+    let mut removed_or_redefined: Vec<EvpnInstanceId> = Vec::new();
+    let mut esi_only_changed: Vec<EvpnInstanceId> = Vec::new();
+    for old in runtime.instances.iter() {
+        match model.instances.get(old.id) {
+            Some(next) if next == old => {
+                if runtime.vni_to_esi.get(&old.id) != model.vni_to_esi.get(&old.id) {
+                    esi_only_changed.push(old.id);
+                }
             }
-            _ => Some(old.id),
-        })
-        .collect();
+            _ => removed_or_redefined.push(old.id),
+        }
+    }
 
-    for vni in stale_vnis {
+    // Snapshot replay keys before the drain clears each advertised route.
+    // ESI-only changes intentionally keep the local observation caches,
+    // pending IP bindings, remote views, and duplicate-MAC quarantine
+    // state. Only delete/redefine may use the full VNI state purge below.
+    let mut replay_local_macs: LocalMacReplaySet = BTreeMap::new();
+    for &vni in &esi_only_changed {
+        let macs = state
+            .local_macs
+            .get(&vni)
+            .map(|per_vni| per_vni.keys().copied().collect())
+            .unwrap_or_default();
+        replay_local_macs.insert(vni, macs);
+    }
+
+    for vni in removed_or_redefined.iter().copied() {
         drain_vni_to_withdraws(
             state,
             runtime.instances.as_ref(),
@@ -737,6 +760,18 @@ async fn apply_runtime_model(
         )
         .await;
         remove_vni_state(state, vni, &runtime.metrics);
+    }
+    for vni in esi_only_changed.iter().copied() {
+        drain_vni_to_withdraws(
+            state,
+            runtime.instances.as_ref(),
+            vni,
+            &runtime.rib_tx,
+            &runtime.metrics,
+            &runtime.originated_local_mac_counts,
+            runtime.vni_to_esi.as_ref(),
+        )
+        .await;
     }
 
     for inst in model.instances.iter() {
@@ -764,6 +799,35 @@ async fn apply_runtime_model(
     .await
     {
         warn!(error = %e, "EVPN originator: runtime model repoll failed");
+    }
+
+    // Replay the preserved local MAC/IP state under the new ESI map. This
+    // runs after `repoll_rib` so the remote contender view is current and
+    // mobility sequencing is correct. Without this, an ESI-map change would
+    // withdraw the member VNI's local Type 2 routes and never re-originate
+    // them until the next kernel local-MAC event.
+    for (vni, macs) in replay_local_macs {
+        for mac in macs {
+            if duplicate_mac_is_quarantined(state, vni, mac) {
+                debug!(
+                    ?vni,
+                    ?mac,
+                    "EVPN originator: preserving duplicate-MAC suppression across ESI-map change"
+                );
+                continue;
+            }
+            replay_local_mac_after_recovery(
+                vni,
+                mac,
+                state,
+                runtime.instances.as_ref(),
+                &runtime.rib_tx,
+                &runtime.metrics,
+                &runtime.originated_local_mac_counts,
+                runtime.vni_to_esi.as_ref(),
+            )
+            .await;
+        }
     }
 }
 
@@ -3601,6 +3665,306 @@ mod tests {
         }
         let observed = log.lock().await.clone();
         panic!("{context}: expected {expected:?}, observed {observed:?}");
+    }
+
+    // Records full injected routes (not just keys) so tests can inspect
+    // route attributes such as the Type 2 ESI.
+    fn runtime_model_full_route_responder(
+        mut rib_rx: mpsc::Receiver<RibUpdate>,
+        injects: Arc<tokio::sync::Mutex<Vec<EvpnRibRoute>>>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let (events_tx, _) = broadcast::channel(16);
+            while let Some(msg) = rib_rx.recv().await {
+                match msg {
+                    RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                        let _ = reply.send(events_tx.subscribe());
+                    }
+                    RibUpdate::QueryEvpnRoutes { reply } => {
+                        let _ = reply.send(vec![]);
+                    }
+                    RibUpdate::InjectEvpn { route, reply } => {
+                        injects.lock().await.push(route);
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => {}
+                }
+            }
+        })
+    }
+
+    async fn wait_for_macip_with_esi(
+        routes: &Arc<tokio::sync::Mutex<Vec<EvpnRibRoute>>>,
+        esi: EthernetSegmentIdentifier,
+        context: &str,
+    ) {
+        for _ in 0..50 {
+            if routes
+                .lock()
+                .await
+                .iter()
+                .any(|r| matches!(&r.route, EvpnRoute::MacIp(macip) if macip.esi == esi))
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("{context}: no MacIp route observed carrying esi {esi:?}");
+    }
+
+    fn originator_runtime_for_test(
+        instances: Arc<EvpnInstanceTable>,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        metrics: BgpMetrics,
+        originated_local_mac_counts: OriginatedLocalMacCounts,
+        vni_to_esi: Arc<BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>>,
+    ) -> OriginatorRuntime {
+        let (_, model_rx) = watch::channel(Arc::new(OriginatorRuntimeModel {
+            instances: instances.clone(),
+            vni_to_esi: vni_to_esi.clone(),
+        }));
+        OriginatorRuntime {
+            instances,
+            model_rx,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+            shutdown: CancellationToken::new(),
+            vni_to_esi,
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_model_esi_change_restamps_local_mac_with_segment_esi() {
+        // Regression: an ESI-map change must not just withdraw the member
+        // VNI's ESI=0 local MAC route — it must re-originate it under the
+        // new segment ESI without waiting for another kernel local-MAC
+        // event.
+        let instances = instance_table(100);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(32);
+        let (local_tx, local_rx) = mpsc::channel(16);
+        let injected = Arc::new(tokio::sync::Mutex::new(Vec::<EvpnRibRoute>::new()));
+        let _responder = runtime_model_full_route_responder(rib_rx, injected.clone());
+
+        let h = spawn(
+            OriginatorConfig {
+                poll_interval: Duration::from_mins(1),
+            },
+            &instances,
+            rib_tx,
+            Some(local_rx),
+            BgpMetrics::new(),
+            OriginatedLocalMacCounts::default(),
+            CancellationToken::new(),
+            Arc::new(std::collections::BTreeMap::new()),
+        )
+        .expect("originator spawned");
+
+        local_tx
+            .send(LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            })
+            .await
+            .unwrap();
+        wait_for_macip_with_esi(
+            &injected,
+            EthernetSegmentIdentifier::ZERO,
+            "initial origination should carry ESI 0",
+        )
+        .await;
+
+        let segment_esi = EthernetSegmentIdentifier::new([
+            0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x00, 0x01,
+        ]);
+        let mut vni_to_esi = std::collections::BTreeMap::new();
+        vni_to_esi.insert(vni(100), segment_esi);
+        assert!(h.replace_runtime_model(instances, Arc::new(vni_to_esi)));
+
+        wait_for_macip_with_esi(
+            &injected,
+            segment_esi,
+            "ESI-map change should re-stamp the local MAC under the segment ESI",
+        )
+        .await;
+        h.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_model_esi_change_preserves_duplicate_mac_quarantine() {
+        let instances = instance_table_with(suppress_local_instance(100));
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (log, _responder) = rib_capture_responder(rib_rx);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = originator_state(&instances);
+        state.remote_mac_view.insert(
+            (vni(100), mac(0xAA)),
+            RemoteMacView {
+                mac: mac(0xAA),
+                mobility_sequence: Some(3),
+                sticky: false,
+                next_hop: ipa("10.0.0.2"),
+            },
+        );
+
+        observe_test(
+            LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        let duplicate_key = DuplicateMacKey::new(vni(100), mac(0xAA));
+        assert!(
+            state
+                .active_duplicate_mac_quarantines
+                .contains(&duplicate_key),
+            "remote contender should activate suppress-local quarantine"
+        );
+        assert!(
+            log.lock().await.is_empty(),
+            "quarantined local MAC must not advertise before ESI change"
+        );
+        assert_quarantine_metric(&metrics, 100, 0xAA, 1);
+
+        let segment_esi = EthernetSegmentIdentifier::new([
+            0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x00, 0x01,
+        ]);
+        let mut next_vni_to_esi = BTreeMap::new();
+        next_vni_to_esi.insert(vni(100), segment_esi);
+        let mut runtime = originator_runtime_for_test(
+            instances.clone(),
+            rib_tx,
+            metrics.clone(),
+            counts,
+            Arc::new(BTreeMap::new()),
+        );
+
+        apply_runtime_model(
+            Arc::new(OriginatorRuntimeModel {
+                instances,
+                vni_to_esi: Arc::new(next_vni_to_esi),
+            }),
+            &mut state,
+            &mut runtime,
+        )
+        .await;
+
+        assert!(
+            state
+                .active_duplicate_mac_quarantines
+                .contains(&duplicate_key),
+            "ESI-map changes must not clear active duplicate-MAC suppression"
+        );
+        assert!(
+            state
+                .duplicate_mac_detector
+                .is_quarantined(duplicate_key, Instant::now()),
+            "duplicate-MAC detector state must survive ESI-map changes"
+        );
+        assert!(
+            log.lock().await.is_empty(),
+            "ESI-map replay must not re-advertise a quarantined local MAC"
+        );
+        assert_quarantine_metric(&metrics, 100, 0xAA, 1);
+    }
+
+    #[tokio::test]
+    async fn runtime_model_esi_change_preserves_pending_ip_bindings() {
+        let instances = instance_table(100);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (log, _responder) = rib_capture_responder(rib_rx);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = originator_state(&instances);
+
+        observe_test(
+            LocalMacObservation::IpAdded {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ip: ipa("192.0.2.10"),
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+        assert!(
+            state
+                .pending_ip_bindings
+                .get(&(vni(100), mac(0xAA)))
+                .is_some_and(|ips| ips.contains(&ipa("192.0.2.10"))),
+            "IP-before-MAC binding should be pending before ESI change"
+        );
+
+        let segment_esi = EthernetSegmentIdentifier::new([
+            0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x00, 0x01,
+        ]);
+        let mut next_vni_to_esi = BTreeMap::new();
+        next_vni_to_esi.insert(vni(100), segment_esi);
+        let mut runtime = originator_runtime_for_test(
+            instances.clone(),
+            rib_tx.clone(),
+            metrics.clone(),
+            counts.clone(),
+            Arc::new(BTreeMap::new()),
+        );
+
+        apply_runtime_model(
+            Arc::new(OriginatorRuntimeModel {
+                instances: instances.clone(),
+                vni_to_esi: Arc::new(next_vni_to_esi),
+            }),
+            &mut state,
+            &mut runtime,
+        )
+        .await;
+        assert!(
+            state
+                .pending_ip_bindings
+                .get(&(vni(100), mac(0xAA)))
+                .is_some_and(|ips| ips.contains(&ipa("192.0.2.10"))),
+            "ESI-map changes must preserve pending IP bindings"
+        );
+
+        handle_observation(
+            &LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+            runtime.vni_to_esi.as_ref(),
+        )
+        .await;
+
+        assert_eq!(
+            log.lock().await.clone(),
+            vec![RibAction::Inject(macip_key_with(
+                100,
+                0xAA,
+                Some("192.0.2.10")
+            ))],
+            "Learned after ESI-map change must drain the preserved pending IP and emit MAC+IP"
+        );
     }
 
     #[tokio::test]

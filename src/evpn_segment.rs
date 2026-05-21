@@ -84,13 +84,6 @@ impl EvpnSegmentRuntimeControl {
 
     /// Replace the desired Ethernet Segment snapshot consumed by the
     /// segment actor. Returns `false` if the actor has already exited.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "ADR-0063 coordinator wiring will call this command; this slice adds the actor command surface first"
-        )
-    )]
     #[must_use]
     pub fn replace_segments(&self, segments: Arc<Vec<EthernetSegment>>) -> bool {
         if self.segments_tx.is_closed() {
