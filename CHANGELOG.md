@@ -9,6 +9,36 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **ADR-0063 EVPN runtime convergence — live commit for single-add edits.**
+  `EvpnService.ApplyEvpnRuntime` now drives a daemon actor converger instead of
+  failing closed on every non-noop edit. A **single L2VNI add** (one new
+  `[[evpn_instances]]` entry) originates IMET and republishes the effective
+  L2VNI table to the dataplane supervisor, the Type 2 MAC/MAC+IP originator, and
+  the SVI-MAC task; a **single IP-VRF add** (one new `[[evpn_ip_vrfs]]` entry)
+  republishes the effective IP-VRF table to the dataplane supervisor and the
+  Type 5 originator. Either supported add commits the next runtime generation.
+  Convergence is ordered with rollback: a partial actor failure restores the
+  prior effective tables, withdraws the speculative IMET, and marks the runtime
+  degraded. Other non-noop shapes — delete, redefine, Ethernet Segment changes,
+  mixed L2VNI + IP-VRF in one request, more than one add, or an add on an
+  RR-only / no-actor daemon — still return `FAILED_PRECONDITION` without
+  advancing the generation or degrading the committed model. The originator and
+  SVI actors drain removed/redefined VNIs (including stale duplicate-MAC
+  move-window state) before accepting a new model. Remaining shapes tracked in
+  [#210](https://github.com/lance0/rustbgpd/issues/210). SIGHUP that edits EVPN
+  is still restart-required.
+
+- **FIB status-row sampling metadata.** `ListFibRoutes` `FibRouteStatus` rows now
+  carry sampling fields (`sampling_sampled_rows`, `sampling_suppressed_rows`,
+  `sampling_total_rows`, `sampling_max_routes`, `sampling_sample_limit`,
+  `sampling_complete`) for high-cardinality sets such as `route_limit_exceeded`,
+  so operators can see how many over-cap rows were suppressed behind the sampled
+  status rows. Counts are scoped to the table/metric/reason set, not the
+  pagination page. `rustbgpctl rib fib` surfaces the metadata in both human and
+  `--page-size` JSON output (deduplicated per sampled set).
+
 ## [0.25.0] — 2026-05-21
 
 ### Added
