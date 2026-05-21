@@ -92,6 +92,34 @@ impl Default for SupervisorConfig {
 /// code, so a plain `drop()` would detach the tasks rather than
 /// drain. The daemon binary moves the handle into the coordinated-
 /// shutdown block in `main.rs` and calls `shutdown().await` there.
+#[derive(Clone, Debug)]
+pub(crate) struct EvpnDataplaneRuntimeControl {
+    evpn_instances_tx: watch::Sender<Arc<EvpnInstanceTable>>,
+}
+
+impl EvpnDataplaneRuntimeControl {
+    /// Whether the dataplane supervisor can still receive runtime
+    /// model snapshots.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        !self.evpn_instances_tx.is_closed()
+    }
+
+    /// Replace the effective L2VNI table consumed by the supervisor.
+    ///
+    /// ADR-0063 runtime commits publish complete snapshots rather than
+    /// mutating the startup table in place. Returns `false` if the
+    /// dataplane supervisor has already exited.
+    #[must_use]
+    pub fn replace_evpn_instances(&self, instances: Arc<EvpnInstanceTable>) -> bool {
+        if self.evpn_instances_tx.is_closed() {
+            return false;
+        }
+        self.evpn_instances_tx.send_replace(instances);
+        true
+    }
+}
+
 #[derive(Debug)]
 pub struct EvpnDataplaneHandle {
     pub(crate) shutdown: CancellationToken,
@@ -145,6 +173,15 @@ impl EvpnDataplaneHandle {
         self.bum_enforcement_tx.clone()
     }
 
+    /// Cloneable ADR-0063 runtime control surface for daemon apply
+    /// wiring. The full handle remains owned by coordinated shutdown.
+    #[must_use]
+    pub(crate) fn runtime_control(&self) -> EvpnDataplaneRuntimeControl {
+        EvpnDataplaneRuntimeControl {
+            evpn_instances_tx: self.evpn_instances_tx.clone(),
+        }
+    }
+
     /// Replace the effective L2VNI table consumed by the supervisor.
     ///
     /// ADR-0063 runtime commits publish complete snapshots rather than
@@ -159,11 +196,7 @@ impl EvpnDataplaneHandle {
     )]
     #[must_use]
     pub fn replace_evpn_instances(&self, instances: Arc<EvpnInstanceTable>) -> bool {
-        if self.evpn_instances_tx.is_closed() {
-            return false;
-        }
-        self.evpn_instances_tx.send_replace(instances);
-        true
+        self.runtime_control().replace_evpn_instances(instances)
     }
 
     /// Cancel the shutdown token, which causes the reconcile actor to

@@ -109,6 +109,39 @@ impl Default for OriginatorConfig {
 /// [`Self::shutdown`] from the coordinated-shutdown block to cancel
 /// the task, drain outstanding originations as Withdraws, and await
 /// the join handle under a 5 s timeout.
+#[derive(Clone, Debug)]
+pub(crate) struct EvpnOriginatorRuntimeControl {
+    model_tx: watch::Sender<Arc<OriginatorRuntimeModel>>,
+}
+
+impl EvpnOriginatorRuntimeControl {
+    /// Whether the originator can still receive runtime model snapshots.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        !self.model_tx.is_closed()
+    }
+
+    /// Replace the effective L2VNI model the originator reconciles
+    /// against. ADR-0063 runtime commits publish complete snapshots;
+    /// this actor drains removed/redefined VNIs before accepting the
+    /// new table for future local observations and RIB-event replay.
+    #[must_use]
+    pub fn replace_runtime_model(
+        &self,
+        instances: Arc<EvpnInstanceTable>,
+        vni_to_esi: Arc<std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>>,
+    ) -> bool {
+        if self.model_tx.is_closed() {
+            return false;
+        }
+        self.model_tx.send_replace(Arc::new(OriginatorRuntimeModel {
+            instances,
+            vni_to_esi,
+        }));
+        true
+    }
+}
+
 #[derive(Debug)]
 pub struct EvpnOriginatorHandle {
     pub(crate) shutdown: CancellationToken,
@@ -122,6 +155,15 @@ impl EvpnOriginatorHandle {
     #[must_use]
     pub fn control(&self) -> EvpnOriginatorControl {
         self.control.clone()
+    }
+
+    /// Cloneable ADR-0063 runtime control surface for daemon apply
+    /// wiring. The full handle remains owned by coordinated shutdown.
+    #[must_use]
+    pub(crate) fn runtime_control(&self) -> EvpnOriginatorRuntimeControl {
+        EvpnOriginatorRuntimeControl {
+            model_tx: self.model_tx.clone(),
+        }
     }
 
     /// Replace the effective L2VNI model the originator reconciles
@@ -141,14 +183,8 @@ impl EvpnOriginatorHandle {
         instances: Arc<EvpnInstanceTable>,
         vni_to_esi: Arc<std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>>,
     ) -> bool {
-        if self.model_tx.is_closed() {
-            return false;
-        }
-        self.model_tx.send_replace(Arc::new(OriginatorRuntimeModel {
-            instances,
-            vni_to_esi,
-        }));
-        true
+        self.runtime_control()
+            .replace_runtime_model(instances, vni_to_esi)
     }
 
     /// Cancel the actor and wait for it to drain.

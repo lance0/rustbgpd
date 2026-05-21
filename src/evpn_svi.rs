@@ -83,6 +83,31 @@ use crate::evpn_originator::{OriginatedLocalMacCounts, build_originated_route};
 
 /// Handle returned to the daemon for shutdown coordination. Holding
 /// this alive keeps the SVI task running.
+#[derive(Clone, Debug)]
+pub(crate) struct EvpnSviRuntimeControl {
+    instances_tx: watch::Sender<Arc<EvpnInstanceTable>>,
+}
+
+impl EvpnSviRuntimeControl {
+    /// Whether the SVI task can still receive runtime model snapshots.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        !self.instances_tx.is_closed()
+    }
+
+    /// Replace the effective L2VNI table the SVI task uses for
+    /// dataplane-report reconciliation. Returns `false` if the actor
+    /// has already exited.
+    #[must_use]
+    pub fn replace_evpn_instances(&self, instances: Arc<EvpnInstanceTable>) -> bool {
+        if self.instances_tx.is_closed() {
+            return false;
+        }
+        self.instances_tx.send_replace(instances);
+        true
+    }
+}
+
 #[derive(Debug)]
 pub struct EvpnSviHandle {
     pub(crate) shutdown: CancellationToken,
@@ -91,6 +116,15 @@ pub struct EvpnSviHandle {
 }
 
 impl EvpnSviHandle {
+    /// Cloneable ADR-0063 runtime control surface for daemon apply
+    /// wiring. The full handle remains owned by coordinated shutdown.
+    #[must_use]
+    pub(crate) fn runtime_control(&self) -> EvpnSviRuntimeControl {
+        EvpnSviRuntimeControl {
+            instances_tx: self.instances_tx.clone(),
+        }
+    }
+
     /// Replace the effective L2VNI table the SVI task uses for
     /// dataplane-report reconciliation. Returns `false` if the actor
     /// has already exited.
@@ -103,11 +137,7 @@ impl EvpnSviHandle {
     )]
     #[must_use]
     pub fn replace_evpn_instances(&self, instances: Arc<EvpnInstanceTable>) -> bool {
-        if self.instances_tx.is_closed() {
-            return false;
-        }
-        self.instances_tx.send_replace(instances);
-        true
+        self.runtime_control().replace_evpn_instances(instances)
     }
 
     /// Cancel the actor and wait for it to drain. Drain emits
