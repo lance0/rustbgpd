@@ -868,6 +868,7 @@ mod tests {
             peer_address: "10.0.0.1".to_string(),
             state: state as i32,
             reason: "test".to_string(),
+            ..Default::default()
         }
     }
 

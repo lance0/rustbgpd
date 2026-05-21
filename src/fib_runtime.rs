@@ -63,6 +63,17 @@ pub struct FibRuntimeStatus {
     pub peer: Option<IpAddr>,
     pub state: FibRuntimeState,
     pub reason: String,
+    pub sampling: Option<FibRuntimeSampling>,
+}
+
+/// Sampling metadata for high-cardinality FIB status reasons.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FibRuntimeSampling {
+    pub sampled_rows: u64,
+    pub suppressed_rows: u64,
+    pub total_rows: u64,
+    pub max_routes: u32,
+    pub sample_limit: u32,
 }
 
 /// High-level install state surfaced through gRPC/CLI and metrics.
@@ -1061,6 +1072,7 @@ fn status_for_drop(
                 peer: None,
                 state: FibRuntimeState::Rejected,
                 reason: "next_hop_family_unsupported".to_string(),
+                sampling: None,
             }
         }
         FibDrop::ForeignRouteExists { key } => {
@@ -1080,6 +1092,7 @@ fn status_for_drop(
                     peer: None,
                     state: FibRuntimeState::Rejected,
                     reason: "foreign_route_exists".to_string(),
+                    sampling: None,
                 }
             }
         }
@@ -1102,6 +1115,7 @@ fn status_for_drop(
                 peer: Some(*peer),
                 state: FibRuntimeState::Rejected,
                 reason: "peer_not_allowed".to_string(),
+                sampling: None,
             }
         }
         FibDrop::RouteLimitExceeded {
@@ -1119,8 +1133,30 @@ fn status_for_drop(
             peer: Some(*peer),
             state: FibRuntimeState::Rejected,
             reason: "route_limit_exceeded".to_string(),
+            sampling: route_limit_sampling(drop),
         },
     }
+}
+
+fn route_limit_sampling(drop: &FibDrop) -> Option<FibRuntimeSampling> {
+    let FibDrop::RouteLimitExceeded {
+        limit,
+        sampled_rows,
+        suppressed_rows,
+        total_rows,
+        sample_limit,
+        ..
+    } = drop
+    else {
+        return None;
+    };
+    Some(FibRuntimeSampling {
+        sampled_rows: *sampled_rows,
+        suppressed_rows: *suppressed_rows,
+        total_rows: *total_rows,
+        max_routes: *limit,
+        sample_limit: *sample_limit,
+    })
 }
 
 fn table_name_for_key(config: &FibRuntimeConfig, key: FibRouteKey) -> String {
@@ -1190,6 +1226,7 @@ fn status_for_route(route: &FibRoute, state: FibRuntimeState, reason: String) ->
         peer: Some(route.peer),
         state,
         reason,
+        sampling: None,
     }
 }
 
@@ -2598,6 +2635,7 @@ mod tests {
             peer: Some(ip("198.51.100.1")),
             state: FibRuntimeState::Installed,
             reason: "owned".to_string(),
+            sampling: None,
         }]);
 
         drain_owned(&config(), &mut fib, &metrics(), &status_tx, &mut owned).await;
@@ -2641,6 +2679,7 @@ mod tests {
             peer: Some(ip("198.51.100.1")),
             state: FibRuntimeState::Installed,
             reason: "owned".to_string(),
+            sampling: None,
         }]);
 
         drain_owned(&config(), &mut fib, &metrics(), &status_tx, &mut owned).await;
@@ -2720,6 +2759,14 @@ mod tests {
         assert!(statuses.iter().all(|status| {
             status.state == FibRuntimeState::Rejected && status.reason == "route_limit_exceeded"
         }));
+        let sampling = statuses[0]
+            .sampling
+            .as_ref()
+            .expect("route_limit_exceeded status should carry sampling metadata");
+        assert_eq!(sampling.sampled_rows, 2);
+        assert_eq!(sampling.suppressed_rows, 0);
+        assert_eq!(sampling.total_rows, 2);
+        assert_eq!(sampling.max_routes, 1);
     }
 
     #[tokio::test]

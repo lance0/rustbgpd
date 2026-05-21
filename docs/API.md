@@ -732,13 +732,18 @@ legacy full-snapshot response, and `page_token` is valid only when
 `page_size > 0`. The response includes `next_page_token` and `total_count`;
 CLI JSON output remains a route array unless `--page-size` is greater than
 `0`, in which case it emits an object with `routes`,
-`next_page_token`, and `total_count`.
+`next_page_token`, `total_count`, and optional `sampling` metadata.
 
 `table_id`, `metric`, `prefix`, `prefix_length`, and `next_hop` describe
 the route identity and forwarding value. The CLI human table renders
 `Table`, `Metric`, `Prefix`, `Next hop`, `State`, and `Reason`; JSON output
 uses `table_name`, `table_id`, `metric`, `prefix`, `next_hop`,
-`peer_address`, `state`, and `reason`. A pre-existing kernel row in a
+`peer_address`, `state`, `reason`, and optional `sampling`. Sampling is present
+on high-cardinality rows such as `route_limit_exceeded`; it reports the number
+of surfaced sample rows, suppressed rows, total rows in that table/metric/reason
+set, the configured `max_routes`, the status sample cap, and whether the sample
+is complete. Pagination still applies only to surfaced rows: `total_count` does
+not include suppressed rows. A pre-existing kernel row in a
 configured table is reported as `foreign_route_exists`; `RTPROT_BGP` is not
 ownership proof by itself because another daemon can use the same protocol
 marker. A row rustbgpd previously owned but later finds changed by another
@@ -846,8 +851,9 @@ fails to apply, and are live-only and not replayed by `ListFibRoutes`. EVPN
 events are sourced from the RIB's EVPN best-path broadcast and are also
 retained in a bounded `ListEvpnEvents` process-local history ring.
 The FIB `rejected` count reflects surfaced status rows; high-cardinality
-`route_limit_exceeded` rows are sampled in `ListFibRoutes`, so this is not a
-global suppressed-route total. Empty category and type filters subscribe to
+`route_limit_exceeded` rows carry `ListFibRoutes` sampling metadata with
+suppressed-row totals, so the event count itself is not a global
+suppressed-route total. Empty category and type filters subscribe to
 the default route + session live stream. A non-empty type filter narrows the
 stream; `BGP_EVENT_TYPE_POLICY_CHANGED`,
 `BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED`, or an EVPN route event type with

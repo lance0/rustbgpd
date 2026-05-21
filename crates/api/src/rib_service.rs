@@ -1676,6 +1676,7 @@ mod tests {
             peer_address: peer_address.to_string(),
             state: state as i32,
             reason: reason.to_string(),
+            ..Default::default()
         }
     }
 
@@ -2141,6 +2142,7 @@ mod tests {
                     peer_address: "198.51.100.1".to_string(),
                     state: proto::FibRouteState::Installed as i32,
                     reason: "owned".to_string(),
+                    ..Default::default()
                 }]
             }),
         );

@@ -170,6 +170,22 @@ struct JsonFibRouteStatus {
     peer_address: String,
     state: String,
     reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sampling: Option<JsonFibRouteSamplingMetadata>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize)]
+struct JsonFibRouteSamplingMetadata {
+    table_name: String,
+    table_id: u32,
+    metric: u32,
+    reason: String,
+    sampled_rows: u64,
+    suppressed_rows: u64,
+    total_rows: u64,
+    max_routes: u32,
+    sample_limit: u32,
+    complete: bool,
 }
 
 #[derive(Serialize)]
@@ -177,6 +193,8 @@ struct JsonFibRoutePage {
     routes: Vec<JsonFibRouteStatus>,
     next_page_token: String,
     total_count: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sampling: Vec<JsonFibRouteSamplingMetadata>,
 }
 
 fn print_blackhole_discards(discards: &[crate::proto::BlackholeDiscard], json: bool) {
@@ -211,6 +229,7 @@ fn print_fib_routes(resp: &ListFibRoutesResponse, json: bool, include_page_meta:
             resp.routes.iter().map(fib_route_status_to_json).collect();
         if include_page_meta {
             let out = JsonFibRoutePage {
+                sampling: fib_sampling_metadata(&resp.routes),
                 routes,
                 next_page_token: resp.next_page_token.clone(),
                 total_count: resp.total_count,
@@ -252,6 +271,20 @@ fn print_fib_routes(resp: &ListFibRoutesResponse, json: bool, include_page_meta:
         if !resp.next_page_token.is_empty() {
             println!("Next page token: {}", resp.next_page_token);
         }
+        for sampling in fib_sampling_metadata(&resp.routes) {
+            println!(
+                "Sampling: table={} metric={} reason={} sampled={} suppressed={} total={} max_routes={} sample_limit={} complete={}",
+                sampling.table_name,
+                sampling.metric,
+                sampling.reason,
+                sampling.sampled_rows,
+                sampling.suppressed_rows,
+                sampling.total_rows,
+                sampling.max_routes,
+                sampling.sample_limit,
+                sampling.complete
+            );
+        }
     }
 }
 
@@ -282,7 +315,43 @@ fn fib_route_status_to_json(r: &crate::proto::FibRouteStatus) -> JsonFibRouteSta
         peer_address: r.peer_address.clone(),
         state: fib_state_label(r.state).to_string(),
         reason: r.reason.clone(),
+        sampling: fib_route_sampling_metadata(r),
     }
+}
+
+fn fib_sampling_metadata(
+    routes: &[crate::proto::FibRouteStatus],
+) -> Vec<JsonFibRouteSamplingMetadata> {
+    let mut out = Vec::new();
+    for sampling in routes.iter().filter_map(fib_route_sampling_metadata) {
+        if !out.contains(&sampling) {
+            out.push(sampling);
+        }
+    }
+    out
+}
+
+fn fib_route_sampling_metadata(
+    route: &crate::proto::FibRouteStatus,
+) -> Option<JsonFibRouteSamplingMetadata> {
+    if route.sampling_total_rows == 0
+        && route.sampling_sampled_rows == 0
+        && route.sampling_suppressed_rows == 0
+    {
+        return None;
+    }
+    Some(JsonFibRouteSamplingMetadata {
+        table_name: route.table_name.clone(),
+        table_id: route.table_id,
+        metric: route.metric,
+        reason: route.reason.clone(),
+        sampled_rows: route.sampling_sampled_rows,
+        suppressed_rows: route.sampling_suppressed_rows,
+        total_rows: route.sampling_total_rows,
+        max_routes: route.sampling_max_routes,
+        sample_limit: route.sampling_sample_limit,
+        complete: route.sampling_complete,
+    })
 }
 
 fn blackhole_state_label(state: i32) -> &'static str {
@@ -1001,6 +1070,7 @@ mod tests {
             peer_address: "198.51.100.1".to_string(),
             state: crate::proto::FibRouteState::Failed as i32,
             reason: "install_failed:EPERM".to_string(),
+            ..Default::default()
         };
 
         let value = serde_json::to_value(fib_route_status_to_json(&route)).unwrap();
@@ -1012,6 +1082,34 @@ mod tests {
         assert_eq!(value["peer_address"], "198.51.100.1");
         assert_eq!(value["state"], "failed");
         assert_eq!(value["reason"], "install_failed:EPERM");
+        assert!(value.get("sampling").is_none());
+    }
+
+    #[test]
+    fn fib_json_includes_sampling_metadata_when_present() {
+        let route = crate::proto::FibRouteStatus {
+            table_name: "edge".to_string(),
+            table_id: 1000,
+            metric: 200,
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+            next_hop: "192.0.2.1".to_string(),
+            peer_address: "198.51.100.1".to_string(),
+            state: crate::proto::FibRouteState::Rejected as i32,
+            reason: "route_limit_exceeded".to_string(),
+            sampling_sampled_rows: 128,
+            sampling_suppressed_rows: 22,
+            sampling_total_rows: 150,
+            sampling_max_routes: 1,
+            sampling_sample_limit: 128,
+            sampling_complete: false,
+        };
+
+        let value = serde_json::to_value(fib_route_status_to_json(&route)).unwrap();
+        assert_eq!(value["sampling"]["sampled_rows"], 128);
+        assert_eq!(value["sampling"]["suppressed_rows"], 22);
+        assert_eq!(value["sampling"]["total_rows"], 150);
+        assert_eq!(value["sampling"]["complete"], false);
     }
 
     #[test]
@@ -1020,6 +1118,7 @@ mod tests {
             routes: vec![],
             next_page_token: "100".to_string(),
             total_count: 250,
+            sampling: vec![],
         };
 
         let value = serde_json::to_value(out).unwrap();

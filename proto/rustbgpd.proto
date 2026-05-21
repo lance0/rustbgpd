@@ -810,6 +810,20 @@ message FibRouteStatus {
   // "replace_failed:DETAIL", or "remove_failed:DETAIL". Treat text after
   // ':' as diagnostic detail.
   string reason = 9;
+  // Non-zero when this row belongs to a sampled high-cardinality status set
+  // such as route_limit_exceeded. Counts are scoped to the row's
+  // table/metric/reason, not to the current pagination page.
+  uint64 sampling_sampled_rows = 10;
+  // Rows suppressed after the status sample cap was reached.
+  uint64 sampling_suppressed_rows = 11;
+  // Total rows in the sampled status set before sampling.
+  uint64 sampling_total_rows = 12;
+  // Configured max_routes value that triggered route_limit_exceeded sampling.
+  uint32 sampling_max_routes = 13;
+  // Status-row sample cap applied to this status set.
+  uint32 sampling_sample_limit = 14;
+  // True when no rows were suppressed for this sampled status set.
+  bool sampling_complete = 15;
 }
 
 message ListFibRoutesResponse {

@@ -1594,28 +1594,37 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             Arc::new(move || {
                 rx.borrow()
                     .iter()
-                    .map(|status| rustbgpd_api::proto::FibRouteStatus {
-                        table_name: status.table_name.clone(),
-                        table_id: status.table_id,
-                        metric: status.metric,
-                        prefix: status.prefix.addr_string(),
-                        prefix_length: u32::from(status.prefix.prefix_len()),
-                        next_hop: status
-                            .next_hop
-                            .map_or_else(String::new, |ip| ip.to_string()),
-                        peer_address: status.peer.map_or_else(String::new, |ip| ip.to_string()),
-                        state: match status.state {
-                            fib_runtime::FibRuntimeState::Installed => {
-                                rustbgpd_api::proto::FibRouteState::Installed as i32
-                            }
-                            fib_runtime::FibRuntimeState::Rejected => {
-                                rustbgpd_api::proto::FibRouteState::Rejected as i32
-                            }
-                            fib_runtime::FibRuntimeState::Failed => {
-                                rustbgpd_api::proto::FibRouteState::Failed as i32
-                            }
-                        },
-                        reason: status.reason.clone(),
+                    .map(|status| {
+                        let sampling = status.sampling.as_ref();
+                        rustbgpd_api::proto::FibRouteStatus {
+                            table_name: status.table_name.clone(),
+                            table_id: status.table_id,
+                            metric: status.metric,
+                            prefix: status.prefix.addr_string(),
+                            prefix_length: u32::from(status.prefix.prefix_len()),
+                            next_hop: status
+                                .next_hop
+                                .map_or_else(String::new, |ip| ip.to_string()),
+                            peer_address: status.peer.map_or_else(String::new, |ip| ip.to_string()),
+                            state: match status.state {
+                                fib_runtime::FibRuntimeState::Installed => {
+                                    rustbgpd_api::proto::FibRouteState::Installed as i32
+                                }
+                                fib_runtime::FibRuntimeState::Rejected => {
+                                    rustbgpd_api::proto::FibRouteState::Rejected as i32
+                                }
+                                fib_runtime::FibRuntimeState::Failed => {
+                                    rustbgpd_api::proto::FibRouteState::Failed as i32
+                                }
+                            },
+                            reason: status.reason.clone(),
+                            sampling_sampled_rows: sampling.map_or(0, |s| s.sampled_rows),
+                            sampling_suppressed_rows: sampling.map_or(0, |s| s.suppressed_rows),
+                            sampling_total_rows: sampling.map_or(0, |s| s.total_rows),
+                            sampling_max_routes: sampling.map_or(0, |s| s.max_routes),
+                            sampling_sample_limit: sampling.map_or(0, |s| s.sample_limit),
+                            sampling_complete: sampling.is_some_and(|s| s.suppressed_rows == 0),
+                        }
                     })
                     .collect()
             })
