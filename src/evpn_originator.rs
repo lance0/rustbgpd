@@ -483,6 +483,12 @@ struct OriginatorState {
     /// the M/N window and active suppressions; this daemon state owns
     /// the route-withdraw/replay policy.
     duplicate_mac_detector: DuplicateMacDetector,
+    /// Keys ever inserted into [`Self::duplicate_mac_detector`] and not
+    /// later explicitly cleared. The detector intentionally hides its
+    /// window map, so the daemon tracks keys here to purge all stale
+    /// per-VNI move history when a runtime model removes/redefines a
+    /// VNI.
+    known_duplicate_mac_keys: BTreeSet<DuplicateMacKey>,
     /// Active duplicate-MAC quarantine keys published to the EVPN
     /// dataplane supervisor. The supervisor filters these keys out of
     /// remote-FDB intent while leaving Loc-RIB/RR visibility intact.
@@ -511,6 +517,7 @@ impl OriginatorState {
             remote_mac_view: BTreeMap::new(),
             remote_mac_ip_view: BTreeMap::new(),
             duplicate_mac_detector: DuplicateMacDetector::default(),
+            known_duplicate_mac_keys: BTreeSet::new(),
             active_duplicate_mac_quarantines: BTreeSet::new(),
             duplicate_mac_quarantine_tx,
         }
@@ -712,7 +719,12 @@ async fn apply_runtime_model(
         .instances
         .iter()
         .filter_map(|old| match model.instances.get(old.id) {
-            Some(next) if next == old => None,
+            Some(next)
+                if next == old
+                    && runtime.vni_to_esi.get(&old.id) == model.vni_to_esi.get(&old.id) =>
+            {
+                None
+            }
             _ => Some(old.id),
         })
         .collect();
@@ -774,20 +786,22 @@ fn remove_vni_state(state: &mut OriginatorState, vni: EvpnInstanceId, metrics: &
         .remote_mac_ip_view
         .retain(|(route_vni, _, _), _| *route_vni != vni);
 
-    let removed_quarantines: Vec<DuplicateMacKey> = state
-        .active_duplicate_mac_quarantines
+    let removed_duplicate_mac_keys: Vec<DuplicateMacKey> = state
+        .known_duplicate_mac_keys
         .iter()
         .copied()
         .filter(|key| key.vni == vni)
         .collect();
-    for key in removed_quarantines {
+    for key in removed_duplicate_mac_keys {
         state.duplicate_mac_detector.clear(key);
-        state.active_duplicate_mac_quarantines.remove(&key);
-        metrics.set_evpn_duplicate_mac_quarantine_active(
-            key.vni.as_u32(),
-            &key.mac.to_string(),
-            false,
-        );
+        state.known_duplicate_mac_keys.remove(&key);
+        if state.active_duplicate_mac_quarantines.remove(&key) {
+            metrics.set_evpn_duplicate_mac_quarantine_active(
+                key.vni.as_u32(),
+                &key.mac.to_string(),
+                false,
+            );
+        }
     }
     publish_duplicate_mac_quarantines(
         &state.duplicate_mac_quarantine_tx,
@@ -1000,6 +1014,7 @@ fn record_duplicate_mac_move(
     let config = inst.duplicate_mac_detection;
     let now = Instant::now();
     let key = DuplicateMacKey::new(vni, mac);
+    state.known_duplicate_mac_keys.insert(key);
     if state.duplicate_mac_detector.expire_key(key, now) {
         metrics.set_evpn_duplicate_mac_quarantine_active(vni.as_u32(), &mac.to_string(), false);
         set_duplicate_mac_quarantine_active(state, key, false);
@@ -1142,6 +1157,7 @@ async fn recover_duplicate_macs(
 ) {
     let recovered = state.duplicate_mac_detector.expire(Instant::now());
     for key in recovered {
+        state.known_duplicate_mac_keys.remove(&key);
         metrics.set_evpn_duplicate_mac_quarantine_active(
             key.vni.as_u32(),
             &key.mac.to_string(),
@@ -1183,6 +1199,9 @@ async fn clear_duplicate_mac_quarantine(
 
     let was_active = state.active_duplicate_mac_quarantines.contains(&key);
     let had_state = state.duplicate_mac_detector.clear(key);
+    if had_state {
+        state.known_duplicate_mac_keys.remove(&key);
+    }
     if !was_active {
         if had_state {
             debug!(
@@ -3689,6 +3708,80 @@ mod tests {
         )
         .await;
         h.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_model_esi_change_drains_originated_local_mac_routes() {
+        let instances = instance_table(100);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(32);
+        let (local_tx, local_rx) = mpsc::channel(16);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _responder = runtime_model_rib_responder(rib_rx, injects.clone(), withdraws.clone());
+
+        let h = spawn(
+            OriginatorConfig {
+                poll_interval: Duration::from_mins(1),
+            },
+            &instances,
+            rib_tx,
+            Some(local_rx),
+            BgpMetrics::new(),
+            OriginatedLocalMacCounts::default(),
+            CancellationToken::new(),
+            Arc::new(std::collections::BTreeMap::new()),
+        )
+        .expect("originator spawned");
+
+        let key = EvpnRouteKey::MacIp {
+            rd: rd(65000, 100),
+            ethernet_tag: EthernetTagId(0),
+            mac: mac(0xAA),
+            ip: None,
+        };
+        local_tx
+            .send(LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            })
+            .await
+            .unwrap();
+        wait_for_key(&injects, key, "initial VNI should originate").await;
+
+        let mut vni_to_esi = std::collections::BTreeMap::new();
+        vni_to_esi.insert(
+            vni(100),
+            EthernetSegmentIdentifier::new([
+                0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x00, 0x01,
+            ]),
+        );
+        assert!(h.replace_runtime_model(instances, Arc::new(vni_to_esi)));
+        wait_for_key(
+            &withdraws,
+            key,
+            "runtime ESI-map change should drain stale local MAC originations",
+        )
+        .await;
+        h.shutdown().await;
+    }
+
+    #[test]
+    fn remove_vni_state_clears_inactive_duplicate_mac_detector_windows() {
+        let instances = instance_table(100);
+        let mut state = originator_state(&instances);
+        let metrics = BgpMetrics::new();
+        let key = DuplicateMacKey::new(vni(100), mac(0xAA));
+        let inst = instances.get(vni(100)).unwrap();
+
+        assert!(!record_duplicate_mac_move(
+            &metrics, &mut state, inst, key.vni, key.mac
+        ));
+        assert!(state.known_duplicate_mac_keys.contains(&key));
+        remove_vni_state(&mut state, key.vni, &metrics);
+
+        assert!(!state.known_duplicate_mac_keys.contains(&key));
+        assert!(!state.duplicate_mac_detector.clear(key));
     }
 
     #[tokio::test]
