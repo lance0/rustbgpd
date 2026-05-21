@@ -9,6 +9,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **ADR-0063 EVPN runtime convergence — single standalone L2VNI delete.**
+  `EvpnService.ApplyEvpnRuntime` can now commit exactly one deleted
+  `[[evpn_instances]]` entry in L2-only deployments. The daemon republishes the
+  candidate L2VNI table to the dataplane supervisor and Type 2/SVI originators,
+  withdraws the removed VNI's IMET route, and advances the runtime generation
+  only after convergence accepts the candidate. Linked delete, redefine, mixed
+  and multi-element edits, IP-VRF/ES delete, RR-only/no-actor delete, and the
+  runtime-added-member-VNI ES case remain fail-closed under #210. SIGHUP EVPN
+  edits remain restart-required.
+
 ## [0.26.0] — 2026-05-21
 
 ### Added

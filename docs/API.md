@@ -1253,7 +1253,7 @@ future runtime mutation semantics.
 | `ListIpVrfs`        | List configured IP-VRFs / L3VNI tenants (name, l3vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, router_mac, optional `evpn_instance` link, readiness state, originated_routes_count, installed_routes_count) — Gate 9 / ADR-0058 |
 | `GetIpVrf`          | Detail view of a single IP-VRF including the seven readiness predicates (`not_ready_reasons`) when `readiness_state != Ready` |
 | `ClearDuplicateMacQuarantine` | Clear one RFC 7432 §15.1 duplicate-MAC local-origin quarantine by `(vni, mac)`. Returns `cleared=false` when no active quarantine exists; read-only listeners reject it. |
-| `ApplyEvpnRuntime` | Validate or apply a full candidate EVPN runtime model through the ADR-0063 coordinator. `validate_only=true` returns the plan without mutation; no-op applies succeed; a single L2VNI add or a single IP-VRF add converges live and commits a new generation; other non-noop shapes (delete, redefine, Ethernet Segment changes, mixed or multi-add) still fail closed. |
+| `ApplyEvpnRuntime` | Validate or apply a full candidate EVPN runtime model through the ADR-0063 coordinator. `validate_only=true` returns the plan without mutation; no-op applies succeed; a single L2VNI add, single standalone L2VNI delete in L2-only deployments, single IP-VRF add, or single Ethernet Segment add converges live and commits a new generation; other non-noop shapes (linked delete, redefine, mixed or multi-element edits) still fail closed. |
 
 Instance mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) remains out
 of scope. `GetEvpnRuntime` now reports the daemon-owned ADR-0063
@@ -1420,11 +1420,12 @@ JSON
 ```
 
 A non-`validate_only` request commits when the candidate is a no-op, a
-single L2VNI add, or a single IP-VRF add against the committed model; the
-response carries the committed generation and outcome. Every other
-non-noop shape (delete, redefine, Ethernet Segment changes, a mixed
-L2VNI + IP-VRF request, or more than one add) is rejected with
-`FAILED_PRECONDITION`, leaving the prior generation committed.
+single L2VNI add, a single standalone L2VNI delete in an L2-only deployment,
+a single IP-VRF add, or a single Ethernet Segment add against the committed
+model; the response carries the committed generation and outcome. Every other
+non-noop shape (linked delete, redefine, a mixed L2VNI + IP-VRF request,
+multi-element edits, or an ES referencing a runtime-added member VNI) is
+rejected with `FAILED_PRECONDITION`, leaving the prior generation committed.
 
 ---
 
