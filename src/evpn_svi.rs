@@ -81,8 +81,8 @@ use tracing::{debug, info, warn};
 
 use crate::evpn_originator::{OriginatedLocalMacCounts, build_originated_route};
 
-/// Handle returned to the daemon for shutdown coordination. Holding
-/// this alive keeps the SVI task running.
+/// Cloneable ADR-0063 runtime control surface for daemon apply
+/// wiring. The full handle remains owned by coordinated shutdown.
 #[derive(Clone, Debug)]
 pub(crate) struct EvpnSviRuntimeControl {
     instances_tx: watch::Sender<Arc<EvpnInstanceTable>>,

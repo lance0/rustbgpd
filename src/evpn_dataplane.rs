@@ -83,15 +83,8 @@ impl Default for SupervisorConfig {
     }
 }
 
-/// Handle returned to the daemon for shutdown coordination.
-///
-/// Holding this type alive keeps both the supervisor and the
-/// reconcile actor running. Call [`Self::shutdown`] from the
-/// daemon's coordinated shutdown path to cancel the actor and await
-/// its bounded drain — *dropping* the handle does not run async
-/// code, so a plain `drop()` would detach the tasks rather than
-/// drain. The daemon binary moves the handle into the coordinated-
-/// shutdown block in `main.rs` and calls `shutdown().await` there.
+/// Cloneable ADR-0063 runtime control surface for daemon apply
+/// wiring. The full handle remains owned by coordinated shutdown.
 #[derive(Clone, Debug)]
 pub(crate) struct EvpnDataplaneRuntimeControl {
     evpn_instances_tx: watch::Sender<Arc<EvpnInstanceTable>>,

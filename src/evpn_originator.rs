@@ -103,12 +103,8 @@ impl Default for OriginatorConfig {
     }
 }
 
-/// Handle returned to the daemon for shutdown coordination.
-///
-/// Holding this alive keeps the originator task running. Call
-/// [`Self::shutdown`] from the coordinated-shutdown block to cancel
-/// the task, drain outstanding originations as Withdraws, and await
-/// the join handle under a 5 s timeout.
+/// Cloneable ADR-0063 runtime control surface for daemon apply
+/// wiring. The full handle remains owned by coordinated shutdown.
 #[derive(Clone, Debug)]
 pub(crate) struct EvpnOriginatorRuntimeControl {
     model_tx: watch::Sender<Arc<OriginatorRuntimeModel>>,
