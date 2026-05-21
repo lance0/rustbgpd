@@ -11,13 +11,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0063 EVPN runtime convergence — single Ethernet Segment delete.**
+  `EvpnService.ApplyEvpnRuntime` can now commit exactly one deleted
+  `[[ethernet_segments]]` entry when the candidate has no L2VNI, IP-VRF, or
+  ES redefine/add changes. The daemon republishes the Type 2 originator's
+  candidate VNI-to-ESI map so former member VNIs restamp local MAC routes back
+  to single-homed ESI zero, then publishes the full candidate ES snapshot to
+  the segment actor so Type 4, EAD-per-ES, EAD-per-EVI, and BUM enforcement
+  state drain under the segment owner. ES redefine, mixed and multi-element
+  edits, RR-only/no-actor delete, and runtime-added-member-VNI ES convergence
+  remain fail-closed under #210.
+
 - **ADR-0063 EVPN runtime convergence — single standalone IP-VRF delete.**
   `EvpnService.ApplyEvpnRuntime` can now commit exactly one deleted
   `[[evpn_ip_vrfs]]` entry when no committed L2VNI references that IP-VRF.
   The daemon republishes the candidate IP-VRF table to the dataplane
   supervisor and Type 5 originator so remote Type 5 FIB intent and locally
   originated Type 5 routes drain before the runtime generation advances.
-  Linked IP-VRF delete, redefine, mixed and multi-element edits, ES delete,
+  Linked IP-VRF delete, redefine, mixed and multi-element edits,
   RR-only/no-actor delete, and runtime-added-member-VNI ES convergence remain
   fail-closed under #210.
 
