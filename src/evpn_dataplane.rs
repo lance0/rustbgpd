@@ -88,6 +88,7 @@ impl Default for SupervisorConfig {
 #[derive(Clone, Debug)]
 pub(crate) struct EvpnDataplaneRuntimeControl {
     evpn_instances_tx: watch::Sender<Arc<EvpnInstanceTable>>,
+    ip_vrfs_tx: watch::Sender<Arc<IpVrfTable>>,
 }
 
 impl EvpnDataplaneRuntimeControl {
@@ -95,7 +96,7 @@ impl EvpnDataplaneRuntimeControl {
     /// model snapshots.
     #[must_use]
     pub fn is_open(&self) -> bool {
-        !self.evpn_instances_tx.is_closed()
+        !self.evpn_instances_tx.is_closed() && !self.ip_vrfs_tx.is_closed()
     }
 
     /// Replace the effective L2VNI table consumed by the supervisor.
@@ -109,6 +110,18 @@ impl EvpnDataplaneRuntimeControl {
             return false;
         }
         self.evpn_instances_tx.send_replace(instances);
+        true
+    }
+
+    /// Replace the effective IP-VRF table consumed by the supervisor.
+    ///
+    /// Returns `false` if the dataplane supervisor has already exited.
+    #[must_use]
+    pub fn replace_ip_vrfs(&self, ip_vrfs: Arc<IpVrfTable>) -> bool {
+        if self.ip_vrfs_tx.is_closed() {
+            return false;
+        }
+        self.ip_vrfs_tx.send_replace(ip_vrfs);
         true
     }
 }
@@ -172,6 +185,7 @@ impl EvpnDataplaneHandle {
     pub(crate) fn runtime_control(&self) -> EvpnDataplaneRuntimeControl {
         EvpnDataplaneRuntimeControl {
             evpn_instances_tx: self.evpn_instances_tx.clone(),
+            ip_vrfs_tx: self.ip_vrfs_tx.clone(),
         }
     }
 

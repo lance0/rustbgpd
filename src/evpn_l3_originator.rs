@@ -125,8 +125,33 @@ impl OriginatedIpVrfRouteCounts {
     }
 }
 
-/// Handle returned by [`spawn`]. Call [`Self::shutdown`] to cancel
-/// the actor and wait for the drain to finish.
+/// Cloneable ADR-0063 runtime control surface for daemon apply
+/// wiring. The full handle remains owned by coordinated shutdown.
+#[derive(Clone)]
+pub(crate) struct EvpnL3OriginatorRuntimeControl {
+    ip_vrfs_tx: watch::Sender<Arc<IpVrfTable>>,
+}
+
+impl EvpnL3OriginatorRuntimeControl {
+    /// Whether the Type 5 originator can still receive runtime model
+    /// snapshots.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        !self.ip_vrfs_tx.is_closed()
+    }
+
+    /// Replace the effective IP-VRF table the originator reconciles
+    /// against. Returns `false` if the actor has already exited.
+    #[must_use]
+    pub fn replace_ip_vrfs(&self, ip_vrfs: Arc<IpVrfTable>) -> bool {
+        if self.ip_vrfs_tx.is_closed() {
+            return false;
+        }
+        self.ip_vrfs_tx.send_replace(ip_vrfs);
+        true
+    }
+}
+
 pub struct EvpnL3OriginatorHandle {
     shutdown: CancellationToken,
     ip_vrfs_tx: watch::Sender<Arc<IpVrfTable>>,
@@ -134,6 +159,15 @@ pub struct EvpnL3OriginatorHandle {
 }
 
 impl EvpnL3OriginatorHandle {
+    /// Cloneable ADR-0063 runtime control surface for daemon apply
+    /// wiring. The full handle remains owned by coordinated shutdown.
+    #[must_use]
+    pub(crate) fn runtime_control(&self) -> EvpnL3OriginatorRuntimeControl {
+        EvpnL3OriginatorRuntimeControl {
+            ip_vrfs_tx: self.ip_vrfs_tx.clone(),
+        }
+    }
+
     /// Replace the effective IP-VRF table the originator reconciles
     /// against. Returns `false` if the actor has already exited.
     #[cfg_attr(
@@ -145,11 +179,7 @@ impl EvpnL3OriginatorHandle {
     )]
     #[must_use]
     pub fn replace_ip_vrfs(&self, ip_vrfs: Arc<IpVrfTable>) -> bool {
-        if self.ip_vrfs_tx.is_closed() {
-            return false;
-        }
-        self.ip_vrfs_tx.send_replace(ip_vrfs);
-        true
+        self.runtime_control().replace_ip_vrfs(ip_vrfs)
     }
 
     /// Cancel the actor and wait for it to drain (mirrors
