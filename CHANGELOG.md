@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.26.0] — 2026-05-21
+
 ### Added
 
 - **ADR-0063 EVPN runtime convergence — live commit for single-add edits.**
@@ -18,17 +20,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   L2VNI table to the dataplane supervisor, the Type 2 MAC/MAC+IP originator, and
   the SVI-MAC task; a **single IP-VRF add** (one new `[[evpn_ip_vrfs]]` entry)
   republishes the effective IP-VRF table to the dataplane supervisor and the
-  Type 5 originator. Either supported add commits the next runtime generation.
+  Type 5 originator; and a **single Ethernet Segment add** (one new
+  `[[ethernet_segments]]` entry) republishes the full desired-ES snapshot to the
+  segment actor — which drains/rebuilds Type 4 / EAD-per-ES / EAD-per-EVI and
+  BUM-enforcement state — and re-stamps the member VNIs' local MAC routes with
+  the segment ESI (duplicate-MAC quarantine and pending IP bindings are
+  preserved across the change). Each supported add commits the next runtime
+  generation.
   Convergence is ordered with rollback: a partial actor failure restores the
   prior effective tables, withdraws the speculative IMET, and marks the runtime
-  degraded. Other non-noop shapes — delete, redefine, Ethernet Segment changes,
-  mixed L2VNI + IP-VRF in one request, more than one add, or an add on an
-  RR-only / no-actor daemon — still return `FAILED_PRECONDITION` without
-  advancing the generation or degrading the committed model. The originator and
-  SVI actors drain removed/redefined VNIs (including stale duplicate-MAC
-  move-window state) before accepting a new model. Remaining shapes tracked in
-  [#210](https://github.com/lance0/rustbgpd/issues/210). SIGHUP that edits EVPN
-  is still restart-required.
+  degraded. Other non-noop shapes — delete, redefine, mixed L2VNI + IP-VRF in
+  one request, more than one add, an add on an RR-only / no-actor daemon, or an
+  Ethernet Segment referencing a member VNI added at runtime (the segment actor
+  reads a startup-pinned instance table) — still return `FAILED_PRECONDITION`
+  without advancing the generation or degrading the committed model. The
+  originator and SVI actors drain removed/redefined VNIs (including stale
+  duplicate-MAC move-window state) before accepting a new model. Remaining
+  shapes tracked in [#210](https://github.com/lance0/rustbgpd/issues/210).
+  SIGHUP that edits EVPN is still restart-required.
 
 - **FIB status-row sampling metadata.** `ListFibRoutes` `FibRouteStatus` rows now
   carry sampling fields (`sampling_sampled_rows`, `sampling_suppressed_rows`,
