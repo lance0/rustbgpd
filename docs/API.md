@@ -1268,21 +1268,24 @@ MAC-only/MAC+IP/SVI Type 2 originators, the Type 5/IP-VRF originator, and
 the Linux dataplane supervisor through ordered convergence commands with
 rollback on partial failure.
 
-Two non-noop shapes converge live and commit the next generation: a
+Four non-noop shapes converge live and commit the next generation: a
 **single L2VNI add** (exactly one new `[[evpn_instances]]` entry and no
-other changes) and a **single IP-VRF add** (exactly one new
-`[[evpn_ip_vrfs]]` entry and no other changes). A supported add originates
-IMET (L2VNI) or republishes the effective tables (both) to the relevant
-actors and then publishes the new committed generation. Every other
-non-noop shape — delete, redefine, Ethernet Segment changes, a mixed
-L2VNI + IP-VRF request, more than one add, or an add on an RR-only /
-no-actor daemon — returns `FAILED_PRECONDITION` without advancing the
-generation and without degrading the committed model, because an
+other changes), a **single standalone L2VNI delete** in an L2-only
+deployment, a **single IP-VRF add** (exactly one new `[[evpn_ip_vrfs]]`
+entry and no other changes), and a **single Ethernet Segment add**
+(exactly one new `[[ethernet_segments]]` entry and no other changes). A
+supported add/delete originates or withdraws IMET as needed, republishes
+the relevant effective tables or desired-ES snapshot to live actors, and
+then publishes the new committed generation. Every other non-noop shape
+— linked delete, redefine, mixed L2VNI + IP-VRF edits, multi-element
+edits, or an apply on an RR-only / no-actor daemon — returns
+`FAILED_PRECONDITION` without advancing the generation and without
+degrading the committed model, because an
 unsupported shape is a capability gap, not an operational failure, so
 `GetEvpnRuntime` continues to report the healthy committed generation. If
-a supported add starts converging but an actor command fails midway, the
-apply rolls back the partial work, returns `FAILED_PRECONDITION`, and
-marks the runtime degraded. Remaining shapes are tracked in
+a supported shape starts converging but an actor command fails midway,
+the apply rolls back the partial work, returns `FAILED_PRECONDITION`,
+and marks the runtime degraded. Remaining shapes are tracked in
 [issue #210](https://github.com/lance0/rustbgpd/issues/210).
 
 Operators configure instances via the `[[evpn_instances]]` TOML

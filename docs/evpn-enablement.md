@@ -427,7 +427,7 @@ flow that Gate 7b's foundation left as a stub.
 |------|----------------|
 | MAC duplication detection (RFC 7432 §15.1 M=180s/N=5) — ✅ complete (#139): detect-only defaults, opt-in local-origin `suppress_local` action, remote-route processing suppression, receive-side intent filtering, and a manual clear API (`ClearDuplicateMacQuarantine`). Only explicit kernel drop/filter primitives remain optional follow-up. | `crates/evpn/src/duplicate_mac.rs`, `src/evpn_originator.rs`, `crates/api/src/evpn_service.rs` |
 | Type 5 IP Prefix origination per L3VNI | ✅ Gate 9 slice 6 (v0.18.0) — kernel-route observation, `IpVrfStatus`-gated origination via `RibUpdate::InjectEvpn`, remote import + transactional L3 FIB programming (`L3OwnedState`), Router MAC conflict detection, four-phase apply ordering, foreign-state preservation. `RTNLGRP_IPV4/IPV6_ROUTE` multicast added sub-second withdraw on tenant `ip addr del`. |
-| Mutation surface — whole-model `EvpnService.ApplyEvpnRuntime` (ADR-0063); single L2VNI / IP-VRF / Ethernet Segment add commits live, other shapes fail closed (#210) | `crates/api/src/evpn_service.rs`, `src/main.rs`, `src/evpn_segment.rs` |
+| Mutation surface — whole-model `EvpnService.ApplyEvpnRuntime` (ADR-0063); single L2VNI add/delete plus single IP-VRF / Ethernet Segment add commit live, other shapes fail closed (#210) | `crates/api/src/evpn_service.rs`, `src/main.rs`, `src/evpn_segment.rs` |
 | Kernel VXLAN interface config generator? | ops question — maybe not |
 
 **Closed in v0.17.0 (post-v0.16.0 follow-ups):**
