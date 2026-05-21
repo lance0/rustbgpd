@@ -11,6 +11,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0063 EVPN runtime convergence — single standalone IP-VRF delete.**
+  `EvpnService.ApplyEvpnRuntime` can now commit exactly one deleted
+  `[[evpn_ip_vrfs]]` entry when no committed L2VNI references that IP-VRF.
+  The daemon republishes the candidate IP-VRF table to the dataplane
+  supervisor and Type 5 originator so remote Type 5 FIB intent and locally
+  originated Type 5 routes drain before the runtime generation advances.
+  Linked IP-VRF delete, redefine, mixed and multi-element edits, ES delete,
+  RR-only/no-actor delete, and runtime-added-member-VNI ES convergence remain
+  fail-closed under #210.
+
 - **ADR-0063 EVPN runtime convergence — single standalone L2VNI delete.**
   `EvpnService.ApplyEvpnRuntime` can now commit exactly one deleted
   `[[evpn_instances]]` entry in L2-only deployments. The daemon republishes the
