@@ -114,6 +114,7 @@ pub struct EvpnOriginatorHandle {
     pub(crate) shutdown: CancellationToken,
     pub(crate) join: tokio::task::JoinHandle<()>,
     control: EvpnOriginatorControl,
+    model_tx: watch::Sender<Arc<OriginatorRuntimeModel>>,
 }
 
 impl EvpnOriginatorHandle {
@@ -123,10 +124,44 @@ impl EvpnOriginatorHandle {
         self.control.clone()
     }
 
+    /// Replace the effective L2VNI model the originator reconciles
+    /// against. ADR-0063 runtime commits publish complete snapshots;
+    /// this actor drains removed/redefined VNIs before accepting the
+    /// new table for future local observations and RIB-event replay.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "ADR-0063 coordinator wiring will call this command; this slice adds the actor command surface first"
+        )
+    )]
+    #[must_use]
+    pub fn replace_runtime_model(
+        &self,
+        instances: Arc<EvpnInstanceTable>,
+        vni_to_esi: Arc<std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>>,
+    ) -> bool {
+        if self.model_tx.is_closed() {
+            return false;
+        }
+        self.model_tx.send_replace(Arc::new(OriginatorRuntimeModel {
+            instances,
+            vni_to_esi,
+        }));
+        true
+    }
+
     /// Cancel the actor and wait for it to drain.
     pub async fn shutdown(self) {
-        self.shutdown.cancel();
-        let _ = tokio::time::timeout(Duration::from_secs(5), self.join).await;
+        let Self {
+            shutdown,
+            join,
+            control: _,
+            model_tx,
+        } = self;
+        shutdown.cancel();
+        drop(model_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(5), join).await;
     }
 }
 
@@ -247,6 +282,7 @@ impl OriginatedLocalMacCounts {
 
 struct OriginatorRuntime {
     instances: Arc<EvpnInstanceTable>,
+    model_rx: watch::Receiver<Arc<OriginatorRuntimeModel>>,
     rib_tx: mpsc::Sender<RibUpdate>,
     metrics: BgpMetrics,
     originated_local_mac_counts: OriginatedLocalMacCounts,
@@ -259,6 +295,12 @@ struct OriginatorRuntime {
     /// with EAD-per-EVI routes via aliasing (RFC 7432 §14). VNIs
     /// not in this map default to `EthernetSegmentIdentifier::ZERO`
     /// (single-homed CE), preserving Gate 7b+1 behavior.
+    vni_to_esi: Arc<std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>>,
+}
+
+#[derive(Debug)]
+struct OriginatorRuntimeModel {
+    instances: Arc<EvpnInstanceTable>,
     vni_to_esi: Arc<std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>>,
 }
 
@@ -321,10 +363,15 @@ pub fn spawn_with_quarantine(
     let state = OriginatorState::new(evpn_instances, duplicate_mac_quarantine_tx);
     let (command_tx, command_rx) = mpsc::channel(16);
     let control = EvpnOriginatorControl { command_tx };
+    let (model_tx, model_rx) = watch::channel(Arc::new(OriginatorRuntimeModel {
+        instances: evpn_instances.clone(),
+        vni_to_esi: vni_to_esi.clone(),
+    }));
 
     let shutdown = daemon_shutdown;
     let runtime = OriginatorRuntime {
         instances: evpn_instances.clone(),
+        model_rx,
         rib_tx,
         metrics,
         originated_local_mac_counts,
@@ -343,6 +390,7 @@ pub fn spawn_with_quarantine(
         shutdown,
         join,
         control,
+        model_tx,
     })
 }
 
@@ -456,7 +504,7 @@ impl OriginatorState {
 #[allow(clippy::too_many_lines)] // The actor select keeps shutdown, local observations, RIB events, and poll recovery together.
 async fn originator_loop(
     config: OriginatorConfig,
-    runtime: OriginatorRuntime,
+    mut runtime: OriginatorRuntime,
     mut local_mac_rx: mpsc::Receiver<LocalMacObservation>,
     mut command_rx: mpsc::Receiver<OriginatorCommand>,
     mut state: OriginatorState,
@@ -465,6 +513,7 @@ async fn originator_loop(
     poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut local_mac_rx_open = true;
     let mut command_rx_open = true;
+    let mut model_rx_open = true;
 
     // Subscribe to the RIB's EVPN best-path broadcast. A failure here
     // is non-fatal: the 5 s poll fallback is the same convergence
@@ -508,6 +557,15 @@ async fn originator_loop(
                     command_rx_open = false;
                 }
             },
+            changed = runtime.model_rx.changed(), if model_rx_open => {
+                if changed.is_err() {
+                    debug!("EVPN originator: runtime model watch closed; continuing with current model");
+                    model_rx_open = false;
+                    continue;
+                }
+                let model = runtime.model_rx.borrow_and_update().clone();
+                apply_runtime_model(model, &mut state, &mut runtime).await;
+            }
             obs = local_mac_rx.recv(), if local_mac_rx_open => {
                 let Some(obs) = obs else {
                     debug!("local-mac channel closed; originator idle");
@@ -607,6 +665,98 @@ async fn recv_evpn_event(
         Some(r) => r.recv().await,
         None => std::future::pending().await,
     }
+}
+
+async fn apply_runtime_model(
+    model: Arc<OriginatorRuntimeModel>,
+    state: &mut OriginatorState,
+    runtime: &mut OriginatorRuntime,
+) {
+    let stale_vnis: Vec<EvpnInstanceId> = runtime
+        .instances
+        .iter()
+        .filter_map(|old| match model.instances.get(old.id) {
+            Some(next) if next == old => None,
+            _ => Some(old.id),
+        })
+        .collect();
+
+    for vni in stale_vnis {
+        drain_vni_to_withdraws(
+            state,
+            runtime.instances.as_ref(),
+            vni,
+            &runtime.rib_tx,
+            &runtime.metrics,
+            &runtime.originated_local_mac_counts,
+            runtime.vni_to_esi.as_ref(),
+        )
+        .await;
+        remove_vni_state(state, vni, &runtime.metrics);
+    }
+
+    for inst in model.instances.iter() {
+        state
+            .mac_originators
+            .entry(inst.id)
+            .or_insert_with(|| LocalMacOriginator::new(inst.id, inst.rd));
+        state
+            .mac_ip_originators
+            .entry(inst.id)
+            .or_insert_with(|| LocalMacIpOriginator::new(inst.id, inst.rd));
+    }
+
+    runtime.instances = model.instances.clone();
+    runtime.vni_to_esi = model.vni_to_esi.clone();
+
+    if let Err(e) = repoll_rib(
+        runtime.instances.as_ref(),
+        &runtime.rib_tx,
+        state,
+        &runtime.metrics,
+        &runtime.originated_local_mac_counts,
+        runtime.vni_to_esi.as_ref(),
+    )
+    .await
+    {
+        warn!(error = %e, "EVPN originator: runtime model repoll failed");
+    }
+}
+
+fn remove_vni_state(state: &mut OriginatorState, vni: EvpnInstanceId, metrics: &BgpMetrics) {
+    state.mac_originators.remove(&vni);
+    state.mac_ip_originators.remove(&vni);
+    state.local_macs.remove(&vni);
+    state.live_mac_ip.remove(&vni);
+    state
+        .pending_ip_bindings
+        .retain(|(binding_vni, _), _| *binding_vni != vni);
+    state
+        .remote_mac_view
+        .retain(|(route_vni, _), _| *route_vni != vni);
+    state
+        .remote_mac_ip_view
+        .retain(|(route_vni, _, _), _| *route_vni != vni);
+
+    let removed_quarantines: Vec<DuplicateMacKey> = state
+        .active_duplicate_mac_quarantines
+        .iter()
+        .copied()
+        .filter(|key| key.vni == vni)
+        .collect();
+    for key in removed_quarantines {
+        state.duplicate_mac_detector.clear(key);
+        state.active_duplicate_mac_quarantines.remove(&key);
+        metrics.set_evpn_duplicate_mac_quarantine_active(
+            key.vni.as_u32(),
+            &key.mac.to_string(),
+            false,
+        );
+    }
+    publish_duplicate_mac_quarantines(
+        &state.duplicate_mac_quarantine_tx,
+        &state.active_duplicate_mac_quarantines,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1738,17 +1888,17 @@ async fn drain_to_withdraws(
     originated_local_mac_counts: &OriginatedLocalMacCounts,
     vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
 ) {
-    for (vni, orig) in &mut state.mac_ip_originators {
-        let actions = orig.drain_to_withdraws();
-        if actions.is_empty() {
-            continue;
-        }
-        let Some(inst) = instances.get(*vni) else {
-            continue;
-        };
-        apply_actions(
-            actions,
-            inst,
+    let vnis: BTreeSet<EvpnInstanceId> = state
+        .mac_ip_originators
+        .keys()
+        .chain(state.mac_originators.keys())
+        .copied()
+        .collect();
+    for vni in vnis {
+        drain_vni_to_withdraws(
+            state,
+            instances,
+            vni,
             rib_tx,
             metrics,
             originated_local_mac_counts,
@@ -1756,23 +1906,48 @@ async fn drain_to_withdraws(
         )
         .await;
     }
-    for (vni, orig) in &mut state.mac_originators {
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drain_vni_to_withdraws(
+    state: &mut OriginatorState,
+    instances: &EvpnInstanceTable,
+    vni: EvpnInstanceId,
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    originated_local_mac_counts: &OriginatedLocalMacCounts,
+    vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+) {
+    let Some(inst) = instances.get(vni) else {
+        return;
+    };
+    if let Some(orig) = state.mac_ip_originators.get_mut(&vni) {
         let actions = orig.drain_to_withdraws();
-        if actions.is_empty() {
-            continue;
+        if !actions.is_empty() {
+            apply_actions(
+                actions,
+                inst,
+                rib_tx,
+                metrics,
+                originated_local_mac_counts,
+                vni_to_esi,
+            )
+            .await;
         }
-        let Some(inst) = instances.get(*vni) else {
-            continue;
-        };
-        apply_actions(
-            actions,
-            inst,
-            rib_tx,
-            metrics,
-            originated_local_mac_counts,
-            vni_to_esi,
-        )
-        .await;
+    }
+    if let Some(orig) = state.mac_originators.get_mut(&vni) {
+        let actions = orig.drain_to_withdraws();
+        if !actions.is_empty() {
+            apply_actions(
+                actions,
+                inst,
+                rib_tx,
+                metrics,
+                originated_local_mac_counts,
+                vni_to_esi,
+            )
+            .await;
+        }
     }
 }
 
@@ -2261,6 +2436,14 @@ mod tests {
     fn instance_table(v: u32) -> Arc<EvpnInstanceTable> {
         let mut t = EvpnInstanceTable::new();
         t.insert(local_instance(v)).unwrap();
+        Arc::new(t)
+    }
+
+    fn instance_table_many(vnis: &[u32]) -> Arc<EvpnInstanceTable> {
+        let mut t = EvpnInstanceTable::new();
+        for v in vnis {
+            t.insert(local_instance(*v)).unwrap();
+        }
         Arc::new(t)
     }
 
@@ -3323,6 +3506,153 @@ mod tests {
             std::sync::Arc::new(std::collections::BTreeMap::new()),
         );
         assert!(h.is_none());
+    }
+
+    fn runtime_model_rib_responder(
+        mut rib_rx: mpsc::Receiver<RibUpdate>,
+        injects: Arc<tokio::sync::Mutex<Vec<EvpnRouteKey>>>,
+        withdraws: Arc<tokio::sync::Mutex<Vec<EvpnRouteKey>>>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let (events_tx, _) = broadcast::channel(16);
+            while let Some(msg) = rib_rx.recv().await {
+                match msg {
+                    RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                        let _ = reply.send(events_tx.subscribe());
+                    }
+                    RibUpdate::QueryEvpnRoutes { reply } => {
+                        let _ = reply.send(vec![]);
+                    }
+                    RibUpdate::InjectEvpn { route, reply } => {
+                        injects.lock().await.push(route.key());
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { key, reply } => {
+                        withdraws.lock().await.push(key);
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => {}
+                }
+            }
+        })
+    }
+
+    async fn wait_for_key(
+        log: &Arc<tokio::sync::Mutex<Vec<EvpnRouteKey>>>,
+        expected: EvpnRouteKey,
+        context: &str,
+    ) {
+        for _ in 0..50 {
+            if log.lock().await.contains(&expected) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let observed = log.lock().await.clone();
+        panic!("{context}: expected {expected:?}, observed {observed:?}");
+    }
+
+    #[tokio::test]
+    async fn runtime_model_add_allows_future_local_mac_learns() {
+        let instances = instance_table(100);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(32);
+        let (local_tx, local_rx) = mpsc::channel(16);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _responder = runtime_model_rib_responder(rib_rx, injects.clone(), withdraws.clone());
+
+        let h = spawn(
+            OriginatorConfig {
+                poll_interval: Duration::from_mins(1),
+            },
+            &instances,
+            rib_tx,
+            Some(local_rx),
+            BgpMetrics::new(),
+            OriginatedLocalMacCounts::default(),
+            CancellationToken::new(),
+            Arc::new(std::collections::BTreeMap::new()),
+        )
+        .expect("originator spawned");
+
+        assert!(h.replace_runtime_model(
+            instance_table_many(&[100, 200]),
+            Arc::new(std::collections::BTreeMap::new()),
+        ));
+        local_tx
+            .send(LocalMacObservation::Learned {
+                vni: vni(200),
+                mac: mac(0xBB),
+                ifindex: 20,
+            })
+            .await
+            .unwrap();
+
+        wait_for_key(
+            &injects,
+            EvpnRouteKey::MacIp {
+                rd: rd(65000, 200),
+                ethernet_tag: EthernetTagId(0),
+                mac: mac(0xBB),
+                ip: None,
+            },
+            "runtime-added VNI should accept future local learns",
+        )
+        .await;
+        assert!(withdraws.lock().await.is_empty());
+        h.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_model_remove_drains_originated_local_mac_routes() {
+        let instances = instance_table(100);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(32);
+        let (local_tx, local_rx) = mpsc::channel(16);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _responder = runtime_model_rib_responder(rib_rx, injects.clone(), withdraws.clone());
+
+        let h = spawn(
+            OriginatorConfig {
+                poll_interval: Duration::from_mins(1),
+            },
+            &instances,
+            rib_tx,
+            Some(local_rx),
+            BgpMetrics::new(),
+            OriginatedLocalMacCounts::default(),
+            CancellationToken::new(),
+            Arc::new(std::collections::BTreeMap::new()),
+        )
+        .expect("originator spawned");
+
+        let key = EvpnRouteKey::MacIp {
+            rd: rd(65000, 100),
+            ethernet_tag: EthernetTagId(0),
+            mac: mac(0xAA),
+            ip: None,
+        };
+        local_tx
+            .send(LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            })
+            .await
+            .unwrap();
+        wait_for_key(&injects, key, "initial VNI should originate").await;
+
+        assert!(h.replace_runtime_model(
+            Arc::new(EvpnInstanceTable::new()),
+            Arc::new(std::collections::BTreeMap::new()),
+        ));
+        wait_for_key(
+            &withdraws,
+            key,
+            "runtime-removed VNI should drain local MAC originations",
+        )
+        .await;
+        h.shutdown().await;
     }
 
     #[tokio::test]

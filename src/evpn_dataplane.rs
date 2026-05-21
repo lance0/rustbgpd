@@ -145,6 +145,27 @@ impl EvpnDataplaneHandle {
         self.bum_enforcement_tx.clone()
     }
 
+    /// Replace the effective L2VNI table consumed by the supervisor.
+    ///
+    /// ADR-0063 runtime commits publish complete snapshots rather than
+    /// mutating the startup table in place. Returns `false` if the
+    /// dataplane supervisor has already exited.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "ADR-0063 coordinator wiring will call this command; this slice adds the actor command surface first"
+        )
+    )]
+    #[must_use]
+    pub fn replace_evpn_instances(&self, instances: Arc<EvpnInstanceTable>) -> bool {
+        if self.evpn_instances_tx.is_closed() {
+            return false;
+        }
+        self.evpn_instances_tx.send_replace(instances);
+        true
+    }
+
     /// Cancel the shutdown token, which causes the reconcile actor to
     /// drain owned remote FDB entries and exit. The supervisor
     /// follows once the watch sender is dropped. Awaits both tasks
@@ -1092,6 +1113,34 @@ mod tests {
         assert!(text.contains("evpn_fdb_nhg_drift_groups_replaced_total 3"));
         assert!(text.contains("evpn_fdb_nhg_orphans_cleaned_total 4"));
         assert!(text.contains("evpn_fdb_nhg_drift_disabled_total 1"));
+    }
+
+    #[tokio::test]
+    async fn handle_replace_evpn_instances_updates_effective_table_watch() {
+        let initial = Arc::new(local_instance_table(100, Some("br100")));
+        let replacement = Arc::new(local_instance_table_many(&[
+            (100, Some("br100")),
+            (200, Some("br200")),
+        ]));
+        let (evpn_instances_tx, evpn_instances_rx) = watch::channel(initial);
+        let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
+        let (bum_enforcement_tx, _bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (report_tx, _) = broadcast::channel::<DataplaneReport>(1);
+
+        let handle = EvpnDataplaneHandle {
+            shutdown: CancellationToken::new(),
+            supervisor_join: tokio::spawn(async {}),
+            actor_join: tokio::spawn(async {}),
+            local_mac_rx: None,
+            report_tx,
+            bum_enforcement_tx,
+            evpn_instances_tx,
+            ip_vrfs_tx,
+        };
+
+        assert!(handle.replace_evpn_instances(replacement));
+        assert_eq!(evpn_instances_rx.borrow().len(), 2);
+        handle.shutdown().await;
     }
 
     #[test]

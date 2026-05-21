@@ -75,7 +75,7 @@ use rustbgpd_evpn::{
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{EthernetTagId, EvpnRouteKey, RouteDistinguisher};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -87,15 +87,41 @@ use crate::evpn_originator::{OriginatedLocalMacCounts, build_originated_route};
 pub struct EvpnSviHandle {
     pub(crate) shutdown: CancellationToken,
     pub(crate) join: tokio::task::JoinHandle<()>,
+    instances_tx: watch::Sender<Arc<EvpnInstanceTable>>,
 }
 
 impl EvpnSviHandle {
+    /// Replace the effective L2VNI table the SVI task uses for
+    /// dataplane-report reconciliation. Returns `false` if the actor
+    /// has already exited.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "ADR-0063 coordinator wiring will call this command; this slice adds the actor command surface first"
+        )
+    )]
+    #[must_use]
+    pub fn replace_evpn_instances(&self, instances: Arc<EvpnInstanceTable>) -> bool {
+        if self.instances_tx.is_closed() {
+            return false;
+        }
+        self.instances_tx.send_replace(instances);
+        true
+    }
+
     /// Cancel the actor and wait for it to drain. Drain emits
     /// Withdraws for any still-advertised SVI MACs so peer state
     /// converges before the daemon exits.
     pub async fn shutdown(self) {
-        self.shutdown.cancel();
-        let _ = tokio::time::timeout(Duration::from_secs(5), self.join).await;
+        let Self {
+            shutdown,
+            join,
+            instances_tx,
+        } = self;
+        shutdown.cancel();
+        drop(instances_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(5), join).await;
     }
 }
 
@@ -115,6 +141,7 @@ pub fn spawn(
         info!("no [[evpn_instances]] has advertise_svi_mac=true; SVI-MAC task not spawned");
         return None;
     }
+    let (instances_tx, instances_rx) = watch::channel(evpn_instances.clone());
     let runtime = SviRuntime {
         instances: evpn_instances.clone(),
         rib_tx,
@@ -122,10 +149,11 @@ pub fn spawn(
         originated_local_mac_counts,
         shutdown: daemon_shutdown.clone(),
     };
-    let join = tokio::spawn(svi_loop(runtime, report_rx));
+    let join = tokio::spawn(svi_loop(runtime, report_rx, instances_rx));
     Some(EvpnSviHandle {
         shutdown: daemon_shutdown,
         join,
+        instances_tx,
     })
 }
 
@@ -140,7 +168,11 @@ struct SviRuntime {
 /// Per-VNI tracker of what's currently advertised for the SVI MAC.
 type OriginatedSet = BTreeMap<EvpnInstanceId, (EvpnRouteKey, MacAddress)>;
 
-async fn svi_loop(runtime: SviRuntime, mut report_rx: broadcast::Receiver<DataplaneReport>) {
+async fn svi_loop(
+    mut runtime: SviRuntime,
+    mut report_rx: broadcast::Receiver<DataplaneReport>,
+    mut instances_rx: watch::Receiver<Arc<EvpnInstanceTable>>,
+) {
     let mut originated: OriginatedSet = BTreeMap::new();
 
     loop {
@@ -165,8 +197,44 @@ async fn svi_loop(runtime: SviRuntime, mut report_rx: broadcast::Receiver<Datapl
                     return;
                 }
             },
+            changed = instances_rx.changed() => {
+                if changed.is_err() {
+                    debug!("EVPN SVI: runtime model watch closed; shutting down");
+                    drain_to_withdraws(&mut originated, &runtime).await;
+                    return;
+                }
+                let new_instances = instances_rx.borrow_and_update().clone();
+                apply_runtime_instance_model(new_instances, &mut originated, &mut runtime).await;
+            }
         }
     }
+}
+
+async fn apply_runtime_instance_model(
+    new_instances: Arc<EvpnInstanceTable>,
+    originated: &mut OriginatedSet,
+    runtime: &mut SviRuntime,
+) {
+    let stale_vnis: Vec<EvpnInstanceId> = originated
+        .keys()
+        .copied()
+        .filter(
+            |vni| match (runtime.instances.get(*vni), new_instances.get(*vni)) {
+                (Some(old), Some(new)) => old != new || !new.advertise_svi_mac,
+                _ => true,
+            },
+        )
+        .collect();
+
+    for vni in stale_vnis {
+        if let Some((key, _mac)) = originated.remove(&vni)
+            && let Some(inst) = runtime.instances.get(vni)
+        {
+            withdraw_svi_mac(inst, key, runtime).await;
+        }
+    }
+
+    runtime.instances = new_instances;
 }
 
 /// Apply one [`DataplaneReport`] — walks every status row and runs
@@ -422,6 +490,10 @@ mod tests {
         Arc::new(t)
     }
 
+    fn empty_instance_table() -> Arc<EvpnInstanceTable> {
+        Arc::new(EvpnInstanceTable::new())
+    }
+
     fn report_with(vni_val: u32, state: InstanceState, mac: Option<MacAddress>) -> DataplaneReport {
         DataplaneReport {
             intent_generation: 0,
@@ -463,6 +535,72 @@ mod tests {
                 }
             }
         })
+    }
+
+    async fn wait_for_withdraw(
+        withdraws: &Arc<tokio::sync::Mutex<Vec<EvpnRouteKey>>>,
+        expected: EvpnRouteKey,
+        context: &str,
+    ) {
+        for _ in 0..50 {
+            if withdraws.lock().await.contains(&expected) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let observed = withdraws.lock().await.clone();
+        panic!("{context}: expected {expected:?}, observed {observed:?}");
+    }
+
+    async fn wait_for_inject(
+        injects: &Arc<tokio::sync::Mutex<Vec<EvpnRibRoute>>>,
+        context: &str,
+    ) -> EvpnRouteKey {
+        for _ in 0..50 {
+            if let Some(route) = injects.lock().await.first() {
+                return route.key();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let observed = injects.lock().await.len();
+        panic!("{context}: expected an injected SVI MAC route, observed {observed}");
+    }
+
+    #[tokio::test]
+    async fn runtime_model_remove_drains_originated_svi_mac() {
+        let instances = instance_table(true);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (report_tx, report_rx) = broadcast::channel::<DataplaneReport>(16);
+        let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _responder = drain_responder(rib_rx, captured.clone(), withdraws.clone());
+        let counts = OriginatedLocalMacCounts::default();
+        let shutdown = CancellationToken::new();
+
+        let handle = spawn(
+            &instances,
+            rib_tx,
+            report_rx,
+            BgpMetrics::new(),
+            counts,
+            shutdown,
+        )
+        .expect("SVI task should spawn");
+
+        let svi_mac = MacAddress::new([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
+        report_tx
+            .send(report_with(100, InstanceState::Ready, Some(svi_mac)))
+            .unwrap();
+        let key = wait_for_inject(&captured, "initial SVI MAC should originate").await;
+
+        assert!(handle.replace_evpn_instances(empty_instance_table()));
+        wait_for_withdraw(
+            &withdraws,
+            key,
+            "runtime model removal should drain SVI MAC",
+        )
+        .await;
+        handle.shutdown().await;
     }
 
     /// `(None, Ready+mac)` — first observation must originate exactly
