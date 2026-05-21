@@ -21,15 +21,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   RR-only/no-actor delete, and runtime-added-member-VNI ES convergence remain
   fail-closed under #210.
 
-- **ADR-0063 EVPN runtime convergence — single standalone L2VNI delete.**
+- **ADR-0063 EVPN runtime convergence — single L2VNI delete in IP-VRF deployments.**
   `EvpnService.ApplyEvpnRuntime` can now commit exactly one deleted
-  `[[evpn_instances]]` entry in L2-only deployments. The daemon republishes the
-  candidate L2VNI table to the dataplane supervisor and Type 2/SVI originators,
-  withdraws the removed VNI's IMET route, and advances the runtime generation
-  only after convergence accepts the candidate. Linked delete, redefine, mixed
-  and multi-element edits, IP-VRF/ES delete, RR-only/no-actor delete, and the
-  runtime-added-member-VNI ES case remain fail-closed under #210. SIGHUP EVPN
-  edits remain restart-required.
+  `[[evpn_instances]]` entry when the VNI is not an Ethernet Segment member,
+  including IP-VRF deployments where the candidate keeps the IP-VRF row and
+  only drops the deleted L2VNI's derived tenant link metadata. The daemon
+  republishes candidate IP-VRF metadata plus the candidate L2VNI table to the
+  dataplane supervisor and Type 2/SVI originators, withdraws the removed VNI's
+  IMET route, and advances the runtime generation only after convergence
+  accepts the candidate. Linked IP-VRF delete / tenant teardown, ES-aware
+  L2VNI delete, redefine, mixed and multi-element edits, RR-only/no-actor
+  delete, and the runtime-added-member-VNI ES case remain fail-closed under
+  #210. SIGHUP EVPN edits remain restart-required.
 
 - **EVPN overlay-index Type 5 receive-side recursion.** Remote Type 5 routes
   with a non-zero Gateway Address now resolve through a Type 2 MAC/IP route
