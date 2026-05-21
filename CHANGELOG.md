@@ -9,6 +9,104 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.25.0] — 2026-05-21
+
+### Added
+
+- **ADR-0063 EVPN runtime mutation foundation.** Added the safe-mutation
+  contract for the startup-pinned EVPN model (`[[evpn_instances]]`,
+  `[[evpn_ip_vrfs]]`, `[[ethernet_segments]]`). A generationed runtime model
+  is initialized from the startup-resolved L2/L3/ES tables and exposed
+  read-only through `EvpnService.GetEvpnRuntime` and `rustbgpctl evpn runtime`.
+  Pure candidate-planning primitives classify add/delete/redefine/unchanged
+  rows without publishing a generation. A coordinator core adds a convergence
+  commit gate with idle/commit/failed state that retains failed-convergence
+  plan and error detail without publishing candidate tables. The public
+  `EvpnService.ApplyEvpnRuntime` mutation contract validates a full candidate
+  TOML through the daemon config layer, supports validate-only planning and
+  no-op apply, redacts credentials from audit summaries, and fails closed for
+  non-noop mutations (no generation advance) until actor convergence exists.
+  SIGHUP restart-required behavior is unchanged. Tracked in #210.
+
+- **ADR-0063 EVPN runtime convergence command surfaces.** The daemon now owns
+  an `EvpnImetController` for Type 3 IMET lifecycle state with per-VNI
+  originate/withdraw methods and explicit outcomes (including reply-dropped
+  tracking so a possibly-applied inject is still withdrawn at shutdown). The
+  EVPN dataplane supervisor consumes watch-backed effective L2VNI and IP-VRF
+  tables instead of startup-pinned `Arc`s and republishes `DataplaneIntent`
+  immediately when those tables change, while preserving stable-poll
+  generation suppression and the cached BUM-enforcement publish path. The
+  Type 5 originator gains a handle-owned effective IP-VRF model watch and
+  reconciles origination on IP-VRF model changes in addition to
+  route/readiness changes. These are the command targets the coordinator will
+  drive; live commits remain gated behind actor convergence (#210).
+
+- **EVPN Type 5 (IP Prefix) route injection.** Added pure / interface-less
+  EVPN Type 5 support to `AddEvpnRoute` / `DeleteEvpnRoute` (ESI 0, gateway 0,
+  L3VNI label, Router MAC extended community) with `rustbgpctl evpn
+  add-ip-prefix` / `delete-ip-prefix`. Validated against FRR 10.3.1 by the new
+  M45 control-plane interop smoke. Per RFC 9136.
+
+- **EVPN duplicate-MAC quarantine manual clear.** Added
+  `EvpnService.ClearDuplicateMacQuarantine` (classified as an ADR-0064
+  mutating method) and a bounded EVPN originator control command that clears
+  one active duplicate-MAC quarantine, resets metrics/watch state, and replays
+  still-live local MAC / MAC+IP state. Exposed as `rustbgpctl evpn
+  clear-duplicate-mac`.
+
+- **EVPN auto-derived Route Targets.** `auto_derive_route_target = true` is now
+  accepted for both `[[evpn_instances]]` and `[[evpn_ip_vrfs]]`. L2VNI MAC-VRFs
+  derive the RFC 8365 §5.1.2.1 VXLAN form; L3VNI IP-VRFs derive the plain
+  `AS:VNI` form (the cross-vendor form FRR's tenant-VRF auto-RT uses). Explicit
+  RTs are preserved, and explicit/derived duplicates are deduplicated through
+  the existing runtime tables. Cross-vendor import validated by the new M39b
+  FRR interop smoke. Requires a 2-octet AS.
+
+- **EVPN route event history.** `EventService` now carries typed EVPN route
+  events under `EVENT_CATEGORY_EVPN` with bounded in-RIB history exposed via
+  `ListEvpnEvents` (peer / RD / route-type filters) and a live `WatchEvents`
+  category. Added `rustbgpctl events evpn` plus live-watch rendering.
+
+- **FIB dataplane route outcome events.** Added typed `DataplaneRouteEvent`
+  payloads and event types for ADR-0061 FIB install, withdraw, and
+  apply-failure outcomes, published live from `fib_runtime`, bridged into
+  `EventService`, and filterable by dataplane type / peer / family / prefix.
+  Surfaced in `rustbgpctl events watch`.
+
+- **Policy-filtered route events.** Added unicast `policy_filtered` route
+  events carrying explicit source-peer, target-peer, and reason fields, with
+  export-policy denial state tracked so dirty/forced resyncs do not emit
+  duplicate events. Wired through history queries, `EventService` filters, and
+  CLI JSON/text output.
+
+- **`ListFibRoutes` pagination.** Added optional `page_size` / `page_token`
+  request fields and `next_page_token` / `total_count` response fields, with
+  legacy unpaged behavior preserved when `page_size = 0`. Exposed via
+  `rustbgpctl rib fib --page-size/--page-token`.
+
+- **TCP-AO socket info inspection (ADR-0062).** Added Linux `TCP_AO_INFO`
+  inspection and a transport `TcpAoInfoSnapshot`; the daemon logs TCP-AO
+  current / rnext key IDs and counters after a protected active-open connect
+  and a protected passive accept, and carries accepted-socket TCP-AO info on
+  `AcceptedConnection` for a later API/CLI exposure tranche.
+
+### Changed
+
+- **Startup failures now emit fatal diagnostics instead of panicking.**
+  Production startup `expect()` paths in `src/main.rs` are replaced with
+  explicit fatal diagnostics and clean `process::exit(1)`. Pre-logging Tokio
+  runtime construction reports through `eprintln!`; post-logging invariant
+  failures report through `tracing::error!`.
+
+### Fixed
+
+- **EVPN duplicate-MAC remote route processing is suppressed during an active
+  quarantine.** While a duplicate-MAC quarantine is active, the EVPN originator
+  no longer runs remote MAC / MAC+IP route-processing callbacks for the
+  quarantined MAC, while keeping remote contender caches fresh and continuing
+  to enforce local Type 2 suppression once per quarantined MAC (RFC 7432
+  §15.1).
+
 ## [0.24.0] — 2026-05-19
 
 ### Changed
