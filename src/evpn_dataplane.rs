@@ -47,7 +47,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustbgpd_evpn::ip_vrf::IpVrfTable;
+use rustbgpd_evpn::ip_vrf::{IpVrfTable, RemoteIpPrefixTable};
 use rustbgpd_evpn::{
     BumEnforcementTable, DataplaneIntent, DataplaneReport, DuplicateMacKey, EvpnInstanceTable,
     FdbNhgDriftCounters, LocalMacObservation, ProjectedEvpnEadPerEvi, ProjectedEvpnRoute,
@@ -116,6 +116,15 @@ pub struct EvpnDataplaneHandle {
     /// supervisor folds it into the same [`DataplaneIntent`] watch
     /// stream as remote-MAC programming.
     pub(crate) bum_enforcement_tx: watch::Sender<Arc<BumEnforcementTable>>,
+    /// ADR-0063 effective L2VNI table input. Future runtime commits
+    /// publish complete table snapshots here; the supervisor folds
+    /// the latest table into [`DataplaneIntent`] without mutating a
+    /// shared `Arc` in place.
+    pub(crate) evpn_instances_tx: watch::Sender<Arc<EvpnInstanceTable>>,
+    /// ADR-0063 effective IP-VRF table input. Same snapshot-watch
+    /// shape as [`Self::evpn_instances_tx`], kept separate because
+    /// L2VNI and IP-VRF commits can be staged independently.
+    pub(crate) ip_vrfs_tx: watch::Sender<Arc<IpVrfTable>>,
 }
 
 impl EvpnDataplaneHandle {
@@ -143,13 +152,24 @@ impl EvpnDataplaneHandle {
     /// internal 5 s drain (ADR-0054 §7) but short enough that a
     /// stuck task can't wedge the daemon's exit.
     pub async fn shutdown(self) {
-        self.shutdown.cancel();
+        let Self {
+            shutdown,
+            supervisor_join,
+            actor_join,
+            local_mac_rx: _,
+            report_tx: _,
+            bum_enforcement_tx: _,
+            evpn_instances_tx,
+            ip_vrfs_tx,
+        } = self;
+        shutdown.cancel();
+        drop((evpn_instances_tx, ip_vrfs_tx));
         // Bound the wait — the actor's drain timeout is internal, but
         // a stuck task should not wedge the daemon's shutdown
         // forever.
         let _ = tokio::time::timeout(Duration::from_secs(10), async {
-            let _ = self.supervisor_join.await;
-            let _ = self.actor_join.await;
+            let _ = supervisor_join.await;
+            let _ = actor_join.await;
         })
         .await;
     }
@@ -325,6 +345,8 @@ where
     let (intent_tx, intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
     let (bum_enforcement_tx, bum_enforcement_rx) =
         watch::channel(Arc::new(BumEnforcementTable::new()));
+    let (evpn_instances_tx, evpn_instances_rx) = watch::channel(evpn_instances.clone());
+    let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(ip_vrfs.clone());
 
     // Reconcile actor sends reports through a bounded mpsc; a
     // forwarder task drains it and republishes through a broadcast
@@ -369,12 +391,10 @@ where
     }
 
     let supervisor_shutdown = daemon_shutdown.clone();
-    let supervisor_instances = evpn_instances.clone();
-    let supervisor_ip_vrfs = ip_vrfs.clone();
     let supervisor_join = tokio::spawn(supervisor_loop(
         config.poll_interval,
-        supervisor_instances,
-        supervisor_ip_vrfs,
+        evpn_instances_rx,
+        ip_vrfs_rx,
         rib_tx,
         intent_tx,
         bum_enforcement_rx,
@@ -398,6 +418,8 @@ where
         local_mac_rx: None,
         report_tx: report_broadcast_tx,
         bum_enforcement_tx,
+        evpn_instances_tx,
+        ip_vrfs_tx,
     }
 }
 
@@ -408,34 +430,146 @@ fn record_fdb_nhg_drift_metrics(metrics: &BgpMetrics, counters: FdbNhgDriftCount
     metrics.add_evpn_fdb_nhg_drift_disabled(counters.drift_disabled);
 }
 
+#[derive(Debug)]
+struct SupervisorIntentState {
+    generation: u64,
+    last_instances: Arc<EvpnInstanceTable>,
+    last_ip_vrfs: Arc<IpVrfTable>,
+    last_table: RemoteMacTable,
+    last_ip_prefixes: RemoteIpPrefixTable,
+    last_bum_enforcement: BumEnforcementTable,
+}
+
+impl Default for SupervisorIntentState {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            last_instances: Arc::new(EvpnInstanceTable::new()),
+            last_ip_vrfs: Arc::new(IpVrfTable::new()),
+            last_table: RemoteMacTable::new(),
+            last_ip_prefixes: RemoteIpPrefixTable::new(),
+            last_bum_enforcement: BumEnforcementTable::new(),
+        }
+    }
+}
+
+impl SupervisorIntentState {
+    fn has_cached_projection_for(
+        &self,
+        instances: &EvpnInstanceTable,
+        ip_vrfs: &IpVrfTable,
+    ) -> bool {
+        self.generation > 0
+            && instances == self.last_instances.as_ref()
+            && ip_vrfs == self.last_ip_vrfs.as_ref()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_dataplane_intent(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    intent_tx: &watch::Sender<Arc<DataplaneIntent>>,
+    instances: Arc<EvpnInstanceTable>,
+    ip_vrfs: Arc<IpVrfTable>,
+    bum_enforcement: BumEnforcementTable,
+    quarantined_macs: &BTreeSet<DuplicateMacKey>,
+    state: &mut SupervisorIntentState,
+) -> Result<bool, RibQueryError> {
+    let tables = build_intent_tables(
+        rib_tx,
+        instances.as_ref(),
+        ip_vrfs.as_ref(),
+        quarantined_macs,
+    )
+    .await?;
+    if state.generation > 0
+        && instances.as_ref() == state.last_instances.as_ref()
+        && ip_vrfs.as_ref() == state.last_ip_vrfs.as_ref()
+        && tables.remote_macs == state.last_table
+        && tables.remote_ip_prefixes == state.last_ip_prefixes
+        && bum_enforcement == state.last_bum_enforcement
+    {
+        // No semantic change since the last publish. Skipping the
+        // watch send keeps the reconcile actor's permanent-suppression
+        // set alive across periodic polls, so an EPERM / EOPNOTSUPP
+        // on op N doesn't get retried every 5 s tick.
+        return Ok(true);
+    }
+
+    state.generation = state.generation.saturating_add(1);
+    state.last_instances = instances.clone();
+    state.last_ip_vrfs = ip_vrfs.clone();
+    state.last_table = tables.remote_macs.clone();
+    state.last_ip_prefixes = tables.remote_ip_prefixes.clone();
+    state.last_bum_enforcement = bum_enforcement.clone();
+
+    let intent = Arc::new(DataplaneIntent {
+        generation: state.generation,
+        instances,
+        remote_macs: Arc::new(tables.remote_macs),
+        bum_enforcement: Arc::new(bum_enforcement),
+        ip_vrfs,
+        remote_ip_prefixes: Arc::new(tables.remote_ip_prefixes),
+    });
+    if intent_tx.send(intent).is_err() {
+        debug!("intent receiver gone; supervisor exiting");
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn publish_cached_dataplane_intent(
+    intent_tx: &watch::Sender<Arc<DataplaneIntent>>,
+    bum_enforcement: BumEnforcementTable,
+    state: &mut SupervisorIntentState,
+) -> bool {
+    if state.generation > 0 && bum_enforcement == state.last_bum_enforcement {
+        return true;
+    }
+
+    state.generation = state.generation.saturating_add(1);
+    state.last_bum_enforcement = bum_enforcement.clone();
+
+    let intent = Arc::new(DataplaneIntent {
+        generation: state.generation,
+        instances: state.last_instances.clone(),
+        remote_macs: Arc::new(state.last_table.clone()),
+        bum_enforcement: Arc::new(bum_enforcement),
+        ip_vrfs: state.last_ip_vrfs.clone(),
+        remote_ip_prefixes: Arc::new(state.last_ip_prefixes.clone()),
+    });
+    if intent_tx.send(intent).is_err() {
+        debug!("intent receiver gone; supervisor exiting");
+        return false;
+    }
+    true
+}
+
 /// Periodic supervisor loop: query the RIB, project, publish.
 ///
-/// Generation only advances when the projected `RemoteMacTable` or
-/// BUM-enforcement table actually differs from the previously-published
-/// one. The
-/// reconcile actor uses the generation as the trigger to clear its
-/// permanent-failure suppression set (so an EPERM on op N stops
-/// retrying); incrementing on every poll regardless of content
-/// change would defeat that suppression and cause the actor to
-/// hammer the kernel every 5 s. The instance table is pinned at
-/// startup (ADR-0052), so equality on the two mutable tables is
-/// sufficient — if the instance set ever becomes mutable here, extend
-/// the comparison.
+/// Generation only advances when the effective EVPN tables, projected
+/// `RemoteMacTable`, projected Type 5 prefix table, or BUM-enforcement
+/// table differ from the previously-published intent. The reconcile
+/// actor uses generation as the trigger to clear permanent-failure
+/// suppression; incrementing on every poll regardless of content change
+/// would defeat that suppression and hammer the kernel every 5 s.
+///
+/// ADR-0063 table inputs are watch channels rather than mutable shared
+/// tables. A future coordinator commit can publish a complete effective
+/// L2VNI/IP-VRF snapshot, and the supervisor will re-project
+/// immediately without waiting for the next poll interval.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Supervisor wiring intentionally keeps actor dependencies explicit.
 async fn supervisor_loop(
     poll_interval: Duration,
-    instances: Arc<EvpnInstanceTable>,
-    ip_vrfs: Arc<IpVrfTable>,
+    mut instances_rx: watch::Receiver<Arc<EvpnInstanceTable>>,
+    mut ip_vrfs_rx: watch::Receiver<Arc<IpVrfTable>>,
     rib_tx: mpsc::Sender<RibUpdate>,
     intent_tx: watch::Sender<Arc<DataplaneIntent>>,
     mut bum_enforcement_rx: watch::Receiver<Arc<BumEnforcementTable>>,
     mut duplicate_mac_quarantine_rx: watch::Receiver<Arc<BTreeSet<DuplicateMacKey>>>,
     shutdown: CancellationToken,
 ) {
-    let mut generation: u64 = 0;
-    let mut last_table = RemoteMacTable::new();
-    let mut last_ip_prefixes = rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable::new();
-    let mut last_bum_enforcement = BumEnforcementTable::new();
+    let mut state = SupervisorIntentState::default();
     let mut duplicate_mac_quarantine_updates_open = true;
     let mut tick = tokio::time::interval(poll_interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -448,49 +582,24 @@ async fn supervisor_loop(
                 return;
             }
             _ = tick.tick() => {
+                let instances = instances_rx.borrow().clone();
+                let ip_vrfs = ip_vrfs_rx.borrow().clone();
+                let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
                 let quarantined = duplicate_mac_quarantine_rx.borrow().clone();
-                let tables = match build_intent_tables(
+                match publish_dataplane_intent(
                     &rib_tx,
-                    &instances,
-                    &ip_vrfs,
+                    &intent_tx,
+                    instances,
+                    ip_vrfs,
+                    bum_enforcement,
                     quarantined.as_ref(),
+                    &mut state,
                 ).await {
-                    Ok(t) => t,
+                    Ok(true) => {}
+                    Ok(false) => return,
                     Err(e) => {
                         warn!(error = %e, "EVPN dataplane supervisor: RIB query failed");
-                        continue;
-                    }
-                };
-                let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
-                if tables.remote_macs == last_table
-                    && tables.remote_ip_prefixes == last_ip_prefixes
-                    && bum_enforcement == last_bum_enforcement
-                    && generation > 0
-                {
-                    // No semantic change since the last publish.
-                    // Skipping the `intent_tx.send` here keeps the
-                    // reconcile actor's permanent-suppression set
-                    // alive across periodic polls, so an EPERM /
-                    // EOPNOTSUPP on op N doesn't get retried every
-                    // 5 s tick — it stays suppressed until the
-                    // operator's RIB really changes.
-                    continue;
-                }
-                generation = generation.saturating_add(1);
-                last_table = tables.remote_macs.clone();
-                last_ip_prefixes = tables.remote_ip_prefixes.clone();
-                last_bum_enforcement = bum_enforcement.clone();
-                let intent = Arc::new(DataplaneIntent {
-                    generation,
-                    instances: instances.clone(),
-                    remote_macs: Arc::new(tables.remote_macs),
-                    bum_enforcement: Arc::new(bum_enforcement),
-                    ip_vrfs: ip_vrfs.clone(),
-                    remote_ip_prefixes: Arc::new(tables.remote_ip_prefixes),
-                });
-                if intent_tx.send(intent).is_err() {
-                    debug!("intent receiver gone; supervisor exiting");
-                    return;
+                    },
                 }
             }
             changed = bum_enforcement_rx.changed() => {
@@ -499,22 +608,33 @@ async fn supervisor_loop(
                     return;
                 }
                 let bum_enforcement = bum_enforcement_rx.borrow_and_update().as_ref().clone();
-                if bum_enforcement == last_bum_enforcement && generation > 0 {
-                    continue;
-                }
-                generation = generation.saturating_add(1);
-                last_bum_enforcement = bum_enforcement.clone();
-                let intent = Arc::new(DataplaneIntent {
-                    generation,
-                    instances: instances.clone(),
-                    remote_macs: Arc::new(last_table.clone()),
-                    bum_enforcement: Arc::new(bum_enforcement),
-                    ip_vrfs: ip_vrfs.clone(),
-                    remote_ip_prefixes: Arc::new(last_ip_prefixes.clone()),
-                });
-                if intent_tx.send(intent).is_err() {
-                    debug!("intent receiver gone; supervisor exiting");
-                    return;
+                let instances = instances_rx.borrow().clone();
+                let ip_vrfs = ip_vrfs_rx.borrow().clone();
+                if state.has_cached_projection_for(instances.as_ref(), ip_vrfs.as_ref()) {
+                    if !publish_cached_dataplane_intent(
+                        &intent_tx,
+                        bum_enforcement,
+                        &mut state,
+                    ) {
+                        return;
+                    }
+                } else {
+                    let quarantined = duplicate_mac_quarantine_rx.borrow().clone();
+                    match publish_dataplane_intent(
+                        &rib_tx,
+                        &intent_tx,
+                        instances,
+                        ip_vrfs,
+                        bum_enforcement,
+                        quarantined.as_ref(),
+                        &mut state,
+                    ).await {
+                        Ok(true) => {}
+                        Ok(false) => return,
+                        Err(e) => {
+                            warn!(error = %e, "EVPN dataplane supervisor: RIB query failed");
+                        },
+                    }
                 }
             }
             changed = duplicate_mac_quarantine_rx.changed(), if duplicate_mac_quarantine_updates_open => {
@@ -523,42 +643,74 @@ async fn supervisor_loop(
                     duplicate_mac_quarantine_updates_open = false;
                     continue;
                 }
+                let instances = instances_rx.borrow().clone();
+                let ip_vrfs = ip_vrfs_rx.borrow().clone();
+                let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
                 let quarantined = duplicate_mac_quarantine_rx.borrow_and_update().clone();
-                let tables = match build_intent_tables(
+                match publish_dataplane_intent(
                     &rib_tx,
-                    &instances,
-                    &ip_vrfs,
+                    &intent_tx,
+                    instances,
+                    ip_vrfs,
+                    bum_enforcement,
                     quarantined.as_ref(),
+                    &mut state,
                 ).await {
-                    Ok(t) => t,
+                    Ok(true) => {}
+                    Ok(false) => return,
                     Err(e) => {
                         warn!(error = %e, "EVPN dataplane supervisor: RIB query failed");
-                        continue;
-                    }
-                };
-                let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
-                if tables.remote_macs == last_table
-                    && tables.remote_ip_prefixes == last_ip_prefixes
-                    && bum_enforcement == last_bum_enforcement
-                    && generation > 0
-                {
-                    continue;
+                    },
                 }
-                generation = generation.saturating_add(1);
-                last_table = tables.remote_macs.clone();
-                last_ip_prefixes = tables.remote_ip_prefixes.clone();
-                last_bum_enforcement = bum_enforcement.clone();
-                let intent = Arc::new(DataplaneIntent {
-                    generation,
-                    instances: instances.clone(),
-                    remote_macs: Arc::new(tables.remote_macs),
-                    bum_enforcement: Arc::new(bum_enforcement),
-                    ip_vrfs: ip_vrfs.clone(),
-                    remote_ip_prefixes: Arc::new(tables.remote_ip_prefixes),
-                });
-                if intent_tx.send(intent).is_err() {
-                    debug!("intent receiver gone; supervisor exiting");
+            }
+            changed = instances_rx.changed() => {
+                if changed.is_err() {
+                    debug!("EVPN instance model publisher gone; supervisor exiting");
                     return;
+                }
+                let instances = instances_rx.borrow_and_update().clone();
+                let ip_vrfs = ip_vrfs_rx.borrow().clone();
+                let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
+                let quarantined = duplicate_mac_quarantine_rx.borrow().clone();
+                match publish_dataplane_intent(
+                    &rib_tx,
+                    &intent_tx,
+                    instances,
+                    ip_vrfs,
+                    bum_enforcement,
+                    quarantined.as_ref(),
+                    &mut state,
+                ).await {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(e) => {
+                        warn!(error = %e, "EVPN dataplane supervisor: RIB query failed");
+                    },
+                }
+            }
+            changed = ip_vrfs_rx.changed() => {
+                if changed.is_err() {
+                    debug!("EVPN IP-VRF model publisher gone; supervisor exiting");
+                    return;
+                }
+                let instances = instances_rx.borrow().clone();
+                let ip_vrfs = ip_vrfs_rx.borrow_and_update().clone();
+                let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
+                let quarantined = duplicate_mac_quarantine_rx.borrow().clone();
+                match publish_dataplane_intent(
+                    &rib_tx,
+                    &intent_tx,
+                    instances,
+                    ip_vrfs,
+                    bum_enforcement,
+                    quarantined.as_ref(),
+                    &mut state,
+                ).await {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(e) => {
+                        warn!(error = %e, "EVPN dataplane supervisor: RIB query failed");
+                    },
                 }
             }
         }
@@ -799,6 +951,7 @@ mod tests {
     use std::net::IpAddr;
 
     use prometheus::Encoder;
+    use rustbgpd_evpn::ip_vrf::{IpVrf, IpVrfId};
     use rustbgpd_evpn::{
         BumEnforcementReadiness, BumEnforcementTable, DfRole, EvpnInstance, EvpnInstanceId,
         EvpnInstanceTable, FdbNhgDriftCounters, MacAddress, RouteDistinguisher, RouteTarget,
@@ -832,11 +985,11 @@ mod tests {
         String::from_utf8(buf).unwrap()
     }
 
-    fn local_instance_table(v: u32, bridge: Option<&str>) -> EvpnInstanceTable {
+    fn local_instance(v: u32, bridge: Option<&str>) -> EvpnInstance {
         let mut bytes = [0u8; 8];
         bytes[2..4].copy_from_slice(&65001u16.to_be_bytes());
         bytes[4..8].copy_from_slice(&v.to_be_bytes());
-        let inst = EvpnInstance::new(
+        EvpnInstance::new(
             vni(v),
             RouteDistinguisher::new(bytes),
             vec![RouteTarget::TwoOctetAs {
@@ -847,9 +1000,47 @@ mod tests {
             bridge.map(String::from),
             false,
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    fn local_instance_table(v: u32, bridge: Option<&str>) -> EvpnInstanceTable {
         let mut t = EvpnInstanceTable::new();
-        t.insert(inst).unwrap();
+        t.insert(local_instance(v, bridge)).unwrap();
+        t
+    }
+
+    fn local_instance_table_many(instances: &[(u32, Option<&str>)]) -> EvpnInstanceTable {
+        let mut t = EvpnInstanceTable::new();
+        for (v, bridge) in instances {
+            t.insert(local_instance(*v, *bridge)).unwrap();
+        }
+        t
+    }
+
+    fn local_ip_vrf(name: &str, v: u32, table_id: u32) -> IpVrf {
+        let mut bytes = [0u8; 8];
+        bytes[2..4].copy_from_slice(&65001u16.to_be_bytes());
+        bytes[4..8].copy_from_slice(&v.to_be_bytes());
+        IpVrf::new(
+            name.to_string(),
+            IpVrfId::new(v).unwrap(),
+            RouteDistinguisher::new(bytes),
+            vec![RouteTarget::TwoOctetAs {
+                asn: 65001,
+                value: v,
+            }],
+            ipa("10.0.0.1"),
+            MacAddress::new([0x02, 0, 0, 0, 0, (v & 0xff) as u8]),
+            format!("vrf-{name}"),
+            format!("l3vni-{v}"),
+            table_id,
+        )
+        .unwrap()
+    }
+
+    fn ip_vrf_table_one(name: &str, v: u32, table_id: u32) -> IpVrfTable {
+        let mut t = IpVrfTable::new();
+        t.insert(local_ip_vrf(name, v, table_id)).unwrap();
         t
     }
 
@@ -1237,11 +1428,12 @@ mod tests {
         let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
         let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
         let supervisor_shutdown = shutdown.clone();
-        let ip_vrfs = Arc::new(IpVrfTable::new());
+        let (_instances_tx, instances_rx) = watch::channel(instances);
+        let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
         let join = tokio::spawn(super::supervisor_loop(
             Duration::from_millis(15),
-            instances,
-            ip_vrfs,
+            instances_rx,
+            ip_vrfs_rx,
             rib_tx,
             intent_tx,
             bum_rx,
@@ -1280,6 +1472,221 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn supervisor_reprojects_on_runtime_instance_table_change() {
+        let initial_instances = Arc::new(local_instance_table(100, Some("br100")));
+        let expanded_instances = Arc::new(local_instance_table_many(&[
+            (100, Some("br100")),
+            (200, Some("br200")),
+        ]));
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let shutdown = CancellationToken::new();
+
+        let _rib_responder = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+                    let routes = vec![
+                        evpn_macip_route(100, 1, "10.0.0.2", Some(1)),
+                        evpn_macip_route(200, 2, "10.0.0.3", Some(1)),
+                    ];
+                    let _ = reply.send(routes);
+                }
+            }
+        });
+
+        let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+        let (instances_tx, instances_rx) = watch::channel(initial_instances);
+        let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
+        let supervisor_shutdown = shutdown.clone();
+        let join = tokio::spawn(super::supervisor_loop(
+            Duration::from_mins(1),
+            instances_rx,
+            ip_vrfs_rx,
+            rib_tx,
+            intent_tx,
+            bum_rx,
+            quarantine_rx,
+            supervisor_shutdown,
+        ));
+
+        tokio::time::timeout(Duration::from_millis(200), intent_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let initial = intent_rx.borrow_and_update().clone();
+        assert!(initial.remote_macs.get(vni(100), mac(1)).is_some());
+        assert!(
+            initial.remote_macs.get(vni(200), mac(2)).is_none(),
+            "VNI 200 must be filtered before the effective table update"
+        );
+
+        instances_tx.send_replace(expanded_instances);
+        tokio::time::timeout(Duration::from_millis(200), intent_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let updated = intent_rx.borrow_and_update().clone();
+        assert!(updated.generation > initial.generation);
+        assert_eq!(updated.instances.len(), 2);
+        assert!(
+            updated.remote_macs.get(vni(200), mac(2)).is_some(),
+            "runtime table update should re-project before the next long poll"
+        );
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(Duration::from_millis(200), join).await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_republishes_on_runtime_ip_vrf_table_change() {
+        let instances = Arc::new(EvpnInstanceTable::new());
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let shutdown = CancellationToken::new();
+
+        let _rib_responder = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+                    let _ = reply.send(vec![]);
+                }
+            }
+        });
+
+        let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+        let (_instances_tx, instances_rx) = watch::channel(instances);
+        let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
+        let supervisor_shutdown = shutdown.clone();
+        let join = tokio::spawn(super::supervisor_loop(
+            Duration::from_mins(1),
+            instances_rx,
+            ip_vrfs_rx,
+            rib_tx,
+            intent_tx,
+            bum_rx,
+            quarantine_rx,
+            supervisor_shutdown,
+        ));
+
+        tokio::time::timeout(Duration::from_millis(200), intent_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let initial = intent_rx.borrow_and_update().clone();
+        assert!(initial.ip_vrfs.is_empty());
+
+        ip_vrfs_tx.send_replace(Arc::new(ip_vrf_table_one("blue", 100, 1000)));
+        tokio::time::timeout(Duration::from_millis(200), intent_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let updated = intent_rx.borrow_and_update().clone();
+        assert!(updated.generation > initial.generation);
+        assert_eq!(updated.ip_vrfs.len(), 1);
+        assert!(
+            updated.remote_ip_prefixes.is_empty(),
+            "stable empty RIB should still republish the changed IP-VRF table"
+        );
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(Duration::from_millis(200), join).await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_bum_enforcement_change_uses_cached_projection() {
+        let instances = Arc::new(local_instance_table(100, Some("br100")));
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let shutdown = CancellationToken::new();
+
+        let _rib_responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let _ = reply.send(vec![evpn_macip_route(100, 1, "10.0.0.2", Some(1))]);
+            }
+            // Drop the receiver after the initial projection. A BUM
+            // update must republish cached route projection instead
+            // of depending on another RIB query.
+        });
+
+        let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let (bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+        let (_instances_tx, instances_rx) = watch::channel(instances);
+        let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
+        let supervisor_shutdown = shutdown.clone();
+        let join = tokio::spawn(super::supervisor_loop(
+            Duration::from_mins(1),
+            instances_rx,
+            ip_vrfs_rx,
+            rib_tx,
+            intent_tx,
+            bum_rx,
+            quarantine_rx,
+            supervisor_shutdown,
+        ));
+
+        tokio::time::timeout(Duration::from_millis(200), intent_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let initial = intent_rx.borrow_and_update().clone();
+        assert!(initial.remote_macs.get(vni(100), mac(1)).is_some());
+
+        let mut table = BumEnforcementTable::new();
+        let esi = EthernetSegmentIdentifier::new([9; 10]);
+        table.insert(esi, vni(100), DfRole::NonDf, "br100".to_string());
+        bum_tx.send_replace(Arc::new(table));
+
+        tokio::time::timeout(Duration::from_millis(200), intent_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let updated = intent_rx.borrow_and_update().clone();
+        assert!(updated.generation > initial.generation);
+        assert!(updated.remote_macs.get(vni(100), mac(1)).is_some());
+        assert_eq!(
+            updated
+                .bum_enforcement
+                .get(esi, vni(100))
+                .map(|row| row.role),
+            Some(DfRole::NonDf)
+        );
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(Duration::from_millis(200), join).await;
+    }
+
+    #[test]
+    fn cached_bum_republish_uses_cached_effective_tables() {
+        let cached_instances = Arc::new(local_instance_table(100, Some("br100")));
+        let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let mut state = SupervisorIntentState {
+            generation: 1,
+            last_instances: cached_instances.clone(),
+            last_ip_vrfs: Arc::new(IpVrfTable::new()),
+            last_table: RemoteMacTable::new(),
+            last_ip_prefixes: RemoteIpPrefixTable::new(),
+            last_bum_enforcement: BumEnforcementTable::new(),
+        };
+        let mut table = BumEnforcementTable::new();
+        let esi = EthernetSegmentIdentifier::new([9; 10]);
+        table.insert(esi, vni(100), DfRole::NonDf, "br100".to_string());
+
+        assert!(publish_cached_dataplane_intent(
+            &intent_tx, table, &mut state
+        ));
+
+        let updated = intent_rx.borrow_and_update().clone();
+        assert_eq!(
+            updated.instances.as_ref(),
+            cached_instances.as_ref(),
+            "cached BUM republish must use the effective tables that produced the cached projection"
+        );
+        assert_eq!(updated.ip_vrfs.len(), 0);
+        assert_eq!(updated.generation, 2);
+    }
+
+    #[tokio::test]
     async fn supervisor_reprojects_on_duplicate_mac_quarantine_change() {
         let instances = Arc::new(local_instance_table(100, Some("br100")));
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
@@ -1298,11 +1705,12 @@ mod tests {
         let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
         let (quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
         let supervisor_shutdown = shutdown.clone();
-        let ip_vrfs = Arc::new(IpVrfTable::new());
+        let (_instances_tx, instances_rx) = watch::channel(instances);
+        let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
         let join = tokio::spawn(super::supervisor_loop(
             Duration::from_mins(1),
-            instances,
-            ip_vrfs,
+            instances_rx,
+            ip_vrfs_rx,
             rib_tx,
             intent_tx,
             bum_rx,
