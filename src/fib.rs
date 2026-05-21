@@ -183,6 +183,16 @@ pub(crate) enum FibDrop {
         peer: IpAddr,
         /// Configured maximum route count.
         limit: u32,
+        /// Number of sampled `route_limit_exceeded` rows surfaced for
+        /// this table/reason.
+        sampled_rows: u64,
+        /// Number of over-cap rows suppressed after the status sample
+        /// cap was reached.
+        suppressed_rows: u64,
+        /// Total over-cap rows for this table/reason before sampling.
+        total_rows: u64,
+        /// Per-table status sample cap.
+        sample_limit: u32,
     },
 }
 
@@ -238,7 +248,8 @@ pub(crate) fn project_fib_intent_with_peer_groups(
     for table in tables {
         let mut table_routes: BTreeMap<FibRouteKey, FibRoute> = BTreeMap::new();
         let mut table_frozen = false;
-        let mut route_limit_drop_count = 0usize;
+        let mut route_limit_drops = RouteLimitDropCounters::default();
+        let route_limit_drop_start = intent.drops.len();
         let allowed_neighbors = table
             .allowed_neighbors
             .iter()
@@ -287,7 +298,7 @@ pub(crate) fn project_fib_intent_with_peer_groups(
                                 &table.name,
                                 projected,
                                 limit,
-                                &mut route_limit_drop_count,
+                                &mut route_limit_drops,
                             );
                         }
                         table_routes.clear();
@@ -300,7 +311,7 @@ pub(crate) fn project_fib_intent_with_peer_groups(
                         route.next_hop,
                         route.peer,
                         limit,
-                        &mut route_limit_drop_count,
+                        &mut route_limit_drops,
                     );
                     continue;
                 }
@@ -318,6 +329,11 @@ pub(crate) fn project_fib_intent_with_peer_groups(
             table_routes.insert(key, projected);
         }
         if table_frozen {
+            annotate_route_limit_drops(
+                &mut intent.drops[route_limit_drop_start..],
+                route_limit_drops.sampled,
+                route_limit_drops.total,
+            );
             continue;
         }
         intent.routes.extend(table_routes);
@@ -331,7 +347,7 @@ fn push_route_limit_drop(
     table_name: &str,
     route: &FibRoute,
     limit: u32,
-    drop_count: &mut usize,
+    counters: &mut RouteLimitDropCounters,
 ) {
     push_route_limit_drop_for_route(
         intent,
@@ -340,8 +356,14 @@ fn push_route_limit_drop(
         route.target.next_hop,
         route.peer,
         limit,
-        drop_count,
+        counters,
     );
+}
+
+#[derive(Default)]
+struct RouteLimitDropCounters {
+    sampled: usize,
+    total: usize,
 }
 
 fn push_route_limit_drop_for_route(
@@ -351,9 +373,10 @@ fn push_route_limit_drop_for_route(
     next_hop: IpAddr,
     peer: IpAddr,
     limit: u32,
-    drop_count: &mut usize,
+    counters: &mut RouteLimitDropCounters,
 ) {
-    if *drop_count >= MAX_ROUTE_LIMIT_EXCEEDED_DROPS_PER_TABLE {
+    counters.total += 1;
+    if counters.sampled >= MAX_ROUTE_LIMIT_EXCEEDED_DROPS_PER_TABLE {
         return;
     }
     intent.drops.push(FibDrop::RouteLimitExceeded {
@@ -362,8 +385,32 @@ fn push_route_limit_drop_for_route(
         next_hop,
         peer,
         limit,
+        sampled_rows: 0,
+        suppressed_rows: 0,
+        total_rows: 0,
+        sample_limit: u32::try_from(MAX_ROUTE_LIMIT_EXCEEDED_DROPS_PER_TABLE).unwrap(),
     });
-    *drop_count += 1;
+    counters.sampled += 1;
+}
+
+fn annotate_route_limit_drops(drops: &mut [FibDrop], sampled_count: usize, total_count: usize) {
+    let sampled_rows = u64::try_from(sampled_count).unwrap_or(u64::MAX);
+    let total_rows = u64::try_from(total_count).unwrap_or(u64::MAX);
+    let suppressed_rows =
+        u64::try_from(total_count.saturating_sub(sampled_count)).unwrap_or(u64::MAX);
+    for drop in drops {
+        if let FibDrop::RouteLimitExceeded {
+            sampled_rows: drop_sampled_rows,
+            suppressed_rows: drop_suppressed_rows,
+            total_rows: drop_total_rows,
+            ..
+        } = drop
+        {
+            *drop_sampled_rows = sampled_rows;
+            *drop_suppressed_rows = suppressed_rows;
+            *drop_total_rows = total_rows;
+        }
+    }
 }
 
 /// Compute the route operations needed to converge owned state to intent.
@@ -875,6 +922,28 @@ mod tests {
                 .filter(|drop| matches!(drop, FibDrop::RouteLimitExceeded { .. }))
                 .count(),
             MAX_ROUTE_LIMIT_EXCEEDED_DROPS_PER_TABLE
+        );
+        let FibDrop::RouteLimitExceeded {
+            limit,
+            sampled_rows,
+            suppressed_rows,
+            total_rows,
+            sample_limit,
+            ..
+        } = &intent.drops[0]
+        else {
+            panic!("first drop should carry route-limit sampling metadata");
+        };
+        assert_eq!(*limit, 1);
+        assert_eq!(
+            *sampled_rows,
+            u64::try_from(MAX_ROUTE_LIMIT_EXCEEDED_DROPS_PER_TABLE).unwrap()
+        );
+        assert_eq!(*suppressed_rows, 22);
+        assert_eq!(*total_rows, 150);
+        assert_eq!(
+            *sample_limit,
+            u32::try_from(MAX_ROUTE_LIMIT_EXCEEDED_DROPS_PER_TABLE).unwrap()
         );
     }
 
