@@ -41,7 +41,7 @@
 //! mass-withdraw on `AS_PATH` change, DF-role-aware MAC origination)
 //! remains Gate 8b — see ADR-0057.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -63,14 +63,61 @@ use tracing::{debug, info, warn};
 
 use crate::evpn_originator::{LOCAL_PEER, route_target_to_extcomm};
 
+/// Cloneable ADR-0063 runtime control surface for the Ethernet
+/// Segment owner.
+///
+/// The full handle remains owned by coordinated shutdown. Runtime
+/// commits publish complete ES snapshots through this control; the
+/// segment actor remains the only Type 1/4 originator.
+#[derive(Clone, Debug)]
+pub(crate) struct EvpnSegmentRuntimeControl {
+    segments_tx: watch::Sender<Arc<Vec<EthernetSegment>>>,
+}
+
+impl EvpnSegmentRuntimeControl {
+    /// Whether the segment actor can still receive runtime ES
+    /// snapshots.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        !self.segments_tx.is_closed()
+    }
+
+    /// Replace the desired Ethernet Segment snapshot consumed by the
+    /// segment actor. Returns `false` if the actor has already exited.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "ADR-0063 coordinator wiring will call this command; this slice adds the actor command surface first"
+        )
+    )]
+    #[must_use]
+    pub fn replace_segments(&self, segments: Arc<Vec<EthernetSegment>>) -> bool {
+        if self.segments_tx.is_closed() {
+            return false;
+        }
+        self.segments_tx.send_replace(segments);
+        true
+    }
+}
+
 /// Handle returned to the daemon for shutdown coordination.
 #[derive(Debug)]
 pub struct EvpnSegmentHandle {
     pub(crate) shutdown: CancellationToken,
     pub(crate) join: tokio::task::JoinHandle<()>,
+    segments_tx: watch::Sender<Arc<Vec<EthernetSegment>>>,
 }
 
 impl EvpnSegmentHandle {
+    /// Cloneable ADR-0063 runtime control surface for future daemon
+    /// apply wiring.
+    pub(crate) fn runtime_control(&self) -> EvpnSegmentRuntimeControl {
+        EvpnSegmentRuntimeControl {
+            segments_tx: self.segments_tx.clone(),
+        }
+    }
+
     /// Cancel the actor and wait for the bounded shutdown drain.
     pub async fn shutdown(self) {
         self.shutdown.cancel();
@@ -94,6 +141,7 @@ pub fn spawn(
         info!("no [[ethernet_segments]] configured — EVPN segment orchestrator not spawned");
         return None;
     }
+    let (segments_tx, segments_rx) = watch::channel(Arc::new(segments));
     let runtime = SegmentRuntime {
         instances: instances.clone(),
         rib_tx,
@@ -101,10 +149,11 @@ pub fn spawn(
         metrics,
         shutdown: daemon_shutdown.clone(),
     };
-    let join = tokio::spawn(segment_loop(runtime, segments));
+    let join = tokio::spawn(segment_loop(runtime, segments_rx));
     Some(EvpnSegmentHandle {
         shutdown: daemon_shutdown,
         join,
+        segments_tx,
     })
 }
 
@@ -140,84 +189,23 @@ struct SegmentState {
 }
 
 #[allow(clippy::too_many_lines)] // setup + main select loop combined; further extraction hurts the lifecycle story
-async fn segment_loop(runtime: SegmentRuntime, segments: Vec<EthernetSegment>) {
+async fn segment_loop(
+    runtime: SegmentRuntime,
+    mut segments_rx: watch::Receiver<Arc<Vec<EthernetSegment>>>,
+) {
     let mut by_esi: HashMap<EthernetSegmentIdentifier, SegmentState> = HashMap::new();
     // One allocator per spawn so two operators on different daemons
     // don't have to coordinate label space; the allocator survives
     // for the lifetime of the actor task and assignments stay
     // stable across reconfiguration within that lifetime.
     let mut esi_label_allocator = rustbgpd_evpn::EsiLabelAllocator::new();
-
-    // Build per-ESI state.
-    for seg in segments {
-        let Some(reference_vni) = seg.member_vnis.iter().copied().next() else {
-            warn!(
-                esi = ?seg.esi.octets(),
-                "ethernet_segments entry has no member_vnis — skipping"
-            );
-            continue;
-        };
-        let Some(inst) = runtime.instances.get(reference_vni) else {
-            warn!(
-                esi = ?seg.esi.octets(),
-                vni = reference_vni.as_u32(),
-                "ethernet_segments entry references unknown VNI — skipping"
-            );
-            continue;
-        };
-        let rd = inst.rd;
-        // Reserve the per-ESI label via the allocator. First-seen
-        // ESIs land on their deterministic synth label so operators
-        // upgrading from Gate 8b prep observe no label change;
-        // subsequent collisions get distinct labels from the
-        // allocator's free-list / fresh-scan paths.
-        let esi_label = match esi_label_allocator.reserve(seg.esi) {
-            Ok(label) => label,
-            Err(e) => {
-                warn!(
-                    esi = ?seg.esi.octets(),
-                    error = %e,
-                    "ESI label allocator exhausted — skipping segment"
-                );
-                continue;
-            }
-        };
-        let es_origin = LocalEsOriginator::new(rd, seg.esi, seg.originator_ip);
-        let ead_per_es = LocalEadPerEsOriginator::new(rd, seg.esi, esi_label);
-        let mut ead_per_evi = LocalEadPerEviOriginator::new(rd, seg.esi);
-        let labels: BTreeMap<EvpnInstanceId, MplsLabel> = seg
-            .member_vnis
-            .iter()
-            .map(|&v| (v, MplsLabel::new(v.as_u32())))
-            .collect();
-        let rds: BTreeMap<_, _> = seg
-            .member_vnis
-            .iter()
-            .map(|&v| {
-                let inst = runtime
-                    .instances
-                    .get(v)
-                    .expect("validated by Config::resolve_ethernet_segments");
-                (v, inst.rd)
-            })
-            .collect();
-        ead_per_evi.set_rds(rds);
-        ead_per_evi.set_labels(labels);
-        let election = DfElection::new(seg.esi, seg.member_vnis.iter().copied());
-        by_esi.insert(
-            seg.esi,
-            SegmentState {
-                config: seg,
-                es_origin,
-                ead_per_es,
-                ead_per_evi,
-                election,
-                last_roles: BTreeMap::new(),
-                reference_instance_id: reference_vni,
-                esi_label,
-            },
-        );
-    }
+    let startup_segments = segments_rx.borrow().as_ref().clone();
+    rebuild_segment_states(
+        &runtime,
+        &mut by_esi,
+        &mut esi_label_allocator,
+        startup_segments,
+    );
 
     // Subscribe to the EVPN best-path broadcast for re-election triggers.
     let mut evpn_event_rx = subscribe_evpn_events(&runtime.rib_tx).await;
@@ -245,6 +233,23 @@ async fn segment_loop(runtime: SegmentRuntime, segments: Vec<EthernetSegment>) {
                 publish_empty_bum_enforcement_snapshot(&runtime);
                 return;
             }
+            changed = segments_rx.changed() => {
+                if let Ok(()) = changed {
+                    let segments = segments_rx.borrow_and_update().as_ref().clone();
+                    apply_runtime_segment_snapshot(
+                        &runtime,
+                        &mut by_esi,
+                        &mut esi_label_allocator,
+                        segments,
+                    )
+                    .await;
+                } else {
+                    debug!("EVPN segment: runtime segment watch closed; draining");
+                    drain(&runtime, &mut by_esi).await;
+                    publish_empty_bum_enforcement_snapshot(&runtime);
+                    return;
+                }
+            },
             event = recv_evpn_event(&mut evpn_event_rx) => match event {
                 Ok(ev) => {
                     handle_evpn_event(&runtime, &mut by_esi, &ev).await;
@@ -266,6 +271,132 @@ async fn segment_loop(runtime: SegmentRuntime, segments: Vec<EthernetSegment>) {
             }
         }
     }
+}
+
+fn rebuild_segment_states(
+    runtime: &SegmentRuntime,
+    by_esi: &mut HashMap<EthernetSegmentIdentifier, SegmentState>,
+    esi_label_allocator: &mut rustbgpd_evpn::EsiLabelAllocator,
+    segments: Vec<EthernetSegment>,
+) {
+    // Release labels for ESIs dropped by this snapshot so the allocator
+    // returns them to its free list and can reuse the label space across
+    // runtime add/remove churn. Persisting ESIs are left reserved —
+    // `reserve` is idempotent and returns their existing label below.
+    let next_esis: HashSet<EthernetSegmentIdentifier> =
+        segments.iter().map(|seg| seg.esi).collect();
+    let removed: Vec<EthernetSegmentIdentifier> = by_esi
+        .keys()
+        .copied()
+        .filter(|esi| !next_esis.contains(esi))
+        .collect();
+    for esi in removed {
+        esi_label_allocator.release(esi);
+    }
+
+    by_esi.clear();
+    for seg in segments {
+        let Some(state) = build_segment_state(runtime, seg, esi_label_allocator) else {
+            continue;
+        };
+        if by_esi.insert(state.config.esi, state).is_some() {
+            warn!("duplicate Ethernet Segment in runtime snapshot; last entry wins");
+        }
+    }
+}
+
+fn build_segment_state(
+    runtime: &SegmentRuntime,
+    seg: EthernetSegment,
+    esi_label_allocator: &mut rustbgpd_evpn::EsiLabelAllocator,
+) -> Option<SegmentState> {
+    let Some(reference_vni) = seg.member_vnis.iter().copied().next() else {
+        warn!(
+            esi = ?seg.esi.octets(),
+            "ethernet_segments entry has no member_vnis — skipping"
+        );
+        return None;
+    };
+    let Some(inst) = runtime.instances.get(reference_vni) else {
+        warn!(
+            esi = ?seg.esi.octets(),
+            vni = reference_vni.as_u32(),
+            "ethernet_segments entry references unknown VNI — skipping"
+        );
+        return None;
+    };
+    let rd = inst.rd;
+    // Reserve the per-ESI label via the allocator. First-seen ESIs
+    // land on their deterministic synth label so operators upgrading
+    // from Gate 8b prep observe no label change; subsequent collisions
+    // get distinct labels from the allocator's free-list / fresh-scan
+    // paths.
+    let esi_label = match esi_label_allocator.reserve(seg.esi) {
+        Ok(label) => label,
+        Err(e) => {
+            warn!(
+                esi = ?seg.esi.octets(),
+                error = %e,
+                "ESI label allocator exhausted — skipping segment"
+            );
+            return None;
+        }
+    };
+    let es_origin = LocalEsOriginator::new(rd, seg.esi, seg.originator_ip);
+    let ead_per_es = LocalEadPerEsOriginator::new(rd, seg.esi, esi_label);
+    let mut ead_per_evi = LocalEadPerEviOriginator::new(rd, seg.esi);
+    let labels: BTreeMap<EvpnInstanceId, MplsLabel> = seg
+        .member_vnis
+        .iter()
+        .map(|&v| (v, MplsLabel::new(v.as_u32())))
+        .collect();
+    let mut rds = BTreeMap::new();
+    for &v in &seg.member_vnis {
+        let Some(inst) = runtime.instances.get(v) else {
+            warn!(
+                esi = ?seg.esi.octets(),
+                vni = v.as_u32(),
+                "ethernet_segments entry references unknown VNI — skipping"
+            );
+            return None;
+        };
+        rds.insert(v, inst.rd);
+    }
+    ead_per_evi.set_rds(rds);
+    ead_per_evi.set_labels(labels);
+    let election = DfElection::new(seg.esi, seg.member_vnis.iter().copied());
+    Some(SegmentState {
+        config: seg,
+        es_origin,
+        ead_per_es,
+        ead_per_evi,
+        election,
+        last_roles: BTreeMap::new(),
+        reference_instance_id: reference_vni,
+        esi_label,
+    })
+}
+
+async fn apply_runtime_segment_snapshot(
+    runtime: &SegmentRuntime,
+    by_esi: &mut HashMap<EthernetSegmentIdentifier, SegmentState>,
+    esi_label_allocator: &mut rustbgpd_evpn::EsiLabelAllocator,
+    segments: Vec<EthernetSegment>,
+) {
+    let changed = segments.len() != by_esi.len()
+        || segments.iter().any(|seg| {
+            by_esi
+                .get(&seg.esi)
+                .is_none_or(|state| state.config != *seg)
+        });
+    if !changed {
+        return;
+    }
+
+    drain(runtime, by_esi).await;
+    rebuild_segment_states(runtime, by_esi, esi_label_allocator, segments);
+    initial_startup(runtime, by_esi).await;
+    publish_bum_enforcement_snapshot(runtime, by_esi);
 }
 
 async fn subscribe_evpn_events(
@@ -888,6 +1019,16 @@ mod tests {
         }
     }
 
+    fn segment(id: EthernetSegmentIdentifier, members: &[u32]) -> EthernetSegment {
+        EthernetSegment {
+            esi: id,
+            member_vnis: members.iter().copied().map(vni).collect(),
+            df_preference: 32_768,
+            df_algorithm: DfAlgorithm::DefaultModulo,
+            originator_ip: ipa("10.0.0.1"),
+        }
+    }
+
     fn type_4_es_route(
         id: EthernetSegmentIdentifier,
         originator_ip: &str,
@@ -915,6 +1056,54 @@ mod tests {
         vec![PathAttribute::ExtendedCommunities(vec![
             ExtendedCommunity::es_import_rt(es_import_rt_from_esi(id)),
         ])]
+    }
+
+    fn rib_recorder(
+        mut rib_rx: mpsc::Receiver<RibUpdate>,
+        injects: Arc<tokio::sync::Mutex<Vec<EvpnRouteKey>>>,
+        withdraws: Arc<tokio::sync::Mutex<Vec<EvpnRouteKey>>>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let (events_tx, _) = broadcast::channel(16);
+            while let Some(update) = rib_rx.recv().await {
+                match update {
+                    RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                        let _ = reply.send(events_tx.subscribe());
+                    }
+                    RibUpdate::QueryEvpnRoutes { reply } => {
+                        let _ = reply.send(Vec::new());
+                    }
+                    RibUpdate::InjectEvpn { route, reply } => {
+                        injects.lock().await.push(route.key());
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { key, reply } => {
+                        withdraws.lock().await.push(key);
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => {}
+                }
+            }
+        })
+    }
+
+    async fn wait_for_keys(
+        keys: &Arc<tokio::sync::Mutex<Vec<EvpnRouteKey>>>,
+        expected: usize,
+        label: &str,
+    ) -> Vec<EvpnRouteKey> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let observed = keys.lock().await.clone();
+            if observed.len() >= expected {
+                return observed;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {expected} {label}; observed {observed:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[test]
@@ -1215,6 +1404,114 @@ mod tests {
             CancellationToken::new(),
         );
         assert!(h.is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_control_replaces_segments_and_drains_removed_routes() {
+        let mut t = EvpnInstanceTable::new();
+        t.insert(instance(100)).unwrap();
+        let instances = Arc::new(t);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(32);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let handle = spawn(
+            &instances,
+            vec![segment(esi(0x21), &[100])],
+            rib_tx,
+            None,
+            BgpMetrics::new(),
+            CancellationToken::new(),
+        )
+        .expect("non-empty ES config should spawn segment actor");
+        let control = handle.runtime_control();
+        assert!(control.is_open());
+
+        let injected = wait_for_keys(&injects, 3, "ES injections").await;
+        assert!(
+            injected
+                .iter()
+                .any(|key| matches!(key, EvpnRouteKey::Es { .. }))
+        );
+        assert!(
+            injected
+                .iter()
+                .any(|key| matches!(key, EvpnRouteKey::EadPerEs { .. }))
+        );
+        assert!(
+            injected
+                .iter()
+                .any(|key| matches!(key, EvpnRouteKey::EadPerEvi { .. }))
+        );
+
+        assert!(control.replace_segments(Arc::new(Vec::new())));
+        let drained_keys = wait_for_keys(&withdraws, 3, "ES withdraws").await;
+        assert!(
+            drained_keys
+                .iter()
+                .any(|key| matches!(key, EvpnRouteKey::Es { .. }))
+        );
+        assert!(
+            drained_keys
+                .iter()
+                .any(|key| matches!(key, EvpnRouteKey::EadPerEs { .. }))
+        );
+        assert!(
+            drained_keys
+                .iter()
+                .any(|key| matches!(key, EvpnRouteKey::EadPerEvi { .. }))
+        );
+
+        handle.shutdown().await;
+        assert!(!control.is_open());
+    }
+
+    #[test]
+    fn rebuild_segment_states_releases_dropped_esi_labels() {
+        let mut t = EvpnInstanceTable::new();
+        t.insert(instance(100)).unwrap();
+        let instances = Arc::new(t);
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let runtime = SegmentRuntime {
+            instances,
+            rib_tx,
+            bum_enforcement_tx: None,
+            metrics: BgpMetrics::new(),
+            shutdown: CancellationToken::new(),
+        };
+        let mut by_esi: HashMap<EthernetSegmentIdentifier, SegmentState> = HashMap::new();
+        let mut alloc = rustbgpd_evpn::EsiLabelAllocator::new();
+
+        rebuild_segment_states(
+            &runtime,
+            &mut by_esi,
+            &mut alloc,
+            vec![segment(esi(0x21), &[100]), segment(esi(0x22), &[100])],
+        );
+        assert_eq!(alloc.len(), 2);
+        let label_a = alloc.get(esi(0x21)).expect("esi A reserved");
+
+        // Re-apply a snapshot that drops ESI B. The allocator must
+        // release B (so its label returns to the free list) while the
+        // persisting ESI A keeps its existing label.
+        rebuild_segment_states(
+            &runtime,
+            &mut by_esi,
+            &mut alloc,
+            vec![segment(esi(0x21), &[100])],
+        );
+        assert_eq!(alloc.len(), 1, "dropped ESI label must be released");
+        assert!(
+            alloc.get(esi(0x22)).is_none(),
+            "removed ESI must be released from the allocator"
+        );
+        assert_eq!(
+            alloc.get(esi(0x21)),
+            Some(label_a),
+            "persisting ESI must keep its existing label"
+        );
+        assert_eq!(by_esi.len(), 1);
     }
 
     #[test]

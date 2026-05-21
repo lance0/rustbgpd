@@ -389,7 +389,7 @@ not a tactical feature. Only worth it if there's a specific use case
 |------|----------------|--------|
 | Daemon-level integration test booting with `[[evpn_instances]]` and round-tripping through `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances`. The tripwire that proves config → daemon → gRPC → CLI still works while internals get more dynamic. | `tests/evpn_instances_binary.rs` | landed |
 | Dataplane-boundary ADR — what `crates/evpn-linux` consumes from `crates/evpn`, what it observes from the kernel, what it returns. Diff loop semantics (push / pull / reconcile-on-event). Failure surfacing back to the domain layer. | `docs/adr/0054-evpn-linux-dataplane-boundary.md` | landed |
-| Runtime mutation surface for the startup-pinned EVPN model — ADR-0063 rejects a direct `ArcSwap` / `RwLock` table swap as the first implementation. The foundation exposes the committed generation through `GetEvpnRuntime` / `rustbgpctl evpn runtime`, includes the coordinator core / commit gate, and wires `EvpnService.ApplyEvpnRuntime` to daemon-owned candidate parsing, full EVPN table validation, plan summaries, validate-only mode, and no-op apply. A daemon actor converger now commits two live shapes: a **single L2VNI add** (IMET originate + effective-table republish to the dataplane supervisor, Type 2 MAC/MAC+IP originator, and SVI task) and a **single IP-VRF add** (effective-table republish to the dataplane supervisor and Type 5 originator). Convergence is ordered with rollback, and the originator / SVI actors drain removed-or-redefined VNIs (including stale duplicate-MAC move-window state) before accepting a new model. Other non-noop shapes — delete, redefine, Ethernet Segment changes, mixed L2VNI + IP-VRF, multi-add, or an add on an RR-only / no-actor daemon — still fail closed with `FAILED_PRECONDITION` without advancing or degrading the committed generation. | `crates/evpn/src/runtime.rs`, `crates/api/src/evpn_service.rs`, `src/main.rs`, `src/evpn_imet.rs`, `src/evpn_originator.rs`, `src/evpn_svi.rs`, `src/evpn_l3_originator.rs`, `src/evpn_dataplane.rs` | single L2VNI/IP-VRF add convergence landed; delete / redefine / ES / mixed / multi-add convergence tracked in [#210](https://github.com/lance0/rustbgpd/issues/210) |
+| Runtime mutation surface for the startup-pinned EVPN model — ADR-0063 rejects a direct `ArcSwap` / `RwLock` table swap as the first implementation. The foundation exposes the committed generation through `GetEvpnRuntime` / `rustbgpctl evpn runtime`, includes the coordinator core / commit gate, and wires `EvpnService.ApplyEvpnRuntime` to daemon-owned candidate parsing, full EVPN table validation, plan summaries, validate-only mode, and no-op apply. A daemon actor converger now commits two live shapes: a **single L2VNI add** (IMET originate + effective-table republish to the dataplane supervisor, Type 2 MAC/MAC+IP originator, and SVI task) and a **single IP-VRF add** (effective-table republish to the dataplane supervisor and Type 5 originator). Convergence is ordered with rollback, and the originator / SVI actors drain removed-or-redefined VNIs (including stale duplicate-MAC move-window state) before accepting a new model. The Ethernet Segment actor now has a cloneable owner/control surface for complete desired-ES snapshots while remaining the only Type 1/4 owner. Other non-noop shapes — delete, redefine, Ethernet Segment `ApplyEvpnRuntime` commits, mixed L2VNI + IP-VRF, multi-add, or an add on an RR-only / no-actor daemon — still fail closed with `FAILED_PRECONDITION` without advancing or degrading the committed generation. | `crates/evpn/src/runtime.rs`, `crates/api/src/evpn_service.rs`, `src/main.rs`, `src/evpn_imet.rs`, `src/evpn_originator.rs`, `src/evpn_svi.rs`, `src/evpn_l3_originator.rs`, `src/evpn_dataplane.rs`, `src/evpn_segment.rs` | single L2VNI/IP-VRF add convergence landed; ES owner/control foundation landed; delete / redefine / ES commit / mixed / multi-add convergence tracked in [#210](https://github.com/lance0/rustbgpd/issues/210) |
 
 **FDB reconciler (PR #34):**
 
@@ -427,7 +427,7 @@ flow that Gate 7b's foundation left as a stub.
 |------|----------------|
 | MAC duplication detection (RFC 7432 §15.1 M=180s/N=5) — ✅ complete (#139): detect-only defaults, opt-in local-origin `suppress_local` action, remote-route processing suppression, receive-side intent filtering, and a manual clear API (`ClearDuplicateMacQuarantine`). Only explicit kernel drop/filter primitives remain optional follow-up. | `crates/evpn/src/duplicate_mac.rs`, `src/evpn_originator.rs`, `crates/api/src/evpn_service.rs` |
 | Type 5 IP Prefix origination per L3VNI | ✅ Gate 9 slice 6 (v0.18.0) — kernel-route observation, `IpVrfStatus`-gated origination via `RibUpdate::InjectEvpn`, remote import + transactional L3 FIB programming (`L3OwnedState`), Router MAC conflict detection, four-phase apply ordering, foreign-state preservation. `RTNLGRP_IPV4/IPV6_ROUTE` multicast added sub-second withdraw on tenant `ip addr del`. |
-| Mutation surface — whole-model `EvpnService.ApplyEvpnRuntime` (ADR-0063); single L2VNI / IP-VRF add commits live, other shapes fail closed (#210) | `crates/api/src/evpn_service.rs`, `src/main.rs` |
+| Mutation surface — whole-model `EvpnService.ApplyEvpnRuntime` (ADR-0063); single L2VNI / IP-VRF add commits live, ES has an owner/control foundation, other shapes fail closed (#210) | `crates/api/src/evpn_service.rs`, `src/main.rs`, `src/evpn_segment.rs` |
 | Kernel VXLAN interface config generator? | ops question — maybe not |
 
 **Closed in v0.17.0 (post-v0.16.0 follow-ups):**
@@ -464,6 +464,11 @@ Ships:
   shape is role-independent per RFC 7432 §14).
 - Daemon orchestrator (`src/evpn_segment.rs`) wiring all of the
   above off the EVPN best-path broadcast (Gate 7c).
+- Cloneable runtime owner/control surface for complete desired-ES
+  snapshots. This preserves `src/evpn_segment.rs` as the only Type 1/4
+  owner and gives future ADR-0063 ES commits a single actor boundary;
+  `ApplyEvpnRuntime` still fails closed for ES changes until the
+  coordinator wires that boundary into committed generation changes.
 - Observable Prometheus surface — `evpn_df_role{esi,vni,role}`
   gauge and `evpn_df_role_changes_total{esi,vni}` counter.
 - ADR-0057 records the observation/enforcement carve-out.
@@ -636,8 +641,9 @@ Still ahead:
   non-zero Type 5 Gateway Address through matching Type 2 MAC/IP
   state, then add local origination / API surfaces.
 - Runtime instance mutation completion (ADR-0063 / #210): single L2VNI
-  and single IP-VRF add commit live via `ApplyEvpnRuntime`; delete,
-  redefine, Ethernet Segment changes, and mixed / multi-element edits
+  and single IP-VRF add commit live via `ApplyEvpnRuntime`; the ES actor
+  has a runtime owner/control foundation, but delete, redefine,
+  committed Ethernet Segment changes, and mixed / multi-element edits
   remain restart-required.
 
 (The protected self-hosted `kernel-dataplane` workflow now covers M36 /

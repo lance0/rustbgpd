@@ -188,6 +188,7 @@ struct EvpnRuntimeActorConverger {
     originator: Option<evpn_originator::EvpnOriginatorRuntimeControl>,
     svi: Option<evpn_svi::EvpnSviRuntimeControl>,
     l3_originator: Option<evpn_l3_originator::EvpnL3OriginatorRuntimeControl>,
+    segment: Option<evpn_segment::EvpnSegmentRuntimeControl>,
 }
 
 impl EvpnRuntimeActorConverger {
@@ -367,6 +368,20 @@ impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
             }
             if plan.ip_vrfs.has_changes() {
                 return self.converge_ip_vrf_add(current, candidate, plan);
+            }
+            if plan.ethernet_segments.has_changes() {
+                let owner_state = if self
+                    .segment
+                    .as_ref()
+                    .is_some_and(evpn_segment::EvpnSegmentRuntimeControl::is_open)
+                {
+                    "an Ethernet Segment owner control is present, but live ES commits still require coordinator semantics"
+                } else {
+                    "no active Ethernet Segment owner control is present"
+                };
+                return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                    "ApplyEvpnRuntime keeps Ethernet Segment changes fail-closed; {owner_state}"
+                )));
             }
             Err(DaemonEvpnRuntimeConvergeError::unsupported(
                 "ApplyEvpnRuntime has no supported changes in this candidate",
@@ -1646,6 +1661,9 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             evpn_segment_shutdown.clone(),
         )
     };
+    let evpn_segment_runtime_control = evpn_segment_handle
+        .as_ref()
+        .map(evpn_segment::EvpnSegmentHandle::runtime_control);
 
     // Latest snapshot of `DataplaneReport.ip_vrf_status` rows for the
     // gRPC `ListIpVrfs` / `GetIpVrf` surface (Gate 9 slice 5). Backed
@@ -1815,6 +1833,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         originator: evpn_originator_runtime_control,
         svi: evpn_svi_runtime_control,
         l3_originator: evpn_l3_originator_runtime_control,
+        segment: evpn_segment_runtime_control,
     });
 
     // RFC 7999 BLACKHOLE kernel-discard reconciler (ADR-0060 FIB
@@ -2531,6 +2550,32 @@ local_vtep_ip = "10.0.0.1"
 "#
     }
 
+    fn l2vni_with_ethernet_segment_runtime_candidate_toml() -> &'static str {
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.1"
+"#
+    }
+
     fn two_l2vni_runtime_candidate_toml() -> &'static str {
         r#"
 [global]
@@ -2844,6 +2889,55 @@ table_id = 6000
     }
 
     #[tokio::test]
+    async fn apply_evpn_runtime_ethernet_segment_change_fails_closed() {
+        let current = runtime_candidate_from_toml(l2vni_runtime_candidate_toml());
+        let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+            current.instances().clone(),
+            current.ip_vrfs().clone(),
+            Vec::new(),
+        )));
+        let apply_lock = tokio::sync::Mutex::new(());
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(
+                tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()),
+            ),
+            dataplane: None,
+            originator: None,
+            svi: None,
+            l3_originator: None,
+            segment: None,
+        };
+
+        let error = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: l2vni_with_ethernet_segment_runtime_candidate_toml().to_string(),
+                validate_only: false,
+            },
+            coordinator.as_ref(),
+            &apply_lock,
+            &converger,
+        )
+        .await
+        .unwrap_err();
+
+        let GrpcEvpnRuntimeApplyError::FailedPrecondition(message) = error else {
+            panic!("expected failed-precondition error");
+        };
+        assert!(
+            message.contains("Ethernet Segment changes fail-closed"),
+            "unexpected error message: {message}"
+        );
+        let snapshot = coordinator.lock().unwrap().snapshot();
+        assert_eq!(snapshot.generation.as_u64(), 1);
+        assert_eq!(
+            snapshot.mutation_state,
+            rustbgpd_evpn::EvpnRuntimeMutationState::Idle
+        );
+    }
+
+    #[tokio::test]
     async fn apply_evpn_runtime_convergence_failure_marks_runtime_failed() {
         let coordinator = empty_evpn_runtime_coordinator();
         let apply_lock = tokio::sync::Mutex::new(());
@@ -2923,6 +3017,7 @@ table_id = 6000
             originator: Some(originator_handle.runtime_control()),
             svi: None,
             l3_originator: None,
+            segment: None,
         };
 
         converger
@@ -2993,6 +3088,7 @@ table_id = 6000
             originator: None,
             svi: None,
             l3_originator: Some(l3_handle.runtime_control()),
+            segment: None,
         };
 
         converger
