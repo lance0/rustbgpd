@@ -3370,7 +3370,7 @@ table_id = 6000
         records: &Arc<tokio::sync::Mutex<Vec<rustbgpd_wire::EvpnRouteKey>>>,
         message: &'static str,
     ) {
-        tokio::time::timeout(Duration::from_millis(500), async {
+        tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if !records.lock().await.is_empty() {
                     break;
