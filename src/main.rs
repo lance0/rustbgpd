@@ -270,17 +270,17 @@ impl EvpnRuntimeActorConverger {
             )));
         }
 
-        if !dataplane.replace_evpn_instances(candidate_instances.clone()) {
-            self.rollback_imet(added_vni).await;
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
-                "EVPN dataplane runtime model publish failed",
-            ));
-        }
         if ip_vrf_metadata_changed && !dataplane.replace_ip_vrfs(candidate_ip_vrfs) {
-            Self::rollback_l2vni_add_dataplane(dataplane, current, false);
             self.rollback_imet(added_vni).await;
             return Err(DaemonEvpnRuntimeConvergeError::failed(
                 "EVPN dataplane IP-VRF runtime model publish failed",
+            ));
+        }
+        if !dataplane.replace_evpn_instances(candidate_instances.clone()) {
+            Self::rollback_l2vni_add_dataplane(dataplane, current, ip_vrf_metadata_changed);
+            self.rollback_imet(added_vni).await;
+            return Err(DaemonEvpnRuntimeConvergeError::failed(
+                "EVPN dataplane runtime model publish failed",
             ));
         }
         if !originator.replace_runtime_model(candidate_instances.clone(), candidate_vni_to_esi) {

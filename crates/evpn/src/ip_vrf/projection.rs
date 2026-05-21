@@ -326,6 +326,11 @@ where
     I: IntoIterator<Item = ProjectedIpPrefixRoute>,
     O: IntoIterator<Item = ProjectedOverlayIndexRoute>,
 {
+    enum PrefixResolution {
+        OverlayIndex,
+        InterfaceLess(MacAddress),
+    }
+
     // Pre-collect local VTEP IPs from every IP-VRF for the
     // self-origination filter.
     let local_vteps: Vec<(String, IpAddr)> = vrfs
@@ -349,13 +354,12 @@ where
 
         let overlay_gateway = !route.gateway.is_unspecified();
 
-        // Interface-less Type 5 still requires a Router MAC. Overlay
-        // index routes get their inner MAC from the resolved Type 2
-        // MAC/IP route instead.
-        let interface_less_router_mac = if overlay_gateway {
-            None
+        // Interface-less Type 5 still requires a Router MAC. Overlay-index
+        // routes get their inner MAC from the resolved Type 2 MAC/IP route.
+        let resolution = if overlay_gateway {
+            PrefixResolution::OverlayIndex
         } else if let Some(router_mac) = route.router_mac {
-            Some(router_mac)
+            PrefixResolution::InterfaceLess(router_mac)
         } else {
             table.drops.push(DropReason::MissingRouterMac {
                 prefix: route.prefix,
@@ -388,23 +392,17 @@ where
                 });
                 continue;
             }
-            let (next_hop, router_mac) = if overlay_gateway {
-                match resolve_overlay_index_gateway(vrfs, vrf, &route, &overlay_index) {
-                    Ok(resolved) => (resolved.next_hop, resolved.mac),
-                    Err(reason) => {
-                        table.drops.push(reason);
-                        continue;
+            let (next_hop, router_mac) = match resolution {
+                PrefixResolution::OverlayIndex => {
+                    match resolve_overlay_index_gateway(vrfs, vrf, &route, &overlay_index) {
+                        Ok(resolved) => (resolved.next_hop, resolved.mac),
+                        Err(reason) => {
+                            table.drops.push(reason);
+                            continue;
+                        }
                     }
                 }
-            } else {
-                let Some(router_mac) = interface_less_router_mac else {
-                    table.drops.push(DropReason::MissingRouterMac {
-                        prefix: route.prefix,
-                        next_hop: route.next_hop,
-                    });
-                    continue;
-                };
-                (route.next_hop, router_mac)
+                PrefixResolution::InterfaceLess(router_mac) => (route.next_hop, router_mac),
             };
             let entry = RemoteIpPrefixEntry {
                 prefix: route.prefix,
