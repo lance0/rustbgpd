@@ -187,6 +187,7 @@ struct EvpnRuntimeActorConverger {
     dataplane: Option<evpn_dataplane::EvpnDataplaneRuntimeControl>,
     originator: Option<evpn_originator::EvpnOriginatorRuntimeControl>,
     svi: Option<evpn_svi::EvpnSviRuntimeControl>,
+    l3_originator: Option<evpn_l3_originator::EvpnL3OriginatorRuntimeControl>,
 }
 
 impl EvpnRuntimeActorConverger {
@@ -292,6 +293,57 @@ impl EvpnRuntimeActorConverger {
         Ok(())
     }
 
+    fn converge_ip_vrf_add(
+        &self,
+        current: &rustbgpd_evpn::EvpnRuntimeModel,
+        candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
+        plan: &rustbgpd_evpn::EvpnRuntimePlan,
+    ) -> Result<(), DaemonEvpnRuntimeConvergeError> {
+        let added_name = validate_single_ip_vrf_add(plan)?;
+        let candidate_ip_vrfs = Arc::new(candidate.ip_vrfs().clone());
+        if candidate.ip_vrfs().get(&added_name).is_none() {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "candidate is missing planned IP-VRF {added_name:?}"
+            )));
+        }
+
+        let dataplane = self.dataplane.as_ref().ok_or_else(|| {
+            DaemonEvpnRuntimeConvergeError::unsupported(
+                "IP-VRF runtime add requires an active EVPN dataplane actor; \
+                 no-EVPN startup actor-spawn is not supported yet",
+            )
+        })?;
+        let l3_originator = self.l3_originator.as_ref().ok_or_else(|| {
+            DaemonEvpnRuntimeConvergeError::unsupported(
+                "IP-VRF runtime add requires an active EVPN Type 5 originator; \
+                 live Type 5 actor-spawn is not supported yet",
+            )
+        })?;
+        if !dataplane.is_open() {
+            return Err(DaemonEvpnRuntimeConvergeError::failed(
+                "EVPN dataplane runtime control is closed",
+            ));
+        }
+        if !l3_originator.is_open() {
+            return Err(DaemonEvpnRuntimeConvergeError::failed(
+                "EVPN Type 5 originator runtime control is closed",
+            ));
+        }
+
+        if !dataplane.replace_ip_vrfs(candidate_ip_vrfs.clone()) {
+            return Err(DaemonEvpnRuntimeConvergeError::failed(
+                "EVPN dataplane IP-VRF runtime model publish failed",
+            ));
+        }
+        if !l3_originator.replace_ip_vrfs(candidate_ip_vrfs) {
+            let _ = dataplane.replace_ip_vrfs(Arc::new(current.ip_vrfs().clone()));
+            return Err(DaemonEvpnRuntimeConvergeError::failed(
+                "EVPN Type 5 originator runtime model publish failed",
+            ));
+        }
+        Ok(())
+    }
+
     async fn rollback_imet(&self, vni: rustbgpd_evpn::EvpnInstanceId) {
         let _ = self
             .imet_controller
@@ -309,7 +361,17 @@ impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
         candidate: &'a rustbgpd_evpn::EvpnRuntimeCandidate,
         plan: &'a rustbgpd_evpn::EvpnRuntimePlan,
     ) -> DaemonEvpnRuntimeConvergeFuture<'a> {
-        Box::pin(async move { self.converge_l2vni_add(current, candidate, plan).await })
+        Box::pin(async move {
+            if plan.evpn_instances.has_changes() {
+                return self.converge_l2vni_add(current, candidate, plan).await;
+            }
+            if plan.ip_vrfs.has_changes() {
+                return self.converge_ip_vrf_add(current, candidate, plan);
+            }
+            Err(DaemonEvpnRuntimeConvergeError::unsupported(
+                "ApplyEvpnRuntime has no supported changes in this candidate",
+            ))
+        })
     }
 }
 
@@ -320,7 +382,7 @@ fn validate_single_l2vni_add(
 ) -> Result<rustbgpd_evpn::EvpnInstanceId, DaemonEvpnRuntimeConvergeError> {
     if plan.ip_vrfs.has_changes() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only L2VNI add; IP-VRF changes are not supported yet",
+            "ApplyEvpnRuntime currently does not support mixed L2VNI and IP-VRF changes in one request",
         ));
     }
     if plan.ethernet_segments.has_changes() {
@@ -356,6 +418,32 @@ fn validate_single_l2vni_add(
         )));
     }
     Ok(added_vni)
+}
+
+fn validate_single_ip_vrf_add(
+    plan: &rustbgpd_evpn::EvpnRuntimePlan,
+) -> Result<String, DaemonEvpnRuntimeConvergeError> {
+    if plan.evpn_instances.has_changes() {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+            "ApplyEvpnRuntime currently supports IP-VRF add only when L2VNI changes are absent",
+        ));
+    }
+    if plan.ethernet_segments.has_changes() {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+            "ApplyEvpnRuntime currently supports IP-VRF add only when Ethernet Segment changes are absent",
+        ));
+    }
+    if !plan.ip_vrfs.deleted.is_empty() || !plan.ip_vrfs.redefined.is_empty() {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+            "ApplyEvpnRuntime currently supports only add-only IP-VRF changes; delete/redefine is not supported yet",
+        ));
+    }
+    if plan.ip_vrfs.added.len() != 1 {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+            "ApplyEvpnRuntime currently supports exactly one added IP-VRF per request",
+        ));
+    }
+    Ok(plan.ip_vrfs.added[0].clone())
 }
 
 fn evpn_runtime_candidate_from_toml(
@@ -1533,14 +1621,6 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     let evpn_svi_runtime_control = evpn_svi_handle
         .as_ref()
         .map(evpn_svi::EvpnSviHandle::runtime_control);
-    let evpn_runtime_apply_lock = Arc::new(tokio::sync::Mutex::new(()));
-    let evpn_runtime_converger = Arc::new(EvpnRuntimeActorConverger {
-        rib_tx: rib_tx.clone(),
-        imet_controller: evpn_imet_controller.clone(),
-        dataplane: evpn_dataplane_runtime_control,
-        originator: evpn_originator_runtime_control,
-        svi: evpn_svi_runtime_control,
-    });
 
     // EVPN Ethernet Segment orchestrator (Gate 8 multihoming
     // foundation — observable DF election, no enforcement). Spawned
@@ -1723,6 +1803,18 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         metrics: metrics.clone(),
         originated_counts: evpn_originated_ip_vrf_route_counts.clone(),
         shutdown: evpn_l3_originator_shutdown.clone(),
+    });
+    let evpn_l3_originator_runtime_control = evpn_l3_originator_handle
+        .as_ref()
+        .map(evpn_l3_originator::EvpnL3OriginatorHandle::runtime_control);
+    let evpn_runtime_apply_lock = Arc::new(tokio::sync::Mutex::new(()));
+    let evpn_runtime_converger = Arc::new(EvpnRuntimeActorConverger {
+        rib_tx: rib_tx.clone(),
+        imet_controller: evpn_imet_controller.clone(),
+        dataplane: evpn_dataplane_runtime_control,
+        originator: evpn_originator_runtime_control,
+        svi: evpn_svi_runtime_control,
+        l3_originator: evpn_l3_originator_runtime_control,
     });
 
     // RFC 7999 BLACKHOLE kernel-discard reconciler (ADR-0060 FIB
@@ -2457,10 +2549,82 @@ local_vtep_ip = "10.0.0.1"
 "#
     }
 
+    fn ip_vrf_runtime_candidate_toml() -> &'static str {
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#
+    }
+
+    fn two_ip_vrf_runtime_candidate_toml() -> &'static str {
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+
+[[evpn_ip_vrfs]]
+name = "tenant-green"
+vni = 6000
+rd = "65000:6000"
+route_targets = ["65000:6000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:02"
+vrf_device = "vrf-green"
+l3vxlan_device = "vni6000"
+table_id = 6000
+"#
+    }
+
     fn empty_evpn_runtime_coordinator() -> Arc<Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>> {
         Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
             rustbgpd_evpn::EvpnInstanceTable::new(),
             rustbgpd_evpn::IpVrfTable::new(),
+            Vec::new(),
+        )))
+    }
+
+    fn ip_vrf_runtime_coordinator() -> Arc<Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>> {
+        let current = runtime_candidate_from_toml(ip_vrf_runtime_candidate_toml());
+        Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+            rustbgpd_evpn::EvpnInstanceTable::new(),
+            current.ip_vrfs().clone(),
             Vec::new(),
         )))
     }
@@ -2603,6 +2767,36 @@ local_vtep_ip = "10.0.0.1"
     }
 
     #[tokio::test]
+    async fn apply_evpn_runtime_ip_vrf_add_commits_after_convergence() {
+        let coordinator = ip_vrf_runtime_coordinator();
+        let apply_lock = tokio::sync::Mutex::new(());
+        let converger = TestRuntimeConverger::ok();
+
+        let response = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: two_ip_vrf_runtime_candidate_toml().to_string(),
+                validate_only: false,
+            },
+            coordinator.as_ref(),
+            &apply_lock,
+            &converger,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.outcome,
+            proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyCommitted as i32
+        );
+        let runtime = response.runtime.unwrap();
+        assert_eq!(runtime.generation, 2);
+        let plan = response.plan.unwrap();
+        assert_eq!(plan.evpn_ip_vrfs.unwrap().added, vec!["tenant-green"]);
+        let guard = coordinator.lock().unwrap();
+        assert!(guard.model().ip_vrfs().get("tenant-green").is_some());
+    }
+
+    #[tokio::test]
     async fn apply_evpn_runtime_unsupported_non_noop_does_not_degrade_runtime() {
         let coordinator = empty_evpn_runtime_coordinator();
         let apply_lock = tokio::sync::Mutex::new(());
@@ -2719,6 +2913,7 @@ local_vtep_ip = "10.0.0.1"
             dataplane: Some(dataplane_handle.runtime_control()),
             originator: Some(originator_handle.runtime_control()),
             svi: None,
+            l3_originator: None,
         };
 
         converger
@@ -2737,6 +2932,67 @@ local_vtep_ip = "10.0.0.1"
             "L2VNI add should originate an IMET route before generation commit"
         );
         originator_handle.shutdown().await;
+        dataplane_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_actor_converger_ip_vrf_add_publishes_dataplane_model() {
+        let current = runtime_model_from_candidate_toml(ip_vrf_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(two_ip_vrf_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        let current_instances = Arc::new(current.instances().clone());
+        let current_ip_vrfs = Arc::new(current.ip_vrfs().clone());
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(32);
+
+        let (evpn_instances_tx, _evpn_instances_rx) = watch::channel(current_instances);
+        let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(current_ip_vrfs.clone());
+        let (bum_enforcement_tx, _bum_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
+        let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            supervisor_join: tokio::spawn(async {}),
+            actor_join: tokio::spawn(async {}),
+            local_mac_rx: None,
+            report_tx,
+            bum_enforcement_tx,
+            evpn_instances_tx,
+            ip_vrfs_tx,
+        };
+        let (_obs_tx, obs_rx) = watch::channel(Arc::new(std::collections::HashMap::<
+            rustbgpd_evpn::IpVrfId,
+            Vec<rustbgpd_evpn::ip_vrf::LocalIpRouteObservation>,
+        >::new()));
+        let (_status_tx, status_rx) =
+            watch::channel(Vec::<rustbgpd_evpn::IpVrfDataplaneStatus>::new());
+        let l3_handle = evpn_l3_originator::spawn(evpn_l3_originator::SpawnConfig {
+            ip_vrfs: current_ip_vrfs,
+            rib_tx: rib_tx.clone(),
+            route_observations_rx: obs_rx,
+            ip_vrf_status_rx: status_rx,
+            metrics: BgpMetrics::new(),
+            originated_counts: evpn_l3_originator::OriginatedIpVrfRouteCounts::default(),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+        })
+        .expect("L3 originator should spawn for non-empty current model");
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(
+                tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()),
+            ),
+            dataplane: Some(dataplane_handle.runtime_control()),
+            originator: None,
+            svi: None,
+            l3_originator: Some(l3_handle.runtime_control()),
+        };
+
+        converger
+            .converge(&current, &candidate, &plan)
+            .await
+            .unwrap();
+
+        assert!(ip_vrfs_rx.borrow().get("tenant-green").is_some());
+        l3_handle.shutdown().await;
         dataplane_handle.shutdown().await;
     }
 
