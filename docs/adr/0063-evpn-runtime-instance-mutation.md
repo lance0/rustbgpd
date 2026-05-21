@@ -1,9 +1,10 @@
 # ADR-0063: EVPN runtime instance mutation semantics
 
-**Status:** Accepted; partially implemented — single L2VNI add, single
-standalone L2VNI delete, single IP-VRF add, single standalone IP-VRF delete,
-and single Ethernet Segment add commit live via `EvpnService.ApplyEvpnRuntime`;
-redefine / mixed / multi-element edits and linked delete shapes still fail closed (remaining shapes tracked in
+**Status:** Accepted; partially implemented — single L2VNI add, single L2VNI
+delete when the VNI is not an Ethernet Segment member, single IP-VRF add,
+single standalone IP-VRF delete, and single Ethernet Segment add commit live
+via `EvpnService.ApplyEvpnRuntime`; redefine / mixed / multi-element edits,
+linked IP-VRF delete, and ES-aware delete shapes still fail closed (remaining shapes tracked in
 [#210](https://github.com/lance0/rustbgpd/issues/210)). The segment actor reads
 a startup-pinned instance table, so an ES whose member VNI was added at runtime
 is rejected (restart-required), not silently dropped — full instances-watch
@@ -131,11 +132,13 @@ silently advance the live EVPN runtime model.
   restart-required, and repeated SIGHUPs keep surfacing the drift.
 - The runtime mutation implementation is larger than a shared-table swap, but
   it avoids split-brain between gRPC, BGP-originated routes, DF/ES state, and
-  Linux owned state. The first increments — single L2VNI add, single standalone
-  L2VNI delete, single IP-VRF add, single standalone IP-VRF delete, and single
-  Ethernet Segment add — now commit live through the daemon actor converger;
-  redefine / mixed / multi-element edits and linked delete shapes still fail
-  closed.
+  Linux owned state. The first increments — single L2VNI add, single L2VNI
+  delete when the VNI is not an Ethernet Segment member, single IP-VRF add,
+  single standalone IP-VRF delete, and single Ethernet Segment add — now commit
+  live through the daemon actor converger. L2VNI delete also republishes derived
+  IP-VRF reference metadata to the dataplane when the deleted VNI was linked to
+  a still-present IP-VRF; IP-VRF row delete/redefine and mixed tenant teardown
+  still fail closed.
 - The Ethernet Segment actor owns a cloneable runtime control surface for
   complete desired-ES snapshots and remains the sole Type 1/4 owner. A single ES
   add now commits live by republishing the full desired-ES snapshot through that
@@ -144,10 +147,11 @@ silently advance the live EVPN runtime model.
   member VNI was added by a prior runtime L2VNI add is rejected
   (restart-required) by the converger rather than silently dropped; the
   full instances-watch convergence and delete/redefine remain in #210.
-- Redefine, mixed / multi-element edits, linked IP-VRF delete, ES delete/redefine,
-  runtime-added-member-VNI ES convergence, and linked L2VNI delete shapes are
-  still validated as pure fail-closed plans; their live convergence is the
-  remaining work in [#210](https://github.com/lance0/rustbgpd/issues/210).
+- Redefine, mixed / multi-element edits, linked IP-VRF delete / tenant teardown,
+  ES-aware L2VNI delete, ES delete/redefine, and runtime-added-member-VNI ES
+  convergence are still validated as pure fail-closed plans; their live
+  convergence is the remaining work in
+  [#210](https://github.com/lance0/rustbgpd/issues/210).
 - Issue #133 (design) is resolved and closed; the remaining implementation is
   tracked in #210.
 
