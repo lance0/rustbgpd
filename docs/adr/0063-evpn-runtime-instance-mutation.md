@@ -1,11 +1,13 @@
 # ADR-0063: EVPN runtime instance mutation semantics
 
-**Status:** Accepted; partially implemented — single L2VNI add and single
-IP-VRF add commit live via `EvpnService.ApplyEvpnRuntime`; the Ethernet Segment
-actor now has an ADR-0063 owner/control foundation, but delete / redefine /
-Ethernet Segment / mixed / multi-element `ApplyEvpnRuntime` edits still fail
-closed (remaining shapes tracked in
-[#210](https://github.com/lance0/rustbgpd/issues/210))
+**Status:** Accepted; partially implemented — single L2VNI add, single IP-VRF
+add, and single Ethernet Segment add commit live via
+`EvpnService.ApplyEvpnRuntime`; delete / redefine / mixed / multi-element edits
+still fail closed (remaining shapes tracked in
+[#210](https://github.com/lance0/rustbgpd/issues/210)). The segment actor reads
+a startup-pinned instance table, so an ES whose member VNI was added at runtime
+is rejected (restart-required), not silently dropped — full instances-watch
+convergence is also #210.
 **Date:** 2026-05-17 (implementation in progress through v0.25.0)
 
 ## Context
@@ -129,14 +131,18 @@ silently advance the live EVPN runtime model.
   restart-required, and repeated SIGHUPs keep surfacing the drift.
 - The runtime mutation implementation is larger than a shared-table swap, but
   it avoids split-brain between gRPC, BGP-originated routes, DF/ES state, and
-  Linux owned state. The first increments — single L2VNI add and single IP-VRF
-  add — now commit live through the daemon actor converger; delete / redefine /
-  Ethernet Segment / mixed / multi-element edits still fail closed.
+  Linux owned state. The first increments — single L2VNI add, single IP-VRF
+  add, and single Ethernet Segment add — now commit live through the daemon
+  actor converger; delete / redefine / mixed / multi-element edits still fail
+  closed.
 - The Ethernet Segment actor owns a cloneable runtime control surface for
-  complete desired-ES snapshots. It remains the sole Type 1/4 owner and can
-  drain/rebuild Type 4, EAD-per-ES, EAD-per-EVI, and BUM enforcement state
-  internally, but that owner path is not yet wired as a committed
-  `ApplyEvpnRuntime` ES mutation.
+  complete desired-ES snapshots and remains the sole Type 1/4 owner. A single ES
+  add now commits live by republishing the full desired-ES snapshot through that
+  owner (it drains/rebuilds Type 4, EAD-per-ES, EAD-per-EVI, and BUM enforcement
+  state internally). The actor's instance view is startup-pinned, so an ES whose
+  member VNI was added by a prior runtime L2VNI add is rejected
+  (restart-required) by the converger rather than silently dropped; the
+  full instances-watch convergence and delete/redefine remain in #210.
 - Delete/redefine are still validated as a pure drain plan; their live
   convergence is the remaining work in [#210](https://github.com/lance0/rustbgpd/issues/210).
 - Issue #133 (design) is resolved and closed; the remaining implementation is
