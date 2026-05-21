@@ -1,9 +1,11 @@
 # ADR-0063: EVPN runtime instance mutation semantics
 
 **Status:** Accepted; partially implemented — single L2VNI add and single
-IP-VRF add commit live via `EvpnService.ApplyEvpnRuntime`; delete / redefine /
-Ethernet Segment / mixed / multi-element edits fail closed (remaining shapes
-tracked in [#210](https://github.com/lance0/rustbgpd/issues/210))
+IP-VRF add commit live via `EvpnService.ApplyEvpnRuntime`; the Ethernet Segment
+actor now has an ADR-0063 owner/control foundation, but delete / redefine /
+Ethernet Segment / mixed / multi-element `ApplyEvpnRuntime` edits still fail
+closed (remaining shapes tracked in
+[#210](https://github.com/lance0/rustbgpd/issues/210))
 **Date:** 2026-05-17 (implementation in progress through v0.25.0)
 
 ## Context
@@ -130,6 +132,11 @@ silently advance the live EVPN runtime model.
   Linux owned state. The first increments — single L2VNI add and single IP-VRF
   add — now commit live through the daemon actor converger; delete / redefine /
   Ethernet Segment / mixed / multi-element edits still fail closed.
+- The Ethernet Segment actor owns a cloneable runtime control surface for
+  complete desired-ES snapshots. It remains the sole Type 1/4 owner and can
+  drain/rebuild Type 4, EAD-per-ES, EAD-per-EVI, and BUM enforcement state
+  internally, but that owner path is not yet wired as a committed
+  `ApplyEvpnRuntime` ES mutation.
 - Delete/redefine are still validated as a pure drain plan; their live
   convergence is the remaining work in [#210](https://github.com/lance0/rustbgpd/issues/210).
 - Issue #133 (design) is resolved and closed; the remaining implementation is
