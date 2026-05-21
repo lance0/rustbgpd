@@ -116,9 +116,9 @@ and suppresses locally-originated Type 2 routes for the offending
 `(VNI, MAC)` until timed recovery. Sticky-bit origination remains an
 independent operator signal: an operator's sticky MAC and a contender
 at higher seq still produce normal best-path movement unless duplicate
-MAC detection is separately enabled. Future work tracked in
-`docs/evpn-alpha-soak.md` / #139 will add remote-route processing and
-dataplane loop-protection.
+MAC detection is separately enabled. Duplicate-MAC remote-route
+processing suppression, receive-side intent filtering, and the manual
+clear API shipped subsequently (#139, closed).
 
 ## Consequences
 

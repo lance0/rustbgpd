@@ -1,6 +1,6 @@
 # EVPN Enablement Roadmap
 
-Last updated: 2026-05-17
+Last updated: 2026-05-21
 
 Gate-by-gate plan for turning rustbgpd's Phase 1 EVPN Route Reflector into a
 production-ready control plane and, eventually, a VTEP-capable daemon.
@@ -302,8 +302,9 @@ Status: **done** (feat/evpn-rr, 2026-04-24)
 
 Unlocks: SDN controllers / orchestration systems pushing EVPN routes
 directly into the RR via `AddEvpnRoute` / `DeleteEvpnRoute` gRPC.
-Phase 1 supports Type 2 (MAC/IP) and Type 3 (IMET); Type 5 IP-Prefix
-injection is deferred pending use-case signal. Native Type 1/4
+Controller injection supports Type 2 (MAC/IP), Type 3 (IMET), and Type 5
+(IP Prefix, RFC 9136 — shipped v0.25.0 via `AddEvpnRoute`/`DeleteEvpnRoute`
++ `rustbgpctl evpn add-ip-prefix`, M45 smoke). Native Type 1/4
 multi-homing origination ships through `[[ethernet_segments]]`, but
 controller injection for those route types is not exposed.
 
@@ -424,9 +425,9 @@ flow that Gate 7b's foundation left as a stub.
 
 | Task | File / location |
 |------|----------------|
-| MAC duplication detection (RFC 7432 §15.1 M=180s/N=5) — detect-only defaults plus opt-in local-origin `suppress_local` action shipped; remote-route processing and dataplane loop-protection remain follow-up scope tracked in [#139](https://github.com/lance0/rustbgpd/issues/139) | `crates/evpn/src/duplicate_mac.rs`, `src/evpn_originator.rs`; future receive-side projection / dataplane work |
+| MAC duplication detection (RFC 7432 §15.1 M=180s/N=5) — ✅ complete (#139): detect-only defaults, opt-in local-origin `suppress_local` action, remote-route processing suppression, receive-side intent filtering, and a manual clear API (`ClearDuplicateMacQuarantine`). Only explicit kernel drop/filter primitives remain optional follow-up. | `crates/evpn/src/duplicate_mac.rs`, `src/evpn_originator.rs`, `crates/api/src/evpn_service.rs` |
 | Type 5 IP Prefix origination per L3VNI | ✅ Gate 9 slice 6 (v0.18.0) — kernel-route observation, `IpVrfStatus`-gated origination via `RibUpdate::InjectEvpn`, remote import + transactional L3 FIB programming (`L3OwnedState`), Router MAC conflict detection, four-phase apply ordering, foreign-state preservation. `RTNLGRP_IPV4/IPV6_ROUTE` multicast added sub-second withdraw on tenant `ip addr del`. |
-| Mutation surface (`AddEvpnInstance` / `DeleteEvpnInstance`) | `crates/api/src/evpn_service.rs` |
+| Mutation surface — whole-model `EvpnService.ApplyEvpnRuntime` (ADR-0063); single L2VNI / IP-VRF add commits live, other shapes fail closed (#210) | `crates/api/src/evpn_service.rs`, `src/main.rs` |
 | Kernel VXLAN interface config generator? | ops question — maybe not |
 
 **Closed in v0.17.0 (post-v0.16.0 follow-ups):**
@@ -634,10 +635,13 @@ Still ahead:
 - Overlay-index IRB recursive resolution (RFC 9135 §9.2): resolve
   non-zero Type 5 Gateway Address through matching Type 2 MAC/IP
   state, then add local origination / API surfaces.
-- Extend the protected self-hosted `kernel-dataplane` workflow beyond
-  M39 / M40 / M42 to cover the earlier VTEP / DF-election smokes
-  (M36 / M37 / M37+IP / M38) or explicitly keep those reviewer-run
-  (<https://github.com/lance0/rustbgpd/issues/130>).
+- Runtime instance mutation completion (ADR-0063 / #210): single L2VNI
+  and single IP-VRF add commit live via `ApplyEvpnRuntime`; delete,
+  redefine, Ethernet Segment changes, and mixed / multi-element edits
+  remain restart-required.
+
+(The protected self-hosted `kernel-dataplane` workflow now covers M36 /
+M37 / M37+IP / M38 / M39 / M39b / M40 / M42 / M43 — #130 closed.)
 
 Further out on this track:
 

@@ -49,17 +49,15 @@ Preferred posture:
 - If you need to expose monitoring directly, prefer a dedicated
   `access_mode = "read_only"` listener over exposing the mutating control
   surface.
-- `access_mode` is still a listener-level boundary, not per-client RBAC. The
-  method-risk inventory in `docs/grpc-method-inventory.md` and
-  `crates/api/src/authz.rs` is the ADR-0064 foundation for future
-  per-method tiers (`read`, `sensitive_read`, `mutating`,
-  `operator_only`). The runtime now emits `grpc_authz` decision logs and
-  `bgp_grpc_authz_decisions_total`; listener `max_tier` caps are enforced,
-  and opt-in `security.grpc.enforcement = "tier"` enforces per-principal role
-  ceilings. The
-  external-review packet in `docs/adr/0064-threat-model.md` summarizes
-  the trust boundaries, abuse paths, evidence checklist, and residual
-  risks for that migration.
+- `access_mode` is a listener-level boundary; per-client RBAC is layered on top
+  via the ADR-0064 per-method tiers (`read`, `sensitive_read`, `mutating`,
+  `operator_only`) catalogued in `docs/grpc-method-inventory.md` and
+  `crates/api/src/authz.rs`. The runtime emits `grpc_authz` decision logs and
+  `bgp_grpc_authz_decisions_total`; listener `max_tier` caps are enforced, and
+  `security.grpc.enforcement = "tier"` (the default since v0.24.0) enforces
+  per-principal role ceilings. The external-review packet in
+  `docs/adr/0064-threat-model.md` summarizes the trust boundaries, abuse paths,
+  evidence checklist, and residual risks for that surface.
 - `[security.grpc.roles]` and listener `principal` labels can be staged now so
   audit records use stable operator-controlled identities on bearer-token TCP
   and UDS listeners. Native mTLS listeners derive audit principals from the
@@ -272,20 +270,17 @@ needed by rustbgpd.
 The following security improvements are intentionally deferred and tracked in
 the roadmap:
 
-- ADR-0064 default enforcement flip for the checked gRPC method-tier matrix
-  (`read`, `sensitive_read`, `mutating`, `operator_only`). Runtime
-  method-tier decision logs/metrics, staged principal/role config, enforced
-  listener tier caps, mTLS certificate principal extraction (URI SAN →
-  email SAN → Subject CN), opt-in role enforcement, and result-aware audit
-  records with masked credential-bearing request summaries are present. The
-  migration path is documented: stage `[security.grpc.roles]`, add explicit
-  principals for UDS and bearer-token listeners, validate the candidate config
-  with `rustbgpd --check`, then opt into `enforcement = "tier"`. The production
-  default still remains `legacy`; the final default flip remains deferred.
-  Structured-log audit collection, retention, query examples, and
-  resource-abuse guardrails are documented in
-  [`docs/OPERATIONS.md`](OPERATIONS.md#grpc-authorization-audit-and-resource-guardrails).
-  A separate in-daemon durable audit sink remains deferred until file/syslog
+- A separate in-daemon durable audit sink for `grpc_authz` records (file /
+  syslog with defined backpressure and failure semantics). The ADR-0064
+  per-method tier matrix itself is fully enforced —
+  `enforcement = "tier"` is the **default since v0.24.0**, with runtime
+  decision logs/metrics, listener tier caps, mTLS certificate principal
+  extraction (URI SAN → email SAN → Subject CN), per-principal role
+  enforcement, and result-aware audit records with masked credential-bearing
+  request summaries. Structured-log audit collection, retention, query
+  examples, and resource-abuse guardrails are documented in
+  [`docs/OPERATIONS.md`](OPERATIONS.md#grpc-authorization-audit-and-resource-guardrails);
+  only the durable in-daemon sink remains deferred until file/syslog
   backpressure and failure semantics are designed.
 - TCP-AO (RFC 5925) dynamic-neighbor support, runtime key rotation,
   multi-key rollover, and accepted-socket inspection for BGP session
@@ -293,12 +288,12 @@ the roadmap:
 
 ## Current gaps
 
-- Authorization defaults to legacy listener-wide behavior (`read_only` vs
-  `read_write`) plus listener `max_tier` caps. Operators can opt into
-  per-principal role enforcement with `security.grpc.enforcement = "tier"`.
-  The default flip to tier mode remains a future migration slice; configs that
-  rely on the implicit UDS listener must declare `[global.telemetry.grpc_uds]`
-  with a `principal` before they can run under tier enforcement.
+- Authorization defaults to per-principal tier enforcement
+  (`security.grpc.enforcement = "tier"`, default since v0.24.0) layered on
+  listener `access_mode` (`read_only` vs `read_write`) and `max_tier` caps.
+  `enforcement = "legacy"` remains a supported opt-out. Configs that rely on the
+  implicit UDS listener must declare `[global.telemetry.grpc_uds]` with a
+  `principal` to run under tier enforcement.
 - Per-principal request-rate and stream-count budgets are not implemented in
   the daemon. Use listener tier caps, role enforcement, management-network
   controls, client deadlines, and the documented `grpc_authz` / stream metrics

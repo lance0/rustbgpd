@@ -174,11 +174,14 @@ curl -s http://127.0.0.1:9179/metrics \
 
 Repeated increments for the same `(vni, mac)` indicate cross-VTEP
 contention and should be investigated as a loop, spoof, or host mobility
-event. One-off increments can be normal during planned host moves. If
-`evpn_duplicate_mac_quarantine_active{vni,mac}` is `1`, this daemon is
-not originating local Type 2 routes for that key; remote route
-visibility and receive-side dataplane processing are intentionally not
-filtered by the first action slice.
+event. One-off increments can be normal during planned host moves. While
+`evpn_duplicate_mac_quarantine_active{vni,mac}` is `1`, this daemon does
+not originate local Type 2 routes for that key, and it filters the
+quarantined `(VNI, MAC)` out of the remote-FDB dataplane intent (so Linux
+FDB / NHG state stops programming forwarding for it); Loc-RIB, RR
+reflection, and `ListEvpnRoutes` visibility are preserved. Quarantine
+clears automatically after `recovery_seconds`, or immediately via
+`rustbgpctl evpn clear-duplicate-mac --vni <VNI> --mac <MAC>`.
 
 ## MAC+IP routes not appearing
 

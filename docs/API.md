@@ -85,8 +85,8 @@ decisions for every RPC via structured `grpc_authz` logs and
 `max_tier` caps are enforced in all modes. When
 `[security.grpc].enforcement = "tier"` is enabled, the same runtime layer also
 enforces the authenticated principal's configured role ceiling before the
-handler runs; the default remains `"legacy"` until the dedicated migration
-slice flips it.
+handler runs; `"tier"` is the default since v0.24.0, and `"legacy"` is the
+supported opt-out.
 Forwarded calls emit result-aware labels such as `result="handler_ok"` or
 `result="handler_invalid_argument"` after the handler returns. Rejected calls use
 bounded pre-handler labels: `result="listener_tier_denied"` means the method was
@@ -109,11 +109,12 @@ legacy mode remains active. Extracted principal values must fit the bounded
 audit label form and must not contain embedded control characters; unsupported
 values also fall back to `mtls-unresolved`.
 
-Before the future default flip to tier enforcement, operators should stage
-`[security.grpc.roles]` plus explicit listener principals while still running
-`enforcement = "legacy"`, validate the candidate config with `rustbgpd --check`,
-then opt into `enforcement = "tier"`. The implicit default UDS listener is safe
-for local access under legacy mode, but tier mode requires an explicit
+Tier enforcement is the default since v0.24.0. When upgrading from an older
+release (or from `enforcement = "legacy"`), stage `[security.grpc.roles]` plus
+explicit listener principals, validate the candidate config with
+`rustbgpd --check`, then move to `enforcement = "tier"` (or rely on the
+default). The implicit default UDS listener is safe for local access under
+legacy mode, but tier mode requires an explicit
 `[global.telemetry.grpc_uds]` block with `principal` so requests can be mapped
 to a role.
 `docs/adr/0064-threat-model.md` is the external-review packet for this surface:

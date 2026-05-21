@@ -312,8 +312,9 @@ External reviewers should be able to verify:
 
 Already filed:
 
-- [#164](https://github.com/lance0/rustbgpd/issues/164) — complete
-  deny-by-tier enforcement after the listener `max_tier` sub-scope.
+- [#164](https://github.com/lance0/rustbgpd/issues/164) — **done (closed).**
+  Deny-by-tier enforcement shipped and `enforcement = "tier"` became the
+  default in v0.24.0.
 - [#165](https://github.com/lance0/rustbgpd/issues/165) — add explicit
   bearer-token / UDS principals and gRPC roles.
 - [#166](https://github.com/lance0/rustbgpd/issues/166) — close once the mTLS

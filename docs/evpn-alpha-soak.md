@@ -114,9 +114,11 @@ none of them block the current release on their own.
   `on_remote_ip_changed` route-processing callbacks. This preserves
   Loc-RIB, RR reflection, and `ListEvpnRoutes` visibility while keeping
   local Type 2 originations suppressed until timed recovery.
-- [ ] **Duplicate-MAC full loop-protection completion.** Explicit
-  kernel drop / filter primitives and an optional manual clear API
-  remain follow-up scope.
+- [x] **Duplicate-MAC loop-protection completion (#139).** Remote-route
+  processing suppression, receive-side intent filtering, and the manual
+  clear API (`ClearDuplicateMacQuarantine` / `rustbgpctl evpn
+  clear-duplicate-mac`) all shipped. Explicit kernel drop / filter
+  primitives remain an optional future enhancement, not a blocker.
 - [x] **Sticky MAC anti-spoof config schema.** Closed by ADR-0056
   — `[[evpn_instances]].sticky_macs` lists MACs to mark with the
   RFC 7432 §15.4 sticky bit on origination. **Not** a static FDB:
@@ -392,13 +394,14 @@ landing, tracked here for visibility)
   round-trips that traverse the same kernel link list. Saves
   one syscall + one allocation per pass; matters under churn.
   Not a correctness blocker.
-- [ ] **`[[evpn_instances]]` mutation surface.** Today the table is
-  pinned at startup. `AddEvpnInstance` / `DeleteEvpnInstance` gRPC
-  + SIGHUP reload semantics need the ADR-0063 command-driven EVPN
-  coordinator, not a direct shared-table swap: delete/redefine must
-  explicitly drain or replay IMET, MAC-only / MAC+IP / SVI Type 2,
-  Type 5 / IP-VRF, DF/ES, and Linux owned dataplane state before a
-  new runtime generation is published.
+- [~] **`[[evpn_instances]]` mutation surface (partial — #210).** The
+  ADR-0063 command-driven EVPN coordinator + whole-model
+  `EvpnService.ApplyEvpnRuntime` now commit a single L2VNI add or a
+  single IP-VRF add live (ordered drain/replay across IMET, MAC-only /
+  MAC+IP / SVI Type 2, Type 5 / IP-VRF, and Linux owned dataplane state,
+  with rollback). Delete, redefine, Ethernet Segment changes, mixed, and
+  multi-element edits still fail closed and remain restart-required.
+  SIGHUP file-driven EVPN edits stay restart-required.
 
 ## Field-readiness gates
 

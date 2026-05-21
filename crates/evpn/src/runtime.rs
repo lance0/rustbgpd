@@ -1,10 +1,12 @@
 //! Generationed EVPN runtime model foundation (ADR-0063).
 //!
 //! This module models the committed runtime snapshot and the
-//! coordinator-owned commit gate for future mutation commands. The
-//! daemon still builds the public model from startup-resolved tables and
-//! SIGHUP continues to pin EVPN edits as restart-required until daemon
-//! actor convergence is wired through this coordinator.
+//! coordinator-owned commit gate for mutation commands. The daemon
+//! builds the public model from startup-resolved tables; the
+//! `EvpnService.ApplyEvpnRuntime` path drives this coordinator to commit
+//! a single L2VNI add or single IP-VRF add live (other shapes fail
+//! closed — see issue #210). SIGHUP file-driven EVPN edits remain
+//! restart-required.
 
 use std::{collections::BTreeMap, sync::Arc};
 

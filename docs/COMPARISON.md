@@ -2,7 +2,7 @@
 
 A feature comparison of open-source BGP daemon implementations.
 
-Last updated: 2026-05-19 (post-v0.24.0 main, including the ADR-0064 gRPC authorization default flip to per-principal tier enforcement with M44 over-the-wire interop coverage, EVPN duplicate-MAC dataplane quarantine, and the EVPN production-default flip for `apply_bum_enforcement`)
+Last updated: 2026-05-21 (v0.25.0: ADR-0063 EVPN runtime convergence — single L2VNI/IP-VRF add commits live via `ApplyEvpnRuntime`; EVPN Type 5 gRPC injection; auto-derived Route Targets; typed EVPN/FIB/policy event categories; FIB status sampling metadata. Built on the v0.24.0 ADR-0064 gRPC tier-enforcement default and EVPN duplicate-MAC quarantine.)
 
 ## Overview
 

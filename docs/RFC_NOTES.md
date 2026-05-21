@@ -819,11 +819,13 @@ implemented per ADR-0040.
   surfaces let operators read it without scraping logs.
   **M39 protected self-hosted kernel-dataplane CI** validates the
   bidirectional Type 5 path against FRR 10.3.1.
-- **Still ahead after Gate 9:** full RFC 9135
-  overlay-index IRB (Gate 9 ships the Interface-less variant
-  only), auto-derived Route Targets (RFC 8365 §5.1.2.1),
-  protected self-hosted kernel-dataplane CI now gates the M39 + M40
-  smokes.
+- **Shipped since Gate 9:** auto-derived Route Targets (RFC 8365
+  §5.1.2.1 for L2VNI / AS:VNI for L3VNI, v0.25.0, M39b cross-vendor
+  smoke) and Type 5 gRPC injection (v0.25.0, M45). Protected
+  self-hosted kernel-dataplane CI gates M36–M43 incl. M39b.
+- **Still ahead after Gate 9:** full RFC 9135 overlay-index IRB
+  recursive resolution (Gate 9 ships the Interface-less variant only;
+  non-zero gateways are detected and fail-closed).
 
 ---
 
@@ -872,8 +874,9 @@ implemented per ADR-0040.
   via `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` multicast,
   `rustbgpctl evpn vrfs` CLI + `ListIpVrfs`/`GetIpVrf` gRPC,
   M39 protected self-hosted smoke against FRR 10.3.1.
-- **Still ahead:** full RFC 9135 overlay-index
-  IRB, auto-derived Route Targets (RFC 8365 §5.1.2.1).
+- **Still ahead:** full RFC 9135 overlay-index IRB recursive
+  resolution. (Auto-derived Route Targets per RFC 8365 §5.1.2.1
+  shipped in v0.25.0.)
 
 ---
 

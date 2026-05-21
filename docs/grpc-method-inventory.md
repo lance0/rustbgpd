@@ -172,7 +172,7 @@ shape itself does not raise the tier.
 | `ListIpVrfs` | `sensitive_read` | Gate 9 IP-VRF table. |
 | `GetIpVrf` | `sensitive_read` | Single-VRF detail. |
 | `ClearDuplicateMacQuarantine` | `mutating` | Clears one local duplicate-MAC suppression key and may replay still-live local MAC state. Reversible, per-`(VNI, MAC)` scope; not a route-injection primitive and not a clear-all. |
-| `ApplyEvpnRuntime` | `mutating` | ADR-0063 full-candidate EVPN runtime validation/apply entry point. `validate_only` and no-op applies are bounded; non-noop applies currently fail closed until daemon actor convergence commands exist. Request TOML can contain credentials and must be audit-redacted. |
+| `ApplyEvpnRuntime` | `mutating` | ADR-0063 full-candidate EVPN runtime validation/apply entry point. `validate_only` and no-op applies are bounded; a single L2VNI add or single IP-VRF add converges live and commits a new generation, while other non-noop shapes (delete, redefine, Ethernet Segment changes, mixed or multi-add) fail closed (issue #210). Request TOML can contain credentials and must be audit-redacted. |
 
 ## Totals
 
@@ -234,8 +234,8 @@ specific method if the model warrants it.
    (for example a `[security.grpc]` block that defaults to
    legacy-permissive but can opt into per-tier enforcement) so the
    cut-over is not a breaking change for everyone on the same
-   release. That opt-in path is now the slice-5a behavior; the
-   production default flip remains a separate migration slice.
+   release. That opt-in path shipped as slice-5a, and the production
+   default flipped to `tier` in v0.24.0 (legacy is now the opt-out).
 7. **`SetGlobal` is `UNIMPLEMENTED` today.** Classifying it
    `operator_only` now sets the design constraint for whoever lands
    the implementation — otherwise the natural temptation is to ship
@@ -254,13 +254,13 @@ specific method if the model warrants it.
    distinguish role-map denials from listener caps. `DiffRuntimeConfig`
    and `SetPeerGroup` request summaries mask
    credential-bearing fields, including candidate TOML that may contain
-   `md5_password` or `tcp_ao.key`. The external review still needs durable
-   audit sink / retention guidance, optional proto credential markers, and
-   the default enforcement flip.
+   `md5_password` or `tcp_ao.key`. The default enforcement flip shipped in
+   v0.24.0; the external review still needs durable audit sink / retention
+   guidance and optional proto credential markers.
 
 ## Code matrix
 
-`crates/api/src/authz.rs` contains the same 69-method classification
+`crates/api/src/authz.rs` contains the same 71-method classification
 as a static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added

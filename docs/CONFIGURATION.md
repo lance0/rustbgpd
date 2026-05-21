@@ -282,16 +282,16 @@ principal falls back to `mtls-unresolved`.
 
 ### `[security.grpc]`
 
-ADR-0064 per-method authorization ships with a compatibility default. Legacy
-mode preserves existing listener-wide behavior while still enforcing listener
-`max_tier` caps. Opt-in tier mode also enforces `[security.grpc.roles]` for the
-authenticated principal before the handler runs. The project will flip the
-default in a later migration slice; until then operators can stage and test
-`tier` explicitly.
+ADR-0064 per-method authorization defaults to `"tier"` since v0.24.0. Tier
+mode enforces `[security.grpc.roles]` for the authenticated principal before
+the handler runs, in addition to listener `max_tier` caps; upgrading without a
+`[security.grpc.roles]` block fails validation at startup. Legacy mode
+(`enforcement = "legacy"`) remains a supported opt-out that preserves the prior
+listener-wide behavior.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `enforcement` | string | no | `"legacy"` | ADR-0064 enforcement mode. `"legacy"` preserves existing listener `access_mode` behavior. `"tier"` enables per-principal role enforcement in addition to listener `max_tier` caps |
+| `enforcement` | string | no | `"tier"` | ADR-0064 enforcement mode (default since v0.24.0). `"tier"` enables per-principal role enforcement in addition to listener `max_tier` caps. `"legacy"` is the opt-out that preserves prior listener `access_mode` behavior |
 
 `[security.grpc.roles]` maps an authenticated principal string to one of the
 built-in roles:

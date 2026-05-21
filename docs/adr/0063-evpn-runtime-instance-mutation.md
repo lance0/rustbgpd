@@ -1,7 +1,10 @@
 # ADR-0063: EVPN runtime instance mutation semantics
 
-**Status:** Accepted
-**Date:** 2026-05-17
+**Status:** Accepted; partially implemented — single L2VNI add and single
+IP-VRF add commit live via `EvpnService.ApplyEvpnRuntime`; delete / redefine /
+Ethernet Segment / mixed / multi-element edits fail closed (remaining shapes
+tracked in [#210](https://github.com/lance0/rustbgpd/issues/210))
+**Date:** 2026-05-17 (implementation in progress through v0.25.0)
 
 ## Context
 
@@ -120,20 +123,22 @@ silently advance the live EVPN runtime model.
 
 ## Consequences
 
-- Operators keep the current safe behavior: EVPN instance edits require a
-  restart, and repeated SIGHUPs keep surfacing the drift.
-- The future runtime mutation implementation is larger than a shared-table
-  swap, but it avoids split-brain between gRPC, BGP-originated routes,
-  DF/ES state, and Linux owned state.
-- Delete/redefine can be tested as a pure drain plan before any live
-  mutation API is added.
-- Issue #133 is resolved at the design level; implementation remains a
-  follow-up.
+- SIGHUP file-driven EVPN edits keep the current safe behavior: they remain
+  restart-required, and repeated SIGHUPs keep surfacing the drift.
+- The runtime mutation implementation is larger than a shared-table swap, but
+  it avoids split-brain between gRPC, BGP-originated routes, DF/ES state, and
+  Linux owned state. The first increments — single L2VNI add and single IP-VRF
+  add — now commit live through the daemon actor converger; delete / redefine /
+  Ethernet Segment / mixed / multi-element edits still fail closed.
+- Delete/redefine are still validated as a pure drain plan; their live
+  convergence is the remaining work in [#210](https://github.com/lance0/rustbgpd/issues/210).
+- Issue #133 (design) is resolved and closed; the remaining implementation is
+  tracked in #210.
 
 ## Non-goals
 
-- No runtime `AddEvpnInstance` / `DeleteEvpnInstance` protobuf surface in
-  this ADR.
+- No per-instance `AddEvpnInstance` / `DeleteEvpnInstance` protobuf surface;
+  mutation is a whole-model apply via `EvpnService.ApplyEvpnRuntime`.
 - No hot SIGHUP apply for `[[evpn_instances]]`, `[[evpn_ip_vrfs]]`, or
   `[[ethernet_segments]]`.
 - No automatic Linux bridge, VXLAN, VRF, or Ethernet Segment netdev

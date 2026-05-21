@@ -51,7 +51,7 @@ input from the network. It runs under continuous fuzzing in CI.
 
 - **TCP MD5 (RFC 2385):** Supported. Linux only.
 - **GTSM (RFC 5082):** Supported. Configurable per peer.
-- **TCP-AO (RFC 5925):** Not v1. Roadmap item.
+- **TCP-AO (RFC 5925):** Supported for static neighbors on Linux (ADR-0062, startup key install). Dynamic-neighbor, runtime key rotation, and multi-key rollover remain roadmap items.
 - **gRPC:** Unix domain socket by default (local-only). TCP listeners
   are opt-in via config. Per-listener bearer-token authentication is
   available via `token_file`. Native mTLS terminates in-process on TCP

@@ -184,13 +184,14 @@ resolved.
 - **Injected routes support multiple paths via path_id.** `InjectionService`
   supports multiple injected routes per prefix using explicit `path_id`.
   Path ID 0 is the default path.
-- **EVPN instance tables are startup-pinned.** `[[evpn_instances]]`,
-  `[[ethernet_segments]]`, and `[[evpn_ip_vrfs]]` are
-  restart-required today. SIGHUP keeps the running EVPN tables pinned
-  to their startup values so VTEP dataplane/origination state cannot
-  drift silently. Runtime add/delete/redefine semantics still need a
-  design pass before any mutation RPC lands; tracked in
-  <https://github.com/lance0/rustbgpd/issues/133>.
+- **EVPN instance mutation is partial.** SIGHUP keeps the running EVPN
+  tables (`[[evpn_instances]]`, `[[ethernet_segments]]`,
+  `[[evpn_ip_vrfs]]`) pinned to their startup values, so file-driven
+  EVPN edits remain restart-required. The gRPC `EvpnService.ApplyEvpnRuntime`
+  path (ADR-0063) now commits a single L2VNI add or a single IP-VRF add
+  live; delete, redefine, Ethernet Segment changes, mixed, and multi-element
+  edits still fail closed. Remaining shapes tracked in
+  <https://github.com/lance0/rustbgpd/issues/210>.
 - **Family scope is still limited.** MP-BGP supports AFI/SAFI negotiation,
   but rustbgpd currently implements IPv4/IPv6 unicast (AFI 1/2, SAFI 1),
   IPv4/IPv6 FlowSpec (AFI 1/2, SAFI 133), and L2VPN/EVPN (AFI 25, SAFI
@@ -291,8 +292,10 @@ resolved.
   snapshot to the startup value (so drift detection stays observable
   on every subsequent reload), and leaves the live state unchanged
   until restart. `rustbgpd --diff` surfaces the change under
-  Restart-required. Runtime mutation will land via the ADR-0063
+  Restart-required. Runtime mutation is landing via the ADR-0063
   command-driven EVPN coordinator (a single serialized owner of a
   generationed runtime model — explicitly not `ArcSwap` /
-  `RwLock` / per-service locks), alongside `AddEvpnInstance` /
-  `DeleteEvpnInstance` gRPC mutations.
+  `RwLock` / per-service locks), exposed through the whole-model
+  `EvpnService.ApplyEvpnRuntime` RPC: a single L2VNI add or single
+  IP-VRF add now commits live; delete / redefine / Ethernet Segment /
+  mixed / multi edits still fail closed (tracked in #210).

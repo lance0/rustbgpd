@@ -1538,9 +1538,11 @@ service EvpnService {
   // ADR-0063 — validate or apply a full candidate EVPN runtime model
   // through the coordinator. The request carries full candidate TOML
   // so the daemon can reuse the config layer's validation and table
-  // resolution. Until actor convergence commands exist, non-noop
-  // apply attempts fail closed without advancing generation; use
-  // validate_only to inspect the plan safely.
+  // resolution. A single L2VNI add or a single IP-VRF add converges
+  // live and commits a new generation; other non-noop shapes (delete,
+  // redefine, Ethernet Segment changes, mixed or multi-add) fail closed
+  // without advancing generation (tracked in issue #210). Use
+  // validate_only to inspect the plan without mutating.
   rpc ApplyEvpnRuntime(ApplyEvpnRuntimeRequest) returns (ApplyEvpnRuntimeResponse);
 }
 

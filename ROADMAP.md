@@ -207,17 +207,16 @@ those priorities exist.
   the bidirectional VTEP loop covers MAC-only and MAC+IP origination
   under the FRR replace model with sub-second mobility convergence,
   plus observable DF election against shared Ethernet Segments and
-  observable IP-VRF readiness state. `docs/evpn-alpha-soak.md`
-  tracks the residuals as a checklist: protected CI for M36 + M37 +
-  M37+IP + M38 now lives in `.github/workflows/kernel-dataplane.yml`,
-  the M37 local-origination 24 h MAC-churn soak
-  (harness ready at `tests/soak/run-m37-local-origination-churn-soak.sh`;
-  run + postmortem still tracked in
-  [#134](https://github.com/lance0/rustbgpd/issues/134)), and
-  RFC 7432 §15.1 duplicate-MAC local-origin suppression action (detect-only
-  by default, opt-in `suppress_local` shipped; remote-route processing and
-  dataplane loop-protection tracked in #139).
-  These are the slope to v1.0-grade EVPN confidence.
+  observable IP-VRF readiness state. Protected CI for M36 + M37 +
+  M37+IP + M38 runs in `.github/workflows/kernel-dataplane.yml`, the
+  M37 local-origination 24 h MAC-churn soak completed (postmortem
+  `docs/soak-m37-local-origination-churn-24h.md`), and the RFC 7432
+  §15.1 duplicate-MAC story is complete: detect-only by default, opt-in
+  `suppress_local` quarantine, remote-route processing suppression,
+  receive-side intent filtering, and a manual clear API
+  (`ClearDuplicateMacQuarantine`). The remaining slope to v1.0-grade EVPN
+  confidence is runtime instance mutation completion (delete / redefine /
+  Ethernet Segment / mixed edits — single add now commits live, #210).
 - [ ] **CI regression tracking for benchmarks** — automated runs of
   the criterion benchmarks with threshold-based alerts on PR. The
   benchmarks exist; the regression gate doesn't.
