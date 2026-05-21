@@ -32,7 +32,7 @@ This is not a full routing suite replacement. rustbgpd will not implement OSPF, 
 
 **EVPN VTEP — bidirectional (Phase 2 Gates 7a + 7b + 7b+1 + 7b+2 + 7c).** Local EVI/VNI domain types (`crates/evpn`) and an `[[evpn_instances]]` TOML schema with a read-only `EvpnService.ListEvpnInstances` gRPC surface (Gate 7a, ADR-0052). Linux kernel reconciliation programs remote-MAC FDB entries from received Type 2 routes (Gate 7b, ADR-0054). Local-MAC origination subscribes to `RTNLGRP_NEIGH` and emits Type 2 routes per RFC 7432 §15.1 mobility sequencing, plus one Type 3 IMET per L2VNI carrying the PMSI Tunnel attribute (Gate 7b+1, ADR-0055). `advertise_svi_mac` originates a Type 2 for the bridge's own MAC (RFC 9135 §6.1) on instance-Ready by surfacing the bridge link-layer address through `InstanceDataplaneStatus.bridge_mac`; `sticky_macs` (ADR-0056) marks origination with the RFC 7432 §15.4 sticky bit. Gate 7b+2 closes the MAC+IP path: with `bridge link set ... neigh_suppress on`, ARP/ND-snooped `(IP, MAC)` bindings on the bridge's neighbour table drive MAC+IP Type 2 origination under the FRR-style replace model — one Type 2 per MAC at any time, `IpAdded` upgrades from MAC-only to MAC+IP, last `IpRemoved` downgrades back. Mobility events propagate sub-second via the EVPN-keyed `EvpnRouteEvent` broadcast in `crates/rib`; the 5 s `QueryEvpnRoutes` poll stays as a `Lagged` / cold-start backstop (Gate 7c). RR-only deployments (empty `[[evpn_instances]]`) spawn no kernel-facing tasks for either direction.
 
-**Later:** RFC 9135 overlay-index IRB recursive resolution (Gate 9 ships the Interface-less variant per RFC 9136 §4.4.2 / ADR-0058; non-zero gateways are detected and fail-closed), EVPN runtime instance delete/redefine (single add commits live via ApplyEvpnRuntime, #210), VPNv4/v6, MPLS-EVPN encap. (Shipped since: duplicate-MAC remote-route suppression + manual clear, production-default `apply_bum_enforcement` / `apply_aliasing_ecmp` enforcement, and auto-derived Route Targets per RFC 8365 §5.1.2.1.)
+**Later:** EVPN runtime instance delete/redefine (single add commits live via ApplyEvpnRuntime, #210), VPNv4/v6, MPLS-EVPN encap. (Shipped since: duplicate-MAC remote-route suppression + manual clear, production-default `apply_bum_enforcement` / `apply_aliasing_ecmp` enforcement, auto-derived Route Targets per RFC 8365 §5.1.2.1, and receive-side RFC 9135 overlay-index Type 5 recursion with fail-closed unresolved / ambiguous gateways.)
 
 ---
 
@@ -487,8 +487,10 @@ controller-driven injection for Type 2 / Type 3. What remains:
   through the transactional `L3OwnedState` model with four-phase
   apply ordering, Router MAC conflict detection, and the M39
   protected self-hosted smoke are all on `main`. Auto-derived RTs
-  (RFC 8365 §5.1.2.1) shipped in v0.25.0; RFC 9135 overlay-index IRB
-  recursive resolution remains a follow-up.
+  (RFC 8365 §5.1.2.1) shipped in v0.25.0. Receive-side RFC 9135
+  overlay-index Type 5 recursion now resolves non-zero Gateway Address
+  routes through unambiguous linked Type 2 MAC/IP state while leaving
+  unresolved or ambiguous gateways fail-closed.
 - **Controller injection beyond Type 2 / Type 3:** Type 5 IP-Prefix and
   Type 1 / Type 4 multi-homing route injection are not yet exposed in
   the injection RPCs. Native daemon Type 1/4 origination exists via

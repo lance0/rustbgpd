@@ -212,6 +212,8 @@ impl EvpnRuntimeActorConverger {
         };
         let candidate_instances = Arc::new(candidate.instances().clone());
         let candidate_vni_to_esi = evpn_vni_to_esi_map(candidate.ethernet_segments());
+        let candidate_ip_vrfs = Arc::new(candidate.ip_vrfs().clone());
+        let ip_vrf_metadata_changed = current.ip_vrfs() != candidate.ip_vrfs();
 
         let dataplane = self.dataplane.as_ref().ok_or_else(|| {
             DaemonEvpnRuntimeConvergeError::unsupported(
@@ -268,15 +270,21 @@ impl EvpnRuntimeActorConverger {
             )));
         }
 
+        if ip_vrf_metadata_changed && !dataplane.replace_ip_vrfs(candidate_ip_vrfs) {
+            self.rollback_imet(added_vni).await;
+            return Err(DaemonEvpnRuntimeConvergeError::failed(
+                "EVPN dataplane IP-VRF runtime model publish failed",
+            ));
+        }
         if !dataplane.replace_evpn_instances(candidate_instances.clone()) {
+            Self::rollback_l2vni_add_dataplane(dataplane, current, ip_vrf_metadata_changed);
             self.rollback_imet(added_vni).await;
             return Err(DaemonEvpnRuntimeConvergeError::failed(
                 "EVPN dataplane runtime model publish failed",
             ));
         }
         if !originator.replace_runtime_model(candidate_instances.clone(), candidate_vni_to_esi) {
-            let current_instances = Arc::new(current.instances().clone());
-            let _ = dataplane.replace_evpn_instances(current_instances);
+            Self::rollback_l2vni_add_dataplane(dataplane, current, ip_vrf_metadata_changed);
             self.rollback_imet(added_vni).await;
             return Err(DaemonEvpnRuntimeConvergeError::failed(
                 "EVPN Type 2 originator runtime model publish failed",
@@ -285,8 +293,8 @@ impl EvpnRuntimeActorConverger {
         if let Some(svi) = svi
             && !svi.replace_evpn_instances(candidate_instances)
         {
+            Self::rollback_l2vni_add_dataplane(dataplane, current, ip_vrf_metadata_changed);
             let current_instances = Arc::new(current.instances().clone());
-            let _ = dataplane.replace_evpn_instances(current_instances.clone());
             let _ = originator.replace_runtime_model(
                 current_instances,
                 evpn_vni_to_esi_map(current.ethernet_segments()),
@@ -298,6 +306,17 @@ impl EvpnRuntimeActorConverger {
         }
 
         Ok(())
+    }
+
+    fn rollback_l2vni_add_dataplane(
+        dataplane: &evpn_dataplane::EvpnDataplaneRuntimeControl,
+        current: &rustbgpd_evpn::EvpnRuntimeModel,
+        rollback_ip_vrf_metadata: bool,
+    ) {
+        let _ = dataplane.replace_evpn_instances(Arc::new(current.instances().clone()));
+        if rollback_ip_vrf_metadata {
+            let _ = dataplane.replace_ip_vrfs(Arc::new(current.ip_vrfs().clone()));
+        }
     }
 
     async fn converge_l2vni_delete(
@@ -3037,7 +3056,7 @@ originator_ip = "10.0.0.1"
 "#
     }
 
-    fn two_l2vni_runtime_candidate_toml() -> &'static str {
+    fn l2vni_linked_ip_vrf_runtime_candidate_toml() -> &'static str {
         r#"
 [global]
 asn = 65000
@@ -3055,12 +3074,58 @@ vni = 100
 rd = "65000:100"
 route_targets = ["65000:100"]
 local_vtep_ip = "10.0.0.1"
+ip_vrf = "tenant-blue"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#
+    }
+
+    fn two_l2vni_linked_ip_vrf_runtime_candidate_toml() -> &'static str {
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+ip_vrf = "tenant-blue"
 
 [[evpn_instances]]
 vni = 200
 rd = "65000:200"
 route_targets = ["65000:200"]
 local_vtep_ip = "10.0.0.1"
+ip_vrf = "tenant-blue"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
 "#
     }
 
@@ -3096,7 +3161,7 @@ table_id = 5000
 "#
     }
 
-    fn l2vni_linked_ip_vrf_runtime_candidate_toml() -> &'static str {
+    fn two_l2vni_runtime_candidate_toml() -> &'static str {
         r#"
 [global]
 asn = 65000
@@ -3114,18 +3179,12 @@ vni = 100
 rd = "65000:100"
 route_targets = ["65000:100"]
 local_vtep_ip = "10.0.0.1"
-ip_vrf = "tenant-blue"
 
-[[evpn_ip_vrfs]]
-name = "tenant-blue"
-vni = 5000
-rd = "65000:5000"
-route_targets = ["65000:5000"]
-local_vtep_ip = "10.0.0.100"
-router_mac = "02:00:00:00:00:01"
-vrf_device = "vrf-blue"
-l3vxlan_device = "vni5000"
-table_id = 5000
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
 "#
     }
 
@@ -3814,16 +3873,19 @@ table_id = 6000
 
     #[tokio::test]
     async fn runtime_actor_converger_l2vni_add_publishes_imet_and_actor_models() {
-        let current = runtime_model_from_candidate_toml(l2vni_runtime_candidate_toml());
-        let candidate = runtime_candidate_from_toml(two_l2vni_runtime_candidate_toml());
+        let current =
+            runtime_model_from_candidate_toml(l2vni_linked_ip_vrf_runtime_candidate_toml());
+        let candidate =
+            runtime_candidate_from_toml(two_l2vni_linked_ip_vrf_runtime_candidate_toml());
         let plan = current.plan_candidate(&candidate);
         let current_instances = Arc::new(current.instances().clone());
+        let current_ip_vrfs = Arc::new(current.ip_vrfs().clone());
         let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(32);
         let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let _rib = runtime_converger_rib_responder(rib_rx, injects.clone());
 
         let (evpn_instances_tx, evpn_instances_rx) = watch::channel(current_instances.clone());
-        let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(Arc::new(rustbgpd_evpn::IpVrfTable::new()));
+        let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(current_ip_vrfs);
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
@@ -3869,6 +3931,13 @@ table_id = 6000
 
         let added_vni = rustbgpd_evpn::EvpnInstanceId::new(200).unwrap();
         assert!(evpn_instances_rx.borrow().get(added_vni).is_some());
+        assert!(
+            ip_vrfs_rx
+                .borrow()
+                .referenced_l2vnis("tenant-blue")
+                .is_some_and(|vnis| vnis.contains(&added_vni)),
+            "dataplane IP-VRF model should learn that the runtime-added L2VNI is linked to tenant-blue"
+        );
         assert!(
             injects
                 .lock()

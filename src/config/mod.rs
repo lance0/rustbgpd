@@ -835,7 +835,15 @@ impl Config {
                         ),
                     });
                 }
-                table.mark_referenced(name.clone());
+                let vni = rustbgpd_evpn::EvpnInstanceId::new(inst.vni).map_err(|e| {
+                    ConfigError::InvalidEvpnIpVrf {
+                        reason: format!(
+                            "evpn_instances[vni={}]: cannot record ip_vrf {:?} reference: {e}",
+                            inst.vni, name
+                        ),
+                    }
+                })?;
+                table.mark_referenced_by_l2vni(name.clone(), vni);
             }
         }
         Ok(table)

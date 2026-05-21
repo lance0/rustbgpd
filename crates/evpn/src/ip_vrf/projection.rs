@@ -51,9 +51,11 @@
 //!
 //! ## Router MAC
 //!
-//! Every imported Type 5 must carry a Router MAC extcomm — the inner
-//! destination MAC for symmetric IRB recursive lookup. Routes without
-//! one are dropped (logged at the call site, not here).
+//! Interface-less Type 5 routes (Gateway Address zero) must carry a
+//! Router MAC extcomm — the inner destination MAC for symmetric IRB
+//! recursive lookup. Overlay-index Type 5 routes (non-zero Gateway
+//! Address) resolve that inner MAC recursively from a matching Type 2
+//! MAC/IP route in an L2VNI linked to the target IP-VRF.
 //!
 //! ## Self-origination filter
 //!
@@ -62,11 +64,12 @@
 //! a route reflector. Filtering here keeps the daemon from
 //! programming kernel routes pointing at its own VTEP.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 use rustbgpd_wire::{EvpnIpPrefixValue, ExtendedCommunity, MacAddress, RouteDistinguisher};
 
+use crate::instance::EvpnInstanceId;
 use crate::ip_vrf::IpVrfId;
 use crate::route_target::RouteTarget;
 
@@ -84,9 +87,9 @@ pub struct ProjectedIpPrefixRoute {
     /// Resolved next hop from `MP_REACH_NLRI` — the remote VTEP IP
     /// the dataplane will program as the FIB nexthop.
     pub next_hop: IpAddr,
-    /// Type 5 Gateway Address. The currently supported Interface-less
-    /// model requires this to be zero; non-zero values are RFC 9135
-    /// overlay-index routes and require recursive Type 2 resolution.
+    /// Type 5 Gateway Address. Zero selects the Interface-less model;
+    /// non-zero values use RFC 9135 §9.2 overlay-index recursion
+    /// through Type 2 MAC/IP state.
     pub gateway: IpAddr,
     /// L3VNI from the route's MPLS label slot (RFC 8365: VXLAN VNI
     /// carried in the MPLS label field).
@@ -99,6 +102,31 @@ pub struct ProjectedIpPrefixRoute {
     /// the route doesn't carry one; the projection drops the route
     /// in that case.
     pub router_mac: Option<MacAddress>,
+}
+
+/// Trimmed best-path EVPN Type 2 MAC/IP route usable for resolving
+/// an RFC 9135 §9.2 Type 5 overlay-index Gateway Address.
+///
+/// The daemon builds this from the same RIB snapshot as Type 5 input
+/// and only passes rows that survived the normal Type 2 projection
+/// gates: remote, non-quarantined, mass-withdraw-reachable MAC/IP
+/// routes with a host IP.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectedOverlayIndexRoute {
+    /// L2VNI carried by the Type 2 route's primary label.
+    pub vni: EvpnInstanceId,
+    /// Host IP carried by the Type 2 MAC/IP NLRI.
+    pub host_ip: IpAddr,
+    /// MAC carried by the Type 2 MAC/IP NLRI.
+    pub mac: MacAddress,
+    /// Remote VTEP next hop for the Type 2 route.
+    pub next_hop: IpAddr,
+    /// MAC mobility sequence (RFC 7432 §15) of the originating Type 2
+    /// route, when it carried a `MAC Mobility` extended community. Used
+    /// to resolve overlay-index contenders the same way the Type 2
+    /// projection does — the highest sequence reflects the most recent
+    /// host location.
+    pub mobility_sequence: Option<u32>,
 }
 
 impl ProjectedIpPrefixRoute {
@@ -129,13 +157,17 @@ impl ProjectedIpPrefixRoute {
 pub struct RemoteIpPrefixEntry {
     /// Prefix to install in the IP-VRF's route table.
     pub prefix: EvpnIpPrefixValue,
-    /// Originator VTEP — the FIB nexthop, what the recursive lookup
-    /// terminates on after VXLAN encap.
+    /// The FIB nexthop — what the recursive lookup terminates on
+    /// after VXLAN encap. For interface-less Type 5 this is the Type 5
+    /// originator VTEP; for overlay-index Type 5 it is the resolved
+    /// Type 2 MAC/IP route's VTEP.
     pub next_hop: IpAddr,
     /// L3VNI to wrap encapsulated frames with.
     pub l3vni: u32,
     /// Inner destination MAC the kernel needs for the recursive
-    /// lookup. Pulled from the RFC 9135 Router MAC extcomm.
+    /// lookup. For interface-less Type 5 this is the RFC 9135 Router
+    /// MAC extcomm; for overlay-index Type 5 it is the MAC of the
+    /// resolved Type 2 MAC/IP route.
     pub router_mac: MacAddress,
 }
 
@@ -208,14 +240,37 @@ pub enum DropReason {
         prefix: EvpnIpPrefixValue,
         next_hop: IpAddr,
     },
-    /// The route uses RFC 9135 overlay-index semantics. Full support
-    /// requires recursively resolving the Type 5 Gateway Address
-    /// through a matching Type 2 MAC/IP route, so the Interface-less
-    /// projection deliberately drops it for now.
-    UnsupportedOverlayIndexGateway {
+    /// The route uses RFC 9135 overlay-index semantics, but the
+    /// matched IP-VRF has no local L2VNI linked through
+    /// `[[evpn_instances]].ip_vrf`. Without that binding the daemon
+    /// cannot safely scope the recursive Type 2 lookup to a tenant.
+    OverlayIndexNoLinkedL2Vni {
         prefix: EvpnIpPrefixValue,
         gateway: IpAddr,
         next_hop: IpAddr,
+        vrf: String,
+    },
+    /// The route uses RFC 9135 overlay-index semantics, but no
+    /// eligible Type 2 MAC/IP route resolved the Gateway Address in
+    /// the matched IP-VRF's linked L2VNIs.
+    UnresolvedOverlayIndexGateway {
+        prefix: EvpnIpPrefixValue,
+        gateway: IpAddr,
+        next_hop: IpAddr,
+        vrf: String,
+    },
+    /// The route uses RFC 9135 overlay-index semantics, but the Gateway
+    /// Address resolved to more than one distinct MAC at the highest MAC
+    /// mobility sequence. A single MAC reachable through several VTEPs
+    /// (multi-homing) resolves; conflicting MACs would leak traffic
+    /// across an ambiguous recursive lookup, so they stay fail-closed.
+    /// `candidates` counts the distinct MACs.
+    AmbiguousOverlayIndexGateway {
+        prefix: EvpnIpPrefixValue,
+        gateway: IpAddr,
+        next_hop: IpAddr,
+        vrf: String,
+        candidates: usize,
     },
     /// The route's `NEXT_HOP` matched one of our own IP-VRFs' VTEP IPs
     /// — reflected from a route reflector. The daemon would otherwise
@@ -261,12 +316,40 @@ pub fn project_ip_prefix_routes<I>(
 where
     I: IntoIterator<Item = ProjectedIpPrefixRoute>,
 {
+    project_ip_prefix_routes_with_overlay_index(vrfs, routes, std::iter::empty())
+}
+
+/// Build a [`RemoteIpPrefixTable`] from Type 5 records plus Type 2
+/// MAC/IP records that can resolve RFC 9135 §9.2 overlay-index
+/// gateways.
+///
+/// Interface-less Type 5 routes (Gateway Address zero) keep the
+/// existing Router-MAC-extcomm projection path. Non-zero Gateway
+/// Address routes are recursively resolved through exactly one Type 2
+/// MAC/IP route in an L2VNI linked to the matched IP-VRF; unresolved
+/// or ambiguous gateways are recorded as drops.
+#[must_use]
+pub fn project_ip_prefix_routes_with_overlay_index<I, O>(
+    vrfs: &crate::ip_vrf::IpVrfTable,
+    routes: I,
+    overlay_index_routes: O,
+) -> RemoteIpPrefixTable
+where
+    I: IntoIterator<Item = ProjectedIpPrefixRoute>,
+    O: IntoIterator<Item = ProjectedOverlayIndexRoute>,
+{
+    enum PrefixResolution {
+        OverlayIndex,
+        InterfaceLess(MacAddress),
+    }
+
     // Pre-collect local VTEP IPs from every IP-VRF for the
     // self-origination filter.
     let local_vteps: Vec<(String, IpAddr)> = vrfs
         .iter()
         .map(|v| (v.name.clone(), v.local_vtep_ip))
         .collect();
+    let overlay_index = build_overlay_index(overlay_index_routes);
 
     let mut table = RemoteIpPrefixTable::new();
 
@@ -281,25 +364,15 @@ where
             continue;
         }
 
-        // Non-zero gateway is the RFC 9135 §9.2 overlay-index model:
-        // the gateway is a TS IP that must be recursively resolved via
-        // a Type 2 MAC/IP route. The current projection supports only
-        // Interface-less Type 5, so fail closed with a specific reason
-        // instead of falling through to misleading Router MAC/L3VNI
-        // validation or installing a hybrid route as Interface-less.
-        if !route.gateway.is_unspecified() {
-            table
-                .drops
-                .push(DropReason::UnsupportedOverlayIndexGateway {
-                    prefix: route.prefix,
-                    gateway: route.gateway,
-                    next_hop: route.next_hop,
-                });
-            continue;
-        }
+        let overlay_gateway = !route.gateway.is_unspecified();
 
-        // Router MAC must be present.
-        let Some(router_mac) = route.router_mac else {
+        // Interface-less Type 5 still requires a Router MAC. Overlay-index
+        // routes get their inner MAC from the resolved Type 2 MAC/IP route.
+        let resolution = if overlay_gateway {
+            PrefixResolution::OverlayIndex
+        } else if let Some(router_mac) = route.router_mac {
+            PrefixResolution::InterfaceLess(router_mac)
+        } else {
             table.drops.push(DropReason::MissingRouterMac {
                 prefix: route.prefix,
                 next_hop: route.next_hop,
@@ -331,9 +404,21 @@ where
                 });
                 continue;
             }
+            let (next_hop, router_mac) = match resolution {
+                PrefixResolution::OverlayIndex => {
+                    match resolve_overlay_index_gateway(vrfs, vrf, &route, &overlay_index) {
+                        Ok(resolved) => (resolved.next_hop, resolved.mac),
+                        Err(reason) => {
+                            table.drops.push(reason);
+                            continue;
+                        }
+                    }
+                }
+                PrefixResolution::InterfaceLess(router_mac) => (route.next_hop, router_mac),
+            };
             let entry = RemoteIpPrefixEntry {
                 prefix: route.prefix,
-                next_hop: route.next_hop,
+                next_hop,
                 l3vni: vrf.id.as_u32(),
                 router_mac,
             };
@@ -355,6 +440,111 @@ where
     table
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OverlayIndexTarget {
+    mac: MacAddress,
+    next_hop: IpAddr,
+    mobility_sequence: Option<u32>,
+}
+
+type OverlayIndexMap = BTreeMap<(EvpnInstanceId, IpAddr), Vec<OverlayIndexTarget>>;
+
+fn build_overlay_index<O>(routes: O) -> OverlayIndexMap
+where
+    O: IntoIterator<Item = ProjectedOverlayIndexRoute>,
+{
+    let mut index: OverlayIndexMap = BTreeMap::new();
+    for route in routes {
+        index
+            .entry((route.vni, route.host_ip))
+            .or_default()
+            .push(OverlayIndexTarget {
+                mac: route.mac,
+                next_hop: route.next_hop,
+                mobility_sequence: route.mobility_sequence,
+            });
+    }
+    index
+}
+
+fn resolve_overlay_index_gateway(
+    vrfs: &crate::ip_vrf::IpVrfTable,
+    vrf: &crate::ip_vrf::IpVrf,
+    route: &ProjectedIpPrefixRoute,
+    overlay_index: &OverlayIndexMap,
+) -> Result<OverlayIndexTarget, DropReason> {
+    let Some(linked_l2vnis) = vrfs
+        .referenced_l2vnis(&vrf.name)
+        .filter(|vnis| !vnis.is_empty())
+    else {
+        return Err(DropReason::OverlayIndexNoLinkedL2Vni {
+            prefix: route.prefix,
+            gateway: route.gateway,
+            next_hop: route.next_hop,
+            vrf: vrf.name.clone(),
+        });
+    };
+    let matches = overlay_index_matches(linked_l2vnis, route.gateway, overlay_index);
+    if matches.is_empty() {
+        return Err(DropReason::UnresolvedOverlayIndexGateway {
+            prefix: route.prefix,
+            gateway: route.gateway,
+            next_hop: route.next_hop,
+            vrf: vrf.name.clone(),
+        });
+    }
+    // Mobility tie-break, mirroring the Type 2 projection: the highest
+    // MAC mobility sequence reflects the most recent host location, so
+    // it wins (a route with no sequence loses to one that carries one).
+    // Among the top-sequence contenders, a single MAC — possibly
+    // multi-homed across several VTEPs — is unambiguous; resolve it to
+    // the lowest next_hop for determinism. Distinct MACs tied at the
+    // top sequence are a genuine conflict and stay fail-closed.
+    let top_seq = matches
+        .iter()
+        .map(|t| t.mobility_sequence)
+        .max()
+        .expect("matches is non-empty");
+    let winners: Vec<OverlayIndexTarget> = matches
+        .into_iter()
+        .filter(|t| t.mobility_sequence == top_seq)
+        .collect();
+    let mut distinct_macs: Vec<MacAddress> = Vec::new();
+    for w in &winners {
+        if !distinct_macs.contains(&w.mac) {
+            distinct_macs.push(w.mac);
+        }
+    }
+    if distinct_macs.len() == 1 {
+        Ok(winners
+            .into_iter()
+            .min_by_key(|t| t.next_hop)
+            .expect("winners is non-empty"))
+    } else {
+        Err(DropReason::AmbiguousOverlayIndexGateway {
+            prefix: route.prefix,
+            gateway: route.gateway,
+            next_hop: route.next_hop,
+            vrf: vrf.name.clone(),
+            candidates: distinct_macs.len(),
+        })
+    }
+}
+
+fn overlay_index_matches(
+    linked_l2vnis: &BTreeSet<EvpnInstanceId>,
+    gateway: IpAddr,
+    overlay_index: &OverlayIndexMap,
+) -> Vec<OverlayIndexTarget> {
+    let mut matches = Vec::new();
+    for vni in linked_l2vnis {
+        if let Some(targets) = overlay_index.get(&(*vni, gateway)) {
+            matches.extend(targets.iter().copied());
+        }
+    }
+    matches
+}
+
 /// Intersection test: at least one RT in common.
 fn rt_match(vrf_rts: &[RouteTarget], route_rts: &[RouteTarget]) -> bool {
     vrf_rts.iter().any(|a| route_rts.iter().any(|b| a == b))
@@ -373,6 +563,14 @@ mod tests {
 
     fn mac() -> MacAddress {
         MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01])
+    }
+
+    fn mac_with_tail(tail: u8) -> MacAddress {
+        MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, tail])
+    }
+
+    fn l2vni(n: u32) -> EvpnInstanceId {
+        EvpnInstanceId::new(n).unwrap()
     }
 
     fn vrf_with(name: &str, vni: u32, local: &str, rts: &[&str]) -> IpVrf {
@@ -411,6 +609,31 @@ mod tests {
             l3vni: 5000,
             route_targets: rts.iter().map(|s| rt(s)).collect(),
             router_mac: Some(mac()),
+        }
+    }
+
+    fn overlay(
+        vni: u32,
+        host_ip: &str,
+        mac_tail: u8,
+        next_hop: &str,
+    ) -> ProjectedOverlayIndexRoute {
+        overlay_seq(vni, host_ip, mac_tail, next_hop, None)
+    }
+
+    fn overlay_seq(
+        vni: u32,
+        host_ip: &str,
+        mac_tail: u8,
+        next_hop: &str,
+        mobility_sequence: Option<u32>,
+    ) -> ProjectedOverlayIndexRoute {
+        ProjectedOverlayIndexRoute {
+            vni: l2vni(vni),
+            host_ip: host_ip.parse().unwrap(),
+            mac: mac_with_tail(mac_tail),
+            next_hop: next_hop.parse().unwrap(),
+            mobility_sequence,
         }
     }
 
@@ -476,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn nonzero_v4_gateway_drops_as_unsupported_overlay_index() {
+    fn nonzero_v4_gateway_without_linked_l2vni_drops() {
         let vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
         let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.2", &["65000:5000"]);
         r.gateway = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10));
@@ -484,15 +707,16 @@ mod tests {
         assert!(table.is_empty());
         assert!(matches!(
             table.drops()[0],
-            DropReason::UnsupportedOverlayIndexGateway {
+            DropReason::OverlayIndexNoLinkedL2Vni {
                 gateway: IpAddr::V4(gateway),
+                ref vrf,
                 ..
-            } if gateway == Ipv4Addr::new(10, 0, 0, 10)
+            } if gateway == Ipv4Addr::new(10, 0, 0, 10) && vrf == "blue"
         ));
     }
 
     #[test]
-    fn nonzero_v6_gateway_drops_as_unsupported_overlay_index() {
+    fn nonzero_v6_gateway_without_linked_l2vni_drops() {
         let vrfs = one_vrf("blue", 5000, "2001:db8::1", &["65000:5000"]);
         let mut r = route(
             v6(
@@ -507,11 +731,136 @@ mod tests {
         assert!(table.is_empty());
         assert!(matches!(
             table.drops()[0],
-            DropReason::UnsupportedOverlayIndexGateway {
+            DropReason::OverlayIndexNoLinkedL2Vni {
                 gateway: IpAddr::V6(gateway),
+                ref vrf,
                 ..
-            } if gateway == "2001:db8::10".parse::<Ipv6Addr>().unwrap()
+            } if gateway == "2001:db8::10".parse::<Ipv6Addr>().unwrap() && vrf == "blue"
         ));
+    }
+
+    #[test]
+    fn overlay_index_gateway_resolves_through_linked_type2_mac_ip() {
+        let mut vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        vrfs.mark_referenced_by_l2vni("blue".to_string(), l2vni(100));
+        let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.9", &["65000:5000"]);
+        r.gateway = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        // Overlay-index resolution uses the Type 2 MAC, not the
+        // Type 5 Router-MAC extcomm.
+        r.router_mac = None;
+
+        let table = project_ip_prefix_routes_with_overlay_index(
+            &vrfs,
+            vec![r],
+            vec![overlay(100, "192.0.2.10", 0xaa, "10.0.0.2")],
+        );
+
+        assert!(table.drops().is_empty());
+        let blue = IpVrfId::new(5000).unwrap();
+        let entries: Vec<_> = table.for_vrf(blue).collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.next_hop, "10.0.0.2".parse::<IpAddr>().unwrap());
+        assert_eq!(entries[0].1.router_mac, mac_with_tail(0xaa));
+    }
+
+    #[test]
+    fn overlay_index_gateway_ignores_type2_outside_linked_l2vnis() {
+        let mut vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        vrfs.mark_referenced_by_l2vni("blue".to_string(), l2vni(100));
+        let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.9", &["65000:5000"]);
+        r.gateway = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+
+        let table = project_ip_prefix_routes_with_overlay_index(
+            &vrfs,
+            vec![r],
+            vec![overlay(200, "192.0.2.10", 0xaa, "10.0.0.2")],
+        );
+
+        assert!(table.is_empty());
+        assert!(matches!(
+            table.drops()[0],
+            DropReason::UnresolvedOverlayIndexGateway { ref vrf, .. } if vrf == "blue"
+        ));
+    }
+
+    #[test]
+    fn overlay_index_gateway_drops_when_type2_resolution_is_ambiguous() {
+        let mut vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        vrfs.mark_referenced_by_l2vni("blue".to_string(), l2vni(100));
+        vrfs.mark_referenced_by_l2vni("blue".to_string(), l2vni(101));
+        let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.9", &["65000:5000"]);
+        r.gateway = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+
+        let table = project_ip_prefix_routes_with_overlay_index(
+            &vrfs,
+            vec![r],
+            vec![
+                overlay(100, "192.0.2.10", 0xaa, "10.0.0.2"),
+                overlay(101, "192.0.2.10", 0xbb, "10.0.0.3"),
+            ],
+        );
+
+        assert!(table.is_empty());
+        assert!(matches!(
+            table.drops()[0],
+            DropReason::AmbiguousOverlayIndexGateway { candidates: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn overlay_index_gateway_resolves_multihomed_same_mac() {
+        // A multi-homed gateway: the same MAC for the gateway IP is
+        // reachable through two ES-peer VTEPs. That is unambiguous —
+        // resolve to a deterministic (lowest) next_hop, not a drop.
+        let mut vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        vrfs.mark_referenced_by_l2vni("blue".to_string(), l2vni(100));
+        let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.9", &["65000:5000"]);
+        r.gateway = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        r.router_mac = None;
+
+        let table = project_ip_prefix_routes_with_overlay_index(
+            &vrfs,
+            vec![r],
+            vec![
+                overlay(100, "192.0.2.10", 0xaa, "10.0.0.3"),
+                overlay(100, "192.0.2.10", 0xaa, "10.0.0.2"),
+            ],
+        );
+
+        assert!(table.drops().is_empty());
+        let blue = IpVrfId::new(5000).unwrap();
+        let entries: Vec<_> = table.for_vrf(blue).collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.next_hop, "10.0.0.2".parse::<IpAddr>().unwrap());
+        assert_eq!(entries[0].1.router_mac, mac_with_tail(0xaa));
+    }
+
+    #[test]
+    fn overlay_index_gateway_higher_mobility_sequence_wins() {
+        // The gateway IP moved from MAC 0xaa to MAC 0xbb. The newer
+        // advertisement carries the higher mobility sequence, so it wins
+        // the recursive lookup rather than dropping as ambiguous.
+        let mut vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        vrfs.mark_referenced_by_l2vni("blue".to_string(), l2vni(100));
+        let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.9", &["65000:5000"]);
+        r.gateway = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        r.router_mac = None;
+
+        let table = project_ip_prefix_routes_with_overlay_index(
+            &vrfs,
+            vec![r],
+            vec![
+                overlay_seq(100, "192.0.2.10", 0xaa, "10.0.0.2", Some(5)),
+                overlay_seq(100, "192.0.2.10", 0xbb, "10.0.0.3", Some(6)),
+            ],
+        );
+
+        assert!(table.drops().is_empty());
+        let blue = IpVrfId::new(5000).unwrap();
+        let entries: Vec<_> = table.for_vrf(blue).collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.next_hop, "10.0.0.3".parse::<IpAddr>().unwrap());
+        assert_eq!(entries[0].1.router_mac, mac_with_tail(0xbb));
     }
 
     #[test]
