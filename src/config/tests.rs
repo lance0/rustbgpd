@@ -6292,10 +6292,15 @@ table_id = 5001
         table.is_referenced("tenant-blue"),
         "tenant-blue is bound by [[evpn_instances]].ip_vrf"
     );
+    let linked_vnis = table
+        .referenced_l2vnis("tenant-blue")
+        .expect("tenant-blue should carry linked L2VNI set");
+    assert!(linked_vnis.contains(&rustbgpd_evpn::EvpnInstanceId::new(100).unwrap()));
     assert!(
         !table.is_referenced("tenant-red"),
         "tenant-red has no L2VNI binding"
     );
+    assert!(table.referenced_l2vnis("tenant-red").is_none());
 }
 
 #[test]

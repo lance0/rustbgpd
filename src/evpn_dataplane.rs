@@ -846,7 +846,6 @@ async fn build_intent_tables(
         .iter()
         .filter_map(|r| project_ead_per_evi(r, &local_vtep_ips))
         .collect();
-    let remote_macs = project_evpn_routes_with_aliases(instances, projected, ead_per_evi);
 
     // Gate 9 slice 6c: project Type 5 (`EvpnRoute::IpPrefix`) routes
     // through the pure helper. Skip when no IP-VRFs are configured
@@ -856,8 +855,17 @@ async fn build_intent_tables(
     } else {
         let projected_t5: Vec<rustbgpd_evpn::ip_vrf::ProjectedIpPrefixRoute> =
             routes.iter().filter_map(project_type5).collect();
-        rustbgpd_evpn::ip_vrf::project_ip_prefix_routes(ip_vrfs, projected_t5)
+        let overlay_index_t2: Vec<rustbgpd_evpn::ip_vrf::ProjectedOverlayIndexRoute> = projected
+            .iter()
+            .filter_map(|route| project_overlay_index(route, instances))
+            .collect();
+        rustbgpd_evpn::ip_vrf::project_ip_prefix_routes_with_overlay_index(
+            ip_vrfs,
+            projected_t5,
+            overlay_index_t2,
+        )
     };
+    let remote_macs = project_evpn_routes_with_aliases(instances, projected, ead_per_evi);
 
     Ok(IntentTables {
         remote_macs,
@@ -877,6 +885,29 @@ fn projected_route_is_quarantined(
         return false;
     };
     quarantined_macs.contains(&DuplicateMacKey::new(vni, route.mac))
+}
+
+/// Translate a projected Type 2 MAC/IP route into an overlay-index
+/// resolver input for Type 5 recursion. The caller already applied
+/// mass-withdraw and quarantine gates; this helper adds host-IP,
+/// local-instance, and self-originated filtering.
+fn project_overlay_index(
+    route: &ProjectedEvpnRoute,
+    instances: &EvpnInstanceTable,
+) -> Option<rustbgpd_evpn::ip_vrf::ProjectedOverlayIndexRoute> {
+    let host_ip = route.host_ip?;
+    let raw_vni = route.label1.as_vni();
+    let vni = rustbgpd_evpn::EvpnInstanceId::new(raw_vni).ok()?;
+    let local_instance = instances.get(vni)?;
+    if route.next_hop == local_instance.local_vtep_ip {
+        return None;
+    }
+    Some(rustbgpd_evpn::ip_vrf::ProjectedOverlayIndexRoute {
+        vni,
+        host_ip,
+        mac: route.mac,
+        next_hop: route.next_hop,
+    })
 }
 
 /// Translate an `EvpnRibRoute` carrying a Type 5 NLRI into the
@@ -1009,7 +1040,7 @@ const fn _force_link() -> &'static dyn Fn(&[ExtendedCommunity]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::net::IpAddr;
+    use std::net::{IpAddr, Ipv4Addr};
 
     use prometheus::Encoder;
     use rustbgpd_evpn::ip_vrf::{IpVrf, IpVrfId};
@@ -1022,8 +1053,8 @@ mod tests {
     };
     use rustbgpd_rib::route::EvpnRibRoute;
     use rustbgpd_wire::{
-        EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, ExtendedCommunity,
-        MplsLabel, PathAttribute,
+        EthernetSegmentIdentifier, EthernetTagId, EvpnIpPrefixRoute, EvpnIpPrefixValue, EvpnMacIp,
+        EvpnRoute, ExtendedCommunity, Ipv4Prefix, MplsLabel, PathAttribute,
     };
 
     use super::*;
@@ -1106,12 +1137,22 @@ mod tests {
     }
 
     fn evpn_macip_route(v: u32, m: u8, dst: &str, seq: Option<u32>) -> EvpnRibRoute {
+        evpn_macip_route_with_host_ip(v, m, None, dst, seq)
+    }
+
+    fn evpn_macip_route_with_host_ip(
+        v: u32,
+        m: u8,
+        host_ip: Option<&str>,
+        dst: &str,
+        seq: Option<u32>,
+    ) -> EvpnRibRoute {
         let macip = EvpnMacIp {
             rd: RouteDistinguisher::ZERO,
             esi: EthernetSegmentIdentifier::ZERO,
             ethernet_tag: EthernetTagId(0),
             mac: MacAddress::new([m; 6]),
-            ip: None,
+            ip: host_ip.map(ipa),
             label1: MplsLabel::new(v),
             label2: None,
         };
@@ -1127,6 +1168,44 @@ mod tests {
             link_local_next_hop: None,
             peer: ipa("10.0.0.99"),
             attributes: Arc::new(attrs),
+            received_at: std::time::Instant::now(),
+            origin_type: rustbgpd_rib::route::RouteOrigin::Ebgp,
+            peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 99),
+            is_stale: false,
+            is_llgr_stale: false,
+        }
+    }
+
+    fn evpn_ip_prefix_route(
+        prefix: &str,
+        gateway: &str,
+        next_hop: &str,
+        l3vni: u32,
+    ) -> EvpnRibRoute {
+        let (addr, len) = prefix.split_once('/').unwrap();
+        let prefix = EvpnIpPrefixValue::V4(Ipv4Prefix::new(
+            addr.parse::<Ipv4Addr>().unwrap(),
+            len.parse().unwrap(),
+        ));
+        EvpnRibRoute {
+            route: EvpnRoute::IpPrefix(EvpnIpPrefixRoute {
+                rd: RouteDistinguisher::ZERO,
+                esi: EthernetSegmentIdentifier::ZERO,
+                ethernet_tag: EthernetTagId(0),
+                prefix,
+                gateway: gateway.parse().unwrap(),
+                label: MplsLabel::new(l3vni),
+            }),
+            next_hop: ipa(next_hop),
+            link_local_next_hop: None,
+            peer: ipa("10.0.0.99"),
+            attributes: Arc::new(vec![PathAttribute::ExtendedCommunities(vec![
+                RouteTarget::TwoOctetAs {
+                    asn: 65001,
+                    value: l3vni,
+                }
+                .to_extended_community(),
+            ])]),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::route::RouteOrigin::Ebgp,
             peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 99),
@@ -1324,6 +1403,41 @@ mod tests {
                 .remote_vtep_ip,
             ipa("10.0.0.3")
         );
+    }
+
+    #[tokio::test]
+    async fn build_intent_tables_resolves_overlay_index_type5_through_type2() {
+        let instances = local_instance_table(100, Some("br100"));
+        let mut ip_vrfs = ip_vrf_table_one("blue", 5000, 5000);
+        ip_vrfs.mark_referenced_by_l2vni("blue".to_string(), vni(100));
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let _responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let routes = vec![
+                    evpn_macip_route_with_host_ip(
+                        100,
+                        0xaa,
+                        Some("192.0.2.10"),
+                        "10.0.0.2",
+                        Some(7),
+                    ),
+                    evpn_ip_prefix_route("10.1.0.0/24", "192.0.2.10", "10.0.0.9", 5000),
+                ];
+                let _ = reply.send(routes);
+            }
+        });
+
+        let tables = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new())
+            .await
+            .unwrap();
+        assert!(tables.remote_ip_prefixes.drops().is_empty());
+        let entries: Vec<_> = tables
+            .remote_ip_prefixes
+            .for_vrf(IpVrfId::new(5000).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.next_hop, ipa("10.0.0.2"));
+        assert_eq!(entries[0].1.router_mac, MacAddress::new([0xaa; 6]));
     }
 
     #[test]

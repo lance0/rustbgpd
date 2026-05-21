@@ -584,9 +584,10 @@ entry.
 ### Gate 9 — Symmetric IRB (RFC 9135), adjacent standards
 
 Status: end-to-end shipped in v0.18.0 · auto-derived RTs are now
-available as an explicit config opt-in · overlay-index Type 5 is
-detected and fail-closed, while full recursive resolution remains a
-follow-up
+available as an explicit config opt-in · receive-side overlay-index
+Type 5 recursion now resolves non-zero Gateway Address routes through
+linked Type 2 MAC/IP state, with unresolved or ambiguous gateways
+still fail-closed
 
 Unlocks: L3 routing between EVPN tenants on the same VTEP under the
 RFC 9136 §4.4.2 symmetric Interface-less IRB model (matches FRR's
@@ -623,10 +624,14 @@ Shipped pieces (v0.18.0):
     cross-vendor interop smoke).
   See `docs/CONFIGURATION.md` for the full interop matrix.
 - RFC 9135 §9.2 overlay-index Type 5 detection on the receive path:
-  non-zero Type 5 Gateway Address routes are explicitly classified and
-  dropped rather than being treated as Interface-less Type 5. Full
-  recursive resolution through matching Type 2 MAC/IP state remains a
-  follow-up.
+  non-zero Type 5 Gateway Address routes are no longer treated as
+  Interface-less Type 5. The dataplane projection resolves them through
+  exactly one Type 2 MAC/IP route from the same RIB snapshot when that
+  Type 2 route's L2VNI is linked to the matched IP-VRF through
+  `[[evpn_instances]].ip_vrf`; missing links, unresolved gateways,
+  ambiguous Type 2 matches, self-originated rows, quarantined MACs,
+  mass-withdraw-filtered Type 2 rows, RT misses, and L3VNI mismatches
+  remain fail-closed drops.
 - Linux `ip_vrf::dump_ip_vrf_observations` (VRF + L3 VXLAN
   rtnetlink dumps), `Dataplane::probe_ip_vrfs` trait method +
   Linux implementation, `IpVrfTable` plumbed through
@@ -639,9 +644,11 @@ Shipped pieces (v0.18.0):
 
 Still ahead:
 
-- Overlay-index IRB recursive resolution (RFC 9135 §9.2): resolve
-  non-zero Type 5 Gateway Address through matching Type 2 MAC/IP
-  state, then add local origination / API surfaces.
+- Overlay-index IRB follow-through (RFC 9135 §9.2): the receive-side
+  recursive resolution (non-zero Type 5 Gateway Address through matching
+  Type 2 MAC/IP state) now ships; add local origination, API/status
+  details for recursive drops, and a protected interop smoke for
+  overlay-index Type 5 topologies.
 - Runtime instance mutation completion (ADR-0063 / #210): single L2VNI add,
   single standalone L2VNI delete, single IP-VRF add/delete, and single
   Ethernet Segment add commit live via `ApplyEvpnRuntime`; linked delete,

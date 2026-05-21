@@ -20,17 +20,19 @@ pub use origination::{
     LocalIpRoute, OriginatedIpPrefixRoute, OriginationError, originate_ip_prefix_route,
 };
 pub use projection::{
-    ProjectedIpPrefixRoute, RemoteIpPrefixEntry, RemoteIpPrefixTable, project_ip_prefix_routes,
+    ProjectedIpPrefixRoute, ProjectedOverlayIndexRoute, RemoteIpPrefixEntry, RemoteIpPrefixTable,
+    project_ip_prefix_routes, project_ip_prefix_routes_with_overlay_index,
 };
 pub use readiness::{
     IpVrfKernelSnapshot, IpVrfNotReady, IpVrfStatus, L3VxlanObservation, VrfObservation, probe,
 };
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 use rustbgpd_wire::{MacAddress, RouteDistinguisher};
 
+use crate::instance::EvpnInstanceId;
 use crate::route_target::RouteTarget;
 
 /// Identifier for one local IP-VRF, distinct from the L2 VNI namespace
@@ -218,6 +220,11 @@ pub struct IpVrfTable {
     /// Built incrementally so the config layer can validate without
     /// scanning the L2 table.
     referenced_names: BTreeSet<String>,
+    /// IP-VRF name -> local L2VNIs that reference it through
+    /// `[[evpn_instances]].ip_vrf`. Overlay-index Type 5 recursion
+    /// uses this to constrain gateway Type 2 lookups to the tenant's
+    /// own MAC-VRFs instead of guessing from a globally unique host IP.
+    referenced_l2vnis: BTreeMap<String, BTreeSet<EvpnInstanceId>>,
 }
 
 impl IpVrfTable {
@@ -273,9 +280,16 @@ impl IpVrfTable {
         self.referenced_names.contains(name)
     }
 
-    /// Mark an IP-VRF as referenced by some L2VNI. Idempotent.
-    pub fn mark_referenced(&mut self, name: String) {
-        self.referenced_names.insert(name);
+    /// Return the local L2VNIs that reference this IP-VRF.
+    #[must_use]
+    pub fn referenced_l2vnis(&self, name: &str) -> Option<&BTreeSet<EvpnInstanceId>> {
+        self.referenced_l2vnis.get(name)
+    }
+
+    /// Mark an IP-VRF as referenced by one L2VNI. Idempotent.
+    pub fn mark_referenced_by_l2vni(&mut self, name: String, vni: EvpnInstanceId) {
+        self.referenced_names.insert(name.clone());
+        self.referenced_l2vnis.entry(name).or_default().insert(vni);
     }
 
     /// Iterate the IP-VRFs in name order.

@@ -31,6 +31,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runtime-added-member-VNI ES case remain fail-closed under #210. SIGHUP EVPN
   edits remain restart-required.
 
+- **EVPN overlay-index Type 5 receive-side recursion.** Remote Type 5 routes
+  with a non-zero Gateway Address now resolve through an unambiguous Type 2
+  MAC/IP route from the same RIB snapshot when the Type 2 route's L2VNI is
+  linked to the matched IP-VRF through `[[evpn_instances]].ip_vrf`. The
+  dataplane programs the resolved Type 2 VTEP and MAC for the remote prefix.
+  Missing IP-VRF/L2VNI linkage, unresolved gateways, ambiguous Type 2 matches,
+  self-originated rows, quarantined MACs, mass-withdraw-filtered Type 2 rows,
+  RT misses, and L3VNI mismatches remain observable fail-closed drops.
+
 ## [0.26.0] — 2026-05-21
 
 ### Added
