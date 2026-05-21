@@ -626,10 +626,13 @@ Shipped pieces (v0.18.0):
 - RFC 9135 §9.2 overlay-index Type 5 detection on the receive path:
   non-zero Type 5 Gateway Address routes are no longer treated as
   Interface-less Type 5. The dataplane projection resolves them through
-  exactly one Type 2 MAC/IP route from the same RIB snapshot when that
-  Type 2 route's L2VNI is linked to the matched IP-VRF through
-  `[[evpn_instances]].ip_vrf`; missing links, unresolved gateways,
-  ambiguous Type 2 matches, self-originated rows, quarantined MACs,
+  a Type 2 MAC/IP route from the same RIB snapshot when that Type 2
+  route's L2VNI is linked to the matched IP-VRF through
+  `[[evpn_instances]].ip_vrf`. Contenders are tie-broken like the Type 2
+  path — highest MAC mobility sequence wins, and a single MAC reachable
+  through several VTEPs (multi-homing) resolves to a deterministic
+  next_hop. Missing links, unresolved gateways, gateways resolving to
+  multiple distinct MACs, self-originated rows, quarantined MACs,
   mass-withdraw-filtered Type 2 rows, RT misses, and L3VNI mismatches
   remain fail-closed drops.
 - Linux `ip_vrf::dump_ip_vrf_observations` (VRF + L3 VXLAN

@@ -121,6 +121,12 @@ pub struct ProjectedOverlayIndexRoute {
     pub mac: MacAddress,
     /// Remote VTEP next hop for the Type 2 route.
     pub next_hop: IpAddr,
+    /// MAC mobility sequence (RFC 7432 §15) of the originating Type 2
+    /// route, when it carried a `MAC Mobility` extended community. Used
+    /// to resolve overlay-index contenders the same way the Type 2
+    /// projection does — the highest sequence reflects the most recent
+    /// host location.
+    pub mobility_sequence: Option<u32>,
 }
 
 impl ProjectedIpPrefixRoute {
@@ -253,10 +259,12 @@ pub enum DropReason {
         next_hop: IpAddr,
         vrf: String,
     },
-    /// The route uses RFC 9135 overlay-index semantics, but more than
-    /// one eligible Type 2 MAC/IP route resolved the Gateway Address.
-    /// Installing one arbitrarily would leak traffic across an
-    /// ambiguous recursive lookup.
+    /// The route uses RFC 9135 overlay-index semantics, but the Gateway
+    /// Address resolved to more than one distinct MAC at the highest MAC
+    /// mobility sequence. A single MAC reachable through several VTEPs
+    /// (multi-homing) resolves; conflicting MACs would leak traffic
+    /// across an ambiguous recursive lookup, so they stay fail-closed.
+    /// `candidates` counts the distinct MACs.
     AmbiguousOverlayIndexGateway {
         prefix: EvpnIpPrefixValue,
         gateway: IpAddr,
@@ -436,6 +444,7 @@ where
 struct OverlayIndexTarget {
     mac: MacAddress,
     next_hop: IpAddr,
+    mobility_sequence: Option<u32>,
 }
 
 type OverlayIndexMap = BTreeMap<(EvpnInstanceId, IpAddr), Vec<OverlayIndexTarget>>;
@@ -452,6 +461,7 @@ where
             .push(OverlayIndexTarget {
                 mac: route.mac,
                 next_hop: route.next_hop,
+                mobility_sequence: route.mobility_sequence,
             });
     }
     index
@@ -475,21 +485,49 @@ fn resolve_overlay_index_gateway(
         });
     };
     let matches = overlay_index_matches(linked_l2vnis, route.gateway, overlay_index);
-    match matches.as_slice() {
-        [resolved] => Ok(*resolved),
-        [] => Err(DropReason::UnresolvedOverlayIndexGateway {
+    if matches.is_empty() {
+        return Err(DropReason::UnresolvedOverlayIndexGateway {
             prefix: route.prefix,
             gateway: route.gateway,
             next_hop: route.next_hop,
             vrf: vrf.name.clone(),
-        }),
-        _ => Err(DropReason::AmbiguousOverlayIndexGateway {
+        });
+    }
+    // Mobility tie-break, mirroring the Type 2 projection: the highest
+    // MAC mobility sequence reflects the most recent host location, so
+    // it wins (a route with no sequence loses to one that carries one).
+    // Among the top-sequence contenders, a single MAC — possibly
+    // multi-homed across several VTEPs — is unambiguous; resolve it to
+    // the lowest next_hop for determinism. Distinct MACs tied at the
+    // top sequence are a genuine conflict and stay fail-closed.
+    let top_seq = matches
+        .iter()
+        .map(|t| t.mobility_sequence)
+        .max()
+        .expect("matches is non-empty");
+    let winners: Vec<OverlayIndexTarget> = matches
+        .into_iter()
+        .filter(|t| t.mobility_sequence == top_seq)
+        .collect();
+    let mut distinct_macs: Vec<MacAddress> = Vec::new();
+    for w in &winners {
+        if !distinct_macs.contains(&w.mac) {
+            distinct_macs.push(w.mac);
+        }
+    }
+    if distinct_macs.len() == 1 {
+        Ok(winners
+            .into_iter()
+            .min_by_key(|t| t.next_hop)
+            .expect("winners is non-empty"))
+    } else {
+        Err(DropReason::AmbiguousOverlayIndexGateway {
             prefix: route.prefix,
             gateway: route.gateway,
             next_hop: route.next_hop,
             vrf: vrf.name.clone(),
-            candidates: matches.len(),
-        }),
+            candidates: distinct_macs.len(),
+        })
     }
 }
 
@@ -580,11 +618,22 @@ mod tests {
         mac_tail: u8,
         next_hop: &str,
     ) -> ProjectedOverlayIndexRoute {
+        overlay_seq(vni, host_ip, mac_tail, next_hop, None)
+    }
+
+    fn overlay_seq(
+        vni: u32,
+        host_ip: &str,
+        mac_tail: u8,
+        next_hop: &str,
+        mobility_sequence: Option<u32>,
+    ) -> ProjectedOverlayIndexRoute {
         ProjectedOverlayIndexRoute {
             vni: l2vni(vni),
             host_ip: host_ip.parse().unwrap(),
             mac: mac_with_tail(mac_tail),
             next_hop: next_hop.parse().unwrap(),
+            mobility_sequence,
         }
     }
 
@@ -756,6 +805,62 @@ mod tests {
             table.drops()[0],
             DropReason::AmbiguousOverlayIndexGateway { candidates: 2, .. }
         ));
+    }
+
+    #[test]
+    fn overlay_index_gateway_resolves_multihomed_same_mac() {
+        // A multi-homed gateway: the same MAC for the gateway IP is
+        // reachable through two ES-peer VTEPs. That is unambiguous —
+        // resolve to a deterministic (lowest) next_hop, not a drop.
+        let mut vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        vrfs.mark_referenced_by_l2vni("blue".to_string(), l2vni(100));
+        let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.9", &["65000:5000"]);
+        r.gateway = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        r.router_mac = None;
+
+        let table = project_ip_prefix_routes_with_overlay_index(
+            &vrfs,
+            vec![r],
+            vec![
+                overlay(100, "192.0.2.10", 0xaa, "10.0.0.3"),
+                overlay(100, "192.0.2.10", 0xaa, "10.0.0.2"),
+            ],
+        );
+
+        assert!(table.drops().is_empty());
+        let blue = IpVrfId::new(5000).unwrap();
+        let entries: Vec<_> = table.for_vrf(blue).collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.next_hop, "10.0.0.2".parse::<IpAddr>().unwrap());
+        assert_eq!(entries[0].1.router_mac, mac_with_tail(0xaa));
+    }
+
+    #[test]
+    fn overlay_index_gateway_higher_mobility_sequence_wins() {
+        // The gateway IP moved from MAC 0xaa to MAC 0xbb. The newer
+        // advertisement carries the higher mobility sequence, so it wins
+        // the recursive lookup rather than dropping as ambiguous.
+        let mut vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        vrfs.mark_referenced_by_l2vni("blue".to_string(), l2vni(100));
+        let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.9", &["65000:5000"]);
+        r.gateway = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        r.router_mac = None;
+
+        let table = project_ip_prefix_routes_with_overlay_index(
+            &vrfs,
+            vec![r],
+            vec![
+                overlay_seq(100, "192.0.2.10", 0xaa, "10.0.0.2", Some(5)),
+                overlay_seq(100, "192.0.2.10", 0xbb, "10.0.0.3", Some(6)),
+            ],
+        );
+
+        assert!(table.drops().is_empty());
+        let blue = IpVrfId::new(5000).unwrap();
+        let entries: Vec<_> = table.for_vrf(blue).collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.next_hop, "10.0.0.3".parse::<IpAddr>().unwrap());
+        assert_eq!(entries[0].1.router_mac, mac_with_tail(0xbb));
     }
 
     #[test]

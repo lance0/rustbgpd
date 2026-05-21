@@ -32,11 +32,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   edits remain restart-required.
 
 - **EVPN overlay-index Type 5 receive-side recursion.** Remote Type 5 routes
-  with a non-zero Gateway Address now resolve through an unambiguous Type 2
-  MAC/IP route from the same RIB snapshot when the Type 2 route's L2VNI is
-  linked to the matched IP-VRF through `[[evpn_instances]].ip_vrf`. The
-  dataplane programs the resolved Type 2 VTEP and MAC for the remote prefix.
-  Missing IP-VRF/L2VNI linkage, unresolved gateways, ambiguous Type 2 matches,
+  with a non-zero Gateway Address now resolve through a Type 2 MAC/IP route
+  from the same RIB snapshot when the Type 2 route's L2VNI is linked to the
+  matched IP-VRF through `[[evpn_instances]].ip_vrf`. The dataplane programs
+  the resolved Type 2 VTEP and MAC for the remote prefix. Contenders are
+  tie-broken the same way as the Type 2 path — the highest MAC mobility
+  sequence wins, and a single MAC reachable through several VTEPs
+  (multi-homing) resolves to a deterministic next_hop. Missing IP-VRF/L2VNI
+  linkage, unresolved gateways, gateways resolving to multiple distinct MACs,
   self-originated rows, quarantined MACs, mass-withdraw-filtered Type 2 rows,
   RT misses, and L3VNI mismatches remain observable fail-closed drops.
 

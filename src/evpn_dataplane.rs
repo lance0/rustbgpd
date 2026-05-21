@@ -907,6 +907,7 @@ fn project_overlay_index(
         host_ip,
         mac: route.mac,
         next_hop: route.next_hop,
+        mobility_sequence: route.mobility_sequence,
     })
 }
 
