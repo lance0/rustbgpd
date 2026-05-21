@@ -587,7 +587,7 @@ Status: end-to-end shipped in v0.18.0 · auto-derived RTs are now
 available as an explicit config opt-in · receive-side overlay-index
 Type 5 recursion now resolves non-zero Gateway Address routes through
 linked Type 2 MAC/IP state, with unresolved or ambiguous gateways
-still fail-closed
+still fail-closed and counted by Prometheus
 
 Unlocks: L3 routing between EVPN tenants on the same VTEP under the
 RFC 9136 §4.4.2 symmetric Interface-less IRB model (matches FRR's
@@ -634,7 +634,11 @@ Shipped pieces (v0.18.0):
   next_hop. Missing links, unresolved gateways, gateways resolving to
   multiple distinct MACs, self-originated rows, quarantined MACs,
   mass-withdraw-filtered Type 2 rows, RT misses, and L3VNI mismatches
-  remain fail-closed drops.
+  remain fail-closed drops. The daemon publishes the current remote
+  Type 5 projection-drop counts through
+  `evpn_ip_vrf_remote_prefix_drops{vrf,reason}` with fixed reason
+  labels so recursive failures are visible without prefix/MAC
+  cardinality in metrics.
 - Linux `ip_vrf::dump_ip_vrf_observations` (VRF + L3 VXLAN
   rtnetlink dumps), `Dataplane::probe_ip_vrfs` trait method +
   Linux implementation, `IpVrfTable` plumbed through
@@ -649,8 +653,9 @@ Still ahead:
 
 - Overlay-index IRB follow-through (RFC 9135 §9.2): the receive-side
   recursive resolution (non-zero Type 5 Gateway Address through matching
-  Type 2 MAC/IP state) now ships; add local origination, API/status
-  details for recursive drops, and a protected interop smoke for
+  Type 2 MAC/IP state) and bounded drop metrics now ship; add local
+  origination, row-level API/status detail for recursive drops, and a
+  protected interop smoke for
   overlay-index Type 5 topologies.
 - Runtime instance mutation completion (ADR-0063 / #210): single L2VNI add,
   single L2VNI delete when the VNI is not an Ethernet Segment member, single

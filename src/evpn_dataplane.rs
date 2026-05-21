@@ -43,7 +43,7 @@
 //! - ADR-0054 §2 (snapshot/watch input)
 //! - ADR-0054 §6 (level-triggered reconcile)
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -460,6 +460,7 @@ where
         intent_tx,
         bum_enforcement_rx,
         duplicate_mac_quarantine_rx,
+        metrics.clone(),
         supervisor_shutdown,
     ));
 
@@ -491,6 +492,33 @@ fn record_fdb_nhg_drift_metrics(metrics: &BgpMetrics, counters: FdbNhgDriftCount
     metrics.add_evpn_fdb_nhg_drift_disabled(counters.drift_disabled);
 }
 
+fn record_remote_prefix_drop_metrics(
+    metrics: &BgpMetrics,
+    previous: &mut BTreeMap<(String, &'static str), u64>,
+    current: BTreeMap<(String, &'static str), u64>,
+) {
+    if *previous == current {
+        return;
+    }
+
+    let stale: Vec<(String, &'static str)> = previous
+        .keys()
+        .filter(|key| !current.contains_key(*key))
+        .cloned()
+        .collect();
+    for (vrf, reason) in stale {
+        metrics.set_evpn_ip_vrf_remote_prefix_drops(&vrf, reason, 0);
+    }
+    for ((vrf, reason), count) in &current {
+        metrics.set_evpn_ip_vrf_remote_prefix_drops(
+            vrf,
+            reason,
+            i64::try_from(*count).unwrap_or(i64::MAX),
+        );
+    }
+    *previous = current;
+}
+
 #[derive(Debug)]
 struct SupervisorIntentState {
     generation: u64,
@@ -498,6 +526,7 @@ struct SupervisorIntentState {
     last_ip_vrfs: Arc<IpVrfTable>,
     last_table: RemoteMacTable,
     last_ip_prefixes: RemoteIpPrefixTable,
+    last_ip_prefix_drop_counts: BTreeMap<(String, &'static str), u64>,
     last_bum_enforcement: BumEnforcementTable,
 }
 
@@ -509,6 +538,7 @@ impl Default for SupervisorIntentState {
             last_ip_vrfs: Arc::new(IpVrfTable::new()),
             last_table: RemoteMacTable::new(),
             last_ip_prefixes: RemoteIpPrefixTable::new(),
+            last_ip_prefix_drop_counts: BTreeMap::new(),
             last_bum_enforcement: BumEnforcementTable::new(),
         }
     }
@@ -534,6 +564,7 @@ async fn publish_dataplane_intent(
     ip_vrfs: Arc<IpVrfTable>,
     bum_enforcement: BumEnforcementTable,
     quarantined_macs: &BTreeSet<DuplicateMacKey>,
+    metrics: &BgpMetrics,
     state: &mut SupervisorIntentState,
 ) -> Result<bool, RibQueryError> {
     let tables = build_intent_tables(
@@ -556,6 +587,12 @@ async fn publish_dataplane_intent(
         // on op N doesn't get retried every 5 s tick.
         return Ok(true);
     }
+
+    record_remote_prefix_drop_metrics(
+        metrics,
+        &mut state.last_ip_prefix_drop_counts,
+        tables.remote_ip_prefixes.drop_counts_by_vrf_reason(),
+    );
 
     state.generation = state.generation.saturating_add(1);
     state.last_instances = instances.clone();
@@ -628,6 +665,7 @@ async fn supervisor_loop(
     intent_tx: watch::Sender<Arc<DataplaneIntent>>,
     mut bum_enforcement_rx: watch::Receiver<Arc<BumEnforcementTable>>,
     mut duplicate_mac_quarantine_rx: watch::Receiver<Arc<BTreeSet<DuplicateMacKey>>>,
+    metrics: BgpMetrics,
     shutdown: CancellationToken,
 ) {
     let mut state = SupervisorIntentState::default();
@@ -654,6 +692,7 @@ async fn supervisor_loop(
                     ip_vrfs,
                     bum_enforcement,
                     quarantined.as_ref(),
+                    &metrics,
                     &mut state,
                 ).await {
                     Ok(true) => {}
@@ -688,6 +727,7 @@ async fn supervisor_loop(
                         ip_vrfs,
                         bum_enforcement,
                         quarantined.as_ref(),
+                        &metrics,
                         &mut state,
                     ).await {
                         Ok(true) => {}
@@ -715,6 +755,7 @@ async fn supervisor_loop(
                     ip_vrfs,
                     bum_enforcement,
                     quarantined.as_ref(),
+                    &metrics,
                     &mut state,
                 ).await {
                     Ok(true) => {}
@@ -740,6 +781,7 @@ async fn supervisor_loop(
                     ip_vrfs,
                     bum_enforcement,
                     quarantined.as_ref(),
+                    &metrics,
                     &mut state,
                 ).await {
                     Ok(true) => {}
@@ -765,6 +807,7 @@ async fn supervisor_loop(
                     ip_vrfs,
                     bum_enforcement,
                     quarantined.as_ref(),
+                    &metrics,
                     &mut state,
                 ).await {
                     Ok(true) => {}
@@ -1236,6 +1279,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_type5_projection_drop_metrics_track_current_snapshot() {
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(2);
+        let _rib_responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let route = evpn_ip_prefix_route("10.1.0.0/24", "192.0.2.10", "10.0.0.9", 5000);
+                let _ = reply.send(vec![route]);
+            }
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let _ = reply.send(vec![]);
+            }
+        });
+        let metrics = BgpMetrics::new();
+        let instances = Arc::new(EvpnInstanceTable::new());
+        let ip_vrfs = Arc::new(ip_vrf_table_one("blue", 5000, 5000));
+        let (intent_tx, _intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let mut state = SupervisorIntentState::default();
+
+        assert!(
+            publish_dataplane_intent(
+                &rib_tx,
+                &intent_tx,
+                instances.clone(),
+                ip_vrfs.clone(),
+                BumEnforcementTable::new(),
+                &BTreeSet::new(),
+                &metrics,
+                &mut state,
+            )
+            .await
+            .unwrap()
+        );
+        let text = gather_metrics_text(&metrics);
+        assert!(
+            text.contains(
+                "evpn_ip_vrf_remote_prefix_drops{reason=\"overlay_index_no_linked_l2vni\",vrf=\"blue\"} 1"
+            ) || text.contains(
+                "evpn_ip_vrf_remote_prefix_drops{vrf=\"blue\",reason=\"overlay_index_no_linked_l2vni\"} 1"
+            ),
+            "missing current drop gauge in metrics text: {text}"
+        );
+
+        assert!(
+            publish_dataplane_intent(
+                &rib_tx,
+                &intent_tx,
+                instances,
+                ip_vrfs,
+                BumEnforcementTable::new(),
+                &BTreeSet::new(),
+                &metrics,
+                &mut state,
+            )
+            .await
+            .unwrap()
+        );
+        let text = gather_metrics_text(&metrics);
+        assert!(
+            text.contains(
+                "evpn_ip_vrf_remote_prefix_drops{reason=\"overlay_index_no_linked_l2vni\",vrf=\"blue\"} 0"
+            ) || text.contains(
+                "evpn_ip_vrf_remote_prefix_drops{vrf=\"blue\",reason=\"overlay_index_no_linked_l2vni\"} 0"
+            ),
+            "stale drop gauge should be reset in metrics text: {text}"
+        );
+    }
+
+    #[tokio::test]
     async fn handle_replace_evpn_instances_updates_effective_table_watch() {
         let initial = Arc::new(local_instance_table(100, Some("br100")));
         let replacement = Arc::new(local_instance_table_many(&[
@@ -1642,6 +1752,7 @@ mod tests {
             intent_tx,
             bum_rx,
             quarantine_rx,
+            BgpMetrics::new(),
             supervisor_shutdown,
         ));
 
@@ -1711,6 +1822,7 @@ mod tests {
             intent_tx,
             bum_rx,
             quarantine_rx,
+            BgpMetrics::new(),
             supervisor_shutdown,
         ));
 
@@ -1770,6 +1882,7 @@ mod tests {
             intent_tx,
             bum_rx,
             quarantine_rx,
+            BgpMetrics::new(),
             supervisor_shutdown,
         ));
 
@@ -1826,6 +1939,7 @@ mod tests {
             intent_tx,
             bum_rx,
             quarantine_rx,
+            BgpMetrics::new(),
             supervisor_shutdown,
         ));
 
@@ -1870,6 +1984,7 @@ mod tests {
             last_ip_vrfs: Arc::new(IpVrfTable::new()),
             last_table: RemoteMacTable::new(),
             last_ip_prefixes: RemoteIpPrefixTable::new(),
+            last_ip_prefix_drop_counts: BTreeMap::new(),
             last_bum_enforcement: BumEnforcementTable::new(),
         };
         let mut table = BumEnforcementTable::new();
@@ -1919,6 +2034,7 @@ mod tests {
             intent_tx,
             bum_rx,
             quarantine_rx,
+            BgpMetrics::new(),
             supervisor_shutdown,
         ));
 

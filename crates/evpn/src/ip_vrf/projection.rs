@@ -73,6 +73,10 @@ use crate::instance::EvpnInstanceId;
 use crate::ip_vrf::IpVrfId;
 use crate::route_target::RouteTarget;
 
+/// VRF metric label for Type 5 projection drops that happen before
+/// the route can be scoped to a configured IP-VRF.
+pub const UNSCOPED_DROP_VRF_LABEL: &str = "_unscoped";
+
 /// Trimmed best-path EVPN Type 5 record for projection input.
 ///
 /// The daemon translates `EvpnRibRoute` (`crates/rib`) into this
@@ -223,6 +227,20 @@ impl RemoteIpPrefixTable {
     pub fn drops(&self) -> &[DropReason] {
         &self.drops
     }
+
+    /// Count dropped Type 5 routes by bounded `(vrf, reason)` labels
+    /// for Prometheus / status surfaces. Prefix, gateway, next-hop,
+    /// RD, RT, and MAC values deliberately stay out of the key.
+    #[must_use]
+    pub fn drop_counts_by_vrf_reason(&self) -> BTreeMap<(String, &'static str), u64> {
+        let mut counts = BTreeMap::new();
+        for drop in &self.drops {
+            *counts
+                .entry((drop.vrf_label().to_string(), drop.reason_label()))
+                .or_insert(0) += 1;
+        }
+        counts
+    }
 }
 
 /// Why a single route was excluded from the projection.
@@ -295,6 +313,36 @@ pub enum DropReason {
         observed_vni: u32,
         configured_vni: u32,
     },
+}
+
+impl DropReason {
+    /// Stable, bounded label for Prometheus and operator summaries.
+    #[must_use]
+    pub const fn reason_label(&self) -> &'static str {
+        match self {
+            Self::NoMatchingIpVrf { .. } => "no_matching_ip_vrf",
+            Self::MissingRouterMac { .. } => "missing_router_mac",
+            Self::OverlayIndexNoLinkedL2Vni { .. } => "overlay_index_no_linked_l2vni",
+            Self::UnresolvedOverlayIndexGateway { .. } => "unresolved_overlay_index_gateway",
+            Self::AmbiguousOverlayIndexGateway { .. } => "ambiguous_overlay_index_gateway",
+            Self::SelfOriginated { .. } => "self_originated",
+            Self::L3VniMismatch { .. } => "l3vni_mismatch",
+        }
+    }
+
+    /// Operator-facing IP-VRF label, or a fixed unscoped sentinel for
+    /// drops that happen before RT / VRF resolution can run.
+    #[must_use]
+    pub fn vrf_label(&self) -> &str {
+        match self {
+            Self::OverlayIndexNoLinkedL2Vni { vrf, .. }
+            | Self::UnresolvedOverlayIndexGateway { vrf, .. }
+            | Self::AmbiguousOverlayIndexGateway { vrf, .. }
+            | Self::SelfOriginated { vrf, .. }
+            | Self::L3VniMismatch { vrf, .. } => vrf,
+            Self::NoMatchingIpVrf { .. } | Self::MissingRouterMac { .. } => UNSCOPED_DROP_VRF_LABEL,
+        }
+    }
 }
 
 /// Build a [`RemoteIpPrefixTable`] from the IP-VRF table and a stream
@@ -696,6 +744,43 @@ mod tests {
             table.drops()[0],
             DropReason::MissingRouterMac { .. }
         ));
+    }
+
+    #[test]
+    fn drop_counts_use_bounded_vrf_and_reason_labels() {
+        let vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        let no_rt = route(v4([10, 1, 0, 0], 24), "10.0.0.2", &["65000:9999"]);
+        let mut missing_router_mac = route(v4([10, 2, 0, 0], 24), "10.0.0.2", &["65000:5000"]);
+        missing_router_mac.router_mac = None;
+        let mut unresolved_overlay_1 = route(v4([10, 3, 0, 0], 24), "10.0.0.2", &["65000:5000"]);
+        unresolved_overlay_1.gateway = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let mut unresolved_overlay_2 = route(v4([10, 4, 0, 0], 24), "10.0.0.2", &["65000:5000"]);
+        unresolved_overlay_2.gateway = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11));
+
+        let table = project_ip_prefix_routes(
+            &vrfs,
+            vec![
+                no_rt,
+                missing_router_mac,
+                unresolved_overlay_1,
+                unresolved_overlay_2,
+            ],
+        );
+        let counts = table.drop_counts_by_vrf_reason();
+
+        assert_eq!(
+            counts.get(&(UNSCOPED_DROP_VRF_LABEL.to_string(), "no_matching_ip_vrf")),
+            Some(&1)
+        );
+        assert_eq!(
+            counts.get(&(UNSCOPED_DROP_VRF_LABEL.to_string(), "missing_router_mac")),
+            Some(&1)
+        );
+        assert_eq!(
+            counts.get(&("blue".to_string(), "overlay_index_no_linked_l2vni")),
+            Some(&2)
+        );
+        assert_eq!(counts.len(), 3);
     }
 
     #[test]

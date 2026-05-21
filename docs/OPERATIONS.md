@@ -459,6 +459,7 @@ cache itself has stale data.
 | `evpn_duplicate_mac_first_move_timestamp_seconds{vni,mac}` | Unix timestamp of the first observed duplicate-MAC / mobility contention event for that key |
 | `evpn_duplicate_mac_threshold_exceeded_total{vni,mac,action}` | RFC 7432 §15.1 M/N threshold crossings. `action` is `detect` or `suppress_local` from the per-instance config |
 | `evpn_duplicate_mac_quarantine_active{vni,mac}` | `1` while `action = "suppress_local"` is actively suppressing local Type 2 originations for that key; returns to `0` after timed recovery |
+| `evpn_ip_vrf_remote_prefix_drops{vrf,reason}` | Current remote Type 5 projection drops by bounded IP-VRF/reason labels. Overlay-index reasons include `overlay_index_no_linked_l2vni`, `unresolved_overlay_index_gateway`, and `ambiguous_overlay_index_gateway`; `vrf="_unscoped"` means the drop happened before a configured IP-VRF could be selected. |
 
 During M37 or a synthetic MAC-churn soak, the inject and withdraw counters
 should follow the `bridge fdb add` / `bridge fdb del` cadence. Any non-zero

@@ -87,6 +87,7 @@ pub struct BgpMetrics {
     evpn_ip_vrf_origination_suppressed: IntCounterVec,
     evpn_ip_vrf_originated_routes: IntGaugeVec,
     evpn_ip_vrf_installed_routes: IntGaugeVec,
+    evpn_ip_vrf_remote_prefix_drops: IntGaugeVec,
     evpn_fdb_nhg_drift_members_repaired: IntCounter,
     evpn_fdb_nhg_drift_groups_replaced: IntCounter,
     evpn_fdb_nhg_orphans_cleaned: IntCounter,
@@ -532,6 +533,19 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_ip_vrf_remote_prefix_drops = IntGaugeVec::new(
+            Opts::new(
+                "evpn_ip_vrf_remote_prefix_drops",
+                "Current remote EVPN Type 5 projection drops by IP-VRF and bounded \
+                 reason. Reasons include overlay-index recursive-resolution failures, \
+                 RT misses, missing Router MAC, self-originated rows, and L3VNI \
+                 mismatches. The special vrf label `_unscoped` covers drops that \
+                 happen before the route can be tied to a configured IP-VRF.",
+            ),
+            &["vrf", "reason"],
+        )
+        .expect("valid metric definition");
+
         let evpn_fdb_nhg_drift_members_repaired = IntCounter::new(
             "evpn_fdb_nhg_drift_members_repaired_total",
             "FDB-NHG per-VTEP member nexthops repaired by ADR-0059 drift recovery.",
@@ -734,6 +748,9 @@ impl BgpMetrics {
             .register(Box::new(evpn_ip_vrf_installed_routes.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_ip_vrf_remote_prefix_drops.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(evpn_fdb_nhg_drift_members_repaired.clone()))
             .expect("metric not already registered");
         registry
@@ -807,6 +824,7 @@ impl BgpMetrics {
             evpn_ip_vrf_origination_suppressed,
             evpn_ip_vrf_originated_routes,
             evpn_ip_vrf_installed_routes,
+            evpn_ip_vrf_remote_prefix_drops,
             evpn_fdb_nhg_drift_members_repaired,
             evpn_fdb_nhg_drift_groups_replaced,
             evpn_fdb_nhg_orphans_cleaned,
@@ -1206,6 +1224,14 @@ impl BgpMetrics {
     pub fn set_evpn_ip_vrf_installed_routes(&self, vrf: &str, count: i64) {
         self.evpn_ip_vrf_installed_routes
             .with_label_values(&[vrf])
+            .set(count);
+    }
+
+    /// Set the current Type 5 projection-drop gauge for one bounded
+    /// `(vrf, reason)` label pair.
+    pub fn set_evpn_ip_vrf_remote_prefix_drops(&self, vrf: &str, reason: &str, count: i64) {
+        self.evpn_ip_vrf_remote_prefix_drops
+            .with_label_values(&[vrf, reason])
             .set(count);
     }
 
@@ -1741,6 +1767,35 @@ mod tests {
         assert!(text.contains("evpn_fdb_nhg_drift_groups_replaced_total 3"));
         assert!(text.contains("evpn_fdb_nhg_orphans_cleaned_total 4"));
         assert!(text.contains("evpn_fdb_nhg_drift_disabled_total 1"));
+    }
+
+    #[test]
+    fn evpn_ip_vrf_remote_prefix_drop_gauge_is_exported() {
+        let m = BgpMetrics::new();
+        m.set_evpn_ip_vrf_remote_prefix_drops("blue", "unresolved_overlay_index_gateway", 2);
+        m.set_evpn_ip_vrf_remote_prefix_drops("_unscoped", "no_matching_ip_vrf", 1);
+
+        assert_eq!(
+            m.evpn_ip_vrf_remote_prefix_drops
+                .with_label_values(&["blue", "unresolved_overlay_index_gateway"])
+                .get(),
+            2
+        );
+        assert_eq!(
+            m.evpn_ip_vrf_remote_prefix_drops
+                .with_label_values(&["_unscoped", "no_matching_ip_vrf"])
+                .get(),
+            1
+        );
+
+        let text = gather_text(&m);
+        assert!(
+            text.contains(
+                "evpn_ip_vrf_remote_prefix_drops{reason=\"unresolved_overlay_index_gateway\",vrf=\"blue\"} 2"
+            ) || text.contains(
+                "evpn_ip_vrf_remote_prefix_drops{vrf=\"blue\",reason=\"unresolved_overlay_index_gateway\"} 2"
+            )
+        );
     }
 
     #[test]

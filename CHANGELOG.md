@@ -22,6 +22,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   edits, RR-only/no-actor delete, and runtime-added-member-VNI ES convergence
   remain fail-closed under #210.
 
+- **EVPN Type 5 projection-drop metrics.** Prometheus now exports
+  `evpn_ip_vrf_remote_prefix_drops{vrf,reason}` as a current gauge for
+  receive-side remote Type 5 routes that were kept fail-closed by the
+  projection layer. The fixed reason labels cover overlay-index recursive
+  failures (`overlay_index_no_linked_l2vni`,
+  `unresolved_overlay_index_gateway`,
+  `ambiguous_overlay_index_gateway`), RT misses, missing Router MACs,
+  self-originated routes, and L3VNI mismatches; the special
+  `vrf="_unscoped"` label covers drops that occur before a route can be tied
+  to a configured IP-VRF.
+
 - **ADR-0063 EVPN runtime convergence — single standalone IP-VRF delete.**
   `EvpnService.ApplyEvpnRuntime` can now commit exactly one deleted
   `[[evpn_ip_vrfs]]` entry when no committed L2VNI references that IP-VRF.
