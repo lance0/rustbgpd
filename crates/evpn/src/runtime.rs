@@ -4,8 +4,9 @@
 //! coordinator-owned commit gate for mutation commands. The daemon
 //! builds the public model from startup-resolved tables; the
 //! `EvpnService.ApplyEvpnRuntime` path drives this coordinator to commit
-//! a single L2VNI add or single IP-VRF add live (other shapes fail
-//! closed — see issue #210). SIGHUP file-driven EVPN edits remain
+//! narrow live mutation shapes (single L2VNI add/delete, single IP-VRF
+//! add/delete, or single Ethernet Segment add), while other shapes fail
+//! closed — see issue #210. SIGHUP file-driven EVPN edits remain
 //! restart-required.
 
 use std::{collections::BTreeMap, sync::Arc};

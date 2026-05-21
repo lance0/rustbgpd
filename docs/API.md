@@ -1253,7 +1253,7 @@ future runtime mutation semantics.
 | `ListIpVrfs`        | List configured IP-VRFs / L3VNI tenants (name, l3vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, router_mac, optional `evpn_instance` link, readiness state, originated_routes_count, installed_routes_count) — Gate 9 / ADR-0058 |
 | `GetIpVrf`          | Detail view of a single IP-VRF including the seven readiness predicates (`not_ready_reasons`) when `readiness_state != Ready` |
 | `ClearDuplicateMacQuarantine` | Clear one RFC 7432 §15.1 duplicate-MAC local-origin quarantine by `(vni, mac)`. Returns `cleared=false` when no active quarantine exists; read-only listeners reject it. |
-| `ApplyEvpnRuntime` | Validate or apply a full candidate EVPN runtime model through the ADR-0063 coordinator. `validate_only=true` returns the plan without mutation; no-op applies succeed; a single L2VNI add, single standalone L2VNI delete in L2-only deployments, single IP-VRF add, or single Ethernet Segment add converges live and commits a new generation; other non-noop shapes (linked delete, redefine, mixed or multi-element edits) still fail closed. |
+| `ApplyEvpnRuntime` | Validate or apply a full candidate EVPN runtime model through the ADR-0063 coordinator. `validate_only=true` returns the plan without mutation; no-op applies succeed; a single L2VNI add, single standalone L2VNI delete in L2-only deployments, single IP-VRF add, single standalone IP-VRF delete with no L2VNI links, or single Ethernet Segment add converges live and commits a new generation; other non-noop shapes (linked delete, redefine, mixed or multi-element edits) still fail closed. |
 
 Instance mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) remains out
 of scope. `GetEvpnRuntime` now reports the daemon-owned ADR-0063
@@ -1268,17 +1268,18 @@ MAC-only/MAC+IP/SVI Type 2 originators, the Type 5/IP-VRF originator, and
 the Linux dataplane supervisor through ordered convergence commands with
 rollback on partial failure.
 
-Four non-noop shapes converge live and commit the next generation: a
+Five non-noop shapes converge live and commit the next generation: a
 **single L2VNI add** (exactly one new `[[evpn_instances]]` entry and no
 other changes), a **single standalone L2VNI delete** in an L2-only
 deployment, a **single IP-VRF add** (exactly one new `[[evpn_ip_vrfs]]`
-entry and no other changes), and a **single Ethernet Segment add**
-(exactly one new `[[ethernet_segments]]` entry and no other changes). A
-supported add/delete originates or withdraws IMET as needed, republishes
-the relevant effective tables or desired-ES snapshot to live actors, and
-then publishes the new committed generation. Every other non-noop shape
-— linked delete, redefine, mixed L2VNI + IP-VRF edits, multi-element
-edits, or an apply on an RR-only / no-actor daemon — returns
+entry and no other changes), a **single standalone IP-VRF delete** when
+no committed L2VNI references that IP-VRF, and a **single Ethernet Segment
+add** (exactly one new `[[ethernet_segments]]` entry and no other
+changes). A supported add/delete originates or withdraws IMET as needed,
+republishes the relevant effective tables or desired-ES snapshot to live
+actors, and then publishes the new committed generation. Every other
+non-noop shape — linked delete, redefine, mixed L2VNI + IP-VRF edits,
+multi-element edits, or an apply on an RR-only / no-actor daemon — returns
 `FAILED_PRECONDITION` without advancing the generation and without
 degrading the committed model, because an
 unsupported shape is a capability gap, not an operational failure, so
@@ -1424,10 +1425,11 @@ JSON
 
 A non-`validate_only` request commits when the candidate is a no-op, a
 single L2VNI add, a single standalone L2VNI delete in an L2-only deployment,
-a single IP-VRF add, or a single Ethernet Segment add against the committed
-model; the response carries the committed generation and outcome. Every other
-non-noop shape (linked delete, redefine, a mixed L2VNI + IP-VRF request,
-multi-element edits, or an ES referencing a runtime-added member VNI) is
+a single IP-VRF add, a single standalone IP-VRF delete with no L2VNI links,
+or a single Ethernet Segment add against the committed model; the response
+carries the committed generation and outcome. Every other non-noop shape
+(linked delete, redefine, a mixed L2VNI + IP-VRF request, multi-element edits,
+or an ES referencing a runtime-added member VNI) is
 rejected with `FAILED_PRECONDITION`, leaving the prior generation committed.
 
 ---
