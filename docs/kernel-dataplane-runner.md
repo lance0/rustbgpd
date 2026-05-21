@@ -25,7 +25,7 @@ runner.
 
 5. If several runner services are registered, keep them on the same host and
    Docker daemon. The workflow builds `rustbgpd:dev` once, then fans out the
-   M39/M40/M42 jobs against that shared local image.
+   M36–M43 EVPN / FIB / TCP-AO jobs against that shared local image.
 
 ## Host Requirements
 
@@ -52,16 +52,22 @@ and VXLAN devices before deploying any topology.
 
 The protected workflow currently runs:
 
+- M36: EVPN VTEP receive-side FDB programming against FRR.
+- M37 / M37+IP: EVPN local MAC / MAC+IP origination against FRR.
+- M38: EVPN DF election + Type 1/4 origination (rustbgpd ×2).
 - M39: EVPN Type 5 symmetric Interface-less IRB against FRR.
+- M39b: EVPN auto-derived Route Targets, cross-vendor against FRR.
 - M40: EVPN aliasing dataplane ECMP via FDB nexthop groups against FRR EVPN-MH.
 - M42: ADR-0061 configured-table unicast FIB runtime against FRR.
+- M43: ADR-0062 static-neighbor TCP-AO protected session against BIRD 3.2.1
+  (conditional on the runner advertising `CONFIG_TCP_AO=y`).
 - Docker netns selectors:
   - `fdb_nhg`
   - `fib_runtime`
 
-Older privileged smokes such as M36, M37, M37+IP, and M38 remain available
-through the manual `Privileged Interop` workflow or local execution until they
-are assigned to this runner.
+(M36 / M37 / M37+IP / M38 were moved onto this protected runner when #130
+closed; the manual `Privileged Interop` workflow remains available for local
+execution.)
 
 ## Security Model
 

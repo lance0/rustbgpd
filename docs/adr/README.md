@@ -72,6 +72,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0062](0062-tcp-ao-foundation.md) | TCP-AO foundation | Accepted | 2026-05-16 |
 | [0063](0063-evpn-runtime-instance-mutation.md) | EVPN runtime instance mutation semantics | Accepted | 2026-05-17 |
 | [0064](0064-grpc-authorization.md) | gRPC per-method authorization | Accepted | 2026-05-18 |
+| [0064-annex](0064-threat-model.md) | gRPC management-plane threat model (ADR-0064 external-review annex) | Draft audit packet | 2026-05-18 |
 
 ## Template
 

@@ -17,6 +17,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 1997 | Standard communities (4-byte), including `NO_EXPORT`, `NO_ADVERTISE`, and `NO_EXPORT_SUBCONFED` well-known constants |
 | 2545 | IPv6 link-local next-hop in `MP_REACH_NLRI` (32-byte form); second-segment validated as `fe80::/10` on receive (rejects malformed advertisements) |
 | 2918 | Route Refresh capability |
+| 3032 | MPLS label: 3-byte label field as carried in EVPN NLRI |
 | 4271 | BGP-4 core: OPEN, UPDATE, NOTIFICATION, KEEPALIVE |
 | 4360 | Extended communities (route target, route origin, 4-byte AS) |
 | 4364 §4.2 | Route Distinguisher: 8-byte wire form with all three encodings (2-octet AS, IPv4, 4-octet AS) plus `Display` and `FromStr` for the canonical textual forms |
@@ -24,9 +25,12 @@ analyzers, test harnesses, MRT readers, etc.
 | 4486 | NOTIFICATION subcodes |
 | 4724 | Graceful restart capability |
 | 4760 | MP-BGP: `MP_REACH_NLRI` / `MP_UNREACH_NLRI` |
+| 4761 §3.2.5 | Default Gateway extended community (decode) |
 | 5492 | BGP capabilities |
+| 5512 | Tunnel Encapsulation extended-community layout (4-byte reserved + 2-byte value) used by the EVPN VXLAN encap sub-type |
 | 6514 §5 | PMSI Tunnel attribute (path attribute type 22): all 8 tunnel types from the IANA registry, with the EVPN-VXLAN ingress-replication form encoding the label field as the raw 24-bit VNI per RFC 8365 §5.1.3 |
 | 6793 | 4-octet AS numbers |
+| 6811 | RPKI prefix-origin validation state (typed extended community) |
 | 7313 | Enhanced Route Refresh (BoRR / EoRR markers) |
 | 7385 | PMSI Tunnel Type IANA registry — `PmsiTunnelType` preserves unknown values via an `Other(u8)` variant |
 | 7432 | EVPN: Types 1–4 (EAD, MAC/IP, IMET, Ethernet Segment) including MAC Mobility extended community (§7.7) |
