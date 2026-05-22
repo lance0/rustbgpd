@@ -552,6 +552,21 @@ impl EvpnRuntimeActorConverger {
         self.publish_ethernet_segment_runtime_snapshot(current, candidate, "delete")
     }
 
+    fn converge_ethernet_segment_redefine(
+        &self,
+        current: &rustbgpd_evpn::EvpnRuntimeModel,
+        candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
+        plan: &rustbgpd_evpn::EvpnRuntimePlan,
+    ) -> Result<(), DaemonEvpnRuntimeConvergeError> {
+        validate_single_ethernet_segment_redefine(
+            current,
+            candidate,
+            plan,
+            &self.segment_known_vnis,
+        )?;
+        self.publish_ethernet_segment_runtime_snapshot(current, candidate, "redefine")
+    }
+
     fn publish_ethernet_segment_runtime_snapshot(
         &self,
         current: &rustbgpd_evpn::EvpnRuntimeModel,
@@ -570,7 +585,7 @@ impl EvpnRuntimeActorConverger {
             ));
         }
 
-        // ES add/delete changes member VNI -> ESI bindings, which the
+        // ES add/delete/redefine changes member VNI -> ESI bindings, which the
         // Type 2 originator stamps onto local MAC / MAC+IP routes.
         // Republish the originator's runtime model (unchanged instances,
         // new vni->esi map) so it drains stale local routes and
@@ -666,6 +681,12 @@ impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
                     && plan.ethernet_segments.redefined.is_empty()
                 {
                     return self.converge_ethernet_segment_delete(current, candidate, plan);
+                }
+                if plan.ethernet_segments.added.is_empty()
+                    && plan.ethernet_segments.deleted.is_empty()
+                    && !plan.ethernet_segments.redefined.is_empty()
+                {
+                    return self.converge_ethernet_segment_redefine(current, candidate, plan);
                 }
                 return self.converge_ethernet_segment_add(current, candidate, plan);
             }
@@ -925,24 +946,7 @@ fn validate_single_ethernet_segment_add(
         )));
     };
 
-    if seg.member_vnis.is_empty() {
-        return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
-            "Ethernet Segment {added_esi} has no member VNIs"
-        )));
-    }
-    // The segment actor reads a startup-pinned instance table, so it can
-    // only resolve member VNIs present at startup. Reject (rather than
-    // letting the actor silently drop the ES) an ES referencing a VNI
-    // added at runtime. Full instances-watch convergence is #210.
-    for vni in &seg.member_vnis {
-        if !segment_known_vnis.contains(vni) {
-            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
-                "Ethernet Segment {added_esi} references member VNI {} that was not present at \
-                 startup; the segment actor cannot resolve runtime-added VNIs yet (restart required)",
-                vni.as_u32()
-            )));
-        }
-    }
+    validate_ethernet_segment_member_vnis_known(added_esi, &seg.member_vnis, segment_known_vnis)?;
 
     Ok(added_esi)
 }
@@ -994,6 +998,88 @@ fn validate_single_ethernet_segment_delete(
     }
 
     Ok(deleted_esi)
+}
+
+fn validate_single_ethernet_segment_redefine(
+    current: &rustbgpd_evpn::EvpnRuntimeModel,
+    candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
+    plan: &rustbgpd_evpn::EvpnRuntimePlan,
+    segment_known_vnis: &std::collections::BTreeSet<rustbgpd_evpn::EvpnInstanceId>,
+) -> Result<rustbgpd_wire::EthernetSegmentIdentifier, DaemonEvpnRuntimeConvergeError> {
+    if plan.evpn_instances.has_changes() {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+            "ApplyEvpnRuntime currently supports Ethernet Segment redefine only when L2VNI changes are absent",
+        ));
+    }
+    if plan.ip_vrfs.has_changes() {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+            "ApplyEvpnRuntime currently supports Ethernet Segment redefine only when IP-VRF changes are absent",
+        ));
+    }
+    if !plan.ethernet_segments.added.is_empty() || !plan.ethernet_segments.deleted.is_empty() {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+            "ApplyEvpnRuntime currently supports only redefine-only Ethernet Segment changes; add/delete is not supported in the same request",
+        ));
+    }
+    if plan.ethernet_segments.redefined.len() != 1 {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+            "ApplyEvpnRuntime currently supports exactly one redefined Ethernet Segment per request",
+        ));
+    }
+
+    let redefined_esi = plan.ethernet_segments.redefined[0];
+    if !current
+        .ethernet_segments()
+        .iter()
+        .any(|seg| seg.esi == redefined_esi)
+    {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+            "planned Ethernet Segment {redefined_esi} is not committed"
+        )));
+    }
+    let Some(seg) = candidate
+        .ethernet_segments()
+        .iter()
+        .find(|seg| seg.esi == redefined_esi)
+    else {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+            "candidate is missing planned Ethernet Segment {redefined_esi}"
+        )));
+    };
+
+    validate_ethernet_segment_member_vnis_known(
+        redefined_esi,
+        &seg.member_vnis,
+        segment_known_vnis,
+    )?;
+
+    Ok(redefined_esi)
+}
+
+fn validate_ethernet_segment_member_vnis_known(
+    esi: rustbgpd_wire::EthernetSegmentIdentifier,
+    member_vnis: &std::collections::BTreeSet<rustbgpd_evpn::EvpnInstanceId>,
+    segment_known_vnis: &std::collections::BTreeSet<rustbgpd_evpn::EvpnInstanceId>,
+) -> Result<(), DaemonEvpnRuntimeConvergeError> {
+    if member_vnis.is_empty() {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+            "Ethernet Segment {esi} has no member VNIs"
+        )));
+    }
+    // The segment actor reads a startup-pinned instance table, so it can
+    // only resolve member VNIs present at startup. Reject (rather than
+    // letting the actor silently drop the ES) an ES referencing a VNI
+    // added at runtime. Full instances-watch convergence is #210.
+    for vni in member_vnis {
+        if !segment_known_vnis.contains(vni) {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "Ethernet Segment {esi} references member VNI {} that was not present at \
+                 startup; the segment actor cannot resolve runtime-added VNIs yet (restart required)",
+                vni.as_u32()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn evpn_runtime_candidate_from_toml(
@@ -3162,6 +3248,40 @@ originator_ip = "10.0.0.1"
 "#
     }
 
+    // Redefines the existing ES so it also covers VNI 200. Used by the
+    // single-ES-redefine tests.
+    fn two_l2vni_redefined_es_runtime_candidate_toml() -> &'static str {
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100, 200]
+originator_ip = "10.0.0.1"
+"#
+    }
+
     fn l2vni_linked_ip_vrf_runtime_candidate_toml() -> &'static str {
         r#"
 [global]
@@ -3976,6 +4096,74 @@ table_id = 6000
         segment_handle.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn apply_evpn_runtime_ethernet_segment_redefine_commits_after_convergence() {
+        // Committed model has one ES over VNI 100; the candidate redefines
+        // that same ESI so it also covers VNI 200.
+        let current = runtime_candidate_from_toml(two_l2vni_one_es_runtime_candidate_toml());
+        let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+            current.instances().clone(),
+            current.ip_vrfs().clone(),
+            current.ethernet_segments().to_vec(),
+        )));
+        let apply_lock = tokio::sync::Mutex::new(());
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = runtime_converger_rib_responder(rib_rx, injects);
+
+        let instances = Arc::new(current.instances().clone());
+        let segment_handle = evpn_segment::spawn(
+            &instances,
+            current.ethernet_segments().to_vec(),
+            rib_tx.clone(),
+            None,
+            BgpMetrics::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("segment actor should spawn for non-empty ES config");
+
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(
+                tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()),
+            ),
+            dataplane: None,
+            originator: None,
+            svi: None,
+            l3_originator: None,
+            segment: Some(segment_handle.runtime_control()),
+            segment_known_vnis: Arc::new(std::collections::BTreeSet::from([
+                rustbgpd_evpn::EvpnInstanceId::new(100).unwrap(),
+                rustbgpd_evpn::EvpnInstanceId::new(200).unwrap(),
+            ])),
+        };
+
+        let response = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: two_l2vni_redefined_es_runtime_candidate_toml().to_string(),
+                validate_only: false,
+            },
+            coordinator.as_ref(),
+            &apply_lock,
+            &converger,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.outcome,
+            proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyCommitted as i32
+        );
+        assert_eq!(response.runtime.unwrap().generation, 2);
+        {
+            let guard = coordinator.lock().unwrap();
+            assert_eq!(guard.model().generation().as_u64(), 2);
+            assert_eq!(guard.model().ethernet_segments().len(), 1);
+            assert_eq!(guard.model().ethernet_segments()[0].member_vnis.len(), 2);
+        }
+        segment_handle.shutdown().await;
+    }
+
     #[test]
     fn validate_single_ethernet_segment_add_rejects_runtime_added_member_vni() {
         // Both VNI 100 and 200 are committed, but only VNI 100 was present
@@ -3989,6 +4177,45 @@ table_id = 6000
 
         let error =
             validate_single_ethernet_segment_add(&current, &candidate, &plan, &known).unwrap_err();
+        let DaemonEvpnRuntimeConvergeError::Unsupported(message) = error else {
+            panic!("expected unsupported error, got {error:?}");
+        };
+        assert!(
+            message.contains("not present at startup"),
+            "unexpected error message: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_single_ethernet_segment_redefine_accepts_one_redefined_segment() {
+        let current = runtime_model_from_candidate_toml(two_l2vni_one_es_runtime_candidate_toml());
+        let candidate =
+            runtime_candidate_from_toml(two_l2vni_redefined_es_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        let known = std::collections::BTreeSet::from([
+            rustbgpd_evpn::EvpnInstanceId::new(100).unwrap(),
+            rustbgpd_evpn::EvpnInstanceId::new(200).unwrap(),
+        ]);
+
+        let redefined_esi =
+            validate_single_ethernet_segment_redefine(&current, &candidate, &plan, &known).unwrap();
+        assert_eq!(
+            redefined_esi,
+            rustbgpd_wire::EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+        );
+    }
+
+    #[test]
+    fn validate_single_ethernet_segment_redefine_rejects_runtime_added_member_vni() {
+        let current = runtime_model_from_candidate_toml(two_l2vni_one_es_runtime_candidate_toml());
+        let candidate =
+            runtime_candidate_from_toml(two_l2vni_redefined_es_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        let known =
+            std::collections::BTreeSet::from([rustbgpd_evpn::EvpnInstanceId::new(100).unwrap()]);
+
+        let error = validate_single_ethernet_segment_redefine(&current, &candidate, &plan, &known)
+            .unwrap_err();
         let DaemonEvpnRuntimeConvergeError::Unsupported(message) = error else {
             panic!("expected unsupported error, got {error:?}");
         };
@@ -4727,6 +4954,212 @@ table_id = 6000
             assert!(
                 StdInstant::now() < drain_deadline,
                 "ES add did not republish the originator model (no local MAC drain observed)"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        originator_handle.shutdown().await;
+        segment_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_actor_converger_ethernet_segment_redefine_rebuilds_es_routes() {
+        let current = runtime_model_from_candidate_toml(two_l2vni_one_es_runtime_candidate_toml());
+        let candidate =
+            runtime_candidate_from_toml(two_l2vni_redefined_es_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        let current_instances = Arc::new(current.instances().clone());
+        let redefined_esi =
+            rustbgpd_wire::EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = runtime_converger_rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let segment_handle = evpn_segment::spawn(
+            &current_instances,
+            current.ethernet_segments().to_vec(),
+            rib_tx.clone(),
+            None,
+            BgpMetrics::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("segment actor should spawn for non-empty ES config");
+
+        let initial_deadline = StdInstant::now() + Duration::from_secs(2);
+        loop {
+            if injects.lock().await.iter().any(|key| {
+                matches!(
+                    key,
+                    rustbgpd_wire::EvpnRouteKey::EadPerEvi {
+                        esi,
+                        ethernet_tag,
+                        ..
+                    } if *esi == redefined_esi && ethernet_tag.0 == 100
+                )
+            }) {
+                break;
+            }
+            assert!(
+                StdInstant::now() < initial_deadline,
+                "timed out waiting for initial ES EAD-per-EVI route"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(
+                tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()),
+            ),
+            dataplane: None,
+            originator: None,
+            svi: None,
+            l3_originator: None,
+            segment: Some(segment_handle.runtime_control()),
+            segment_known_vnis: Arc::new(std::collections::BTreeSet::from([
+                rustbgpd_evpn::EvpnInstanceId::new(100).unwrap(),
+                rustbgpd_evpn::EvpnInstanceId::new(200).unwrap(),
+            ])),
+        };
+
+        converger
+            .converge(&current, &candidate, &plan)
+            .await
+            .unwrap();
+
+        let redefine_deadline = StdInstant::now() + Duration::from_secs(2);
+        loop {
+            let drained = withdraws.lock().await.clone();
+            let injected = injects.lock().await.clone();
+            let drained_old_evi = drained.iter().any(|key| {
+                matches!(
+                    key,
+                    rustbgpd_wire::EvpnRouteKey::EadPerEvi {
+                        esi,
+                        ethernet_tag,
+                        ..
+                    } if *esi == redefined_esi && ethernet_tag.0 == 100
+                )
+            });
+            let injected_new_evi = injected.iter().any(|key| {
+                matches!(
+                    key,
+                    rustbgpd_wire::EvpnRouteKey::EadPerEvi {
+                        esi,
+                        ethernet_tag,
+                        ..
+                    } if *esi == redefined_esi && ethernet_tag.0 == 200
+                )
+            });
+            if drained_old_evi && injected_new_evi {
+                break;
+            }
+            assert!(
+                StdInstant::now() < redefine_deadline,
+                "ES redefine did not drain/rebuild EAD-per-EVI routes; drained {drained:?}, injected {injected:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        segment_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_actor_converger_ethernet_segment_redefine_restamps_member_vni_local_macs() {
+        let current = runtime_model_from_candidate_toml(two_l2vni_one_es_runtime_candidate_toml());
+        let candidate =
+            runtime_candidate_from_toml(two_l2vni_redefined_es_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        let current_instances = Arc::new(current.instances().clone());
+
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = runtime_converger_rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let (local_tx, local_rx) = mpsc::channel(8);
+        let originator_handle = evpn_originator::spawn(
+            evpn_originator::OriginatorConfig::default(),
+            &current_instances,
+            rib_tx.clone(),
+            Some(local_rx),
+            BgpMetrics::new(),
+            evpn_originator::OriginatedLocalMacCounts::default(),
+            tokio_util::sync::CancellationToken::new(),
+            evpn_vni_to_esi_map(current.ethernet_segments()),
+        )
+        .expect("originator should spawn for non-empty current model");
+        let segment_handle = evpn_segment::spawn(
+            &current_instances,
+            current.ethernet_segments().to_vec(),
+            rib_tx.clone(),
+            None,
+            BgpMetrics::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("segment actor should spawn for non-empty ES config");
+
+        local_tx
+            .send(rustbgpd_evpn::LocalMacObservation::Learned {
+                vni: rustbgpd_evpn::EvpnInstanceId::new(200).unwrap(),
+                mac: rustbgpd_evpn::MacAddress::new([0x02, 0, 0, 0, 0, 0xee]),
+                ifindex: 20,
+            })
+            .await
+            .unwrap();
+        let mac_inject_deadline = StdInstant::now() + Duration::from_secs(2);
+        loop {
+            if injects
+                .lock()
+                .await
+                .iter()
+                .any(|key| matches!(key, rustbgpd_wire::EvpnRouteKey::MacIp { .. }))
+            {
+                break;
+            }
+            assert!(
+                StdInstant::now() < mac_inject_deadline,
+                "originator did not originate the VNI 200 local MAC"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(
+                tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()),
+            ),
+            dataplane: None,
+            originator: Some(originator_handle.runtime_control()),
+            svi: None,
+            l3_originator: None,
+            segment: Some(segment_handle.runtime_control()),
+            segment_known_vnis: Arc::new(std::collections::BTreeSet::from([
+                rustbgpd_evpn::EvpnInstanceId::new(100).unwrap(),
+                rustbgpd_evpn::EvpnInstanceId::new(200).unwrap(),
+            ])),
+        };
+
+        converger
+            .converge(&current, &candidate, &plan)
+            .await
+            .unwrap();
+
+        let drain_deadline = StdInstant::now() + Duration::from_secs(2);
+        loop {
+            if withdraws
+                .lock()
+                .await
+                .iter()
+                .any(|key| matches!(key, rustbgpd_wire::EvpnRouteKey::MacIp { .. }))
+            {
+                break;
+            }
+            assert!(
+                StdInstant::now() < drain_deadline,
+                "ES redefine did not republish the originator model (no local MAC drain observed)"
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

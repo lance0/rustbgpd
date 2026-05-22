@@ -11,6 +11,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0063 EVPN runtime convergence — single Ethernet Segment redefine.**
+  `EvpnService.ApplyEvpnRuntime` can now commit exactly one redefined
+  `[[ethernet_segments]]` entry when the candidate has no L2VNI, IP-VRF, or
+  ES add/delete changes. The daemon republishes the Type 2 originator's
+  candidate VNI-to-ESI map so member VNIs added to or removed from the segment
+  restamp local MAC routes, then publishes the full candidate ES snapshot to
+  the segment actor so Type 4, EAD-per-ES, EAD-per-EVI, and BUM enforcement
+  state drain and rebuild under the segment owner. Mixed and multi-element
+  edits, RR-only/no-actor redefine, and runtime-added-member-VNI ES convergence
+  remain fail-closed under #210.
+
 - **ADR-0063 EVPN runtime convergence — single Ethernet Segment delete.**
   `EvpnService.ApplyEvpnRuntime` can now commit exactly one deleted
   `[[ethernet_segments]]` entry when the candidate has no L2VNI, IP-VRF, or
@@ -18,9 +29,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   candidate VNI-to-ESI map so former member VNIs restamp local MAC routes back
   to single-homed ESI zero, then publishes the full candidate ES snapshot to
   the segment actor so Type 4, EAD-per-ES, EAD-per-EVI, and BUM enforcement
-  state drain under the segment owner. ES redefine, mixed and multi-element
-  edits, RR-only/no-actor delete, and runtime-added-member-VNI ES convergence
-  remain fail-closed under #210.
+  state drain under the segment owner. Mixed and multi-element edits,
+  RR-only/no-actor delete, and runtime-added-member-VNI ES convergence remain
+  fail-closed under #210.
 
 - **EVPN Type 5 projection-drop metrics.** Prometheus now exports
   `evpn_ip_vrf_remote_prefix_drops{vrf,reason}` as a current gauge for
