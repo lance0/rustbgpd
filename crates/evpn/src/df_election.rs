@@ -262,13 +262,19 @@ fn hrw_lcg_step(x: u32) -> u32 {
 
 /// `Si` for the HRW weight. RFC 8584 §3.2 defines it as the PE IPv4 address;
 /// IPv4 maps directly to its 32-bit value (the cross-vendor-interoperable
-/// case). IPv6 underlays have no standardized 128→32-bit reduction, so fold
-/// the address with the same CRC-32 used for `D(V,Es)`; this stays deterministic
-/// and self-consistent across rustbgpd PEs but is not cross-vendor guaranteed.
+/// case). IPv6 underlays have no standardized 128→32-bit reduction, so use the
+/// low-order 31 bits of the address — `Si` feeds an LCG that already reduces
+/// `mod 2^31`, so this is the natural "address as a number" input without an
+/// extra hash. Deterministic and self-consistent across rustbgpd PEs (PEs with
+/// distinct addresses that collide in the low 31 bits fall to the lowest-IP
+/// tie-break); not cross-vendor guaranteed.
 fn pe_ip_weight_input(ip: IpAddr) -> u32 {
     match ip {
         IpAddr::V4(v4) => u32::from_be_bytes(v4.octets()),
-        IpAddr::V6(v6) => crc32_ieee(&v6.octets()),
+        IpAddr::V6(v6) => {
+            let o = v6.octets();
+            u32::from_be_bytes([o[12], o[13], o[14], o[15]]) & 0x7FFF_FFFF
+        }
     }
 }
 
@@ -576,6 +582,20 @@ mod tests {
             42_737_338
         );
         assert_eq!(hrw_weight(vni(100), esi(1), ip("10.0.0.1")), 664_511_525);
+    }
+
+    #[test]
+    fn hrw_weight_ipv6_uses_low_order_31_bits() {
+        // `::a00:1` has low 32 bits 0x0A000001 — the same integer as 10.0.0.1
+        // and within 31 bits, so Si (and therefore the whole weight) matches
+        // the IPv4 case. Confirms IPv6 folds to the low-order 31 bits, not a
+        // separate hash.
+        let v6: IpAddr = "::a00:1".parse().unwrap();
+        assert_eq!(
+            hrw_weight(vni(100), esi(1), v6),
+            hrw_weight(vni(100), esi(1), ip("10.0.0.1"))
+        );
+        assert_eq!(hrw_weight(vni(100), esi(1), v6), 664_511_525);
     }
 
     #[test]

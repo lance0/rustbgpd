@@ -65,14 +65,18 @@ The Gate 8 surface is:
   known-answer unit test pins the digest + weight against an
   independent computation. The IPv4 weight is cross-vendor exact
   (the interoperable VXLAN-underlay case); IPv6 `Si` has no
-  standardized 128→32-bit reduction, so it folds the address with the
-  same CRC-32 — deterministic and self-consistent across rustbgpd PEs
-  but not cross-vendor guaranteed. **HRW has no cross-vendor interop
-  smoke yet** (M38 is rustbgpd×2, which any deterministic hash
-  satisfies); a protected smoke against an FRR/other HRW peer is the
-  remaining validation. RFC 8584 algorithm negotiation falls back to
-  default service carving when candidates disagree or omit the DF
-  Election Extended Community.
+  standardized 128→32-bit reduction, so it uses the address's
+  low-order 31 bits (the LCG already reduces `mod 2^31`) —
+  deterministic and self-consistent across rustbgpd PEs but not
+  cross-vendor guaranteed. The M46 rustbgpd×2 smoke exercises the
+  config → DF Election extcomm → unanimous-HRW negotiation → election
+  → failover path over real BGP (using a VNI where the HRW winner
+  differs from the modulo winner, so it positively proves HRW is in
+  effect); a true cross-vendor HRW smoke is not possible because FRR
+  implements RFC 9785 preference-DF, not HRW, so the known-answer test
+  is the cross-vendor conformance guarantee. RFC 8584 algorithm
+  negotiation falls back to default service carving when candidates
+  disagree or omit the DF Election Extended Community.
 - **Three Type 1/4 originator state machines** in
   `crates/evpn/src/origination_es.rs`: `LocalEsOriginator` (Type 4
   ES), `LocalEadPerEsOriginator` (Type 1 EAD-per-ES with MAX_ET

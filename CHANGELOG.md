@@ -23,7 +23,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   M46 two-PE rustbgpd HRW interop smoke (over a VNI where the HRW winner differs
   from the modulo winner) plus a known-answer unit test pinning the weight to
   the RFC value; cross-vendor HRW is not testable against FRR, which implements
-  RFC 9785 preference-DF rather than HRW.
+  RFC 9785 preference-DF rather than HRW. IPv6 originator addresses use the
+  low-order 31 bits as the HRW `Si` input (self-consistent; IPv4 is the
+  cross-vendor-exact case).
 - **ADR-0063 EVPN runtime convergence — single IP-VRF redefine.**
   `EvpnService.ApplyEvpnRuntime` can now commit exactly one redefined
   `[[evpn_ip_vrfs]]` entry when the candidate has no L2VNI or Ethernet Segment
