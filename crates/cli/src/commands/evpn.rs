@@ -164,6 +164,7 @@ pub async fn add_mac_ip(
             prefix: String::new(),
             prefix_length: 0,
             router_mac: String::new(),
+            gateway: String::new(),
         })
         .await?;
     output::print_result(json, "add_evpn", "", "EVPN Type 2 route added");
@@ -198,6 +199,7 @@ pub async fn add_imet(
             prefix: String::new(),
             prefix_length: 0,
             router_mac: String::new(),
+            gateway: String::new(),
         })
         .await?;
     output::print_result(json, "add_evpn", "", "EVPN Type 3 route added");
@@ -212,12 +214,18 @@ pub async fn add_ip_prefix(
     prefix: String,
     label: u32,
     next_hop: String,
+    gateway: Option<String>,
     router_mac: Option<String>,
     route_targets: Vec<String>,
     disable_vxlan_encap: bool,
     json: bool,
 ) -> Result<(), CliError> {
     let router_mac = router_mac
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
+    let gateway = gateway
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -242,6 +250,7 @@ pub async fn add_ip_prefix(
             prefix,
             prefix_length,
             router_mac: router_mac.unwrap_or_default(),
+            gateway: gateway.unwrap_or_default(),
         })
         .await?;
     output::print_result(json, "add_evpn", "", "EVPN Type 5 route added");
@@ -251,7 +260,7 @@ pub async fn add_ip_prefix(
 fn validate_ip_prefix_ethernet_tag(ethernet_tag: u32) -> Result<(), CliError> {
     if ethernet_tag != 0 {
         return Err(CliError::Argument(
-            "EVPN Type 5 pure/interface-less injection requires --ethernet-tag 0".into(),
+            "EVPN Type 5 injection requires --ethernet-tag 0".into(),
         ));
     }
     Ok(())

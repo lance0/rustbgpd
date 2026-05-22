@@ -982,7 +982,7 @@ export policy).
 | `DeletePath` | Withdraw a previously injected route |
 | `AddFlowSpec` | Inject a FlowSpec rule with actions |
 | `DeleteFlowSpec` | Withdraw a previously injected FlowSpec rule |
-| `AddEvpnRoute` | Inject an EVPN Type 2 (MAC/IP), Type 3 (IMET), or pure/interface-less Type 5 (IP Prefix) route |
+| `AddEvpnRoute` | Inject an EVPN Type 2 (MAC/IP), Type 3 (IMET), or Type 5 (IP Prefix) route; Type 5 may be interface-less or carry an overlay-index gateway |
 | `DeleteEvpnRoute` | Withdraw a previously injected EVPN route by its EVPN route key |
 
 ### Inject an IPv4 route
@@ -1090,7 +1090,9 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 Encapsulation extended community (tunnel-type=8) is attached
 automatically. Set `disable_vxlan_encap: true` for MPLS-over-GRE
 deployments. The injection API supports `route_type` 2 (MAC/IP), 3
-(IMET), and pure/interface-less 5 (IP Prefix). Native Gate 9 Type 5
+(IMET), and 5 (IP Prefix). Type 5 injection can use the default
+interface-less gateway-zero shape or an explicit overlay-index
+Gateway Address. Native Gate 9 Type 5
 origination from `[[evpn_ip_vrfs]]` shipped in v0.18.0 (slice 6 PR A
 #77): the daemon dumps kernel routes per
 IP-VRF `table_id`, classifies them (connected/static/manual only —
@@ -1139,15 +1141,17 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.InjectionService/AddEvpnRoute
 ```
 
-Type 5 injection is intentionally pure/interface-less in this slice:
-ESI and Gateway IP are encoded as zero, `label` carries the L3VNI in
-the RFC 8365 VXLAN label slot, `ethernet_tag` must be 0, and
-`next_hop` is the VTEP loopback. The prefix and next-hop must use the
-same IP family. `router_mac` is required when VXLAN encapsulation is
-enabled (the default) and is advertised as the RFC 9135 Router MAC
-extended community. Omit it when `disable_vxlan_encap` is true. At
-least one `route_targets` entry is required for Type 5 injection.
-Overlay-index IRB via non-zero Gateway IP or ESI is not exposed yet.
+By default, Type 5 injection is interface-less: ESI and Gateway IP are
+encoded as zero, `label` carries the L3VNI in the RFC 8365 VXLAN label
+slot, `ethernet_tag` must be 0, and `next_hop` is the VTEP loopback.
+Set optional `gateway` to inject a controller-supplied overlay-index
+Type 5 route with a non-zero Gateway Address; the prefix, gateway, and
+next-hop must use the same IP family. Non-zero ESI overlay-index
+injection is not exposed. `router_mac` is required when VXLAN
+encapsulation is enabled (the default) and is advertised as the RFC
+9135 Router MAC extended community. Omit it when
+`disable_vxlan_encap` is true. At least one `route_targets` entry is
+required for Type 5 injection.
 
 ### Withdraw an EVPN route
 
@@ -1165,8 +1169,9 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 
 The withdrawal key (route type + RD + ethernet tag + MAC + optional IP
 for Type 2; route type + RD + ethernet tag + originator IP for Type 3;
-route type + RD + `ethernet_tag=0` + prefix/prefix length for Type 5
-in this pure/interface-less slice) matches the EVPN route identity.
+route type + RD + `ethernet_tag=0` + prefix/prefix length for Type 5)
+matches the EVPN route identity used by rustbgpd. Type 5 gateway is
+payload, not part of the local route key.
 Omit `ip` when withdrawing a MAC-only Type 2 route or the key will not
 match. Requests that include key fields from another route type are
 rejected with `INVALID_ARGUMENT`. Returns `NOT_FOUND` if no such route

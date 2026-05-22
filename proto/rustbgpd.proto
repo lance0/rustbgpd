@@ -1390,15 +1390,15 @@ message ListEvpnResponse {
 }
 
 // Controller-injected EVPN route. Supports Type 2 (MAC/IP), Type 3
-// (IMET), and pure/interface-less Type 5 (IP Prefix).
+// (IMET), and Type 5 (IP Prefix). Type 5 may be pure/interface-less
+// (empty gateway) or carry a controller-supplied overlay-index gateway.
 message AddEvpnRouteRequest {
   // EVPN route type. Only 2, 3, and 5 are accepted; other values
   // return INVALID_ARGUMENT.
   uint32 route_type = 1;
   // Route Distinguisher, "asn:value" / "ip:value". Required.
   string rd = 2;
-  // Ethernet Tag ID (decimal). Default 0. Must be 0 for pure/interface-less
-  // Type 5 injection.
+  // Ethernet Tag ID (decimal). Default 0. Must be 0 for Type 5 injection.
   uint32 ethernet_tag = 3;
   // MAC address "aa:bb:cc:dd:ee:ff" (Type 2 only). Required for Type 2.
   string mac = 4;
@@ -1432,6 +1432,11 @@ message AddEvpnRouteRequest {
   // Router MAC extended community value (Type 5 VXLAN only),
   // "aa:bb:cc:dd:ee:ff". Required when `disable_vxlan_encap` is false.
   string router_mac = 13;
+  // Optional Gateway IP (Type 5 only). Empty encodes the interface-less
+  // zero gateway for the prefix family; non-empty enables overlay-index
+  // Type 5 injection and must use the same address family as `prefix`
+  // and `next_hop`.
+  string gateway = 14;
 }
 
 message AddEvpnRouteResponse {}
@@ -1442,8 +1447,7 @@ message DeleteEvpnRouteRequest {
   // or IP prefix (Type 5).
   uint32 route_type = 1;
   string rd = 2;
-  // Ethernet Tag ID (decimal). Must be 0 for pure/interface-less Type 5
-  // withdrawals.
+  // Ethernet Tag ID (decimal). Must be 0 for Type 5 withdrawals.
   uint32 ethernet_tag = 3;
   string mac = 4;
   string ip = 5;

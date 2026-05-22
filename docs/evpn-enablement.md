@@ -304,7 +304,9 @@ Unlocks: SDN controllers / orchestration systems pushing EVPN routes
 directly into the RR via `AddEvpnRoute` / `DeleteEvpnRoute` gRPC.
 Controller injection supports Type 2 (MAC/IP), Type 3 (IMET), and Type 5
 (IP Prefix, RFC 9136 — shipped v0.25.0 via `AddEvpnRoute`/`DeleteEvpnRoute`
-+ `rustbgpctl evpn add-ip-prefix`, M45 smoke). Native Type 1/4
++ `rustbgpctl evpn add-ip-prefix`, M45 smoke). Type 5 injection accepts the
+default interface-less gateway-zero shape and a controller-supplied
+overlay-index Gateway Address with ESI still zero. Native Type 1/4
 multi-homing origination ships through `[[ethernet_segments]]`, but
 controller injection for those route types is not exposed.
 
@@ -639,7 +641,9 @@ Shipped pieces (v0.18.0):
   `evpn_ip_vrf_remote_prefix_drops{vrf,reason}` with fixed reason
   labels and the `IpVrfState.remote_prefix_drop_counts` API / CLI field, so
   recursive failures are visible without prefix/MAC cardinality in metrics or
-  status output.
+  status output. Controller injection can now synthesize non-zero Gateway
+  Address Type 5 routes for targeted overlay-index testing without enabling
+  native local overlay-index origination.
 - Linux `ip_vrf::dump_ip_vrf_observations` (VRF + L3 VXLAN
   rtnetlink dumps), `Dataplane::probe_ip_vrfs` trait method +
   Linux implementation, `IpVrfTable` plumbed through
