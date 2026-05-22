@@ -260,7 +260,7 @@ pub async fn add_ip_prefix(
 fn validate_ip_prefix_ethernet_tag(ethernet_tag: u32) -> Result<(), CliError> {
     if ethernet_tag != 0 {
         return Err(CliError::Argument(
-            "EVPN Type 5 injection requires --ethernet-tag 0".into(),
+            "EVPN Type 5 requires --ethernet-tag 0".into(),
         ));
     }
     Ok(())
