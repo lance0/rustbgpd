@@ -3,12 +3,11 @@
 **Status:** Accepted; partially implemented — single L2VNI add, single L2VNI
 delete when the VNI is not an Ethernet Segment member, single IP-VRF add,
 single standalone IP-VRF delete, and single Ethernet Segment add/delete/redefine commit live
-via `EvpnService.ApplyEvpnRuntime`; L2VNI/IP-VRF redefine / mixed /
-multi-element edits, linked IP-VRF delete, and ES-aware L2VNI delete shapes still fail closed (remaining shapes tracked in
-[#210](https://github.com/lance0/rustbgpd/issues/210)). The segment actor reads
-a startup-pinned instance table, so an ES whose member VNI was added at runtime
-is rejected (restart-required), not silently dropped — full instances-watch
-convergence is also #210.
+via `EvpnService.ApplyEvpnRuntime`; ES add/redefine can bind member VNIs added
+by a prior live L2VNI add when the segment actor already exists. L2VNI/IP-VRF
+redefine / mixed / multi-element edits, linked IP-VRF delete, and ES-aware
+L2VNI delete shapes still fail closed (remaining shapes tracked in
+[#210](https://github.com/lance0/rustbgpd/issues/210)).
 **Date:** 2026-05-17 (implementation in progress through v0.25.0)
 
 ## Context
@@ -140,16 +139,18 @@ silently advance the live EVPN runtime model.
   a still-present IP-VRF; linked IP-VRF delete, IP-VRF redefine, and mixed tenant teardown
   still fail closed.
 - The Ethernet Segment actor owns a cloneable runtime control surface for
-  complete desired-ES snapshots and remains the sole Type 1/4 owner. A single ES
-  add, delete, or redefine now commits live by republishing the full desired-ES snapshot
-  through that owner (it drains/rebuilds Type 4, EAD-per-ES, EAD-per-EVI, and
-  BUM enforcement state internally). The actor's instance view is startup-pinned,
-  so an ES whose member VNI was added by a prior runtime L2VNI add is rejected
-  (restart-required) by the converger rather than silently dropped; the
-  full instances-watch convergence remains in #210.
+  complete desired-ES snapshots and current EVPN instance snapshots, and
+  remains the sole Type 1/4 owner. A single ES add, delete, or redefine now
+  commits live by republishing the full desired-ES snapshot through that owner
+  (it drains/rebuilds Type 4, EAD-per-ES, EAD-per-EVI, and BUM enforcement
+  state internally). L2VNI add/delete convergence also republishes the
+  candidate instance table to an already-running segment actor, so a later ES
+  add/redefine can bind a member VNI added at runtime. ES add/redefine still
+  fails closed if no segment actor was spawned at startup or if a member VNI is
+  absent from the candidate runtime instance table.
 - L2VNI/IP-VRF redefine, mixed / multi-element edits, linked IP-VRF delete / tenant teardown,
-  ES-aware L2VNI delete, and runtime-added-member-VNI ES
-  convergence are still validated as pure fail-closed plans; their live
+  and ES-aware L2VNI delete convergence are still validated as pure
+  fail-closed plans; their live
   convergence is the remaining work in
   [#210](https://github.com/lance0/rustbgpd/issues/210).
 - Issue #133 (design) is resolved and closed; the remaining implementation is
