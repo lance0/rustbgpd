@@ -74,10 +74,14 @@ pub struct EthernetSegment {
 
 /// DF election algorithm (RFC 7432 §8.5 + RFC 8584 §3).
 ///
-/// `DefaultModulo` is the only algorithm Gate 8 implements. The
-/// other variants are reserved so the wire-side codec exposure is
-/// forward-compat — peers may negotiate them and the local PE will
-/// surface a typed mismatch rather than silently degrading.
+/// `DefaultModulo` and `HighestRandomWeight` are implemented. The
+/// preference variants are reserved for the RFC 9785 follow-up so the
+/// wire-side codec exposure is forward-compatible. Per RFC 8584 §2.2
+/// negotiation: if every candidate unanimously advertises a reserved
+/// variant the election engine returns a typed
+/// [`crate::df_election::DfElectionError::AlgorithmNotImplemented`]
+/// (the caller logs + skips rather than mis-electing); a *mixed*
+/// deployment instead falls back to `DefaultModulo` service carving.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DfAlgorithm {
     /// RFC 7432 §8.5 — service carving. Sort candidate PEs by
@@ -87,25 +91,29 @@ pub enum DfAlgorithm {
     #[default]
     DefaultModulo,
     /// RFC 8584 §3 — Highest Random Weight. Algorithm ID 1.
-    /// Reserved; election engine returns
-    /// [`crate::df_election::DfElectionError::AlgorithmNotImplemented`].
     HighestRandomWeight,
-    /// RFC 8584 §3 — Preference-based. Algorithm ID 2. Reserved;
+    /// RFC 9785 — Highest-Preference. Algorithm ID 2. Reserved;
     /// election engine returns
     /// [`crate::df_election::DfElectionError::AlgorithmNotImplemented`].
-    PreferenceBased,
+    HighestPreference,
+    /// RFC 9785 — Lowest-Preference. Algorithm ID 3. Reserved;
+    /// election engine returns
+    /// [`crate::df_election::DfElectionError::AlgorithmNotImplemented`].
+    LowestPreference,
 }
 
 impl DfAlgorithm {
-    /// Wire-side algorithm ID per RFC 8584 §3.1's DF Election
-    /// extcomm. Used both by the Type 4 origination side and by the
-    /// state machine's mismatch-tiebreak code path (lower ID wins).
+    /// Wire-side algorithm ID per RFC 8584 §3.1's DF Election extcomm,
+    /// used by the Type 4 origination/decode path. Negotiation is
+    /// unanimous-or-`DefaultModulo` (see
+    /// [`crate::df_election`]); the ID is not a mismatch tiebreak.
     #[must_use]
     pub const fn algorithm_id(self) -> u8 {
         match self {
             Self::DefaultModulo => 0,
             Self::HighestRandomWeight => 1,
-            Self::PreferenceBased => 2,
+            Self::HighestPreference => 2,
+            Self::LowestPreference => 3,
         }
     }
 
@@ -116,7 +124,8 @@ impl DfAlgorithm {
     pub const fn from_algorithm_id(id: u8) -> Self {
         match id {
             1 => Self::HighestRandomWeight,
-            2 => Self::PreferenceBased,
+            2 => Self::HighestPreference,
+            3 => Self::LowestPreference,
             _ => Self::DefaultModulo,
         }
     }
@@ -159,7 +168,8 @@ mod tests {
         for alg in [
             DfAlgorithm::DefaultModulo,
             DfAlgorithm::HighestRandomWeight,
-            DfAlgorithm::PreferenceBased,
+            DfAlgorithm::HighestPreference,
+            DfAlgorithm::LowestPreference,
         ] {
             assert_eq!(DfAlgorithm::from_algorithm_id(alg.algorithm_id()), alg);
         }
@@ -171,7 +181,7 @@ mod tests {
         // algorithm fall back to default-modulo. Unknown IDs (255,
         // 99, etc.) decode to DefaultModulo so the local PE doesn't
         // crash on a future RFC's algorithm.
-        for id in [3u8, 99, 200, 255] {
+        for id in [4u8, 99, 200, 255] {
             assert_eq!(
                 DfAlgorithm::from_algorithm_id(id),
                 DfAlgorithm::DefaultModulo
@@ -198,14 +208,14 @@ mod tests {
 
     #[test]
     fn algorithm_ord_matches_id_ord() {
-        // Algorithm ID is the wire-tiebreak field per RFC 8584 §3,
-        // and the lowest ID wins. Ord on the enum follows declaration
-        // order, which matches algorithm_id ordering — pin that
-        // invariant so a future re-ordering doesn't silently break
-        // the tiebreak.
+        // Ord on the enum follows declaration order, which matches
+        // algorithm_id ordering. Pin that invariant so future
+        // algorithm additions don't accidentally reorder telemetry or
+        // debug output.
         let mut algs = vec![
-            DfAlgorithm::PreferenceBased,
+            DfAlgorithm::LowestPreference,
             DfAlgorithm::DefaultModulo,
+            DfAlgorithm::HighestPreference,
             DfAlgorithm::HighestRandomWeight,
         ];
         algs.sort();
@@ -214,7 +224,8 @@ mod tests {
             vec![
                 DfAlgorithm::DefaultModulo,
                 DfAlgorithm::HighestRandomWeight,
-                DfAlgorithm::PreferenceBased,
+                DfAlgorithm::HighestPreference,
+                DfAlgorithm::LowestPreference,
             ]
         );
     }

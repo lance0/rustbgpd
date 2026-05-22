@@ -16,11 +16,12 @@ ASPA path verification, FlowSpec, BMP, MRT, and full gRPC/CLI management
 are implemented. Default-off Linux FIB integration exists for RFC 7999
 discard routes and configured unicast FIB tables; broader router features
 remain future work. Validated with a workspace test suite, fuzz targets,
-and 48 automated interop scenarios — primarily against FRR 10.3.1, plus
+and an automated interop suite — primarily against FRR 10.3.1, plus
 GoBGP 4.3.0 and StayRTR-backed RTR coverage; BIRD 2.0.12 has documented
-M0 containerlab validation. Eighteen interop tests run on every PR; the
+M0 containerlab validation. A foundation tier runs on every PR; the
 remaining scripts and privileged kernel dataplane smokes are local /
-manual gates for runtime or kernel reasons.
+manual gates for runtime or kernel reasons. See `docs/INTEROP.md` for
+the full matrix.
 
 > **Alpha expectations:** The config format and gRPC API are not yet frozen.
 > Breaking changes are possible between minor versions. The daemon runs on
@@ -273,7 +274,7 @@ and more explicit internal architecture.
 |----------|---------|
 | Workspace tests | Unit, integration, and property tests (`cargo test --workspace`) |
 | Wire fuzzing | libFuzzer harnesses on message and attribute decoders, CI smoke + nightly extended |
-| Interop suites | 48 automated interop scenarios, primarily against FRR 10.3.1 plus GoBGP 4.3.0 and StayRTR-backed RTR coverage; BIRD 2.0.12 has documented M0 containerlab validation. Eighteen interop tests are gated on every PR; privileged / longer kernel smokes run locally. |
+| Interop suites | Automated interop suite (see `docs/INTEROP.md` for the full matrix), primarily against FRR 10.3.1 plus GoBGP 4.3.0 and StayRTR-backed RTR coverage; BIRD 2.0.12 has documented M0 containerlab validation. A foundation tier is gated on every PR; privileged / longer kernel smokes run locally. |
 | Protocol coverage | RFC 4271 FSM + UPDATE validation, MP-BGP, GR/LLGR, Add-Path, FlowSpec, RPKI, ASPA, Extended Messages, Extended Next Hop, Route Refresh/ERR, RFC 7999 BLACKHOLE receiver scoping + opt-in FIB discard, ADR-0061 configured-table unicast Linux FIB programming, RFC 8326 Graceful Shutdown |
 | Architecture decisions | ADRs documenting every protocol and design choice ([docs/adr/](docs/adr/)) |
 
@@ -339,7 +340,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
 | **Not yet supported** | EVPN runtime instance ES-member L2VNI redefine / `ip_vrf` relink, linked IP-VRF delete / tenant teardown, ES-aware L2VNI delete, L3VNI/device/table IP-VRF redefine, mixed / multi-element edits (single L2VNI add/delete/redefine, single IP-VRF add/standalone delete/redefine with unchanged L3VNI/device/table identity, and single Ethernet Segment add/delete/redefine commit live), RFC 9135 overlay-index IRB local origination, EVPN route types 6-11 / MPLS / PBB / MVPN, VPNv4/v6, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
-| **Tests** | Workspace test suite, fuzz targets, 48 automated interop scenarios primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (18 interop tests gated on every PR; privileged kernel dataplane smokes run locally) |
+| **Tests** | Workspace test suite, fuzz targets, an automated interop suite (see `docs/INTEROP.md`) primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (foundation tier gated on every PR; privileged kernel dataplane smokes run locally) |
 
 ## Documentation
 

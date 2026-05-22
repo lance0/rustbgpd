@@ -2582,18 +2582,23 @@ fn parse_ethernet_segment(
 
     let df_algorithm = match cfg.df_algorithm.as_str() {
         "default-modulo" => DfAlgorithm::DefaultModulo,
-        "highest-random-weight" | "preference-based" => {
+        "highest-random-weight" => DfAlgorithm::HighestRandomWeight,
+        "preference-based" | "highest-preference" | "lowest-preference" => {
             return Err(ConfigError::InvalidEthernetSegment {
                 reason: format!(
-                    "df_algorithm {:?}: reserved for a future Gate 8b/8c implementation; \
-                     Gate 8 accepts only \"default-modulo\"",
+                    "df_algorithm {:?}: reserved for a future RFC 9785 preference-based \
+                     DF election implementation; supported values are \"default-modulo\" \
+                     and \"highest-random-weight\"",
                     cfg.df_algorithm
                 ),
             });
         }
         other => {
             return Err(ConfigError::InvalidEthernetSegment {
-                reason: format!("df_algorithm {other:?}: must be \"default-modulo\""),
+                reason: format!(
+                    "df_algorithm {other:?}: must be \"default-modulo\" or \
+                     \"highest-random-weight\""
+                ),
             });
         }
     };

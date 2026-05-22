@@ -1,0 +1,41 @@
+# M46 PE2: higher-IP candidate of a 2-PE Ethernet Segment running the
+# RFC 8584 §3.2 Highest Random Weight DF algorithm. For VNI 200 the
+# HRW weights elect this PE (10.0.0.2) as DF, even though default
+# service carving (`200 mod 2` = slot 0 → lower IP) would elect
+# 10.0.0.1. Asserting this PE is DF proves HRW is in effect.
+[global]
+asn = 65000
+router_id = "10.0.0.2"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+prometheus_addr = "0.0.0.0:9179"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[evpn_instances]]
+vni = 200
+rd = "10.0.0.2:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.2"
+bridge = "br200"
+advertise_svi_mac = false
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [200]
+df_preference = 32768
+df_algorithm = "highest-random-weight"
+originator_ip = "10.0.0.2"
+
+[[neighbors]]
+address = "10.0.0.1"
+remote_asn = 65000
+description = "pe1"
+hold_time = 30
+families = ["l2vpn_evpn"]
+
+[security.grpc]
+enforcement = "legacy"

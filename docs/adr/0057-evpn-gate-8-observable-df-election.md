@@ -44,21 +44,39 @@ The Gate 8 surface is:
 
 - **Domain types** in `crates/evpn/src/segment.rs`: `EthernetSegment`,
   `DfAlgorithm` (`DefaultModulo`, `HighestRandomWeight`,
-  `PreferenceBased`), `DfRole`. The runtime config is parsed from
+  `HighestPreference`, `LowestPreference`), `DfRole`. The runtime config is parsed from
   `[[ethernet_segments]]` in `Config::resolve_ethernet_segments`;
-  Gate 8 config accepts only `DefaultModulo` with the default
-  preference `32768`, while the non-default enum variants and
-  preference field are retained for wire/decode compatibility and
-  the later Gate 8b/8c implementation.
+  Gate 8 config accepts `DefaultModulo` with the default preference
+  `32768`; the HRW follow-up additionally accepts
+  `HighestRandomWeight`. The preference field and RFC 9785
+  preference variants are retained for wire/decode compatibility and
+  a later implementation.
 - **Pure DF election state machine** in
   `crates/evpn/src/df_election.rs`: `DfElection::run` takes the
   candidate set + the local PE's originator IP and returns
   `BTreeMap<EvpnInstanceId, DfRole>`. RFC 7432 §8.5 service carving
   (sort candidates by originator IP ascending; the candidate at slot
-  `vni mod n` is the DF). RFC 8584 §3 algorithm negotiation
-  resolves to the lowest agreed algorithm-id; `DefaultModulo` is
-  the universal floor, so an algorithm disagreement always reduces
-  to default service carving rather than failing the segment.
+  `vni mod n` is the DF). RFC 8584 §3.2 Highest Random Weight
+  selects the PE with the highest `Wrand(V, ESI, PE-IP)`, computed
+  byte-for-byte per the RFC: `D(V,Es)` is a 31-bit CRC-32 (IEEE,
+  MSB discarded) of the 4-octet Ethernet Tag + 10-octet ESI, fed
+  through the `(1103515245·x + 12345) mod 2^31` LCG, with the
+  numerically lowest PE IP as the equal-weight tie-break. A
+  known-answer unit test pins the digest + weight against an
+  independent computation. The IPv4 weight is cross-vendor exact
+  (the interoperable VXLAN-underlay case); IPv6 `Si` has no
+  standardized 128→32-bit reduction, so it uses the address's
+  low-order 31 bits (the LCG already reduces `mod 2^31`) —
+  deterministic and self-consistent across rustbgpd PEs but not
+  cross-vendor guaranteed. The M46 rustbgpd×2 smoke exercises the
+  config → DF Election extcomm → unanimous-HRW negotiation → election
+  → failover path over real BGP (using a VNI where the HRW winner
+  differs from the modulo winner, so it positively proves HRW is in
+  effect); a true cross-vendor HRW smoke is not possible because FRR
+  implements RFC 9785 preference-DF, not HRW, so the known-answer test
+  is the cross-vendor conformance guarantee. RFC 8584 algorithm
+  negotiation falls back to default service carving when candidates
+  disagree or omit the DF Election Extended Community.
 - **Three Type 1/4 originator state machines** in
   `crates/evpn/src/origination_es.rs`: `LocalEsOriginator` (Type 4
   ES), `LocalEadPerEsOriginator` (Type 1 EAD-per-ES with MAX_ET

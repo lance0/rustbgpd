@@ -216,6 +216,18 @@ pub struct MpUnreachNlri {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExtendedCommunity(u64);
 
+/// Decoded DF Election Extended Community (RFC 8584 / RFC 9785).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DfElectionExtendedCommunity {
+    /// Five-bit DF algorithm ID.
+    pub algorithm_id: u8,
+    /// Two-octet capability bitmap.
+    pub capabilities: u16,
+    /// DF Preference. Defined only for RFC 9785 preference algorithms;
+    /// `None` for DefaultModulo/HRW where the trailing bytes are reserved.
+    pub preference: Option<u16>,
+}
+
 impl ExtendedCommunity {
     /// Create from a raw 8-byte value.
     #[must_use]
@@ -402,6 +414,42 @@ impl ExtendedCommunity {
     #[must_use]
     pub fn es_import_rt(mac: [u8; 6]) -> Self {
         let raw = u64::from_be_bytes([0x06, 0x02, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]]);
+        Self(raw)
+    }
+
+    /// Decode as DF Election Extended Community (RFC 8584 §2.2,
+    /// updated by RFC 9785 §3). Type 0x06, subtype 0x06.
+    #[must_use]
+    pub fn as_df_election(self) -> Option<DfElectionExtendedCommunity> {
+        if self.type_byte() & 0x3F != 0x06 || self.subtype() != 0x06 {
+            return None;
+        }
+        let v = self.value_bytes();
+        let algorithm_id = v[0] & 0x1f;
+        let capabilities = u16::from_be_bytes([v[1], v[2]]);
+        let preference = match algorithm_id {
+            2 | 3 => Some(u16::from_be_bytes([v[4], v[5]])),
+            _ => None,
+        };
+        Some(DfElectionExtendedCommunity {
+            algorithm_id,
+            capabilities,
+            preference,
+        })
+    }
+
+    /// Construct a DF Election Extended Community (RFC 8584 §2.2,
+    /// RFC 9785 §3).
+    ///
+    /// `algorithm_id` is masked to the five-bit DF Alg field. For
+    /// `DefaultModulo` and HRW, pass `None` for `preference` so the
+    /// reserved trailing bytes are emitted as zero.
+    #[must_use]
+    pub fn df_election(algorithm_id: u8, capabilities: u16, preference: Option<u16>) -> Self {
+        let alg = algorithm_id & 0x1f;
+        let cap = capabilities.to_be_bytes();
+        let pref = preference.unwrap_or(0).to_be_bytes();
+        let raw = u64::from_be_bytes([0x06, 0x06, alg, cap[0], cap[1], 0, pref[0], pref[1]]);
         Self(raw)
     }
 
@@ -1800,6 +1848,35 @@ mod tests {
         assert_eq!(e.as_es_import_rt(), Some(mac));
         assert_eq!(e.type_byte(), 0x06);
         assert_eq!(e.subtype(), 0x02);
+    }
+
+    #[test]
+    fn ext_comm_df_election_hrw_roundtrips_reserved_bytes_zero() {
+        let ec = ExtendedCommunity::df_election(1, 0, None);
+        assert_eq!(ec.type_byte(), 0x06);
+        assert_eq!(ec.subtype(), 0x06);
+        assert_eq!(
+            ec.as_df_election(),
+            Some(DfElectionExtendedCommunity {
+                algorithm_id: 1,
+                capabilities: 0,
+                preference: None,
+            })
+        );
+        assert_eq!(ec.as_u64().to_be_bytes(), [0x06, 0x06, 0x01, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn ext_comm_df_election_preference_bytes_decode_for_rfc9785_algorithms() {
+        let ec = ExtendedCommunity::df_election(3, 0x8000, Some(42));
+        assert_eq!(
+            ec.as_df_election(),
+            Some(DfElectionExtendedCommunity {
+                algorithm_id: 3,
+                capabilities: 0x8000,
+                preference: Some(42),
+            })
+        );
     }
 
     #[test]

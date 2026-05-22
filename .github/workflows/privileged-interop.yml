@@ -20,6 +20,7 @@ on:
           - m39
           - m39b
           - m40
+          - m46
           - all
 
 permissions:
@@ -122,6 +123,13 @@ jobs:
           sudo containerlab deploy -t tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml
           CLEANUP=1 bash tests/interop/scripts/test-m40-evpn-aliasing-ecmp-frr.sh
 
+      - name: Run M46 HRW DF election smoke
+        if: inputs.suite == 'm46' || inputs.suite == 'all'
+        run: |
+          set -euo pipefail
+          sudo containerlab deploy -t tests/interop/m46-evpn-df-hrw.clab.yml
+          CLEANUP=1 bash tests/interop/scripts/test-m46-evpn-df-hrw.sh
+
       - name: Best-effort containerlab cleanup
         if: always()
         run: |
@@ -133,7 +141,8 @@ jobs:
             tests/interop/m38-evpn-df-election.clab.yml \
             tests/interop/m39-evpn-type5-symmetric-irb.clab.yml \
             tests/interop/m39b-evpn-auto-rt-frr.clab.yml \
-            tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml
+            tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml \
+            tests/interop/m46-evpn-df-hrw.clab.yml
           do
             sudo containerlab destroy -t "$topo" --cleanup >/dev/null 2>&1
           done

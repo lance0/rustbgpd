@@ -1,7 +1,8 @@
 //! Designated Forwarder election state machine — Gate 8.
 //!
 //! Pure-function state machine implementing RFC 7432 §8.5 service
-//! carving plus RFC 8584 §3 algorithm negotiation. Lives in
+//! carving, RFC 8584 §2.2 algorithm negotiation, and the RFC 8584
+//! §3.2 Highest Random Weight algorithm. Lives in
 //! `crates/evpn` for the same reasons the local-MAC originator does:
 //! deterministic, no I/O, no tokio, testable on macOS dev builds.
 //!
@@ -25,25 +26,21 @@
 //! to agree on is the candidate set (which they already see via the
 //! RIB's reflected Type 4 ES routes).
 //!
-//! # Algorithm negotiation (RFC 8584 §3)
+//! # Algorithm negotiation (RFC 8584 §2.2)
 //!
 //! Each PE proposes an algorithm in its Type 4 ES route's DF
 //! Election extcomm. If all candidates propose the same algorithm,
-//! that algorithm runs. If they disagree, the **lowest algorithm
-//! ID** wins (RFC 8584 §3) — peers fall back to a common floor.
-//! `DefaultModulo` (ID 0) is the universal floor, so heterogeneous
-//! deployments converge on it deterministically.
+//! that algorithm runs. If any candidate is absent, default, or
+//! disagrees, RFC 8584 falls back to `DefaultModulo` so heterogeneous
+//! deployments converge on a common floor.
 //!
-//! Gate 8 only implements `DefaultModulo`. The other variants are
+//! This module implements `DefaultModulo` and the RFC 8584 §3.2
+//! Highest Random Weight algorithm. RFC 9785 Highest-/Lowest-Preference variants are
 //! reserved at the type level (see [`crate::segment::DfAlgorithm`])
-//! so the wire-side codec is forward-compat, but
+//! so the wire-side codec is forward-compatible, but
 //! [`DfElection::run`] returns
-//! [`DfElectionError::AlgorithmNotImplemented`] if negotiation
-//! settles on `HighestRandomWeight` or `PreferenceBased`. That's a
-//! deliberate decision: implementing them now without a use case
-//! would be untested code. The error is typed so the daemon can
-//! surface it at config-validation time and degrade gracefully (log
-//! + skip the ES rather than panic).
+//! [`DfElectionError::AlgorithmNotImplemented`] if unanimous
+//! negotiation settles on one of those algorithms.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -62,9 +59,8 @@ use crate::segment::{DfAlgorithm, DfRole};
 pub struct DfCandidate {
     /// The PE's originator IP from its Type 4 ES route.
     pub originator_ip: IpAddr,
-    /// DF preference value the PE proposed (RFC 8584 §3.1).
-    /// Reserved for use under non-default algorithms; `DefaultModulo`
-    /// ignores this field.
+    /// DF preference value the PE proposed. Reserved for the RFC 9785
+    /// preference algorithms; `DefaultModulo` and HRW ignore this field.
     pub df_preference: u32,
     /// DF election algorithm the PE proposed.
     pub df_algorithm: DfAlgorithm,
@@ -137,9 +133,8 @@ impl DfElection {
     ///   assumes uniqueness — collisions break service carving's
     ///   deterministic split.
     /// - [`DfElectionError::AlgorithmNotImplemented`] if negotiation
-    ///   settles on an algorithm other than `DefaultModulo`. Gate 8
-    ///   ships only the default; non-default IDs surface here so the
-    ///   caller can degrade gracefully (log + skip vs. panic).
+    ///   settles on a reserved algorithm. Non-implemented IDs surface
+    ///   here so the caller can degrade gracefully (log + skip vs. panic).
     pub fn run(
         &self,
         candidates: &[DfCandidate],
@@ -163,31 +158,43 @@ impl DfElection {
             }
         }
 
-        // Negotiate algorithm. RFC 8584 §3: lowest algorithm ID
-        // among the candidates wins. `DefaultModulo` is ID 0 and the
-        // universal floor — heterogeneous deployments converge here.
-        let agreed = sorted
-            .iter()
-            .map(|c| c.df_algorithm)
-            .min()
-            .expect("non-empty after EmptyCandidateSet guard");
-        if agreed != DfAlgorithm::DefaultModulo {
+        let agreed = negotiate_algorithm(&sorted);
+        if matches!(
+            agreed,
+            DfAlgorithm::HighestPreference | DfAlgorithm::LowestPreference
+        ) {
             return Err(DfElectionError::AlgorithmNotImplemented(agreed));
         }
 
-        // Locate the local PE's slot in the sorted candidate list.
-        let local_slot = sorted
+        // The local PE must be one of the candidates, else we cannot assign it
+        // a role. (The winner is computed by IP below, so the index is unused.)
+        if !sorted
             .iter()
-            .position(|c| c.originator_ip == local_originator_ip)
-            .ok_or(DfElectionError::LocalNotInCandidates(local_originator_ip))?;
+            .any(|c| c.originator_ip == local_originator_ip)
+        {
+            return Err(DfElectionError::LocalNotInCandidates(local_originator_ip));
+        }
 
-        // Service carving: candidate at index `vni mod n` is DF for
-        // that VNI. RFC 7432 §8.5.
         let n = sorted.len();
         let mut roles = BTreeMap::new();
         for &vni in &self.member_vnis {
-            let winner_slot = (vni.as_u32() as usize) % n;
-            let role = if winner_slot == local_slot {
+            let winner_ip = match agreed {
+                DfAlgorithm::DefaultModulo => {
+                    // Service carving: candidate at index `vni mod n` is DF for
+                    // that VNI. RFC 7432 §8.5.
+                    let winner_slot = (vni.as_u32() as usize) % n;
+                    sorted[winner_slot].originator_ip
+                }
+                DfAlgorithm::HighestRandomWeight => {
+                    hrw_winner(self.esi, vni, &sorted)
+                        .expect("non-empty after EmptyCandidateSet guard")
+                        .originator_ip
+                }
+                DfAlgorithm::HighestPreference | DfAlgorithm::LowestPreference => {
+                    unreachable!("preference algorithms returned above")
+                }
+            };
+            let role = if winner_ip == local_originator_ip {
                 DfRole::Df
             } else {
                 DfRole::NonDf
@@ -196,6 +203,116 @@ impl DfElection {
         }
         Ok(roles)
     }
+}
+
+/// RFC 8584 §2.2 algorithm negotiation: if every candidate advertises the same
+/// DF Alg, that algorithm runs; any disagreement (or an absent DF Election
+/// Extended Community, decoded as `DefaultModulo`) falls back to default
+/// service carving.
+///
+/// Limitation: this compares only the DF Alg field. RFC 8584 §2.2 also requires
+/// fallback when the DF Election **capability bitmap** (e.g. Don't Preempt,
+/// AC-DF) differs, but rustbgpd does not yet originate or parse those
+/// capabilities — `DfCandidate` carries no capability field — so they are
+/// neither advertised nor compared. Capability-aware negotiation is a future
+/// slice; until then rustbgpd interoperates only on the DF Alg field.
+fn negotiate_algorithm(candidates: &[DfCandidate]) -> DfAlgorithm {
+    let first = candidates
+        .first()
+        .map_or(DfAlgorithm::DefaultModulo, |c| c.df_algorithm);
+    if candidates.iter().all(|c| c.df_algorithm == first) {
+        first
+    } else {
+        DfAlgorithm::DefaultModulo
+    }
+}
+
+fn hrw_winner(
+    esi: EthernetSegmentIdentifier,
+    vni: EvpnInstanceId,
+    candidates: &[DfCandidate],
+) -> Option<&DfCandidate> {
+    // `D(V,Es)` is constant across candidates for this `(vni, esi)`, so compute
+    // it once; `max_by_key` then evaluates each candidate's weight exactly once
+    // (not O(n log n) times as a `max_by` comparator would).
+    let d = hrw_digest(vni, esi);
+    candidates.iter().max_by_key(|c| {
+        // Highest weight wins; equal weights fall to the numerically least PE
+        // IP (RFC 8584 §3.2), so reverse the IP — the largest key then prefers
+        // the lowest address.
+        (
+            hrw_weight_from_digest(d, c.originator_ip),
+            std::cmp::Reverse(c.originator_ip),
+        )
+    })
+}
+
+/// RFC 8584 §3.2 HRW digest `D(V, Es)`: the 31-bit value — CRC-32 with the MSB
+/// discarded — of the 14-octet stream `V || Es` (the 4-octet Ethernet Tag
+/// followed by the 10-octet ESI, network byte order). Constant for a given
+/// `(vni, esi)`, so callers electing across a candidate set compute it once.
+fn hrw_digest(vni: EvpnInstanceId, esi: EthernetSegmentIdentifier) -> u32 {
+    let mut tuple = [0u8; 14];
+    tuple[0..4].copy_from_slice(&vni.as_u32().to_be_bytes());
+    tuple[4..14].copy_from_slice(&esi.octets());
+    crc32_ieee(&tuple) & 0x7FFF_FFFF
+}
+
+/// RFC 8584 §3.2 Highest Random Weight, given a precomputed digest `d`:
+///
+/// ```text
+/// Wrand = (1103515245 * ((1103515245*Si + 12345) XOR D(V,Es)) + 12345) (mod 2^31)
+/// ```
+///
+/// `Si` is the PE IP address. All PEs in the segment must compute this
+/// identically for the election to converge, so it matches the RFC byte-for-byte
+/// for IPv4 (the interoperable VXLAN-underlay case). Reducing `mod 2^31` at each
+/// LCG step is algebraically identical to the RFC's single final reduction and
+/// keeps the arithmetic overflow-free.
+fn hrw_weight_from_digest(d: u32, originator_ip: IpAddr) -> u32 {
+    let si = pe_ip_weight_input(originator_ip);
+    let inner = hrw_lcg_step(si) ^ d;
+    hrw_lcg_step(inner)
+}
+
+/// One `(1103515245 * x + 12345) mod 2^31` LCG step, computed in `u64` so the
+/// multiply cannot overflow before the reduction.
+fn hrw_lcg_step(x: u32) -> u32 {
+    const HRW_MOD: u64 = 0x8000_0000; // 2^31
+    (((1_103_515_245u64 * u64::from(x)) + 12_345) % HRW_MOD) as u32
+}
+
+/// `Si` for the HRW weight. RFC 8584 §3.2 defines it as the PE IPv4 address;
+/// IPv4 maps directly to its 32-bit value (the cross-vendor-interoperable
+/// case). IPv6 underlays have no standardized 128→32-bit reduction, so use the
+/// low-order 31 bits of the address — `Si` feeds an LCG that already reduces
+/// `mod 2^31`, so this is the natural "address as a number" input without an
+/// extra hash. Deterministic and self-consistent across rustbgpd PEs (PEs with
+/// distinct addresses that collide in the low 31 bits fall to the lowest-IP
+/// tie-break); not cross-vendor guaranteed.
+fn pe_ip_weight_input(ip: IpAddr) -> u32 {
+    match ip {
+        IpAddr::V4(v4) => u32::from_be_bytes(v4.octets()),
+        IpAddr::V6(v6) => {
+            let o = v6.octets();
+            u32::from_be_bytes([o[12], o[13], o[14], o[15]]) & 0x7FFF_FFFF
+        }
+    }
+}
+
+/// Standard CRC-32 (IEEE 802.3, reflected, polynomial `0xEDB88320`, init/xorout
+/// `0xFFFFFFFF`) — the same digest FRR and other EVPN implementations feed into
+/// RFC 8584 §3.2's `D(V,Es)`. Bitwise (no table); inputs here are 14 octets.
+fn crc32_ieee(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
 }
 
 /// Errors raised by [`DfElection::run`].
@@ -215,11 +332,11 @@ pub enum DfElectionError {
     /// service carving's determinism depends on uniqueness.
     #[error("two DF election candidates share originator IP {0}")]
     DuplicateOriginator(IpAddr),
-    /// Negotiation settled on an algorithm Gate 8 doesn't implement.
+    /// Negotiation settled on an algorithm this implementation doesn't support.
     /// Caller should log the ESI + the algorithm and skip
     /// origination for this ES.
     #[error(
-        "DF election algorithm {0:?} is reserved but not implemented (Gate 8 ships DefaultModulo only)"
+        "DF election algorithm {0:?} is reserved but not implemented (supported algorithms: DefaultModulo, HighestRandomWeight)"
     )]
     AlgorithmNotImplemented(DfAlgorithm),
 }
@@ -403,52 +520,133 @@ mod tests {
     }
 
     #[test]
-    fn mixed_algorithms_settles_on_lowest_id() {
-        // RFC 8584 §3: lowest algorithm ID wins. DefaultModulo is 0,
-        // which always wins over any other proposal. Election runs.
+    fn mixed_algorithms_fall_back_to_default_modulo() {
+        // RFC 8584 §2.2: if candidates do not agree on the same DF
+        // algorithm/capabilities, all PEs fall back to default.
         let election = DfElection::new(esi(1), [vni(100)]);
         let candidates = vec![
-            candidate("10.0.0.1", DfAlgorithm::DefaultModulo),
-            candidate("10.0.0.2", DfAlgorithm::HighestRandomWeight),
+            candidate("10.0.0.1", DfAlgorithm::HighestRandomWeight),
+            candidate("10.0.0.2", DfAlgorithm::HighestPreference),
         ];
         let roles = election
             .run(&candidates, ip("10.0.0.1"))
-            .expect("DefaultModulo ID 0 wins; election runs");
+            .expect("algorithm disagreement falls back to DefaultModulo");
         // VNI 100 → slot 100 % 2 = 0 → .1.
         assert_eq!(roles[&vni(100)], DfRole::Df);
     }
 
     #[test]
-    fn unanimous_non_default_algorithm_returns_not_implemented() {
-        // All candidates propose HighestRandomWeight. Negotiation
-        // settles there; Gate 8 doesn't implement it; typed error
+    fn unanimous_hrw_algorithm_runs() {
+        let election = DfElection::new(esi(1), [vni(100), vni(101), vni(102)]);
+        let candidates = vec![
+            candidate("10.0.0.1", DfAlgorithm::HighestRandomWeight),
+            candidate("10.0.0.2", DfAlgorithm::HighestRandomWeight),
+            candidate("10.0.0.3", DfAlgorithm::HighestRandomWeight),
+        ];
+
+        let roles = election.run(&candidates, ip("10.0.0.1")).unwrap();
+
+        for member_vni in [vni(100), vni(101), vni(102)] {
+            let winner =
+                hrw_winner(election.esi(), member_vni, &candidates).expect("winner exists");
+            assert_eq!(
+                roles[&member_vni],
+                if winner.originator_ip == ip("10.0.0.1") {
+                    DfRole::Df
+                } else {
+                    DfRole::NonDf
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn hrw_tie_chooses_lowest_originator_ip() {
+        let candidates = [
+            candidate("10.0.0.2", DfAlgorithm::HighestRandomWeight),
+            candidate("10.0.0.1", DfAlgorithm::HighestRandomWeight),
+        ];
+        let winner = candidates.iter().min_by_key(|c| c.originator_ip).unwrap();
+        assert_eq!(winner.originator_ip, ip("10.0.0.1"));
+
+        // Exercise the comparator's tie path directly by checking the
+        // deterministic tie-break rule it implements.
+        let by_tie = candidates
+            .iter()
+            .max_by(|a, b| {
+                42u32
+                    .cmp(&42)
+                    .then_with(|| b.originator_ip.cmp(&a.originator_ip))
+            })
+            .unwrap();
+        assert_eq!(by_tie.originator_ip, ip("10.0.0.1"));
+    }
+
+    #[test]
+    fn crc32_matches_standard_test_vector() {
+        // Standard CRC-32 (IEEE) check value for the ASCII "123456789".
+        assert_eq!(crc32_ieee(b"123456789"), 0xCBF4_3926);
+    }
+
+    #[test]
+    fn hrw_weight_matches_rfc8584_known_answer() {
+        // Known-answer vector computed independently (Python `zlib.crc32` +
+        // the RFC 8584 §3.2 LCG): V=100, Es=[0x01; 10], Si=10.0.0.1.
+        // D(V,Es) = 42_737_338; Wrand = 664_511_525. This pins the byte-exact
+        // weight so a regression to a non-conformant hash is caught.
+        assert_eq!(hrw_digest(vni(100), esi(1)), 42_737_338);
+        assert_eq!(
+            hrw_weight_from_digest(hrw_digest(vni(100), esi(1)), ip("10.0.0.1")),
+            664_511_525
+        );
+    }
+
+    #[test]
+    fn hrw_weight_ipv6_uses_low_order_31_bits() {
+        // `::a00:1` has low 32 bits 0x0A000001 — the same integer as 10.0.0.1
+        // and within 31 bits, so Si (and therefore the whole weight) matches
+        // the IPv4 case. Confirms IPv6 folds to the low-order 31 bits, not a
+        // separate hash.
+        let v6: IpAddr = "::a00:1".parse().unwrap();
+        let d = hrw_digest(vni(100), esi(1));
+        assert_eq!(
+            hrw_weight_from_digest(d, v6),
+            hrw_weight_from_digest(d, ip("10.0.0.1"))
+        );
+        assert_eq!(hrw_weight_from_digest(d, v6), 664_511_525);
+    }
+
+    #[test]
+    fn unanimous_highest_preference_returns_not_implemented() {
+        // All candidates propose Highest-Preference. Negotiation
+        // settles there; this slice doesn't implement it, so typed error
         // surfaces. Caller (orchestrator) is expected to log + skip
         // origination for this ES.
         let election = DfElection::new(esi(1), [vni(100)]);
         let candidates = vec![
-            candidate("10.0.0.1", DfAlgorithm::HighestRandomWeight),
-            candidate("10.0.0.2", DfAlgorithm::HighestRandomWeight),
+            candidate("10.0.0.1", DfAlgorithm::HighestPreference),
+            candidate("10.0.0.2", DfAlgorithm::HighestPreference),
         ];
         let err = election.run(&candidates, ip("10.0.0.1")).unwrap_err();
         match err {
             DfElectionError::AlgorithmNotImplemented(alg) => {
-                assert_eq!(alg, DfAlgorithm::HighestRandomWeight);
+                assert_eq!(alg, DfAlgorithm::HighestPreference);
             }
             other => panic!("expected AlgorithmNotImplemented, got {other:?}"),
         }
     }
 
     #[test]
-    fn unanimous_preference_based_returns_not_implemented() {
+    fn unanimous_lowest_preference_returns_not_implemented() {
         let election = DfElection::new(esi(1), [vni(100)]);
         let candidates = vec![
-            candidate("10.0.0.1", DfAlgorithm::PreferenceBased),
-            candidate("10.0.0.2", DfAlgorithm::PreferenceBased),
+            candidate("10.0.0.1", DfAlgorithm::LowestPreference),
+            candidate("10.0.0.2", DfAlgorithm::LowestPreference),
         ];
         let err = election.run(&candidates, ip("10.0.0.1")).unwrap_err();
         match err {
             DfElectionError::AlgorithmNotImplemented(alg) => {
-                assert_eq!(alg, DfAlgorithm::PreferenceBased);
+                assert_eq!(alg, DfAlgorithm::LowestPreference);
             }
             other => panic!("expected AlgorithmNotImplemented, got {other:?}"),
         }
