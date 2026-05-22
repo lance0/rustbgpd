@@ -114,16 +114,21 @@ The Gate 8 surface is:
 - **ESI Label extcomm (RFC 7432 §7.5) origination — closed in the
   Gate 8b prep follow-up.** The Type 1 EAD-per-ES route now carries
   the ESI Label extcomm with an allocated per-ESI label and
-  `single_active = false` (all-active default). Gate 8b also adds
-  the load-bearing half: opt-in dataplane filtering that suppresses
-  segment BUM on non-DF receivers.
+  a configured `single_active` flag (`false` for all-active, `true`
+  for single-active). Gate 8b also adds the load-bearing half:
+  opt-in dataplane filtering that suppresses segment BUM on non-DF
+  receivers.
 - **Aliasing / backup paths (RFC 7432 §14) — closed end-to-end.**
   Projection resolves Type 1 EAD-per-EVI alternatives into
   `RemoteMacEntry::alias_vtep_ips`; the kernel-side ECMP /
   multi-destination programming subsequently shipped under
   [ADR-0059](0059-evpn-aliasing-fdb-nexthop-groups.md) (FDB
   nexthop groups via `NDA_NH_ID` / `NHA_FDB`, slices 1-4,
-  M40 protected self-hosted smoke against FRR EVPN-MH 10.3.1).
+  M40 protected self-hosted smoke against FRR EVPN-MH 10.3.1) for
+  all-active ES reachability. Receiver-side aliasing suppresses
+  those ECMP alternatives when the remote EAD-per-ES advertises the
+  Single-Active flag. Proactive backup-path programming for
+  single-active remains a follow-up.
 - **Mass withdraw — receive-side filter closed in Gate 8b.** The
   dataplane supervisor snapshots EAD-per-ES reachability and drops
   non-zero-ESI Type 2 routes whose `(origin VTEP next-hop, ESI)` is

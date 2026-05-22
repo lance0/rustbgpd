@@ -947,6 +947,10 @@ fn default_fib_families() -> Vec<String> {
 ///   `"highest-preference"` / `"lowest-preference"` (revertive;
 ///   local Don't-Preempt/non-revertive behavior is deferred).
 ///   Default `"default-modulo"`.
+/// - `redundancy_mode` — `"all-active"` (default) or
+///   `"single-active"`; single-active sets the ESI Label extcomm flag
+///   and prevents receiver-side all-active aliasing ECMP for remote
+///   single-active ES reachability.
 /// - `originator_ip` — IP this PE uses as the Type 4 ES route's
 ///   originator address. Typically equals `evpn_instances[].local_vtep_ip`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -963,6 +967,9 @@ pub struct EthernetSegmentConfig {
     /// DF algorithm string. Default `"default-modulo"`.
     #[serde(default = "default_df_algorithm")]
     pub df_algorithm: String,
+    /// Redundancy mode string. Default `"all-active"`.
+    #[serde(default = "default_redundancy_mode")]
+    pub redundancy_mode: String,
     /// Originator IP carried on the Type 4 ES route.
     pub originator_ip: String,
 }
@@ -973,6 +980,10 @@ fn default_df_preference() -> u32 {
 
 fn default_df_algorithm() -> String {
     "default-modulo".to_string()
+}
+
+fn default_redundancy_mode() -> String {
+    "all-active".to_string()
 }
 
 #[derive(Debug, thiserror::Error)]

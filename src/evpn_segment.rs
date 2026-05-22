@@ -49,7 +49,7 @@ use std::time::{Duration, Instant};
 use rustbgpd_evpn::{
     BumEnforcementTable, DfAlgorithm, DfCandidate, DfElection, DfRole, EthernetSegment,
     EvpnInstance, EvpnInstanceId, EvpnInstanceTable, LocalEadPerEsOriginator,
-    LocalEadPerEviOriginator, LocalEsOriginator, OriginationAction,
+    LocalEadPerEviOriginator, LocalEsOriginator, OriginationAction, RedundancyMode,
 };
 use rustbgpd_rib::{EvpnRouteEvent, RibUpdate, route::EvpnRibRoute};
 use rustbgpd_telemetry::BgpMetrics;
@@ -642,6 +642,7 @@ async fn run_election_with_candidates(
             state.esi_label,
             state.config.df_algorithm,
             state.config.df_preference,
+            state.config.redundancy_mode,
             actions,
         )
         .await;
@@ -871,6 +872,7 @@ async fn apply(runtime: &SegmentRuntime, state: &SegmentState, actions: Vec<Orig
         state.esi_label,
         state.config.df_algorithm,
         state.config.df_preference,
+        state.config.redundancy_mode,
         actions,
     )
     .await;
@@ -882,12 +884,20 @@ async fn apply_with_instance(
     esi_label: MplsLabel,
     df_algorithm: DfAlgorithm,
     df_preference: u32,
+    redundancy_mode: RedundancyMode,
     actions: Vec<OriginationAction>,
 ) {
     for action in actions {
         match action {
             OriginationAction::Inject { key, .. } => {
-                let route = build_es_route(inst, &key, esi_label, df_algorithm, df_preference);
+                let route = build_es_route(
+                    inst,
+                    &key,
+                    esi_label,
+                    df_algorithm,
+                    df_preference,
+                    redundancy_mode,
+                );
                 let (reply_tx, reply_rx) = oneshot::channel();
                 if runtime
                     .rib_tx
@@ -941,9 +951,10 @@ async fn apply_with_instance(
 ///   ESI bytes [1..7]. Peers can now correlate the segment via RT
 ///   match without preconfiguration.
 /// - **Type 1 EAD-per-ES**: ESI Label extcomm (§7.5) carrying the
-///   synthesized ESI label with `single_active = false`. Peers wire
-///   the label into their split-horizon filter tables; Gate 8b adds
-///   the dataplane drops on non-DF receivers.
+///   synthesized ESI label and the configured redundancy-mode flag
+///   (`single_active` set for single-active). Peers wire the label
+///   into their split-horizon filter tables; Gate 8b adds the
+///   dataplane drops on non-DF receivers.
 /// - **Type 4 ES with RFC 8584/9785 DF extcomm**: non-default
 ///   algorithms advertise their algorithm ID; preference algorithms
 ///   also advertise the configured DF Preference with local
@@ -957,6 +968,7 @@ fn build_es_route(
     esi_label: MplsLabel,
     df_algorithm: DfAlgorithm,
     df_preference: u32,
+    redundancy_mode: RedundancyMode,
 ) -> EvpnRibRoute {
     let (route, key_specific_extcomms): (EvpnRoute, Vec<rustbgpd_wire::ExtendedCommunity>) =
         match key {
@@ -994,10 +1006,9 @@ fn build_es_route(
                 // truth: the per-ESI allocator's reservation, threaded
                 // through `apply_with_instance` so the route's
                 // `EvpnEadPerEs.label` field and this extcomm always
-                // agree. `single_active = false` for the all-active
-                // default mode.
+                // agree.
                 vec![rustbgpd_wire::ExtendedCommunity::esi_label(
-                    false,
+                    redundancy_mode.is_single_active(),
                     esi_label.value(),
                 )],
             ),
@@ -1146,6 +1157,7 @@ mod tests {
             member_vnis: member_vnis.clone(),
             df_preference: 32_768,
             df_algorithm: DfAlgorithm::DefaultModulo,
+            redundancy_mode: RedundancyMode::AllActive,
             originator_ip: ipa("10.0.0.1"),
         };
         SegmentState {
@@ -1166,6 +1178,7 @@ mod tests {
             member_vnis: members.iter().copied().map(vni).collect(),
             df_preference: 32_768,
             df_algorithm: DfAlgorithm::DefaultModulo,
+            redundancy_mode: RedundancyMode::AllActive,
             originator_ip: ipa("10.0.0.1"),
         }
     }
@@ -1285,6 +1298,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::DefaultModulo,
             32_768,
+            RedundancyMode::AllActive,
         );
         assert!(matches!(route.route, EvpnRoute::Es(_)));
         // Must carry: Origin, AsPath, NextHop, ExtendedCommunities.
@@ -1328,6 +1342,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::DefaultModulo,
             32_768,
+            RedundancyMode::AllActive,
         );
         match route.route {
             EvpnRoute::EadPerEs(r) => {
@@ -1351,6 +1366,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::DefaultModulo,
             32_768,
+            RedundancyMode::AllActive,
         );
         match route.route {
             EvpnRoute::EadPerEvi(r) => {
@@ -1410,6 +1426,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::DefaultModulo,
             32_768,
+            RedundancyMode::AllActive,
         );
         let extcomms = route
             .attributes
@@ -1442,6 +1459,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::HighestRandomWeight,
             32_768,
+            RedundancyMode::AllActive,
         );
         let extcomms = route
             .attributes
@@ -1479,6 +1497,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::HighestPreference,
             500,
+            RedundancyMode::AllActive,
         );
         let extcomms = route
             .attributes
@@ -1516,6 +1535,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::DefaultModulo,
             32_768,
+            RedundancyMode::AllActive,
         );
         let extcomms = route
             .attributes
@@ -1638,6 +1658,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::DefaultModulo,
             32_768,
+            RedundancyMode::AllActive,
         );
         let extcomms = route
             .attributes
@@ -1667,6 +1688,40 @@ mod tests {
     }
 
     #[test]
+    fn type_1_ead_per_es_sets_single_active_flag_when_configured() {
+        let inst = instance(100);
+        let id = esi(8);
+        let key = EvpnRouteKey::EadPerEs {
+            rd: rd(65000, 100),
+            esi: id,
+            ethernet_tag: EthernetTagId::MAX_ET,
+        };
+        let route = build_es_route(
+            &inst,
+            &key,
+            MplsLabel::new(123),
+            DfAlgorithm::DefaultModulo,
+            32_768,
+            RedundancyMode::SingleActive,
+        );
+        let extcomms = route
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(v) => Some(v.clone()),
+                _ => None,
+            })
+            .expect("ExtendedCommunities attribute present");
+        let (single_active, label) = extcomms
+            .iter()
+            .copied()
+            .find_map(ExtendedCommunity::as_esi_label)
+            .expect("ESI Label extcomm attached");
+        assert!(single_active);
+        assert_eq!(label, 123);
+    }
+
+    #[test]
     fn type_1_ead_per_evi_does_not_carry_esi_label_extcomm() {
         let inst = instance(100);
         let key = EvpnRouteKey::EadPerEvi {
@@ -1680,6 +1735,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::DefaultModulo,
             32_768,
+            RedundancyMode::AllActive,
         );
         let extcomms = route
             .attributes

@@ -148,7 +148,7 @@ pub use runtime::{
     EvpnRuntimeGeneration, EvpnRuntimeLifecycle, EvpnRuntimeModel, EvpnRuntimeMutationState,
     EvpnRuntimePlan, EvpnRuntimeSnapshot,
 };
-pub use segment::{DfAlgorithm, DfRole, EthernetSegment};
+pub use segment::{DfAlgorithm, DfRole, EthernetSegment, RedundancyMode};
 
 // Re-export the wire `RouteDistinguisher` so consumers of this crate
 // (including `crates/evpn-linux` and the daemon's projection layer)

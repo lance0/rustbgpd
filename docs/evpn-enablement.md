@@ -455,7 +455,8 @@ Ships:
   VNI list, `df_preference = 32768`,
   `df_algorithm = "default-modulo"`, `"highest-random-weight"`,
   `"highest-preference"`, or `"lowest-preference"`,
-  and originator IP.
+  `redundancy_mode = "all-active"` or `"single-active"`, and
+  originator IP.
   Single-homed and RR deployments take the empty-config early return
   and pay zero runtime cost.
 - Pure DF election state machine (`crates/evpn/src/df_election.rs`)
@@ -466,10 +467,13 @@ Ships:
   deferred.
 - Three Type 1/4 origination state machines
   (`crates/evpn/src/origination_es.rs`) — Type 4 ES, Type 1
-  EAD-per-ES (with MAX_ET marker), Type 1 EAD-per-EVI. The
-  EAD-per-EVI originator tracks per-VNI DF role internally for
-  Gate 8b but emits no wire churn on role flips (the Gate 8 wire
-  shape is role-independent per RFC 7432 §14).
+  EAD-per-ES with the MAX_ET marker and ESI Label single-active flag,
+  and Type 1 EAD-per-EVI. Receiver-side aliasing ECMP is limited to
+  all-active remote ES reachability; single-active backup-path
+  pre-install remains a follow-up. The EAD-per-EVI originator tracks
+  per-VNI DF role internally for Gate 8b but emits no wire churn on
+  role flips (the Gate 8 wire shape is role-independent per RFC 7432
+  §14).
 - Daemon orchestrator (`src/evpn_segment.rs`) wiring all of the
   above off the EVPN best-path broadcast (Gate 7c).
 - Cloneable runtime owner/control surface for complete desired-ES
