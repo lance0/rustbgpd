@@ -11,6 +11,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0063 EVPN runtime convergence — atomic tenant teardown.**
+  `EvpnService.ApplyEvpnRuntime` now commits a delete-only tenant teardown: a
+  plan that drops an Ethernet-Segment-member L2VNI together with its Ethernet
+  Segment (deleted or member-shrink redefined) and/or a linked IP-VRF in one
+  pass. This closes the runtime tenant lifecycle — an operator can now both
+  build up and tear down a tenant without a restart. The converger validates
+  internal consistency (no surviving L2VNI may dangle on a deleted IP-VRF; no
+  candidate Ethernet Segment may still list a deleted member VNI; ES redefines
+  accepted only as a member-shrink), withdraws each deleted L2VNI's Type 3 IMET,
+  and republishes the candidate snapshots to every level-triggered actor
+  (dataplane instances + IP-VRF metadata, SVI, Type 2 originator, segment, Type 5
+  originator) with a rollback ladder that re-originates IMET on failure. The
+  segment actor now emits Type 1/4 withdraws for a member VNI whose instance was
+  removed in the same pass. New interop smoke **M47**
+  (`tests/interop/m47-evpn-tenant-teardown.clab.yml`) drives the teardown over
+  gRPC against FRR on the self-hosted privileged-interop runner. Non-teardown
+  mixed edits (an add combined with a delete/redefine), `ip_vrf` relink, and
+  L3VNI/device/table IP-VRF redefine remain fail-closed under
+  [#210](https://github.com/lance0/rustbgpd/issues/210).
 - **ADR-0063 EVPN runtime convergence — ES-member L2VNI redefine.**
   `EvpnService.ApplyEvpnRuntime` can now commit exactly one redefined
   `[[evpn_instances]]` entry even when that VNI is an Ethernet Segment member,
@@ -19,8 +38,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   actor now treats watched member-instance content changes as a Type 1/4
   rebuild trigger, withdrawing old-RD Type 4 / EAD-per-ES / EAD-per-EVI routes
   and originating the candidate route identity while keeping the ESI label
-  stable. `ip_vrf` relink, ES-aware L2VNI delete, linked IP-VRF delete /
-  tenant teardown, mixed, and multi-element edits remain fail-closed under
+  stable. `ip_vrf` relink and non-teardown mixed edits remain fail-closed under
   [#210](https://github.com/lance0/rustbgpd/issues/210).
 - **EVPN DF election — RFC 9785 Highest-/Lowest-Preference.**
   `[[ethernet_segments]].df_algorithm` now accepts `"highest-preference"`

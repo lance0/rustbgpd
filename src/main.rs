@@ -497,6 +497,211 @@ impl EvpnRuntimeActorConverger {
         Ok(())
     }
 
+    /// Converge an atomic tenant teardown — a delete-only multi-element /
+    /// cross-resource mutation (ES-aware L2VNI delete + linked IP-VRF delete +
+    /// ES delete/member-shrink) that the single-shape converters can't route.
+    ///
+    /// All derived state drains through the level-triggered consumers when the
+    /// candidate snapshots are published: the Type 5 originator
+    /// (`drain_changed_ip_vrfs`) and dataplane re-projection drop removed
+    /// IP-VRFs' Type 5 + L3 FIB; the segment actor drops removed members'
+    /// Type 1/4 (it skips segments whose member VNI has no instance); the Type 2
+    /// originator and SVI drop removed VNIs' routes. The only explicit consumer
+    /// is the per-VNI Type 3 IMET, withdrawn here. On any publish failure the
+    /// rollback republishes the committed snapshots and re-originates IMET.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "ordered multi-consumer teardown with a per-step rollback ladder reads clearest as one sequence"
+    )]
+    async fn converge_tenant_teardown(
+        &self,
+        current: &rustbgpd_evpn::EvpnRuntimeModel,
+        candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
+        plan: &rustbgpd_evpn::EvpnRuntimePlan,
+    ) -> Result<(), DaemonEvpnRuntimeConvergeError> {
+        let deleted_instances = validate_tenant_teardown(current, candidate, plan)?;
+        let candidate_instances = Arc::new(candidate.instances().clone());
+        let candidate_ip_vrfs = Arc::new(candidate.ip_vrfs().clone());
+        let candidate_segments = Arc::new(candidate.ethernet_segments().to_vec());
+        let candidate_vni_to_esi = evpn_vni_to_esi_map(candidate.ethernet_segments());
+        let ip_vrf_changed = current.ip_vrfs() != candidate.ip_vrfs();
+
+        let dataplane = self.require_l2vni_dataplane("tenant teardown")?;
+        let originator = self.require_l2vni_originator("tenant teardown")?;
+        let svi_required = deleted_instances.iter().any(|inst| inst.advertise_svi_mac);
+        let svi = self.svi.as_ref();
+        if svi_required && svi.is_none() {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+                "tenant teardown of an advertise_svi_mac L2VNI requires an active SVI actor; \
+                 live SVI actor-spawn is not supported yet",
+            ));
+        }
+        if let Some(svi) = svi
+            && !svi.is_open()
+        {
+            return Err(DaemonEvpnRuntimeConvergeError::failed(
+                "EVPN SVI runtime control is closed",
+            ));
+        }
+        let segment = self.open_segment_runtime_control()?;
+        let l3_originator = if ip_vrf_changed {
+            let l3 = self.l3_originator.as_ref().ok_or_else(|| {
+                DaemonEvpnRuntimeConvergeError::unsupported(
+                    "tenant teardown with IP-VRF changes requires an active EVPN Type 5 \
+                     originator; live Type 5 actor-spawn is not supported yet",
+                )
+            })?;
+            if !l3.is_open() {
+                return Err(DaemonEvpnRuntimeConvergeError::failed(
+                    "EVPN Type 5 originator runtime control is closed",
+                ));
+            }
+            Some(l3)
+        } else {
+            None
+        };
+
+        // Each step publishes a candidate snapshot to a level-triggered actor;
+        // on failure, `rollback_tenant_teardown` republishes the committed
+        // snapshots + re-originates IMET, and `teardown_failure` escalates if
+        // that IMET restore itself fails.
+        if ip_vrf_changed && !dataplane.replace_ip_vrfs(candidate_ip_vrfs.clone()) {
+            let restored = self
+                .rollback_tenant_teardown(current, &deleted_instances)
+                .await;
+            return Err(teardown_failure(
+                restored,
+                "EVPN dataplane IP-VRF runtime model publish failed",
+            ));
+        }
+        if !dataplane.replace_evpn_instances(candidate_instances.clone()) {
+            let restored = self
+                .rollback_tenant_teardown(current, &deleted_instances)
+                .await;
+            return Err(teardown_failure(
+                restored,
+                "EVPN dataplane runtime model publish failed",
+            ));
+        }
+        if let Some(svi) = svi
+            && !svi.replace_evpn_instances(candidate_instances.clone())
+        {
+            let restored = self
+                .rollback_tenant_teardown(current, &deleted_instances)
+                .await;
+            return Err(teardown_failure(
+                restored,
+                "EVPN SVI runtime model publish failed",
+            ));
+        }
+
+        for inst in &deleted_instances {
+            let outcome = self
+                .imet_controller
+                .lock()
+                .await
+                .withdraw_instance(inst.id, &self.rib_tx)
+                .await;
+            if !matches!(
+                outcome,
+                evpn_imet::ImetWithdrawOutcome::Withdrawn { .. }
+                    | evpn_imet::ImetWithdrawOutcome::NotOriginated { .. }
+            ) {
+                let vni = inst.id;
+                let restored = self
+                    .rollback_tenant_teardown(current, &deleted_instances)
+                    .await;
+                return Err(teardown_failure(
+                    restored,
+                    &format!("EVPN IMET withdrawal failed for L2VNI {vni}: {outcome:?}"),
+                ));
+            }
+        }
+
+        if !originator.replace_runtime_model(candidate_instances.clone(), candidate_vni_to_esi) {
+            let restored = self
+                .rollback_tenant_teardown(current, &deleted_instances)
+                .await;
+            return Err(teardown_failure(
+                restored,
+                "EVPN Type 2 originator runtime model publish failed",
+            ));
+        }
+        if let Some(segment) = segment {
+            if !segment.replace_instances(candidate_instances.clone()) {
+                let restored = self
+                    .rollback_tenant_teardown(current, &deleted_instances)
+                    .await;
+                return Err(teardown_failure(
+                    restored,
+                    "EVPN segment instance runtime model publish failed",
+                ));
+            }
+            if !segment.replace_segments(candidate_segments) {
+                let restored = self
+                    .rollback_tenant_teardown(current, &deleted_instances)
+                    .await;
+                return Err(teardown_failure(
+                    restored,
+                    "EVPN segment runtime model publish failed",
+                ));
+            }
+        }
+        if let Some(l3) = l3_originator
+            && !l3.replace_ip_vrfs(candidate_ip_vrfs)
+        {
+            let restored = self
+                .rollback_tenant_teardown(current, &deleted_instances)
+                .await;
+            return Err(teardown_failure(
+                restored,
+                "EVPN Type 5 originator runtime model publish failed",
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Best-effort rollback of a tenant teardown: republish every committed
+    /// snapshot to its actor (all idempotent, level-triggered) and re-originate
+    /// the Type 3 IMET for each deleted L2VNI. Returns whether every IMET route
+    /// was restored, so the caller can escalate when live Type 3 state is left
+    /// withdrawn.
+    async fn rollback_tenant_teardown(
+        &self,
+        current: &rustbgpd_evpn::EvpnRuntimeModel,
+        deleted_instances: &[rustbgpd_evpn::EvpnInstance],
+    ) -> bool {
+        let current_instances = Arc::new(current.instances().clone());
+        let current_ip_vrfs = Arc::new(current.ip_vrfs().clone());
+        let current_segments = Arc::new(current.ethernet_segments().to_vec());
+        let current_vni_to_esi = evpn_vni_to_esi_map(current.ethernet_segments());
+
+        if let Some(dataplane) = self.dataplane.as_ref() {
+            let _ = dataplane.replace_ip_vrfs(current_ip_vrfs.clone());
+            let _ = dataplane.replace_evpn_instances(current_instances.clone());
+        }
+        if let Some(svi) = self.svi.as_ref() {
+            let _ = svi.replace_evpn_instances(current_instances.clone());
+        }
+        if let Some(originator) = self.originator.as_ref() {
+            let _ = originator.replace_runtime_model(current_instances.clone(), current_vni_to_esi);
+        }
+        if let Some(segment) = self.segment.as_ref() {
+            let _ = segment.replace_instances(current_instances);
+            let _ = segment.replace_segments(current_segments);
+        }
+        if let Some(l3) = self.l3_originator.as_ref() {
+            let _ = l3.replace_ip_vrfs(current_ip_vrfs);
+        }
+
+        let mut all_restored = true;
+        for inst in deleted_instances {
+            all_restored &= self.restore_imet(inst.clone()).await;
+        }
+        all_restored
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "ordered IMET re-originate + watch-channel republish with a per-step rollback ladder reads clearest as one sequence"
@@ -1005,6 +1210,14 @@ impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
         plan: &'a rustbgpd_evpn::EvpnRuntimePlan,
     ) -> DaemonEvpnRuntimeConvergeFuture<'a> {
         Box::pin(async move {
+            // Atomic tenant teardown (delete-only multi-element / cross-resource)
+            // is routed first; single-element deletes fall through to the
+            // single-shape converters below.
+            if is_tenant_teardown_plan(plan, current) {
+                return self
+                    .converge_tenant_teardown(current, candidate, plan)
+                    .await;
+            }
             if plan.evpn_instances.has_changes() {
                 if plan.evpn_instances.added.is_empty()
                     && !plan.evpn_instances.deleted.is_empty()
@@ -1241,6 +1454,236 @@ fn validate_l2vni_delete_ip_vrf_metadata(
         }
     }
     Ok(())
+}
+
+/// Whether `plan` is an atomic tenant teardown — a delete-only mutation that
+/// the single-shape converters cannot handle (multi-element, cross-resource,
+/// an ES-member L2VNI delete, or a still-referenced IP-VRF delete). Clean
+/// single-element non-ES, non-referenced deletes return `false` so they keep
+/// routing to the existing single-shape delete converters.
+fn is_tenant_teardown_plan(
+    plan: &rustbgpd_evpn::EvpnRuntimePlan,
+    current: &rustbgpd_evpn::EvpnRuntimeModel,
+) -> bool {
+    let no_adds = plan.evpn_instances.added.is_empty()
+        && plan.ip_vrfs.added.is_empty()
+        && plan.ethernet_segments.added.is_empty();
+    // L2VNI / IP-VRF redefines stay on their dedicated single-redefine paths;
+    // teardown allows ES redefines (member-shrink) only.
+    let no_l2_ipvrf_redefine =
+        plan.evpn_instances.redefined.is_empty() && plan.ip_vrfs.redefined.is_empty();
+    let has_deletion = !plan.evpn_instances.deleted.is_empty()
+        || !plan.ip_vrfs.deleted.is_empty()
+        || !plan.ethernet_segments.deleted.is_empty();
+    if !(no_adds && no_l2_ipvrf_redefine && has_deletion) {
+        return false;
+    }
+
+    let resource_types_changed = [
+        plan.evpn_instances.has_changes(),
+        plan.ip_vrfs.has_changes(),
+        plan.ethernet_segments.has_changes(),
+    ]
+    .into_iter()
+    .filter(|changed| *changed)
+    .count();
+    let multi_resource = resource_types_changed > 1;
+    let multi_element = plan.evpn_instances.deleted.len() > 1
+        || plan.ip_vrfs.deleted.len() > 1
+        || plan.ethernet_segments.deleted.len() > 1;
+    let es_member_l2vni_deleted = plan.evpn_instances.deleted.iter().any(|&raw| {
+        rustbgpd_evpn::EvpnInstanceId::new(raw).is_ok_and(|vni| {
+            current
+                .ethernet_segments()
+                .iter()
+                .any(|segment| segment.member_vnis.contains(&vni))
+        })
+    });
+    let referenced_ip_vrf_deleted = plan
+        .ip_vrfs
+        .deleted
+        .iter()
+        .any(|name| current.ip_vrfs().is_referenced(name));
+
+    multi_resource || multi_element || es_member_l2vni_deleted || referenced_ip_vrf_deleted
+}
+
+/// Validate an atomic tenant teardown and return the deleted L2VNI instances
+/// (needed for IMET withdraw + SVI gating + rollback restore). Accepts a
+/// delete-only plan: ≥1 deletion, no adds, no L2VNI/IP-VRF redefines, ES
+/// redefines limited to member-shrink, and the candidate internally consistent
+/// (no IP-VRF deleted while an L2VNI still references it; no ES still listing a
+/// deleted member VNI).
+#[expect(
+    clippy::too_many_lines,
+    reason = "sequential teardown guards read clearer inline than split across helpers"
+)]
+fn validate_tenant_teardown(
+    current: &rustbgpd_evpn::EvpnRuntimeModel,
+    candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
+    plan: &rustbgpd_evpn::EvpnRuntimePlan,
+) -> Result<Vec<rustbgpd_evpn::EvpnInstance>, DaemonEvpnRuntimeConvergeError> {
+    if !plan.evpn_instances.added.is_empty()
+        || !plan.ip_vrfs.added.is_empty()
+        || !plan.ethernet_segments.added.is_empty()
+    {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+            "ApplyEvpnRuntime tenant teardown does not support adds in the same request",
+        ));
+    }
+    if !plan.evpn_instances.redefined.is_empty() {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+            "ApplyEvpnRuntime tenant teardown does not support L2VNI redefine in the same request",
+        ));
+    }
+    if !plan.ip_vrfs.redefined.is_empty() {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+            "ApplyEvpnRuntime tenant teardown does not support IP-VRF redefine in the same request",
+        ));
+    }
+    if plan.evpn_instances.deleted.is_empty()
+        && plan.ip_vrfs.deleted.is_empty()
+        && plan.ethernet_segments.deleted.is_empty()
+    {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+            "ApplyEvpnRuntime tenant teardown requires at least one deletion",
+        ));
+    }
+
+    // ES redefines in a teardown may only shrink member_vnis (drop the VNIs
+    // being deleted); every other ES field must be unchanged.
+    for esi in &plan.ethernet_segments.redefined {
+        let Some(cur) = current
+            .ethernet_segments()
+            .iter()
+            .find(|seg| seg.esi == *esi)
+        else {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "planned redefined Ethernet Segment {esi} is not committed"
+            )));
+        };
+        let Some(cand) = candidate
+            .ethernet_segments()
+            .iter()
+            .find(|seg| seg.esi == *esi)
+        else {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "candidate is missing planned redefined Ethernet Segment {esi}"
+            )));
+        };
+        let member_shrink_only = cand.member_vnis.len() < cur.member_vnis.len()
+            && cand.member_vnis.iter().all(|v| cur.member_vnis.contains(v))
+            && {
+                let mut probe = cur.clone();
+                probe.member_vnis.clone_from(&cand.member_vnis);
+                &probe == cand
+            };
+        if !member_shrink_only {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "ApplyEvpnRuntime tenant teardown supports Ethernet Segment {esi} redefine only as a member_vnis shrink; other field changes are not supported"
+            )));
+        }
+    }
+
+    // Resolve + validate each deleted L2VNI.
+    let mut deleted_instances = Vec::with_capacity(plan.evpn_instances.deleted.len());
+    for &raw_vni in &plan.evpn_instances.deleted {
+        let vni = rustbgpd_evpn::EvpnInstanceId::new(raw_vni).map_err(|err| {
+            DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "invalid planned L2VNI {raw_vni}: {err}"
+            ))
+        })?;
+        let Some(instance) = current.instances().get(vni).cloned() else {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "planned L2VNI {vni} is not committed"
+            )));
+        };
+        if candidate.instances().get(vni).is_some() {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "candidate still contains planned deleted L2VNI {vni}"
+            )));
+        }
+        deleted_instances.push(instance);
+    }
+    let deleted_vnis: std::collections::BTreeSet<rustbgpd_evpn::EvpnInstanceId> =
+        deleted_instances.iter().map(|inst| inst.id).collect();
+
+    // Consistency A — a deleted IP-VRF must have all its referencing L2VNIs
+    // deleted in the same request (no surviving L2VNI may dangle on it).
+    for name in &plan.ip_vrfs.deleted {
+        if current.ip_vrfs().get(name).is_none() {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "planned IP-VRF {name:?} is not committed"
+            )));
+        }
+        if candidate.ip_vrfs().get(name).is_some() {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "candidate still contains planned deleted IP-VRF {name:?}"
+            )));
+        }
+        let refs = current
+            .ip_vrfs()
+            .referenced_l2vnis(name)
+            .cloned()
+            .unwrap_or_default();
+        for vni in refs {
+            if !deleted_vnis.contains(&vni) {
+                return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                    "tenant teardown: IP-VRF {name:?} is referenced by L2VNI {vni}, which must be deleted in the same request"
+                )));
+            }
+        }
+    }
+
+    // Consistency B — no candidate Ethernet Segment may still list a deleted
+    // VNI as a member (delete or member-shrink the segment in the same request).
+    for seg in candidate.ethernet_segments() {
+        for vni in &seg.member_vnis {
+            if deleted_vnis.contains(vni) {
+                return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                    "tenant teardown: candidate Ethernet Segment {} still references deleted L2VNI {vni}; delete or member-shrink the segment in the same request",
+                    seg.esi
+                )));
+            }
+        }
+    }
+
+    // Validate each deleted Ethernet Segment.
+    for esi in &plan.ethernet_segments.deleted {
+        if !current
+            .ethernet_segments()
+            .iter()
+            .any(|seg| seg.esi == *esi)
+        {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "planned deleted Ethernet Segment {esi} is not committed"
+            )));
+        }
+        if candidate
+            .ethernet_segments()
+            .iter()
+            .any(|seg| seg.esi == *esi)
+        {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "candidate still contains planned deleted Ethernet Segment {esi}"
+            )));
+        }
+    }
+
+    Ok(deleted_instances)
+}
+
+/// Build the failure returned from a tenant-teardown step. Escalates when the
+/// IMET rollback could not restore the committed Type 3 routes.
+fn teardown_failure(imet_restored: bool, step_message: &str) -> DaemonEvpnRuntimeConvergeError {
+    if imet_restored {
+        DaemonEvpnRuntimeConvergeError::failed(step_message.to_string())
+    } else {
+        DaemonEvpnRuntimeConvergeError::failed(format!(
+            "{step_message}; EVPN IMET teardown rollback also failed — \
+             live Type 3 state may require repair/restart"
+        ))
+    }
 }
 
 fn validate_single_ip_vrf_add(
@@ -3811,6 +4254,48 @@ originator_ip = "10.0.0.1"
 "#
     }
 
+    // A full tenant: L2VNI 100 that is both an Ethernet Segment member and
+    // linked to IP-VRF tenant-blue. Tearing this down to the minimal candidate
+    // exercises ES-aware L2VNI delete + ES delete + linked IP-VRF delete at
+    // once.
+    fn es_member_l2vni_linked_ip_vrf_runtime_candidate_toml() -> &'static str {
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+ip_vrf = "tenant-blue"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.1"
+"#
+    }
+
     fn l2vni_linked_ip_vrf_runtime_candidate_toml() -> &'static str {
         r#"
 [global]
@@ -5811,6 +6296,152 @@ table_id = 6000
         );
     }
 
+    #[test]
+    fn validate_tenant_teardown_accepts_full_tenant() {
+        let current = runtime_model_from_candidate_toml(
+            es_member_l2vni_linked_ip_vrf_runtime_candidate_toml(),
+        );
+        let candidate = runtime_candidate_from_toml(minimal_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+
+        // A tenant teardown spans all three resource types in one delete-only plan.
+        assert_eq!(plan.evpn_instances.deleted, vec![100]);
+        assert_eq!(plan.ip_vrfs.deleted, vec!["tenant-blue".to_string()]);
+        assert_eq!(plan.ethernet_segments.deleted.len(), 1);
+        assert!(plan.evpn_instances.added.is_empty());
+        assert!(is_tenant_teardown_plan(&plan, &current));
+
+        let deleted = validate_tenant_teardown(&current, &candidate, &plan).unwrap();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(
+            deleted[0].id,
+            rustbgpd_evpn::EvpnInstanceId::new(100).unwrap()
+        );
+    }
+
+    #[test]
+    fn validate_tenant_teardown_accepts_es_member_shrink() {
+        // VNI 200 leaves; the ES it shared with VNI 100 shrinks its member set
+        // to [100] in the same request (a member-shrink redefine, not a delete).
+        let current =
+            runtime_model_from_candidate_toml(two_l2vni_redefined_es_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(l2vni_one_es_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+
+        assert_eq!(plan.evpn_instances.deleted, vec![200]);
+        assert_eq!(plan.ethernet_segments.redefined.len(), 1);
+        assert!(plan.ethernet_segments.deleted.is_empty());
+        assert!(is_tenant_teardown_plan(&plan, &current));
+
+        let deleted = validate_tenant_teardown(&current, &candidate, &plan).unwrap();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(
+            deleted[0].id,
+            rustbgpd_evpn::EvpnInstanceId::new(200).unwrap()
+        );
+    }
+
+    #[test]
+    fn validate_tenant_teardown_rejects_add() {
+        let current = runtime_model_from_candidate_toml(l2vni_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(two_l2vni_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+
+        assert_eq!(plan.evpn_instances.added, vec![200]);
+        let error = validate_tenant_teardown(&current, &candidate, &plan).unwrap_err();
+        let DaemonEvpnRuntimeConvergeError::Unsupported(message) = error else {
+            panic!("expected unsupported error, got {error:?}");
+        };
+        assert!(
+            message.contains("does not support adds"),
+            "unexpected error message: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_tenant_teardown_rejects_l2vni_redefine() {
+        let current = runtime_model_from_candidate_toml(two_l2vni_runtime_candidate_toml());
+        let candidate =
+            runtime_candidate_from_toml(two_l2vni_one_redefined_l2vni_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+
+        assert_eq!(plan.evpn_instances.redefined, vec![100]);
+        let error = validate_tenant_teardown(&current, &candidate, &plan).unwrap_err();
+        let DaemonEvpnRuntimeConvergeError::Unsupported(message) = error else {
+            panic!("expected unsupported error, got {error:?}");
+        };
+        assert!(
+            message.contains("does not support L2VNI redefine"),
+            "unexpected error message: {message}"
+        );
+    }
+
+    #[test]
+    fn m47_interop_configs_describe_a_tenant_teardown() {
+        // Pin the M47 interop fixtures: the booted PE config and the gRPC
+        // teardown candidate must parse through the real config loader and
+        // diff to an atomic tenant teardown (L2VNI 100 + its Ethernet
+        // Segment). Guards the smoke against drift in either the configs or
+        // the teardown classifier.
+        let current = runtime_model_from_candidate_toml(include_str!(
+            "../tests/interop/configs/rustbgpd-m47-pe1.toml"
+        ));
+        let candidate = runtime_candidate_from_toml(include_str!(
+            "../tests/interop/configs/rustbgpd-m47-teardown.toml"
+        ));
+        let plan = current.plan_candidate(&candidate);
+
+        assert_eq!(plan.evpn_instances.deleted, vec![100]);
+        assert_eq!(plan.ethernet_segments.deleted.len(), 1);
+        assert!(is_tenant_teardown_plan(&plan, &current));
+
+        let deleted = validate_tenant_teardown(&current, &candidate, &plan).unwrap();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(
+            deleted[0].id,
+            rustbgpd_evpn::EvpnInstanceId::new(100).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_evpn_runtime_tenant_teardown_commits() {
+        let current =
+            runtime_candidate_from_toml(es_member_l2vni_linked_ip_vrf_runtime_candidate_toml());
+        let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+            current.instances().clone(),
+            current.ip_vrfs().clone(),
+            current.ethernet_segments().to_vec(),
+        )));
+        let apply_lock = tokio::sync::Mutex::new(());
+        let converger = TestRuntimeConverger::ok();
+
+        let response = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: minimal_runtime_candidate_toml().to_string(),
+                validate_only: false,
+            },
+            coordinator.as_ref(),
+            &apply_lock,
+            &converger,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.outcome,
+            proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyCommitted as i32
+        );
+        assert_eq!(response.runtime.unwrap().generation, 2);
+        let plan = response.plan.unwrap();
+        assert_eq!(plan.evpn_instances.unwrap().deleted, vec!["100"]);
+        assert_eq!(plan.evpn_ip_vrfs.unwrap().deleted, vec!["tenant-blue"]);
+        let guard = coordinator.lock().unwrap();
+        assert_eq!(guard.model().generation().as_u64(), 2);
+        assert!(guard.model().instances().is_empty());
+        assert!(guard.model().ip_vrfs().get("tenant-blue").is_none());
+        assert!(guard.model().ethernet_segments().is_empty());
+    }
+
     #[tokio::test]
     async fn runtime_actor_converger_ip_vrf_add_publishes_dataplane_model() {
         let current = runtime_model_from_candidate_toml(ip_vrf_runtime_candidate_toml());
@@ -6768,6 +7399,146 @@ table_id = 6000
         }
 
         segment_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "tenant teardown exercises every actor at once"
+    )]
+    async fn runtime_actor_converger_tenant_teardown_drains_imet_and_es_routes() {
+        // Tear down an ES-member L2VNI + its Ethernet Segment in one pass and
+        // assert the multi-actor drain: Type 3 IMET withdraw, Type 1/4 segment
+        // withdraws, and the dataplane instance model emptied.
+        let current = runtime_model_from_candidate_toml(l2vni_one_es_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(minimal_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        let current_instances = Arc::new(current.instances().clone());
+        let current_ip_vrfs = Arc::new(current.ip_vrfs().clone());
+        let deleted_vni = rustbgpd_evpn::EvpnInstanceId::new(100).unwrap();
+        let removed_esi =
+            rustbgpd_wire::EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = runtime_converger_rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let (evpn_instances_tx, evpn_instances_rx) = watch::channel(current_instances.clone());
+        let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(current_ip_vrfs);
+        let (bum_enforcement_tx, _bum_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
+            watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
+        let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
+        let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            supervisor_join: tokio::spawn(async {}),
+            actor_join: tokio::spawn(async {}),
+            local_mac_rx: None,
+            report_tx,
+            bum_enforcement_tx,
+            evpn_instances_tx,
+            ip_vrfs_tx,
+            remote_prefix_drop_counts_rx,
+        };
+        let (_local_tx, local_rx) = mpsc::channel(1);
+        let originator_handle = evpn_originator::spawn(
+            evpn_originator::OriginatorConfig::default(),
+            &current_instances,
+            rib_tx.clone(),
+            Some(local_rx),
+            BgpMetrics::new(),
+            evpn_originator::OriginatedLocalMacCounts::default(),
+            tokio_util::sync::CancellationToken::new(),
+            evpn_vni_to_esi_map(current.ethernet_segments()),
+        )
+        .expect("originator should spawn for non-empty current model");
+        let segment_handle = evpn_segment::spawn(
+            &current_instances,
+            current.ethernet_segments().to_vec(),
+            rib_tx.clone(),
+            None,
+            BgpMetrics::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("segment actor should spawn for non-empty ES config");
+        let mut imet_controller = evpn_imet::EvpnImetController::new();
+        let imet_keys = imet_controller
+            .originate_all(current.instances().iter().cloned(), &rib_tx)
+            .await;
+        assert_eq!(imet_keys.len(), 1);
+
+        let initial_deadline = StdInstant::now() + Duration::from_secs(2);
+        loop {
+            let observed = injects.lock().await.clone();
+            let has_es = observed
+                .iter()
+                .any(|key| matches!(key, rustbgpd_wire::EvpnRouteKey::Es { esi, .. } if *esi == removed_esi));
+            let has_ead_es = observed.iter().any(|key| {
+                matches!(key, rustbgpd_wire::EvpnRouteKey::EadPerEs { esi, .. } if *esi == removed_esi)
+            });
+            let has_ead_evi = observed.iter().any(|key| {
+                matches!(key, rustbgpd_wire::EvpnRouteKey::EadPerEvi { esi, .. } if *esi == removed_esi)
+            });
+            if has_es && has_ead_es && has_ead_evi {
+                break;
+            }
+            assert!(
+                StdInstant::now() < initial_deadline,
+                "timed out waiting for initial ES routes; observed {observed:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(tokio::sync::Mutex::new(imet_controller)),
+            dataplane: Some(dataplane_handle.runtime_control()),
+            originator: Some(originator_handle.runtime_control()),
+            svi: None,
+            l3_originator: None,
+            segment: Some(segment_handle.runtime_control()),
+        };
+
+        converger
+            .converge(&current, &candidate, &plan)
+            .await
+            .unwrap();
+
+        assert!(
+            evpn_instances_rx.borrow().get(deleted_vni).is_none(),
+            "dataplane instance model should drop the torn-down L2VNI"
+        );
+
+        let drain_deadline = StdInstant::now() + Duration::from_secs(2);
+        loop {
+            let drained = withdraws.lock().await.clone();
+            let has_imet = drained
+                .iter()
+                .any(|key| matches!(key, rustbgpd_wire::EvpnRouteKey::Imet { .. }));
+            let has_es = drained
+                .iter()
+                .any(|key| matches!(key, rustbgpd_wire::EvpnRouteKey::Es { esi, .. } if *esi == removed_esi));
+            let has_ead_es = drained.iter().any(|key| {
+                matches!(key, rustbgpd_wire::EvpnRouteKey::EadPerEs { esi, .. } if *esi == removed_esi)
+            });
+            let has_ead_evi = drained.iter().any(|key| {
+                matches!(key, rustbgpd_wire::EvpnRouteKey::EadPerEvi { esi, .. } if *esi == removed_esi)
+            });
+            if has_imet && has_es && has_ead_es && has_ead_evi {
+                break;
+            }
+            assert!(
+                StdInstant::now() < drain_deadline,
+                "tenant teardown did not drain IMET + segment routes; drained {drained:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        originator_handle.shutdown().await;
+        segment_handle.shutdown().await;
+        dataplane_handle.shutdown().await;
     }
 
     #[tokio::test]

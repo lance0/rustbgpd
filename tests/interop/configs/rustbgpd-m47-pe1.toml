@@ -1,0 +1,46 @@
+# M47 PE (rustbgpd) — runtime EVPN tenant teardown via ApplyEvpnRuntime.
+#
+# Boots a tenant whose routes span Type 3 (IMET, from the L2VNI) and
+# Type 1/4 (EAD-per-ES / EAD-per-EVI / ES, from the Ethernet Segment).
+# Both originate from config at startup, independent of any kernel
+# dataplane, so the smoke is pure control-plane. The test driver then
+# tears the tenant down at runtime over gRPC with the candidate in
+# rustbgpd-m47-teardown.toml; the daemon converges the L2VNI + ES delete
+# as one atomic tenant teardown.
+#
+# No `bridge` is set on the L2VNI: the smoke asserts on the advertised /
+# withdrawn EVPN NLRI, not on L2 forwarding, so the L2 dataplane is out
+# of scope here.
+
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+prometheus_addr = "0.0.0.0:9179"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.1"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "frr"
+hold_time = 90
+families = ["l2vpn_evpn"]
+
+[security.grpc]
+enforcement = "legacy"

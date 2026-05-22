@@ -1,0 +1,32 @@
+# M47 teardown candidate — the `candidate_toml` body sent to
+# EvpnService/ApplyEvpnRuntime to remove the whole tenant.
+#
+# Identical to rustbgpd-m47-pe1.toml minus the [[evpn_instances]] and
+# [[ethernet_segments]] blocks. The coordinator diffs this candidate's
+# (empty) EVPN runtime model against the committed one, producing a
+# delete-only plan — L2VNI 100 (an ES member) + Ethernet Segment ...01 —
+# which routes through the atomic tenant-teardown converger. Global,
+# telemetry, gRPC, and neighbor config are unchanged: ApplyEvpnRuntime
+# only mutates the EVPN runtime model, not the session layer.
+
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+prometheus_addr = "0.0.0.0:9179"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "frr"
+hold_time = 90
+families = ["l2vpn_evpn"]
+
+[security.grpc]
+enforcement = "legacy"

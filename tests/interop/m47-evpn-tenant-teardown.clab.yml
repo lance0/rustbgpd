@@ -1,0 +1,69 @@
+# Containerlab topology: rustbgpd PE ↔ FRR receiver
+# (M47 — runtime EVPN tenant teardown via ApplyEvpnRuntime, ADR-0063 / #210)
+#
+# Validates the atomic tenant-teardown shape of the EVPN runtime-mutation
+# API: rustbgpd boots a tenant (an Ethernet-Segment-member L2VNI), advertises
+# its Type 3 (IMET) and Type 1/4 (EAD + ES) routes to a real FRR peer, then
+# an operator drives `EvpnService/ApplyEvpnRuntime` over gRPC with a candidate
+# that drops the whole tenant. The daemon converges the multi-element delete
+# (L2VNI + Ethernet Segment in one pass) through the tenant-teardown path and
+# every tenant route is withdrawn from FRR.
+#
+# This is a pure control-plane smoke — it deliberately does NOT set up a
+# kernel bridge / VXLAN / VRF. rustbgpd originates Type 3 from the L2VNI
+# config and Type 1/4 from the Ethernet Segment config at boot, independent
+# of dataplane readiness, so the tenant routes reach FRR's global EVPN RIB
+# (`show bgp l2vpn evpn`) without any kernel state. Skipping the dataplane
+# keeps the smoke runnable on a runner that lacks the `vrf`/`vxlan` modules
+# and keeps the assertion surface on the over-the-wire withdraw, which is the
+# behavior under test. The linked-IP-VRF + kernel-L3 teardown datapath is a
+# follow-up smoke; its drains are covered by the unit + actor-converger tests.
+#
+# Topology:
+#   rustbgpd (10.0.0.1, AS 65000) — tenant L2VNI 100 + ES, teardown via gRPC
+#     └── iBGP L2VPN/EVPN ────── FRR (10.0.0.2, AS 65000) — receiver
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m47-evpn-tenant-teardown.clab.yml
+#   bash tests/interop/scripts/test-m47-evpn-tenant-teardown.sh
+#   containerlab destroy -t tests/interop/m47-evpn-tenant-teardown.clab.yml
+
+name: m47-evpn-tenant-teardown
+
+mgmt:
+  network: clab-mgmt
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m47-pe1.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m47-receiver.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.0.0.0/24
+# rustbgpd: 10.0.0.1, AS 65000 — tenant owner (L2VNI 100 + ESI ...01)
+# FRR:      10.0.0.2, AS 65000 — iBGP L2VPN/EVPN receiver
+# Tenant: L2VNI 100 (RD 65000:100, RT 65000:100), Ethernet Segment
+#         00:00:00:00:00:00:00:00:00:01 over [100]. Teardown candidate:
+#         tests/interop/configs/rustbgpd-m47-teardown.toml (no EVPN state).

@@ -4,14 +4,16 @@
 delete when the VNI is not an Ethernet Segment member, single L2VNI redefine
 including Ethernet Segment members when `ip_vrf` link metadata is unchanged,
 single IP-VRF add, single standalone IP-VRF delete, single IP-VRF redefine with
-unchanged L3VNI/device/table identity, and single Ethernet Segment
-add/delete/redefine commit live via `EvpnService.ApplyEvpnRuntime`; ES
-add/redefine can bind member VNIs added by a prior live L2VNI add when the
-segment actor already exists. L3VNI/device/table IP-VRF redefine, `ip_vrf`
-relink, mixed / multi-element edits, linked IP-VRF delete, and ES-aware L2VNI
-delete shapes still fail closed (remaining shapes tracked in
-[#210](https://github.com/lance0/rustbgpd/issues/210)).
-**Date:** 2026-05-17 (implementation in progress through v0.25.0)
+unchanged L3VNI/device/table identity, single Ethernet Segment
+add/delete/redefine, and atomic tenant teardown — a delete-only plan that drops
+an ES-member L2VNI together with its Ethernet Segment (delete or member-shrink)
+and/or a linked IP-VRF in one pass — commit live via
+`EvpnService.ApplyEvpnRuntime`; ES add/redefine can bind member VNIs added by a
+prior live L2VNI add when the segment actor already exists. L3VNI/device/table
+IP-VRF redefine, `ip_vrf` relink, and non-teardown mixed edits (an add combined
+with a delete or redefine in the same request) still fail closed (remaining
+shapes tracked in [#210](https://github.com/lance0/rustbgpd/issues/210)).
+**Date:** 2026-05-17 (implementation in progress through v0.27.0)
 
 ## Context
 
@@ -156,8 +158,9 @@ silently advance the live EVPN runtime model.
   add/delete/redefine — now commit live through the
   daemon actor converger. L2VNI delete also republishes derived IP-VRF
   reference metadata to the dataplane when the deleted VNI was linked to a
-  still-present IP-VRF; linked IP-VRF delete and mixed tenant
-  teardown still fail closed. L2VNI redefine re-originates the per-VNI Type 3
+  still-present IP-VRF; tearing down the referenced IP-VRF (or the L2VNI's
+  Ethernet Segment) is covered by the tenant-teardown path below rather than the
+  single-delete path. L2VNI redefine re-originates the per-VNI Type 3
   IMET (the lone explicit consumer — withdraw the committed route, then
   originate the candidate one) and republishes the candidate instance table to
   the level-triggered watch consumers (Type 2 originator, SVI, dataplane,
@@ -185,11 +188,24 @@ silently advance the live EVPN runtime model.
   EAD-per-EVI, and BUM enforcement state from the updated instance snapshot. ES
   add/redefine still fails closed if no segment actor was spawned at startup or
   if a member VNI is absent from the candidate runtime instance table.
-- `ip_vrf` relink, mixed / multi-element edits, linked IP-VRF delete / tenant
-  teardown, ES-aware L2VNI delete convergence, and L3VNI/device/table IP-VRF
-  redefine are still validated as pure fail-closed plans; their live convergence
-  is the remaining work in
-  [#210](https://github.com/lance0/rustbgpd/issues/210).
+- Atomic tenant teardown commits a delete-only plan that spans more than one
+  resource (or deletes an ES-member L2VNI, or deletes a referenced IP-VRF) in a
+  single pass. The converger validates internal consistency (no surviving L2VNI
+  may dangle on a deleted IP-VRF; no candidate Ethernet Segment may still list a
+  deleted member VNI — ES redefines are accepted only as a member-shrink), then
+  withdraws each deleted L2VNI's Type 3 IMET and republishes the candidate
+  snapshots to every level-triggered actor (dataplane instances + IP-VRF
+  metadata, SVI, Type 2 originator, segment instances + segments, Type 5
+  originator). A rollback ladder republishes the committed snapshots and
+  re-originates IMET on any failed publish, escalating the error when an IMET
+  restore itself fails. The drains reuse the existing level-triggered consumers;
+  the only added primitive is the segment actor emitting Type 1/4 withdraws for a
+  member VNI whose instance has already been removed (a withdraw needs only the
+  route key, not the reference instance's path attributes).
+- `ip_vrf` relink, L3VNI/device/table IP-VRF redefine, and non-teardown mixed
+  edits (an add combined with a delete or redefine in the same request) are still
+  validated as pure fail-closed plans; their live convergence is the remaining
+  work in [#210](https://github.com/lance0/rustbgpd/issues/210).
 - Issue #133 (design) is resolved and closed; the remaining implementation is
   tracked in #210.
 
