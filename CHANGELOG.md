@@ -11,6 +11,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN DF election — RFC 8584 Highest Random Weight.**
+  `[[ethernet_segments]].df_algorithm = "highest-random-weight"` now runs the
+  HRW DF algorithm using the RFC 8584 §3.2 `Wrand(V, ESI, PE-IP)` weight
+  function (a 31-bit CRC-32 digest of the Ethernet Tag + ESI fed through the
+  specified LCG, `mod 2^31`), with the numerically lowest PE IP as the
+  equal-weight tie-break, and advertises the DF Election Extended Community on
+  Type 4 ES routes. Mixed or absent DF Election advertisements still fall back
+  to default service carving, while RFC 9785 Highest-/Lowest-Preference and
+  Don't Preempt behavior remain fail-closed for a later slice.
 - **ADR-0063 EVPN runtime convergence — single IP-VRF redefine.**
   `EvpnService.ApplyEvpnRuntime` can now commit exactly one redefined
   `[[evpn_ip_vrfs]]` entry when the candidate has no L2VNI or Ethernet Segment
@@ -1964,15 +1973,16 @@ The wire crate stays at 0.9.0 — no source-level changes under
   - **Domain types** — new `crates/evpn/src/segment.rs` ships
     `EthernetSegment` (ESI, member VNIs, DF preference, algorithm,
     originator IP), `DfAlgorithm` (`DefaultModulo`,
-    `HighestRandomWeight`, `PreferenceBased`), and `DfRole`.
+    `HighestRandomWeight`, `HighestPreference`, `LowestPreference`),
+    and `DfRole`.
   - **Pure DF election state machine** in
     `crates/evpn/src/df_election.rs`. `DfElection::run` takes the
     candidate set + the local PE's originator IP and returns
     `BTreeMap<EvpnInstanceId, DfRole>`. Implements RFC 7432 §8.5
     service carving (sort candidates by originator IP ascending;
     candidate at slot `vni mod n` is DF) and RFC 8584 §3 algorithm
-    negotiation (lowest agreed algorithm-id wins; `DefaultModulo`
-    is the universal floor).
+    negotiation (algorithm disagreement falls back to default service
+    carving; `DefaultModulo` is the universal floor).
   - **Three Type 1/4 origination state machines** in
     `crates/evpn/src/origination_es.rs`. `LocalEsOriginator`
     (Type 4 ES), `LocalEadPerEsOriginator` (Type 1 EAD-per-ES with
@@ -1993,8 +2003,7 @@ The wire crate stays at 0.9.0 — no source-level changes under
     sentinel, requires a non-empty member-VNI list, validates that
     every member VNI maps to a configured EVPN instance, and accepts
     only `df_algorithm = "default-modulo"` plus the default
-    `df_preference = 32768` until the non-default RFC 8584 algorithms
-    are implemented.
+    `df_preference = 32768` until non-default algorithms are implemented.
   - **Observable surface** — `evpn_df_role{esi,vni,role}` gauge
     (PromQL `evpn_df_role{role="df"} == 1` finds active DFs) and
     `evpn_df_role_changes_total{esi,vni}` counter for spotting

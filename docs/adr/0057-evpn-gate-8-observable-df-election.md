@@ -44,21 +44,23 @@ The Gate 8 surface is:
 
 - **Domain types** in `crates/evpn/src/segment.rs`: `EthernetSegment`,
   `DfAlgorithm` (`DefaultModulo`, `HighestRandomWeight`,
-  `PreferenceBased`), `DfRole`. The runtime config is parsed from
+  `HighestPreference`, `LowestPreference`), `DfRole`. The runtime config is parsed from
   `[[ethernet_segments]]` in `Config::resolve_ethernet_segments`;
-  Gate 8 config accepts only `DefaultModulo` with the default
-  preference `32768`, while the non-default enum variants and
-  preference field are retained for wire/decode compatibility and
-  the later Gate 8b/8c implementation.
+  Gate 8 config accepts `DefaultModulo` with the default preference
+  `32768`; the HRW follow-up additionally accepts
+  `HighestRandomWeight`. The preference field and RFC 9785
+  preference variants are retained for wire/decode compatibility and
+  a later implementation.
 - **Pure DF election state machine** in
   `crates/evpn/src/df_election.rs`: `DfElection::run` takes the
   candidate set + the local PE's originator IP and returns
   `BTreeMap<EvpnInstanceId, DfRole>`. RFC 7432 §8.5 service carving
   (sort candidates by originator IP ascending; the candidate at slot
-  `vni mod n` is the DF). RFC 8584 §3 algorithm negotiation
-  resolves to the lowest agreed algorithm-id; `DefaultModulo` is
-  the universal floor, so an algorithm disagreement always reduces
-  to default service carving rather than failing the segment.
+  `vni mod n` is the DF). RFC 8584 §3.2 Highest Random Weight
+  selects the PE with the highest `Weight(V, ESI, PE-IP)`, with
+  lowest PE IP as tie-break. RFC 8584 algorithm negotiation falls
+  back to default service carving when candidates disagree or omit
+  the DF Election Extended Community.
 - **Three Type 1/4 originator state machines** in
   `crates/evpn/src/origination_es.rs`: `LocalEsOriginator` (Type 4
   ES), `LocalEadPerEsOriginator` (Type 1 EAD-per-ES with MAX_ET

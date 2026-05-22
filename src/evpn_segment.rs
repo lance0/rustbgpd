@@ -604,7 +604,14 @@ async fn run_election_with_candidates(
             );
             continue;
         };
-        apply_with_instance(runtime, &inst, state.esi_label, actions).await;
+        apply_with_instance(
+            runtime,
+            &inst,
+            state.esi_label,
+            state.config.df_algorithm,
+            actions,
+        )
+        .await;
         debug!(
             esi = esi_str.as_str(),
             vni = vni.as_u32(),
@@ -739,19 +746,20 @@ fn has_matching_es_import_rt(attrs: &[PathAttribute], esi: EthernetSegmentIdenti
 }
 
 fn decode_df_election_extcomm(attrs: &[PathAttribute]) -> Option<(u32, DfAlgorithm)> {
-    // RFC 8584 §3.1: DF Election extcomm type 0x06 subtype 0x06,
-    // carrying RSV(3 bits), DF Alg(5 bits), bitmap(16 bits), and
-    // reserved bytes. Decode is best-effort — unrecognized extcomms
-    // fall back to defaults at the call site.
+    // RFC 8584 §2.2 / RFC 9785 §3: DF Election extcomm type 0x06
+    // subtype 0x06, carrying RSV(3 bits), DF Alg(5 bits), bitmap(16
+    // bits), and algorithm-specific trailing bytes. Decode is
+    // best-effort — unrecognized extcomms fall back to defaults at
+    // the call site.
     for attr in attrs {
         let PathAttribute::ExtendedCommunities(ecs) = attr else {
             continue;
         };
         for ec in ecs {
-            let bytes = ec.as_u64().to_be_bytes();
-            if bytes[0] == 0x06 && bytes[1] == 0x06 {
-                let alg = DfAlgorithm::from_algorithm_id(bytes[2] & 0x1f);
-                return Some((32_768, alg));
+            if let Some(df) = ec.as_df_election() {
+                let alg = DfAlgorithm::from_algorithm_id(df.algorithm_id);
+                let pref = df.preference.map_or(32_768, u32::from);
+                return Some((pref, alg));
             }
         }
     }
@@ -781,19 +789,27 @@ async fn apply(runtime: &SegmentRuntime, state: &SegmentState, actions: Vec<Orig
     let Some(inst) = runtime.instances.get(state.reference_instance_id).cloned() else {
         return;
     };
-    apply_with_instance(runtime, &inst, state.esi_label, actions).await;
+    apply_with_instance(
+        runtime,
+        &inst,
+        state.esi_label,
+        state.config.df_algorithm,
+        actions,
+    )
+    .await;
 }
 
 async fn apply_with_instance(
     runtime: &SegmentRuntime,
     inst: &EvpnInstance,
     esi_label: MplsLabel,
+    df_algorithm: DfAlgorithm,
     actions: Vec<OriginationAction>,
 ) {
     for action in actions {
         match action {
             OriginationAction::Inject { key, .. } => {
-                let route = build_es_route(inst, &key, esi_label);
+                let route = build_es_route(inst, &key, esi_label, df_algorithm);
                 let (reply_tx, reply_rx) = oneshot::channel();
                 if runtime
                     .rib_tx
@@ -857,6 +873,7 @@ fn build_es_route(
     instance: &EvpnInstance,
     key: &EvpnRouteKey,
     esi_label: MplsLabel,
+    df_algorithm: DfAlgorithm,
 ) -> EvpnRibRoute {
     let (route, key_specific_extcomms): (EvpnRoute, Vec<rustbgpd_wire::ExtendedCommunity>) =
         match key {
@@ -877,7 +894,16 @@ fn build_es_route(
                 // to the ESI without RT preconfiguration.
                 vec![rustbgpd_wire::ExtendedCommunity::es_import_rt(
                     es_import_rt_from_esi(*esi),
-                )],
+                )]
+                .into_iter()
+                .chain((df_algorithm != DfAlgorithm::DefaultModulo).then_some(
+                    rustbgpd_wire::ExtendedCommunity::df_election(
+                        df_algorithm.algorithm_id(),
+                        0,
+                        None,
+                    ),
+                ))
+                .collect(),
             ),
             EvpnRouteKey::EadPerEs {
                 rd,
@@ -1177,7 +1203,7 @@ mod tests {
             esi: esi(1),
             originator_ip: ipa("10.0.0.1"),
         };
-        let route = build_es_route(&inst, &key, MplsLabel::new(123));
+        let route = build_es_route(&inst, &key, MplsLabel::new(123), DfAlgorithm::DefaultModulo);
         assert!(matches!(route.route, EvpnRoute::Es(_)));
         // Must carry: Origin, AsPath, NextHop, ExtendedCommunities.
         assert!(
@@ -1214,7 +1240,7 @@ mod tests {
             esi: esi(1),
             ethernet_tag: EthernetTagId::MAX_ET,
         };
-        let route = build_es_route(&inst, &key, MplsLabel::new(123));
+        let route = build_es_route(&inst, &key, MplsLabel::new(123), DfAlgorithm::DefaultModulo);
         match route.route {
             EvpnRoute::EadPerEs(r) => {
                 assert_eq!(r.ethernet_tag, EthernetTagId::MAX_ET);
@@ -1231,7 +1257,7 @@ mod tests {
             esi: esi(1),
             ethernet_tag: EthernetTagId(100),
         };
-        let route = build_es_route(&inst, &key, MplsLabel::new(123));
+        let route = build_es_route(&inst, &key, MplsLabel::new(123), DfAlgorithm::DefaultModulo);
         match route.route {
             EvpnRoute::EadPerEvi(r) => {
                 assert_eq!(r.ethernet_tag.0, 100);
@@ -1243,12 +1269,20 @@ mod tests {
 
     #[test]
     fn decode_df_election_extcomm_reads_five_bit_algorithm() {
-        let ec =
-            ExtendedCommunity::new(u64::from_be_bytes([0x06, 0x06, 0b1110_0001, 0, 0, 0, 0, 0]));
+        let ec = ExtendedCommunity::df_election(1, 0, None);
         let attrs = [PathAttribute::ExtendedCommunities(vec![ec])];
         let (pref, alg) = decode_df_election_extcomm(&attrs).unwrap();
         assert_eq!(pref, 32_768);
         assert_eq!(alg, DfAlgorithm::HighestRandomWeight);
+    }
+
+    #[test]
+    fn decode_df_election_extcomm_reads_rfc9785_preference_bytes() {
+        let ec = ExtendedCommunity::df_election(3, 0, Some(42));
+        let attrs = [PathAttribute::ExtendedCommunities(vec![ec])];
+        let (pref, alg) = decode_df_election_extcomm(&attrs).unwrap();
+        assert_eq!(pref, 42);
+        assert_eq!(alg, DfAlgorithm::LowestPreference);
     }
 
     #[test]
@@ -1274,7 +1308,7 @@ mod tests {
             esi: id,
             originator_ip: ipa("10.0.0.1"),
         };
-        let route = build_es_route(&inst, &key, MplsLabel::new(123));
+        let route = build_es_route(&inst, &key, MplsLabel::new(123), DfAlgorithm::DefaultModulo);
         let extcomms = route
             .attributes
             .iter()
@@ -1289,6 +1323,68 @@ mod tests {
             .find_map(ExtendedCommunity::as_es_import_rt)
             .expect("ES-Import RT extcomm attached");
         assert_eq!(derived, [0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+    }
+
+    #[test]
+    fn type_4_es_route_carries_hrw_df_election_extcomm_when_configured() {
+        let inst = instance(100);
+        let id = esi(0x21);
+        let key = EvpnRouteKey::Es {
+            rd: rd(65000, 100),
+            esi: id,
+            originator_ip: ipa("10.0.0.1"),
+        };
+        let route = build_es_route(
+            &inst,
+            &key,
+            MplsLabel::new(123),
+            DfAlgorithm::HighestRandomWeight,
+        );
+        let extcomms = route
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(v) => Some(v.clone()),
+                _ => None,
+            })
+            .expect("ExtendedCommunities attribute present");
+        let df = extcomms
+            .iter()
+            .copied()
+            .find_map(ExtendedCommunity::as_df_election)
+            .expect("DF Election extcomm attached");
+        assert_eq!(
+            df.algorithm_id,
+            DfAlgorithm::HighestRandomWeight.algorithm_id()
+        );
+        assert_eq!(df.capabilities, 0);
+        assert_eq!(df.preference, None);
+    }
+
+    #[test]
+    fn default_modulo_type_4_es_route_omits_df_election_extcomm() {
+        let inst = instance(100);
+        let id = esi(0x22);
+        let key = EvpnRouteKey::Es {
+            rd: rd(65000, 100),
+            esi: id,
+            originator_ip: ipa("10.0.0.1"),
+        };
+        let route = build_es_route(&inst, &key, MplsLabel::new(123), DfAlgorithm::DefaultModulo);
+        let extcomms = route
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(v) => Some(v.clone()),
+                _ => None,
+            })
+            .expect("ExtendedCommunities attribute present");
+        assert!(
+            extcomms
+                .iter()
+                .copied()
+                .all(|ec| ec.as_df_election().is_none())
+        );
     }
 
     #[test]
@@ -1366,7 +1462,7 @@ mod tests {
             esi: id,
             ethernet_tag: EthernetTagId::MAX_ET,
         };
-        let route = build_es_route(&inst, &key, MplsLabel::new(123));
+        let route = build_es_route(&inst, &key, MplsLabel::new(123), DfAlgorithm::DefaultModulo);
         let extcomms = route
             .attributes
             .iter()
@@ -1402,7 +1498,7 @@ mod tests {
             esi: esi(1),
             ethernet_tag: EthernetTagId(100),
         };
-        let route = build_es_route(&inst, &key, MplsLabel::new(123));
+        let route = build_es_route(&inst, &key, MplsLabel::new(123), DfAlgorithm::DefaultModulo);
         let extcomms = route
             .attributes
             .iter()
