@@ -1553,6 +1553,11 @@ Optional, repeatable. Declares the local L2VNI / EVPN-instance tenants
 this VTEP serves (Gate 7a foundation, ADR-0052 + ADR-0055). Empty by
 default — RR-only deployments leave it empty.
 
+> rustbgpd is observe-only for kernel netdevs: you provision the bridge
+> and VXLAN port yourself, and the daemon probes them (ADR-0054 §4). See
+> [docs/evpn-vtep-setup.md](evpn-vtep-setup.md) for the `ip link` recipe
+> the `bridge` / `local_vtep_ip` fields below must match.
+
 ```toml
 [[evpn_instances]]
 vni = 100
@@ -1734,6 +1739,11 @@ Optional, repeatable. Declares the local IP-VRF / L3VNI tenants this VTEP
 serves under the RFC 9136 §4.4.2 symmetric Interface-less IRB model
 (Gate 9, ADR-0058). Empty by default — L2-only VTEPs and RR-only
 deployments leave it empty.
+
+> rustbgpd is observe-only for kernel netdevs: you provision the VRF and
+> L3 VXLAN devices yourself, and the daemon probes them against the seven
+> ADR-0058 §3 predicates. See [docs/evpn-vtep-setup.md](evpn-vtep-setup.md)
+> for the `ip link` recipe the fields below must match.
 
 The daemon parses and validates this block, builds an `IpVrfTable`,
 runs the per-pass `IpVrfStatus` readiness probe (the seven ADR-0058
