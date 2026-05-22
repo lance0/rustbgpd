@@ -12,6 +12,9 @@
 #      requested route-target — proving the over-the-wire NLRI +
 #      extended-community encoding decodes cleanly on a real peer.
 #   5. DeleteEvpnRoute withdraws it; FRR drops it from the EVPN RIB.
+#   6. A second Type 5 carrying a non-zero Gateway Address is accepted,
+#      surfaces through ListEvpnRoutes with that gateway, reaches FRR's
+#      EVPN RIB, and withdraws cleanly.
 #
 # Pure control-plane: no kernel VRF / L3VNI on the FRR side, so the
 # route lands in `show bgp l2vpn evpn` (received, not VRF-imported).
@@ -27,7 +30,7 @@
 
 TOPO="m45-evpn-type5-injection"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=test-lib.sh
+# shellcheck source=tests/interop/scripts/test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 
 FRR="clab-${TOPO}-frr"
@@ -35,6 +38,9 @@ RUSTBGPD_IP="10.0.0.1"
 RD="65000:5000"
 PREFIX="198.51.100.0"
 PREFIX_LEN=24
+OVERLAY_PREFIX="198.51.101.0"
+OVERLAY_PREFIX_LEN=24
+OVERLAY_GATEWAY="192.0.2.254"
 VNI=100
 RT="65000:100"
 ROUTER_MAC="02:00:00:00:50:00"
@@ -51,9 +57,21 @@ grpc_add_type5() {
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddEvpnRoute 2>&1 || true
 }
 
+grpc_add_type5_overlay_gateway() {
+    grpcurl -plaintext -import-path . -proto "$PROTO" \
+        -d "{\"routeType\":5,\"rd\":\"$RD\",\"ethernetTag\":0,\"label\":$VNI,\"nextHop\":\"$RUSTBGPD_IP\",\"routeTargets\":[\"$RT\"],\"disableVxlanEncap\":false,\"prefix\":\"$OVERLAY_PREFIX\",\"prefixLength\":$OVERLAY_PREFIX_LEN,\"routerMac\":\"$ROUTER_MAC\",\"gateway\":\"$OVERLAY_GATEWAY\"}" \
+        "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddEvpnRoute 2>&1 || true
+}
+
 grpc_delete_type5() {
     grpcurl -plaintext -import-path . -proto "$PROTO" \
         -d "{\"routeType\":5,\"rd\":\"$RD\",\"ethernetTag\":0,\"prefix\":\"$PREFIX\",\"prefixLength\":$PREFIX_LEN}" \
+        "$GRPC_ADDR" rustbgpd.v1.InjectionService/DeleteEvpnRoute 2>&1 || true
+}
+
+grpc_delete_type5_overlay_gateway() {
+    grpcurl -plaintext -import-path . -proto "$PROTO" \
+        -d "{\"routeType\":5,\"rd\":\"$RD\",\"ethernetTag\":0,\"prefix\":\"$OVERLAY_PREFIX\",\"prefixLength\":$OVERLAY_PREFIX_LEN}" \
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/DeleteEvpnRoute 2>&1 || true
 }
 
@@ -74,9 +92,10 @@ frr_type5_routes() {
 # Poll FRR's EVPN RIB until the injected prefix is present / absent.
 wait_frr_type5_present() {
     local timeout=${1:-30}
+    local prefix=${2:-$PREFIX}
     local attempts=$((timeout / 2))
     for _ in $(seq 1 "$attempts"); do
-        if frr_type5_routes | grep -q "$PREFIX"; then
+        if frr_type5_routes | grep -q "$prefix"; then
             return 0
         fi
         sleep 2
@@ -86,9 +105,10 @@ wait_frr_type5_present() {
 
 wait_frr_type5_absent() {
     local timeout=${1:-20}
+    local prefix=${2:-$PREFIX}
     local attempts=$((timeout / 2))
     for _ in $(seq 1 "$attempts"); do
-        if ! frr_type5_routes | grep -q "$PREFIX"; then
+        if ! frr_type5_routes | grep -q "$prefix"; then
             return 0
         fi
         sleep 2
@@ -104,9 +124,11 @@ resolve_grpc_addr
 start_rustbgpd
 
 # Test 1: rustbgpd ↔ FRR Established on L2VPN/EVPN
-wait_frr_established "$FRR" "$RUSTBGPD_IP" "FRR L2VPN/EVPN" \
-    && ok "FRR reached Established with rustbgpd" \
-    || fail "FRR did not reach Established"
+if wait_frr_established "$FRR" "$RUSTBGPD_IP" "FRR L2VPN/EVPN"; then
+    ok "FRR reached Established with rustbgpd"
+else
+    fail "FRR did not reach Established"
+fi
 
 # Test 2: inject the Type 5 route via the gRPC InjectionService
 log "[test] Injecting Type 5 ${PREFIX}/${PREFIX_LEN} via AddEvpnRoute"
@@ -171,6 +193,48 @@ if wait_frr_type5_absent 20; then
     ok "FRR dropped ${PREFIX}/${PREFIX_LEN} after withdrawal"
 else
     fail "FRR still shows ${PREFIX}/${PREFIX_LEN} 20s after withdrawal"
+    frr_type5_routes >&2
+fi
+
+# Test 6: overlay-index Gateway Address injection — still control-plane only,
+# but now the NLRI carries a non-zero Gateway Address.
+log "[test] Injecting overlay-index Type 5 ${OVERLAY_PREFIX}/${OVERLAY_PREFIX_LEN} gateway ${OVERLAY_GATEWAY}"
+overlay_add_out=$(grpc_add_type5_overlay_gateway)
+if echo "$overlay_add_out" | grep -qi "error"; then
+    fail "AddEvpnRoute overlay-index Type 5 rejected: $overlay_add_out"
+else
+    ok "AddEvpnRoute overlay-index Type 5 accepted"
+fi
+
+log "[test] rustbgpd ListEvpnRoutes shows the overlay-index gateway"
+evpn_json=$(grpc_list_evpn)
+if echo "$evpn_json" | grep -q "$OVERLAY_PREFIX" \
+    && echo "$evpn_json" | grep -q "\"gateway\": \"$OVERLAY_GATEWAY\""; then
+    ok "ListEvpnRoutes includes overlay-index Type 5 gateway ${OVERLAY_GATEWAY}"
+else
+    fail "ListEvpnRoutes missing overlay-index Type 5 gateway ${OVERLAY_GATEWAY}"
+    echo "$evpn_json" | head -60 >&2
+fi
+
+log "[test] FRR receives the overlay-index Type 5 NLRI"
+if wait_frr_type5_present 30 "$OVERLAY_PREFIX"; then
+    ok "FRR EVPN RIB contains overlay-index ${OVERLAY_PREFIX}/${OVERLAY_PREFIX_LEN}"
+else
+    fail "FRR never received overlay-index Type 5 within 30s"
+    frr_type5_routes >&2
+fi
+
+log "[test] Withdrawal: DeleteEvpnRoute removes the overlay-index Type 5"
+overlay_del_out=$(grpc_delete_type5_overlay_gateway)
+if echo "$overlay_del_out" | grep -qi "error"; then
+    fail "DeleteEvpnRoute overlay-index Type 5 rejected: $overlay_del_out"
+else
+    ok "DeleteEvpnRoute overlay-index Type 5 accepted"
+fi
+if wait_frr_type5_absent 20 "$OVERLAY_PREFIX"; then
+    ok "FRR dropped overlay-index ${OVERLAY_PREFIX}/${OVERLAY_PREFIX_LEN} after withdrawal"
+else
+    fail "FRR still shows overlay-index ${OVERLAY_PREFIX}/${OVERLAY_PREFIX_LEN} 20s after withdrawal"
     frr_type5_routes >&2
 fi
 
