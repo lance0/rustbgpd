@@ -52,6 +52,14 @@ grpc_list_evpn() {
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListEvpnRoutes 2>/dev/null || true
 }
 
+# True if the ListEvpnRoutes JSON in $1 contains a route of EVPN type $2.
+# Parses with jq (any `routeType` field anywhere in the document) so the
+# check is robust to grpcurl formatting and the response wrapper shape.
+evpn_has_route_type() {
+    printf '%s' "$1" | jq -e --argjson t "$2" \
+        'any(.. | objects | .routeType?; . == $t)' >/dev/null 2>&1
+}
+
 # Drive EvpnService/ApplyEvpnRuntime with the teardown candidate. The
 # candidate TOML is passed verbatim as the `candidate_toml` string; jq
 # handles the multi-line escaping.
@@ -115,13 +123,13 @@ fi
 # Test 3: rustbgpd's own RIB holds the locally-originated Type 3 + Type 4.
 log "[test] rustbgpd ListEvpnRoutes shows the tenant's Type 3 + Type 4"
 evpn_json=$(grpc_list_evpn)
-if echo "$evpn_json" | grep -q '"routeType": 3'; then
+if evpn_has_route_type "$evpn_json" 3; then
     ok "ListEvpnRoutes includes the L2VNI Type 3 (IMET)"
 else
     fail "ListEvpnRoutes missing the L2VNI Type 3 (IMET)"
     echo "$evpn_json" | head -60 >&2
 fi
-if echo "$evpn_json" | grep -q '"routeType": 4'; then
+if evpn_has_route_type "$evpn_json" 4; then
     ok "ListEvpnRoutes includes the Ethernet Segment Type 4"
 else
     fail "ListEvpnRoutes missing the Ethernet Segment Type 4"
@@ -137,11 +145,21 @@ else
     fail "ApplyEvpnRuntime did not commit the teardown"
     echo "$apply_out" | head -60 >&2
 fi
-# The plan summary should attribute the delete to the L2VNI.
-if echo "$apply_out" | grep -q '"100"'; then
+# Assert the plan summary lists L2VNI 100 in the deleted L2VNI field
+# specifically (not an incidental "100" substring of an RD/RT), and that the
+# Ethernet Segment is dropped in the same plan.
+if printf '%s' "$apply_out" | jq -e \
+    '(.plan.evpnInstances.deleted // []) | index("100")' >/dev/null 2>&1; then
     ok "teardown plan deletes L2VNI 100"
 else
-    fail "teardown plan does not list L2VNI 100 as deleted"
+    fail "teardown plan does not list L2VNI 100 in evpnInstances.deleted"
+    echo "$apply_out" | head -60 >&2
+fi
+if printf '%s' "$apply_out" | jq -e \
+    '((.plan.ethernetSegments.deleted // []) | length) > 0' >/dev/null 2>&1; then
+    ok "teardown plan drops the tenant's Ethernet Segment"
+else
+    fail "teardown plan does not delete the Ethernet Segment"
     echo "$apply_out" | head -60 >&2
 fi
 
@@ -157,7 +175,7 @@ fi
 # Test 6: rustbgpd's RIB no longer holds the tenant's Type 3 / Type 4.
 log "[test] rustbgpd ListEvpnRoutes drained the tenant routes"
 evpn_json=$(grpc_list_evpn)
-if echo "$evpn_json" | grep -q '"routeType": 3' || echo "$evpn_json" | grep -q '"routeType": 4'; then
+if evpn_has_route_type "$evpn_json" 3 || evpn_has_route_type "$evpn_json" 4; then
     fail "ListEvpnRoutes still shows tenant Type 3/4 after teardown"
     echo "$evpn_json" | head -60 >&2
 else
