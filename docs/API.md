@@ -1145,9 +1145,9 @@ By default, Type 5 injection is interface-less: ESI and Gateway IP are
 encoded as zero, `label` carries the L3VNI in the RFC 8365 VXLAN label
 slot, `ethernet_tag` must be 0, and `next_hop` is the VTEP loopback.
 Set optional `gateway` to inject a controller-supplied overlay-index
-Type 5 route with a non-zero Gateway Address; the prefix, gateway, and
-next-hop must use the same IP family. Non-zero ESI overlay-index
-injection is not exposed. `router_mac` is required when VXLAN
+Type 5 route with a non-zero **unicast** Gateway Address; the prefix,
+gateway, and next-hop must use the same IP family. Non-zero ESI
+overlay-index injection is not exposed. `router_mac` is required when VXLAN
 encapsulation is enabled (the default) and is advertised as the RFC
 9135 Router MAC extended community. Omit it when
 `disable_vxlan_encap` is true. At least one `route_targets` entry is

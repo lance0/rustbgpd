@@ -1432,10 +1432,10 @@ message AddEvpnRouteRequest {
   // Router MAC extended community value (Type 5 VXLAN only),
   // "aa:bb:cc:dd:ee:ff". Required when `disable_vxlan_encap` is false.
   string router_mac = 13;
-  // Optional Gateway IP (Type 5 only). Empty encodes the interface-less
-  // zero gateway for the prefix family; non-empty enables overlay-index
-  // Type 5 injection and must use the same address family as `prefix`
-  // and `next_hop`.
+  // Optional Gateway IP (Type 5 only). Omit (empty) for interface-less
+  // Type 5 — the server encodes the zero gateway for the prefix family.
+  // When set it must be a non-zero unicast address in the same family as
+  // `prefix` and `next_hop`, and enables overlay-index Type 5 injection.
   string gateway = 14;
 }
 

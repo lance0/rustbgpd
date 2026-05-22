@@ -128,6 +128,11 @@ fn parse_type5_gateway(
             "gateway must not be zero; omit gateway for interface-less Type 5",
         ));
     }
+    if gateway.is_multicast() {
+        return Err(Status::invalid_argument(
+            "Type 5 gateway must be a unicast address",
+        ));
+    }
     if !evpn_prefix_family_matches(prefix, gateway) {
         return Err(Status::invalid_argument(
             "Type 5 gateway and prefix must use the same IP family",
@@ -2137,6 +2142,30 @@ mod tests {
         let err = svc.add_evpn_route(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("omit gateway"));
+    }
+
+    #[tokio::test]
+    async fn add_evpn_type5_rejects_multicast_gateway() {
+        let svc = make_service();
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 5,
+            rd: "65000:5000".into(),
+            ethernet_tag: 0,
+            mac: String::new(),
+            ip: String::new(),
+            label: 5000,
+            label2: 0,
+            next_hop: "192.0.2.10".into(),
+            route_targets: vec!["65000:5000".into()],
+            disable_vxlan_encap: false,
+            prefix: "10.50.0.0".into(),
+            prefix_length: 24,
+            router_mac: "02:00:00:00:50:00".into(),
+            gateway: "224.0.0.1".into(),
+        });
+        let err = svc.add_evpn_route(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("unicast"));
     }
 
     #[tokio::test]
