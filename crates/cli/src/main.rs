@@ -667,7 +667,7 @@ enum EvpnAction {
     AddIpPrefix {
         #[arg(long)]
         rd: String,
-        /// Ethernet Tag ID. Must be 0 for this pure/interface-less Type 5 slice.
+        /// Ethernet Tag ID. Must be 0 for supported Type 5 injection.
         #[arg(long, default_value_t = 0)]
         ethernet_tag: u32,
         /// IP prefix, e.g. "10.0.0.0/24" or "2001:db8::/48".
@@ -679,6 +679,9 @@ enum EvpnAction {
         /// VTEP loopback IP (next-hop).
         #[arg(long)]
         next_hop: String,
+        /// Optional Type 5 Gateway IP for overlay-index injection. Omit for interface-less Type 5.
+        #[arg(long)]
+        gateway: Option<String>,
         /// Router MAC extended community value. Required unless --no-vxlan-encap is set.
         #[arg(long)]
         router_mac: Option<String>,
@@ -711,7 +714,7 @@ enum EvpnAction {
     DeleteIpPrefix {
         #[arg(long)]
         rd: String,
-        /// Ethernet Tag ID. Must be 0 for this pure/interface-less Type 5 slice.
+        /// Ethernet Tag ID. Must be 0 for Type 5 withdrawal.
         #[arg(long, default_value_t = 0)]
         ethernet_tag: u32,
         /// IP prefix, e.g. "10.0.0.0/24" or "2001:db8::/48".
@@ -1320,6 +1323,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 prefix,
                 label,
                 next_hop,
+                gateway,
                 router_mac,
                 rt,
                 no_vxlan_encap,
@@ -1331,6 +1335,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     prefix,
                     label,
                     next_hop,
+                    gateway,
                     router_mac,
                     rt,
                     no_vxlan_encap,
@@ -1786,6 +1791,8 @@ mod tests {
             "5000",
             "--next-hop",
             "192.0.2.10",
+            "--gateway",
+            "192.0.2.254",
             "--router-mac",
             "02:00:00:00:50:00",
             "--rt",
@@ -1798,6 +1805,7 @@ mod tests {
                     rd,
                     prefix,
                     label,
+                    gateway,
                     router_mac,
                     ..
                 }),
@@ -1807,6 +1815,7 @@ mod tests {
             assert_eq!(rd, "65000:5000");
             assert_eq!(prefix, "10.50.0.0/24");
             assert_eq!(label, 5000);
+            assert_eq!(gateway.as_deref(), Some("192.0.2.254"));
             assert_eq!(router_mac.as_deref(), Some("02:00:00:00:50:00"));
         } else {
             panic!("expected Evpn AddIpPrefix command");
@@ -1835,6 +1844,7 @@ mod tests {
         if let Command::Evpn {
             action:
                 Some(EvpnAction::AddIpPrefix {
+                    gateway,
                     router_mac,
                     no_vxlan_encap,
                     ..
@@ -1842,6 +1852,7 @@ mod tests {
             ..
         } = cli.command
         {
+            assert!(gateway.is_none());
             assert!(router_mac.is_none());
             assert!(no_vxlan_encap);
         } else {

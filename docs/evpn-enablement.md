@@ -304,7 +304,9 @@ Unlocks: SDN controllers / orchestration systems pushing EVPN routes
 directly into the RR via `AddEvpnRoute` / `DeleteEvpnRoute` gRPC.
 Controller injection supports Type 2 (MAC/IP), Type 3 (IMET), and Type 5
 (IP Prefix, RFC 9136 — shipped v0.25.0 via `AddEvpnRoute`/`DeleteEvpnRoute`
-+ `rustbgpctl evpn add-ip-prefix`, M45 smoke). Native Type 1/4
++ `rustbgpctl evpn add-ip-prefix`, M45 smoke). Type 5 injection accepts the
+default interface-less gateway-zero shape and a controller-supplied
+overlay-index Gateway Address with ESI still zero. Native Type 1/4
 multi-homing origination ships through `[[ethernet_segments]]`, but
 controller injection for those route types is not exposed.
 

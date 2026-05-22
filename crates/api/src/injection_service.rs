@@ -107,6 +107,41 @@ const fn zero_gateway_for_prefix(prefix: EvpnIpPrefixValue) -> IpAddr {
     }
 }
 
+fn parse_type5_gateway(
+    gateway_str: &str,
+    prefix: EvpnIpPrefixValue,
+    next_hop: IpAddr,
+) -> Result<IpAddr, Status> {
+    if !evpn_prefix_family_matches(prefix, next_hop) {
+        return Err(Status::invalid_argument(
+            "Type 5 prefix and next_hop must use the same IP family",
+        ));
+    }
+    if gateway_str.is_empty() {
+        return Ok(zero_gateway_for_prefix(prefix));
+    }
+    let gateway: IpAddr = gateway_str
+        .parse()
+        .map_err(|e| Status::invalid_argument(format!("invalid Type 5 gateway: {e}")))?;
+    if gateway.is_unspecified() {
+        return Err(Status::invalid_argument(
+            "gateway must not be zero; omit gateway for interface-less Type 5",
+        ));
+    }
+    let is_broadcast = matches!(gateway, IpAddr::V4(v4) if v4.is_broadcast());
+    if gateway.is_multicast() || is_broadcast {
+        return Err(Status::invalid_argument(
+            "Type 5 gateway must be a unicast address",
+        ));
+    }
+    if !evpn_prefix_family_matches(prefix, gateway) {
+        return Err(Status::invalid_argument(
+            "Type 5 gateway and prefix must use the same IP family",
+        ));
+    }
+    Ok(gateway)
+}
+
 /// Parse a unicast next-hop string and reject unspecified / multicast values.
 /// Shared by `AddPath`, `AddFlowSpec`, and `AddEvpnRoute` so all injection
 /// surfaces apply the same guardrails.
@@ -507,7 +542,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             5 => {
                 if req.ethernet_tag != 0 {
                     return Err(Status::invalid_argument(
-                        "ethernet_tag must be 0 for pure/interface-less Type 5 IP Prefix withdrawal",
+                        "ethernet_tag must be 0 for Type 5 IP Prefix withdrawal",
                     ));
                 }
                 if !req.mac.is_empty() {
@@ -941,6 +976,11 @@ fn reject_type5_only_fields(
             "router_mac is Type 5 only; must be empty for Type {route_type}"
         )));
     }
+    if !req.gateway.is_empty() {
+        return Err(Status::invalid_argument(format!(
+            "gateway is Type 5 only; must be empty for Type {route_type}"
+        )));
+    }
     Ok(())
 }
 
@@ -1036,12 +1076,11 @@ fn build_type3(
     Ok((route, build_common_attrs(req)?))
 }
 
-/// Assemble a pure/interface-less Type 5 IP Prefix route + attributes.
+/// Assemble a Type 5 IP Prefix route + attributes.
 ///
-/// Overlay-index Type 5 (non-zero ESI or gateway) is intentionally out of
-/// scope for this API slice. The daemon's native IP-VRF originator uses the
-/// same interface-less shape: ESI=0, gateway=0, label=L3VNI, and `NEXT_HOP`
-/// as the VTEP loopback.
+/// Empty `gateway` keeps the original interface-less shape. A non-empty
+/// gateway enables controller-injected overlay-index Type 5 while keeping ESI
+/// zero; native IP-VRF local origination still uses gateway zero.
 fn build_type5(
     req: &proto::AddEvpnRouteRequest,
     rd: RouteDistinguisher,
@@ -1049,7 +1088,7 @@ fn build_type5(
 ) -> Result<(EvpnRoute, Vec<PathAttribute>), Status> {
     if req.ethernet_tag != 0 {
         return Err(Status::invalid_argument(
-            "ethernet_tag must be 0 for pure/interface-less Type 5 IP Prefix",
+            "ethernet_tag must be 0 for Type 5 IP Prefix",
         ));
     }
     if !req.mac.is_empty() {
@@ -1094,18 +1133,14 @@ fn build_type5(
     }
 
     let prefix = parse_evpn_ip_prefix(&req.prefix, req.prefix_length)?;
-    if !evpn_prefix_family_matches(prefix, next_hop) {
-        return Err(Status::invalid_argument(
-            "Type 5 prefix and next_hop must use the same IP family",
-        ));
-    }
+    let gateway = parse_type5_gateway(&req.gateway, prefix, next_hop)?;
 
     let route = EvpnRoute::IpPrefix(EvpnIpPrefixRoute {
         rd,
         esi: EthernetSegmentIdentifier::ZERO,
         ethernet_tag: EthernetTagId(req.ethernet_tag),
         prefix,
-        gateway: zero_gateway_for_prefix(prefix),
+        gateway,
         label: MplsLabel::new(req.label),
     });
 
@@ -1542,6 +1577,7 @@ mod tests {
             prefix: String::new(),
             prefix_length: 0,
             router_mac: String::new(),
+            gateway: String::new(),
         });
         svc.add_evpn_route(req).await.unwrap();
         let key = reply_task.await.unwrap().unwrap();
@@ -1592,6 +1628,7 @@ mod tests {
             prefix: String::new(),
             prefix_length: 0,
             router_mac: String::new(),
+            gateway: String::new(),
         });
         svc.add_evpn_route(req).await.unwrap();
         let route = reply_task.await.unwrap();
@@ -1642,6 +1679,7 @@ mod tests {
             prefix: String::new(),
             prefix_length: 0,
             router_mac: String::new(),
+            gateway: String::new(),
         });
         svc.add_evpn_route(req).await.unwrap();
         let route = reply_task.await.unwrap();
@@ -1676,6 +1714,7 @@ mod tests {
             prefix: String::new(),
             prefix_length: 0,
             router_mac: String::new(),
+            gateway: String::new(),
         });
         let err = svc.add_evpn_route(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1700,6 +1739,7 @@ mod tests {
             prefix: "10.50.0.0".into(),
             prefix_length: 24,
             router_mac: String::new(),
+            gateway: String::new(),
         });
         let err = svc.add_evpn_route(type2_with_prefix).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1719,10 +1759,31 @@ mod tests {
             prefix: String::new(),
             prefix_length: 0,
             router_mac: "02:00:00:00:50:00".into(),
+            gateway: String::new(),
         });
         let err = svc.add_evpn_route(type2_with_router_mac).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("router_mac"));
+
+        let type2_with_gateway = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 2,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: "02:00:00:aa:bb:cc".into(),
+            ip: String::new(),
+            label: 100,
+            label2: 0,
+            next_hop: "10.0.0.2".into(),
+            route_targets: vec![],
+            disable_vxlan_encap: false,
+            prefix: String::new(),
+            prefix_length: 0,
+            router_mac: String::new(),
+            gateway: "192.0.2.10".into(),
+        });
+        let err = svc.add_evpn_route(type2_with_gateway).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("gateway"));
 
         let type3_with_prefix = Request::new(proto::AddEvpnRouteRequest {
             route_type: 3,
@@ -1738,6 +1799,7 @@ mod tests {
             prefix: "10.50.0.0".into(),
             prefix_length: 24,
             router_mac: String::new(),
+            gateway: String::new(),
         });
         let err = svc.add_evpn_route(type3_with_prefix).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1775,6 +1837,7 @@ mod tests {
             prefix: "10.50.0.0".into(),
             prefix_length: 24,
             router_mac: "02:00:00:00:50:00".into(),
+            gateway: String::new(),
         });
         svc.add_evpn_route(req).await.unwrap();
         let route = reply_task.await.unwrap();
@@ -1821,6 +1884,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_evpn_type5_overlay_gateway_reaches_rib_channel() {
+        let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
+        let svc = InjectionService::new(tx, AccessMode::ReadWrite);
+
+        let reply_task = tokio::spawn(async move {
+            let update = rx.recv().await.expect("service should send one RibUpdate");
+            match update {
+                RibUpdate::InjectEvpn { route, reply } => {
+                    assert_eq!(route.route.route_type(), 5);
+                    reply.send(Ok(())).ok();
+                    route
+                }
+                _ => panic!("expected InjectEvpn"),
+            }
+        });
+
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 5,
+            rd: "65000:5000".into(),
+            ethernet_tag: 0,
+            mac: String::new(),
+            ip: String::new(),
+            label: 5000,
+            label2: 0,
+            next_hop: "192.0.2.10".into(),
+            route_targets: vec!["65000:5000".into()],
+            disable_vxlan_encap: false,
+            prefix: "10.50.0.0".into(),
+            prefix_length: 24,
+            router_mac: "02:00:00:00:50:00".into(),
+            gateway: "192.0.2.254".into(),
+        });
+        svc.add_evpn_route(req).await.unwrap();
+        let route = reply_task.await.unwrap();
+
+        let EvpnRoute::IpPrefix(t5) = route.route else {
+            panic!("expected Type 5 IP Prefix route");
+        };
+        assert_eq!(t5.esi, EthernetSegmentIdentifier::ZERO);
+        assert_eq!(t5.ethernet_tag, EthernetTagId(0));
+        assert_eq!(t5.label.value(), 5000);
+        assert_eq!(t5.gateway, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 254)));
+        assert!(
+            matches!(t5.prefix, EvpnIpPrefixValue::V4(p) if p.addr == Ipv4Addr::new(10, 50, 0, 0) && p.len == 24)
+        );
+    }
+
+    #[tokio::test]
     async fn add_evpn_type5_ipv6_reaches_rib_channel() {
         let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
         let svc = InjectionService::new(tx, AccessMode::ReadWrite);
@@ -1851,6 +1962,7 @@ mod tests {
             prefix: "2001:db8:50::".into(),
             prefix_length: 48,
             router_mac: "02:00:00:00:50:00".into(),
+            gateway: String::new(),
         });
         svc.add_evpn_route(req).await.unwrap();
         let route = reply_task.await.unwrap();
@@ -1882,6 +1994,7 @@ mod tests {
             prefix: "10.50.0.0".into(),
             prefix_length: 24,
             router_mac: String::new(),
+            gateway: String::new(),
         });
         let err = svc.add_evpn_route(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1905,6 +2018,7 @@ mod tests {
             prefix: "10.50.0.0".into(),
             prefix_length: 24,
             router_mac: "02:00:00:00:50:00".into(),
+            gateway: String::new(),
         });
         let err = svc.add_evpn_route(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1928,6 +2042,7 @@ mod tests {
             prefix: "10.50.0.0".into(),
             prefix_length: 24,
             router_mac: "02:00:00:00:50:00".into(),
+            gateway: String::new(),
         });
         let err = svc.add_evpn_route(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1951,6 +2066,7 @@ mod tests {
             prefix: "10.50.0.0".into(),
             prefix_length: 24,
             router_mac: "02:00:00:00:50:00".into(),
+            gateway: String::new(),
         });
         let err = svc.add_evpn_route(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1974,10 +2090,107 @@ mod tests {
             prefix: "10.50.0.0".into(),
             prefix_length: 24,
             router_mac: "02:00:00:00:50:00".into(),
+            gateway: String::new(),
         });
         let err = svc.add_evpn_route(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("same IP family"));
+    }
+
+    #[tokio::test]
+    async fn add_evpn_type5_rejects_gateway_family_mismatch() {
+        let svc = make_service();
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 5,
+            rd: "65000:5000".into(),
+            ethernet_tag: 0,
+            mac: String::new(),
+            ip: String::new(),
+            label: 5000,
+            label2: 0,
+            next_hop: "192.0.2.10".into(),
+            route_targets: vec!["65000:5000".into()],
+            disable_vxlan_encap: false,
+            prefix: "10.50.0.0".into(),
+            prefix_length: 24,
+            router_mac: "02:00:00:00:50:00".into(),
+            gateway: "2001:db8::1".into(),
+        });
+        let err = svc.add_evpn_route(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("gateway and prefix"));
+    }
+
+    #[tokio::test]
+    async fn add_evpn_type5_rejects_explicit_zero_gateway() {
+        let svc = make_service();
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 5,
+            rd: "65000:5000".into(),
+            ethernet_tag: 0,
+            mac: String::new(),
+            ip: String::new(),
+            label: 5000,
+            label2: 0,
+            next_hop: "192.0.2.10".into(),
+            route_targets: vec!["65000:5000".into()],
+            disable_vxlan_encap: false,
+            prefix: "10.50.0.0".into(),
+            prefix_length: 24,
+            router_mac: "02:00:00:00:50:00".into(),
+            gateway: "0.0.0.0".into(),
+        });
+        let err = svc.add_evpn_route(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("omit gateway"));
+    }
+
+    #[tokio::test]
+    async fn add_evpn_type5_rejects_multicast_gateway() {
+        let svc = make_service();
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 5,
+            rd: "65000:5000".into(),
+            ethernet_tag: 0,
+            mac: String::new(),
+            ip: String::new(),
+            label: 5000,
+            label2: 0,
+            next_hop: "192.0.2.10".into(),
+            route_targets: vec!["65000:5000".into()],
+            disable_vxlan_encap: false,
+            prefix: "10.50.0.0".into(),
+            prefix_length: 24,
+            router_mac: "02:00:00:00:50:00".into(),
+            gateway: "224.0.0.1".into(),
+        });
+        let err = svc.add_evpn_route(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("unicast"));
+    }
+
+    #[tokio::test]
+    async fn add_evpn_type5_rejects_broadcast_gateway() {
+        let svc = make_service();
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 5,
+            rd: "65000:5000".into(),
+            ethernet_tag: 0,
+            mac: String::new(),
+            ip: String::new(),
+            label: 5000,
+            label2: 0,
+            next_hop: "192.0.2.10".into(),
+            route_targets: vec!["65000:5000".into()],
+            disable_vxlan_encap: false,
+            prefix: "10.50.0.0".into(),
+            prefix_length: 24,
+            router_mac: "02:00:00:00:50:00".into(),
+            gateway: "255.255.255.255".into(),
+        });
+        let err = svc.add_evpn_route(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("unicast"));
     }
 
     #[tokio::test]
@@ -2095,6 +2308,7 @@ mod tests {
             prefix: String::new(),
             prefix_length: 0,
             router_mac: String::new(),
+            gateway: String::new(),
         });
         let err = svc.add_evpn_route(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -2118,6 +2332,7 @@ mod tests {
             prefix: String::new(),
             prefix_length: 0,
             router_mac: String::new(),
+            gateway: String::new(),
         });
         let err = svc.add_evpn_route(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);

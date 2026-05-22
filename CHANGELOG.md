@@ -21,6 +21,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unknown member VNIs, mixed same-request L2VNI+ES edits, RR-only/no-segment
   actor deployments, and live segment actor spawn from a zero-ES startup model.
 
+- **EVPN Type 5 overlay-index gateway injection.** `AddEvpnRoute` and
+  `rustbgpctl evpn add-ip-prefix` can now inject a Type 5 IP Prefix route with
+  an optional non-zero Gateway Address for controller-supplied overlay-index
+  testing. Empty `gateway` preserves the existing interface-less gateway-zero
+  shape; non-zero ESI and native local overlay-index origination remain out of
+  scope.
+
 - **ADR-0063 EVPN runtime convergence — single Ethernet Segment redefine.**
   `EvpnService.ApplyEvpnRuntime` can now commit exactly one redefined
   `[[ethernet_segments]]` entry when the candidate has no L2VNI, IP-VRF, or
