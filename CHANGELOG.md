@@ -9,6 +9,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **ADR-0063 EVPN runtime convergence — single L2VNI redefine.**
+  `EvpnService.ApplyEvpnRuntime` can now commit exactly one redefined
+  `[[evpn_instances]]` entry (same VNI, changed `rd` / `route_targets` /
+  `local_vtep_ip` / `bridge` / `advertise_svi_mac` / `sticky_macs` /
+  `duplicate_mac_detection` / `apply_aliasing_ecmp`) when the candidate has no
+  L2VNI add/delete, IP-VRF, or Ethernet Segment changes. The daemon
+  re-originates the per-VNI Type 3 IMET (withdraw committed, originate
+  candidate) and republishes the candidate instance table to the
+  level-triggered Type 2 originator, SVI task, dataplane supervisor, and
+  segment actor, which drain and re-derive the content-changed VNI; rollback
+  unwinds on partial failure. This makes `apply_aliasing_ecmp` runtime-drivable
+  via the dataplane `FdbNhg → SingleDst` transition (SIGHUP stays
+  restart-required). ES-member L2VNI redefine, `ip_vrf` relink, IP-VRF
+  redefine, mixed, and multi-element edits remain fail-closed under
+  [#210](https://github.com/lance0/rustbgpd/issues/210).
+
 ## [0.27.0] — 2026-05-22
 
 ### Added
