@@ -172,7 +172,7 @@ shape itself does not raise the tier.
 | `ListIpVrfs` | `sensitive_read` | Gate 9 IP-VRF table. |
 | `GetIpVrf` | `sensitive_read` | Single-VRF detail. |
 | `ClearDuplicateMacQuarantine` | `mutating` | Clears one local duplicate-MAC suppression key and may replay still-live local MAC state. Reversible, per-`(VNI, MAC)` scope; not a route-injection primitive and not a clear-all. |
-| `ApplyEvpnRuntime` | `mutating` | ADR-0063 full-candidate EVPN runtime validation/apply entry point. `validate_only` and no-op applies are bounded; seven shapes converge live and commit a new generation (single L2VNI add/delete, single IP-VRF add/standalone-delete, single Ethernet Segment add/delete/redefine), while other non-noop shapes (L2VNI/IP-VRF redefine, linked IP-VRF delete, ES-aware L2VNI delete, mixed or multi-element edits) fail closed (issue #210). Request TOML can contain credentials and must be audit-redacted. |
+| `ApplyEvpnRuntime` | `mutating` | ADR-0063 full-candidate EVPN runtime validation/apply entry point. `validate_only` and no-op applies are bounded; eight shapes converge live and commit a new generation (single L2VNI add/delete/redefine, single IP-VRF add/standalone-delete, single Ethernet Segment add/delete/redefine), while other non-noop shapes (IP-VRF redefine, ES-member L2VNI redefine / `ip_vrf` relink, linked IP-VRF delete, ES-aware L2VNI delete, mixed or multi-element edits) fail closed (issue #210). Request TOML can contain credentials and must be audit-redacted. |
 
 ## Totals
 
