@@ -55,10 +55,12 @@ architecture diagrams, example configs, and API workflows.
 - Large-scale production EVPN fabrics that need the full feature
   surface — VXLAN EVPN is functional and FRR-interop-tested (Route
   Reflector, single-homed VTEP with bidirectional MAC / MAC+IP
-  origination, symmetric Interface-less IRB / Type 5, opt-in
-  active-active multi-homing) but still **alpha**: runtime
-  `[[evpn_instances]]` edits are partial (a single add commits live;
-  delete / redefine / Ethernet-Segment edits stay restart-required),
+  origination, symmetric Interface-less IRB / Type 5, production-default
+  active-active multi-homing enforcement with opt-out flags) but still
+  **alpha**: runtime EVPN model edits are partial (`ApplyEvpnRuntime`
+  commits seven live shapes, while L2VNI/IP-VRF redefine, linked
+  IP-VRF delete / tenant teardown, ES-aware L2VNI delete, mixed, and
+  multi-element edits remain restart-required),
   and MPLS / PBB / MVPN encapsulations are not implemented. See
   [docs/evpn-enablement.md](docs/evpn-enablement.md) for the shipped
   feature ladder
@@ -302,12 +304,15 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
   ADR-0052 / 0054–0059 / 0063 and
   [docs/evpn-enablement.md](docs/evpn-enablement.md) for the full gate
   ladder. Known gaps: runtime `[[evpn_instances]]` mutation is partial
-  (single add commits live; delete / redefine / Ethernet-Segment edits
-  remain restart-required — [#210](https://github.com/lance0/rustbgpd/issues/210)),
-  overlay-index IRB recursive resolution (RFC 9135 §9.2) is
-  detected-and-fail-closed rather than resolved, VLAN-aware bridges and
-  bridge / VXLAN netdev creation are operator-provisioned, and EVPN over
-  MPLS / PBB / MVPN is not implemented
+  (`ApplyEvpnRuntime` commits single L2VNI add/delete, single IP-VRF
+  add/standalone delete, and single Ethernet Segment add/delete/redefine;
+  L2VNI/IP-VRF redefine, linked IP-VRF delete / tenant teardown,
+  ES-aware L2VNI delete, mixed, and multi-element edits remain
+  restart-required — [#210](https://github.com/lance0/rustbgpd/issues/210)),
+  overlay-index IRB native local origination and protected recursion-path
+  interop remain ahead, VLAN-aware bridges and bridge / VXLAN netdev
+  creation are operator-provisioned, and EVPN over MPLS / PBB / MVPN
+  plus route types 6-11 are not implemented
 - No VPNv4 / VPNv6 or Confederation support
 - TCP-AO (RFC 5925) static-neighbor startup keys are supported on Linux;
   dynamic-neighbor TCP-AO, runtime key rotation, and multi-key rollover remain
@@ -327,7 +332,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | **Runtime** | Rust 1.92+ (workspace MSRV — Tokio rolling-6-month policy), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | EVPN runtime instance L2VNI/IP-VRF redefine, mixed / multi-element edits (single add, single delete, and single Ethernet Segment redefine commit live), RFC 9135 overlay-index IRB local origination, EVPN over MPLS / PBB / MVPN, VPNv4/v6, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
+| **Not yet supported** | EVPN runtime instance L2VNI/IP-VRF redefine, linked IP-VRF delete / tenant teardown, ES-aware L2VNI delete, mixed / multi-element edits (single L2VNI add/delete, single IP-VRF add/standalone delete, and single Ethernet Segment add/delete/redefine commit live), RFC 9135 overlay-index IRB local origination, EVPN route types 6-11 / MPLS / PBB / MVPN, VPNv4/v6, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
 | **Tests** | Workspace test suite, fuzz targets, 48 automated interop scenarios primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (18 interop tests gated on every PR; privileged kernel dataplane smokes run locally) |
 
 ## Documentation
@@ -348,7 +353,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | [docs/evpn-vtep-setup.md](docs/evpn-vtep-setup.md) | EVPN VTEP kernel setup: `ip link` recipes for L2VNI / IP-VRF / multi-homing mapped to the ADR-0054 §4 + ADR-0058 §3 readiness checks (operator-provisioned netdevs) |
 | [docs/evpn-vtep-troubleshooting.md](docs/evpn-vtep-troubleshooting.md) | EVPN VTEP alpha troubleshooting runbook |
 | [docs/gobgp-parity.md](docs/gobgp-parity.md) | rustbgpd vs GoBGP feature parity by use case |
-| [docs/adr/](docs/adr/) | Architecture decision records (64 ADRs) |
+| [docs/adr/](docs/adr/) | Architecture decision records — one per protocol and design choice |
 | [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) | Pre-release smoke matrix and release steps |
 | [ROADMAP.md](ROADMAP.md) | Remaining gaps and planned work |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |

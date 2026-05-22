@@ -153,8 +153,8 @@ fields.
 listener config (including any TLS / mTLS field), `[rpki]`, `[bmp]`,
 `[mrt]`, `[[evpn_instances]]` (Phase-2 VTEP foundation — gRPC
 `EvpnService.GetEvpnRuntime` exposes the committed startup generation
-and confirms live mutation is still disabled; ADR-0063 requires a future
-command-driven coordinator before reload-time mutation can safely land),
+and `EvpnService.ApplyEvpnRuntime` can live-commit the supported seven
+ADR-0063 shapes; SIGHUP mutation and unsupported shapes still fail closed),
 `[[ethernet_segments]]` (Gate 8 segment orchestrator snapshot),
 `[[evpn_ip_vrfs]]` (Gate 9 IP-VRF foundation — pinned
 `Arc<IpVrfTable>` consumed by the readiness probe),
@@ -263,19 +263,23 @@ via gRPC `GetMetrics` and `GetHealth` RPCs.
 
 | Metric | What it tells you |
 |--------|-------------------|
-| `bgp_peers_established` | Number of peers in Established state |
-| `bgp_peers_configured` | Total configured peers |
-| `bgp_uptime_seconds` | Daemon uptime |
+| `bgp_session_established_total` | Cumulative sessions that reached Established (per-process counter; resets on restart) |
+| `bgp_session_flaps_total` | Cumulative session flaps |
+| `bgp_session_state_transitions_total` | FSM state transitions |
+
+The current count of Established peers and daemon uptime are read via
+`ControlService.GetHealth` / `rustbgpctl health` (and `GetMetrics`), not a
+Prometheus gauge.
 
 ### Routing
 
 | Metric | What it tells you |
 |--------|-------------------|
-| `bgp_rib_prefixes{table="loc_rib"}` | Loc-RIB size (best paths) |
-| `bgp_rib_prefixes{table="adj_rib_in"}` | Total received prefixes |
-| `bgp_rib_prefixes{table="adj_rib_out"}` | Total advertised prefixes |
-| `bgp_updates_received_total` | Inbound UPDATE count |
-| `bgp_updates_sent_total` | Outbound UPDATE count |
+| `bgp_rib_loc_prefixes{afi_safi}` | Loc-RIB size (best paths) per AFI/SAFI |
+| `bgp_rib_prefixes{peer,afi_safi}` | Adj-RIB-In size per peer + AFI/SAFI (received) |
+| `bgp_rib_adj_out_prefixes{peer,afi_safi}` | Adj-RIB-Out size per peer + AFI/SAFI (advertised) |
+| `bgp_messages_received_total` | Inbound BGP messages by type |
+| `bgp_messages_sent_total` | Outbound BGP messages by type |
 
 ### Event Streams
 
@@ -976,9 +980,9 @@ session machinery:
 > reconciliation, local MAC and MAC+IP origination, Type 3 IMET,
 > SVI MAC origination, sticky MAC config, and sub-second mobility
 > wakeups. Gate 8/8b adds alpha multi-homing execution: DF election,
-> Type 1/4 origination, opt-in BUM suppression, ESI-aware Type 2
-> origination, aliasing projection, and receive-side mass-withdraw
-> filtering. **Gate 9** ships symmetric Interface-less IRB
+> Type 1/4 origination, production-default BUM suppression with opt-out
+> config, ESI-aware Type 2 origination, aliasing projection, and
+> receive-side mass-withdraw filtering. **Gate 9** ships symmetric Interface-less IRB
 > end-to-end in v0.18.0 (RFC 9136 §4.4.2 / ADR-0058):
 > `[[evpn_ip_vrfs]]` config schema + `[[evpn_instances]].ip_vrf`
 > binding, `IpVrfStatus` readiness probe, Linux VRF / L3VXLAN
@@ -994,9 +998,12 @@ session machinery:
 > (PRs #91 / #92 / #93) added the `apply_aliasing_ecmp`
 > per-instance off-switch, periodic `RTM_GETNEXTHOP` drift
 > recovery, and homogeneous IPv6 alias members. Production-default
-> multi-homing enforcement and auto-derived RTs have since shipped.
-> Still ahead: ADR-0063 live EVPN runtime mutation, RFC 9135 overlay-
-> index IRB, and deeper cross-vendor/scale validation. See
+> multi-homing enforcement, auto-derived RTs, partial ADR-0063 live
+> EVPN runtime mutation, receive-side RFC 9135 overlay-index recursion,
+> and controller Gateway Address Type 5 injection have since shipped.
+> Still ahead: remaining ADR-0063 shapes, native overlay-index local
+> origination / recursion-path interop, and deeper cross-vendor/scale
+> validation. See
 > [`evpn-enablement.md`](evpn-enablement.md) for the gate ladder,
 > [`evpn-alpha-soak.md`](evpn-alpha-soak.md) for the residual
 > alpha-confidence checklist, and
@@ -1073,14 +1080,15 @@ Two complementary origination paths exist:
    `DeleteEvpnRoute` (the `rustbgpctl evpn add-mac-ip / add-imet /
    add-ip-prefix / delete-*` commands above). The controller decides
    what to originate; rustbgpd reflects + distributes. Type 2
-   (MAC/IP), Type 3 (IMET), and pure/interface-less Type 5 (IP
-   Prefix) are exposed. Type 5 injection uses ESI=0 and Gateway IP=0;
-   Ethernet Tag ID must be 0. `--router-mac` is required for the
-   default VXLAN encapsulation path and should be omitted when
-   `--no-vxlan-encap` is set. Overlay-index IRB via non-zero Gateway
-   IP/ESI and Type 1/4
-   multi-homing route injection are not exposed. Native Type 1/4
-   origination is driven by `[[ethernet_segments]]`.
+   (MAC/IP), Type 3 (IMET), and Type 5 (IP Prefix) are exposed.
+   Type 5 injection uses ESI=0 and Ethernet Tag ID=0. Omitting
+   `--gateway` keeps the Interface-less Gateway IP=0 form; supplying
+   `--gateway` injects a non-zero overlay-index Gateway Address.
+   `--router-mac` is required for the default VXLAN encapsulation path
+   and should be omitted when `--no-vxlan-encap` is set. Non-zero ESI
+   overlay-index injection and Type 1/4 multi-homing route injection
+   are not exposed. Native Type 1/4 origination is driven by
+   `[[ethernet_segments]]`.
 2. **Kernel-driven origination (Phase 2, Gate 7b+1):** with
    `[[evpn_instances]]` populated, the daemon subscribes to
    `RTNLGRP_NEIGH` (enum group id 3) and emits Type 2 routes for

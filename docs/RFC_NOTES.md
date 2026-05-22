@@ -780,7 +780,8 @@ implemented per ADR-0040.
   and updates the Prometheus surface
   (`evpn_df_role{esi,vni,role}` gauge,
   `evpn_df_role_changes_total{esi,vni}` counter).
-- **Gate 8 scope was observation only; Gate 8b is now alpha opt-in.**
+- **Gate 8 scope was observation only; Gate 8b is now alpha and default-on
+  with explicit opt-out flags.**
   The follow-up Gate 8b slices add ESI Label / ES-Import RT
   origination, DF-role-aware Type 2 ESI attachment, the
   BUM-suppression kernel primitive behind `apply_bum_enforcement`,

@@ -35,9 +35,10 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   v0.14.0, and v0.15.0. Together they close the bidirectional
   single-homed L2VNI VTEP alpha loop.
 - **Gate 8/8b** adds active-active multi-homing alpha execution:
-  DF election, Type 1/4 origination, opt-in BUM suppression,
-  ESI-aware Type 2 origination, aliasing projection, and
-  receive-side mass-withdraw filtering. **Gate 9** ships symmetric
+  DF election, Type 1/4 origination, production-default BUM
+  suppression with opt-out config, ESI-aware Type 2 origination,
+  aliasing projection, and receive-side mass-withdraw filtering.
+  **Gate 9** ships symmetric
   Interface-less IRB end-to-end (v0.18.0): `[[evpn_ip_vrfs]]`
   config schema, `IpVrfStatus` readiness probe (seven ADR-0058
   §3 predicates), Linux VRF + L3 VXLAN netlink dumps,
@@ -50,10 +51,10 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   `rustbgpctl evpn vrfs` CLI. ADR-0059 (v0.19.0) adds
   receive-path aliasing-ECMP via FDB nexthop groups, validated
   against FRR EVPN-MH by the protected self-hosted M40 smoke.
-  Remaining big
-  investments (overlay-index IRB / RFC 9135, production-default
-  multi-homing enforcement) are gated by operator demand and
-  the MAC-churn variant of the Gate 8b soak.
+  Remaining big investments are the remaining ADR-0063 runtime
+  convergence shapes, native overlay-index origination / protected
+  recursion-path interop, and lower-priority VTEP operability gaps
+  such as VLAN-aware bridges and rustbgpd-managed netdev creation.
 
 ## Current Position
 
@@ -501,8 +502,9 @@ so this was an origination-only change with no wire bump:
 
 ### Gate 8b — Multi-homing enforcement
 
-Status: ✅ alpha-supported, opt-in by config (shipped in v0.17.0) ·
-Blockers cleared: Gate 8 + Gate 8b prep.
+Status: ✅ alpha-supported, production-default with opt-out config
+(default flipped in v0.23.0 after soak evidence) · Blockers cleared:
+Gate 8 + Gate 8b prep.
 
 Shipped pieces:
 
@@ -673,7 +675,10 @@ M37 / M37+IP / M38 / M39 / M39b / M40 / M42 / M43 — #130 closed.)
 Further out on this track:
 
 - **RFC 9251 EVPN-MVPN** (Route Types 6/7/8) — multicast integration
+- **RFC 9572 EVPN BUM segmentation** (Route Types 9/10/11)
 - **RFC 7623 PBB-EVPN** — provider-backbone EVPN for carriers
+- **RFC 9574 optimized ingress replication** and **RFC 9573 tunnel
+  aggregation / common labels**
 - **MPLS encapsulation** — SP EVPN deployments beyond VXLAN
 - **Add-Path for EVPN (RFC 9252)** — tables already support it, not negotiated
 
@@ -689,10 +694,10 @@ Gate 6 (controller inject)      ── ✅ done   << full Phase 1 RR bundle comp
 ───────────── decision point ─────────────
 Gate 7 (VTEP mode)               ── ✅ done
 Gate 8 (multi-homing foundation) ── ✅ done   << observable DF election, M38 smoke
-Gate 8b (multi-homing enforcement) ── ✅ alpha, opt-in
+Gate 8b (multi-homing enforcement) ── ✅ alpha, default-on with opt-out
 Gate 9 (IRB, Type 5)             ── ✅ symmetric Interface-less IRB end-to-end (v0.18.0)
 ADR-0059 (aliasing FDB-NHG)      ── ✅ shipped (slices 1-4); M40 FRR-validated
-Gate 9+ (MVPN, PBB, MPLS)        ── furthest horizon
+Gate 9+ (MVPN/PBB/MPLS/BUM ext)  ── furthest horizon
 ```
 
 ### Harness reuse
@@ -737,5 +742,5 @@ did not take on:
 - **docs/INTEROP.md** — P1.5 "EVPN validation depth" gap list
 - **docs/RFC_NOTES.md** — RFC 7432 / 9012 / 9135 implementation notes
 - **docs/USE_CASES.md §7** — "VXLAN-EVPN DC Fabric Route Reflector"
-- **docs/gobgp-parity.md** — DC fabric RR section, ~85% parity claim
+- **docs/gobgp-parity.md** — DC fabric RR section + feature-parity matrix
 - **examples/rr-evpn-fabric/config.toml** — reference RR config

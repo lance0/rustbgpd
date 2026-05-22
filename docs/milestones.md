@@ -664,7 +664,7 @@ for the architectural record.
   Prometheus `evpn_df_role` surface so operators can observe DF /
   Non-DF role per `(ESI, EVI)`. **M38 containerlab smoke** validates
   the DF inputs end-to-end against FRR.
-- **Multi-homing enforcement alpha (Gate 8b) — landed (opt-in).**
+- **Multi-homing enforcement alpha (Gate 8b) — landed (default-on with opt-out).**
   ESI Label + ES-Import RT extcomms attached to Type 1/4
   origination, DF-role-aware Type 2 ESI attachment, RFC 7432 §14
   aliasing receive-side projection
@@ -734,13 +734,13 @@ for the architectural record.
   #91 / #92 / #93: per-instance `apply_aliasing_ecmp` off-switch,
   periodic `RTM_GETNEXTHOP` drift recovery, and homogeneous IPv6
   alias members.
-- **Type 5 / Type 1 / Type 4 origination via gRPC** — still
-  deferred. Native Type 1/4 origination ships through
-  `[[ethernet_segments]]`; controller injection for those route
-  types and for Type 5 is not exposed.
-- **RFC 9251 Route Types 6-8** (multicast EVPN), **RFC 7623
-  PBB-EVPN**, **MPLS encapsulation**, **RFC 9252 Add-Path for
-  EVPN** — still deferred.
+- **Type 1 / Type 4 origination via gRPC** — still deferred.
+  Native Type 1/4 origination ships through `[[ethernet_segments]]`;
+  Type 5 controller injection, including non-zero Gateway Address for
+  targeted overlay-index testing, is exposed.
+- **RFC 9251 Route Types 6-8** (multicast EVPN), **RFC 9572 Route
+  Types 9-11** (BUM segmentation), **RFC 7623 PBB-EVPN**, **MPLS
+  encapsulation**, **RFC 9252 Add-Path for EVPN** — still deferred.
 
 ### Phase 2 interop scripts (local-only driver scripts)
 

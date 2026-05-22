@@ -30,10 +30,13 @@ more than a read surface:
 - Gate 9 Type 5 origination and L3 FIB programming for linked IP-VRFs
   (RFC 9136 §4.4).
 
-Issue #133 asks for explicit delete/redefine semantics before any gRPC
-or SIGHUP runtime mutation path lands. A table swap alone would make the
-API view change before the originators, DF/segment orchestrator, and
-dataplane reconciler have drained or replayed their derived state.
+Issue #133 asked for explicit delete/redefine semantics before a runtime
+mutation path could safely land. The design is now resolved and the
+`ApplyEvpnRuntime` full-candidate RPC commits the supported shapes, while
+SIGHUP and remaining unsupported shapes still fail closed under #210. A
+table swap alone would make the API view change before the originators,
+DF/segment orchestrator, and dataplane reconciler have drained or replayed
+their derived state.
 
 ## Decision
 

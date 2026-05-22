@@ -172,7 +172,7 @@ shape itself does not raise the tier.
 | `ListIpVrfs` | `sensitive_read` | Gate 9 IP-VRF table. |
 | `GetIpVrf` | `sensitive_read` | Single-VRF detail. |
 | `ClearDuplicateMacQuarantine` | `mutating` | Clears one local duplicate-MAC suppression key and may replay still-live local MAC state. Reversible, per-`(VNI, MAC)` scope; not a route-injection primitive and not a clear-all. |
-| `ApplyEvpnRuntime` | `mutating` | ADR-0063 full-candidate EVPN runtime validation/apply entry point. `validate_only` and no-op applies are bounded; a single L2VNI add or single IP-VRF add converges live and commits a new generation, while other non-noop shapes (delete, redefine, Ethernet Segment changes, mixed or multi-add) fail closed (issue #210). Request TOML can contain credentials and must be audit-redacted. |
+| `ApplyEvpnRuntime` | `mutating` | ADR-0063 full-candidate EVPN runtime validation/apply entry point. `validate_only` and no-op applies are bounded; seven shapes converge live and commit a new generation (single L2VNI add/delete, single IP-VRF add/standalone-delete, single Ethernet Segment add/delete/redefine), while other non-noop shapes (L2VNI/IP-VRF redefine, linked IP-VRF delete, ES-aware L2VNI delete, mixed or multi-element edits) fail closed (issue #210). Request TOML can contain credentials and must be audit-redacted. |
 
 ## Totals
 

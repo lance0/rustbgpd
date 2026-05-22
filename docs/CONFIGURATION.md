@@ -75,7 +75,7 @@ don't survive to the demotion step.
 iBGP peers (`remote_asn == global.asn`) are exempt because `LOCAL_PREF` is
 preserved within an AS; re-applying the demotion per iBGP hop would clobber
 values set legitimately at the upstream EBGP edge. Confederation gating is
-tracked in `KNOWN_ISSUES.md` as a follow-up.
+tracked in [`KNOWN_ISSUES.md`](../KNOWN_ISSUES.md) as a follow-up.
 
 Off by default — the operator opt-in is deliberate, RFC 8326 §4 says receivers
 SHOULD apply this, not MUST.
@@ -931,7 +931,7 @@ Every route receives a validation state based on RPKI data:
 
 Use `match_rpki_validation` in import or export policy statements to filter
 routes by RPKI state. Import validation evaluates against the current VRP
-snapshot at ingress time — see KNOWN_ISSUES.md for best-effort semantics.
+snapshot at ingress time — see [`KNOWN_ISSUES.md`](../KNOWN_ISSUES.md) for best-effort semantics.
 
 Drop RPKI-invalid routes (recommended):
 
@@ -1673,12 +1673,12 @@ kernel-side ECMP); other L2VNIs in the same daemon are unaffected.
 **Restart required**: `[[evpn_instances]]` is pinned at startup today
 — config reload reverts instance-table edits — so flipping
 `apply_aliasing_ecmp` or any other instance field requires a daemon
-restart to take effect. ADR-0063 defines the future runtime mutation
-contract: a command-driven EVPN coordinator must validate the whole
-candidate model, drain/replay IMET, Type 2, Type 5, DF/ES, and Linux
-owned state explicitly, and then publish a new generation. There is no
-operator-facing RPC or hot-SIGHUP path for that yet. The implementation
-work remains tracked in <https://github.com/lance0/rustbgpd/issues/133>.
+restart to take effect. ADR-0063's `EvpnService.ApplyEvpnRuntime`
+coordinator can live-commit the supported add/delete/ES shapes, but
+L2VNI redefine, including field flips such as `apply_aliasing_ecmp`,
+still fails closed and remains tracked in
+<https://github.com/lance0/rustbgpd/issues/210>. SIGHUP remains
+restart-required for EVPN table edits.
 
 **Restart edge case**: if you flip `apply_aliasing_ecmp = false` and
 restart the daemon while tagged FDB nexthop groups from the prior run
@@ -1698,20 +1698,20 @@ default — single-homed VTEPs leave it empty.
 [[ethernet_segments]]
 esi = "00:00:00:00:00:00:00:00:00:01"          # 10-byte ESI (Type 0 here; Types 1–5 also accepted)
 member_vnis = [100, 200]                       # L2VNIs this ES is reachable on
-df_preference = 32768                          # RFC 8584 DF preference (default 32768)
-df_algorithm = "preference"                    # "modulo" (RFC 7432 §8.5) or "preference" (RFC 8584)
-originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 origination (defaults to a member VNI's local_vtep_ip)
+df_preference = 32768                          # reserved; Gate 8 accepts only default 32768
+df_algorithm = "default-modulo"                # only supported DF algorithm today
+originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 origination
 ```
 
 ### Fields
 
 | Field           | Type     | Required | Default       | Description |
 |-----------------|----------|----------|---------------|-------------|
-| `esi`           | string   | yes      | --            | 10-byte ESI in colon-separated hex (RFC 7432 §5). All ESI Types accepted; Type 0 is the operator-static form, Type 3 is MAC-based (`03:<sys-mac>:<id-be>`), etc. |
+| `esi`           | string   | yes      | --            | 10-byte non-zero ESI in colon-separated hex (RFC 7432 §5). The all-zero Type 0 single-homed sentinel is rejected; non-zero Type 0 and Types 1–5 are accepted. |
 | `member_vnis`   | u32[]    | yes      | --            | L2VNIs this segment is reachable on. Each must match a configured `[[evpn_instances]].vni` |
-| `df_preference` | u16      | no       | `32768`       | RFC 8584 §3 DF preference. Higher wins; ties break by lowest VTEP IP |
-| `df_algorithm`  | string   | no       | `"preference"`| `"modulo"` (RFC 7432 §8.5 round-robin) or `"preference"` (RFC 8584 highest-preference) |
-| `originator_ip` | string   | no       | first member  | Source IP carried in Type 1/4 origination. Defaults to the `local_vtep_ip` of the first member VNI |
+| `df_preference` | u32      | no       | `32768`       | Reserved for RFC 8584 preference-based election. Gate 8 accepts only the default because default-modulo ignores preference |
+| `df_algorithm`  | string   | no       | `"default-modulo"` | `"default-modulo"` (RFC 7432 §8.5 service carving). `"highest-random-weight"` and `"preference-based"` are reserved and rejected until implemented |
+| `originator_ip` | string   | yes      | --            | Source IP carried in Type 1/4 origination. Usually equals a member VNI's `local_vtep_ip` |
 
 ### What gets originated
 
@@ -1729,7 +1729,10 @@ remote Type 4 routes for the same ESI; the elected DF role drives
 Type 2 origination ESI tagging and the optional BUM-suppression
 filter (see `apply_bum_enforcement` in `[global]`).
 
-Restart-required: `[[ethernet_segments]]` is pinned at startup.
+Restart-required on SIGHUP: `[[ethernet_segments]]` is pinned for
+config reloads. `EvpnService.ApplyEvpnRuntime` can live-commit a single
+Ethernet Segment add, delete, or redefine when the segment actor exists;
+unsupported mixed / multi-element changes still fail closed.
 
 ---
 
@@ -1837,6 +1840,9 @@ the transition once per state change rather than every pass.
 - Every `[[evpn_instances]].ip_vrf` resolves to a declared IP-VRF.
 - `[[evpn_ip_vrfs]]` is restart-required — SIGHUP pins the in-memory
   snapshot back to the startup value, same lifecycle as `[[evpn_instances]]`.
+  `EvpnService.ApplyEvpnRuntime` can live-commit a single IP-VRF add or
+  standalone delete; IP-VRF redefine and linked tenant teardown remain
+  fail-closed #210 shapes.
 
 See [ADR-0058](adr/0058-evpn-gate-9-irb-l3vni.md) for the design rationale.
 
@@ -1901,13 +1907,15 @@ snapshot back to the startup value so drift detection stays observable
 across every reload. Gate 8 segment and Gate 8b enforcement settings
 follow the same pinning rule because their actors also resolve startup
 snapshots. The Gate 9 `[[evpn_ip_vrfs]]` table (ADR-0058) is pinned the
-same way; the Gate 9 actors consume it for IP-VRF readiness, Type 5
+same way for SIGHUP; the Gate 9 actors consume it for IP-VRF readiness, Type 5
 origination, and L3 FIB programming. The ADR-0061 `[[fib_tables]]`
 table is pinned for the same reason: the general FIB actor owns only the
-explicit tables resolved at startup. Runtime EVPN mutation
-(`AddEvpnInstance` / `DeleteEvpnInstance` and SIGHUP delta application)
-requires the command-driven coordinator described in ADR-0063 and is
-tracked in <https://github.com/lance0/rustbgpd/issues/133>.
+explicit tables resolved at startup. Runtime EVPN mutation is exposed
+through ADR-0063's full-candidate `EvpnService.ApplyEvpnRuntime` RPC for
+the supported seven live shapes; direct `AddEvpnInstance` /
+`DeleteEvpnInstance` RPCs and SIGHUP delta application remain out of
+scope. Unsupported shapes are tracked in
+<https://github.com/lance0/rustbgpd/issues/210>.
 
 Reload failures are reported per-step with structured logging
 (bucket / target / error). The previous in-memory config snapshot

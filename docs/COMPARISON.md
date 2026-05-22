@@ -2,7 +2,7 @@
 
 A feature comparison of open-source BGP daemon implementations.
 
-Last updated: 2026-05-21 (v0.25.0: ADR-0063 EVPN runtime convergence — single L2VNI/IP-VRF add commits live via `ApplyEvpnRuntime`; EVPN Type 5 gRPC injection; auto-derived Route Targets; typed EVPN/FIB/policy event categories; FIB status sampling metadata. Built on the v0.24.0 ADR-0064 gRPC tier-enforcement default and EVPN duplicate-MAC quarantine.)
+Last updated: 2026-05-22 (v0.26.0 + unreleased: ADR-0063 EVPN runtime convergence now commits seven live `ApplyEvpnRuntime` shapes — single L2VNI add/delete, single IP-VRF add/standalone-delete, and single Ethernet Segment add/delete/redefine, including ES binding of a runtime-added member VNI; EVPN Type 5 overlay-index receive-side recursion + bounded drop metrics/status + controller gateway injection; auto-derived Route Targets; typed EVPN/FIB/policy event categories. Built on the v0.24.0 ADR-0064 gRPC tier-enforcement default and EVPN duplicate-MAC quarantine.)
 
 ## Overview
 
@@ -120,9 +120,9 @@ Last updated: 2026-05-21 (v0.25.0: ADR-0063 EVPN runtime convergence — single 
 | Docker image | Yes | Yes | Yes | Yes | No |
 | Fuzz testing | Yes | No | No | No | No |
 | Interop test suite | Yes | No | No | No | No |
-| FIB/kernel integration | No | Yes | Yes | Yes | Yes |
+| FIB/kernel integration | Partial | Yes | Yes | Yes | Yes |
 | Route server mode | Yes | Yes | Yes | Yes | Yes |
-| Dynamic neighbors | No | Yes | Yes | Yes | No |
+| Dynamic neighbors | Yes | Yes | Yes | Yes | No |
 | Looking glass | Yes | No | Yes | No | Yes |
 | BFD integration | No | Yes | Yes | No | No |
 
