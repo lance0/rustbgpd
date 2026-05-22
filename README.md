@@ -61,9 +61,10 @@ architecture diagrams, example configs, and API workflows.
   all-active correctness gate (ASIC/offload-dependent on the Linux
   softswitch — see ADR-0065); runtime EVPN model edits are partial
   (`ApplyEvpnRuntime`
-  commits eight live shapes, while IP-VRF redefine, ES-member L2VNI
-  redefine, linked IP-VRF delete / tenant teardown, ES-aware L2VNI
-  delete, mixed, and multi-element edits remain restart-required),
+  commits nine live shapes, while ES-member L2VNI redefine / `ip_vrf` relink,
+  linked IP-VRF delete / tenant teardown, ES-aware L2VNI delete,
+  L3VNI/device/table IP-VRF redefine, mixed, and multi-element edits remain
+  restart-required),
   and MPLS / PBB / MVPN encapsulations are not implemented. See
   [docs/evpn-enablement.md](docs/evpn-enablement.md) for the shipped
   feature ladder
@@ -308,9 +309,10 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
   [docs/evpn-enablement.md](docs/evpn-enablement.md) for the full gate
   ladder. Known gaps: runtime `[[evpn_instances]]` mutation is partial
   (`ApplyEvpnRuntime` commits single L2VNI add/delete/redefine, single
-  IP-VRF add/standalone delete, and single Ethernet Segment add/delete/redefine;
-  IP-VRF redefine, ES-member L2VNI redefine / `ip_vrf` relink, linked
-  IP-VRF delete / tenant teardown, ES-aware L2VNI delete, mixed, and
+  IP-VRF add/standalone delete/redefine with unchanged L3VNI/device/table
+  identity, and single Ethernet Segment add/delete/redefine; ES-member L2VNI
+  redefine / `ip_vrf` relink, linked IP-VRF delete / tenant teardown,
+  ES-aware L2VNI delete, L3VNI/device/table IP-VRF redefine, mixed, and
   multi-element edits remain
   restart-required — [#210](https://github.com/lance0/rustbgpd/issues/210)),
   overlay-index IRB native local origination and protected recursion-path
@@ -336,7 +338,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | **Runtime** | Rust 1.92+ (workspace MSRV — Tokio rolling-6-month policy), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | EVPN runtime instance IP-VRF redefine, ES-member L2VNI redefine / `ip_vrf` relink, linked IP-VRF delete / tenant teardown, ES-aware L2VNI delete, mixed / multi-element edits (single L2VNI add/delete/redefine, single IP-VRF add/standalone delete, and single Ethernet Segment add/delete/redefine commit live), RFC 9135 overlay-index IRB local origination, EVPN route types 6-11 / MPLS / PBB / MVPN, VPNv4/v6, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
+| **Not yet supported** | EVPN runtime instance ES-member L2VNI redefine / `ip_vrf` relink, linked IP-VRF delete / tenant teardown, ES-aware L2VNI delete, L3VNI/device/table IP-VRF redefine, mixed / multi-element edits (single L2VNI add/delete/redefine, single IP-VRF add/standalone delete/redefine with unchanged L3VNI/device/table identity, and single Ethernet Segment add/delete/redefine commit live), RFC 9135 overlay-index IRB local origination, EVPN route types 6-11 / MPLS / PBB / MVPN, VPNv4/v6, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
 | **Tests** | Workspace test suite, fuzz targets, 48 automated interop scenarios primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (18 interop tests gated on every PR; privileged kernel dataplane smokes run locally) |
 
 ## Documentation

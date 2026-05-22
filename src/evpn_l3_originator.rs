@@ -56,7 +56,7 @@
 //! is created and the Prometheus gauge stays at zero-label-vector
 //! state until an originator action is observed.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -308,7 +308,16 @@ async fn originator_loop(mut cfg: SpawnConfig, mut ip_vrf_model: EffectiveIpVrfM
                     drain_all(&mut originated, &cfg, &vrf_names).await;
                     return;
                 }
-                ip_vrfs = ip_vrf_model.rx.borrow().clone();
+                let next_ip_vrfs = ip_vrf_model.rx.borrow().clone();
+                drain_changed_ip_vrfs(
+                    &mut originated,
+                    &cfg,
+                    ip_vrfs.as_ref(),
+                    next_ip_vrfs.as_ref(),
+                    &vrf_names,
+                )
+                .await;
+                ip_vrfs = next_ip_vrfs;
                 merge_vrf_names(&mut vrf_names, ip_vrfs.as_ref());
                 publish_all_originated_gauges(&cfg, ip_vrfs.as_ref());
                 reconcile(&mut originated, &mut cfg, ip_vrfs.as_ref(), &vrf_names).await;
@@ -393,14 +402,12 @@ async fn reconcile(
         }
     }
 
-    // Phase 2: injections — `want - have`. Only record the entry in
-    // `originated` once the RIB has acknowledged the inject. A
-    // failed inject leaves us in the "want, not yet originated"
-    // state so the next pass retries with the same shape.
+    // Phase 2: injections — `want - have`, plus stale-key repair for
+    // same-(VRF,prefix) route-attribute changes. Only record the entry in
+    // `originated` once the RIB has acknowledged the inject. A failed inject
+    // leaves us in the "want, not yet originated" state so the next pass
+    // retries with the same shape.
     for ((vrf_id, prefix), obs) in &want {
-        if originated.contains_key(&(*vrf_id, *prefix)) {
-            continue; // already originated
-        }
         let Some(vrf) = ready_vrfs.get(vrf_id) else {
             continue; // checked above, but keep the guard for clarity
         };
@@ -412,15 +419,69 @@ async fn reconcile(
                     SUPPRESS_FAMILY_MISMATCH,
                     1,
                 );
+                if let Some(stale_key) = originated.get(&(*vrf_id, *prefix)).copied()
+                    && withdraw_one(&cfg.rib_tx, *vrf_id, stale_key, &cfg.originated_counts).await
+                {
+                    originated.remove(&(*vrf_id, *prefix));
+                    publish_originated_gauge(cfg, *vrf_id, &vrf.name);
+                }
                 continue;
             }
         };
         let key = route.key();
+        if let Some(existing_key) = originated.get(&(*vrf_id, *prefix)).copied() {
+            if existing_key == key {
+                continue; // already originated with the desired key
+            }
+            if !withdraw_one(&cfg.rib_tx, *vrf_id, existing_key, &cfg.originated_counts).await {
+                continue;
+            }
+            originated.remove(&(*vrf_id, *prefix));
+            publish_originated_gauge(cfg, *vrf_id, &vrf.name);
+        }
         if inject_one(&cfg.rib_tx, *vrf_id, key, route, &cfg.originated_counts).await {
             originated.insert((*vrf_id, *prefix), key);
             // We have `&IpVrf` in hand here (`vrf.name`), so skip
             // the cache lookup — same value as `vrf_names[vrf_id]`.
             publish_originated_gauge(cfg, *vrf_id, &vrf.name);
+        }
+    }
+}
+
+/// Drain Type 5 routes for IP-VRFs that disappeared or changed content in a
+/// runtime model update before reconciling the candidate table. Without this,
+/// a same-L3VNI redefine that changes RD/RT/NEXT_HOP/Router-MAC attributes
+/// would remain in `originated` under the same `(IpVrfId, prefix)` key and the
+/// normal `want - have` pass would skip re-injection.
+async fn drain_changed_ip_vrfs(
+    originated: &mut BTreeMap<(IpVrfId, EvpnIpPrefixValue), EvpnRouteKey>,
+    cfg: &SpawnConfig,
+    current: &IpVrfTable,
+    next: &IpVrfTable,
+    vrf_names: &BTreeMap<IpVrfId, String>,
+) {
+    let changed_ids: BTreeSet<IpVrfId> = current
+        .iter()
+        .filter_map(|old| match next.get(&old.name) {
+            Some(new) if new == old => None,
+            _ => Some(old.id),
+        })
+        .collect();
+    if changed_ids.is_empty() {
+        return;
+    }
+
+    let to_withdraw: Vec<((IpVrfId, EvpnIpPrefixValue), EvpnRouteKey)> = originated
+        .iter()
+        .filter(|((vrf_id, _), _)| changed_ids.contains(vrf_id))
+        .map(|(k, v)| (*k, *v))
+        .collect();
+    for ((vrf_id, prefix), key) in to_withdraw {
+        if withdraw_one(&cfg.rib_tx, vrf_id, key, &cfg.originated_counts).await {
+            originated.remove(&(vrf_id, prefix));
+            if let Some(name) = vrf_names.get(&vrf_id) {
+                publish_originated_gauge(cfg, vrf_id, name);
+            }
         }
     }
 }
@@ -626,6 +687,30 @@ mod tests {
             IpVrfId::new(id).unwrap(),
             format!("65000:{id}").parse::<RouteDistinguisher>().unwrap(),
             vec![format!("65000:{id}").parse::<RouteTarget>().unwrap()],
+            vtep,
+            MacAddress::new([
+                0xaa,
+                0xbb,
+                0xcc,
+                0xdd,
+                0xee,
+                u8::try_from(id & 0xFF).unwrap(),
+            ]),
+            format!("vrf{id}"),
+            format!("l3vxlan{id}"),
+            id,
+        )
+        .unwrap()
+    }
+
+    fn redefined_vrf(id: u32, rd_rt: u32, vtep: IpAddr) -> IpVrf {
+        IpVrf::new(
+            format!("vrf{id}"),
+            IpVrfId::new(id).unwrap(),
+            format!("65000:{rd_rt}")
+                .parse::<RouteDistinguisher>()
+                .unwrap(),
+            vec![format!("65000:{rd_rt}").parse::<RouteTarget>().unwrap()],
             vtep,
             MacAddress::new([
                 0xaa,
@@ -1091,6 +1176,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_ip_vrf_redefine_withdraws_and_reinjects_originated_routes() {
+        let old = vrf(100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let new = redefined_vrf(100, 999, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let prefix = observation(100, [10, 1, 0, 0], 24).prefix;
+        let old_key = predicted_key(&old, prefix);
+        let new_key = predicted_key(&new, prefix);
+        assert_ne!(old_key, new_key, "test setup must change the Type 5 key");
+
+        let mut table = IpVrfTable::new();
+        table.insert(old).unwrap();
+        let (obs_tx, obs_rx) = watch::channel(Arc::new(HashMap::new()));
+        let (status_tx, status_rx) = watch::channel(Vec::<IpVrfDataplaneStatus>::new());
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(32);
+        let handle = spawn(SpawnConfig {
+            ip_vrfs: Arc::new(table),
+            rib_tx,
+            route_observations_rx: obs_rx,
+            ip_vrf_status_rx: status_rx,
+            metrics: BgpMetrics::new(),
+            originated_counts: OriginatedIpVrfRouteCounts::default(),
+            shutdown: CancellationToken::new(),
+        })
+        .expect("non-empty IP-VRF table should spawn originator");
+
+        status_tx.send_replace(vec![ready_status(100)]);
+        let mut obs_map = HashMap::new();
+        obs_map.insert(
+            IpVrfId::new(100).unwrap(),
+            vec![observation(100, [10, 1, 0, 0], 24)],
+        );
+        obs_tx.send_replace(Arc::new(obs_map));
+
+        assert_eq!(next_rib_call(&mut rib_rx).await, RibCall::Inject(old_key));
+
+        let mut redefined_table = IpVrfTable::new();
+        redefined_table.insert(new).unwrap();
+        assert!(handle.replace_ip_vrfs(Arc::new(redefined_table)));
+
+        assert_eq!(
+            next_rib_call(&mut rib_rx).await,
+            RibCall::Withdraw(old_key),
+            "redefining an IP-VRF must withdraw the old-RD Type 5 route first"
+        );
+        assert_eq!(
+            next_rib_call(&mut rib_rx).await,
+            RibCall::Inject(new_key),
+            "redefining an IP-VRF must replay the Type 5 route under the new fields"
+        );
+
+        handle.shutdown().await;
+        drop(obs_tx);
+        drop(status_tx);
+    }
+
+    #[tokio::test]
     async fn dropping_handle_does_not_close_runtime_model_watch() {
         let v = vrf(100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let predicted = predicted_key(&v, observation(100, [10, 1, 0, 0], 24).prefix);
@@ -1231,6 +1371,58 @@ mod tests {
                 .iter()
                 .all(|c| matches!(c, RibCall::Inject(k) if *k == predicted)),
             "every retry uses the same EvpnRouteKey"
+        );
+    }
+
+    #[tokio::test]
+    async fn redefine_withdraw_failure_keeps_stale_key_pending_for_retry() {
+        let old = vrf(100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let new = redefined_vrf(100, 999, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let prefix = observation(100, [10, 1, 0, 0], 24).prefix;
+        let old_key = predicted_key(&old, prefix);
+        let new_key = predicted_key(&new, prefix);
+        let mut h = Harness::with_responder_mode(
+            vec![old],
+            RibResponderMode {
+                inject: ReplyMode::Ok,
+                withdraw: ReplyMode::Reject,
+            },
+        );
+
+        h.status_tx.send_replace(vec![ready_status(100)]);
+        let mut obs_map = HashMap::new();
+        obs_map.insert(
+            IpVrfId::new(100).unwrap(),
+            vec![observation(100, [10, 1, 0, 0], 24)],
+        );
+        h.obs_tx.send_replace(Arc::new(obs_map));
+        let originated = Harness::drive_one(BTreeMap::new(), &mut h.cfg).await;
+
+        let mut redefined = IpVrfTable::new();
+        redefined.insert(new).unwrap();
+        h.cfg.ip_vrfs = Arc::new(redefined);
+        let originated = Harness::drive_one(originated, &mut h.cfg).await;
+        let originated = Harness::drive_one(originated, &mut h.cfg).await;
+
+        assert_eq!(
+            originated
+                .get(&(IpVrfId::new(100).unwrap(), prefix))
+                .copied(),
+            Some(old_key),
+            "failed withdraw must keep the stale key pending for retry"
+        );
+        let calls = h.collect_calls().await;
+        assert_eq!(
+            calls,
+            vec![
+                RibCall::Inject(old_key),
+                RibCall::Withdraw(old_key),
+                RibCall::Withdraw(old_key),
+            ]
+        );
+        assert!(
+            !calls.contains(&RibCall::Inject(new_key)),
+            "new key must not be injected until the stale key withdraw succeeds"
         );
     }
 
