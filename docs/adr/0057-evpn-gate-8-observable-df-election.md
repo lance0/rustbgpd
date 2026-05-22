@@ -112,6 +112,14 @@ The Gate 8 surface is:
 
 ### Rejected: ship Gate 8 with split-horizon enforcement
 
+> **Follow-up (ADR-0065):** what later shipped as Gate 8b is *role-based*
+> DF/non-DF BUM-port suppression, not source-conditioned VXLAN local-bias
+> split-horizon. ADR-0065's netns spike confirmed true local-bias is not
+> achievable with stateless `tc` on the standard bridged-VXLAN softswitch
+> (the overlay source isn't visible to `tc-flower` at the VXLAN ingress
+> hook — the FRR #15400 failure mode) and is ASIC/offload-dependent. It
+> remains the open all-active correctness gate.
+
 The temptation was to bundle observation + enforcement in one gate
 and call it "EVPN multihoming, complete." Three reasons against:
 

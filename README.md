@@ -56,8 +56,11 @@ architecture diagrams, example configs, and API workflows.
   surface — VXLAN EVPN is functional and FRR-interop-tested (Route
   Reflector, single-homed VTEP with bidirectional MAC / MAC+IP
   origination, symmetric Interface-less IRB / Type 5, production-default
-  active-active multi-homing enforcement with opt-out flags) but still
-  **alpha**: runtime EVPN model edits are partial (`ApplyEvpnRuntime`
+  DF/non-DF BUM suppression and aliasing ECMP with opt-out flags) but
+  still **alpha**: VXLAN local-bias split-horizon remains the remaining
+  all-active correctness gate (ASIC/offload-dependent on the Linux
+  softswitch — see ADR-0065); runtime EVPN model edits are partial
+  (`ApplyEvpnRuntime`
   commits seven live shapes, while L2VNI/IP-VRF redefine, linked
   IP-VRF delete / tenant teardown, ES-aware L2VNI delete, mixed, and
   multi-element edits remain restart-required),

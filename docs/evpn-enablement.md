@@ -496,7 +496,9 @@ so this was an origination-only change with no wire bump:
   (Gate 8 default is all-active). Peers can wire the label into
   their split-horizon filter tables; rustbgpd's dataplane-side drops
   are now the production default via `apply_bum_enforcement` (true
-  since v0.23.0).
+  since v0.23.0). Note these are *role-based* (DF/non-DF) BUM-port
+  drops, not source-conditioned local-bias split-horizon — see the
+  Gate 8b note below and ADR-0065.
 - **Type 1 EAD-per-EVI**: unchanged (carries no ESI Label per
   RFC 7432 §14).
 
@@ -515,9 +517,18 @@ Shipped pieces:
    ifindex, CE-facing port ifindexes, and desired action
    (`allow` for DF, `suppress` for Non-DF) through
    `DataplaneReport.bum_enforcement`.
-2. **Dataplane split-horizon kernel primitive** — when
+2. **Dataplane DF/non-DF BUM-suppression primitive** — when
    `apply_bum_enforcement = true`, the Linux dataplane applies the
    validated BUM-suppression primitive for Non-DF CE-facing ports.
+   This is *role-based* (per-port flood-flag) suppression, **not**
+   source-conditioned VXLAN local-bias split-horizon (RFC 8365
+   §8.3.1). True local-bias — dropping only BUM whose overlay source
+   is an ES-peer VTEP while still flooding other BUM and forwarding
+   known unicast — is the **remaining all-active correctness gate**.
+   ADR-0065's netns spike confirmed it is not achievable with
+   stateless `tc` on the standard bridged-VXLAN softswitch (the
+   overlay source is not visible to `tc-flower` at the VXLAN ingress
+   hook — the FRR #15400 failure mode); it is ASIC/offload-dependent.
    The Docker netns harness is PR-CI gated; the default flipped to
    `true` in v0.23.0 after the Gate 8b 24 h MAC-churn soak
    (2026-05-16) and the M37 local-origination 24 h MAC-churn soak
@@ -573,11 +584,14 @@ periodic `RTM_GETNEXTHOP` drift recovery, IPv6 alias members)
 shipped in v0.20.0 — PRs #91 / #92 / #93 — and is no longer on
 the remaining-slices list.
 
-**Operator note:** multi-homing enforcement is the production
-default since v0.23.0. Both `apply_bum_enforcement` and
+**Operator note:** DF/non-DF BUM suppression and aliasing ECMP are the
+production default since v0.23.0. Both `apply_bum_enforcement` and
 `apply_aliasing_ecmp` ship as `true` out of the box; new deployments
-get kernel BUM-suppression on Non-DF CE-facing ports and FDB nexthop
-groups for multi-homed Type 2 routes without additional config.
+get role-based kernel BUM-suppression on Non-DF CE-facing ports and FDB
+nexthop groups for multi-homed Type 2 routes without additional config.
+VXLAN local-bias split-horizon (RFC 8365 §8.3.1) is **not** part of this
+and remains the open all-active correctness gate — ASIC/offload-dependent
+on the Linux softswitch (ADR-0065).
 Operators who need the prior observe-only / single-dst posture can
 still opt out explicitly with `apply_bum_enforcement = false` and/or
 `apply_aliasing_ecmp = false` on the relevant `[[evpn_instances]]`
@@ -695,6 +709,8 @@ Gate 6 (controller inject)      ── ✅ done   << full Phase 1 RR bundle comp
 Gate 7 (VTEP mode)               ── ✅ done
 Gate 8 (multi-homing foundation) ── ✅ done   << observable DF election, M38 smoke
 Gate 8b (multi-homing enforcement) ── ✅ alpha, default-on with opt-out
+                                       (DF/non-DF BUM + aliasing ECMP;
+                                        local-bias SPH ASIC-dep — ADR-0065)
 Gate 9 (IRB, Type 5)             ── ✅ symmetric Interface-less IRB end-to-end (v0.18.0)
 ADR-0059 (aliasing FDB-NHG)      ── ✅ shipped (slices 1-4); M40 FRR-validated
 Gate 9+ (MVPN/PBB/MPLS/BUM ext)  ── furthest horizon
