@@ -34,13 +34,12 @@
 //! disagrees, RFC 8584 falls back to `DefaultModulo` so heterogeneous
 //! deployments converge on a common floor.
 //!
-//! This module implements `DefaultModulo` and the RFC 8584 §3.2
-//! Highest Random Weight algorithm. RFC 9785 Highest-/Lowest-Preference variants are
-//! reserved at the type level (see [`crate::segment::DfAlgorithm`])
-//! so the wire-side codec is forward-compatible, but
-//! [`DfElection::run`] returns
-//! [`DfElectionError::AlgorithmNotImplemented`] if unanimous
-//! negotiation settles on one of those algorithms.
+//! This module implements `DefaultModulo`, the RFC 8584 §3.2 Highest
+//! Random Weight algorithm, and the RFC 9785 Highest-/Lowest-Preference
+//! algorithms. The RFC 9785 Don't-Preempt capability is accepted as a
+//! remote tie-break input; local non-revertive behavior is an
+//! orchestrator policy concern and remains outside this pure election
+//! state machine.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -59,9 +58,12 @@ use crate::segment::{DfAlgorithm, DfRole};
 pub struct DfCandidate {
     /// The PE's originator IP from its Type 4 ES route.
     pub originator_ip: IpAddr,
-    /// DF preference value the PE proposed. Reserved for the RFC 9785
-    /// preference algorithms; `DefaultModulo` and HRW ignore this field.
+    /// DF preference value the PE proposed. RFC 9785 preference
+    /// algorithms use this field; `DefaultModulo` and HRW ignore it.
     pub df_preference: u32,
+    /// RFC 9785 Don't-Preempt capability advertised by this PE.
+    /// Preference algorithms use it as an equal-preference tie-breaker.
+    pub df_dont_preempt: bool,
     /// DF election algorithm the PE proposed.
     pub df_algorithm: DfAlgorithm,
 }
@@ -132,9 +134,6 @@ impl DfElection {
     ///   share the same originator IP. RFC 7432 §8.5 implicitly
     ///   assumes uniqueness — collisions break service carving's
     ///   deterministic split.
-    /// - [`DfElectionError::AlgorithmNotImplemented`] if negotiation
-    ///   settles on a reserved algorithm. Non-implemented IDs surface
-    ///   here so the caller can degrade gracefully (log + skip vs. panic).
     pub fn run(
         &self,
         candidates: &[DfCandidate],
@@ -159,12 +158,6 @@ impl DfElection {
         }
 
         let agreed = negotiate_algorithm(&sorted);
-        if matches!(
-            agreed,
-            DfAlgorithm::HighestPreference | DfAlgorithm::LowestPreference
-        ) {
-            return Err(DfElectionError::AlgorithmNotImplemented(agreed));
-        }
 
         // The local PE must be one of the candidates, else we cannot assign it
         // a role. (The winner is computed by IP below, so the index is unused.)
@@ -190,8 +183,15 @@ impl DfElection {
                         .expect("non-empty after EmptyCandidateSet guard")
                         .originator_ip
                 }
-                DfAlgorithm::HighestPreference | DfAlgorithm::LowestPreference => {
-                    unreachable!("preference algorithms returned above")
+                DfAlgorithm::HighestPreference => {
+                    preference_winner(&sorted, PreferenceOrder::High)
+                        .expect("non-empty after EmptyCandidateSet guard")
+                        .originator_ip
+                }
+                DfAlgorithm::LowestPreference => {
+                    preference_winner(&sorted, PreferenceOrder::Low)
+                        .expect("non-empty after EmptyCandidateSet guard")
+                        .originator_ip
                 }
             };
             let role = if winner_ip == local_originator_ip {
@@ -203,6 +203,26 @@ impl DfElection {
         }
         Ok(roles)
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PreferenceOrder {
+    High,
+    Low,
+}
+
+fn preference_winner(candidates: &[DfCandidate], order: PreferenceOrder) -> Option<&DfCandidate> {
+    candidates.iter().max_by_key(|c| {
+        let preference_key = match order {
+            PreferenceOrder::High => c.df_preference,
+            PreferenceOrder::Low => u32::MAX - c.df_preference,
+        };
+        (
+            preference_key,
+            c.df_dont_preempt,
+            std::cmp::Reverse(c.originator_ip),
+        )
+    })
 }
 
 /// RFC 8584 §2.2 algorithm negotiation: if every candidate advertises the same
@@ -332,13 +352,6 @@ pub enum DfElectionError {
     /// service carving's determinism depends on uniqueness.
     #[error("two DF election candidates share originator IP {0}")]
     DuplicateOriginator(IpAddr),
-    /// Negotiation settled on an algorithm this implementation doesn't support.
-    /// Caller should log the ESI + the algorithm and skip
-    /// origination for this ES.
-    #[error(
-        "DF election algorithm {0:?} is reserved but not implemented (supported algorithms: DefaultModulo, HighestRandomWeight)"
-    )]
-    AlgorithmNotImplemented(DfAlgorithm),
 }
 
 #[cfg(test)]
@@ -362,6 +375,21 @@ mod tests {
         DfCandidate {
             originator_ip: ip(ip_str),
             df_preference: 32_768,
+            df_dont_preempt: false,
+            df_algorithm: alg,
+        }
+    }
+
+    fn preference_candidate(
+        ip_str: &str,
+        alg: DfAlgorithm,
+        preference: u32,
+        dont_preempt: bool,
+    ) -> DfCandidate {
+        DfCandidate {
+            originator_ip: ip(ip_str),
+            df_preference: preference,
+            df_dont_preempt: dont_preempt,
             df_algorithm: alg,
         }
     }
@@ -617,39 +645,46 @@ mod tests {
     }
 
     #[test]
-    fn unanimous_highest_preference_returns_not_implemented() {
-        // All candidates propose Highest-Preference. Negotiation
-        // settles there; this slice doesn't implement it, so typed error
-        // surfaces. Caller (orchestrator) is expected to log + skip
-        // origination for this ES.
+    fn unanimous_highest_preference_prefers_larger_preference() {
         let election = DfElection::new(esi(1), [vni(100)]);
         let candidates = vec![
-            candidate("10.0.0.1", DfAlgorithm::HighestPreference),
-            candidate("10.0.0.2", DfAlgorithm::HighestPreference),
+            preference_candidate("10.0.0.1", DfAlgorithm::HighestPreference, 100, false),
+            preference_candidate("10.0.0.2", DfAlgorithm::HighestPreference, 500, false),
         ];
-        let err = election.run(&candidates, ip("10.0.0.1")).unwrap_err();
-        match err {
-            DfElectionError::AlgorithmNotImplemented(alg) => {
-                assert_eq!(alg, DfAlgorithm::HighestPreference);
-            }
-            other => panic!("expected AlgorithmNotImplemented, got {other:?}"),
-        }
+        let roles = election.run(&candidates, ip("10.0.0.2")).unwrap();
+        assert_eq!(roles[&vni(100)], DfRole::Df);
     }
 
     #[test]
-    fn unanimous_lowest_preference_returns_not_implemented() {
+    fn unanimous_lowest_preference_prefers_smaller_preference() {
         let election = DfElection::new(esi(1), [vni(100)]);
         let candidates = vec![
-            candidate("10.0.0.1", DfAlgorithm::LowestPreference),
-            candidate("10.0.0.2", DfAlgorithm::LowestPreference),
+            preference_candidate("10.0.0.1", DfAlgorithm::LowestPreference, 100, false),
+            preference_candidate("10.0.0.2", DfAlgorithm::LowestPreference, 500, false),
         ];
-        let err = election.run(&candidates, ip("10.0.0.1")).unwrap_err();
-        match err {
-            DfElectionError::AlgorithmNotImplemented(alg) => {
-                assert_eq!(alg, DfAlgorithm::LowestPreference);
-            }
-            other => panic!("expected AlgorithmNotImplemented, got {other:?}"),
-        }
+        let roles = election.run(&candidates, ip("10.0.0.1")).unwrap();
+        assert_eq!(roles[&vni(100)], DfRole::Df);
+    }
+
+    #[test]
+    fn preference_tie_prefers_dont_preempt_then_lowest_originator_ip() {
+        let election = DfElection::new(esi(1), [vni(100)]);
+        let candidates = vec![
+            preference_candidate("10.0.0.1", DfAlgorithm::HighestPreference, 500, false),
+            preference_candidate("10.0.0.2", DfAlgorithm::HighestPreference, 500, true),
+            preference_candidate("10.0.0.3", DfAlgorithm::HighestPreference, 500, false),
+        ];
+        let roles = election.run(&candidates, ip("10.0.0.2")).unwrap();
+        assert_eq!(roles[&vni(100)], DfRole::Df);
+
+        let candidates_without_dp = vec![
+            preference_candidate("10.0.0.2", DfAlgorithm::LowestPreference, 500, false),
+            preference_candidate("10.0.0.1", DfAlgorithm::LowestPreference, 500, false),
+        ];
+        let roles = election
+            .run(&candidates_without_dp, ip("10.0.0.1"))
+            .unwrap();
+        assert_eq!(roles[&vni(100)], DfRole::Df);
     }
 
     #[test]

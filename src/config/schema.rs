@@ -937,15 +937,16 @@ fn default_fib_families() -> Vec<String> {
 /// - `member_vnis` — non-empty set of VNIs that participate in
 ///   this ES. Each member contributes a slot to the per-(ESI, VNI)
 ///   DF election.
-/// - `df_preference` — Designated Forwarder preference value
-///   reserved for the future RFC 9785 preference-based DF Election
-///   algorithms. The daemon accepts only the default 32768 because
-///   default-modulo and HRW ignore preference.
+/// - `df_preference` — RFC 9785 Designated Forwarder preference
+///   value (`0..=65535`, default 32768). Used only by
+///   `"highest-preference"` / `"lowest-preference"`; default-modulo
+///   and HRW require the default because they ignore preference.
 /// - `df_algorithm` — DF election algorithm string. Gate 8 accepts
 ///   `"default-modulo"` (RFC 7432 §8.5) and
-///   `"highest-random-weight"` (RFC 8584 §3.2). RFC 9785
-///   `"highest-preference"` / `"lowest-preference"` algorithms are
-///   reserved until implemented. Default `"default-modulo"`.
+///   `"highest-random-weight"` (RFC 8584 §3.2), plus RFC 9785
+///   `"highest-preference"` / `"lowest-preference"` (revertive;
+///   local Don't-Preempt/non-revertive behavior is deferred).
+///   Default `"default-modulo"`.
 /// - `originator_ip` — IP this PE uses as the Type 4 ES route's
 ///   originator address. Typically equals `evpn_instances[].local_vtep_ip`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -956,7 +957,7 @@ pub struct EthernetSegmentConfig {
     /// VNIs participating in this ES. Each must already be declared
     /// in `[[evpn_instances]]`.
     pub member_vnis: Vec<u32>,
-    /// DF preference reserved for RFC 9785 preference algorithms. Default 32768.
+    /// RFC 9785 DF preference. Default 32768.
     #[serde(default = "default_df_preference")]
     pub df_preference: u32,
     /// DF algorithm string. Default `"default-modulo"`.

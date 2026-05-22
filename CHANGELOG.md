@@ -22,6 +22,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stable. `ip_vrf` relink, ES-aware L2VNI delete, linked IP-VRF delete /
   tenant teardown, mixed, and multi-element edits remain fail-closed under
   [#210](https://github.com/lance0/rustbgpd/issues/210).
+- **EVPN DF election — RFC 9785 Highest-/Lowest-Preference.**
+  `[[ethernet_segments]].df_algorithm` now accepts `"highest-preference"`
+  and `"lowest-preference"` with `df_preference` in the RFC 9785
+  `0..=65535` range. Type 4 Ethernet Segment routes advertise the selected
+  preference algorithm and configured preference, remote Type 4 routes decode
+  the Don't-Preempt bit for tie-breaking, and unanimous preference-DF
+  candidate sets elect the highest or lowest preference with Don't-Preempt and
+  lowest-PE-IP tie-breaks. Mixed algorithms still fall back to default service
+  carving. Local Don't-Preempt / non-revertive behavior remains deferred.
 
 - **EVPN DF election — RFC 8584 Highest Random Weight.**
   `[[ethernet_segments]].df_algorithm = "highest-random-weight"` now runs the
@@ -30,8 +39,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   specified LCG, `mod 2^31`), with the numerically lowest PE IP as the
   equal-weight tie-break, and advertises the DF Election Extended Community on
   Type 4 ES routes. Mixed or absent DF Election advertisements still fall back
-  to default service carving, while RFC 9785 Highest-/Lowest-Preference and
-  Don't Preempt behavior remain fail-closed for a later slice. Validated by the
+  to default service carving. Validated by the
   M46 two-PE rustbgpd HRW interop smoke (over a VNI where the HRW winner differs
   from the modulo winner) plus a known-answer unit test pinning the weight to
   the RFC value; cross-vendor HRW is not testable against FRR, which implements

@@ -453,14 +453,17 @@ Ships:
 
 - `[[ethernet_segments]]` config block with ESI, non-empty member
   VNI list, `df_preference = 32768`,
-  `df_algorithm = "default-modulo"` or `"highest-random-weight"`,
+  `df_algorithm = "default-modulo"`, `"highest-random-weight"`,
+  `"highest-preference"`, or `"lowest-preference"`,
   and originator IP.
   Single-homed and RR deployments take the empty-config early return
   and pay zero runtime cost.
 - Pure DF election state machine (`crates/evpn/src/df_election.rs`)
   — RFC 7432 §8.5 service carving + RFC 8584 §3.2 Highest Random
-  Weight, with RFC 8584 fallback to default when candidates disagree,
-  callable from a unit test.
+  Weight + RFC 9785 Highest-/Lowest-Preference, with fallback to
+  default when candidates disagree, callable from a unit test. Local
+  Don't-Preempt / non-revertive preference-DF behavior remains
+  deferred.
 - Three Type 1/4 origination state machines
   (`crates/evpn/src/origination_es.rs`) — Type 4 ES, Type 1
   EAD-per-ES (with MAX_ET marker), Type 1 EAD-per-EVI. The

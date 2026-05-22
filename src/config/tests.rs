@@ -5920,7 +5920,55 @@ originator_ip = "10.0.0.100"
 }
 
 #[test]
-fn ethernet_segment_rejects_preference_df_algorithm() {
+fn ethernet_segment_accepts_highest_preference_df_algorithm() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+df_algorithm = "highest-preference"
+df_preference = 100
+originator_ip = "10.0.0.100"
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    let segments = config.resolve_ethernet_segments().unwrap();
+    assert_eq!(segments[0].df_algorithm, DfAlgorithm::HighestPreference);
+    assert_eq!(segments[0].df_preference, 100);
+}
+
+#[test]
+fn ethernet_segment_accepts_lowest_preference_df_algorithm() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+df_algorithm = "lowest-preference"
+df_preference = 42
+originator_ip = "10.0.0.100"
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    let segments = config.resolve_ethernet_segments().unwrap();
+    assert_eq!(segments[0].df_algorithm, DfAlgorithm::LowestPreference);
+    assert_eq!(segments[0].df_preference, 42);
+}
+
+#[test]
+fn ethernet_segment_rejects_ambiguous_preference_df_algorithm_alias() {
     let toml = evpn_toml_with(
         r#"
 [[evpn_instances]]
@@ -5943,8 +5991,8 @@ originator_ip = "10.0.0.100"
         "expected InvalidEthernetSegment, got {msg}"
     );
     assert!(
-        msg.contains("RFC 9785"),
-        "msg must call out deferred preference support: {msg}"
+        msg.contains("ambiguous RFC 9785 alias"),
+        "msg must call out the ambiguous alias: {msg}"
     );
 }
 
@@ -5974,6 +6022,36 @@ originator_ip = "10.0.0.100"
     assert!(
         msg.contains("32768"),
         "msg must name supported preference: {msg}"
+    );
+}
+
+#[test]
+fn ethernet_segment_rejects_out_of_range_df_preference() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+df_algorithm = "highest-preference"
+df_preference = 65536
+originator_ip = "10.0.0.100"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        matches!(err, ConfigError::InvalidEthernetSegment { .. }),
+        "expected InvalidEthernetSegment, got {msg}"
+    );
+    assert!(
+        msg.contains("0..=65535"),
+        "msg must name the RFC 9785 preference range: {msg}"
     );
 }
 

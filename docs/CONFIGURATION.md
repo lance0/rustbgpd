@@ -1698,8 +1698,8 @@ default — single-homed VTEPs leave it empty.
 [[ethernet_segments]]
 esi = "00:00:00:00:00:00:00:00:00:01"          # 10-byte ESI (Type 0 here; Types 1–5 also accepted)
 member_vnis = [100, 200]                       # L2VNIs this ES is reachable on
-df_preference = 32768                          # reserved; default/HRW ignore preference
-df_algorithm = "default-modulo"                # "default-modulo" or "highest-random-weight"
+df_preference = 32768                          # RFC 9785 preference; default/HRW require this default
+df_algorithm = "default-modulo"                # default-modulo, highest-random-weight, highest-preference, or lowest-preference
 originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 origination
 ```
 
@@ -1709,8 +1709,8 @@ originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 ori
 |-----------------|----------|----------|---------------|-------------|
 | `esi`           | string   | yes      | --            | 10-byte non-zero ESI in colon-separated hex (RFC 7432 §5). The all-zero Type 0 single-homed sentinel is rejected; non-zero Type 0 and Types 1–5 are accepted. |
 | `member_vnis`   | u32[]    | yes      | --            | L2VNIs this segment is reachable on. Each must match a configured `[[evpn_instances]].vni` |
-| `df_preference` | u32      | no       | `32768`       | Reserved for RFC 9785 preference election. Default-modulo and HRW ignore preference, so only the default is accepted |
-| `df_algorithm`  | string   | no       | `"default-modulo"` | `"default-modulo"` (RFC 7432 §8.5 service carving) or `"highest-random-weight"` (RFC 8584 §3.2). RFC 9785 preference algorithms remain reserved |
+| `df_preference` | u32      | no       | `32768`       | RFC 9785 preference value for `"highest-preference"` / `"lowest-preference"` (`0..=65535`). Default-modulo and HRW ignore preference, so only the default is accepted for those algorithms |
+| `df_algorithm`  | string   | no       | `"default-modulo"` | `"default-modulo"` (RFC 7432 §8.5 service carving), `"highest-random-weight"` (RFC 8584 §3.2), `"highest-preference"` or `"lowest-preference"` (RFC 9785). Local Don't-Preempt / non-revertive behavior remains deferred |
 | `originator_ip` | string   | yes      | --            | Source IP carried in Type 1/4 origination. Usually equals a member VNI's `local_vtep_ip` |
 
 ### What gets originated
