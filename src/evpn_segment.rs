@@ -305,9 +305,10 @@ fn apply_runtime_instance_snapshot(
     runtime: &mut SegmentRuntime,
     instances: Arc<EvpnInstanceTable>,
 ) {
-    if runtime.instances.as_ref() == instances.as_ref() {
-        return;
-    }
+    // Assign unconditionally: the snapshot arrives as an `Arc` from a
+    // watch channel and is only republished on a runtime mutation, so a
+    // deep `EvpnInstanceTable` comparison costs more than the Arc move
+    // it would guard.
     runtime.instances = instances;
 }
 
