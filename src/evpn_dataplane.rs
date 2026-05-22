@@ -512,13 +512,15 @@ fn record_fdb_nhg_drift_metrics(metrics: &BgpMetrics, counters: FdbNhgDriftCount
     metrics.add_evpn_fdb_nhg_drift_disabled(counters.drift_disabled);
 }
 
+/// Returns `true` when the drop-count set changed since the last pass
+/// (so the caller can skip re-publishing an identical status snapshot).
 fn record_remote_prefix_drop_metrics(
     metrics: &BgpMetrics,
     previous: &mut BTreeMap<(String, &'static str), u64>,
     current: BTreeMap<(String, &'static str), u64>,
-) {
+) -> bool {
     if *previous == current {
-        return;
+        return false;
     }
 
     let stale: Vec<(String, &'static str)> = previous
@@ -537,6 +539,7 @@ fn record_remote_prefix_drop_metrics(
         );
     }
     *previous = current;
+    true
 }
 
 fn publish_remote_prefix_drop_counts(
@@ -621,12 +624,13 @@ async fn publish_dataplane_intent(
     }
 
     let drop_counts = tables.remote_ip_prefixes.drop_counts_by_vrf_reason();
-    record_remote_prefix_drop_metrics(
+    if record_remote_prefix_drop_metrics(
         metrics,
         &mut state.last_ip_prefix_drop_counts,
         drop_counts.clone(),
-    );
-    publish_remote_prefix_drop_counts(remote_prefix_drop_counts_tx, &drop_counts);
+    ) {
+        publish_remote_prefix_drop_counts(remote_prefix_drop_counts_tx, &drop_counts);
+    }
 
     state.generation = state.generation.saturating_add(1);
     state.last_instances = instances.clone();

@@ -10,7 +10,7 @@
 //! TOML through the coordinator while non-noop mutations fail closed
 //! until actor convergence commands exist.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -357,6 +357,7 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
         let snapshot = (self.ip_vrf_status_snapshot)();
         let by_id = snapshot_index(&snapshot);
         let drop_counts = (self.remote_ip_prefix_drop_counts_snapshot)();
+        let drop_index = index_remote_ip_prefix_drop_counts(&drop_counts);
         let model = (self.runtime_model)();
         let ip_vrfs: Vec<proto::IpVrfState> = model
             .ip_vrfs()
@@ -369,7 +370,10 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
                     by_id.get(&vrf.id).copied(),
                     originated,
                     installed,
-                    &drop_counts,
+                    drop_index
+                        .get(vrf.name.as_str())
+                        .cloned()
+                        .unwrap_or_default(),
                 )
             })
             .collect();
@@ -396,7 +400,7 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
             status,
             originated,
             installed,
-            &drop_counts,
+            remote_ip_prefix_drop_counts_to_proto(&vrf.name, &drop_counts),
         )))
     }
 
@@ -552,7 +556,7 @@ fn ip_vrf_to_proto(
     status: Option<&IpVrfDataplaneStatus>,
     originated_routes_count: u64,
     installed_routes_count: u64,
-    remote_ip_prefix_drop_counts: &[RemoteIpPrefixDropCount],
+    remote_prefix_drop_counts: Vec<proto::IpVrfRemotePrefixDropCount>,
 ) -> proto::IpVrfState {
     let mut state = proto::IpVrfState {
         name: vrf.name.clone(),
@@ -570,10 +574,7 @@ fn ip_vrf_to_proto(
         not_ready_reasons: Vec::new(),
         originated_routes_count: u32::try_from(originated_routes_count).unwrap_or(u32::MAX),
         installed_routes_count: u32::try_from(installed_routes_count).unwrap_or(u32::MAX),
-        remote_prefix_drop_counts: remote_ip_prefix_drop_counts_to_proto(
-            &vrf.name,
-            remote_ip_prefix_drop_counts,
-        ),
+        remote_prefix_drop_counts,
     };
 
     let Some(row) = status else {
@@ -612,6 +613,28 @@ fn remote_ip_prefix_drop_counts_to_proto(
         .collect();
     rows.sort_by(|a, b| a.reason.cmp(&b.reason));
     rows
+}
+
+/// Group the flat drop-count snapshot by IP-VRF name once so
+/// `list_ip_vrfs` can do an O(1) lookup per VRF instead of rescanning
+/// the whole slice for each one. Each VRF's rows are reason-sorted.
+fn index_remote_ip_prefix_drop_counts(
+    counts: &[RemoteIpPrefixDropCount],
+) -> BTreeMap<String, Vec<proto::IpVrfRemotePrefixDropCount>> {
+    let mut index: BTreeMap<String, Vec<proto::IpVrfRemotePrefixDropCount>> = BTreeMap::new();
+    for count in counts {
+        index
+            .entry(count.vrf.clone())
+            .or_default()
+            .push(proto::IpVrfRemotePrefixDropCount {
+                reason: count.reason.clone(),
+                count: count.count,
+            });
+    }
+    for rows in index.values_mut() {
+        rows.sort_by(|a, b| a.reason.cmp(&b.reason));
+    }
+    index
 }
 
 /// Format one `IpVrfNotReady` predicate failure as a short
