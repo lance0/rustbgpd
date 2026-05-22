@@ -201,6 +201,17 @@ impl DfElection {
     }
 }
 
+/// RFC 8584 §2.2 algorithm negotiation: if every candidate advertises the same
+/// DF Alg, that algorithm runs; any disagreement (or an absent DF Election
+/// Extended Community, decoded as `DefaultModulo`) falls back to default
+/// service carving.
+///
+/// Limitation: this compares only the DF Alg field. RFC 8584 §2.2 also requires
+/// fallback when the DF Election **capability bitmap** (e.g. Don't Preempt,
+/// AC-DF) differs, but rustbgpd does not yet originate or parse those
+/// capabilities — `DfCandidate` carries no capability field — so they are
+/// neither advertised nor compared. Capability-aware negotiation is a future
+/// slice; until then rustbgpd interoperates only on the DF Alg field.
 fn negotiate_algorithm(candidates: &[DfCandidate]) -> DfAlgorithm {
     let first = candidates
         .first()

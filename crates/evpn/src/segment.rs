@@ -75,10 +75,13 @@ pub struct EthernetSegment {
 /// DF election algorithm (RFC 7432 §8.5 + RFC 8584 §3).
 ///
 /// `DefaultModulo` and `HighestRandomWeight` are implemented. The
-/// preference variants are reserved for the RFC 9785 follow-up so
-/// the wire-side codec exposure is forward-compatible — peers may
-/// advertise them and the local PE will surface a typed mismatch
-/// rather than silently degrading.
+/// preference variants are reserved for the RFC 9785 follow-up so the
+/// wire-side codec exposure is forward-compatible. Per RFC 8584 §2.2
+/// negotiation: if every candidate unanimously advertises a reserved
+/// variant the election engine returns a typed
+/// [`crate::df_election::DfElectionError::AlgorithmNotImplemented`]
+/// (the caller logs + skips rather than mis-electing); a *mixed*
+/// deployment instead falls back to `DefaultModulo` service carving.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DfAlgorithm {
     /// RFC 7432 §8.5 — service carving. Sort candidate PEs by
@@ -100,9 +103,10 @@ pub enum DfAlgorithm {
 }
 
 impl DfAlgorithm {
-    /// Wire-side algorithm ID per RFC 8584 §3.1's DF Election
-    /// extcomm. Used both by the Type 4 origination side and by the
-    /// state machine's mismatch-tiebreak code path (lower ID wins).
+    /// Wire-side algorithm ID per RFC 8584 §3.1's DF Election extcomm,
+    /// used by the Type 4 origination/decode path. Negotiation is
+    /// unanimous-or-`DefaultModulo` (see
+    /// [`crate::df_election`]); the ID is not a mismatch tiebreak.
     #[must_use]
     pub const fn algorithm_id(self) -> u8 {
         match self {
