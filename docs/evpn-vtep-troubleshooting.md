@@ -359,7 +359,7 @@ or installs remote prefixes.
    non-forwardable types, and routes whose output device is the
    IP-VRF's own L3 VXLAN.
 4. If `installed_routes_count == 0` despite a remote PE
-   advertising Type 5: check
+   advertising Type 5: first check the **projection layer** via
    `evpn_ip_vrf_remote_prefix_drops{vrf="<name>",reason=...}` in
    Prometheus. `overlay_index_no_linked_l2vni` means the non-zero
    Gateway Address route matched the IP-VRF but no L2VNI is linked
@@ -369,3 +369,11 @@ or installs remote prefixes.
    to multiple distinct MACs at the winning mobility sequence.
    `l3vni_mismatch`, `missing_router_mac`, `no_matching_ip_vrf`, and
    `self_originated` cover the other fail-closed projection gates.
+5. If `evpn_ip_vrf_remote_prefix_drops` is empty/zero but
+   `installed_routes_count == 0`, the route cleared projection and was
+   dropped at **L3 install time** instead — that path has no Prometheus
+   counter today. Confirm the IP-VRF is `Ready` (step 1; an unready VRF
+   yields `L3Drop::NotReady`), then read the daemon's `L3 install drop`
+   debug logs for `RouterMacConflict` (two prefixes mapping
+   `(L3VXLAN ifindex, router_mac)` to different next-hops drop *both*) or
+   `FamilyMismatch` (`L3Drop` in `crates/evpn-linux/src/l3_diff.rs`).

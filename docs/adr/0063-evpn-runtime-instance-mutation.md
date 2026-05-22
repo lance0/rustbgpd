@@ -4,7 +4,7 @@
 delete when the VNI is not an Ethernet Segment member, single IP-VRF add,
 single standalone IP-VRF delete, and single Ethernet Segment add/delete commit live
 via `EvpnService.ApplyEvpnRuntime`; redefine / mixed / multi-element edits,
-linked IP-VRF delete, and ES-aware delete shapes still fail closed (remaining shapes tracked in
+linked IP-VRF delete, ES redefine, and ES-aware L2VNI delete shapes still fail closed (remaining shapes tracked in
 [#210](https://github.com/lance0/rustbgpd/issues/210)). The segment actor reads
 a startup-pinned instance table, so an ES whose member VNI was added at runtime
 is rejected (restart-required), not silently dropped — full instances-watch
