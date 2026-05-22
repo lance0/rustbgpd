@@ -48,9 +48,10 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Dynamic peer management — add, delete, enable, disable neighbors at runtime (IPv4 + IPv6)
 - [x] Observability — Prometheus metrics at all RIB mutation points, structured JSON logging
 - [x] Operations — coordinated shutdown (ctrl-c + gRPC), gRPC server supervision, metrics server hardening
-- [x] Interop validated — 48 automated milestone scenarios (M1–M45), 18 PR-gated,
-  primarily against FRR 10.3.1 plus GoBGP / StayRTR and documented BIRD
-  M0 + M43 coverage; privileged kernel dataplane smokes run locally
+- [x] Interop validated — automated milestone suite (see `docs/INTEROP.md` for
+  the full matrix), foundation tier PR-gated, primarily against FRR 10.3.1 plus
+  GoBGP / StayRTR and documented BIRD M0 + M43 coverage; privileged kernel
+  dataplane smokes run locally
 - [x] Graceful Restart — helper mode + minimal restarting speaker (RFC 4724): capability negotiation, stale route demotion, End-of-RIB detection/sending, timer-based stale sweep, coordinated-restart `R=1` signaling
 - [x] Extended Communities (RFC 4360) — wire decode/encode, common subtypes (route target, route origin, 4-byte AS), RIB storage, gRPC API exposure (ADR-0025)
 - [x] Extended Communities Policy Matching — match on RT/RO values in prefix lists, TOML community-match clauses (ADR-0026)
@@ -746,10 +747,9 @@ Features that market research indicates are lower value than originally planned.
 
 ### Interop Test Coverage
 
-47 automated interop scripts cover M1, M3, M4, M10–M45 (including
-M30b, M32b, M35b, M35c, and M37 variant sub-suites) against FRR 10.3.1,
-BIRD 2.0.12 / 3.2.1, GoBGP 4.3.0, and StayRTR. M0 (FRR, BIRD) are manual
-smoke tests. M36 is the Gate 7b real-VTEP smoke (rustbgpd-as-VTEP,
+The automated interop scripts (see `docs/INTEROP.md` for the full
+matrix) cover the M-series against FRR 10.3.1, BIRD 2.0.12 / 3.2.1,
+GoBGP 4.3.0, and StayRTR. M0 (FRR, BIRD) are manual smoke tests. M36 is the Gate 7b real-VTEP smoke (rustbgpd-as-VTEP,
 FRR-as-originator, iBGP/AS65000) — 8/8 PASS locally against Linux
 6.17 + FRR 10.3.1; M37 is the Gate 7b+1 local-origination smoke
 (rustbgpd-as-originator, FRR-as-consumer) — 4/4 PASS locally against
@@ -889,7 +889,7 @@ If you need these features, combine rustbgpd with purpose-built tools.
 - [x] Nightly fuzz CI (wire decoder fuzzing)
 - [x] Docker image (multi-stage Dockerfile)
 - [x] Containerlab interop topologies (FRR 10.3.1, BIRD 2.0.12 / 3.2.1)
-- [x] Automated interop test scripts (M1, M3, M4, M10–M45, including variant sub-suites)
+- [x] Automated interop test scripts across the M-series (see `docs/INTEROP.md` for the matrix)
 - [x] Binary releases (GitHub Releases with cross-compiled linux-amd64/arm64 binaries)
 - [ ] Homebrew formula
 - [x] crates.io publishing (`rustbgpd-wire` published; other crates remain internal)

@@ -11,8 +11,9 @@ are called out explicitly.
 
 ### CI coverage
 
-The hosted `.github/workflows/interop.yml` path gates 18 of the 48
-automated interop milestone scenarios on every PR:
+The hosted `.github/workflows/interop.yml` path gates the following
+foundation interop milestone scenarios on every PR (the rest of the
+matrix below runs on self-hosted / manual gates):
 
 - **Foundation** — wire-protocol + core RIB / refresh / policy: **M1**, **M13**, **M15**.
 - **Address-family + topology** — MP-BGP, RR, multi-path: **M10**, **M14**, **M17**.
