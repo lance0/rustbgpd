@@ -359,8 +359,13 @@ or installs remote prefixes.
    non-forwardable types, and routes whose output device is the
    IP-VRF's own L3 VXLAN.
 4. If `installed_routes_count == 0` despite a remote PE
-   advertising Type 5: check the Router MAC extcomm conflict
-   path. Two prefixes mapping `(L3VXLAN ifindex, router_mac)` to
-   different next-hops trip
-   `L3Drop::RouterMacConflict` and drop both. Look for
-   `evpn_l3_dropped_router_mac_conflict_total` in Prometheus.
+   advertising Type 5: check
+   `evpn_ip_vrf_remote_prefix_drops{vrf="<name>",reason=...}` in
+   Prometheus. `overlay_index_no_linked_l2vni` means the non-zero
+   Gateway Address route matched the IP-VRF but no L2VNI is linked
+   through `[[evpn_instances]].ip_vrf`; `unresolved_overlay_index_gateway`
+   means no eligible Type 2 MAC/IP route resolved the Gateway Address;
+   `ambiguous_overlay_index_gateway` means the Gateway Address resolved
+   to multiple distinct MACs at the winning mobility sequence.
+   `l3vni_mismatch`, `missing_router_mac`, `no_matching_ip_vrf`, and
+   `self_originated` cover the other fail-closed projection gates.
