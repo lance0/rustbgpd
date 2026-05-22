@@ -11,6 +11,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0063 EVPN runtime convergence — runtime-added member VNIs for Ethernet Segments.**
+  The EVPN segment actor now consumes runtime `[[evpn_instances]]`
+  snapshots in addition to desired `[[ethernet_segments]]` snapshots. When a
+  segment actor was already running at startup, single L2VNI add/delete
+  convergence republishes the candidate instance table to it, so a later
+  single Ethernet Segment add or redefine can bind a member VNI that was added
+  live by `EvpnService.ApplyEvpnRuntime`. ES applies still fail closed for
+  unknown member VNIs, mixed same-request L2VNI+ES edits, RR-only/no-segment
+  actor deployments, and live segment actor spawn from a zero-ES startup model.
+
 - **ADR-0063 EVPN runtime convergence — single Ethernet Segment redefine.**
   `EvpnService.ApplyEvpnRuntime` can now commit exactly one redefined
   `[[ethernet_segments]]` entry when the candidate has no L2VNI, IP-VRF, or
@@ -19,8 +29,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   restamp local MAC routes, then publishes the full candidate ES snapshot to
   the segment actor so Type 4, EAD-per-ES, EAD-per-EVI, and BUM enforcement
   state drain and rebuild under the segment owner. Mixed and multi-element
-  edits, RR-only/no-actor redefine, and runtime-added-member-VNI ES convergence
-  remain fail-closed under #210.
+  edits, same-request L2VNI+ES changes, and RR-only/no-actor redefine remain
+  fail-closed under #210.
 
 - **ADR-0063 EVPN runtime convergence — single Ethernet Segment delete.**
   `EvpnService.ApplyEvpnRuntime` can now commit exactly one deleted
@@ -30,7 +40,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to single-homed ESI zero, then publishes the full candidate ES snapshot to
   the segment actor so Type 4, EAD-per-ES, EAD-per-EVI, and BUM enforcement
   state drain under the segment owner. Mixed and multi-element edits,
-  RR-only/no-actor delete, and runtime-added-member-VNI ES convergence remain
+  same-request L2VNI+ES changes, and RR-only/no-actor delete remain
   fail-closed under #210.
 
 - **EVPN Type 5 projection-drop metrics.** Prometheus now exports
@@ -58,8 +68,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   supervisor and Type 5 originator so remote Type 5 FIB intent and locally
   originated Type 5 routes drain before the runtime generation advances.
   Linked IP-VRF delete, redefine, mixed and multi-element edits,
-  RR-only/no-actor delete, and runtime-added-member-VNI ES convergence remain
-  fail-closed under #210.
+  and RR-only/no-actor delete remain fail-closed under #210.
 
 - **ADR-0063 EVPN runtime convergence — single L2VNI delete in IP-VRF deployments.**
   `EvpnService.ApplyEvpnRuntime` can now commit exactly one deleted
@@ -71,8 +80,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   IMET route, and advances the runtime generation only after convergence
   accepts the candidate. Linked IP-VRF delete / tenant teardown, ES-aware
   L2VNI delete, redefine, mixed and multi-element edits, RR-only/no-actor
-  delete, and the runtime-added-member-VNI ES case remain fail-closed under
-  #210. SIGHUP EVPN edits remain restart-required.
+  delete, and same-request L2VNI+ES edits remain fail-closed under #210.
+  SIGHUP EVPN edits remain restart-required.
 
 - **EVPN overlay-index Type 5 receive-side recursion.** Remote Type 5 routes
   with a non-zero Gateway Address now resolve through a Type 2 MAC/IP route

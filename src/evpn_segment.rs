@@ -71,6 +71,7 @@ use crate::evpn_originator::{LOCAL_PEER, route_target_to_extcomm};
 /// segment actor remains the only Type 1/4 originator.
 #[derive(Clone, Debug)]
 pub(crate) struct EvpnSegmentRuntimeControl {
+    instances_tx: watch::Sender<Arc<EvpnInstanceTable>>,
     segments_tx: watch::Sender<Arc<Vec<EthernetSegment>>>,
 }
 
@@ -79,7 +80,19 @@ impl EvpnSegmentRuntimeControl {
     /// snapshots.
     #[must_use]
     pub fn is_open(&self) -> bool {
-        !self.segments_tx.is_closed()
+        !self.instances_tx.is_closed() && !self.segments_tx.is_closed()
+    }
+
+    /// Replace the EVPN instance snapshot the segment actor resolves
+    /// member VNIs against. Returns `false` if the actor has already
+    /// exited.
+    #[must_use]
+    pub fn replace_instances(&self, instances: Arc<EvpnInstanceTable>) -> bool {
+        if self.instances_tx.is_closed() {
+            return false;
+        }
+        self.instances_tx.send_replace(instances);
+        true
     }
 
     /// Replace the desired Ethernet Segment snapshot consumed by the
@@ -99,6 +112,7 @@ impl EvpnSegmentRuntimeControl {
 pub struct EvpnSegmentHandle {
     pub(crate) shutdown: CancellationToken,
     pub(crate) join: tokio::task::JoinHandle<()>,
+    instances_tx: watch::Sender<Arc<EvpnInstanceTable>>,
     segments_tx: watch::Sender<Arc<Vec<EthernetSegment>>>,
 }
 
@@ -107,6 +121,7 @@ impl EvpnSegmentHandle {
     /// apply wiring.
     pub(crate) fn runtime_control(&self) -> EvpnSegmentRuntimeControl {
         EvpnSegmentRuntimeControl {
+            instances_tx: self.instances_tx.clone(),
             segments_tx: self.segments_tx.clone(),
         }
     }
@@ -135,6 +150,7 @@ pub fn spawn(
         return None;
     }
     let (segments_tx, segments_rx) = watch::channel(Arc::new(segments));
+    let (instances_tx, instances_rx) = watch::channel(instances.clone());
     let runtime = SegmentRuntime {
         instances: instances.clone(),
         rib_tx,
@@ -142,10 +158,11 @@ pub fn spawn(
         metrics,
         shutdown: daemon_shutdown.clone(),
     };
-    let join = tokio::spawn(segment_loop(runtime, segments_rx));
+    let join = tokio::spawn(segment_loop(runtime, instances_rx, segments_rx));
     Some(EvpnSegmentHandle {
         shutdown: daemon_shutdown,
         join,
+        instances_tx,
         segments_tx,
     })
 }
@@ -183,7 +200,8 @@ struct SegmentState {
 
 #[allow(clippy::too_many_lines)] // setup + main select loop combined; further extraction hurts the lifecycle story
 async fn segment_loop(
-    runtime: SegmentRuntime,
+    mut runtime: SegmentRuntime,
+    mut instances_rx: watch::Receiver<Arc<EvpnInstanceTable>>,
     mut segments_rx: watch::Receiver<Arc<Vec<EthernetSegment>>>,
 ) {
     let mut by_esi: HashMap<EthernetSegmentIdentifier, SegmentState> = HashMap::new();
@@ -228,6 +246,12 @@ async fn segment_loop(
             }
             changed = segments_rx.changed() => {
                 if let Ok(()) = changed {
+                    // A coordinator may publish an instance snapshot immediately
+                    // before the segment snapshot that depends on it. Watch
+                    // receivers expose the latest value even if their own
+                    // `changed()` branch has not run yet, so refresh here before
+                    // rebuilding ES state.
+                    apply_runtime_instance_snapshot(&mut runtime, instances_rx.borrow().clone());
                     let segments = segments_rx.borrow_and_update().as_ref().clone();
                     apply_runtime_segment_snapshot(
                         &runtime,
@@ -238,6 +262,17 @@ async fn segment_loop(
                     .await;
                 } else {
                     debug!("EVPN segment: runtime segment watch closed; draining");
+                    drain(&runtime, &mut by_esi).await;
+                    publish_empty_bum_enforcement_snapshot(&runtime);
+                    return;
+                }
+            },
+            changed = instances_rx.changed() => {
+                if let Ok(()) = changed {
+                    let instances = instances_rx.borrow_and_update().clone();
+                    apply_runtime_instance_snapshot(&mut runtime, instances);
+                } else {
+                    debug!("EVPN segment: runtime instance watch closed; draining");
                     drain(&runtime, &mut by_esi).await;
                     publish_empty_bum_enforcement_snapshot(&runtime);
                     return;
@@ -264,6 +299,16 @@ async fn segment_loop(
             }
         }
     }
+}
+
+fn apply_runtime_instance_snapshot(
+    runtime: &mut SegmentRuntime,
+    instances: Arc<EvpnInstanceTable>,
+) {
+    if runtime.instances.as_ref() == instances.as_ref() {
+        return;
+    }
+    runtime.instances = instances;
 }
 
 fn rebuild_segment_states(
@@ -1458,6 +1503,47 @@ mod tests {
 
         handle.shutdown().await;
         assert!(!control.is_open());
+    }
+
+    #[tokio::test]
+    async fn runtime_control_uses_replaced_instances_for_dependent_segment_snapshot() {
+        let mut t = EvpnInstanceTable::new();
+        t.insert(instance(100)).unwrap();
+        let instances = Arc::new(t);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = rib_recorder(rib_rx, injects.clone(), withdraws);
+
+        let handle = spawn(
+            &instances,
+            vec![segment(esi(0x21), &[100])],
+            rib_tx,
+            None,
+            BgpMetrics::new(),
+            CancellationToken::new(),
+        )
+        .expect("non-empty ES config should spawn segment actor");
+        let control = handle.runtime_control();
+        let _ = wait_for_keys(&injects, 3, "initial ES injections").await;
+
+        let mut replacement = instances.as_ref().clone();
+        replacement.insert(instance(200)).unwrap();
+        assert!(control.replace_instances(Arc::new(replacement)));
+        assert!(control.replace_segments(Arc::new(vec![segment(esi(0x22), &[200])])));
+
+        let injected = wait_for_keys(&injects, 6, "runtime-added VNI ES injections").await;
+        assert!(
+            injected.iter().any(|key| {
+                matches!(
+                    key,
+                    EvpnRouteKey::EadPerEvi { ethernet_tag, .. } if ethernet_tag.0 == 200
+                )
+            }),
+            "segment actor should originate EAD-per-EVI for the runtime-added VNI"
+        );
+
+        handle.shutdown().await;
     }
 
     #[test]

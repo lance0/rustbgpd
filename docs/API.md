@@ -1253,7 +1253,7 @@ future runtime mutation semantics.
 | `ListIpVrfs`        | List configured IP-VRFs / L3VNI tenants (name, l3vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, router_mac, optional `evpn_instance` link, readiness state, originated_routes_count, installed_routes_count, remote_prefix_drop_counts) — Gate 9 / ADR-0058 |
 | `GetIpVrf`          | Detail view of a single IP-VRF including the seven readiness predicates (`not_ready_reasons`) when `readiness_state != Ready` and scoped remote Type 5 projection-drop counts |
 | `ClearDuplicateMacQuarantine` | Clear one RFC 7432 §15.1 duplicate-MAC local-origin quarantine by `(vni, mac)`. Returns `cleared=false` when no active quarantine exists; read-only listeners reject it. |
-| `ApplyEvpnRuntime` | Validate or apply a full candidate EVPN runtime model through the ADR-0063 coordinator. `validate_only=true` returns the plan without mutation; no-op applies succeed; a single L2VNI add, single L2VNI delete that is not an Ethernet Segment member, single IP-VRF add, single standalone IP-VRF delete with no L2VNI links, or single Ethernet Segment add/delete/redefine converges live and commits a new generation; other non-noop shapes (linked IP-VRF delete, L2VNI/IP-VRF redefine, mixed or multi-element edits) still fail closed. |
+| `ApplyEvpnRuntime` | Validate or apply a full candidate EVPN runtime model through the ADR-0063 coordinator. `validate_only=true` returns the plan without mutation; no-op applies succeed; a single L2VNI add, single L2VNI delete that is not an Ethernet Segment member, single IP-VRF add, single standalone IP-VRF delete with no L2VNI links, or single Ethernet Segment add/delete/redefine converges live and commits a new generation. When a segment actor already exists, L2VNI add/delete also republishes the current instance table so later ES add/redefine can bind a VNI added at runtime. Other non-noop shapes (linked IP-VRF delete, L2VNI/IP-VRF redefine, mixed or multi-element edits) still fail closed. |
 
 Instance mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) remains out
 of scope. `GetEvpnRuntime` now reports the daemon-owned ADR-0063
@@ -1279,10 +1279,13 @@ IP-VRF delete** when no committed L2VNI references that IP-VRF, and a
 removed, or redefined `[[ethernet_segments]]` entry and no other changes).
 A supported add/delete/redefine
 originates or withdraws IMET as needed, republishes the relevant effective
-tables or desired-ES snapshot to live actors, and then publishes the new
-committed generation. Every other non-noop shape — linked IP-VRF delete / tenant
-teardown, L2VNI/IP-VRF redefine, mixed L2VNI + IP-VRF edits, multi-element edits,
-ES-aware L2VNI delete, or an apply on an RR-only / no-actor daemon — returns
+tables, current segment-actor instance view, or desired-ES snapshot to live
+actors, and then publishes the new committed generation. ES add/redefine can
+reference a member VNI that was added by an earlier live L2VNI add when the
+segment actor was already running. Every other non-noop shape — linked IP-VRF
+delete / tenant teardown, L2VNI/IP-VRF redefine, mixed L2VNI + IP-VRF edits,
+multi-element edits, ES-aware L2VNI delete, or an apply on an RR-only /
+no-actor daemon — returns
 `FAILED_PRECONDITION` without advancing the generation and without
 degrading the committed model, because an
 unsupported shape is a capability gap, not an operational failure, so
@@ -1437,8 +1440,8 @@ a single IP-VRF add, a single standalone IP-VRF delete with no L2VNI links,
 or a single Ethernet Segment add/delete/redefine against the committed model; the response
 carries the committed generation and outcome. Every other non-noop shape
 (linked IP-VRF delete, L2VNI/IP-VRF redefine, a mixed L2VNI + IP-VRF request,
-multi-element edits, ES-aware L2VNI delete, or an ES referencing a
-runtime-added member VNI) is
+multi-element edits, ES-aware L2VNI delete, an ES referencing an unknown member
+VNI, or an ES apply with no running segment actor) is
 rejected with `FAILED_PRECONDITION`, leaving the prior generation committed.
 
 ---
