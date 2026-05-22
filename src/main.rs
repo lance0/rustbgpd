@@ -476,7 +476,7 @@ impl EvpnRuntimeActorConverger {
             if let Some(svi) = svi {
                 let _ = svi.replace_evpn_instances(current_instances);
             }
-            self.restore_imet(deleted_instance).await;
+            let _ = self.restore_imet(deleted_instance).await;
             return Err(DaemonEvpnRuntimeConvergeError::failed(
                 "EVPN Type 2 originator runtime model publish failed",
             ));
@@ -490,7 +490,7 @@ impl EvpnRuntimeActorConverger {
                 current,
                 ip_vrf_metadata_changed,
             );
-            self.restore_imet(deleted_instance).await;
+            let _ = self.restore_imet(deleted_instance).await;
             return Err(err);
         }
 
@@ -546,30 +546,27 @@ impl EvpnRuntimeActorConverger {
         // IMET (Type 3) is the only explicit, non-watch consumer. The
         // controller tracks one key per VNI, so a redefine must withdraw the
         // old-RD route before originating the new one — a bare re-originate
-        // would no-op with `AlreadyOriginated` and keep the stale key.
-        let withdraw_outcome = self
-            .imet_controller
-            .lock()
-            .await
-            .withdraw_instance(redefined_vni, &self.rib_tx)
-            .await;
-        if !matches!(
-            withdraw_outcome,
-            evpn_imet::ImetWithdrawOutcome::Withdrawn { .. }
-                | evpn_imet::ImetWithdrawOutcome::NotOriginated { .. }
-        ) {
-            // Nothing new is tracked yet; the committed route stands or has
-            // already been removed by the failed withdraw. Surface the error.
-            return Err(DaemonEvpnRuntimeConvergeError::failed(format!(
-                "EVPN IMET withdrawal failed for redefined L2VNI {redefined_vni}: {withdraw_outcome:?}"
-            )));
-        }
-        let originate_outcome = self
-            .imet_controller
-            .lock()
-            .await
-            .originate_instance(new_instance.clone(), &self.rib_tx)
-            .await;
+        // would no-op with `AlreadyOriginated` and keep the stale key. Hold the
+        // controller lock across both so the re-origination is atomic against
+        // concurrent IMET mutators (notably the shutdown-time `withdraw_all`),
+        // which must not interleave between the withdraw and the originate.
+        let originate_outcome = {
+            let mut imet = self.imet_controller.lock().await;
+            let withdraw_outcome = imet.withdraw_instance(redefined_vni, &self.rib_tx).await;
+            if !matches!(
+                withdraw_outcome,
+                evpn_imet::ImetWithdrawOutcome::Withdrawn { .. }
+                    | evpn_imet::ImetWithdrawOutcome::NotOriginated { .. }
+            ) {
+                // Nothing new is tracked yet; the committed route stands or has
+                // already been removed by the failed withdraw. Surface the error
+                // (the guard drops as we return, releasing the lock).
+                return Err(DaemonEvpnRuntimeConvergeError::failed(format!(
+                    "EVPN IMET withdrawal failed for redefined L2VNI {redefined_vni}: {withdraw_outcome:?}"
+                )));
+            }
+            imet.originate_instance(new_instance, &self.rib_tx).await
+        };
         if !matches!(
             originate_outcome,
             evpn_imet::ImetOriginateOutcome::Originated { .. }
@@ -578,11 +575,16 @@ impl EvpnRuntimeActorConverger {
         ) {
             // The new route was not originated, so the old key is no longer
             // tracked (we withdrew it above): a plain re-originate of the old
-            // instance is the correct rollback here.
-            self.restore_imet(old_instance).await;
-            return Err(DaemonEvpnRuntimeConvergeError::failed(format!(
-                "EVPN IMET origination failed for redefined L2VNI {redefined_vni}: {originate_outcome:?}"
-            )));
+            // instance restores the committed route. Escalate if even that
+            // fails — the committed Type 3 is then withdrawn with no fallback.
+            let restored = self.restore_imet(old_instance).await;
+            return Err(redefine_imet_failure(
+                restored,
+                redefined_vni,
+                &format!(
+                    "EVPN IMET origination failed for redefined L2VNI {redefined_vni}: {originate_outcome:?}"
+                ),
+            ));
         }
 
         // The remaining consumers are watch-channel level-triggered: each
@@ -864,13 +866,22 @@ impl EvpnRuntimeActorConverger {
             .await;
     }
 
-    async fn restore_imet(&self, instance: rustbgpd_evpn::EvpnInstance) {
-        let _ = self
-            .imet_controller
-            .lock()
-            .await
-            .originate_instance(instance, &self.rib_tx)
-            .await;
+    /// Re-originate a committed instance's Type 3 IMET after a failed
+    /// convergence step withdrew it. Returns `false` if the route could not be
+    /// restored, so callers on the redefine path can escalate (the committed
+    /// Type 3 is then withdrawn with no fallback). Best-effort callers may
+    /// ignore the result.
+    async fn restore_imet(&self, instance: rustbgpd_evpn::EvpnInstance) -> bool {
+        matches!(
+            self.imet_controller
+                .lock()
+                .await
+                .originate_instance(instance, &self.rib_tx)
+                .await,
+            evpn_imet::ImetOriginateOutcome::Originated { .. }
+                | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
+                | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
+        )
     }
 
     /// Roll a redefine's IMET (Type 3) state back to the committed instance
@@ -6091,6 +6102,46 @@ table_id = 6000
         assert!(
             !restored,
             "rollback must report failure when the new IMET key could not be withdrawn"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_imet_reports_failure_when_origination_rejected() {
+        // restore_imet must report whether the committed Type 3 was actually
+        // re-originated, so the redefine originate-failure path can escalate
+        // when even the restore fails.
+        let current = runtime_model_from_candidate_toml(two_l2vni_runtime_candidate_toml());
+        let old_instance = current
+            .instances()
+            .get(rustbgpd_evpn::EvpnInstanceId::new(100).unwrap())
+            .unwrap()
+            .clone();
+
+        // RIB responder that rejects every inject (origination).
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(32);
+        let _rib = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                if let RibUpdate::InjectEvpn { reply, .. } = msg {
+                    let _ = reply.send(Err("inject rejected".to_string()));
+                }
+            }
+        });
+
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(
+                tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()),
+            ),
+            dataplane: None,
+            originator: None,
+            svi: None,
+            l3_originator: None,
+            segment: None,
+        };
+
+        assert!(
+            !converger.restore_imet(old_instance).await,
+            "restore_imet must report failure when the RIB rejects the re-origination"
         );
     }
 
