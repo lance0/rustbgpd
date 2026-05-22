@@ -649,7 +649,11 @@ impl EvpnRuntimeActorConverger {
                 "EVPN segment runtime control is closed",
             ));
         }
-        Self::publish_segment_instances(Some(segment), Arc::new(candidate.instances().clone()))?;
+        // ES add/delete/redefine leaves the instance table unchanged
+        // (`plan.evpn_instances.has_changes() == false`), so clone it once
+        // and share the Arc across the segment + originator publishes.
+        let candidate_instances = Arc::new(candidate.instances().clone());
+        Self::publish_segment_instances(Some(segment), candidate_instances.clone())?;
 
         // ES add/delete/redefine changes member VNI -> ESI bindings, which the
         // Type 2 originator stamps onto local MAC / MAC+IP routes.
@@ -665,7 +669,7 @@ impl EvpnRuntimeActorConverger {
                 ));
             }
             if !originator.replace_runtime_model(
-                Arc::new(candidate.instances().clone()),
+                candidate_instances.clone(),
                 evpn_vni_to_esi_map(candidate.ethernet_segments()),
             ) {
                 return Err(DaemonEvpnRuntimeConvergeError::failed(

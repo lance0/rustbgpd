@@ -76,8 +76,8 @@ pub(crate) struct EvpnSegmentRuntimeControl {
 }
 
 impl EvpnSegmentRuntimeControl {
-    /// Whether the segment actor can still receive runtime ES
-    /// snapshots.
+    /// Whether the segment actor can still receive runtime instance
+    /// and ES snapshots.
     #[must_use]
     pub fn is_open(&self) -> bool {
         !self.instances_tx.is_closed() && !self.segments_tx.is_closed()
