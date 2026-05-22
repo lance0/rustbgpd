@@ -11,6 +11,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0063 EVPN runtime convergence — single IP-VRF redefine.**
+  `EvpnService.ApplyEvpnRuntime` can now commit exactly one redefined
+  `[[evpn_ip_vrfs]]` entry when the candidate has no L2VNI or Ethernet Segment
+  changes, no IP-VRF add/delete, and the IP-VRF keeps the same name, L3VNI,
+  `vrf_device`, `l3vxlan_device`, and `table_id`. The live slice supports
+  route/policy/egress-field changes (`rd`, `route_targets`, `local_vtep_ip`,
+  and `router_mac`) by republishing the candidate IP-VRF table to the dataplane
+  supervisor and Type 5 originator. The Type 5 originator now drains local
+  prefixes for removed or redefined IP-VRFs before reconciling the candidate
+  table, so local Type 5 routes are withdrawn under the old RD and replayed
+  under the new route attributes. L3VNI/device/table redefinition, linked
+  IP-VRF delete / tenant teardown, ES-aware L2VNI delete, ES-member L2VNI
+  redefine / `ip_vrf` relink, mixed, and multi-element edits remain fail-closed
+  under [#210](https://github.com/lance0/rustbgpd/issues/210).
+
 - **ADR-0063 EVPN runtime convergence — single L2VNI redefine.**
   `EvpnService.ApplyEvpnRuntime` can now commit exactly one redefined
   `[[evpn_instances]]` entry (same VNI, changed `rd` / `route_targets` /
@@ -23,8 +38,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   segment actor, which drain and re-derive the content-changed VNI; rollback
   unwinds on partial failure. This makes `apply_aliasing_ecmp` runtime-drivable
   via the dataplane `FdbNhg → SingleDst` transition (SIGHUP stays
-  restart-required). ES-member L2VNI redefine, `ip_vrf` relink, IP-VRF
-  redefine, mixed, and multi-element edits remain fail-closed under
+  restart-required). ES-member L2VNI redefine / `ip_vrf` relink, mixed, and
+  multi-element edits remain fail-closed under
   [#210](https://github.com/lance0/rustbgpd/issues/210).
 
 ## [0.27.0] — 2026-05-22

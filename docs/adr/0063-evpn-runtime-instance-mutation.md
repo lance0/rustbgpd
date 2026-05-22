@@ -2,13 +2,14 @@
 
 **Status:** Accepted; partially implemented — single L2VNI add, single L2VNI
 delete when the VNI is not an Ethernet Segment member, single non-ES-member
-L2VNI redefine, single IP-VRF add, single standalone IP-VRF delete, and single
-Ethernet Segment add/delete/redefine commit live via
-`EvpnService.ApplyEvpnRuntime`; ES add/redefine can bind member VNIs added by a
-prior live L2VNI add when the segment actor already exists. IP-VRF redefine,
-ES-member L2VNI redefine / `ip_vrf` relink, mixed / multi-element edits, linked
-IP-VRF delete, and ES-aware L2VNI delete shapes still fail closed (remaining
-shapes tracked in [#210](https://github.com/lance0/rustbgpd/issues/210)).
+L2VNI redefine, single IP-VRF add, single standalone IP-VRF delete, single
+IP-VRF redefine with unchanged L3VNI/device/table identity, and single Ethernet
+Segment add/delete/redefine commit live via `EvpnService.ApplyEvpnRuntime`; ES
+add/redefine can bind member VNIs added by a prior live L2VNI add when the
+segment actor already exists. L3VNI/device/table IP-VRF redefine, ES-member
+L2VNI redefine / `ip_vrf` relink, mixed / multi-element edits, linked IP-VRF
+delete, and ES-aware L2VNI delete shapes still fail closed (remaining shapes
+tracked in [#210](https://github.com/lance0/rustbgpd/issues/210)).
 **Date:** 2026-05-17 (implementation in progress through v0.25.0)
 
 ## Context
@@ -147,11 +148,12 @@ silently advance the live EVPN runtime model.
   it avoids split-brain between gRPC, BGP-originated routes, DF/ES state, and
   Linux owned state. The first increments — single L2VNI add, single L2VNI
   delete when the VNI is not an Ethernet Segment member, single non-ES-member
-  L2VNI redefine, single IP-VRF add, single standalone IP-VRF delete, and
-  single Ethernet Segment add/delete/redefine — now commit live through the
+  L2VNI redefine, single IP-VRF add, single standalone IP-VRF delete, single
+  IP-VRF redefine with unchanged L3VNI/device/table identity, and single
+  Ethernet Segment add/delete/redefine — now commit live through the
   daemon actor converger. L2VNI delete also republishes derived IP-VRF
   reference metadata to the dataplane when the deleted VNI was linked to a
-  still-present IP-VRF; linked IP-VRF delete, IP-VRF redefine, and mixed tenant
+  still-present IP-VRF; linked IP-VRF delete and mixed tenant
   teardown still fail closed. L2VNI redefine re-originates the per-VNI Type 3
   IMET (the lone explicit consumer — withdraw the committed route, then
   originate the candidate one) and republishes the candidate instance table to
@@ -161,6 +163,14 @@ silently advance the live EVPN runtime model.
   makes `apply_aliasing_ecmp` runtime-drivable via the standard
   `FdbNhg → SingleDst` transition. ES-member redefine and `ip_vrf` relink stay
   fail closed.
+- IP-VRF redefine republishes the candidate IP-VRF table to the dataplane
+  supervisor and Type 5 originator when the operator changes route/policy/egress
+  fields (`rd`, `route_targets`, `local_vtep_ip`, `router_mac`) but keeps the
+  same name, L3VNI, `vrf_device`, `l3vxlan_device`, and `table_id`. The Type 5
+  originator drains local prefixes for removed or redefined IP-VRFs before
+  reconciling the candidate table, so existing local Type 5 routes are withdrawn
+  under the old key and replayed with the new route attributes. Changing the
+  L3VNI, device names, table id, or L2VNI links remains fail closed.
 - The Ethernet Segment actor owns a cloneable runtime control surface for
   complete desired-ES snapshots and current EVPN instance snapshots, and
   remains the sole Type 1/4 owner. A single ES add, delete, or redefine now
@@ -171,10 +181,10 @@ silently advance the live EVPN runtime model.
   add/redefine can bind a member VNI added at runtime. ES add/redefine still
   fails closed if no segment actor was spawned at startup or if a member VNI is
   absent from the candidate runtime instance table.
-- IP-VRF redefine, ES-member L2VNI redefine / `ip_vrf` relink, mixed /
-  multi-element edits, linked IP-VRF delete / tenant teardown, and ES-aware
-  L2VNI delete convergence are still validated as pure fail-closed plans; their
-  live convergence is the remaining work in
+- ES-member L2VNI redefine / `ip_vrf` relink, mixed / multi-element edits,
+  linked IP-VRF delete / tenant teardown, ES-aware L2VNI delete convergence, and
+  L3VNI/device/table IP-VRF redefine are still validated as pure fail-closed
+  plans; their live convergence is the remaining work in
   [#210](https://github.com/lance0/rustbgpd/issues/210).
 - Issue #133 (design) is resolved and closed; the remaining implementation is
   tracked in #210.
