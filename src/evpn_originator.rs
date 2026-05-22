@@ -746,10 +746,12 @@ async fn apply_runtime_model(
     }
 
     // Snapshot replay keys before the drain clears each advertised route.
-    // Redefine and ESI-only changes both keep the local observation caches,
-    // pending IP bindings, remote views, and duplicate-MAC quarantine state
-    // and replay their local MACs under the new instance fields. Only a true
-    // delete uses the full VNI state purge below.
+    // Redefine and ESI-only changes both keep the local observation caches
+    // (local MAC/IP, pending IP bindings, remote views) and replay their local
+    // MACs under the new instance fields. ESI-only changes also keep the
+    // duplicate-MAC detector/quarantine state (the instance is identical); a
+    // redefine drops it below as part of the ADR-0063 delete-old + add-new
+    // contract. Only a true delete uses the full VNI state purge below.
     let mut replay_local_macs: LocalMacReplaySet = BTreeMap::new();
     for &vni in redefined.iter().chain(esi_only_changed.iter()) {
         let macs = state
@@ -782,14 +784,18 @@ async fn apply_runtime_model(
     }
     // A true delete drops every per-VNI state. A redefine keeps the local
     // observation caches (so the replay below re-originates the MACs) but
-    // drops only the RD-bound origination state machines so the loop below
-    // rebuilds them under the candidate's new fields.
+    // drops the RD-bound origination state machines (so they rebuild under the
+    // candidate's new fields) and the duplicate-MAC detector / quarantine state
+    // (delete-old + add-new per ADR-0063). Dropping the quarantine is also what
+    // lets a redefine that disables suppression actually replay the MAC instead
+    // of leaving it stuck quarantined.
     for vni in removed.iter().copied() {
         remove_vni_state(state, vni, &runtime.metrics);
     }
     for vni in &redefined {
         state.mac_originators.remove(vni);
         state.mac_ip_originators.remove(vni);
+        clear_duplicate_mac_state(state, *vni, &runtime.metrics);
     }
 
     for inst in model.instances.iter() {
@@ -864,6 +870,20 @@ fn remove_vni_state(state: &mut OriginatorState, vni: EvpnInstanceId, metrics: &
         .remote_mac_ip_view
         .retain(|(route_vni, _, _), _| *route_vni != vni);
 
+    clear_duplicate_mac_state(state, vni, metrics);
+}
+
+/// Drop all RFC 7432 §15.1 duplicate-MAC detector windows, known keys, and
+/// active local-origin quarantines for one VNI, decrementing the per-key
+/// quarantine gauge and republishing the receive-side suppression set. Shared
+/// by the full delete purge ([`remove_vni_state`]) and by L2VNI redefine,
+/// which drops duplicate-MAC state (delete-old + add-new) while preserving the
+/// local observation caches.
+fn clear_duplicate_mac_state(
+    state: &mut OriginatorState,
+    vni: EvpnInstanceId,
+    metrics: &BgpMetrics,
+) {
     let removed_duplicate_mac_keys: Vec<DuplicateMacKey> = state
         .known_duplicate_mac_keys
         .iter()
@@ -3897,6 +3917,91 @@ mod tests {
             "ESI-map replay must not re-advertise a quarantined local MAC"
         );
         assert_quarantine_metric(&metrics, 100, 0xAA, 1);
+    }
+
+    #[tokio::test]
+    async fn runtime_model_redefine_clears_duplicate_mac_quarantine_and_replays() {
+        // A redefine that disables suppression (delete-old + add-new) must drop
+        // the duplicate-MAC quarantine/detector state and let the local MAC
+        // re-originate under the new fields — not leave it stuck quarantined.
+        let instances = instance_table_with(suppress_local_instance(100));
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (log, _responder) = rib_capture_responder(rib_rx);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = originator_state(&instances);
+        state.remote_mac_view.insert(
+            (vni(100), mac(0xAA)),
+            RemoteMacView {
+                mac: mac(0xAA),
+                mobility_sequence: Some(3),
+                sticky: false,
+                next_hop: ipa("10.0.0.2"),
+            },
+        );
+
+        observe_test(
+            LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        let duplicate_key = DuplicateMacKey::new(vni(100), mac(0xAA));
+        assert!(
+            state
+                .active_duplicate_mac_quarantines
+                .contains(&duplicate_key),
+            "remote contender should activate suppress-local quarantine"
+        );
+        assert_quarantine_metric(&metrics, 100, 0xAA, 1);
+
+        // Redefine VNI 100 to the same identity but with suppression disabled
+        // (local_instance differs from suppress_local_instance only in
+        // duplicate_mac_detection), so this is a content change → redefine.
+        let redefined_instances = instance_table_with(local_instance(100));
+        let mut runtime = originator_runtime_for_test(
+            instances,
+            rib_tx,
+            metrics.clone(),
+            counts,
+            Arc::new(BTreeMap::new()),
+        );
+
+        apply_runtime_model(
+            Arc::new(OriginatorRuntimeModel {
+                instances: redefined_instances,
+                vni_to_esi: Arc::new(BTreeMap::new()),
+            }),
+            &mut state,
+            &mut runtime,
+        )
+        .await;
+
+        assert!(
+            !state
+                .active_duplicate_mac_quarantines
+                .contains(&duplicate_key),
+            "redefine must clear the active duplicate-MAC quarantine"
+        );
+        assert!(
+            !state
+                .duplicate_mac_detector
+                .is_quarantined(duplicate_key, Instant::now()),
+            "redefine must drop the duplicate-MAC detector state"
+        );
+        assert_quarantine_metric(&metrics, 100, 0xAA, 0);
+        assert!(
+            !log.lock().await.is_empty(),
+            "redefine that disables suppression must replay the local MAC"
+        );
     }
 
     #[tokio::test]
