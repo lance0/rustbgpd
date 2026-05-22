@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.27.0] — 2026-05-22
+
 ### Added
 
 - **ADR-0063 EVPN runtime convergence — runtime-added member VNIs for Ethernet Segments.**
