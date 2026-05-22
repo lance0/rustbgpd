@@ -888,11 +888,25 @@ impl EvpnRuntimeActorConverger {
         old_instance: rustbgpd_evpn::EvpnInstance,
     ) -> bool {
         let mut imet = self.imet_controller.lock().await;
-        let _ = imet.withdraw_instance(vni, &self.rib_tx).await;
+        // The withdraw outcome is load-bearing: if it fails (Rejected /
+        // RibUnavailable / ReplyDropped) the controller keeps tracking the
+        // *new* key, so the re-originate below would no-op with
+        // `AlreadyOriginated` and leave the wrong route installed. Only
+        // proceed once the new key is provably cleared.
+        if !matches!(
+            imet.withdraw_instance(vni, &self.rib_tx).await,
+            evpn_imet::ImetWithdrawOutcome::Withdrawn { .. }
+                | evpn_imet::ImetWithdrawOutcome::NotOriginated { .. }
+        ) {
+            return false;
+        }
+        // With the new key cleared, a genuine re-origination yields
+        // `Originated` (or `ReplyDropped`, accepted optimistically as the
+        // main path does); `AlreadyOriginated` here would mean the key was
+        // never cleared and is treated as failure.
         matches!(
             imet.originate_instance(old_instance, &self.rib_tx).await,
             evpn_imet::ImetOriginateOutcome::Originated { .. }
-                | evpn_imet::ImetOriginateOutcome::AlreadyOriginated { .. }
                 | evpn_imet::ImetOriginateOutcome::ReplyDropped { .. }
         )
     }
@@ -6020,6 +6034,64 @@ table_id = 6000
 
         originator_handle.shutdown().await;
         dataplane_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn rollback_imet_redefine_reports_failure_when_withdraw_rejected() {
+        // If the IMET withdraw of the new key fails, the controller keeps
+        // tracking it, so a bare re-originate of the old instance would no-op
+        // with AlreadyOriginated. rollback_imet_redefine must report failure
+        // (false) rather than claiming the committed route was restored.
+        let current = runtime_model_from_candidate_toml(two_l2vni_runtime_candidate_toml());
+        let candidate =
+            runtime_candidate_from_toml(two_l2vni_one_redefined_l2vni_runtime_candidate_toml());
+        let vni100 = rustbgpd_evpn::EvpnInstanceId::new(100).unwrap();
+        let old_instance = current.instances().get(vni100).unwrap().clone();
+        let new_instance = candidate.instances().get(vni100).unwrap().clone();
+
+        // RIB responder that accepts injects but rejects every withdraw.
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(32);
+        let _rib = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                match msg {
+                    RibUpdate::InjectEvpn { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { reply, .. } => {
+                        let _ = reply.send(Err("withdraw rejected".to_string()));
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        // Pre-originate the new key so the controller tracks it (the state
+        // after a successful redefine main path).
+        let imet_controller =
+            Arc::new(tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()));
+        {
+            let _ = imet_controller
+                .lock()
+                .await
+                .originate_instance(new_instance, &rib_tx)
+                .await;
+        }
+
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller,
+            dataplane: None,
+            originator: None,
+            svi: None,
+            l3_originator: None,
+            segment: None,
+        };
+
+        let restored = converger.rollback_imet_redefine(vni100, old_instance).await;
+        assert!(
+            !restored,
+            "rollback must report failure when the new IMET key could not be withdrawn"
+        );
     }
 
     #[tokio::test]
