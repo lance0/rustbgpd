@@ -72,16 +72,11 @@ pub struct EthernetSegment {
     pub originator_ip: IpAddr,
 }
 
-/// DF election algorithm (RFC 7432 §8.5 + RFC 8584 §3).
+/// DF election algorithm (RFC 7432 §8.5, RFC 8584 §3, RFC 9785 §4.1).
 ///
-/// `DefaultModulo` and `HighestRandomWeight` are implemented. The
-/// preference variants are reserved for the RFC 9785 follow-up so the
-/// wire-side codec exposure is forward-compatible. Per RFC 8584 §2.2
-/// negotiation: if every candidate unanimously advertises a reserved
-/// variant the election engine returns a typed
-/// [`crate::df_election::DfElectionError::AlgorithmNotImplemented`]
-/// (the caller logs + skips rather than mis-electing); a *mixed*
-/// deployment instead falls back to `DefaultModulo` service carving.
+/// Per RFC 8584 / RFC 9785 negotiation, all candidates must
+/// advertise the same algorithm or the election falls back to
+/// `DefaultModulo` service carving.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DfAlgorithm {
     /// RFC 7432 §8.5 — service carving. Sort candidate PEs by
@@ -92,13 +87,9 @@ pub enum DfAlgorithm {
     DefaultModulo,
     /// RFC 8584 §3 — Highest Random Weight. Algorithm ID 1.
     HighestRandomWeight,
-    /// RFC 9785 — Highest-Preference. Algorithm ID 2. Reserved;
-    /// election engine returns
-    /// [`crate::df_election::DfElectionError::AlgorithmNotImplemented`].
+    /// RFC 9785 — Highest-Preference. Algorithm ID 2.
     HighestPreference,
-    /// RFC 9785 — Lowest-Preference. Algorithm ID 3. Reserved;
-    /// election engine returns
-    /// [`crate::df_election::DfElectionError::AlgorithmNotImplemented`].
+    /// RFC 9785 — Lowest-Preference. Algorithm ID 3.
     LowestPreference,
 }
 

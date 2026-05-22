@@ -2569,39 +2569,51 @@ fn parse_ethernet_segment(
         }
     }
 
-    let default_preference = 32_768;
-    if cfg.df_preference != default_preference {
-        return Err(ConfigError::InvalidEthernetSegment {
-            reason: format!(
-                "df_preference {}: reserved for a future preference-based DF election \
-                 implementation; Gate 8 accepts only the default {default_preference}",
-                cfg.df_preference
-            ),
-        });
-    }
-
     let df_algorithm = match cfg.df_algorithm.as_str() {
         "default-modulo" => DfAlgorithm::DefaultModulo,
         "highest-random-weight" => DfAlgorithm::HighestRandomWeight,
-        "preference-based" | "highest-preference" | "lowest-preference" => {
+        "highest-preference" => DfAlgorithm::HighestPreference,
+        "lowest-preference" => DfAlgorithm::LowestPreference,
+        "preference-based" => {
             return Err(ConfigError::InvalidEthernetSegment {
-                reason: format!(
-                    "df_algorithm {:?}: reserved for a future RFC 9785 preference-based \
-                     DF election implementation; supported values are \"default-modulo\" \
-                     and \"highest-random-weight\"",
-                    cfg.df_algorithm
-                ),
+                reason: "df_algorithm \"preference-based\": ambiguous RFC 9785 alias; use \
+                         \"highest-preference\" or \"lowest-preference\""
+                    .to_string(),
             });
         }
         other => {
             return Err(ConfigError::InvalidEthernetSegment {
                 reason: format!(
-                    "df_algorithm {other:?}: must be \"default-modulo\" or \
-                     \"highest-random-weight\""
+                    "df_algorithm {other:?}: must be \"default-modulo\", \
+                     \"highest-random-weight\", \"highest-preference\", or \
+                     \"lowest-preference\""
                 ),
             });
         }
     };
+    let default_preference = 32_768;
+    if !matches!(
+        df_algorithm,
+        DfAlgorithm::HighestPreference | DfAlgorithm::LowestPreference
+    ) && cfg.df_preference != default_preference
+    {
+        return Err(ConfigError::InvalidEthernetSegment {
+            reason: format!(
+                "df_preference {}: only RFC 9785 highest-/lowest-preference DF election \
+                 uses preference; default-modulo and highest-random-weight require \
+                 the default {default_preference}",
+                cfg.df_preference
+            ),
+        });
+    }
+    if cfg.df_preference > u32::from(u16::MAX) {
+        return Err(ConfigError::InvalidEthernetSegment {
+            reason: format!(
+                "df_preference {}: must be in the RFC 9785 range 0..=65535",
+                cfg.df_preference
+            ),
+        });
+    }
 
     let originator_ip =
         cfg.originator_ip

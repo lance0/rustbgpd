@@ -48,9 +48,11 @@ The Gate 8 surface is:
   `[[ethernet_segments]]` in `Config::resolve_ethernet_segments`;
   Gate 8 config accepts `DefaultModulo` with the default preference
   `32768`; the HRW follow-up additionally accepts
-  `HighestRandomWeight`. The preference field and RFC 9785
-  preference variants are retained for wire/decode compatibility and
-  a later implementation.
+  `HighestRandomWeight`; the RFC 9785 follow-up accepts
+  `HighestPreference` and `LowestPreference` with an explicit
+  `df_preference` in the `0..=65535` range. Local Don't-Preempt /
+  non-revertive behavior remains deferred, while remote Don't-Preempt
+  is decoded and used as a tie-breaker for preference-DF election.
 - **Pure DF election state machine** in
   `crates/evpn/src/df_election.rs`: `DfElection::run` takes the
   candidate set + the local PE's originator IP and returns
@@ -76,7 +78,11 @@ The Gate 8 surface is:
   implements RFC 9785 preference-DF, not HRW, so the known-answer test
   is the cross-vendor conformance guarantee. RFC 8584 algorithm
   negotiation falls back to default service carving when candidates
-  disagree or omit the DF Election Extended Community.
+  disagree or omit the DF Election Extended Community. RFC 9785
+  Highest-/Lowest-Preference election selects the configured
+  preference order, then Don't-Preempt, then the numerically lowest PE
+  IP as tie-breakers; mixed algorithms likewise fall back to default
+  service carving.
 - **Three Type 1/4 originator state machines** in
   `crates/evpn/src/origination_es.rs`: `LocalEsOriginator` (Type 4
   ES), `LocalEadPerEsOriginator` (Type 1 EAD-per-ES with MAX_ET
