@@ -221,34 +221,70 @@ fn hrw_winner(
         let aw = hrw_weight(vni, esi, a.originator_ip);
         let bw = hrw_weight(vni, esi, b.originator_ip);
         aw.cmp(&bw)
-            // For equal weights, RFC 8584 chooses the numerically least PE IP.
+            // For equal weights, RFC 8584 §3.2 chooses the numerically least
+            // PE IP. `max_by` returns the last maximum, so order the equal-weight
+            // comparison by descending IP to make the least IP the winner.
             .then_with(|| b.originator_ip.cmp(&a.originator_ip))
     })
 }
 
-fn hrw_weight(vni: EvpnInstanceId, esi: EthernetSegmentIdentifier, originator_ip: IpAddr) -> u64 {
-    // Stable FNV-1a over the RFC 8584 HRW tuple: Ethernet Tag, ESI, PE IP.
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    update_hrw_hash(&mut hash, &vni.as_u32().to_be_bytes());
-    update_hrw_hash(&mut hash, &esi.octets());
-    match originator_ip {
-        IpAddr::V4(ip) => {
-            update_hrw_hash(&mut hash, &[4]);
-            update_hrw_hash(&mut hash, &ip.octets());
-        }
-        IpAddr::V6(ip) => {
-            update_hrw_hash(&mut hash, &[6]);
-            update_hrw_hash(&mut hash, &ip.octets());
-        }
-    }
-    hash
+/// RFC 8584 §3.2 Highest Random Weight pseudorandom weight:
+///
+/// ```text
+/// Wrand(V, Es, Si) = (1103515245 * ((1103515245*Si + 12345) XOR D(V,Es))
+///                     + 12345) (mod 2^31)
+/// ```
+///
+/// `D(V, Es)` is the 31-bit digest — CRC-32 with the MSB discarded — of the
+/// 14-octet stream `V || Es` (the 4-octet Ethernet Tag followed by the 10-octet
+/// ESI, network byte order). `Si` is the PE IP address. All PEs in the segment
+/// must compute this identically for the election to converge, so the function
+/// matches the RFC byte-for-byte for IPv4 (the interoperable VXLAN-underlay
+/// case). Reducing `mod 2^31` at each LCG step is algebraically identical to
+/// the RFC's single final reduction and keeps the arithmetic overflow-free.
+fn hrw_weight(vni: EvpnInstanceId, esi: EthernetSegmentIdentifier, originator_ip: IpAddr) -> u32 {
+    let mut tuple = [0u8; 14];
+    tuple[0..4].copy_from_slice(&vni.as_u32().to_be_bytes());
+    tuple[4..14].copy_from_slice(&esi.octets());
+    let d = crc32_ieee(&tuple) & 0x7FFF_FFFF;
+
+    let si = pe_ip_weight_input(originator_ip);
+    let inner = hrw_lcg_step(si) ^ d;
+    hrw_lcg_step(inner)
 }
 
-fn update_hrw_hash(hash: &mut u64, bytes: &[u8]) {
-    for byte in bytes {
-        *hash ^= u64::from(*byte);
-        *hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+/// One `(1103515245 * x + 12345) mod 2^31` LCG step, computed in `u64` so the
+/// multiply cannot overflow before the reduction.
+fn hrw_lcg_step(x: u32) -> u32 {
+    const HRW_MOD: u64 = 0x8000_0000; // 2^31
+    (((1_103_515_245u64 * u64::from(x)) + 12_345) % HRW_MOD) as u32
+}
+
+/// `Si` for the HRW weight. RFC 8584 §3.2 defines it as the PE IPv4 address;
+/// IPv4 maps directly to its 32-bit value (the cross-vendor-interoperable
+/// case). IPv6 underlays have no standardized 128→32-bit reduction, so fold
+/// the address with the same CRC-32 used for `D(V,Es)`; this stays deterministic
+/// and self-consistent across rustbgpd PEs but is not cross-vendor guaranteed.
+fn pe_ip_weight_input(ip: IpAddr) -> u32 {
+    match ip {
+        IpAddr::V4(v4) => u32::from_be_bytes(v4.octets()),
+        IpAddr::V6(v6) => crc32_ieee(&v6.octets()),
     }
+}
+
+/// Standard CRC-32 (IEEE 802.3, reflected, polynomial `0xEDB88320`, init/xorout
+/// `0xFFFFFFFF`) — the same digest FRR and other EVPN implementations feed into
+/// RFC 8584 §3.2's `D(V,Es)`. Bitwise (no table); inputs here are 14 octets.
+fn crc32_ieee(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
 }
 
 /// Errors raised by [`DfElection::run`].
@@ -510,12 +546,36 @@ mod tests {
         let by_tie = candidates
             .iter()
             .max_by(|a, b| {
-                42u64
+                42u32
                     .cmp(&42)
                     .then_with(|| b.originator_ip.cmp(&a.originator_ip))
             })
             .unwrap();
         assert_eq!(by_tie.originator_ip, ip("10.0.0.1"));
+    }
+
+    #[test]
+    fn crc32_matches_standard_test_vector() {
+        // Standard CRC-32 (IEEE) check value for the ASCII "123456789".
+        assert_eq!(crc32_ieee(b"123456789"), 0xCBF4_3926);
+    }
+
+    #[test]
+    fn hrw_weight_matches_rfc8584_known_answer() {
+        // Known-answer vector computed independently (Python `zlib.crc32` +
+        // the RFC 8584 §3.2 LCG): V=100, Es=[0x01; 10], Si=10.0.0.1.
+        // D(V,Es) = 42_737_338; Wrand = 664_511_525. This pins the byte-exact
+        // weight so a regression to a non-conformant hash is caught.
+        assert_eq!(
+            crc32_ieee(&{
+                let mut t = [0u8; 14];
+                t[0..4].copy_from_slice(&100u32.to_be_bytes());
+                t[4..14].copy_from_slice(&[1u8; 10]);
+                t
+            }) & 0x7FFF_FFFF,
+            42_737_338
+        );
+        assert_eq!(hrw_weight(vni(100), esi(1), ip("10.0.0.1")), 664_511_525);
     }
 
     #[test]
