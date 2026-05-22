@@ -641,9 +641,7 @@ Shipped pieces (v0.18.0):
   `evpn_ip_vrf_remote_prefix_drops{vrf,reason}` with fixed reason
   labels and the `IpVrfState.remote_prefix_drop_counts` API / CLI field, so
   recursive failures are visible without prefix/MAC cardinality in metrics or
-  status output. Controller injection can now synthesize non-zero Gateway
-  Address Type 5 routes for targeted overlay-index testing without enabling
-  native local overlay-index origination.
+  status output.
 - Linux `ip_vrf::dump_ip_vrf_observations` (VRF + L3 VXLAN
   rtnetlink dumps), `Dataplane::probe_ip_vrfs` trait method +
   Linux implementation, `IpVrfTable` plumbed through
