@@ -65,11 +65,45 @@ pub struct EthernetSegment {
     /// RFC 8584 §3. The election state machine handles
     /// algorithm-mismatch tiebreak.
     pub df_algorithm: DfAlgorithm,
+    /// Multi-homing redundancy mode signaled in the ESI Label
+    /// extended community on the Type 1 EAD-per-ES route.
+    pub redundancy_mode: RedundancyMode,
     /// IP this PE will use as the originator address in the Type 4
     /// ES route. Typically equals the EVPN instance's local VTEP IP,
     /// but kept separable so a future multi-loopback design (e.g.,
     /// per-fabric-VRF originator IPs) doesn't have to refactor.
     pub originator_ip: IpAddr,
+}
+
+/// Ethernet Segment redundancy mode (RFC 7432 §14.1).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RedundancyMode {
+    /// All PEs attached to the ES may forward known unicast to/from
+    /// the CE for the VLAN. This is rustbgpd's historical default.
+    #[default]
+    AllActive,
+    /// Only the active PE forwards traffic to/from the ES for the
+    /// VLAN. Remote PEs must not use all-active aliasing ECMP for
+    /// this ES.
+    SingleActive,
+}
+
+impl RedundancyMode {
+    /// `true` when the ESI Label extended community's Single-Active
+    /// flag must be set.
+    #[must_use]
+    pub const fn is_single_active(self) -> bool {
+        matches!(self, Self::SingleActive)
+    }
+
+    /// Operator-facing config string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AllActive => "all-active",
+            Self::SingleActive => "single-active",
+        }
+    }
 }
 
 /// DF election algorithm (RFC 7432 §8.5, RFC 8584 §3, RFC 9785 §4.1).
@@ -219,5 +253,13 @@ mod tests {
                 DfAlgorithm::LowestPreference,
             ]
         );
+    }
+
+    #[test]
+    fn redundancy_mode_strings_match_config_surface() {
+        assert_eq!(RedundancyMode::AllActive.as_str(), "all-active");
+        assert_eq!(RedundancyMode::SingleActive.as_str(), "single-active");
+        assert!(!RedundancyMode::AllActive.is_single_active());
+        assert!(RedundancyMode::SingleActive.is_single_active());
     }
 }

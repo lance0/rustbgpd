@@ -31,6 +31,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   candidate sets elect the highest or lowest preference with Don't-Preempt and
   lowest-PE-IP tie-breaks. Mixed algorithms still fall back to default service
   carving. Local Don't-Preempt / non-revertive behavior remains deferred.
+- **EVPN multi-homing — single-active mode signaling.**
+  `[[ethernet_segments]].redundancy_mode` now accepts `"all-active"` (the
+  default) or `"single-active"`. Single-active segments set the RFC 7432 ESI
+  Label extended-community Single-Active flag on Type 1 EAD-per-ES routes, and
+  the receive path suppresses all-active aliasing ECMP when remote EAD-per-ES
+  reachability advertises that flag. Mass-withdraw reachability filtering still
+  applies; proactive single-active backup-path installation remains a follow-up.
 
 - **EVPN DF election — RFC 8584 Highest Random Weight.**
   `[[ethernet_segments]].df_algorithm = "highest-random-weight"` now runs the

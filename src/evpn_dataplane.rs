@@ -919,16 +919,23 @@ async fn build_intent_tables(
     // for any Type 2 they advertise on that ESI. Key by EVPN
     // next-hop, not BGP session peer: behind a route reflector,
     // many origin VTEPs can arrive through the same BGP peer.
+    // Fold duplicates deterministically: if any EAD-per-ES for a given
+    // (next-hop, ESI) advertises single-active, treat the pair as
+    // single-active (suppress all-active aliasing ECMP). A last-wins
+    // `.collect()` would make this nondeterministic across duplicate or
+    // transient (e.g. RD-changing) EAD-per-ES rows for the same key.
+    let mut ead_per_es_modes: std::collections::BTreeMap<
+        (std::net::IpAddr, rustbgpd_wire::EthernetSegmentIdentifier),
+        bool,
+    > = std::collections::BTreeMap::new();
+    for (key, single_active) in routes.iter().filter_map(project_ead_per_es_reachability) {
+        let entry = ead_per_es_modes.entry(key).or_insert(false);
+        *entry = *entry || single_active;
+    }
     let active_ead_per_es: std::collections::BTreeSet<(
         std::net::IpAddr,
         rustbgpd_wire::EthernetSegmentIdentifier,
-    )> = routes
-        .iter()
-        .filter_map(|r| match &r.route {
-            EvpnRoute::EadPerEs(ead) => Some((r.next_hop, ead.esi)),
-            _ => None,
-        })
-        .collect();
+    )> = ead_per_es_modes.keys().copied().collect();
 
     let projected: Vec<ProjectedEvpnRoute> = routes
         .iter()
@@ -937,7 +944,7 @@ async fn build_intent_tables(
         .collect();
     let ead_per_evi: Vec<ProjectedEvpnEadPerEvi> = routes
         .iter()
-        .filter_map(|r| project_ead_per_evi(r, &local_vtep_ips))
+        .filter_map(|r| project_ead_per_evi(r, &local_vtep_ips, &ead_per_es_modes))
         .collect();
 
     // Gate 9 slice 6c: project Type 5 (`EvpnRoute::IpPrefix`) routes
@@ -1035,19 +1042,55 @@ fn project_type5(route: &EvpnRibRoute) -> Option<rustbgpd_evpn::ip_vrf::Projecte
     })
 }
 
+fn project_ead_per_es_reachability(
+    route: &EvpnRibRoute,
+) -> Option<(
+    (std::net::IpAddr, rustbgpd_wire::EthernetSegmentIdentifier),
+    bool,
+)> {
+    let EvpnRoute::EadPerEs(ead) = &route.route else {
+        return None;
+    };
+    Some((
+        (route.next_hop, ead.esi),
+        ead_per_es_is_single_active(&route.attributes),
+    ))
+}
+
+fn ead_per_es_is_single_active(attrs: &[PathAttribute]) -> bool {
+    attrs.iter().any(|attr| {
+        let PathAttribute::ExtendedCommunities(ecs) = attr else {
+            return false;
+        };
+        ecs.iter().copied().any(|ec| {
+            ec.as_esi_label()
+                .is_some_and(|(single_active, _)| single_active)
+        })
+    })
+}
+
 /// Translate a Type 1 EAD-per-EVI [`EvpnRibRoute`] into the
 /// projection's aliasing input shape. Returns `None` for non-EAD
 /// routes and for self-originated EAD-per-EVI rows whose next-hop
 /// matches one of our local VTEP IPs (we shouldn't surface ourselves
-/// as an aliasing alternative).
+/// as an aliasing alternative). Single-active remote EAD-per-ES rows
+/// suppress all-active aliasing ECMP for the same `(next-hop, ESI)`.
 fn project_ead_per_evi(
     route: &EvpnRibRoute,
     local_vtep_ips: &std::collections::BTreeSet<std::net::IpAddr>,
+    ead_per_es_modes: &std::collections::BTreeMap<
+        (std::net::IpAddr, rustbgpd_wire::EthernetSegmentIdentifier),
+        bool,
+    >,
 ) -> Option<ProjectedEvpnEadPerEvi> {
     let EvpnRoute::EadPerEvi(ead) = &route.route else {
         return None;
     };
     if local_vtep_ips.contains(&route.next_hop) {
+        return None;
+    }
+    let single_active = ead_per_es_modes.get(&(route.next_hop, ead.esi)).copied()?;
+    if single_active {
         return None;
     }
     Some(ProjectedEvpnEadPerEvi {
@@ -1133,7 +1176,7 @@ const fn _force_link() -> &'static dyn Fn(&[ExtendedCommunity]) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::net::{IpAddr, Ipv4Addr};
 
     use prometheus::Encoder;
@@ -1147,8 +1190,9 @@ mod tests {
     };
     use rustbgpd_rib::route::EvpnRibRoute;
     use rustbgpd_wire::{
-        EthernetSegmentIdentifier, EthernetTagId, EvpnIpPrefixRoute, EvpnIpPrefixValue, EvpnMacIp,
-        EvpnRoute, ExtendedCommunity, Ipv4Prefix, MplsLabel, PathAttribute,
+        EthernetSegmentIdentifier, EthernetTagId, EvpnEadPerEs, EvpnEadPerEvi, EvpnIpPrefixRoute,
+        EvpnIpPrefixValue, EvpnMacIp, EvpnRoute, ExtendedCommunity, Ipv4Prefix, MplsLabel,
+        PathAttribute,
     };
 
     use super::*;
@@ -1300,6 +1344,56 @@ mod tests {
                 }
                 .to_extended_community(),
             ])]),
+            received_at: std::time::Instant::now(),
+            origin_type: rustbgpd_rib::route::RouteOrigin::Ebgp,
+            peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 99),
+            is_stale: false,
+            is_llgr_stale: false,
+        }
+    }
+
+    fn evpn_ead_per_es_route(
+        esi: EthernetSegmentIdentifier,
+        next_hop: &str,
+        single_active: bool,
+    ) -> EvpnRibRoute {
+        EvpnRibRoute {
+            route: EvpnRoute::EadPerEs(EvpnEadPerEs {
+                rd: RouteDistinguisher::ZERO,
+                esi,
+                ethernet_tag: EthernetTagId::MAX_ET,
+                label: MplsLabel::new(123),
+            }),
+            next_hop: ipa(next_hop),
+            link_local_next_hop: None,
+            peer: ipa("10.0.0.99"),
+            attributes: Arc::new(vec![PathAttribute::ExtendedCommunities(vec![
+                ExtendedCommunity::esi_label(single_active, 123),
+            ])]),
+            received_at: std::time::Instant::now(),
+            origin_type: rustbgpd_rib::route::RouteOrigin::Ebgp,
+            peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 99),
+            is_stale: false,
+            is_llgr_stale: false,
+        }
+    }
+
+    fn evpn_ead_per_evi_route(
+        esi: EthernetSegmentIdentifier,
+        ethernet_tag: u32,
+        next_hop: &str,
+    ) -> EvpnRibRoute {
+        EvpnRibRoute {
+            route: EvpnRoute::EadPerEvi(EvpnEadPerEvi {
+                rd: RouteDistinguisher::ZERO,
+                esi,
+                ethernet_tag: EthernetTagId(ethernet_tag),
+                label: MplsLabel::new(ethernet_tag),
+            }),
+            next_hop: ipa(next_hop),
+            link_local_next_hop: None,
+            peer: ipa("10.0.0.99"),
+            attributes: Arc::new(vec![]),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::route::RouteOrigin::Ebgp,
             peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 99),
@@ -1546,6 +1640,47 @@ mod tests {
         assert!(
             project_one(&from_vtep_b, &active).is_none(),
             "EAD-per-ES from VTEP A must not satisfy VTEP B"
+        );
+    }
+
+    #[test]
+    fn project_ead_per_evi_requires_all_active_ead_per_es_reachability() {
+        let esi = EthernetSegmentIdentifier::new([8; 10]);
+        let local_vteps = BTreeSet::new();
+        let ead = evpn_ead_per_evi_route(esi, 100, "10.0.0.2");
+
+        let no_ead_per_es = BTreeMap::new();
+        assert!(
+            project_ead_per_evi(&ead, &local_vteps, &no_ead_per_es).is_none(),
+            "EAD-per-EVI without EAD-per-ES reachability must not create aliasing input"
+        );
+
+        let all_active = BTreeMap::from([((ipa("10.0.0.2"), esi), false)]);
+        assert!(
+            project_ead_per_evi(&ead, &local_vteps, &all_active).is_some(),
+            "all-active EAD-per-ES reachability allows aliasing input"
+        );
+
+        let single_active = BTreeMap::from([((ipa("10.0.0.2"), esi), true)]);
+        assert!(
+            project_ead_per_evi(&ead, &local_vteps, &single_active).is_none(),
+            "single-active EAD-per-ES reachability must suppress all-active alias ECMP"
+        );
+    }
+
+    #[test]
+    fn project_ead_per_es_reachability_decodes_single_active_flag() {
+        let esi = EthernetSegmentIdentifier::new([9; 10]);
+        let all_active = evpn_ead_per_es_route(esi, "10.0.0.2", false);
+        let single_active = evpn_ead_per_es_route(esi, "10.0.0.3", true);
+
+        assert_eq!(
+            project_ead_per_es_reachability(&all_active),
+            Some(((ipa("10.0.0.2"), esi), false))
+        );
+        assert_eq!(
+            project_ead_per_es_reachability(&single_active),
+            Some(((ipa("10.0.0.3"), esi), true))
         );
     }
 

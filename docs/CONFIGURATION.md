@@ -1700,6 +1700,7 @@ esi = "00:00:00:00:00:00:00:00:00:01"          # 10-byte ESI (Type 0 here; Types
 member_vnis = [100, 200]                       # L2VNIs this ES is reachable on
 df_preference = 32768                          # RFC 9785 preference; default/HRW require this default
 df_algorithm = "default-modulo"                # default-modulo, highest-random-weight, highest-preference, or lowest-preference
+redundancy_mode = "all-active"                 # "all-active" or "single-active"
 originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 origination
 ```
 
@@ -1711,6 +1712,7 @@ originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 ori
 | `member_vnis`   | u32[]    | yes      | --            | L2VNIs this segment is reachable on. Each must match a configured `[[evpn_instances]].vni` |
 | `df_preference` | u32      | no       | `32768`       | RFC 9785 preference value for `"highest-preference"` / `"lowest-preference"` (`0..=65535`). Default-modulo and HRW ignore preference, so only the default is accepted for those algorithms |
 | `df_algorithm`  | string   | no       | `"default-modulo"` | `"default-modulo"` (RFC 7432 §8.5 service carving), `"highest-random-weight"` (RFC 8584 §3.2), `"highest-preference"` or `"lowest-preference"` (RFC 9785). Local Don't-Preempt / non-revertive behavior remains deferred |
+| `redundancy_mode` | string | no       | `"all-active"` | `"all-active"` sets the ESI Label extcomm Single-Active flag to 0 and allows receiver-side aliasing ECMP. `"single-active"` sets the flag to 1 and suppresses all-active aliasing ECMP for remote single-active ES reachability; backup-path pre-install is a follow-up |
 | `originator_ip` | string   | yes      | --            | Source IP carried in Type 1/4 origination. Usually equals a member VNI's `local_vtep_ip` |
 
 ### What gets originated

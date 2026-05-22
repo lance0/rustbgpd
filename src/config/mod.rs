@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use rustbgpd_evpn::{
     DfAlgorithm, DuplicateMacAction, DuplicateMacConfig, EthernetSegment, EvpnInstance,
-    EvpnInstanceId, EvpnInstanceTable, IpVrf, IpVrfId, IpVrfTable, RouteTarget,
+    EvpnInstanceId, EvpnInstanceTable, IpVrf, IpVrfId, IpVrfTable, RedundancyMode, RouteTarget,
 };
 use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::{
@@ -2523,6 +2523,10 @@ fn parse_mac_address(raw: &str) -> Result<MacAddress, &'static str> {
 /// [`EthernetSegment`] domain type. Validates the ESI text form,
 /// rejects Type 0 (single-homed sentinel), and confirms every
 /// member VNI exists in the resolved EVPN instance set.
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear ESI/member-VNI/DF-algorithm/preference/redundancy-mode validation reads clearest as one sequence"
+)]
 fn parse_ethernet_segment(
     cfg: &EthernetSegmentConfig,
     known_vnis: &BTreeSet<EvpnInstanceId>,
@@ -2615,6 +2619,18 @@ fn parse_ethernet_segment(
         });
     }
 
+    let redundancy_mode = match cfg.redundancy_mode.as_str() {
+        "all-active" => RedundancyMode::AllActive,
+        "single-active" => RedundancyMode::SingleActive,
+        other => {
+            return Err(ConfigError::InvalidEthernetSegment {
+                reason: format!(
+                    "redundancy_mode {other:?}: must be \"all-active\" or \"single-active\""
+                ),
+            });
+        }
+    };
+
     let originator_ip =
         cfg.originator_ip
             .parse::<IpAddr>()
@@ -2627,6 +2643,7 @@ fn parse_ethernet_segment(
         member_vnis,
         df_preference: cfg.df_preference,
         df_algorithm,
+        redundancy_mode,
         originator_ip,
     })
 }

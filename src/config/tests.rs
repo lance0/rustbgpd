@@ -5867,6 +5867,7 @@ originator_ip = "10.0.0.100"
     assert_eq!(segments[0].member_vnis.len(), 1);
     assert_eq!(segments[0].df_algorithm, DfAlgorithm::DefaultModulo);
     assert_eq!(segments[0].df_preference, 32_768);
+    assert_eq!(segments[0].redundancy_mode, RedundancyMode::AllActive);
 }
 
 #[test]
@@ -5993,6 +5994,57 @@ originator_ip = "10.0.0.100"
     assert!(
         msg.contains("ambiguous RFC 9785 alias"),
         "msg must call out the ambiguous alias: {msg}"
+    );
+}
+
+#[test]
+fn ethernet_segment_accepts_single_active_redundancy_mode() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+redundancy_mode = "single-active"
+originator_ip = "10.0.0.100"
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    let segments = config.resolve_ethernet_segments().unwrap();
+    assert_eq!(segments[0].redundancy_mode, RedundancyMode::SingleActive);
+}
+
+#[test]
+fn ethernet_segment_rejects_unknown_redundancy_mode() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+redundancy_mode = "active-standby"
+originator_ip = "10.0.0.100"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        matches!(err, ConfigError::InvalidEthernetSegment { .. }),
+        "expected InvalidEthernetSegment, got {msg}"
+    );
+    assert!(
+        msg.contains("redundancy_mode"),
+        "msg must call out redundancy_mode: {msg}"
     );
 }
 
