@@ -10,7 +10,7 @@
 //! TOML through the coordinator while non-noop mutations fail closed
 //! until actor convergence commands exist.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -617,11 +617,13 @@ fn remote_ip_prefix_drop_counts_to_proto(
 
 /// Group the flat drop-count snapshot by IP-VRF name once so
 /// `list_ip_vrfs` can do an O(1) lookup per VRF instead of rescanning
-/// the whole slice for each one. Each VRF's rows are reason-sorted.
+/// the whole slice for each one. Each VRF's rows are reason-sorted;
+/// the index itself is unordered (lookups are by VRF name and the
+/// response order is driven by the model's VRF iteration).
 fn index_remote_ip_prefix_drop_counts(
     counts: &[RemoteIpPrefixDropCount],
-) -> BTreeMap<String, Vec<proto::IpVrfRemotePrefixDropCount>> {
-    let mut index: BTreeMap<String, Vec<proto::IpVrfRemotePrefixDropCount>> = BTreeMap::new();
+) -> HashMap<String, Vec<proto::IpVrfRemotePrefixDropCount>> {
+    let mut index: HashMap<String, Vec<proto::IpVrfRemotePrefixDropCount>> = HashMap::new();
     for count in counts {
         index
             .entry(count.vrf.clone())

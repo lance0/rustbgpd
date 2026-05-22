@@ -654,9 +654,10 @@ Still ahead:
 
 - Overlay-index IRB follow-through (RFC 9135 §9.2): the receive-side
   recursive resolution (non-zero Type 5 Gateway Address through matching
-  Type 2 MAC/IP state), bounded drop metrics, and row-level API/status detail
-  for recursive drops now ship; add local origination and a protected interop smoke for
-  overlay-index Type 5 topologies.
+  Type 2 MAC/IP state), bounded drop metrics, and aggregated per-VRF /
+  per-reason drop counts in gRPC / CLI status now ship; add local
+  origination and a protected interop smoke for overlay-index Type 5
+  topologies.
 - Runtime instance mutation completion (ADR-0063 / #210): single L2VNI add,
   single L2VNI delete when the VNI is not an Ethernet Segment member, single
   IP-VRF add/delete, and single Ethernet Segment add/delete/redefine commit live via

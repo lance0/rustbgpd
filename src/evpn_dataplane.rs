@@ -627,9 +627,15 @@ async fn publish_dataplane_intent(
     if record_remote_prefix_drop_metrics(
         metrics,
         &mut state.last_ip_prefix_drop_counts,
-        drop_counts.clone(),
+        drop_counts,
     ) {
-        publish_remote_prefix_drop_counts(remote_prefix_drop_counts_tx, &drop_counts);
+        // On change the recorder moved the new set into
+        // `last_ip_prefix_drop_counts`, so publish from there instead
+        // of cloning.
+        publish_remote_prefix_drop_counts(
+            remote_prefix_drop_counts_tx,
+            &state.last_ip_prefix_drop_counts,
+        );
     }
 
     state.generation = state.generation.saturating_add(1);
