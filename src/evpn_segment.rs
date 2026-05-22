@@ -270,7 +270,25 @@ async fn segment_loop(
             changed = instances_rx.changed() => {
                 if let Ok(()) = changed {
                     let instances = instances_rx.borrow_and_update().clone();
-                    apply_runtime_instance_snapshot(&mut runtime, instances);
+                    if segment_member_instances_changed(
+                        runtime.instances.as_ref(),
+                        instances.as_ref(),
+                        &by_esi,
+                    ) {
+                        let segments = segments_rx.borrow().as_ref().clone();
+                        drain(&runtime, &mut by_esi).await;
+                        apply_runtime_instance_snapshot(&mut runtime, instances);
+                        rebuild_segment_states(
+                            &runtime,
+                            &mut by_esi,
+                            &mut esi_label_allocator,
+                            segments,
+                        );
+                        initial_startup(&runtime, &mut by_esi).await;
+                        publish_bum_enforcement_snapshot(&runtime, &by_esi);
+                    } else {
+                        apply_runtime_instance_snapshot(&mut runtime, instances);
+                    }
                 } else {
                     debug!("EVPN segment: runtime instance watch closed; draining");
                     drain(&runtime, &mut by_esi).await;
@@ -310,6 +328,20 @@ fn apply_runtime_instance_snapshot(
     // deep `EvpnInstanceTable` comparison costs more than the Arc move
     // it would guard.
     runtime.instances = instances;
+}
+
+fn segment_member_instances_changed(
+    old: &EvpnInstanceTable,
+    new: &EvpnInstanceTable,
+    by_esi: &HashMap<EthernetSegmentIdentifier, SegmentState>,
+) -> bool {
+    by_esi.values().any(|state| {
+        state
+            .config
+            .member_vnis
+            .iter()
+            .any(|&vni| old.get(vni) != new.get(vni))
+    })
 }
 
 fn rebuild_segment_states(
@@ -1049,12 +1081,16 @@ mod tests {
     }
 
     fn instance(v: u32) -> EvpnInstance {
+        instance_with_rd(v, v)
+    }
+
+    fn instance_with_rd(v: u32, rd_value: u32) -> EvpnInstance {
         EvpnInstance::new(
             vni(v),
-            rd(65000, v),
+            rd(65000, rd_value),
             vec![RouteTarget::TwoOctetAs {
                 asn: 65000,
-                value: v,
+                value: rd_value,
             }],
             ipa("10.0.0.1"),
             Some(format!("br{v}")),
@@ -1638,6 +1674,83 @@ mod tests {
                 )
             }),
             "segment actor should originate EAD-per-EVI for the runtime-added VNI"
+        );
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_control_rebuilds_routes_when_member_instance_redefined() {
+        let mut t = EvpnInstanceTable::new();
+        t.insert(instance(100)).unwrap();
+        let instances = Arc::new(t);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let handle = spawn(
+            &instances,
+            vec![segment(esi(0x21), &[100])],
+            rib_tx,
+            None,
+            BgpMetrics::new(),
+            CancellationToken::new(),
+        )
+        .expect("non-empty ES config should spawn segment actor");
+        let control = handle.runtime_control();
+        let old_rd = rd(65000, 100);
+        let new_rd = rd(65000, 111);
+        let _ = wait_for_keys(&injects, 3, "initial ES injections").await;
+
+        let mut replacement = EvpnInstanceTable::new();
+        replacement.insert(instance_with_rd(100, 111)).unwrap();
+        assert!(control.replace_instances(Arc::new(replacement)));
+
+        let drained = wait_for_keys(&withdraws, 3, "member redefine ES withdraws").await;
+        assert!(
+            drained.iter().any(|key| matches!(
+                key,
+                EvpnRouteKey::Es { rd, .. } if *rd == old_rd
+            )),
+            "member instance redefine should withdraw old-RD Type 4; drained {drained:?}"
+        );
+        assert!(
+            drained.iter().any(|key| matches!(
+                key,
+                EvpnRouteKey::EadPerEs { rd, .. } if *rd == old_rd
+            )),
+            "member instance redefine should withdraw old-RD EAD-per-ES; drained {drained:?}"
+        );
+        assert!(
+            drained.iter().any(|key| matches!(
+                key,
+                EvpnRouteKey::EadPerEvi { rd, .. } if *rd == old_rd
+            )),
+            "member instance redefine should withdraw old-RD EAD-per-EVI; drained {drained:?}"
+        );
+
+        let injected = wait_for_keys(&injects, 6, "member redefine ES injections").await;
+        assert!(
+            injected.iter().any(|key| matches!(
+                key,
+                EvpnRouteKey::Es { rd, .. } if *rd == new_rd
+            )),
+            "member instance redefine should originate new-RD Type 4; injected {injected:?}"
+        );
+        assert!(
+            injected.iter().any(|key| matches!(
+                key,
+                EvpnRouteKey::EadPerEs { rd, .. } if *rd == new_rd
+            )),
+            "member instance redefine should originate new-RD EAD-per-ES; injected {injected:?}"
+        );
+        assert!(
+            injected.iter().any(|key| matches!(
+                key,
+                EvpnRouteKey::EadPerEvi { rd, .. } if *rd == new_rd
+            )),
+            "member instance redefine should originate new-RD EAD-per-EVI; injected {injected:?}"
         );
 
         handle.shutdown().await;

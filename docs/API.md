@@ -1258,7 +1258,7 @@ future runtime mutation semantics.
 | `ListIpVrfs`        | List configured IP-VRFs / L3VNI tenants (name, l3vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, router_mac, optional `evpn_instance` link, readiness state, originated_routes_count, installed_routes_count, remote_prefix_drop_counts) — Gate 9 / ADR-0058 |
 | `GetIpVrf`          | Detail view of a single IP-VRF including the seven readiness predicates (`not_ready_reasons`) when `readiness_state != Ready` and scoped remote Type 5 projection-drop counts |
 | `ClearDuplicateMacQuarantine` | Clear one RFC 7432 §15.1 duplicate-MAC local-origin quarantine by `(vni, mac)`. Returns `cleared=false` when no active quarantine exists; read-only listeners reject it. |
-| `ApplyEvpnRuntime` | Validate or apply a full candidate EVPN runtime model through the ADR-0063 coordinator. `validate_only=true` returns the plan without mutation; no-op applies succeed; a single L2VNI add, single L2VNI delete that is not an Ethernet Segment member, single non-ES-member L2VNI redefine, single IP-VRF add, single standalone IP-VRF delete with no L2VNI links, single IP-VRF redefine with unchanged L3VNI/device/table identity, or single Ethernet Segment add/delete/redefine converges live and commits a new generation. When a segment actor already exists, L2VNI add/delete also republishes the current instance table so later ES add/redefine can bind a VNI added at runtime. Other non-noop shapes (linked IP-VRF delete, ES-aware L2VNI delete, ES-member L2VNI redefine / `ip_vrf` relink, L3VNI/device/table IP-VRF redefine, mixed or multi-element edits) still fail closed. |
+| `ApplyEvpnRuntime` | Validate or apply a full candidate EVPN runtime model through the ADR-0063 coordinator. `validate_only=true` returns the plan without mutation; no-op applies succeed; a single L2VNI add, single L2VNI delete that is not an Ethernet Segment member, single L2VNI redefine with unchanged `ip_vrf` link metadata, single IP-VRF add, single standalone IP-VRF delete with no L2VNI links, single IP-VRF redefine with unchanged L3VNI/device/table identity, or single Ethernet Segment add/delete/redefine converges live and commits a new generation. When a segment actor already exists, L2VNI add/delete also republishes the current instance table so later ES add/redefine can bind a VNI added at runtime; ES-member L2VNI redefine also rebuilds the segment actor's Type 1/4 routes from the candidate instance snapshot. Other non-noop shapes (linked IP-VRF delete, ES-aware L2VNI delete, `ip_vrf` relink, L3VNI/device/table IP-VRF redefine, mixed or multi-element edits) still fail closed. |
 
 Instance mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) remains out
 of scope. `GetEvpnRuntime` now reports the daemon-owned ADR-0063
@@ -1277,7 +1277,8 @@ Nine non-noop shapes converge live and commit the next generation: a
 **single L2VNI add** (exactly one new `[[evpn_instances]]` entry and no
 other changes), a **single L2VNI delete** when the deleted VNI is not an
 Ethernet Segment member (including IP-VRF deployments where only derived
-link metadata changes), a **single non-ES-member L2VNI redefine**, a
+link metadata changes), a **single L2VNI redefine** with unchanged `ip_vrf`
+link metadata, a
 **single IP-VRF add** (exactly one new `[[evpn_ip_vrfs]]` entry and no
 other changes), a **single standalone IP-VRF delete** when no committed L2VNI
 references that IP-VRF, a **single IP-VRF redefine** with unchanged
@@ -1289,9 +1290,11 @@ originates or withdraws IMET as needed, republishes the relevant effective
 tables, current segment-actor instance view, or desired-ES snapshot to live
 actors, and then publishes the new committed generation. ES add/redefine can
 reference a member VNI that was added by an earlier live L2VNI add when the
-segment actor was already running. Every other non-noop shape — linked IP-VRF
-delete / tenant teardown, ES-member L2VNI redefine / `ip_vrf` relink,
-L3VNI/device/table IP-VRF redefine, mixed L2VNI + IP-VRF edits,
+segment actor was already running; ES-member L2VNI redefine rebuilds Type 4 /
+EAD-per-ES / EAD-per-EVI routes from the candidate instance snapshot while
+retaining the stable ESI label. Every other non-noop shape — linked IP-VRF
+delete / tenant teardown, `ip_vrf` relink, L3VNI/device/table IP-VRF redefine,
+mixed L2VNI + IP-VRF edits,
 multi-element edits, ES-aware L2VNI delete, or an apply on an RR-only /
 no-actor daemon — returns
 `FAILED_PRECONDITION` without advancing the generation and without
@@ -1444,12 +1447,13 @@ JSON
 
 A non-`validate_only` request commits when the candidate is a no-op, a
 single L2VNI add, a single L2VNI delete that is not an Ethernet Segment member,
-a single non-ES-member L2VNI redefine, a single IP-VRF add, a single standalone
+a single L2VNI redefine with unchanged `ip_vrf` link metadata, a single IP-VRF
+add, a single standalone
 IP-VRF delete with no L2VNI links, a single IP-VRF redefine with unchanged
 L3VNI/device/table identity, or a single Ethernet Segment add/delete/redefine
 against the committed model; the response
 carries the committed generation and outcome. Every other non-noop shape
-(linked IP-VRF delete, ES-member L2VNI redefine / `ip_vrf` relink,
+(linked IP-VRF delete, `ip_vrf` relink,
 L3VNI/device/table IP-VRF redefine, a mixed L2VNI + IP-VRF request,
 multi-element edits, ES-aware L2VNI delete, an ES referencing an unknown member
 VNI, or an ES apply with no running segment actor) is
