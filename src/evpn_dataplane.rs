@@ -61,6 +61,8 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+pub(crate) type RemoteIpPrefixDropCounts = BTreeMap<(String, String), u64>;
+
 /// Defaults for the daemon-side supervisor.
 #[derive(Debug, Clone, Copy)]
 pub struct SupervisorConfig {
@@ -159,6 +161,10 @@ pub struct EvpnDataplaneHandle {
     /// shape as [`Self::evpn_instances_tx`], kept separate because
     /// L2VNI and IP-VRF commits can be staged independently.
     pub(crate) ip_vrfs_tx: watch::Sender<Arc<IpVrfTable>>,
+    /// Current remote Type 5 projection drops by bounded `(vrf,
+    /// reason)` labels. Fed from the same projection summary used by
+    /// Prometheus.
+    pub(crate) remote_prefix_drop_counts_rx: watch::Receiver<Arc<RemoteIpPrefixDropCounts>>,
 }
 
 impl EvpnDataplaneHandle {
@@ -187,6 +193,15 @@ impl EvpnDataplaneHandle {
             evpn_instances_tx: self.evpn_instances_tx.clone(),
             ip_vrfs_tx: self.ip_vrfs_tx.clone(),
         }
+    }
+
+    /// Subscribe to the latest remote Type 5 projection-drop count
+    /// snapshot for API/CLI status surfaces.
+    #[must_use]
+    pub(crate) fn remote_prefix_drop_counts_receiver(
+        &self,
+    ) -> watch::Receiver<Arc<RemoteIpPrefixDropCounts>> {
+        self.remote_prefix_drop_counts_rx.clone()
     }
 
     /// Replace the effective L2VNI table consumed by the supervisor.
@@ -222,6 +237,7 @@ impl EvpnDataplaneHandle {
             bum_enforcement_tx: _,
             evpn_instances_tx,
             ip_vrfs_tx,
+            remote_prefix_drop_counts_rx: _,
         } = self;
         shutdown.cancel();
         drop((evpn_instances_tx, ip_vrfs_tx));
@@ -408,6 +424,8 @@ where
         watch::channel(Arc::new(BumEnforcementTable::new()));
     let (evpn_instances_tx, evpn_instances_rx) = watch::channel(evpn_instances.clone());
     let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(ip_vrfs.clone());
+    let (remote_prefix_drop_counts_tx, remote_prefix_drop_counts_rx) =
+        watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
 
     // Reconcile actor sends reports through a bounded mpsc; a
     // forwarder task drains it and republishes through a broadcast
@@ -460,6 +478,7 @@ where
         intent_tx,
         bum_enforcement_rx,
         duplicate_mac_quarantine_rx,
+        remote_prefix_drop_counts_tx,
         metrics.clone(),
         supervisor_shutdown,
     ));
@@ -482,6 +501,7 @@ where
         bum_enforcement_tx,
         evpn_instances_tx,
         ip_vrfs_tx,
+        remote_prefix_drop_counts_rx,
     }
 }
 
@@ -492,13 +512,15 @@ fn record_fdb_nhg_drift_metrics(metrics: &BgpMetrics, counters: FdbNhgDriftCount
     metrics.add_evpn_fdb_nhg_drift_disabled(counters.drift_disabled);
 }
 
+/// Returns `true` when the drop-count set changed since the last pass
+/// (so the caller can skip re-publishing an identical status snapshot).
 fn record_remote_prefix_drop_metrics(
     metrics: &BgpMetrics,
     previous: &mut BTreeMap<(String, &'static str), u64>,
     current: BTreeMap<(String, &'static str), u64>,
-) {
+) -> bool {
     if *previous == current {
-        return;
+        return false;
     }
 
     let stale: Vec<(String, &'static str)> = previous
@@ -517,6 +539,18 @@ fn record_remote_prefix_drop_metrics(
         );
     }
     *previous = current;
+    true
+}
+
+fn publish_remote_prefix_drop_counts(
+    tx: &watch::Sender<Arc<RemoteIpPrefixDropCounts>>,
+    current: &BTreeMap<(String, &'static str), u64>,
+) {
+    let snapshot = current
+        .iter()
+        .map(|((vrf, reason), count)| ((vrf.clone(), (*reason).to_string()), *count))
+        .collect();
+    tx.send_replace(Arc::new(snapshot));
 }
 
 #[derive(Debug)]
@@ -566,6 +600,7 @@ async fn publish_dataplane_intent(
     quarantined_macs: &BTreeSet<DuplicateMacKey>,
     metrics: &BgpMetrics,
     state: &mut SupervisorIntentState,
+    remote_prefix_drop_counts_tx: &watch::Sender<Arc<RemoteIpPrefixDropCounts>>,
 ) -> Result<bool, RibQueryError> {
     let tables = build_intent_tables(
         rib_tx,
@@ -588,11 +623,20 @@ async fn publish_dataplane_intent(
         return Ok(true);
     }
 
-    record_remote_prefix_drop_metrics(
+    let drop_counts = tables.remote_ip_prefixes.drop_counts_by_vrf_reason();
+    if record_remote_prefix_drop_metrics(
         metrics,
         &mut state.last_ip_prefix_drop_counts,
-        tables.remote_ip_prefixes.drop_counts_by_vrf_reason(),
-    );
+        drop_counts,
+    ) {
+        // On change the recorder moved the new set into
+        // `last_ip_prefix_drop_counts`, so publish from there instead
+        // of cloning.
+        publish_remote_prefix_drop_counts(
+            remote_prefix_drop_counts_tx,
+            &state.last_ip_prefix_drop_counts,
+        );
+    }
 
     state.generation = state.generation.saturating_add(1);
     state.last_instances = instances.clone();
@@ -665,6 +709,7 @@ async fn supervisor_loop(
     intent_tx: watch::Sender<Arc<DataplaneIntent>>,
     mut bum_enforcement_rx: watch::Receiver<Arc<BumEnforcementTable>>,
     mut duplicate_mac_quarantine_rx: watch::Receiver<Arc<BTreeSet<DuplicateMacKey>>>,
+    remote_prefix_drop_counts_tx: watch::Sender<Arc<RemoteIpPrefixDropCounts>>,
     metrics: BgpMetrics,
     shutdown: CancellationToken,
 ) {
@@ -694,6 +739,7 @@ async fn supervisor_loop(
                     quarantined.as_ref(),
                     &metrics,
                     &mut state,
+                    &remote_prefix_drop_counts_tx,
                 ).await {
                     Ok(true) => {}
                     Ok(false) => return,
@@ -729,6 +775,7 @@ async fn supervisor_loop(
                         quarantined.as_ref(),
                         &metrics,
                         &mut state,
+                        &remote_prefix_drop_counts_tx,
                     ).await {
                         Ok(true) => {}
                         Ok(false) => return,
@@ -757,6 +804,7 @@ async fn supervisor_loop(
                     quarantined.as_ref(),
                     &metrics,
                     &mut state,
+                    &remote_prefix_drop_counts_tx,
                 ).await {
                     Ok(true) => {}
                     Ok(false) => return,
@@ -783,6 +831,7 @@ async fn supervisor_loop(
                     quarantined.as_ref(),
                     &metrics,
                     &mut state,
+                    &remote_prefix_drop_counts_tx,
                 ).await {
                     Ok(true) => {}
                     Ok(false) => return,
@@ -809,6 +858,7 @@ async fn supervisor_loop(
                     quarantined.as_ref(),
                     &metrics,
                     &mut state,
+                    &remote_prefix_drop_counts_tx,
                 ).await {
                     Ok(true) => {}
                     Ok(false) => return,
@@ -1294,6 +1344,8 @@ mod tests {
         let instances = Arc::new(EvpnInstanceTable::new());
         let ip_vrfs = Arc::new(ip_vrf_table_one("blue", 5000, 5000));
         let (intent_tx, _intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let (drop_counts_tx, drop_counts_rx) =
+            watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
         let mut state = SupervisorIntentState::default();
 
         assert!(
@@ -1306,9 +1358,20 @@ mod tests {
                 &BTreeSet::new(),
                 &metrics,
                 &mut state,
+                &drop_counts_tx,
             )
             .await
             .unwrap()
+        );
+        assert_eq!(
+            drop_counts_rx
+                .borrow()
+                .get(&(
+                    "blue".to_string(),
+                    "overlay_index_no_linked_l2vni".to_string()
+                ))
+                .copied(),
+            Some(1)
         );
         let text = gather_metrics_text(&metrics);
         assert!(
@@ -1330,10 +1393,12 @@ mod tests {
                 &BTreeSet::new(),
                 &metrics,
                 &mut state,
+                &drop_counts_tx,
             )
             .await
             .unwrap()
         );
+        assert!(drop_counts_rx.borrow().is_empty());
         let text = gather_metrics_text(&metrics);
         assert!(
             text.contains(
@@ -1355,6 +1420,8 @@ mod tests {
         let (evpn_instances_tx, evpn_instances_rx) = watch::channel(initial);
         let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
         let (bum_enforcement_tx, _bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
+        let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
+            watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<DataplaneReport>(1);
 
         let handle = EvpnDataplaneHandle {
@@ -1366,6 +1433,7 @@ mod tests {
             bum_enforcement_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
+            remote_prefix_drop_counts_rx,
         };
 
         assert!(handle.replace_evpn_instances(replacement));
@@ -1741,6 +1809,8 @@ mod tests {
         let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
         let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
         let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+        let (drop_counts_tx, _drop_counts_rx) =
+            watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
         let supervisor_shutdown = shutdown.clone();
         let (_instances_tx, instances_rx) = watch::channel(instances);
         let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
@@ -1752,6 +1822,7 @@ mod tests {
             intent_tx,
             bum_rx,
             quarantine_rx,
+            drop_counts_tx,
             BgpMetrics::new(),
             supervisor_shutdown,
         ));
@@ -1811,6 +1882,8 @@ mod tests {
         let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
         let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
         let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+        let (drop_counts_tx, _drop_counts_rx) =
+            watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
         let (instances_tx, instances_rx) = watch::channel(initial_instances);
         let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
         let supervisor_shutdown = shutdown.clone();
@@ -1822,6 +1895,7 @@ mod tests {
             intent_tx,
             bum_rx,
             quarantine_rx,
+            drop_counts_tx,
             BgpMetrics::new(),
             supervisor_shutdown,
         ));
@@ -1871,6 +1945,8 @@ mod tests {
         let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
         let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
         let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+        let (drop_counts_tx, _drop_counts_rx) =
+            watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
         let (_instances_tx, instances_rx) = watch::channel(instances);
         let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
         let supervisor_shutdown = shutdown.clone();
@@ -1882,6 +1958,7 @@ mod tests {
             intent_tx,
             bum_rx,
             quarantine_rx,
+            drop_counts_tx,
             BgpMetrics::new(),
             supervisor_shutdown,
         ));
@@ -1928,6 +2005,8 @@ mod tests {
         let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
         let (bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
         let (_quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+        let (drop_counts_tx, _drop_counts_rx) =
+            watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
         let (_instances_tx, instances_rx) = watch::channel(instances);
         let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
         let supervisor_shutdown = shutdown.clone();
@@ -1939,6 +2018,7 @@ mod tests {
             intent_tx,
             bum_rx,
             quarantine_rx,
+            drop_counts_tx,
             BgpMetrics::new(),
             supervisor_shutdown,
         ));
@@ -2023,6 +2103,8 @@ mod tests {
         let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
         let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
         let (quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+        let (drop_counts_tx, _drop_counts_rx) =
+            watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
         let supervisor_shutdown = shutdown.clone();
         let (_instances_tx, instances_rx) = watch::channel(instances);
         let (_ip_vrfs_tx, ip_vrfs_rx) = watch::channel(Arc::new(IpVrfTable::new()));
@@ -2034,6 +2116,7 @@ mod tests {
             intent_tx,
             bum_rx,
             quarantine_rx,
+            drop_counts_tx,
             BgpMetrics::new(),
             supervisor_shutdown,
         ));

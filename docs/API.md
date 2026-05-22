@@ -1250,8 +1250,8 @@ future runtime mutation semantics.
 | `GetEvpnRuntime` | Return the committed EVPN runtime generation, lifecycle, mutation state, configured EVI/IP-VRF/ES counts, and a concise status message |
 | `ListEvpnInstances` | List configured local EVPN instances sorted by VNI (vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, optional bridge, advertise_svi_mac flag, originated_local_macs_count) |
 | `ListEvpnNexthops`  | List Linux dataplane reconciler-owned ADR-0059 FDB nexthop groups (per-VNI groups with ESI / Ethernet Tag / kernel group ID, per-VTEP member nexthop IDs + gateways, MAC refs) plus top-level orphan-NH count, pending-delete count, and the `drift_recovery_disabled` latch — read-only operator visibility |
-| `ListIpVrfs`        | List configured IP-VRFs / L3VNI tenants (name, l3vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, router_mac, optional `evpn_instance` link, readiness state, originated_routes_count, installed_routes_count) — Gate 9 / ADR-0058 |
-| `GetIpVrf`          | Detail view of a single IP-VRF including the seven readiness predicates (`not_ready_reasons`) when `readiness_state != Ready` |
+| `ListIpVrfs`        | List configured IP-VRFs / L3VNI tenants (name, l3vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, router_mac, optional `evpn_instance` link, readiness state, originated_routes_count, installed_routes_count, remote_prefix_drop_counts) — Gate 9 / ADR-0058 |
+| `GetIpVrf`          | Detail view of a single IP-VRF including the seven readiness predicates (`not_ready_reasons`) when `readiness_state != Ready` and scoped remote Type 5 projection-drop counts |
 | `ClearDuplicateMacQuarantine` | Clear one RFC 7432 §15.1 duplicate-MAC local-origin quarantine by `(vni, mac)`. Returns `cleared=false` when no active quarantine exists; read-only listeners reject it. |
 | `ApplyEvpnRuntime` | Validate or apply a full candidate EVPN runtime model through the ADR-0063 coordinator. `validate_only=true` returns the plan without mutation; no-op applies succeed; a single L2VNI add, single L2VNI delete that is not an Ethernet Segment member, single IP-VRF add, single standalone IP-VRF delete with no L2VNI links, or single Ethernet Segment add/delete/redefine converges live and commits a new generation; other non-noop shapes (linked IP-VRF delete, L2VNI/IP-VRF redefine, mixed or multi-element edits) still fail closed. |
 
@@ -1360,7 +1360,11 @@ top-level `orphan_nexthops_count`, `pending_delete_count`, and
 
 Gate 9 / ADR-0058 surface. Returns one row per `[[evpn_ip_vrfs]]`
 entry with the readiness verdict the EVPN reconcile actor most
-recently published, plus the Type 5 origination + install counters.
+recently published, plus the Type 5 origination / install counters and
+current scoped remote Type 5 projection-drop counts. The drop counts
+reuse the bounded reason labels from
+`evpn_ip_vrf_remote_prefix_drops{vrf,reason}` and omit per-route
+prefixes, gateways, next-hops, MACs, RDs, and RTs.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
@@ -1380,7 +1384,8 @@ rustbgpctl evpn vrfs vrf1             # single-VRF detail (matches GetIpVrf)
 Returns the same row as `ListIpVrfs` plus, when `readiness_state` is
 not `Ready`, the `not_ready_reasons` list — one entry per failing
 ADR-0058 §3 predicate (e.g., `vrf_table_id_mismatch`,
-`l3vxlan_router_mac_mismatch`).
+`l3vxlan_router_mac_mismatch`). `remote_prefix_drop_counts` reports the
+current bounded receive-side Type 5 projection drops for this IP-VRF.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
