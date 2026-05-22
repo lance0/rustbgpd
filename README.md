@@ -345,6 +345,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | [docs/COMPARISON.md](docs/COMPARISON.md) | Feature comparison with FRR, BIRD, GoBGP, OpenBGPd |
 | [docs/INTEROP.md](docs/INTEROP.md) | Interop test coverage and results |
 | [docs/evpn-enablement.md](docs/evpn-enablement.md) | EVPN Phase 1-9 gate ladder: what each gate unlocks, work per gate, priority |
+| [docs/evpn-vtep-setup.md](docs/evpn-vtep-setup.md) | EVPN VTEP kernel setup: `ip link` recipe mapped to the ADR-0058 readiness predicates (operator-provisioned netdevs) |
 | [docs/evpn-vtep-troubleshooting.md](docs/evpn-vtep-troubleshooting.md) | EVPN VTEP alpha troubleshooting runbook |
 | [docs/gobgp-parity.md](docs/gobgp-parity.md) | rustbgpd vs GoBGP feature parity by use case |
 | [docs/adr/](docs/adr/) | Architecture decision records (64 ADRs) |
