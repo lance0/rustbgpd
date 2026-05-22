@@ -119,8 +119,10 @@ impl EvpnOriginatorRuntimeControl {
 
     /// Replace the effective L2VNI model the originator reconciles
     /// against. ADR-0063 runtime commits publish complete snapshots;
-    /// this actor drains removed/redefined VNIs before accepting the
-    /// new table for future local observations and RIB-event replay.
+    /// this actor drains removed VNIs, and for a redefined VNI drains the
+    /// old-RD routes then re-originates the preserved local MAC/IP state
+    /// under the new instance fields, before accepting the new table for
+    /// future local observations and RIB-event replay.
     #[must_use]
     pub fn replace_runtime_model(
         &self,
@@ -164,8 +166,10 @@ impl EvpnOriginatorHandle {
 
     /// Replace the effective L2VNI model the originator reconciles
     /// against. ADR-0063 runtime commits publish complete snapshots;
-    /// this actor drains removed/redefined VNIs before accepting the
-    /// new table for future local observations and RIB-event replay.
+    /// this actor drains removed VNIs, and for a redefined VNI drains the
+    /// old-RD routes then re-originates the preserved local MAC/IP state
+    /// under the new instance fields, before accepting the new table for
+    /// future local observations and RIB-event replay.
     #[cfg_attr(
         not(test),
         expect(
@@ -715,13 +719,19 @@ async fn apply_runtime_model(
     runtime: &mut OriginatorRuntime,
 ) {
     // Classify currently-known VNIs against the candidate model:
-    //  - removed or redefined (instance gone / content changed): full
-    //    drain + state clear, the same as a delete.
+    //  - removed (instance gone from the candidate): full drain + state
+    //    clear, the same as a delete.
+    //  - redefined (instance present but content changed, e.g. a new RD):
+    //    drain the stale routes under the old fields, then rebuild only the
+    //    RD-bound originators while preserving the local observation caches so
+    //    the routes re-originate under the new fields. Without this a redefine
+    //    would withdraw the VNI's local Type 2 routes and never re-advertise
+    //    them until the next kernel local-MAC event.
     //  - ESI-map changed only (instance identical, vni_to_esi differs):
     //    drain the stale routes but preserve and replay the cached local
-    //    MAC/IP state so it re-originates under the new ESI instead of
-    //    disappearing until the next kernel local-MAC event.
-    let mut removed_or_redefined: Vec<EvpnInstanceId> = Vec::new();
+    //    MAC/IP state so it re-originates under the new ESI.
+    let mut removed: Vec<EvpnInstanceId> = Vec::new();
+    let mut redefined: Vec<EvpnInstanceId> = Vec::new();
     let mut esi_only_changed: Vec<EvpnInstanceId> = Vec::new();
     for old in runtime.instances.iter() {
         match model.instances.get(old.id) {
@@ -730,16 +740,18 @@ async fn apply_runtime_model(
                     esi_only_changed.push(old.id);
                 }
             }
-            _ => removed_or_redefined.push(old.id),
+            Some(_) => redefined.push(old.id),
+            None => removed.push(old.id),
         }
     }
 
     // Snapshot replay keys before the drain clears each advertised route.
-    // ESI-only changes intentionally keep the local observation caches,
-    // pending IP bindings, remote views, and duplicate-MAC quarantine
-    // state. Only delete/redefine may use the full VNI state purge below.
+    // Redefine and ESI-only changes both keep the local observation caches,
+    // pending IP bindings, remote views, and duplicate-MAC quarantine state
+    // and replay their local MACs under the new instance fields. Only a true
+    // delete uses the full VNI state purge below.
     let mut replay_local_macs: LocalMacReplaySet = BTreeMap::new();
-    for &vni in &esi_only_changed {
+    for &vni in redefined.iter().chain(esi_only_changed.iter()) {
         let macs = state
             .local_macs
             .get(&vni)
@@ -748,7 +760,15 @@ async fn apply_runtime_model(
         replay_local_macs.insert(vni, macs);
     }
 
-    for vni in removed_or_redefined.iter().copied() {
+    // Drain advertised routes for every VNI that is leaving or changing,
+    // using the still-current (old) instance table so withdraws carry the
+    // committed RD.
+    for vni in removed
+        .iter()
+        .chain(redefined.iter())
+        .chain(esi_only_changed.iter())
+        .copied()
+    {
         drain_vni_to_withdraws(
             state,
             runtime.instances.as_ref(),
@@ -759,19 +779,17 @@ async fn apply_runtime_model(
             runtime.vni_to_esi.as_ref(),
         )
         .await;
+    }
+    // A true delete drops every per-VNI state. A redefine keeps the local
+    // observation caches (so the replay below re-originates the MACs) but
+    // drops only the RD-bound origination state machines so the loop below
+    // rebuilds them under the candidate's new fields.
+    for vni in removed.iter().copied() {
         remove_vni_state(state, vni, &runtime.metrics);
     }
-    for vni in esi_only_changed.iter().copied() {
-        drain_vni_to_withdraws(
-            state,
-            runtime.instances.as_ref(),
-            vni,
-            &runtime.rib_tx,
-            &runtime.metrics,
-            &runtime.originated_local_mac_counts,
-            runtime.vni_to_esi.as_ref(),
-        )
-        .await;
+    for vni in &redefined {
+        state.mac_originators.remove(vni);
+        state.mac_ip_originators.remove(vni);
     }
 
     for inst in model.instances.iter() {
@@ -4121,6 +4139,92 @@ mod tests {
             &withdraws,
             key,
             "runtime ESI-map change should drain stale local MAC originations",
+        )
+        .await;
+        h.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_model_redefine_reoriginates_local_mac_under_new_rd() {
+        // A redefine (same VNI, new RD) must withdraw the committed-RD local
+        // Type 2 route AND re-originate it under the new RD from the preserved
+        // local observation — not silently drop it until the next kernel event.
+        let instances = instance_table(100);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(32);
+        let (local_tx, local_rx) = mpsc::channel(16);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _responder = runtime_model_rib_responder(rib_rx, injects.clone(), withdraws.clone());
+
+        let h = spawn(
+            OriginatorConfig {
+                poll_interval: Duration::from_mins(1),
+            },
+            &instances,
+            rib_tx,
+            Some(local_rx),
+            BgpMetrics::new(),
+            OriginatedLocalMacCounts::default(),
+            CancellationToken::new(),
+            Arc::new(std::collections::BTreeMap::new()),
+        )
+        .expect("originator spawned");
+
+        let old_key = EvpnRouteKey::MacIp {
+            rd: rd(65000, 100),
+            ethernet_tag: EthernetTagId(0),
+            mac: mac(0xAA),
+            ip: None,
+        };
+        local_tx
+            .send(LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            })
+            .await
+            .unwrap();
+        wait_for_key(
+            &injects,
+            old_key,
+            "initial VNI should originate under old RD",
+        )
+        .await;
+
+        // Redefine VNI 100 with a new RD (65000:111), same VTEP/RT shape.
+        let redefined = EvpnInstance::new(
+            vni(100),
+            rd(65000, 111),
+            vec![RouteTarget::TwoOctetAs {
+                asn: 65000,
+                value: 100,
+            }],
+            ipa("10.0.0.1"),
+            Some("br100".to_string()),
+            false,
+        )
+        .unwrap();
+        let new_instances = instance_table_with(redefined);
+        let new_key = EvpnRouteKey::MacIp {
+            rd: rd(65000, 111),
+            ethernet_tag: EthernetTagId(0),
+            mac: mac(0xAA),
+            ip: None,
+        };
+
+        assert!(
+            h.replace_runtime_model(new_instances, Arc::new(std::collections::BTreeMap::new()))
+        );
+        wait_for_key(
+            &withdraws,
+            old_key,
+            "redefine should withdraw the old-RD local MAC route",
+        )
+        .await;
+        wait_for_key(
+            &injects,
+            new_key,
+            "redefine should re-originate the local MAC route under the new RD",
         )
         .await;
         h.shutdown().await;
