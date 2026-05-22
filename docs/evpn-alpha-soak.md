@@ -396,12 +396,12 @@ landing, tracked here for visibility)
   Not a correctness blocker.
 - [~] **`[[evpn_instances]]` mutation surface (partial — #210).** The
   ADR-0063 command-driven EVPN coordinator + whole-model
-  `EvpnService.ApplyEvpnRuntime` now commit eight shapes live — single
-  L2VNI add/delete/redefine, single IP-VRF add/standalone-delete, and single
-  Ethernet Segment add/delete/redefine (ordered drain/replay across IMET,
+  `EvpnService.ApplyEvpnRuntime` now commit nine shapes live — single
+  L2VNI add/delete/redefine, single IP-VRF add/standalone-delete/redefine, and
+  single Ethernet Segment add/delete/redefine (ordered drain/replay across IMET,
   MAC-only / MAC+IP / SVI Type 2, Type 5 / IP-VRF, segment actor, and
-  Linux owned dataplane state, with rollback). IP-VRF redefine, ES-member
-  L2VNI redefine / `ip_vrf` relink, linked IP-VRF delete / tenant teardown,
+  Linux owned dataplane state, with rollback). `ip_vrf` relink, linked IP-VRF
+  delete / tenant teardown,
   ES-aware L2VNI delete, mixed, and multi-element edits still fail closed
   and remain restart-required.
   SIGHUP file-driven EVPN edits stay restart-required.

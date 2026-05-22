@@ -1200,22 +1200,6 @@ fn validate_single_l2vni_redefine(
         )));
     }
 
-    // ES-aware redefine is deferred: an ES-member L2VNI's RD / local VTEP IP
-    // feed Type 4 ES origination and the DF candidate originator IP, which is
-    // the explicit ES-aware path tracked under #210. Check both the committed
-    // and candidate segment sets (ES changes are already rejected above, so
-    // the two are identical, but check both for clarity/defensiveness).
-    let es_member = current
-        .ethernet_segments()
-        .iter()
-        .chain(candidate.ethernet_segments().iter())
-        .any(|segment| segment.member_vnis.contains(&redefined_vni));
-    if es_member {
-        return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
-            "L2VNI {redefined_vni} is a member of an Ethernet Segment; ES-aware redefine is not supported yet"
-        )));
-    }
-
     // Defensive IP-VRF metadata equality: `plan.ip_vrfs.has_changes()` above
     // already rejects a relink (changing an L2VNI's `ip_vrf` mutates the
     // IpVrfTable's referenced-L2VNI set), but assert table equality directly so
@@ -4089,8 +4073,7 @@ table_id = 5000
 "#
     }
 
-    // Redefines VNI 100 (new RD) while it remains an Ethernet Segment member —
-    // used to assert the validator rejects ES-member redefine.
+    // Redefines VNI 100 (new RD) while it remains an Ethernet Segment member.
     fn two_l2vni_one_es_redefined_member_runtime_candidate_toml() -> &'static str {
         r#"
 [global]
@@ -4377,6 +4360,15 @@ table_id = 6000
             current.instances().clone(),
             rustbgpd_evpn::IpVrfTable::new(),
             Vec::new(),
+        )))
+    }
+
+    fn two_l2vni_one_es_runtime_coordinator() -> Arc<Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>> {
+        let current = runtime_candidate_from_toml(two_l2vni_one_es_runtime_candidate_toml());
+        Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+            current.instances().clone(),
+            rustbgpd_evpn::IpVrfTable::new(),
+            current.ethernet_segments().to_vec(),
         )))
     }
 
@@ -5134,6 +5126,59 @@ table_id = 6000
         );
     }
 
+    #[tokio::test]
+    async fn apply_evpn_runtime_l2vni_redefine_es_member_commits_after_convergence() {
+        let coordinator = two_l2vni_one_es_runtime_coordinator();
+        let apply_lock = tokio::sync::Mutex::new(());
+        let converger = TestRuntimeConverger::ok();
+
+        let response = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: two_l2vni_one_es_redefined_member_runtime_candidate_toml()
+                    .to_string(),
+                validate_only: false,
+            },
+            coordinator.as_ref(),
+            &apply_lock,
+            &converger,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.outcome,
+            proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyCommitted as i32
+        );
+        assert_eq!(response.runtime.unwrap().generation, 2);
+        let plan = response.plan.unwrap();
+        assert_eq!(plan.evpn_instances.unwrap().redefined, vec!["100"]);
+
+        let expected_rd =
+            runtime_candidate_from_toml(two_l2vni_one_es_redefined_member_runtime_candidate_toml())
+                .instances()
+                .get(rustbgpd_evpn::EvpnInstanceId::new(100).unwrap())
+                .unwrap()
+                .rd;
+        let guard = coordinator.lock().unwrap();
+        assert_eq!(
+            guard
+                .model()
+                .instances()
+                .get(rustbgpd_evpn::EvpnInstanceId::new(100).unwrap())
+                .unwrap()
+                .rd,
+            expected_rd,
+            "committed model should carry the redefined RD for ES-member VNI 100"
+        );
+        assert_eq!(guard.model().ethernet_segments().len(), 1);
+        assert!(
+            guard.model().ethernet_segments()[0]
+                .member_vnis
+                .contains(&rustbgpd_evpn::EvpnInstanceId::new(100).unwrap()),
+            "ES membership should remain unchanged"
+        );
+    }
+
     #[test]
     fn validate_single_l2vni_redefine_accepts_one_redefined_instance() {
         let current = runtime_model_from_candidate_toml(two_l2vni_runtime_candidate_toml());
@@ -5146,20 +5191,14 @@ table_id = 6000
     }
 
     #[test]
-    fn validate_single_l2vni_redefine_rejects_es_member() {
+    fn validate_single_l2vni_redefine_accepts_es_member() {
         let current = runtime_model_from_candidate_toml(two_l2vni_one_es_runtime_candidate_toml());
         let candidate =
             runtime_candidate_from_toml(two_l2vni_one_es_redefined_member_runtime_candidate_toml());
         let plan = current.plan_candidate(&candidate);
 
-        let error = validate_single_l2vni_redefine(&current, &candidate, &plan).unwrap_err();
-        let DaemonEvpnRuntimeConvergeError::Unsupported(message) = error else {
-            panic!("expected unsupported error, got {error:?}");
-        };
-        assert!(
-            message.contains("ES-aware redefine is not supported yet"),
-            "unexpected error message: {message}"
-        );
+        let redefined = validate_single_l2vni_redefine(&current, &candidate, &plan).unwrap();
+        assert_eq!(redefined, rustbgpd_evpn::EvpnInstanceId::new(100).unwrap());
     }
 
     #[test]

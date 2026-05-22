@@ -11,6 +11,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0063 EVPN runtime convergence — ES-member L2VNI redefine.**
+  `EvpnService.ApplyEvpnRuntime` can now commit exactly one redefined
+  `[[evpn_instances]]` entry even when that VNI is an Ethernet Segment member,
+  as long as the candidate has no L2VNI add/delete, IP-VRF, or Ethernet
+  Segment changes and the `ip_vrf` link metadata is unchanged. The segment
+  actor now treats watched member-instance content changes as a Type 1/4
+  rebuild trigger, withdrawing old-RD Type 4 / EAD-per-ES / EAD-per-EVI routes
+  and originating the candidate route identity while keeping the ESI label
+  stable. `ip_vrf` relink, ES-aware L2VNI delete, linked IP-VRF delete /
+  tenant teardown, mixed, and multi-element edits remain fail-closed under
+  [#210](https://github.com/lance0/rustbgpd/issues/210).
+
 - **EVPN DF election — RFC 8584 Highest Random Weight.**
   `[[ethernet_segments]].df_algorithm = "highest-random-weight"` now runs the
   HRW DF algorithm using the RFC 8584 §3.2 `Wrand(V, ESI, PE-IP)` weight
@@ -37,8 +49,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prefixes for removed or redefined IP-VRFs before reconciling the candidate
   table, so local Type 5 routes are withdrawn under the old RD and replayed
   under the new route attributes. L3VNI/device/table redefinition, linked
-  IP-VRF delete / tenant teardown, ES-aware L2VNI delete, ES-member L2VNI
-  redefine / `ip_vrf` relink, mixed, and multi-element edits remain fail-closed
+  IP-VRF delete / tenant teardown, ES-aware L2VNI delete, `ip_vrf` relink,
+  mixed, and multi-element edits remain fail-closed
   under [#210](https://github.com/lance0/rustbgpd/issues/210).
 
 - **ADR-0063 EVPN runtime convergence — single L2VNI redefine.**
@@ -53,8 +65,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   segment actor, which drain and re-derive the content-changed VNI; rollback
   unwinds on partial failure. This makes `apply_aliasing_ecmp` runtime-drivable
   via the dataplane `FdbNhg → SingleDst` transition (SIGHUP stays
-  restart-required). ES-member L2VNI redefine / `ip_vrf` relink, mixed, and
-  multi-element edits remain fail-closed under
+  restart-required). `ip_vrf` relink, mixed, and multi-element edits remain
+  fail-closed under
   [#210](https://github.com/lance0/rustbgpd/issues/210).
 
 ## [0.27.0] — 2026-05-22
