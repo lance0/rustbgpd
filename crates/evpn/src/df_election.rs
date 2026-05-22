@@ -166,11 +166,14 @@ impl DfElection {
             return Err(DfElectionError::AlgorithmNotImplemented(agreed));
         }
 
-        // Locate the local PE's slot in the sorted candidate list.
-        sorted
+        // The local PE must be one of the candidates, else we cannot assign it
+        // a role. (The winner is computed by IP below, so the index is unused.)
+        if !sorted
             .iter()
-            .position(|c| c.originator_ip == local_originator_ip)
-            .ok_or(DfElectionError::LocalNotInCandidates(local_originator_ip))?;
+            .any(|c| c.originator_ip == local_originator_ip)
+        {
+            return Err(DfElectionError::LocalNotInCandidates(local_originator_ip));
+        }
 
         let n = sorted.len();
         let mut roles = BTreeMap::new();
