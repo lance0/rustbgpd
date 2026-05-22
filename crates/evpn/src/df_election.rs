@@ -1,7 +1,8 @@
 //! Designated Forwarder election state machine — Gate 8.
 //!
 //! Pure-function state machine implementing RFC 7432 §8.5 service
-//! carving plus RFC 8584 §3 algorithm negotiation. Lives in
+//! carving, RFC 8584 §2.2 algorithm negotiation, and the RFC 8584
+//! §3.2 Highest Random Weight algorithm. Lives in
 //! `crates/evpn` for the same reasons the local-MAC originator does:
 //! deterministic, no I/O, no tokio, testable on macOS dev builds.
 //!
@@ -25,7 +26,7 @@
 //! to agree on is the candidate set (which they already see via the
 //! RIB's reflected Type 4 ES routes).
 //!
-//! # Algorithm negotiation (RFC 8584 §3)
+//! # Algorithm negotiation (RFC 8584 §2.2)
 //!
 //! Each PE proposes an algorithm in its Type 4 ES route's DF
 //! Election extcomm. If all candidates propose the same algorithm,
@@ -33,8 +34,8 @@
 //! disagrees, RFC 8584 falls back to `DefaultModulo` so heterogeneous
 //! deployments converge on a common floor.
 //!
-//! This module implements `DefaultModulo` and RFC 8584 Highest
-//! Random Weight. RFC 9785 Highest-/Lowest-Preference variants are
+//! This module implements `DefaultModulo` and the RFC 8584 §3.2
+//! Highest Random Weight algorithm. RFC 9785 Highest-/Lowest-Preference variants are
 //! reserved at the type level (see [`crate::segment::DfAlgorithm`])
 //! so the wire-side codec is forward-compatible, but
 //! [`DfElection::run`] returns
@@ -228,37 +229,44 @@ fn hrw_winner(
     vni: EvpnInstanceId,
     candidates: &[DfCandidate],
 ) -> Option<&DfCandidate> {
-    candidates.iter().max_by(|a, b| {
-        let aw = hrw_weight(vni, esi, a.originator_ip);
-        let bw = hrw_weight(vni, esi, b.originator_ip);
-        aw.cmp(&bw)
-            // For equal weights, RFC 8584 §3.2 chooses the numerically least
-            // PE IP. `max_by` returns the last maximum, so order the equal-weight
-            // comparison by descending IP to make the least IP the winner.
-            .then_with(|| b.originator_ip.cmp(&a.originator_ip))
+    // `D(V,Es)` is constant across candidates for this `(vni, esi)`, so compute
+    // it once; `max_by_key` then evaluates each candidate's weight exactly once
+    // (not O(n log n) times as a `max_by` comparator would).
+    let d = hrw_digest(vni, esi);
+    candidates.iter().max_by_key(|c| {
+        // Highest weight wins; equal weights fall to the numerically least PE
+        // IP (RFC 8584 §3.2), so reverse the IP — the largest key then prefers
+        // the lowest address.
+        (
+            hrw_weight_from_digest(d, c.originator_ip),
+            std::cmp::Reverse(c.originator_ip),
+        )
     })
 }
 
-/// RFC 8584 §3.2 Highest Random Weight pseudorandom weight:
-///
-/// ```text
-/// Wrand(V, Es, Si) = (1103515245 * ((1103515245*Si + 12345) XOR D(V,Es))
-///                     + 12345) (mod 2^31)
-/// ```
-///
-/// `D(V, Es)` is the 31-bit digest — CRC-32 with the MSB discarded — of the
-/// 14-octet stream `V || Es` (the 4-octet Ethernet Tag followed by the 10-octet
-/// ESI, network byte order). `Si` is the PE IP address. All PEs in the segment
-/// must compute this identically for the election to converge, so the function
-/// matches the RFC byte-for-byte for IPv4 (the interoperable VXLAN-underlay
-/// case). Reducing `mod 2^31` at each LCG step is algebraically identical to
-/// the RFC's single final reduction and keeps the arithmetic overflow-free.
-fn hrw_weight(vni: EvpnInstanceId, esi: EthernetSegmentIdentifier, originator_ip: IpAddr) -> u32 {
+/// RFC 8584 §3.2 HRW digest `D(V, Es)`: the 31-bit value — CRC-32 with the MSB
+/// discarded — of the 14-octet stream `V || Es` (the 4-octet Ethernet Tag
+/// followed by the 10-octet ESI, network byte order). Constant for a given
+/// `(vni, esi)`, so callers electing across a candidate set compute it once.
+fn hrw_digest(vni: EvpnInstanceId, esi: EthernetSegmentIdentifier) -> u32 {
     let mut tuple = [0u8; 14];
     tuple[0..4].copy_from_slice(&vni.as_u32().to_be_bytes());
     tuple[4..14].copy_from_slice(&esi.octets());
-    let d = crc32_ieee(&tuple) & 0x7FFF_FFFF;
+    crc32_ieee(&tuple) & 0x7FFF_FFFF
+}
 
+/// RFC 8584 §3.2 Highest Random Weight, given a precomputed digest `d`:
+///
+/// ```text
+/// Wrand = (1103515245 * ((1103515245*Si + 12345) XOR D(V,Es)) + 12345) (mod 2^31)
+/// ```
+///
+/// `Si` is the PE IP address. All PEs in the segment must compute this
+/// identically for the election to converge, so it matches the RFC byte-for-byte
+/// for IPv4 (the interoperable VXLAN-underlay case). Reducing `mod 2^31` at each
+/// LCG step is algebraically identical to the RFC's single final reduction and
+/// keeps the arithmetic overflow-free.
+fn hrw_weight_from_digest(d: u32, originator_ip: IpAddr) -> u32 {
     let si = pe_ip_weight_input(originator_ip);
     let inner = hrw_lcg_step(si) ^ d;
     hrw_lcg_step(inner)
@@ -583,16 +591,11 @@ mod tests {
         // the RFC 8584 §3.2 LCG): V=100, Es=[0x01; 10], Si=10.0.0.1.
         // D(V,Es) = 42_737_338; Wrand = 664_511_525. This pins the byte-exact
         // weight so a regression to a non-conformant hash is caught.
+        assert_eq!(hrw_digest(vni(100), esi(1)), 42_737_338);
         assert_eq!(
-            crc32_ieee(&{
-                let mut t = [0u8; 14];
-                t[0..4].copy_from_slice(&100u32.to_be_bytes());
-                t[4..14].copy_from_slice(&[1u8; 10]);
-                t
-            }) & 0x7FFF_FFFF,
-            42_737_338
+            hrw_weight_from_digest(hrw_digest(vni(100), esi(1)), ip("10.0.0.1")),
+            664_511_525
         );
-        assert_eq!(hrw_weight(vni(100), esi(1), ip("10.0.0.1")), 664_511_525);
     }
 
     #[test]
@@ -602,11 +605,12 @@ mod tests {
         // the IPv4 case. Confirms IPv6 folds to the low-order 31 bits, not a
         // separate hash.
         let v6: IpAddr = "::a00:1".parse().unwrap();
+        let d = hrw_digest(vni(100), esi(1));
         assert_eq!(
-            hrw_weight(vni(100), esi(1), v6),
-            hrw_weight(vni(100), esi(1), ip("10.0.0.1"))
+            hrw_weight_from_digest(d, v6),
+            hrw_weight_from_digest(d, ip("10.0.0.1"))
         );
-        assert_eq!(hrw_weight(vni(100), esi(1), v6), 664_511_525);
+        assert_eq!(hrw_weight_from_digest(d, v6), 664_511_525);
     }
 
     #[test]
