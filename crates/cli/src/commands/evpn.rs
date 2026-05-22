@@ -693,6 +693,12 @@ fn ip_vrf_to_json(vrf: &IpVrfState) -> serde_json::Value {
         "not_ready_reasons": vrf.not_ready_reasons,
         "originated_routes_count": vrf.originated_routes_count,
         "installed_routes_count": vrf.installed_routes_count,
+        "remote_prefix_drop_counts": vrf.remote_prefix_drop_counts.iter().map(|row| {
+            serde_json::json!({
+                "reason": row.reason,
+                "count": row.count,
+            })
+        }).collect::<Vec<_>>(),
     })
 }
 
@@ -721,6 +727,15 @@ fn format_ip_vrf_human(vrf: &IpVrfState) -> String {
     }
     parts.push(format!("originated-routes={}", vrf.originated_routes_count));
     parts.push(format!("installed-routes={}", vrf.installed_routes_count));
+    if !vrf.remote_prefix_drop_counts.is_empty() {
+        let drops = vrf
+            .remote_prefix_drop_counts
+            .iter()
+            .map(|row| format!("{}={}", row.reason, row.count))
+            .collect::<Vec<_>>()
+            .join(",");
+        parts.push(format!("remote-prefix-drops=[{drops}]"));
+    }
     parts.join(" ")
 }
 
@@ -1194,6 +1209,10 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             not_ready_reasons: vec![],
             originated_routes_count: 3,
             installed_routes_count: 2,
+            remote_prefix_drop_counts: vec![crate::proto::IpVrfRemotePrefixDropCount {
+                reason: "unresolved_overlay_index_gateway".to_string(),
+                count: 4,
+            }],
         });
 
         assert_eq!(value["name"], "blue");
@@ -1201,6 +1220,11 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
         assert_eq!(value["readiness"], "ready");
         assert_eq!(value["originated_routes_count"], 3);
         assert_eq!(value["installed_routes_count"], 2);
+        assert_eq!(
+            value["remote_prefix_drop_counts"][0]["reason"],
+            "unresolved_overlay_index_gateway"
+        );
+        assert_eq!(value["remote_prefix_drop_counts"][0]["count"], 4);
     }
 
     #[test]

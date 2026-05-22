@@ -41,6 +41,23 @@ pub type OriginatedIpVrfRouteCountFn = Arc<dyn Fn(u32) -> u64 + Send + Sync + 's
 /// fed from `DataplaneReport.ip_vrf_installed_routes`.
 pub type InstalledIpVrfRouteCountFn = Arc<dyn Fn(u32) -> u64 + Send + Sync + 'static>;
 
+/// One bounded current projection-drop count for remote EVPN Type 5
+/// routes. `vrf` and `reason` intentionally mirror the bounded label
+/// set used by the Prometheus `evpn_ip_vrf_remote_prefix_drops`
+/// gauge; per-route fields stay out of the API status surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteIpPrefixDropCount {
+    pub vrf: String,
+    pub reason: String,
+    pub count: u64,
+}
+
+/// Read-side hook for current remote Type 5 projection-drop counts.
+/// The daemon backs it with the same projection summary used for
+/// Prometheus metrics.
+pub type RemoteIpPrefixDropCountSnapshotFn =
+    Arc<dyn Fn() -> Vec<RemoteIpPrefixDropCount> + Send + Sync + 'static>;
+
 /// Read-side hook for the latest per-IP-VRF readiness snapshot.
 ///
 /// The daemon subscribes to `DataplaneReport.ip_vrf_status` and
@@ -108,6 +125,7 @@ pub struct EvpnService {
     ip_vrf_status_snapshot: IpVrfStatusSnapshotFn,
     originated_ip_vrf_route_count: OriginatedIpVrfRouteCountFn,
     installed_ip_vrf_route_count: InstalledIpVrfRouteCountFn,
+    remote_ip_prefix_drop_counts_snapshot: RemoteIpPrefixDropCountSnapshotFn,
     fdb_nexthop_snapshot: FdbNexthopSnapshotFn,
     runtime_model: EvpnRuntimeModelFn,
     runtime_apply: Option<EvpnRuntimeApplyFn>,
@@ -128,6 +146,7 @@ impl EvpnService {
             ip_vrf_status_snapshot: Arc::new(Vec::new),
             originated_ip_vrf_route_count: Arc::new(|_| 0),
             installed_ip_vrf_route_count: Arc::new(|_| 0),
+            remote_ip_prefix_drop_counts_snapshot: Arc::new(Vec::new),
             fdb_nexthop_snapshot: Arc::new(FdbNexthopDataplaneStatus::default),
             runtime_model,
             runtime_apply: None,
@@ -152,6 +171,7 @@ impl EvpnService {
             ip_vrf_status_snapshot: Arc::new(Vec::new),
             originated_ip_vrf_route_count: Arc::new(|_| 0),
             installed_ip_vrf_route_count: Arc::new(|_| 0),
+            remote_ip_prefix_drop_counts_snapshot: Arc::new(Vec::new),
             fdb_nexthop_snapshot: Arc::new(FdbNexthopDataplaneStatus::default),
             runtime_model,
             runtime_apply: None,
@@ -242,11 +262,24 @@ impl EvpnService {
             ip_vrf_status_snapshot,
             originated_ip_vrf_route_count,
             installed_ip_vrf_route_count,
+            remote_ip_prefix_drop_counts_snapshot: Arc::new(Vec::new),
             fdb_nexthop_snapshot,
             runtime_model,
             runtime_apply,
             duplicate_mac_clear,
         }
+    }
+
+    /// Override the remote Type 5 projection-drop count provider.
+    /// Kept as a builder-style setter so callers that only need
+    /// readiness and route counts can use the compact constructors.
+    #[must_use]
+    pub fn with_remote_ip_prefix_drop_counts(
+        mut self,
+        remote_ip_prefix_drop_counts_snapshot: RemoteIpPrefixDropCountSnapshotFn,
+    ) -> Self {
+        self.remote_ip_prefix_drop_counts_snapshot = remote_ip_prefix_drop_counts_snapshot;
+        self
     }
 }
 
@@ -323,6 +356,7 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
     ) -> Result<Response<proto::ListIpVrfsResponse>, Status> {
         let snapshot = (self.ip_vrf_status_snapshot)();
         let by_id = snapshot_index(&snapshot);
+        let drop_counts = (self.remote_ip_prefix_drop_counts_snapshot)();
         let model = (self.runtime_model)();
         let ip_vrfs: Vec<proto::IpVrfState> = model
             .ip_vrfs()
@@ -330,7 +364,13 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
             .map(|vrf| {
                 let originated = (self.originated_ip_vrf_route_count)(vrf.id.as_u32());
                 let installed = (self.installed_ip_vrf_route_count)(vrf.id.as_u32());
-                ip_vrf_to_proto(vrf, by_id.get(&vrf.id).copied(), originated, installed)
+                ip_vrf_to_proto(
+                    vrf,
+                    by_id.get(&vrf.id).copied(),
+                    originated,
+                    installed,
+                    &drop_counts,
+                )
             })
             .collect();
         Ok(Response::new(proto::ListIpVrfsResponse { ip_vrfs }))
@@ -348,10 +388,15 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
             .ok_or_else(|| Status::not_found(format!("no IP-VRF named {name:?}")))?;
         let snapshot = (self.ip_vrf_status_snapshot)();
         let status = snapshot.iter().find(|r| r.vrf_id == vrf.id);
+        let drop_counts = (self.remote_ip_prefix_drop_counts_snapshot)();
         let originated = (self.originated_ip_vrf_route_count)(vrf.id.as_u32());
         let installed = (self.installed_ip_vrf_route_count)(vrf.id.as_u32());
         Ok(Response::new(ip_vrf_to_proto(
-            vrf, status, originated, installed,
+            vrf,
+            status,
+            originated,
+            installed,
+            &drop_counts,
         )))
     }
 
@@ -507,6 +552,7 @@ fn ip_vrf_to_proto(
     status: Option<&IpVrfDataplaneStatus>,
     originated_routes_count: u64,
     installed_routes_count: u64,
+    remote_ip_prefix_drop_counts: &[RemoteIpPrefixDropCount],
 ) -> proto::IpVrfState {
     let mut state = proto::IpVrfState {
         name: vrf.name.clone(),
@@ -524,6 +570,10 @@ fn ip_vrf_to_proto(
         not_ready_reasons: Vec::new(),
         originated_routes_count: u32::try_from(originated_routes_count).unwrap_or(u32::MAX),
         installed_routes_count: u32::try_from(installed_routes_count).unwrap_or(u32::MAX),
+        remote_prefix_drop_counts: remote_ip_prefix_drop_counts_to_proto(
+            &vrf.name,
+            remote_ip_prefix_drop_counts,
+        ),
     };
 
     let Some(row) = status else {
@@ -546,6 +596,22 @@ fn ip_vrf_to_proto(
         }
     }
     state
+}
+
+fn remote_ip_prefix_drop_counts_to_proto(
+    vrf_name: &str,
+    counts: &[RemoteIpPrefixDropCount],
+) -> Vec<proto::IpVrfRemotePrefixDropCount> {
+    let mut rows: Vec<proto::IpVrfRemotePrefixDropCount> = counts
+        .iter()
+        .filter(|count| count.vrf == vrf_name)
+        .map(|count| proto::IpVrfRemotePrefixDropCount {
+            reason: count.reason.clone(),
+            count: count.count,
+        })
+        .collect();
+    rows.sort_by(|a, b| a.reason.cmp(&b.reason));
+    rows
 }
 
 /// Format one `IpVrfNotReady` predicate failure as a short
@@ -1229,6 +1295,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_ip_vrfs_surfaces_scoped_remote_prefix_drop_counts() {
+        let mut table = IpVrfTable::new();
+        install_vrf(
+            &mut table,
+            "blue",
+            5000,
+            "65000:5000",
+            "10.0.0.1",
+            [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+        );
+        install_vrf(
+            &mut table,
+            "red",
+            6000,
+            "65000:6000",
+            "10.0.0.2",
+            [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
+        );
+        let svc = EvpnService::with_full_surface(
+            Arc::new(EvpnInstanceTable::new()),
+            Arc::new(table),
+            Arc::new(|_| 0),
+            Arc::new(Vec::new),
+            Arc::new(|_| 0),
+            Arc::new(|_| 0),
+            Arc::new(rustbgpd_evpn::FdbNexthopDataplaneStatus::default),
+        )
+        .with_remote_ip_prefix_drop_counts(Arc::new(|| {
+            vec![
+                RemoteIpPrefixDropCount {
+                    vrf: "blue".to_string(),
+                    reason: "unresolved_overlay_index_gateway".to_string(),
+                    count: 2,
+                },
+                RemoteIpPrefixDropCount {
+                    vrf: "red".to_string(),
+                    reason: "l3vni_mismatch".to_string(),
+                    count: 1,
+                },
+            ]
+        }));
+
+        let resp = svc
+            .list_ip_vrfs(Request::new(proto::ListIpVrfsRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        let blue = resp
+            .ip_vrfs
+            .iter()
+            .find(|row| row.name == "blue")
+            .expect("blue row should exist");
+        assert_eq!(blue.remote_prefix_drop_counts.len(), 1);
+        assert_eq!(
+            blue.remote_prefix_drop_counts[0].reason,
+            "unresolved_overlay_index_gateway"
+        );
+        assert_eq!(blue.remote_prefix_drop_counts[0].count, 2);
+        let red = resp
+            .ip_vrfs
+            .iter()
+            .find(|row| row.name == "red")
+            .expect("red row should exist");
+        assert_eq!(red.remote_prefix_drop_counts.len(), 1);
+        assert_eq!(red.remote_prefix_drop_counts[0].reason, "l3vni_mismatch");
+        assert_eq!(red.remote_prefix_drop_counts[0].count, 1);
+    }
+
+    #[tokio::test]
     async fn list_ip_vrfs_surfaces_not_ready_reasons() {
         let mut table = IpVrfTable::new();
         install_vrf(
@@ -1376,5 +1511,49 @@ mod tests {
             .into_inner();
         assert_eq!(resp.name, "blue");
         assert_eq!(resp.vni, 5000);
+    }
+
+    #[tokio::test]
+    async fn get_ip_vrf_surfaces_remote_prefix_drop_counts() {
+        let mut table = IpVrfTable::new();
+        install_vrf(
+            &mut table,
+            "blue",
+            5000,
+            "65000:5000",
+            "10.0.0.1",
+            [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+        );
+        let svc = EvpnService::with_full_surface(
+            Arc::new(EvpnInstanceTable::new()),
+            Arc::new(table),
+            Arc::new(|_| 0),
+            Arc::new(Vec::new),
+            Arc::new(|_| 0),
+            Arc::new(|_| 0),
+            Arc::new(rustbgpd_evpn::FdbNexthopDataplaneStatus::default),
+        )
+        .with_remote_ip_prefix_drop_counts(Arc::new(|| {
+            vec![RemoteIpPrefixDropCount {
+                vrf: "blue".to_string(),
+                reason: "ambiguous_overlay_index_gateway".to_string(),
+                count: 3,
+            }]
+        }));
+
+        let resp = svc
+            .get_ip_vrf(Request::new(proto::GetIpVrfRequest {
+                name: "blue".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.remote_prefix_drop_counts.len(), 1);
+        assert_eq!(
+            resp.remote_prefix_drop_counts[0].reason,
+            "ambiguous_overlay_index_gateway"
+        );
+        assert_eq!(resp.remote_prefix_drop_counts[0].count, 3);
     }
 }

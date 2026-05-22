@@ -2326,6 +2326,15 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // `EvpnService.ListEvpnNexthops`.
     let (evpn_fdb_nexthops_tx, evpn_fdb_nexthops_rx) =
         tokio::sync::watch::channel(rustbgpd_evpn::FdbNexthopDataplaneStatus::default());
+    let evpn_remote_ip_prefix_drop_counts_rx = evpn_dataplane_handle.as_ref().map_or_else(
+        || {
+            let (_, rx) = tokio::sync::watch::channel(std::sync::Arc::new(
+                evpn_dataplane::RemoteIpPrefixDropCounts::new(),
+            ));
+            rx
+        },
+        evpn_dataplane::EvpnDataplaneHandle::remote_prefix_drop_counts_receiver,
+    );
     if let Some(handle) = evpn_dataplane_handle.as_ref() {
         let mut reports = handle.subscribe_reports();
         // Resolve IpVrfId → operator-facing name for the metric labels
@@ -2569,6 +2578,21 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 rustbgpd_evpn::IpVrfId::new(vni).map_or(0, |id| {
                     u64::from(rx.borrow().get(&id).copied().unwrap_or(0))
                 })
+            })
+        },
+        evpn_remote_ip_prefix_drop_counts: {
+            let rx = evpn_remote_ip_prefix_drop_counts_rx.clone();
+            Arc::new(move || {
+                rx.borrow()
+                    .iter()
+                    .map(|((vrf, reason), count)| {
+                        rustbgpd_api::evpn_service::RemoteIpPrefixDropCount {
+                            vrf: vrf.clone(),
+                            reason: reason.clone(),
+                            count: *count,
+                        }
+                    })
+                    .collect()
             })
         },
         evpn_fdb_nexthop_snapshot: {
@@ -4290,6 +4314,8 @@ table_id = 6000
         let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(current_ip_vrfs);
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
+            watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
         let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
             shutdown: tokio_util::sync::CancellationToken::new(),
@@ -4300,6 +4326,7 @@ table_id = 6000
             bum_enforcement_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
+            remote_prefix_drop_counts_rx,
         };
         let (_local_tx, local_rx) = mpsc::channel(1);
         let originator_handle = evpn_originator::spawn(
@@ -4373,6 +4400,8 @@ table_id = 6000
         let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(Arc::new(rustbgpd_evpn::IpVrfTable::new()));
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
+            watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
         let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
             shutdown: tokio_util::sync::CancellationToken::new(),
@@ -4383,6 +4412,7 @@ table_id = 6000
             bum_enforcement_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
+            remote_prefix_drop_counts_rx,
         };
         let (local_tx, local_rx) = mpsc::channel(8);
         let originator_handle = evpn_originator::spawn(
@@ -4495,6 +4525,8 @@ table_id = 6000
         let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(current_ip_vrfs);
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
+            watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
         let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
             shutdown: tokio_util::sync::CancellationToken::new(),
@@ -4505,6 +4537,7 @@ table_id = 6000
             bum_enforcement_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
+            remote_prefix_drop_counts_rx,
         };
         let (_local_tx, local_rx) = mpsc::channel(1);
         let originator_handle = evpn_originator::spawn(
@@ -4642,6 +4675,8 @@ table_id = 6000
         let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(current_ip_vrfs.clone());
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
+            watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
         let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
             shutdown: tokio_util::sync::CancellationToken::new(),
@@ -4652,6 +4687,7 @@ table_id = 6000
             bum_enforcement_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
+            remote_prefix_drop_counts_rx,
         };
         let (_obs_tx, obs_rx) = watch::channel(Arc::new(std::collections::HashMap::<
             rustbgpd_evpn::IpVrfId,
@@ -4708,6 +4744,8 @@ table_id = 6000
         let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(current_ip_vrfs.clone());
         let (bum_enforcement_tx, _bum_rx) =
             watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
+            watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
         let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
         let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
             shutdown: tokio_util::sync::CancellationToken::new(),
@@ -4718,6 +4756,7 @@ table_id = 6000
             bum_enforcement_tx,
             evpn_instances_tx,
             ip_vrfs_tx,
+            remote_prefix_drop_counts_rx,
         };
         let (obs_tx, obs_rx) = watch::channel(Arc::new(std::collections::HashMap::<
             rustbgpd_evpn::IpVrfId,

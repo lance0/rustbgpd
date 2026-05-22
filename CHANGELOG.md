@@ -44,6 +44,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `vrf="_unscoped"` label covers drops that occur before a route can be tied
   to a configured IP-VRF.
 
+- **EVPN Type 5 projection-drop status.** `EvpnService.ListIpVrfs`,
+  `EvpnService.GetIpVrf`, and `rustbgpctl evpn vrfs [NAME]` now expose scoped
+  `remote_prefix_drop_counts` for current receive-side remote Type 5 routes
+  that were kept out of dataplane intent. The status surface reuses the bounded
+  Prometheus reason labels and intentionally omits per-route prefixes,
+  gateways, next-hops, MACs, RDs, and RTs.
+
 - **ADR-0063 EVPN runtime convergence — single standalone IP-VRF delete.**
   `EvpnService.ApplyEvpnRuntime` can now commit exactly one deleted
   `[[evpn_ip_vrfs]]` entry when no committed L2VNI references that IP-VRF.

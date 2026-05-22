@@ -1632,6 +1632,15 @@ message ListIpVrfsResponse {
   repeated IpVrfState ip_vrfs = 1;
 }
 
+message IpVrfRemotePrefixDropCount {
+  // Stable bounded projection reason label, e.g.
+  // "unresolved_overlay_index_gateway".
+  string reason = 1;
+  // Current number of remote EVPN Type 5 routes for this IP-VRF
+  // that were kept out of dataplane intent for `reason`.
+  uint64 count = 2;
+}
+
 message GetIpVrfRequest {
   // Operator-facing handle (`name` field on `[[evpn_ip_vrfs]]`).
   string name = 1;
@@ -1747,6 +1756,13 @@ message IpVrfState {
   // during that pass (or while retrying a rejected withdraw) the
   // value can be non-zero alongside NOT_READY.
   uint32 installed_routes_count = 15;
+  // Current bounded receive-side projection drops for remote EVPN
+  // Type 5 routes scoped to this IP-VRF. Reasons reuse the stable
+  // labels exported by the Prometheus
+  // `evpn_ip_vrf_remote_prefix_drops{vrf,reason}` gauge; per-route
+  // values such as prefixes, gateways, next-hops, MACs, RDs, and RTs
+  // are intentionally omitted.
+  repeated IpVrfRemotePrefixDropCount remote_prefix_drop_counts = 16;
 }
 
 // Coarse readiness verdict for an IP-VRF. The detailed predicate

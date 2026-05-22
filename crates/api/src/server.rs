@@ -79,6 +79,9 @@ pub struct ServeConfig {
     /// IP-VRF (Gate 9 slice 6c). Returns 0 when no `[[evpn_ip_vrfs]]`
     /// are configured.
     pub evpn_installed_ip_vrf_route_count: crate::evpn_service::InstalledIpVrfRouteCountFn,
+    /// Live snapshot reader for current remote Type 5 projection-drop
+    /// counts by bounded `(vrf, reason)` labels.
+    pub evpn_remote_ip_prefix_drop_counts: crate::evpn_service::RemoteIpPrefixDropCountSnapshotFn,
     /// Live snapshot reader for ADR-0059 FDB nexthop-group owned
     /// state. Returns an empty summary when the dataplane actor is
     /// not running.
@@ -366,6 +369,7 @@ async fn run_listener(
     let evpn_ip_vrf_status_snapshot = config.evpn_ip_vrf_status_snapshot;
     let evpn_originated_ip_vrf_route_count = config.evpn_originated_ip_vrf_route_count;
     let evpn_installed_ip_vrf_route_count = config.evpn_installed_ip_vrf_route_count;
+    let evpn_remote_ip_prefix_drop_counts = config.evpn_remote_ip_prefix_drop_counts;
     let evpn_fdb_nexthop_snapshot = config.evpn_fdb_nexthop_snapshot;
     let evpn_runtime_model = config.evpn_runtime_model;
     let evpn_runtime_apply = config.evpn_runtime_apply;
@@ -408,6 +412,7 @@ async fn run_listener(
                 evpn_ip_vrf_status_snapshot,
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
+                evpn_remote_ip_prefix_drop_counts,
                 evpn_fdb_nexthop_snapshot,
                 evpn_runtime_model,
                 evpn_runtime_apply,
@@ -445,6 +450,7 @@ async fn run_listener(
                 evpn_ip_vrf_status_snapshot,
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
+                evpn_remote_ip_prefix_drop_counts,
                 evpn_fdb_nexthop_snapshot,
                 evpn_runtime_model,
                 evpn_runtime_apply,
@@ -489,6 +495,7 @@ async fn run_tcp_listener(
     evpn_ip_vrf_status_snapshot: crate::evpn_service::IpVrfStatusSnapshotFn,
     evpn_originated_ip_vrf_route_count: crate::evpn_service::OriginatedIpVrfRouteCountFn,
     evpn_installed_ip_vrf_route_count: crate::evpn_service::InstalledIpVrfRouteCountFn,
+    evpn_remote_ip_prefix_drop_counts: crate::evpn_service::RemoteIpPrefixDropCountSnapshotFn,
     evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
     evpn_runtime_model: EvpnRuntimeModelFn,
     evpn_runtime_apply: Option<EvpnRuntimeApplyFn>,
@@ -600,7 +607,8 @@ async fn run_tcp_listener(
                 evpn_runtime_apply,
                 access_mode,
                 evpn_duplicate_mac_clear,
-            ),
+            )
+            .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts),
             interceptor.clone(),
         ))
         .add_service(ControlServiceServer::with_interceptor(
@@ -647,6 +655,7 @@ async fn run_uds_listener(
     evpn_ip_vrf_status_snapshot: crate::evpn_service::IpVrfStatusSnapshotFn,
     evpn_originated_ip_vrf_route_count: crate::evpn_service::OriginatedIpVrfRouteCountFn,
     evpn_installed_ip_vrf_route_count: crate::evpn_service::InstalledIpVrfRouteCountFn,
+    evpn_remote_ip_prefix_drop_counts: crate::evpn_service::RemoteIpPrefixDropCountSnapshotFn,
     evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
     evpn_runtime_model: EvpnRuntimeModelFn,
     evpn_runtime_apply: Option<EvpnRuntimeApplyFn>,
@@ -740,7 +749,8 @@ async fn run_uds_listener(
                 evpn_runtime_apply,
                 access_mode,
                 evpn_duplicate_mac_clear,
-            ),
+            )
+            .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts),
             interceptor.clone(),
         ))
         .add_service(ControlServiceServer::with_interceptor(
