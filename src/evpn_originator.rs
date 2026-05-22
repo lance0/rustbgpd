@@ -119,8 +119,10 @@ impl EvpnOriginatorRuntimeControl {
 
     /// Replace the effective L2VNI model the originator reconciles
     /// against. ADR-0063 runtime commits publish complete snapshots;
-    /// this actor drains removed/redefined VNIs before accepting the
-    /// new table for future local observations and RIB-event replay.
+    /// this actor drains removed VNIs, and for a redefined VNI drains the
+    /// old-RD routes then re-originates the preserved local MAC/IP state
+    /// under the new instance fields, before accepting the new table for
+    /// future local observations and RIB-event replay.
     #[must_use]
     pub fn replace_runtime_model(
         &self,
@@ -164,8 +166,10 @@ impl EvpnOriginatorHandle {
 
     /// Replace the effective L2VNI model the originator reconciles
     /// against. ADR-0063 runtime commits publish complete snapshots;
-    /// this actor drains removed/redefined VNIs before accepting the
-    /// new table for future local observations and RIB-event replay.
+    /// this actor drains removed VNIs, and for a redefined VNI drains the
+    /// old-RD routes then re-originates the preserved local MAC/IP state
+    /// under the new instance fields, before accepting the new table for
+    /// future local observations and RIB-event replay.
     #[cfg_attr(
         not(test),
         expect(
@@ -715,13 +719,19 @@ async fn apply_runtime_model(
     runtime: &mut OriginatorRuntime,
 ) {
     // Classify currently-known VNIs against the candidate model:
-    //  - removed or redefined (instance gone / content changed): full
-    //    drain + state clear, the same as a delete.
+    //  - removed (instance gone from the candidate): full drain + state
+    //    clear, the same as a delete.
+    //  - redefined (instance present but content changed, e.g. a new RD):
+    //    drain the stale routes under the old fields, then rebuild only the
+    //    RD-bound originators while preserving the local observation caches so
+    //    the routes re-originate under the new fields. Without this a redefine
+    //    would withdraw the VNI's local Type 2 routes and never re-advertise
+    //    them until the next kernel local-MAC event.
     //  - ESI-map changed only (instance identical, vni_to_esi differs):
     //    drain the stale routes but preserve and replay the cached local
-    //    MAC/IP state so it re-originates under the new ESI instead of
-    //    disappearing until the next kernel local-MAC event.
-    let mut removed_or_redefined: Vec<EvpnInstanceId> = Vec::new();
+    //    MAC/IP state so it re-originates under the new ESI.
+    let mut removed: Vec<EvpnInstanceId> = Vec::new();
+    let mut redefined: Vec<EvpnInstanceId> = Vec::new();
     let mut esi_only_changed: Vec<EvpnInstanceId> = Vec::new();
     for old in runtime.instances.iter() {
         match model.instances.get(old.id) {
@@ -730,16 +740,20 @@ async fn apply_runtime_model(
                     esi_only_changed.push(old.id);
                 }
             }
-            _ => removed_or_redefined.push(old.id),
+            Some(_) => redefined.push(old.id),
+            None => removed.push(old.id),
         }
     }
 
     // Snapshot replay keys before the drain clears each advertised route.
-    // ESI-only changes intentionally keep the local observation caches,
-    // pending IP bindings, remote views, and duplicate-MAC quarantine
-    // state. Only delete/redefine may use the full VNI state purge below.
+    // Redefine and ESI-only changes both keep the local observation caches
+    // (local MAC/IP, pending IP bindings, remote views) and replay their local
+    // MACs under the new instance fields. ESI-only changes also keep the
+    // duplicate-MAC detector/quarantine state (the instance is identical); a
+    // redefine drops it below as part of the ADR-0063 delete-old + add-new
+    // contract. Only a true delete uses the full VNI state purge below.
     let mut replay_local_macs: LocalMacReplaySet = BTreeMap::new();
-    for &vni in &esi_only_changed {
+    for &vni in redefined.iter().chain(esi_only_changed.iter()) {
         let macs = state
             .local_macs
             .get(&vni)
@@ -748,7 +762,15 @@ async fn apply_runtime_model(
         replay_local_macs.insert(vni, macs);
     }
 
-    for vni in removed_or_redefined.iter().copied() {
+    // Drain advertised routes for every VNI that is leaving or changing,
+    // using the still-current (old) instance table so withdraws carry the
+    // committed RD.
+    for vni in removed
+        .iter()
+        .chain(redefined.iter())
+        .chain(esi_only_changed.iter())
+        .copied()
+    {
         drain_vni_to_withdraws(
             state,
             runtime.instances.as_ref(),
@@ -759,19 +781,21 @@ async fn apply_runtime_model(
             runtime.vni_to_esi.as_ref(),
         )
         .await;
+    }
+    // A true delete drops every per-VNI state. A redefine keeps the local
+    // observation caches (so the replay below re-originates the MACs) but
+    // drops the RD-bound origination state machines (so they rebuild under the
+    // candidate's new fields) and the duplicate-MAC detector / quarantine state
+    // (delete-old + add-new per ADR-0063). Dropping the quarantine is also what
+    // lets a redefine that disables suppression actually replay the MAC instead
+    // of leaving it stuck quarantined.
+    for vni in removed.iter().copied() {
         remove_vni_state(state, vni, &runtime.metrics);
     }
-    for vni in esi_only_changed.iter().copied() {
-        drain_vni_to_withdraws(
-            state,
-            runtime.instances.as_ref(),
-            vni,
-            &runtime.rib_tx,
-            &runtime.metrics,
-            &runtime.originated_local_mac_counts,
-            runtime.vni_to_esi.as_ref(),
-        )
-        .await;
+    for vni in &redefined {
+        state.mac_originators.remove(vni);
+        state.mac_ip_originators.remove(vni);
+        clear_duplicate_mac_state(state, *vni, &runtime.metrics);
     }
 
     for inst in model.instances.iter() {
@@ -846,6 +870,20 @@ fn remove_vni_state(state: &mut OriginatorState, vni: EvpnInstanceId, metrics: &
         .remote_mac_ip_view
         .retain(|(route_vni, _, _), _| *route_vni != vni);
 
+    clear_duplicate_mac_state(state, vni, metrics);
+}
+
+/// Drop all RFC 7432 §15.1 duplicate-MAC detector windows, known keys, and
+/// active local-origin quarantines for one VNI, decrementing the per-key
+/// quarantine gauge and republishing the receive-side suppression set. Shared
+/// by the full delete purge ([`remove_vni_state`]) and by L2VNI redefine,
+/// which drops duplicate-MAC state (delete-old + add-new) while preserving the
+/// local observation caches.
+fn clear_duplicate_mac_state(
+    state: &mut OriginatorState,
+    vni: EvpnInstanceId,
+    metrics: &BgpMetrics,
+) {
     let removed_duplicate_mac_keys: Vec<DuplicateMacKey> = state
         .known_duplicate_mac_keys
         .iter()
@@ -3882,6 +3920,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_model_redefine_clears_duplicate_mac_quarantine_and_replays() {
+        // A redefine that disables suppression (delete-old + add-new) must drop
+        // the duplicate-MAC quarantine/detector state and let the local MAC
+        // re-originate under the new fields — not leave it stuck quarantined.
+        let instances = instance_table_with(suppress_local_instance(100));
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (log, _responder) = rib_capture_responder(rib_rx);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = originator_state(&instances);
+        state.remote_mac_view.insert(
+            (vni(100), mac(0xAA)),
+            RemoteMacView {
+                mac: mac(0xAA),
+                mobility_sequence: Some(3),
+                sticky: false,
+                next_hop: ipa("10.0.0.2"),
+            },
+        );
+
+        observe_test(
+            LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        let duplicate_key = DuplicateMacKey::new(vni(100), mac(0xAA));
+        assert!(
+            state
+                .active_duplicate_mac_quarantines
+                .contains(&duplicate_key),
+            "remote contender should activate suppress-local quarantine"
+        );
+        assert_quarantine_metric(&metrics, 100, 0xAA, 1);
+
+        // Redefine VNI 100 to the same identity but with suppression disabled
+        // (local_instance differs from suppress_local_instance only in
+        // duplicate_mac_detection), so this is a content change → redefine.
+        let redefined_instances = instance_table_with(local_instance(100));
+        let mut runtime = originator_runtime_for_test(
+            instances,
+            rib_tx,
+            metrics.clone(),
+            counts,
+            Arc::new(BTreeMap::new()),
+        );
+
+        apply_runtime_model(
+            Arc::new(OriginatorRuntimeModel {
+                instances: redefined_instances,
+                vni_to_esi: Arc::new(BTreeMap::new()),
+            }),
+            &mut state,
+            &mut runtime,
+        )
+        .await;
+
+        assert!(
+            !state
+                .active_duplicate_mac_quarantines
+                .contains(&duplicate_key),
+            "redefine must clear the active duplicate-MAC quarantine"
+        );
+        assert!(
+            !state
+                .duplicate_mac_detector
+                .is_quarantined(duplicate_key, Instant::now()),
+            "redefine must drop the duplicate-MAC detector state"
+        );
+        assert_quarantine_metric(&metrics, 100, 0xAA, 0);
+        assert!(
+            !log.lock().await.is_empty(),
+            "redefine that disables suppression must replay the local MAC"
+        );
+    }
+
+    #[tokio::test]
     async fn runtime_model_esi_change_preserves_pending_ip_bindings() {
         let instances = instance_table(100);
         let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
@@ -4121,6 +4244,92 @@ mod tests {
             &withdraws,
             key,
             "runtime ESI-map change should drain stale local MAC originations",
+        )
+        .await;
+        h.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_model_redefine_reoriginates_local_mac_under_new_rd() {
+        // A redefine (same VNI, new RD) must withdraw the committed-RD local
+        // Type 2 route AND re-originate it under the new RD from the preserved
+        // local observation — not silently drop it until the next kernel event.
+        let instances = instance_table(100);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(32);
+        let (local_tx, local_rx) = mpsc::channel(16);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _responder = runtime_model_rib_responder(rib_rx, injects.clone(), withdraws.clone());
+
+        let h = spawn(
+            OriginatorConfig {
+                poll_interval: Duration::from_mins(1),
+            },
+            &instances,
+            rib_tx,
+            Some(local_rx),
+            BgpMetrics::new(),
+            OriginatedLocalMacCounts::default(),
+            CancellationToken::new(),
+            Arc::new(std::collections::BTreeMap::new()),
+        )
+        .expect("originator spawned");
+
+        let old_key = EvpnRouteKey::MacIp {
+            rd: rd(65000, 100),
+            ethernet_tag: EthernetTagId(0),
+            mac: mac(0xAA),
+            ip: None,
+        };
+        local_tx
+            .send(LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            })
+            .await
+            .unwrap();
+        wait_for_key(
+            &injects,
+            old_key,
+            "initial VNI should originate under old RD",
+        )
+        .await;
+
+        // Redefine VNI 100 with a new RD (65000:111), same VTEP/RT shape.
+        let redefined = EvpnInstance::new(
+            vni(100),
+            rd(65000, 111),
+            vec![RouteTarget::TwoOctetAs {
+                asn: 65000,
+                value: 100,
+            }],
+            ipa("10.0.0.1"),
+            Some("br100".to_string()),
+            false,
+        )
+        .unwrap();
+        let new_instances = instance_table_with(redefined);
+        let new_key = EvpnRouteKey::MacIp {
+            rd: rd(65000, 111),
+            ethernet_tag: EthernetTagId(0),
+            mac: mac(0xAA),
+            ip: None,
+        };
+
+        assert!(
+            h.replace_runtime_model(new_instances, Arc::new(std::collections::BTreeMap::new()))
+        );
+        wait_for_key(
+            &withdraws,
+            old_key,
+            "redefine should withdraw the old-RD local MAC route",
+        )
+        .await;
+        wait_for_key(
+            &injects,
+            new_key,
+            "redefine should re-originate the local MAC route under the new RD",
         )
         .await;
         h.shutdown().await;

@@ -153,7 +153,7 @@ fields.
 listener config (including any TLS / mTLS field), `[rpki]`, `[bmp]`,
 `[mrt]`, `[[evpn_instances]]` (Phase-2 VTEP foundation — gRPC
 `EvpnService.GetEvpnRuntime` exposes the committed startup generation
-and `EvpnService.ApplyEvpnRuntime` can live-commit the supported seven
+and `EvpnService.ApplyEvpnRuntime` can live-commit the supported eight
 ADR-0063 shapes; SIGHUP mutation and unsupported shapes still fail closed),
 `[[ethernet_segments]]` (Gate 8 segment orchestrator snapshot),
 `[[evpn_ip_vrfs]]` (Gate 9 IP-VRF foundation — pinned

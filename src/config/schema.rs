@@ -769,15 +769,13 @@ pub struct EvpnInstanceConfig {
     /// Single-homed entries are unaffected — they always take the
     /// single-dst path regardless of this flag.
     ///
-    /// **Restart-required.** `[[evpn_instances]]` is pinned at startup
-    /// today (config reload reverts edits to the instance table), so
-    /// changing this knob requires a daemon restart. Across a
-    /// restart with stale tagged FDB rows from a prior run, the
-    /// orphaned rows stay in place until the next periodic drift
-    /// cycle (≤ 60 s, slice 3.5 PR 2). The diff layer is written so
-    /// that a future runtime instance-mutation surface (RPC etc.)
-    /// would converge cleanly via the standard `FdbNhg → SingleDst`
-    /// transition, but operators cannot drive that path today.
+    /// **Runtime-drivable via `EvpnService.ApplyEvpnRuntime` L2VNI redefine;
+    /// SIGHUP remains restart-required.** A config-file reload still reverts
+    /// edits to the instance table, but a runtime L2VNI redefine that flips
+    /// this knob converges cleanly through the dataplane diff's standard
+    /// `FdbNhg → SingleDst` transition (#210). When toggled across a daemon
+    /// restart instead, stale tagged FDB rows from a prior run stay in place
+    /// until the next periodic drift cycle (≤ 60 s, slice 3.5 PR 2).
     #[serde(default = "default_enabled")]
     pub apply_aliasing_ecmp: bool,
     /// RFC 7432 §15.1 duplicate-MAC detection and optional local

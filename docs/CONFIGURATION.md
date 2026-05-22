@@ -1912,7 +1912,7 @@ origination, and L3 FIB programming. The ADR-0061 `[[fib_tables]]`
 table is pinned for the same reason: the general FIB actor owns only the
 explicit tables resolved at startup. Runtime EVPN mutation is exposed
 through ADR-0063's full-candidate `EvpnService.ApplyEvpnRuntime` RPC for
-the supported seven live shapes; direct `AddEvpnInstance` /
+the supported eight live shapes; direct `AddEvpnInstance` /
 `DeleteEvpnInstance` RPCs and SIGHUP delta application remain out of
 scope. Unsupported shapes are tracked in
 <https://github.com/lance0/rustbgpd/issues/210>.
