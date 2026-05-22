@@ -123,12 +123,10 @@ wait_frr_type5_absent() {
 resolve_grpc_addr
 start_rustbgpd
 
-# Test 1: rustbgpd ↔ FRR Established on L2VPN/EVPN
-if wait_frr_established "$FRR" "$RUSTBGPD_IP" "FRR L2VPN/EVPN"; then
-    ok "FRR reached Established with rustbgpd"
-else
-    fail "FRR did not reach Established"
-fi
+# Test 1: rustbgpd ↔ FRR Established on L2VPN/EVPN.
+# wait_frr_established records its own ok/fail; on failure it exits via
+# print_summary rather than being wrapped in a second ok/fail.
+wait_frr_established "$FRR" "$RUSTBGPD_IP" "FRR L2VPN/EVPN" || print_summary
 
 # Test 2: inject the Type 5 route via the gRPC InjectionService
 log "[test] Injecting Type 5 ${PREFIX}/${PREFIX_LEN} via AddEvpnRoute"
