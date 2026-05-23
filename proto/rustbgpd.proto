@@ -1695,6 +1695,10 @@ message EvpnRuntimePlanSummary {
   EvpnRuntimeChangeSummary evpn_instances = 3;
   EvpnRuntimeChangeSummary evpn_ip_vrfs = 4;
   EvpnRuntimeChangeSummary ethernet_segments = 5;
+  // True when the L2VNI->IP-VRF link references changed (an `ip_vrf` relink).
+  // A pure relink leaves every row changeset empty, so this is the only field
+  // that signals the apply was not a no-op.
+  bool ip_vrf_references_changed = 6;
 }
 
 message EvpnRuntimeChangeSummary {

@@ -286,6 +286,17 @@ impl IpVrfTable {
         self.referenced_l2vnis.get(name)
     }
 
+    /// Whether the L2VNI->IP-VRF link references differ from another table,
+    /// independent of the IP-VRF rows themselves. An `ip_vrf` relink (an L2VNI
+    /// re-homed to a different IP-VRF, or its link added/removed) mutates only
+    /// this derived metadata, leaving every IP-VRF row identical — so the plan's
+    /// row changesets stay empty and this is the only signal a relink happened.
+    #[must_use]
+    pub fn references_differ(&self, other: &Self) -> bool {
+        self.referenced_names != other.referenced_names
+            || self.referenced_l2vnis != other.referenced_l2vnis
+    }
+
     /// Mark an IP-VRF as referenced by one L2VNI. Idempotent.
     pub fn mark_referenced_by_l2vni(&mut self, name: String, vni: EvpnInstanceId) {
         self.referenced_names.insert(name.clone());
