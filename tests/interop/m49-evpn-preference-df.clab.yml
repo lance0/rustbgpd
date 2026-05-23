@@ -1,0 +1,74 @@
+# Containerlab topology: 2-PE rustbgpd Ethernet Segment running the
+# RFC 9785 Highest-Preference DF algorithm (M49 — preference-DF smoke).
+#
+# Two rustbgpd PEs share the same ESI for VNI 200 and peer iBGP
+# L2VPN/EVPN, both configured `df_algorithm = "highest-preference"`.
+# PE1 has df_preference 100; PE2 has df_preference 200 and
+# df_dont_preempt = true. Highest-Preference elects PE2 (preference 200
+# > 100). Default service carving would instead elect PE1 (`200 mod 2`
+# = slot 0 -> lower IP). So asserting PE2 is the DF proves the RFC 9785
+# preference algorithm — negotiated over the DF Election Extended
+# Community on Type 4 ES routes — is actually running, not modulo. (The
+# byte-exact DF Election extcomm, including the Don't-Preempt bit, is
+# pinned separately by the `preference_df_election_extcomm_*` unit test;
+# this smoke proves the algorithm drives the cross-PE election outcome.)
+#
+# NOT cross-vendor: both PEs are rustbgpd. FRR also implements
+# preference-DF, but its on-the-wire DP/extcomm behavior is unverified,
+# so a cross-vendor preference-DF smoke is a separate follow-up.
+#
+# Asserts (see scripts/test-m49-evpn-preference-df.sh):
+#   1. Both peers reach Established and exchange both Type 4 ES candidates.
+#   2. PE2 reports `evpn_df_role{...,role="df"} 1` (the preference winner).
+#   3. PE1 reports `evpn_df_role{...,role="nondf"} 1` (loser under
+#      preference, where modulo would have made it DF).
+#   4. After PE2 (the DF) shuts down, PE1 promotes to DF and
+#      `evpn_df_role_changes_total{...}` increments.
+#
+# Topology:
+#   PE1 (10.0.0.1, AS 65000) -- iBGP L2VPN/EVPN -- PE2 (10.0.0.2, AS 65000)
+#
+# Control-plane focused (Type 4 visibility + Prometheus surface); the
+# minimal startup script creates br200 so the EVPN instance reaches
+# Ready. No VXLAN data-plane forwarding.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   sudo containerlab deploy -t tests/interop/m49-evpn-preference-df.clab.yml
+#   bash tests/interop/scripts/test-m49-evpn-preference-df.sh
+#   sudo containerlab destroy -t tests/interop/m49-evpn-preference-df.clab.yml
+
+name: m49-evpn-preference-df
+
+topology:
+  nodes:
+    pe1:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m49-pe1.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-segment.sh:/usr/local/bin/start-rustbgpd-segment.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-segment.sh 200
+      env:
+        RUST_LOG: info,rustbgpd::evpn_segment=debug,rustbgpd_evpn::df_election=debug
+
+    pe2:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m49-pe2.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-segment.sh:/usr/local/bin/start-rustbgpd-segment.sh:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-segment.sh 200
+      env:
+        RUST_LOG: info,rustbgpd::evpn_segment=debug,rustbgpd_evpn::df_election=debug
+
+  links:
+    - endpoints: ["pe1:eth1", "pe2:eth1"]

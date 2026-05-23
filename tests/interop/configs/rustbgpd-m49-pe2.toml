@@ -1,0 +1,45 @@
+# M49 PE2: higher-preference, non-revertive candidate of a 2-PE Ethernet
+# Segment running the RFC 9785 Highest-Preference DF algorithm. For VNI
+# 200 this PE's df_preference 200 (> PE1's 100) elects it as DF, even
+# though default service carving (`200 mod 2` = slot 0 -> lower IP) would
+# elect 10.0.0.1. Asserting this PE is DF proves preference-DF is in
+# effect. df_dont_preempt = true exercises the RFC 9785 Don't-Preempt
+# (non-revertive) origination path — the Type 4 DF Election extcomm
+# carries DP=1.
+[global]
+asn = 65000
+router_id = "10.0.0.2"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+prometheus_addr = "0.0.0.0:9179"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[evpn_instances]]
+vni = 200
+rd = "10.0.0.2:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.2"
+bridge = "br200"
+advertise_svi_mac = false
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [200]
+df_preference = 200
+df_algorithm = "highest-preference"
+df_dont_preempt = true
+originator_ip = "10.0.0.2"
+
+[[neighbors]]
+address = "10.0.0.1"
+remote_asn = 65000
+description = "pe1"
+hold_time = 30
+families = ["l2vpn_evpn"]
+
+[security.grpc]
+enforcement = "legacy"

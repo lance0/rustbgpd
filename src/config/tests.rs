@@ -6019,6 +6019,30 @@ originator_ip = "10.0.0.100"
 }
 
 #[test]
+fn m49_interop_configs_describe_preference_df_with_dont_preempt() {
+    // Pin the M49 interop fixtures: PE1 (pref 100, revertive) and PE2 (pref
+    // 200, non-revertive) both run highest-preference. Guards the smoke against
+    // drift in the configs or the DF config surface.
+    let pe1 = parse(include_str!(
+        "../../tests/interop/configs/rustbgpd-m49-pe1.toml"
+    ))
+    .unwrap();
+    let s1 = pe1.resolve_ethernet_segments().unwrap();
+    assert_eq!(s1[0].df_algorithm, DfAlgorithm::HighestPreference);
+    assert_eq!(s1[0].df_preference, 100);
+    assert!(!s1[0].df_dont_preempt);
+
+    let pe2 = parse(include_str!(
+        "../../tests/interop/configs/rustbgpd-m49-pe2.toml"
+    ))
+    .unwrap();
+    let s2 = pe2.resolve_ethernet_segments().unwrap();
+    assert_eq!(s2[0].df_algorithm, DfAlgorithm::HighestPreference);
+    assert_eq!(s2[0].df_preference, 200);
+    assert!(s2[0].df_dont_preempt);
+}
+
+#[test]
 fn ethernet_segment_rejects_ambiguous_preference_df_algorithm_alias() {
     let toml = evpn_toml_with(
         r#"
