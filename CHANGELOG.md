@@ -69,10 +69,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `"lowest-preference"` with `df_preference` in the RFC 9785
   `0..=65535` range. Type 4 Ethernet Segment routes advertise the selected
   preference algorithm and configured preference, remote Type 4 routes decode
-  the Don't-Preempt bit for tie-breaking, and unanimous preference-DF
-  candidate sets elect the highest or lowest preference with Don't-Preempt and
-  lowest-PE-IP tie-breaks. Mixed algorithms still fall back to default service
-  carving. Local Don't-Preempt / non-revertive behavior remains deferred.
+  the Don't-Preempt bit (status/telemetry only), and unanimous preference-DF
+  candidate sets elect the highest or lowest preference, tie-broken by the
+  lowest PE IP. Mixed algorithms still fall back to default service carving.
+  The DP bit is not an election input; local/stateful non-revertive election
+  remains deferred.
 - **EVPN multi-homing — single-active mode signaling.**
   `[[ethernet_segments]].redundancy_mode` now accepts `"all-active"` (the
   default) or `"single-active"`. Single-active segments set the RFC 7432 ESI

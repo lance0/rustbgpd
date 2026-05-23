@@ -86,9 +86,10 @@ The Gate 8 surface is:
   negotiation falls back to default service carving when candidates
   disagree or omit the DF Election Extended Community. RFC 9785
   Highest-/Lowest-Preference election selects the configured
-  preference order, then Don't-Preempt, then the numerically lowest PE
-  IP as tie-breakers; mixed algorithms likewise fall back to default
-  service carving.
+  preference order, tie-broken by the numerically lowest PE IP (the
+  Don't-Preempt bit is originated and parsed but is not an election
+  input — see the DP scoping note above); mixed algorithms likewise
+  fall back to default service carving.
 - **Three Type 1/4 originator state machines** in
   `crates/evpn/src/origination_es.rs`: `LocalEsOriginator` (Type 4
   ES), `LocalEadPerEsOriginator` (Type 1 EAD-per-ES with MAX_ET

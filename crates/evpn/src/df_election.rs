@@ -36,10 +36,11 @@
 //!
 //! This module implements `DefaultModulo`, the RFC 8584 §3.2 Highest
 //! Random Weight algorithm, and the RFC 9785 Highest-/Lowest-Preference
-//! algorithms. The RFC 9785 Don't-Preempt capability is accepted as a
-//! remote tie-break input; local non-revertive behavior is an
-//! orchestrator policy concern and remains outside this pure election
-//! state machine.
+//! algorithms. The RFC 9785 Don't-Preempt capability is parsed but is
+//! NOT an election input: a stateless election has no incumbent /
+//! prior-role state, so it cannot implement "don't preempt the
+//! incumbent". Stateful non-revertive election is deferred and remains
+//! outside this pure election state machine.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -61,8 +62,10 @@ pub struct DfCandidate {
     /// DF preference value the PE proposed. RFC 9785 preference
     /// algorithms use this field; `DefaultModulo` and HRW ignore it.
     pub df_preference: u32,
-    /// RFC 9785 Don't-Preempt capability advertised by this PE.
-    /// Preference algorithms use it as an equal-preference tie-breaker.
+    /// RFC 9785 Don't-Preempt capability advertised by this PE. Parsed
+    /// and carried for telemetry / future stateful use, but NOT an
+    /// election input today (see the module docs); the preference
+    /// tie-break is the lowest originator IP.
     pub df_dont_preempt: bool,
     /// DF election algorithm the PE proposed.
     pub df_algorithm: DfAlgorithm,

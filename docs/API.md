@@ -1273,7 +1273,7 @@ MAC-only/MAC+IP/SVI Type 2 originators, the Type 5/IP-VRF originator, and
 the Linux dataplane supervisor through ordered convergence commands with
 rollback on partial failure.
 
-Nine non-noop shapes converge live and commit the next generation: a
+These non-noop shapes converge live and commit the next generation: a
 **single L2VNI add** (exactly one new `[[evpn_instances]]` entry and no
 other changes), a **single L2VNI delete** when the deleted VNI is not an
 Ethernet Segment member (including IP-VRF deployments where only derived
@@ -1434,7 +1434,9 @@ rustbgpctl evpn clear-duplicate-mac --vni 100 --mac aa:bb:cc:dd:ee:ff --json
 Validates a full candidate rustbgpd TOML document against the committed
 EVPN runtime model and returns a plan summary. Use `validate_only=true`
 to inspect added/deleted/redefined/unchanged EVPN instances, IP-VRFs,
-and Ethernet Segments without changing the committed generation.
+and Ethernet Segments — plus the `ip_vrf_references_changed` flag, which is
+the only non-empty plan signal for a pure `ip_vrf` relink — without changing
+the committed generation.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
