@@ -1610,6 +1610,10 @@ fn validate_tenant_teardown(
 
     // Consistency A — a deleted IP-VRF must have all its referencing L2VNIs
     // deleted in the same request (no surviving L2VNI may dangle on it).
+    // Defense-in-depth: config validation (`config/mod.rs` L2VNI->IP-VRF
+    // cross-ref) already rejects a candidate that leaves a dangling reference,
+    // so the dangling-ref branch below is unreachable from the gRPC entry
+    // point — kept in case a future caller constructs a candidate directly.
     for name in &plan.ip_vrfs.deleted {
         if current.ip_vrfs().get(name).is_none() {
             return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
@@ -1637,6 +1641,10 @@ fn validate_tenant_teardown(
 
     // Consistency B — no candidate Ethernet Segment may still list a deleted
     // VNI as a member (delete or member-shrink the segment in the same request).
+    // Like Consistency A, config validation (`config/mod.rs` ES member_vnis
+    // existence check) rejects a candidate ES that references an absent VNI, so
+    // this branch is unreachable from the gRPC entry point and stands as
+    // defense-in-depth for direct candidate construction.
     for seg in candidate.ethernet_segments() {
         for vni in &seg.member_vnis {
             if deleted_vnis.contains(vni) {
@@ -4419,6 +4427,37 @@ vni = 100
 rd = "65000:100"
 route_targets = ["65000:100"]
 local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+"#
+    }
+
+    // Two L2VNIs where VNI 100 advertises its SVI MAC. Tearing both down is a
+    // multi-element teardown that exercises the SVI drain leg of
+    // converge_tenant_teardown.
+    fn two_l2vni_one_svi_runtime_candidate_toml() -> &'static str {
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+advertise_svi_mac = true
 
 [[evpn_instances]]
 vni = 200
@@ -7566,6 +7605,343 @@ table_id = 6000
 
         originator_handle.shutdown().await;
         segment_handle.shutdown().await;
+        dataplane_handle.shutdown().await;
+    }
+
+    fn svi_dataplane_report(
+        vni: u32,
+        bridge_mac: rustbgpd_evpn::MacAddress,
+    ) -> rustbgpd_evpn::DataplaneReport {
+        rustbgpd_evpn::DataplaneReport {
+            intent_generation: 0,
+            reconcile_generation: 0,
+            instance_status: vec![rustbgpd_evpn::InstanceDataplaneStatus {
+                vni: rustbgpd_evpn::EvpnInstanceId::new(vni).unwrap(),
+                state: rustbgpd_evpn::InstanceState::Ready,
+                message: None,
+                bridge_mac: Some(bridge_mac),
+            }],
+            applied: vec![],
+            failed: vec![],
+            bum_enforcement: vec![],
+            ip_vrf_status: vec![],
+            ip_vrf_routes: Some(rustbgpd_evpn::ip_vrf::IpVrfRouteDump::default()),
+            ip_vrf_installed_routes: std::collections::HashMap::new(),
+            fdb_nexthops: rustbgpd_evpn::FdbNexthopDataplaneStatus::default(),
+            fdb_nhg_drift_counters: rustbgpd_evpn::FdbNhgDriftCounters::default(),
+        }
+    }
+
+    #[test]
+    fn teardown_failure_escalates_when_imet_not_restored() {
+        // When the rollback restored IMET, the error is the bare step message.
+        let restored = teardown_failure(true, "EVPN segment publish failed");
+        assert_eq!(restored.message(), "EVPN segment publish failed");
+
+        // When IMET could NOT be restored, the message escalates so an operator
+        // knows live Type 3 state may need repair/restart.
+        let stranded = teardown_failure(false, "EVPN segment publish failed");
+        assert!(stranded.message().contains("EVPN segment publish failed"));
+        assert!(
+            stranded
+                .message()
+                .contains("IMET teardown rollback also failed"),
+            "unexpected message: {}",
+            stranded.message()
+        );
+        assert!(stranded.message().contains("repair/restart"));
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "rollback test wires every actor + simulates a mid-teardown state"
+    )]
+    async fn runtime_actor_converger_tenant_teardown_rollback_restores_imet_and_models() {
+        // Drive the rollback ladder directly: seed a live tenant, simulate a
+        // mid-teardown state (IMET withdrawn + segment routes drained), then
+        // call rollback_tenant_teardown and assert it re-originates the Type 3
+        // IMET and the Type 1/4 segment routes and reports full restoration.
+        let current = runtime_model_from_candidate_toml(l2vni_one_es_runtime_candidate_toml());
+        let current_instances = Arc::new(current.instances().clone());
+        let current_ip_vrfs = Arc::new(current.ip_vrfs().clone());
+        let deleted_vni = rustbgpd_evpn::EvpnInstanceId::new(100).unwrap();
+        let deleted_instances = vec![current.instances().get(deleted_vni).cloned().unwrap()];
+        let removed_esi =
+            rustbgpd_wire::EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = runtime_converger_rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let (evpn_instances_tx, _evpn_instances_rx) = watch::channel(current_instances.clone());
+        let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(current_ip_vrfs);
+        let (bum_enforcement_tx, _bum_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
+            watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
+        let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
+        let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            supervisor_join: tokio::spawn(async {}),
+            actor_join: tokio::spawn(async {}),
+            local_mac_rx: None,
+            report_tx,
+            bum_enforcement_tx,
+            evpn_instances_tx,
+            ip_vrfs_tx,
+            remote_prefix_drop_counts_rx,
+        };
+        let (_local_tx, local_rx) = mpsc::channel(1);
+        let originator_handle = evpn_originator::spawn(
+            evpn_originator::OriginatorConfig::default(),
+            &current_instances,
+            rib_tx.clone(),
+            Some(local_rx),
+            BgpMetrics::new(),
+            evpn_originator::OriginatedLocalMacCounts::default(),
+            tokio_util::sync::CancellationToken::new(),
+            evpn_vni_to_esi_map(current.ethernet_segments()),
+        )
+        .expect("originator should spawn for non-empty current model");
+        let segment_handle = evpn_segment::spawn(
+            &current_instances,
+            current.ethernet_segments().to_vec(),
+            rib_tx.clone(),
+            None,
+            BgpMetrics::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("segment actor should spawn for non-empty ES config");
+        let mut imet_controller = evpn_imet::EvpnImetController::new();
+        imet_controller
+            .originate_all(current.instances().iter().cloned(), &rib_tx)
+            .await;
+
+        // Wait for the live tenant's initial origination (IMET + Type 1/4).
+        let initial_deadline = StdInstant::now() + Duration::from_secs(2);
+        loop {
+            let observed = injects.lock().await.clone();
+            let imet = observed
+                .iter()
+                .filter(|k| matches!(k, rustbgpd_wire::EvpnRouteKey::Imet { .. }))
+                .count();
+            let es = observed.iter().any(
+                |k| matches!(k, rustbgpd_wire::EvpnRouteKey::Es { esi, .. } if *esi == removed_esi),
+            );
+            if imet >= 1 && es {
+                break;
+            }
+            assert!(
+                StdInstant::now() < initial_deadline,
+                "no initial origination"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Simulate the mid-teardown state: IMET withdrawn + segment drained.
+        imet_controller
+            .withdraw_instance(deleted_vni, &rib_tx)
+            .await;
+        let empty_instances = Arc::new(rustbgpd_evpn::EvpnInstanceTable::new());
+        let segment_control = segment_handle.runtime_control();
+        assert!(segment_control.replace_instances(empty_instances.clone()));
+        assert!(segment_control.replace_segments(Arc::new(Vec::new())));
+        let drain_deadline = StdInstant::now() + Duration::from_secs(2);
+        loop {
+            let drained = withdraws.lock().await.clone();
+            let imet = drained
+                .iter()
+                .any(|k| matches!(k, rustbgpd_wire::EvpnRouteKey::Imet { .. }));
+            let es = drained.iter().any(
+                |k| matches!(k, rustbgpd_wire::EvpnRouteKey::Es { esi, .. } if *esi == removed_esi),
+            );
+            if imet && es {
+                break;
+            }
+            assert!(
+                StdInstant::now() < drain_deadline,
+                "mid-teardown drain stalled"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let imet_before = injects
+            .lock()
+            .await
+            .iter()
+            .filter(|k| matches!(k, rustbgpd_wire::EvpnRouteKey::Imet { .. }))
+            .count();
+        let es_before = injects
+            .lock()
+            .await
+            .iter()
+            .filter(
+                |k| matches!(k, rustbgpd_wire::EvpnRouteKey::Es { esi, .. } if *esi == removed_esi),
+            )
+            .count();
+
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(tokio::sync::Mutex::new(imet_controller)),
+            dataplane: Some(dataplane_handle.runtime_control()),
+            originator: Some(originator_handle.runtime_control()),
+            svi: None,
+            l3_originator: None,
+            segment: Some(segment_handle.runtime_control()),
+        };
+
+        let restored = converger
+            .rollback_tenant_teardown(&current, &deleted_instances)
+            .await;
+        assert!(restored, "rollback should report full IMET restoration");
+
+        // Rollback re-originates the IMET (synchronously) and republishes the
+        // committed segment snapshot (which re-originates the Type 4 ES route).
+        let restore_deadline = StdInstant::now() + Duration::from_secs(2);
+        loop {
+            let observed = injects.lock().await.clone();
+            let imet_now = observed
+                .iter()
+                .filter(|k| matches!(k, rustbgpd_wire::EvpnRouteKey::Imet { .. }))
+                .count();
+            let es_now = observed
+                .iter()
+                .filter(|k| matches!(k, rustbgpd_wire::EvpnRouteKey::Es { esi, .. } if *esi == removed_esi))
+                .count();
+            if imet_now > imet_before && es_now > es_before {
+                break;
+            }
+            assert!(
+                StdInstant::now() < restore_deadline,
+                "rollback did not re-originate IMET + ES (imet {imet_before}->{imet_now}, es {es_before}->{es_now})"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        originator_handle.shutdown().await;
+        segment_handle.shutdown().await;
+        dataplane_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "wires dataplane + originator + SVI actors and drives a report"
+    )]
+    async fn runtime_actor_converger_tenant_teardown_drains_svi_mac() {
+        // A multi-element teardown that deletes an advertise_svi_mac L2VNI must
+        // drain its SVI MAC (Type 2) through the SVI actor's instance-watch path.
+        let current = runtime_model_from_candidate_toml(two_l2vni_one_svi_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(minimal_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        let current_instances = Arc::new(current.instances().clone());
+        let current_ip_vrfs = Arc::new(current.ip_vrfs().clone());
+        let svi_mac = rustbgpd_evpn::MacAddress::new([0x02, 0, 0, 0, 0, 0x5b]);
+
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = runtime_converger_rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let (evpn_instances_tx, _evpn_instances_rx) = watch::channel(current_instances.clone());
+        let (ip_vrfs_tx, _ip_vrfs_rx) = watch::channel(current_ip_vrfs);
+        let (bum_enforcement_tx, _bum_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
+            watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
+        let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
+        let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            supervisor_join: tokio::spawn(async {}),
+            actor_join: tokio::spawn(async {}),
+            local_mac_rx: None,
+            report_tx,
+            bum_enforcement_tx,
+            evpn_instances_tx,
+            ip_vrfs_tx,
+            remote_prefix_drop_counts_rx,
+        };
+        let (_local_tx, local_rx) = mpsc::channel(1);
+        let originator_handle = evpn_originator::spawn(
+            evpn_originator::OriginatorConfig::default(),
+            &current_instances,
+            rib_tx.clone(),
+            Some(local_rx),
+            BgpMetrics::new(),
+            evpn_originator::OriginatedLocalMacCounts::default(),
+            tokio_util::sync::CancellationToken::new(),
+            evpn_vni_to_esi_map(current.ethernet_segments()),
+        )
+        .expect("originator should spawn for non-empty current model");
+        let (svi_report_tx, svi_report_rx) =
+            broadcast::channel::<rustbgpd_evpn::DataplaneReport>(8);
+        let svi_handle = evpn_svi::spawn(
+            &current_instances,
+            rib_tx.clone(),
+            svi_report_rx,
+            BgpMetrics::new(),
+            evpn_originator::OriginatedLocalMacCounts::default(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("SVI actor should spawn when an instance advertises its SVI MAC");
+        let mut imet_controller = evpn_imet::EvpnImetController::new();
+        imet_controller
+            .originate_all(current.instances().iter().cloned(), &rib_tx)
+            .await;
+
+        // Drive the SVI MAC origination via a Ready dataplane report, then
+        // capture the originated Type 2 key.
+        svi_report_tx
+            .send(svi_dataplane_report(100, svi_mac))
+            .unwrap();
+        let svi_deadline = StdInstant::now() + Duration::from_secs(2);
+        let svi_key = loop {
+            let observed = injects.lock().await.clone();
+            if let Some(key) = observed
+                .iter()
+                .find(|k| matches!(k, rustbgpd_wire::EvpnRouteKey::MacIp { .. }))
+                .copied()
+            {
+                break key;
+            }
+            assert!(
+                StdInstant::now() < svi_deadline,
+                "SVI actor never originated the SVI MAC; observed {observed:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(tokio::sync::Mutex::new(imet_controller)),
+            dataplane: Some(dataplane_handle.runtime_control()),
+            originator: Some(originator_handle.runtime_control()),
+            svi: Some(svi_handle.runtime_control()),
+            l3_originator: None,
+            segment: None,
+        };
+
+        converger
+            .converge(&current, &candidate, &plan)
+            .await
+            .unwrap();
+
+        let drain_deadline = StdInstant::now() + Duration::from_secs(2);
+        loop {
+            if withdraws.lock().await.contains(&svi_key) {
+                break;
+            }
+            assert!(
+                StdInstant::now() < drain_deadline,
+                "tenant teardown did not withdraw the SVI MAC"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        svi_handle.shutdown().await;
+        originator_handle.shutdown().await;
         dataplane_handle.shutdown().await;
     }
 
