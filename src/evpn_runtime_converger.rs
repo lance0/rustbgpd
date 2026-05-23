@@ -1260,7 +1260,7 @@ fn validate_single_l2vni_add(
     }
     if plan.ethernet_segments.has_changes() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only L2VNI add; Ethernet Segment changes are not supported yet",
+            "L2VNI add cannot be combined with Ethernet Segment changes in one request; apply each as a separate ApplyEvpnRuntime request",
         ));
     }
     if !plan.evpn_instances.deleted.is_empty() || !plan.evpn_instances.redefined.is_empty() {
@@ -1341,7 +1341,7 @@ fn validate_single_l2vni_delete(
         .any(|segment| segment.member_vnis.contains(&deleted_vni))
     {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
-            "L2VNI {deleted_vni} is a member of an Ethernet Segment; ES-aware delete is not supported yet"
+            "L2VNI {deleted_vni} is an Ethernet Segment member; delete it together with its Ethernet Segment (atomic tenant teardown) or after removing it from the segment"
         )));
     }
 
@@ -1914,7 +1914,7 @@ fn validate_single_ethernet_segment_add(
     }
     if !plan.ethernet_segments.deleted.is_empty() || !plan.ethernet_segments.redefined.is_empty() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only add-only Ethernet Segment changes; delete/redefine is not supported yet",
+            "Ethernet Segment add cannot be combined with ES delete/redefine in one request; apply each as a separate ApplyEvpnRuntime request",
         ));
     }
     if plan.ethernet_segments.added.len() != 1 {
