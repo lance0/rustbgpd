@@ -1,0 +1,392 @@
+use std::net::IpAddr;
+
+use rustbgpd_api::peer_types::{
+    ConfigEvent, PeerManagerNeighborConfig, SessionLifecycleEventType, SetGshutError,
+};
+use rustbgpd_rib::RibUpdate;
+use rustbgpd_transport::{PeerHandle, SessionIdentity, TcpAoConfig};
+use rustbgpd_wire::{Afi, Safi};
+use tokio::sync::oneshot;
+use tracing::{debug, error, info, warn};
+
+use crate::policy_admin::apply_config_event;
+
+use super::{ManagedPeer, PEER_POLICY_UPDATE_TIMEOUT, PeerManager};
+
+impl PeerManager {
+    pub(super) async fn add_peer(
+        &mut self,
+        config: PeerManagerNeighborConfig,
+        sync_config_snapshot: bool,
+    ) -> Result<(), String> {
+        if self.peers.contains_key(&config.address) {
+            return Err(format!("peer {} already exists", config.address));
+        }
+
+        let (transport, label, peer_group, import_policy, export_policy, next_config) =
+            if sync_config_snapshot {
+                let mut next_config = self.current_config.clone();
+                apply_config_event(
+                    &mut next_config,
+                    &ConfigEvent::NeighborAdded(config.clone()),
+                )
+                .map_err(|e| e.to_string())?;
+                let neighbor = next_config
+                    .neighbors
+                    .iter()
+                    .find(|neighbor| neighbor.address == config.address.to_string())
+                    .ok_or_else(|| {
+                        format!(
+                            "neighbor {} missing after config snapshot update",
+                            config.address
+                        )
+                    })?;
+                let resolved = next_config
+                    .resolve_neighbor(neighbor)
+                    .map_err(|e| e.to_string())?;
+                (
+                    resolved.transport_config,
+                    resolved.label,
+                    resolved.peer_group,
+                    resolved.import_policy,
+                    resolved.export_policy,
+                    Some(next_config),
+                )
+            } else {
+                (
+                    self.build_transport_config(&config),
+                    config.description.clone(),
+                    config.peer_group.clone(),
+                    config.import_policy.clone(),
+                    config.export_policy.clone(),
+                    None,
+                )
+            };
+
+        let address = config.address;
+        let remote_asn = config.remote_asn;
+        let description = label;
+        let hold_time = Some(transport.peer.hold_time);
+        let max_prefixes = transport.max_prefixes;
+
+        let session_id = self.allocate_session_id();
+        let handle = PeerHandle::spawn_with_identity_and_lifecycle(
+            transport.clone(),
+            self.metrics.clone(),
+            self.rib_tx.clone(),
+            import_policy.clone(),
+            export_policy.clone(),
+            Some(self.session_notify_tx.clone()),
+            Some(self.session_notification_event_tx.clone()),
+            Some(self.session_lifecycle_tx.clone()),
+            self.bmp_tx.clone(),
+            self.validation_rx.clone(),
+            false,
+            SessionIdentity::primary(session_id),
+        );
+
+        if let Err(e) = handle.start().await {
+            warn!(%address, error = %e, "failed to start peer session");
+            return Err(format!("failed to start peer: {e}"));
+        }
+
+        info!(%address, %remote_asn, "peer added dynamically");
+        self.peers.insert(
+            address,
+            ManagedPeer {
+                handle,
+                session_id,
+                remote_asn,
+                description,
+                peer_group,
+                enabled: true,
+                hold_time,
+                max_prefixes,
+                transport_config: transport,
+                import_policy,
+                export_policy,
+                pending_inbound: None,
+                is_dynamic: false,
+                pending_refresh: false,
+                pending_export_apply: false,
+                advertise_graceful_shutdown: false,
+            },
+        );
+
+        if let Some(next_config) = next_config {
+            self.current_config = next_config;
+        }
+
+        Ok(())
+    }
+
+    pub(super) async fn delete_peer(
+        &mut self,
+        address: IpAddr,
+        sync_config_snapshot: bool,
+    ) -> Result<(), String> {
+        self.delete_peer_checked(address, sync_config_snapshot, None)
+            .await
+    }
+
+    pub(super) async fn delete_peer_for_reconfigure(
+        &mut self,
+        address: IpAddr,
+        next_tcp_ao: Option<&TcpAoConfig>,
+    ) -> Result<(), String> {
+        self.delete_peer_checked(address, false, next_tcp_ao).await
+    }
+
+    pub(super) async fn delete_peer_checked(
+        &mut self,
+        address: IpAddr,
+        sync_config_snapshot: bool,
+        next_tcp_ao: Option<&TcpAoConfig>,
+    ) -> Result<(), String> {
+        let current_tcp_ao = self
+            .peers
+            .get(&address)
+            .and_then(|managed| managed.transport_config.tcp_ao.as_ref())
+            .cloned();
+        if current_tcp_ao
+            .as_ref()
+            .is_some_and(|current| next_tcp_ao != Some(current))
+        {
+            return Err(format!(
+                "peer {address} uses TCP-AO; removing protected peers requires restart until listener MKT deletion is implemented"
+            ));
+        }
+
+        let managed = self
+            .peers
+            .remove(&address)
+            .ok_or_else(|| format!("peer {address} not found"))?;
+
+        match managed.handle.shutdown().await {
+            Ok(Ok(())) => info!(%address, "peer deleted"),
+            Ok(Err(e)) => warn!(%address, error = %e, "peer shutdown error during delete"),
+            Err(e) => error!(%address, error = %e, "peer task join error during delete"),
+        }
+
+        if sync_config_snapshot {
+            apply_config_event(
+                &mut self.current_config,
+                &ConfigEvent::NeighborDeleted(address),
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    }
+
+    pub(super) async fn enable_peer(&mut self, address: IpAddr) -> Result<(), String> {
+        let managed = self
+            .peers
+            .get_mut(&address)
+            .ok_or_else(|| format!("peer {address} not found"))?;
+        managed.enabled = true;
+        managed
+            .handle
+            .start()
+            .await
+            .map_err(|e| format!("failed to start peer: {e}"))?;
+        self.publish_peer_lifecycle_event(
+            address,
+            SessionLifecycleEventType::PeerEnabled,
+            format!("peer {address} enabled"),
+        );
+        info!(%address, "peer enabled");
+        Ok(())
+    }
+
+    pub(super) async fn disable_peer(
+        &mut self,
+        address: IpAddr,
+        reason: Option<bytes::Bytes>,
+    ) -> Result<(), String> {
+        let pending = {
+            let managed = self
+                .peers
+                .get_mut(&address)
+                .ok_or_else(|| format!("peer {address} not found"))?;
+            managed.enabled = false;
+            managed.pending_inbound.take()
+        };
+        if let Some(pending) = pending {
+            let _ = pending.handle.shutdown().await;
+        }
+        let managed = self
+            .peers
+            .get_mut(&address)
+            .ok_or_else(|| format!("peer {address} not found"))?;
+        managed
+            .handle
+            .stop(reason)
+            .await
+            .map_err(|e| format!("failed to stop peer: {e}"))?;
+        self.publish_peer_lifecycle_event(
+            address,
+            SessionLifecycleEventType::PeerDisabled,
+            format!("peer {address} disabled"),
+        );
+        info!(%address, "peer disabled");
+        Ok(())
+    }
+
+    /// RFC 8326 graceful-shutdown initiator: toggle `GRACEFUL_SHUTDOWN`
+    /// community attachment for one peer (`Some(addr)`) or every
+    /// currently-managed peer (`None`).
+    ///
+    /// Three-step per-peer sequence so the toggle is observable on the
+    /// wire AND survives session restart:
+    ///
+    /// 1. **Update desired state on `ManagedPeer`** — survives session
+    ///    restart so a flap mid-maintenance doesn't silently drop the
+    ///    toggle.
+    /// 2. **Send the live-session command** — flips the per-session
+    ///    bool; the next outbound advertise carries (or stops carrying)
+    ///    the community.
+    /// 3. **Issue `RibUpdate::RefreshPeerOutbound`** — forces re-emission
+    ///    of routes already in `AdjRibOut` so the wire form updates
+    ///    immediately. Without this, an operator running
+    ///    `rustbgpctl gshut` against an Established session with active
+    ///    routes would see no change until something else triggered a
+    ///    re-advertise.
+    ///
+    /// `Some(addr)` for a missing peer surfaces as `SetGshutError::PeerNotFound`
+    /// so callers can distinguish that from a session/RIB failure.
+    /// Per-peer dispatch failures aggregate into `Internal`. The
+    /// authoritative state is updated even when the live-session
+    /// command or refresh fails — the toggle takes effect on the next
+    /// session spawn regardless.
+    pub(super) async fn set_graceful_shutdown(
+        &mut self,
+        address: Option<IpAddr>,
+        enabled: bool,
+    ) -> Result<(), SetGshutError> {
+        let targets: Vec<IpAddr> = match address {
+            Some(addr) => {
+                if !self.peers.contains_key(&addr) {
+                    return Err(SetGshutError::PeerNotFound(addr));
+                }
+                vec![addr]
+            }
+            None => self.peers.keys().copied().collect(),
+        };
+
+        let mut failures: Vec<String> = Vec::new();
+        for addr in &targets {
+            // (1) Update authoritative state on ManagedPeer so it
+            // survives session restart.
+            if let Some(managed) = self.peers.get_mut(addr) {
+                managed.advertise_graceful_shutdown = enabled;
+            } else {
+                // Peer disappeared between snapshot and dispatch; rare
+                // (would require concurrent removal in this same
+                // task). Skip silently.
+                continue;
+            }
+
+            // (2) Tell the live session — best-effort. If the session
+            // task is wedged or already restarting, the new session
+            // will pick up the toggle from ManagedPeer at spawn time.
+            if let Some(managed) = self.peers.get(addr)
+                && let Err(e) = managed
+                    .handle
+                    .update_graceful_shutdown_timeout(enabled, PEER_POLICY_UPDATE_TIMEOUT)
+                    .await
+            {
+                warn!(
+                    %addr,
+                    enabled,
+                    error = %e,
+                    "failed to toggle graceful-shutdown on live peer session — \
+                     desired state stored, will apply on next session"
+                );
+                failures.push(format!("{addr}: session: {e}"));
+                continue;
+            }
+
+            // (3) Force re-emission of already-advertised routes so
+            // the toggle is visible on the wire without waiting for
+            // an unrelated RIB event. RIB ignores peers not yet
+            // registered for outbound (newly added, not Established
+            // yet) — that's fine, the next PeerUp will emit fresh.
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if let Err(e) = self
+                .rib_tx
+                .send(RibUpdate::RefreshPeerOutbound {
+                    peer: *addr,
+                    reply: reply_tx,
+                })
+                .await
+            {
+                warn!(%addr, error = %e, "failed to send RIB refresh after gshut toggle");
+                failures.push(format!("{addr}: rib send: {e}"));
+                continue;
+            }
+            match reply_rx.await {
+                Err(_) => {
+                    warn!(%addr, "RIB dropped reply for gshut refresh");
+                    failures.push(format!("{addr}: rib reply dropped"));
+                }
+                Ok(Err(e)) => {
+                    // "peer X not registered for outbound updates" is
+                    // expected for peers not yet Established — log at
+                    // debug, not as a failure.
+                    debug!(
+                        %addr, error = %e,
+                        "RIB declined refresh (peer likely not yet Established) — \
+                         desired state stored, will apply on next PeerUp"
+                    );
+                }
+                Ok(Ok(())) => {}
+            }
+        }
+
+        if failures.is_empty() {
+            info!(
+                count = targets.len(),
+                enabled, "RFC 8326 graceful-shutdown toggled on peer set"
+            );
+            Ok(())
+        } else {
+            Err(SetGshutError::Internal(format!(
+                "graceful-shutdown toggle had failures on {} of {} peers (desired \
+                 state stored regardless): {}",
+                failures.len(),
+                targets.len(),
+                failures.join("; ")
+            )))
+        }
+    }
+
+    pub(super) async fn soft_reset_in(
+        &self,
+        address: IpAddr,
+        families: Vec<(Afi, Safi)>,
+    ) -> Result<(), String> {
+        let managed = self
+            .peers
+            .get(&address)
+            .ok_or_else(|| format!("not found: peer {address}"))?;
+
+        // Determine which families to request refresh for
+        let target_families = if families.is_empty() {
+            // All configured families for this peer
+            managed.transport_config.peer.families.clone()
+        } else {
+            families
+        };
+
+        for (afi, safi) in &target_families {
+            if let Err(e) = managed.handle.send_route_refresh(*afi, *safi).await {
+                warn!(%address, error = %e, "failed to send route refresh");
+                return Err(format!("send failed: route refresh to {address}: {e}"));
+            }
+        }
+
+        info!(%address, families = ?target_families, "soft reset in requested");
+        Ok(())
+    }
+}
