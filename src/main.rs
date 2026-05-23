@@ -1249,6 +1249,10 @@ impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
             if is_ip_vrf_relink_plan(plan) {
                 return self.converge_ip_vrf_relink(current, candidate, plan);
             }
+            // Teardown + pure relink (both routed above) own reference changes.
+            // For every other route, reject a relink mixed into the request so it
+            // can't diverge the dataplane (ES path) or apply unvalidated.
+            validate_no_unexpected_relink(current, candidate, plan)?;
             if plan.evpn_instances.has_changes() {
                 if plan.evpn_instances.added.is_empty()
                     && !plan.evpn_instances.deleted.is_empty()
@@ -1524,6 +1528,46 @@ fn validate_ip_vrf_relink(
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
             "ApplyEvpnRuntime ip_vrf relink converge requires an IP-VRF link reference change",
         ));
+    }
+    Ok(())
+}
+
+/// Central guard for the fourth change signal. `ip_vrf_references_changed` (an
+/// L2VNI's `ip_vrf` link moving) is not one of the three row changesets the
+/// single-shape validators gate on, so without this a relink could be silently
+/// composed with any row shape — e.g. an ES change would commit the candidate
+/// but never republish `ip_vrfs`, diverging the dataplane from the committed
+/// model. The invariant: a pure relink and atomic tenant teardown own reference
+/// changes on their own paths (both routed before this); a row-shape change may
+/// only carry the link delta intrinsic to its own added/deleted L2VNIs. Any
+/// other relinked VNI is a mixed-in relink and is rejected.
+fn validate_no_unexpected_relink(
+    current: &rustbgpd_evpn::EvpnRuntimeModel,
+    candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
+    plan: &rustbgpd_evpn::EvpnRuntimePlan,
+) -> Result<(), DaemonEvpnRuntimeConvergeError> {
+    if !plan.ip_vrf_references_changed {
+        return Ok(());
+    }
+    let touched: std::collections::BTreeSet<rustbgpd_evpn::EvpnInstanceId> = plan
+        .evpn_instances
+        .added
+        .iter()
+        .chain(plan.evpn_instances.deleted.iter())
+        .filter_map(|raw| rustbgpd_evpn::EvpnInstanceId::new(*raw).ok())
+        .collect();
+    let current_links = current.ip_vrfs().l2vni_link_map();
+    let candidate_links = candidate.ip_vrfs().l2vni_link_map();
+    let mut vnis: std::collections::BTreeSet<rustbgpd_evpn::EvpnInstanceId> =
+        current_links.keys().copied().collect();
+    vnis.extend(candidate_links.keys().copied());
+    for vni in vnis {
+        if current_links.get(&vni) != candidate_links.get(&vni) && !touched.contains(&vni) {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "ApplyEvpnRuntime: L2VNI {vni} `ip_vrf` link change (relink) is mixed into another \
+                 runtime change; apply the relink as a separate request"
+            )));
+        }
     }
     Ok(())
 }
@@ -4861,6 +4905,45 @@ table_id = 5001
 "#
     }
 
+    // The relink fixtures' two IP-VRFs with no L2VNI — a baseline for adding a
+    // linked L2VNI (the reference delta the central relink guard must allow).
+    fn ip_vrfs_blue_green_runtime_candidate_toml() -> &'static str {
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+
+[[evpn_ip_vrfs]]
+name = "tenant-green"
+vni = 5001
+rd = "65000:5001"
+route_targets = ["65000:5001"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:02"
+vrf_device = "vrf-green"
+l3vxlan_device = "vni5001"
+table_id = 5001
+"#
+    }
+
     fn ip_vrf_redefined_runtime_candidate_toml() -> &'static str {
         r#"
 [global]
@@ -5590,6 +5673,52 @@ table_id = 6000
             message.contains("no L2VNI / IP-VRF / Ethernet Segment row changes"),
             "unexpected error message: {message}"
         );
+    }
+
+    #[test]
+    fn validate_no_unexpected_relink_rejects_relink_outside_add_delete() {
+        // A relinked VNI that is neither added nor deleted (the dispatcher only
+        // reaches this guard for non-pure-relink, non-teardown plans) is a relink
+        // mixed into another change — e.g. ES change + relink, which would
+        // otherwise commit but never republish ip_vrfs and diverge the dataplane.
+        let current = runtime_model_from_candidate_toml(relink_blue_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(relink_green_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        assert!(plan.ip_vrf_references_changed);
+        assert!(plan.evpn_instances.added.is_empty() && plan.evpn_instances.deleted.is_empty());
+
+        let error = validate_no_unexpected_relink(&current, &candidate, &plan).unwrap_err();
+        let DaemonEvpnRuntimeConvergeError::Unsupported(message) = error else {
+            panic!("expected unsupported error, got {error:?}");
+        };
+        assert!(
+            message.contains("relink") && message.contains("separate request"),
+            "unexpected error message: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_no_unexpected_relink_allows_linked_l2vni_add() {
+        // Adding an L2VNI that links an IP-VRF is the reference delta intrinsic to
+        // that add (the VNI is in evpn_instances.added), so the guard must allow
+        // it — otherwise building up a linked tenant would fail closed.
+        let current =
+            runtime_model_from_candidate_toml(ip_vrfs_blue_green_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(relink_blue_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        assert_eq!(plan.evpn_instances.added, vec![100]);
+        assert!(plan.ip_vrf_references_changed);
+
+        validate_no_unexpected_relink(&current, &candidate, &plan).unwrap();
+    }
+
+    #[test]
+    fn validate_no_unexpected_relink_noop_when_references_unchanged() {
+        let current = runtime_model_from_candidate_toml(relink_blue_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(relink_blue_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        assert!(!plan.ip_vrf_references_changed);
+        validate_no_unexpected_relink(&current, &candidate, &plan).unwrap();
     }
 
     #[tokio::test]

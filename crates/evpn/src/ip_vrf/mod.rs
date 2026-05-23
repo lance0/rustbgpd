@@ -297,6 +297,21 @@ impl IpVrfTable {
             || self.referenced_l2vnis != other.referenced_l2vnis
     }
 
+    /// Invert the reference metadata into a per-L2VNI link map (`VNI -> IP-VRF
+    /// name`). Each L2VNI links to at most one IP-VRF (`[[evpn_instances]].ip_vrf`
+    /// is a single name), so this is well-defined. Used to tell which specific
+    /// L2VNIs were relinked between a committed model and a candidate.
+    #[must_use]
+    pub fn l2vni_link_map(&self) -> BTreeMap<EvpnInstanceId, String> {
+        let mut map = BTreeMap::new();
+        for (name, vnis) in &self.referenced_l2vnis {
+            for vni in vnis {
+                map.insert(*vni, name.clone());
+            }
+        }
+        map
+    }
+
     /// Mark an IP-VRF as referenced by one L2VNI. Idempotent.
     pub fn mark_referenced_by_l2vni(&mut self, name: String, vni: EvpnInstanceId) {
         self.referenced_names.insert(name.clone());

@@ -185,7 +185,9 @@ silently advance the live EVPN runtime model.
   segment), which each drain and re-derive the content-changed VNI. Because the
   dataplane diff reads every per-VNI field, redefine is the surface that finally
   makes `apply_aliasing_ecmp` runtime-drivable via the standard
-  `FdbNhg → SingleDst` transition. `ip_vrf` relink stays fail closed.
+  `FdbNhg → SingleDst` transition. A standalone `ip_vrf` relink commits live on
+  its own dataplane-only path (see above); a relink combined with a redefine in
+  one request stays fail closed.
 - IP-VRF redefine republishes the candidate IP-VRF table to the dataplane
   supervisor and Type 5 originator when the operator changes route/policy/egress
   fields (`rd`, `route_targets`, `local_vtep_ip`, `router_mac`) but keeps the
