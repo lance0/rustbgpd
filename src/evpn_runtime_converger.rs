@@ -3,7 +3,7 @@
 //! Owns the command-driven convergence of the live daemon to a validated
 //! candidate EVPN runtime model: the per-shape `converge_*` functions, the
 //! shape detectors and validators, the rollback ladder, and the gRPC apply
-//! entry point. Extracted verbatim from `src/main.rs`; see ADR-0063.
+//! entry point. Extracted from `src/main.rs`; see ADR-0063.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -1435,11 +1435,6 @@ fn validate_l2vni_delete_ip_vrf_metadata(
     Ok(())
 }
 
-/// Whether `plan` is an atomic tenant teardown — a delete-only mutation that
-/// the single-shape converters cannot handle (multi-element, cross-resource,
-/// an ES-member L2VNI delete, or a still-referenced IP-VRF delete). Clean
-/// single-element non-ES, non-referenced deletes return `false` so they keep
-/// routing to the existing single-shape delete converters.
 /// True when the plan is a pure `ip_vrf` relink: the L2VNI->IP-VRF reference
 /// metadata changed but no IP-VRF / L2VNI / Ethernet Segment row did. Routed
 /// before the row-changeset blocks; teardown is classified first so a delete
@@ -1515,6 +1510,11 @@ fn validate_no_unexpected_relink(
     Ok(())
 }
 
+/// Whether `plan` is an atomic tenant teardown — a delete-only mutation that
+/// the single-shape converters cannot handle (multi-element, cross-resource,
+/// an ES-member L2VNI delete, or a still-referenced IP-VRF delete). Clean
+/// single-element non-ES, non-referenced deletes return `false` so they keep
+/// routing to the existing single-shape delete converters.
 fn is_tenant_teardown_plan(
     plan: &rustbgpd_evpn::EvpnRuntimePlan,
     current: &rustbgpd_evpn::EvpnRuntimeModel,
@@ -1813,7 +1813,7 @@ fn validate_single_ip_vrf_delete(
     }
     if current.ip_vrfs().is_referenced(&deleted_name) {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
-            "IP-VRF {deleted_name:?} is referenced by an L2VNI; linked IP-VRF delete is not supported yet"
+            "IP-VRF {deleted_name:?} is referenced by an L2VNI; delete it together with the referencing L2VNI(s) (atomic tenant teardown) or after removing the reference"
         )));
     }
 
