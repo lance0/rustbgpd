@@ -6019,6 +6019,57 @@ originator_ip = "10.0.0.100"
 }
 
 #[test]
+fn ethernet_segment_rejects_df_dont_preempt_with_highest_random_weight() {
+    // DP is meaningless for HRW too — only the preference algorithms carry it.
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+df_algorithm = "highest-random-weight"
+df_dont_preempt = true
+originator_ip = "10.0.0.100"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::InvalidEthernetSegment { .. }),
+        "expected InvalidEthernetSegment, got {err:?}"
+    );
+}
+
+#[test]
+fn ethernet_segment_accepts_df_dont_preempt_with_lowest_preference() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+df_algorithm = "lowest-preference"
+df_preference = 42
+df_dont_preempt = true
+originator_ip = "10.0.0.100"
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    let segments = config.resolve_ethernet_segments().unwrap();
+    assert_eq!(segments[0].df_algorithm, DfAlgorithm::LowestPreference);
+    assert!(segments[0].df_dont_preempt);
+}
+
+#[test]
 fn m49_interop_configs_describe_preference_df_with_dont_preempt() {
     // Pin the M49 interop fixtures: PE1 (pref 100, revertive) and PE2 (pref
     // 200, non-revertive) both run highest-preference. Guards the smoke against

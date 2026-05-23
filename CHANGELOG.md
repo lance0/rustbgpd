@@ -22,10 +22,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **EVPN DF election — RFC 9785 Don't-Preempt origination.**
   `[[ethernet_segments]].df_dont_preempt` (default `false`) makes a
   preference-DF PE advertise the RFC 9785 Don't-Preempt bit on its Type 4 ES
-  route's DF Election extended community, so a returning higher-preference PE
-  does not preempt the incumbent DF (non-revertive). Config rejects it for
-  non-preference algorithms (default-modulo / HRW). rustbgpd already read peers'
-  DP bit for tie-breaking; it now advertises its own. New interop smoke **M49**
+  route's DF Election extended community (the wire signal for non-revertive DF).
+  Config rejects it for non-preference algorithms (default-modulo / HRW). This
+  is origination + parse only: the DP bit is intentionally not an election
+  input (a stateless election cannot implement "don't preempt the incumbent");
+  stateful non-revertive election remains deferred. New interop smoke **M49**
   (`tests/interop/m49-evpn-preference-df.clab.yml`) proves preference-DF drives
   the cross-PE election (a 2-PE rustbgpd ES where the preference winner differs
   from the modulo winner).

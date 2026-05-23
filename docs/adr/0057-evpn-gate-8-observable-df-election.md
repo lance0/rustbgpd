@@ -52,10 +52,13 @@ The Gate 8 surface is:
   `HighestPreference` and `LowestPreference` with an explicit
   `df_preference` in the `0..=65535` range. Local Don't-Preempt
   origination shipped (`df_dont_preempt`, preference algorithms only —
-  the Type 4 DF Election extcomm carries DP=1); remote Don't-Preempt is
-  decoded and used as a tie-breaker for preference-DF election. Proactive
-  non-revertive failover (single-active backup-path pre-install) remains
-  deferred.
+  the Type 4 DF Election extcomm carries DP=1) and remote DP is decoded,
+  but the DP bit is intentionally NOT an election input: a stateless
+  `preference_winner` (preference, then lowest originator IP) has no
+  prior-DF/incumbent state, so it cannot implement RFC 9785 "don't preempt
+  the incumbent" — using DP as a static promotion key would make it
+  offensive extra preference weight. Stateful non-revertive election (and
+  single-active backup-path pre-install) remains deferred.
 - **Pure DF election state machine** in
   `crates/evpn/src/df_election.rs`: `DfElection::run` takes the
   candidate set + the local PE's originator IP and returns

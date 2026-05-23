@@ -1628,6 +1628,47 @@ mod tests {
     }
 
     #[test]
+    fn lowest_preference_df_election_extcomm_carries_dont_preempt_and_algorithm() {
+        let inst = instance(100);
+        let key = EvpnRouteKey::Es {
+            rd: rd(65000, 100),
+            esi: esi(0x25),
+            originator_ip: ipa("10.0.0.1"),
+        };
+        let route = build_es_route(
+            &inst,
+            &key,
+            MplsLabel::new(123),
+            DfAlgorithm::LowestPreference,
+            42,
+            true, // df_dont_preempt
+            RedundancyMode::AllActive,
+        );
+        let df = route
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(v) => Some(v.clone()),
+                _ => None,
+            })
+            .expect("ExtendedCommunities attribute present")
+            .iter()
+            .copied()
+            .find_map(ExtendedCommunity::as_df_election)
+            .expect("DF Election extcomm attached");
+        assert_eq!(
+            df.algorithm_id,
+            DfAlgorithm::LowestPreference.algorithm_id()
+        );
+        assert_eq!(df.capabilities, 0x8000, "RFC 9785 DP bit must be set");
+        assert_eq!(df.preference, Some(42));
+        let (_pref, dont_preempt, alg) =
+            decode_df_election_extcomm(&route.attributes).expect("decodes");
+        assert!(dont_preempt);
+        assert_eq!(alg, DfAlgorithm::LowestPreference);
+    }
+
+    #[test]
     fn default_modulo_type_4_es_route_omits_df_election_extcomm() {
         let inst = instance(100);
         let id = esi(0x22);
