@@ -60,11 +60,12 @@ architecture diagrams, example configs, and API workflows.
   DF/non-DF BUM suppression and aliasing ECMP with opt-out flags) but
   still **alpha**: VXLAN local-bias split-horizon remains the remaining
   all-active correctness gate (ASIC/offload-dependent on the Linux
-  softswitch — see ADR-0065); runtime EVPN model edits are partial
-  (`ApplyEvpnRuntime`
-  commits single L2VNI/IP-VRF/Ethernet-Segment add/delete/redefine and atomic
-  tenant teardown, while `ip_vrf` relink, L3VNI/device/table IP-VRF redefine, and
-  non-teardown mixed edits remain restart-required),
+  softswitch — see ADR-0065); the runtime EVPN model-edit surface
+  (`ApplyEvpnRuntime`) is alpha-complete — single
+  L2VNI/IP-VRF/Ethernet-Segment add/delete/redefine, atomic tenant teardown, and
+  `ip_vrf` relink commit live, while L3VNI/device/table IP-VRF identity changes
+  are restart-required by design and non-teardown mixed edits stay fail-closed
+  (apply each as a separate request);
   and MPLS / PBB / MVPN encapsulations are not implemented. See
   [docs/evpn-enablement.md](docs/evpn-enablement.md) for the shipped
   feature ladder

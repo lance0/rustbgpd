@@ -11,6 +11,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0063 EVPN runtime convergence — `ip_vrf` relink.**
+  `EvpnService.ApplyEvpnRuntime` now commits an L2VNI re-homed to a different
+  IP-VRF (or its `ip_vrf` link added/removed) at runtime. A relink edits no
+  IP-VRF/L2VNI/Ethernet-Segment row — the link lives only in the IP-VRF table's
+  reference metadata — so the plan now carries an `ip_vrf_references_changed`
+  signal (also surfaced in `ApplyEvpnRuntimeResponse.plan`) and converges
+  dataplane-only (the dataplane is the sole consumer of the link, for RFC 9135
+  overlay-index recursion; the RD is unchanged, so no Type 3 re-origination).
+- **EVPN DF election — RFC 9785 Don't-Preempt origination.**
+  `[[ethernet_segments]].df_dont_preempt` (default `false`) makes a
+  preference-DF PE advertise the RFC 9785 Don't-Preempt bit on its Type 4 ES
+  route's DF Election extended community, so a returning higher-preference PE
+  does not preempt the incumbent DF (non-revertive). Config rejects it for
+  non-preference algorithms (default-modulo / HRW). rustbgpd already read peers'
+  DP bit for tie-breaking; it now advertises its own. New interop smoke **M49**
+  (`tests/interop/m49-evpn-preference-df.clab.yml`) proves preference-DF drives
+  the cross-PE election (a 2-PE rustbgpd ES where the preference winner differs
+  from the modulo winner).
 - **ADR-0063 EVPN runtime convergence — atomic tenant teardown.**
   `EvpnService.ApplyEvpnRuntime` now commits a delete-only tenant teardown: a
   plan that drops an Ethernet-Segment-member L2VNI together with its Ethernet
@@ -41,8 +59,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   actor now treats watched member-instance content changes as a Type 1/4
   rebuild trigger, withdrawing old-RD Type 4 / EAD-per-ES / EAD-per-EVI routes
   and originating the candidate route identity while keeping the ESI label
-  stable. `ip_vrf` relink and non-teardown mixed edits remain fail-closed under
-  [#210](https://github.com/lance0/rustbgpd/issues/210).
+  stable. (Standalone `ip_vrf` relink commits live on its own path — see
+  above; only non-teardown mixed edits and L3VNI/device/table IP-VRF identity
+  changes remain non-live under
+  [#210](https://github.com/lance0/rustbgpd/issues/210).)
 - **EVPN DF election — RFC 9785 Highest-/Lowest-Preference.**
   `[[ethernet_segments]].df_algorithm` now accepts `"highest-preference"`
   and `"lowest-preference"` with `df_preference` in the RFC 9785
@@ -101,8 +121,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   segment actor, which drain and re-derive the content-changed VNI; rollback
   unwinds on partial failure. This makes `apply_aliasing_ecmp` runtime-drivable
   via the dataplane `FdbNhg → SingleDst` transition (SIGHUP stays
-  restart-required). `ip_vrf` relink, mixed, and multi-element edits remain
-  fail-closed under
+  restart-required). Multi-element edits now commit live as atomic tenant
+  teardown (and `ip_vrf` relink on its own path); only non-teardown mixed edits
+  and L3VNI/device/table IP-VRF identity changes remain non-live under
   [#210](https://github.com/lance0/rustbgpd/issues/210).
 
 ## [0.27.0] — 2026-05-22

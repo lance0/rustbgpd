@@ -50,9 +50,12 @@ The Gate 8 surface is:
   `32768`; the HRW follow-up additionally accepts
   `HighestRandomWeight`; the RFC 9785 follow-up accepts
   `HighestPreference` and `LowestPreference` with an explicit
-  `df_preference` in the `0..=65535` range. Local Don't-Preempt /
-  non-revertive behavior remains deferred, while remote Don't-Preempt
-  is decoded and used as a tie-breaker for preference-DF election.
+  `df_preference` in the `0..=65535` range. Local Don't-Preempt
+  origination shipped (`df_dont_preempt`, preference algorithms only —
+  the Type 4 DF Election extcomm carries DP=1); remote Don't-Preempt is
+  decoded and used as a tie-breaker for preference-DF election. Proactive
+  non-revertive failover (single-active backup-path pre-install) remains
+  deferred.
 - **Pure DF election state machine** in
   `crates/evpn/src/df_election.rs`: `DfElection::run` takes the
   candidate set + the local PE's originator IP and returns

@@ -1,19 +1,22 @@
 # ADR-0063: EVPN runtime instance mutation semantics
 
-**Status:** Accepted; partially implemented — single L2VNI add, single L2VNI
+**Status:** Accepted; **alpha-complete** — single L2VNI add, single L2VNI
 delete when the VNI is not an Ethernet Segment member, single L2VNI redefine
 including Ethernet Segment members when `ip_vrf` link metadata is unchanged,
 single IP-VRF add, single standalone IP-VRF delete, single IP-VRF redefine with
 unchanged L3VNI/device/table identity, single Ethernet Segment
-add/delete/redefine, and atomic tenant teardown — a delete-only plan that drops
-an ES-member L2VNI together with its Ethernet Segment (delete or member-shrink)
-and/or a linked IP-VRF in one pass — commit live via
-`EvpnService.ApplyEvpnRuntime`; ES add/redefine can bind member VNIs added by a
-prior live L2VNI add when the segment actor already exists. L3VNI/device/table
-IP-VRF redefine, `ip_vrf` relink, and non-teardown mixed edits (an add combined
-with a delete or redefine in the same request) still fail closed (remaining
-shapes tracked in [#210](https://github.com/lance0/rustbgpd/issues/210)).
-**Date:** 2026-05-17 (implementation in progress through v0.27.0)
+add/delete/redefine, atomic tenant teardown (a delete-only plan that drops an
+ES-member L2VNI together with its Ethernet Segment (delete or member-shrink)
+and/or a linked IP-VRF in one pass), and `ip_vrf` relink (an L2VNI re-homed to a
+different IP-VRF) commit live via `EvpnService.ApplyEvpnRuntime`; ES add/redefine
+can bind member VNIs added by a prior live L2VNI add when the segment actor
+already exists. Two shapes remain non-live, by design: **L3VNI/device/table
+IP-VRF identity changes** are restart-required (kernel VRF lifecycle —
+`router_mac` is still live-redefinable), and **non-teardown mixed edits** (an add
+combined with a delete/redefine in one request) fail closed with a
+"split the request" error pending a generalized converge-to-candidate follow-up
+([#210](https://github.com/lance0/rustbgpd/issues/210)).
+**Date:** 2026-05-17 (implementation completed through v0.27.0)
 
 ## Context
 
@@ -130,7 +133,22 @@ consumer — withdraws the committed route before originating the candidate one
 scoped to instances with an unchanged `ip_vrf` link. If the redefined VNI is an
 Ethernet Segment member, the segment actor drains and rebuilds Type 4,
 EAD-per-ES, and EAD-per-EVI routes under the candidate route identity while
-retaining the stable ESI label; `ip_vrf` relink remains fail-closed under #210.
+retaining the stable ESI label. An `ip_vrf` relink (the link itself moving) is a
+separate, dataplane-only shape — see below.
+
+### `ip_vrf` relink
+
+Moving an L2VNI's `ip_vrf` link to a different IP-VRF (or adding/removing it)
+edits no IP-VRF/L2VNI/Ethernet-Segment row — the link lives only in the IP-VRF
+table's reference metadata (`referenced_l2vnis`). So a pure relink produces empty
+row changesets; the plan carries a dedicated `ip_vrf_references_changed` signal
+(also surfaced in `ApplyEvpnRuntimeResponse.plan`, so the apply does not read as
+an empty no-op) that the coordinator's `is_noop` check honors. The link drives
+only the dataplane's RFC 9135 §9.2 overlay-index recursion gateway resolution, so
+convergence is dataplane-only: republish the candidate IP-VRF table to the
+dataplane. The RD is unchanged, so there is no Type 3 re-origination; the Type 2
+originator / SVI / segment do not read the link. A relink *combined* with a row
+redefine in one request stays fail-closed.
 
 ### API shape
 
@@ -202,10 +220,14 @@ silently advance the live EVPN runtime model.
   the only added primitive is the segment actor emitting Type 1/4 withdraws for a
   member VNI whose instance has already been removed (a withdraw needs only the
   route key, not the reference instance's path attributes).
-- `ip_vrf` relink, L3VNI/device/table IP-VRF redefine, and non-teardown mixed
-  edits (an add combined with a delete or redefine in the same request) are still
-  validated as pure fail-closed plans; their live convergence is the remaining
-  work in [#210](https://github.com/lance0/rustbgpd/issues/210).
+- `ip_vrf` relink now commits live (dataplane-only, see above). The two shapes
+  that remain non-live are by design: **L3VNI/device/table IP-VRF identity
+  changes** stay restart-required (a kernel VRF lifecycle operation — a runtime
+  drain/recreate would risk a dual-state window; `router_mac` is still
+  live-redefinable), and **non-teardown mixed edits** (an add combined with a
+  delete/redefine in one request) fail closed with an operator-actionable
+  "apply each as a separate request" error, pending a generalized
+  converge-to-candidate follow-up ([#210](https://github.com/lance0/rustbgpd/issues/210)).
 - Issue #133 (design) is resolved and closed; the remaining implementation is
   tracked in #210.
 

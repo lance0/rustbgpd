@@ -1674,10 +1674,14 @@ kernel-side ECMP); other L2VNIs in the same daemon are unaffected.
 — config reload reverts instance-table edits — so flipping
 `apply_aliasing_ecmp` or any other instance field requires a daemon
 restart to take effect. ADR-0063's `EvpnService.ApplyEvpnRuntime`
-coordinator can live-commit the supported add/delete/ES shapes, but
-L2VNI redefine, including field flips such as `apply_aliasing_ecmp`,
-still fails closed and remains tracked in
-<https://github.com/lance0/rustbgpd/issues/210>. SIGHUP remains
+coordinator live-commits single L2VNI/IP-VRF/Ethernet-Segment
+add/delete/redefine (a redefine, including field flips such as
+`apply_aliasing_ecmp`, re-derives the per-VNI state via the
+`FdbNhg → SingleDst` dataplane transition), atomic tenant teardown, and
+`ip_vrf` relink. L3VNI/device/table IP-VRF identity changes are
+restart-required by design, and non-teardown mixed edits (an add combined
+with a delete/redefine) fail closed — apply each as a separate request
+(<https://github.com/lance0/rustbgpd/issues/210>). SIGHUP remains
 restart-required for EVPN table edits.
 
 **Restart edge case**: if you flip `apply_aliasing_ecmp = false` and
@@ -1711,7 +1715,8 @@ originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 ori
 | `esi`           | string   | yes      | --            | 10-byte non-zero ESI in colon-separated hex (RFC 7432 §5). The all-zero Type 0 single-homed sentinel is rejected; non-zero Type 0 and Types 1–5 are accepted. |
 | `member_vnis`   | u32[]    | yes      | --            | L2VNIs this segment is reachable on. Each must match a configured `[[evpn_instances]].vni` |
 | `df_preference` | u32      | no       | `32768`       | RFC 9785 preference value for `"highest-preference"` / `"lowest-preference"` (`0..=65535`). Default-modulo and HRW ignore preference, so only the default is accepted for those algorithms |
-| `df_algorithm`  | string   | no       | `"default-modulo"` | `"default-modulo"` (RFC 7432 §8.5 service carving), `"highest-random-weight"` (RFC 8584 §3.2), `"highest-preference"` or `"lowest-preference"` (RFC 9785). Local Don't-Preempt / non-revertive behavior remains deferred |
+| `df_algorithm`  | string   | no       | `"default-modulo"` | `"default-modulo"` (RFC 7432 §8.5 service carving), `"highest-random-weight"` (RFC 8584 §3.2), `"highest-preference"` or `"lowest-preference"` (RFC 9785) |
+| `df_dont_preempt` | bool   | no       | `false`       | RFC 9785 Don't-Preempt (non-revertive): when `true`, advertise DP=1 in the Type 4 DF Election extcomm so a returning higher-preference PE does not preempt the incumbent DF. Only valid with `"highest-preference"` / `"lowest-preference"` — rejected for default-modulo / HRW. (Proactive sub-second backup-path pre-install is a follow-up.) |
 | `redundancy_mode` | string | no       | `"all-active"` | `"all-active"` sets the ESI Label extcomm Single-Active flag to 0 and allows receiver-side aliasing ECMP. `"single-active"` sets the flag to 1 and suppresses all-active aliasing ECMP for remote single-active ES reachability; backup-path pre-install is a follow-up |
 | `originator_ip` | string   | yes      | --            | Source IP carried in Type 1/4 origination. Usually equals a member VNI's `local_vtep_ip` |
 
