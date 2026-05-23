@@ -156,7 +156,15 @@ for the EVPN gate ladder.
 | Stale route demotion (GR) | Yes | Yes | Yes | Yes | Yes |
 | RPKI preference | Yes | Yes | Yes | Yes | Yes |
 | AIGP | No | Yes | No | Yes | No |
-| Multipath/ECMP | Partial | Yes | Yes | Yes | Yes |
+| Multipath/ECMP | Partial[^multipath] | Yes | Yes | Yes | Yes |
+
+[^multipath]: Add-Path multi-path *send* (RFC 7911, route-server mode) and
+    EVPN aliasing ECMP (ADR-0059 FDB nexthop groups, default-on) are
+    shipped. Classic unicast multipath best-path with multi-nexthop ECMP
+    FIB install (`maximum-paths`-style forwarding load-balancing) is not
+    yet implemented — best-path selects a single path and the FIB programs
+    one next-hop per prefix. Tracked as future work (ROADMAP P0, ADR-0061
+    FIB hardening).
 
 ## Memory (200k prefixes, bgperf2)
 
