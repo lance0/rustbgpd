@@ -207,6 +207,23 @@ jobs:
           topology: tests/interop/m39b-evpn-auto-rt-frr.clab.yml
           script: tests/interop/scripts/test-m39b-evpn-auto-rt-frr.sh
 
+  m48:
+    name: M48 — EVPN runtime tenant teardown over kernel L3 datapath (FRR 10.3.1)
+    runs-on: [self-hosted, linux, kernel-dataplane]
+    needs: build-image
+    environment:
+      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run M48 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M48
+          topology: tests/interop/m48-evpn-tenant-teardown-datapath.clab.yml
+          script: tests/interop/scripts/test-m48-evpn-tenant-teardown-datapath.sh
+
   m40:
     name: M40 — ADR-0059 aliasing dataplane ECMP (FRR EVPN-MH 10.3.1)
     runs-on: [self-hosted, linux, kernel-dataplane]

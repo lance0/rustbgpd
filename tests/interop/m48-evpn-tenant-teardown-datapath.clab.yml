@@ -1,0 +1,76 @@
+# Containerlab topology: rustbgpd PE1 ↔ FRR PE2, runtime EVPN tenant
+# teardown over the kernel L3 datapath (M48 — ADR-0063 / #210)
+#
+# Builds on the M39 symmetric Interface-less IRB datapath (RFC 9136
+# §4.4.2) and adds the runtime teardown leg that M47 (control-plane)
+# cannot exercise: dropping a *linked* IP-VRF together with its L2VNI in
+# one ApplyEvpnRuntime pass, and proving the Type 5 withdraws from FRR
+# and the imported kernel L3 route drains on PE1.
+#
+# PE1 boots the M39 vrf1 / L3VNI 100 datapath (kernel devices created by
+# start-rustbgpd-m39-pe1.sh) plus a bridge-less L2VNI 10 linked to vrf1.
+# PE1 originates Type 5 (192.0.2.0/24 from vrf1's kernel route) + Type 3
+# IMET (L2VNI 10); PE2 (FRR) originates Type 5 (198.51.100.0/24) which
+# PE1 imports into vrf1's kernel table. The driver then drives
+# EvpnService/ApplyEvpnRuntime with a candidate that drops the whole
+# tenant and asserts every tenant route + kernel L3 row drains.
+#
+# Requires CAP_NET_ADMIN + the kernel `vrf`/`vxlan` modules, same as M39
+# — runs on the self-hosted kernel-dataplane runner, not hosted CI.
+#
+# Topology:
+#   PE1 (rustbgpd)              PE2 (FRR 10.3.1)
+#   10.0.0.1, AS 65000          10.0.0.2, AS 65000
+#       └─── iBGP L2VPN/EVPN ────────┘
+#   vrf1 / L3VNI 100             vrf1 / L3VNI 100
+#   L2VNI 10 (linked vrf1)       advertises 198.51.100.0/24
+#   advertises 192.0.2.0/24
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m48-evpn-tenant-teardown-datapath.clab.yml
+#   bash tests/interop/scripts/test-m48-evpn-tenant-teardown-datapath.sh
+#   containerlab destroy -t tests/interop/m48-evpn-tenant-teardown-datapath.clab.yml
+
+name: m48-evpn-tenant-teardown-datapath
+
+topology:
+  nodes:
+    pe1:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m48-pe1.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-m39-pe1.sh:/usr/local/bin/start-rustbgpd-m39-pe1.sh:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+        - ./configs/rustbgpd-m48-teardown.toml:/etc/rustbgpd/teardown.toml:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug
+
+    pe2:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m39-pe2.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep-l3.sh:/usr/local/bin/start-frr-vtep-l3.sh:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-vtep-l3.sh 10.0.0.2 100 vrf1 198.51.100.1/24
+      env:
+        VTEP_LOOPBACK: 10.0.0.2
+        VTEP_VNI: "100"
+        TENANT_VRF: vrf1
+        TENANT_PREFIX: 198.51.100.1/24
+
+  links:
+    - endpoints: ["pe1:eth1", "pe2:eth1"]
+
+# Underlay 10.0.0.0/24. L3VNI 100 (vrf1) on both PEs; L2VNI 10 on PE1
+# linked to vrf1. PE1 tenant 192.0.2.1/24 on lo-vrf1 → Type 5; PE2
+# tenant 198.51.100.1/24 → Type 5 imported into PE1's vrf1 kernel table.
+# Teardown candidate: configs/rustbgpd-m48-teardown.toml (no EVPN state).

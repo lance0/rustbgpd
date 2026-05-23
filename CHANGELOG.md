@@ -24,9 +24,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (dataplane instances + IP-VRF metadata, SVI, Type 2 originator, segment, Type 5
   originator) with a rollback ladder that re-originates IMET on failure. The
   segment actor now emits Type 1/4 withdraws for a member VNI whose instance was
-  removed in the same pass. New interop smoke **M47**
-  (`tests/interop/m47-evpn-tenant-teardown.clab.yml`) drives the teardown over
-  gRPC against FRR on the self-hosted privileged-interop runner. Non-teardown
+  removed in the same pass. Two new interop smokes drive the teardown over gRPC
+  against FRR: **M47** (`tests/interop/m47-evpn-tenant-teardown.clab.yml`,
+  control-plane ES-member L2VNI + Ethernet Segment) and **M48**
+  (`tests/interop/m48-evpn-tenant-teardown-datapath.clab.yml`, a linked
+  L2VNI + IP-VRF teardown over the kernel L3 datapath, asserting the Type 5
+  withdraw and imported kernel-route drain). Non-teardown
   mixed edits (an add combined with a delete/redefine), `ip_vrf` relink, and
   L3VNI/device/table IP-VRF redefine remain fail-closed under
   [#210](https://github.com/lance0/rustbgpd/issues/210).

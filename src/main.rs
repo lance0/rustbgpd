@@ -6403,6 +6403,34 @@ table_id = 6000
         );
     }
 
+    #[test]
+    fn m48_interop_configs_describe_a_linked_ip_vrf_teardown() {
+        // Pin the M48 datapath interop fixtures: the booted PE config and the
+        // gRPC teardown candidate must parse through the real config loader and
+        // diff to an atomic tenant teardown of a linked L2VNI + IP-VRF (vrf1 is
+        // referenced by L2VNI 10, so dropping both routes through the teardown
+        // path rather than a standalone IP-VRF delete). Guards the smoke
+        // against drift in either the configs or the teardown classifier.
+        let current = runtime_model_from_candidate_toml(include_str!(
+            "../tests/interop/configs/rustbgpd-m48-pe1.toml"
+        ));
+        let candidate = runtime_candidate_from_toml(include_str!(
+            "../tests/interop/configs/rustbgpd-m48-teardown.toml"
+        ));
+        let plan = current.plan_candidate(&candidate);
+
+        assert_eq!(plan.evpn_instances.deleted, vec![10]);
+        assert_eq!(plan.ip_vrfs.deleted, vec!["vrf1".to_string()]);
+        assert!(is_tenant_teardown_plan(&plan, &current));
+
+        let deleted = validate_tenant_teardown(&current, &candidate, &plan).unwrap();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(
+            deleted[0].id,
+            rustbgpd_evpn::EvpnInstanceId::new(10).unwrap()
+        );
+    }
+
     #[tokio::test]
     async fn apply_evpn_runtime_tenant_teardown_commits() {
         let current =

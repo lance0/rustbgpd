@@ -1,0 +1,54 @@
+# M48 PE1 (rustbgpd) — runtime EVPN tenant teardown over the kernel L3
+# datapath (ADR-0063 / #210). Extends the M39 symmetric Interface-less
+# IRB PE1 with a linked L2VNI so the tenant spans both an L2VNI (Type 3
+# IMET) and an IP-VRF (Type 5 + kernel L3 FIB). The test driver later
+# tears the whole tenant down at runtime via ApplyEvpnRuntime and asserts
+# the Type 5 withdraws from FRR and the imported kernel L3 route drains.
+#
+# vrf1 (L3VNI 100) is the M39 IP-VRF; its kernel devices are created by
+# start-rustbgpd-m39-pe1.sh before the daemon boots. L2VNI 10 is linked
+# to vrf1 (`ip_vrf = "vrf1"`) and is bridge-less — the smoke asserts on
+# the advertised/withdrawn IMET, not on L2 forwarding, so no kernel
+# bridge is needed. The L2VNI's presence makes vrf1 a *referenced*
+# IP-VRF, so dropping both is an atomic tenant teardown rather than a
+# standalone IP-VRF delete.
+
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "pe2"
+hold_time = 180
+families = ["l2vpn_evpn"]
+
+[[evpn_instances]]
+vni = 10
+rd = "65000:10"
+route_targets = ["65000:10"]
+local_vtep_ip = "10.0.0.1"
+ip_vrf = "vrf1"
+
+[[evpn_ip_vrfs]]
+name = "vrf1"
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+router_mac = "02:00:00:00:01:01"
+vrf_device = "vrf1"
+l3vxlan_device = "l3vxlan100"
+table_id = 100
+
+[security.grpc]
+enforcement = "legacy"
