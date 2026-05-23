@@ -47,10 +47,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   control-plane ES-member L2VNI + Ethernet Segment) and **M48**
   (`tests/interop/m48-evpn-tenant-teardown-datapath.clab.yml`, a linked
   L2VNI + IP-VRF teardown over the kernel L3 datapath, asserting the Type 5
-  withdraw and imported kernel-route drain). Non-teardown
-  mixed edits (an add combined with a delete/redefine), `ip_vrf` relink, and
-  L3VNI/device/table IP-VRF redefine remain fail-closed under
-  [#210](https://github.com/lance0/rustbgpd/issues/210).
+  withdraw and imported kernel-route drain). `ip_vrf` relink also commits live
+  (see above); only non-teardown mixed edits (an add combined with a
+  delete/redefine) and L3VNI/device/table IP-VRF identity changes remain
+  non-live under [#210](https://github.com/lance0/rustbgpd/issues/210).
 - **ADR-0063 EVPN runtime convergence — ES-member L2VNI redefine.**
   `EvpnService.ApplyEvpnRuntime` can now commit exactly one redefined
   `[[evpn_instances]]` entry even when that VNI is an Ethernet Segment member,
@@ -104,10 +104,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   supervisor and Type 5 originator. The Type 5 originator now drains local
   prefixes for removed or redefined IP-VRFs before reconciling the candidate
   table, so local Type 5 routes are withdrawn under the old RD and replayed
-  under the new route attributes. L3VNI/device/table redefinition, linked
-  IP-VRF delete / tenant teardown, ES-aware L2VNI delete, `ip_vrf` relink,
-  mixed, and multi-element edits remain fail-closed
-  under [#210](https://github.com/lance0/rustbgpd/issues/210).
+  under the new route attributes. Linked IP-VRF delete / tenant teardown,
+  ES-aware L2VNI delete, and `ip_vrf` relink now commit live; only
+  L3VNI/device/table IP-VRF identity redefinition and non-teardown mixed edits
+  remain non-live under [#210](https://github.com/lance0/rustbgpd/issues/210).
 
 - **ADR-0063 EVPN runtime convergence — single L2VNI redefine.**
   `EvpnService.ApplyEvpnRuntime` can now commit exactly one redefined

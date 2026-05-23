@@ -1292,10 +1292,11 @@ actors, and then publishes the new committed generation. ES add/redefine can
 reference a member VNI that was added by an earlier live L2VNI add when the
 segment actor was already running; ES-member L2VNI redefine rebuilds Type 4 /
 EAD-per-ES / EAD-per-EVI routes from the candidate instance snapshot while
-retaining the stable ESI label. Every other non-noop shape — linked IP-VRF
-delete / tenant teardown, `ip_vrf` relink, L3VNI/device/table IP-VRF redefine,
-mixed L2VNI + IP-VRF edits,
-multi-element edits, ES-aware L2VNI delete, or an apply on an RR-only /
+retaining the stable ESI label. Atomic tenant teardown (a delete-only plan
+dropping an ES-member L2VNI with its Ethernet Segment and/or a linked IP-VRF)
+and `ip_vrf` relink also converge live. Every other non-noop shape —
+L3VNI/device/table IP-VRF identity changes (restart-required by design),
+non-teardown mixed L2VNI + IP-VRF edits, or an apply on an RR-only /
 no-actor daemon — returns
 `FAILED_PRECONDITION` without advancing the generation and without
 degrading the committed model, because an
@@ -1450,12 +1451,13 @@ single L2VNI add, a single L2VNI delete that is not an Ethernet Segment member,
 a single L2VNI redefine with unchanged `ip_vrf` link metadata, a single IP-VRF
 add, a single standalone
 IP-VRF delete with no L2VNI links, a single IP-VRF redefine with unchanged
-L3VNI/device/table identity, or a single Ethernet Segment add/delete/redefine
+L3VNI/device/table identity, a single Ethernet Segment add/delete/redefine, an
+atomic tenant teardown, or an `ip_vrf` relink
 against the committed model; the response
 carries the committed generation and outcome. Every other non-noop shape
-(linked IP-VRF delete, `ip_vrf` relink,
-L3VNI/device/table IP-VRF redefine, a mixed L2VNI + IP-VRF request,
-multi-element edits, ES-aware L2VNI delete, an ES referencing an unknown member
+(L3VNI/device/table IP-VRF identity changes — restart-required by design,
+a non-teardown mixed L2VNI + IP-VRF request,
+an ES referencing an unknown member
 VNI, or an ES apply with no running segment actor) is
 rejected with `FAILED_PRECONDITION`, leaving the prior generation committed.
 

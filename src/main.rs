@@ -1903,7 +1903,7 @@ fn validate_single_ip_vrf_redefine(
         || current.ip_vrfs().is_referenced(&name) != candidate.ip_vrfs().is_referenced(&name)
     {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
-            "ApplyEvpnRuntime IP-VRF redefine does not support changing L2VNI links for {name:?}; ip_vrf relink remains fail-closed"
+            "ApplyEvpnRuntime does not support an IP-VRF redefine combined with an ip_vrf relink for {name:?} in one request; apply the relink as a separate request"
         )));
     }
 
