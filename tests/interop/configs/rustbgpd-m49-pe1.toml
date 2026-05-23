@@ -1,0 +1,42 @@
+# M49 PE1: lower-preference candidate of a 2-PE Ethernet Segment running
+# the RFC 9785 Highest-Preference DF algorithm. For VNI 200 the higher
+# df_preference on PE2 (200 > this PE's 100) elects PE2 as DF, the
+# opposite of default service carving (`200 mod 2` = slot 0 -> lower IP
+# = this PE). So this PE should be NonDF, which only holds if
+# preference-DF (not modulo) is actually running end-to-end.
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+prometheus_addr = "0.0.0.0:9179"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[evpn_instances]]
+vni = 200
+rd = "10.0.0.1:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+bridge = "br200"
+advertise_svi_mac = false
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [200]
+df_preference = 100
+df_algorithm = "highest-preference"
+originator_ip = "10.0.0.1"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "pe2"
+hold_time = 30
+families = ["l2vpn_evpn"]
+
+[security.grpc]
+enforcement = "legacy"

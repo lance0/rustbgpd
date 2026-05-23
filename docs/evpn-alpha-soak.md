@@ -394,16 +394,17 @@ landing, tracked here for visibility)
   round-trips that traverse the same kernel link list. Saves
   one syscall + one allocation per pass; matters under churn.
   Not a correctness blocker.
-- [~] **`[[evpn_instances]]` mutation surface (partial — #210).** The
+- [x] **`[[evpn_instances]]` mutation surface (alpha-complete — #210).** The
   ADR-0063 command-driven EVPN coordinator + whole-model
-  `EvpnService.ApplyEvpnRuntime` now commit these shapes live — single
+  `EvpnService.ApplyEvpnRuntime` commit these shapes live — single
   L2VNI add/delete/redefine, single IP-VRF add/standalone-delete/redefine,
-  single Ethernet Segment add/delete/redefine, and atomic tenant teardown of an
-  ES-member L2VNI + Ethernet Segment and/or linked IP-VRF in one pass (ordered
-  drain/replay across IMET, MAC-only / MAC+IP / SVI Type 2, Type 5 / IP-VRF,
-  segment actor, and Linux owned dataplane state, with rollback). `ip_vrf`
-  relink, L3VNI/device/table IP-VRF redefine, and non-teardown mixed edits still
-  fail closed and remain restart-required.
+  single Ethernet Segment add/delete/redefine, atomic tenant teardown of an
+  ES-member L2VNI + Ethernet Segment and/or linked IP-VRF in one pass, and
+  `ip_vrf` relink (ordered drain/replay across IMET, MAC-only / MAC+IP / SVI
+  Type 2, Type 5 / IP-VRF, segment actor, and Linux owned dataplane state, with
+  rollback). Only two shapes remain non-live, by design: L3VNI/device/table
+  IP-VRF identity changes (restart-required — kernel VRF lifecycle) and
+  non-teardown mixed edits (fail closed with a "split the request" error).
   SIGHUP file-driven EVPN edits stay restart-required.
 
 ## Field-readiness gates

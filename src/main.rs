@@ -662,6 +662,31 @@ impl EvpnRuntimeActorConverger {
         Ok(())
     }
 
+    /// Converge an `ip_vrf` relink — an L2VNI re-homed to a different IP-VRF (or
+    /// its link added/removed). This mutates only the IP-VRF reference metadata,
+    /// not any row, and only the dataplane reads the link (for RFC 9135 §9.2
+    /// overlay-index recursion gateway resolution). RD is unchanged, so there is
+    /// no IMET re-origination; the Type 2 originator / SVI / segment do not read
+    /// the link, so there is nothing to republish to them. Dataplane-only.
+    fn converge_ip_vrf_relink(
+        &self,
+        current: &rustbgpd_evpn::EvpnRuntimeModel,
+        candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
+        plan: &rustbgpd_evpn::EvpnRuntimePlan,
+    ) -> Result<(), DaemonEvpnRuntimeConvergeError> {
+        validate_ip_vrf_relink(current, candidate, plan)?;
+        let dataplane = self.require_l2vni_dataplane("ip_vrf relink")?;
+        if !dataplane.replace_ip_vrfs(Arc::new(candidate.ip_vrfs().clone())) {
+            // The control is open (checked above); a failed publish means the
+            // actor exited in between and nothing was applied, so there is no
+            // partial state to roll back.
+            return Err(DaemonEvpnRuntimeConvergeError::failed(
+                "EVPN dataplane IP-VRF reference republish failed during ip_vrf relink",
+            ));
+        }
+        Ok(())
+    }
+
     /// Best-effort rollback of a tenant teardown: republish every committed
     /// snapshot to its actor (all idempotent, level-triggered) and re-originate
     /// the Type 3 IMET for each deleted L2VNI. Returns whether every IMET route
@@ -1218,6 +1243,16 @@ impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
                     .converge_tenant_teardown(current, candidate, plan)
                     .await;
             }
+            // An `ip_vrf` relink mutates only the L2VNI->IP-VRF reference
+            // metadata (no row changeset), so it is routed on the dedicated
+            // reference-delta signal before the row-changeset blocks below.
+            if is_ip_vrf_relink_plan(plan) {
+                return self.converge_ip_vrf_relink(current, candidate, plan);
+            }
+            // Teardown + pure relink (both routed above) own reference changes.
+            // For every other route, reject a relink mixed into the request so it
+            // can't diverge the dataplane (ES path) or apply unvalidated.
+            validate_no_unexpected_relink(current, candidate, plan)?;
             if plan.evpn_instances.has_changes() {
                 if plan.evpn_instances.added.is_empty()
                     && !plan.evpn_instances.deleted.is_empty()
@@ -1287,7 +1322,7 @@ fn validate_single_l2vni_add(
     }
     if !plan.evpn_instances.deleted.is_empty() || !plan.evpn_instances.redefined.is_empty() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only add-only L2VNI changes; mixed add/delete/redefine in one request is not supported yet",
+            "ApplyEvpnRuntime currently supports only add-only L2VNI changes; combining add/delete/redefine in one request is not supported — apply each change as a separate ApplyEvpnRuntime request (tracked in #210)",
         ));
     }
     if plan.evpn_instances.added.len() != 1 {
@@ -1332,7 +1367,7 @@ fn validate_single_l2vni_delete(
     }
     if !plan.evpn_instances.added.is_empty() || !plan.evpn_instances.redefined.is_empty() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only delete-only L2VNI changes; mixed add/delete/redefine in one request is not supported yet",
+            "ApplyEvpnRuntime currently supports only delete-only L2VNI changes; combining add/delete/redefine in one request is not supported — apply each change as a separate ApplyEvpnRuntime request (tracked in #210)",
         ));
     }
     if plan.evpn_instances.deleted.len() != 1 {
@@ -1387,7 +1422,7 @@ fn validate_single_l2vni_redefine(
     }
     if !plan.evpn_instances.added.is_empty() || !plan.evpn_instances.deleted.is_empty() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only redefine-only L2VNI changes; mixed add/delete/redefine in one request is not supported yet",
+            "ApplyEvpnRuntime currently supports only redefine-only L2VNI changes; combining add/delete/redefine in one request is not supported — apply each change as a separate ApplyEvpnRuntime request (tracked in #210)",
         ));
     }
     if plan.evpn_instances.redefined.len() != 1 {
@@ -1413,13 +1448,14 @@ fn validate_single_l2vni_redefine(
         )));
     }
 
-    // Defensive IP-VRF metadata equality: `plan.ip_vrfs.has_changes()` above
-    // already rejects a relink (changing an L2VNI's `ip_vrf` mutates the
-    // IpVrfTable's referenced-L2VNI set), but assert table equality directly so
-    // an `ip_vrf` relink can never slip through as "just an instance redefine".
+    // A *pure* `ip_vrf` relink (link change with no row edits) is routed to
+    // `converge_ip_vrf_relink` upstream on `plan.ip_vrf_references_changed`. This
+    // check therefore only fires for a redefine *combined* with a relink (the
+    // L2VNI row is redefined AND its link moved) — keep that fail-closed; a
+    // redefine and a relink must be applied as separate requests.
     if current.ip_vrfs() != candidate.ip_vrfs() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports L2VNI redefine only when IP-VRF link metadata is unchanged; ip_vrf relink is not supported yet",
+            "ApplyEvpnRuntime does not support an L2VNI redefine combined with an ip_vrf relink in one request; apply the relink separately",
         ));
     }
 
@@ -1461,6 +1497,81 @@ fn validate_l2vni_delete_ip_vrf_metadata(
 /// an ES-member L2VNI delete, or a still-referenced IP-VRF delete). Clean
 /// single-element non-ES, non-referenced deletes return `false` so they keep
 /// routing to the existing single-shape delete converters.
+/// True when the plan is a pure `ip_vrf` relink: the L2VNI->IP-VRF reference
+/// metadata changed but no IP-VRF / L2VNI / Ethernet Segment row did. Routed
+/// before the row-changeset blocks; teardown is classified first so a delete
+/// (which also shifts references) never lands here.
+fn is_ip_vrf_relink_plan(plan: &rustbgpd_evpn::EvpnRuntimePlan) -> bool {
+    plan.ip_vrf_references_changed
+        && !plan.evpn_instances.has_changes()
+        && !plan.ip_vrfs.has_changes()
+        && !plan.ethernet_segments.has_changes()
+}
+
+/// Validate an `ip_vrf` relink: no row changesets, and the divergence is purely
+/// in the IP-VRF reference metadata.
+fn validate_ip_vrf_relink(
+    current: &rustbgpd_evpn::EvpnRuntimeModel,
+    candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
+    plan: &rustbgpd_evpn::EvpnRuntimePlan,
+) -> Result<(), DaemonEvpnRuntimeConvergeError> {
+    if plan.evpn_instances.has_changes()
+        || plan.ip_vrfs.has_changes()
+        || plan.ethernet_segments.has_changes()
+    {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+            "ApplyEvpnRuntime ip_vrf relink converge requires no L2VNI / IP-VRF / Ethernet Segment row changes",
+        ));
+    }
+    if !plan.ip_vrf_references_changed || !current.ip_vrfs().references_differ(candidate.ip_vrfs())
+    {
+        return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+            "ApplyEvpnRuntime ip_vrf relink converge requires an IP-VRF link reference change",
+        ));
+    }
+    Ok(())
+}
+
+/// Central guard for the fourth change signal. `ip_vrf_references_changed` (an
+/// L2VNI's `ip_vrf` link moving) is not one of the three row changesets the
+/// single-shape validators gate on, so without this a relink could be silently
+/// composed with any row shape — e.g. an ES change would commit the candidate
+/// but never republish `ip_vrfs`, diverging the dataplane from the committed
+/// model. The invariant: a pure relink and atomic tenant teardown own reference
+/// changes on their own paths (both routed before this); a row-shape change may
+/// only carry the link delta intrinsic to its own added/deleted L2VNIs. Any
+/// other relinked VNI is a mixed-in relink and is rejected.
+fn validate_no_unexpected_relink(
+    current: &rustbgpd_evpn::EvpnRuntimeModel,
+    candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
+    plan: &rustbgpd_evpn::EvpnRuntimePlan,
+) -> Result<(), DaemonEvpnRuntimeConvergeError> {
+    if !plan.ip_vrf_references_changed {
+        return Ok(());
+    }
+    let touched: std::collections::BTreeSet<rustbgpd_evpn::EvpnInstanceId> = plan
+        .evpn_instances
+        .added
+        .iter()
+        .chain(plan.evpn_instances.deleted.iter())
+        .filter_map(|raw| rustbgpd_evpn::EvpnInstanceId::new(*raw).ok())
+        .collect();
+    let current_links = current.ip_vrfs().l2vni_link_map();
+    let candidate_links = candidate.ip_vrfs().l2vni_link_map();
+    let mut vnis: std::collections::BTreeSet<rustbgpd_evpn::EvpnInstanceId> =
+        current_links.keys().copied().collect();
+    vnis.extend(candidate_links.keys().copied());
+    for vni in vnis {
+        if current_links.get(&vni) != candidate_links.get(&vni) && !touched.contains(&vni) {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "ApplyEvpnRuntime: L2VNI {vni} `ip_vrf` link change (relink) is mixed into another \
+                 runtime change; apply the relink as a separate request"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn is_tenant_teardown_plan(
     plan: &rustbgpd_evpn::EvpnRuntimePlan,
     current: &rustbgpd_evpn::EvpnRuntimeModel,
@@ -1709,7 +1820,7 @@ fn validate_single_ip_vrf_add(
     }
     if !plan.ip_vrfs.deleted.is_empty() || !plan.ip_vrfs.redefined.is_empty() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only add-only IP-VRF changes; delete/redefine is not supported in the same request",
+            "ApplyEvpnRuntime currently supports only add-only IP-VRF changes — apply a delete/redefine as a separate ApplyEvpnRuntime request (tracked in #210)",
         ));
     }
     if plan.ip_vrfs.added.len() != 1 {
@@ -1737,7 +1848,7 @@ fn validate_single_ip_vrf_delete(
     }
     if !plan.ip_vrfs.added.is_empty() || !plan.ip_vrfs.redefined.is_empty() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only delete-only IP-VRF changes; add/redefine is not supported in the same request",
+            "ApplyEvpnRuntime currently supports only delete-only IP-VRF changes — apply an add/redefine as a separate ApplyEvpnRuntime request (tracked in #210)",
         ));
     }
     if plan.ip_vrfs.deleted.len() != 1 {
@@ -1783,7 +1894,7 @@ fn validate_single_ip_vrf_redefine(
     }
     if !plan.ip_vrfs.added.is_empty() || !plan.ip_vrfs.deleted.is_empty() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only redefine-only IP-VRF changes; add/delete is not supported in the same request",
+            "ApplyEvpnRuntime currently supports only redefine-only IP-VRF changes — apply an add/delete as a separate ApplyEvpnRuntime request (tracked in #210)",
         ));
     }
     if plan.ip_vrfs.redefined.len() != 1 {
@@ -1804,13 +1915,21 @@ fn validate_single_ip_vrf_redefine(
         )));
     };
 
+    // The L3VNI, VRF device, L3VXLAN device, and table id are the IP-VRF's
+    // kernel-object identity; changing one is a VRF lifecycle operation (destroy
+    // + recreate the kernel VRF), which is restart-required by design — a runtime
+    // drain/recreate would risk a dual-state window (kernel on the old identity
+    // while the originator publishes the new). `router_mac` is NOT identity: it
+    // is an accepted live route/policy-field redefine (the Type 5 originator +
+    // dataplane self-diff it cleanly), so it is intentionally absent from this
+    // guard.
     if old.id != new.id
         || old.vrf_device != new.vrf_device
         || old.l3vxlan_device != new.l3vxlan_device
         || old.table_id != new.table_id
     {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
-            "ApplyEvpnRuntime IP-VRF redefine currently supports only route/policy/egress field changes for {name:?}; L3VNI, vrf_device, l3vxlan_device, and table_id changes are not supported yet"
+            "ApplyEvpnRuntime IP-VRF redefine supports live route/policy/egress field changes (rd, route_targets, local_vtep_ip, router_mac) for {name:?}; changing the L3VNI, vrf_device, l3vxlan_device, or table_id is restart-required by design (kernel VRF identity lifecycle)"
         )));
     }
 
@@ -1828,7 +1947,7 @@ fn validate_single_ip_vrf_redefine(
         || current.ip_vrfs().is_referenced(&name) != candidate.ip_vrfs().is_referenced(&name)
     {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
-            "ApplyEvpnRuntime IP-VRF redefine does not support changing L2VNI links for {name:?}; ip_vrf relink remains fail-closed"
+            "ApplyEvpnRuntime does not support an IP-VRF redefine combined with an ip_vrf relink for {name:?} in one request; apply the relink as a separate request"
         )));
     }
 
@@ -1907,7 +2026,7 @@ fn validate_single_ethernet_segment_delete(
     }
     if !plan.ethernet_segments.added.is_empty() || !plan.ethernet_segments.redefined.is_empty() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only delete-only Ethernet Segment changes; add/redefine is not supported in the same request",
+            "ApplyEvpnRuntime currently supports only delete-only Ethernet Segment changes — apply an add/redefine as a separate ApplyEvpnRuntime request (tracked in #210)",
         ));
     }
     if plan.ethernet_segments.deleted.len() != 1 {
@@ -1956,7 +2075,7 @@ fn validate_single_ethernet_segment_redefine(
     }
     if !plan.ethernet_segments.added.is_empty() || !plan.ethernet_segments.deleted.is_empty() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only redefine-only Ethernet Segment changes; add/delete is not supported in the same request",
+            "ApplyEvpnRuntime currently supports only redefine-only Ethernet Segment changes — apply an add/delete as a separate ApplyEvpnRuntime request (tracked in #210)",
         ));
     }
     if plan.ethernet_segments.redefined.len() != 1 {
@@ -4694,6 +4813,137 @@ table_id = 5000
 "#
     }
 
+    // Two declared IP-VRFs (tenant-blue, tenant-green) with L2VNI 100 linked to
+    // tenant-blue. The `_relinked` variant moves only the L2VNI's `ip_vrf` to
+    // tenant-green — every IP-VRF and L2VNI row is byte-identical, so the diff
+    // is a pure reference-metadata (relink) change.
+    fn relink_blue_runtime_candidate_toml() -> &'static str {
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+ip_vrf = "tenant-blue"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+
+[[evpn_ip_vrfs]]
+name = "tenant-green"
+vni = 5001
+rd = "65000:5001"
+route_targets = ["65000:5001"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:02"
+vrf_device = "vrf-green"
+l3vxlan_device = "vni5001"
+table_id = 5001
+"#
+    }
+
+    fn relink_green_runtime_candidate_toml() -> &'static str {
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+ip_vrf = "tenant-green"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+
+[[evpn_ip_vrfs]]
+name = "tenant-green"
+vni = 5001
+rd = "65000:5001"
+route_targets = ["65000:5001"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:02"
+vrf_device = "vrf-green"
+l3vxlan_device = "vni5001"
+table_id = 5001
+"#
+    }
+
+    // The relink fixtures' two IP-VRFs with no L2VNI — a baseline for adding a
+    // linked L2VNI (the reference delta the central relink guard must allow).
+    fn ip_vrfs_blue_green_runtime_candidate_toml() -> &'static str {
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+
+[[evpn_ip_vrfs]]
+name = "tenant-green"
+vni = 5001
+rd = "65000:5001"
+route_targets = ["65000:5001"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:02"
+vrf_device = "vrf-green"
+l3vxlan_device = "vni5001"
+table_id = 5001
+"#
+    }
+
     fn ip_vrf_redefined_runtime_candidate_toml() -> &'static str {
         r#"
 [global]
@@ -5373,6 +5623,102 @@ table_id = 6000
             message.contains("L3VNI"),
             "unexpected error message: {message}"
         );
+    }
+
+    #[test]
+    fn ip_vrf_relink_is_not_a_noop_and_classifies() {
+        // A pure relink edits no IP-VRF / L2VNI / ES row, so without the
+        // reference-delta signal the plan would read as a no-op and never
+        // converge. Pin that the signal is set, the plan is non-noop, and the
+        // relink classifier routes it.
+        let current = runtime_model_from_candidate_toml(relink_blue_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(relink_green_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+
+        assert!(
+            !plan.evpn_instances.has_changes(),
+            "L2VNI rows are identical"
+        );
+        assert!(!plan.ip_vrfs.has_changes(), "IP-VRF rows are identical");
+        assert!(!plan.ethernet_segments.has_changes());
+        assert!(plan.ip_vrf_references_changed, "the link reference moved");
+        assert!(!plan.is_noop(), "a relink must not read as a no-op");
+        assert!(is_ip_vrf_relink_plan(&plan));
+        assert!(!is_tenant_teardown_plan(&plan, &current));
+    }
+
+    #[test]
+    fn validate_ip_vrf_relink_accepts_pure_relink() {
+        let current = runtime_model_from_candidate_toml(relink_blue_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(relink_green_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+
+        validate_ip_vrf_relink(&current, &candidate, &plan).unwrap();
+    }
+
+    #[test]
+    fn validate_ip_vrf_relink_rejects_row_changes() {
+        // Dropping the L2VNI shifts references too, but it is a row delete — not
+        // a pure relink — so the relink validator must fail closed.
+        let current = runtime_model_from_candidate_toml(relink_blue_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(ip_vrf_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+
+        assert!(plan.evpn_instances.has_changes() || plan.ip_vrfs.has_changes());
+        let error = validate_ip_vrf_relink(&current, &candidate, &plan).unwrap_err();
+        let DaemonEvpnRuntimeConvergeError::Unsupported(message) = error else {
+            panic!("expected unsupported error, got {error:?}");
+        };
+        assert!(
+            message.contains("no L2VNI / IP-VRF / Ethernet Segment row changes"),
+            "unexpected error message: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_no_unexpected_relink_rejects_relink_outside_add_delete() {
+        // A relinked VNI that is neither added nor deleted (the dispatcher only
+        // reaches this guard for non-pure-relink, non-teardown plans) is a relink
+        // mixed into another change — e.g. ES change + relink, which would
+        // otherwise commit but never republish ip_vrfs and diverge the dataplane.
+        let current = runtime_model_from_candidate_toml(relink_blue_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(relink_green_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        assert!(plan.ip_vrf_references_changed);
+        assert!(plan.evpn_instances.added.is_empty() && plan.evpn_instances.deleted.is_empty());
+
+        let error = validate_no_unexpected_relink(&current, &candidate, &plan).unwrap_err();
+        let DaemonEvpnRuntimeConvergeError::Unsupported(message) = error else {
+            panic!("expected unsupported error, got {error:?}");
+        };
+        assert!(
+            message.contains("relink") && message.contains("separate request"),
+            "unexpected error message: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_no_unexpected_relink_allows_linked_l2vni_add() {
+        // Adding an L2VNI that links an IP-VRF is the reference delta intrinsic to
+        // that add (the VNI is in evpn_instances.added), so the guard must allow
+        // it — otherwise building up a linked tenant would fail closed.
+        let current =
+            runtime_model_from_candidate_toml(ip_vrfs_blue_green_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(relink_blue_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        assert_eq!(plan.evpn_instances.added, vec![100]);
+        assert!(plan.ip_vrf_references_changed);
+
+        validate_no_unexpected_relink(&current, &candidate, &plan).unwrap();
+    }
+
+    #[test]
+    fn validate_no_unexpected_relink_noop_when_references_unchanged() {
+        let current = runtime_model_from_candidate_toml(relink_blue_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(relink_blue_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        assert!(!plan.ip_vrf_references_changed);
+        validate_no_unexpected_relink(&current, &candidate, &plan).unwrap();
     }
 
     #[tokio::test]
@@ -6510,6 +6856,57 @@ table_id = 6000
     }
 
     #[tokio::test]
+    async fn apply_evpn_runtime_ip_vrf_relink_commits() {
+        // The coordinator must commit a pure relink (not short-circuit to Noop):
+        // the candidate edits no row, so this only works because the plan's
+        // ip_vrf_references_changed signal makes is_noop() false.
+        let current = runtime_candidate_from_toml(relink_blue_runtime_candidate_toml());
+        let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+            current.instances().clone(),
+            current.ip_vrfs().clone(),
+            current.ethernet_segments().to_vec(),
+        )));
+        let apply_lock = tokio::sync::Mutex::new(());
+        let converger = TestRuntimeConverger::ok();
+
+        let response = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: relink_green_runtime_candidate_toml().to_string(),
+                validate_only: false,
+            },
+            coordinator.as_ref(),
+            &apply_lock,
+            &converger,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.outcome,
+            proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyCommitted as i32
+        );
+        assert_eq!(response.runtime.unwrap().generation, 2);
+        let plan = response.plan.unwrap();
+        assert!(
+            plan.ip_vrf_references_changed,
+            "the plan summary must surface the relink so it doesn't read as empty/COMMITTED"
+        );
+        assert!(plan.evpn_instances.unwrap().redefined.is_empty());
+        assert!(plan.evpn_ip_vrfs.unwrap().redefined.is_empty());
+        let guard = coordinator.lock().unwrap();
+        assert_eq!(guard.model().generation().as_u64(), 2);
+        let vni100 = rustbgpd_evpn::EvpnInstanceId::new(100).unwrap();
+        assert!(
+            guard
+                .model()
+                .ip_vrfs()
+                .referenced_l2vnis("tenant-green")
+                .is_some_and(|v| v.contains(&vni100))
+        );
+        assert!(!guard.model().ip_vrfs().is_referenced("tenant-blue"));
+    }
+
+    #[tokio::test]
     async fn runtime_actor_converger_ip_vrf_add_publishes_dataplane_model() {
         let current = runtime_model_from_candidate_toml(ip_vrf_runtime_candidate_toml());
         let candidate = runtime_candidate_from_toml(two_ip_vrf_runtime_candidate_toml());
@@ -6571,6 +6968,75 @@ table_id = 6000
 
         assert!(ip_vrfs_rx.borrow().get("tenant-green").is_some());
         l3_handle.shutdown().await;
+        dataplane_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_actor_converger_ip_vrf_relink_republishes_ip_vrfs() {
+        // A relink is dataplane-only: republish the candidate IP-VRF table (now
+        // carrying the moved link reference) to the dataplane watch. No IMET /
+        // originator / SVI / segment / l3 work.
+        let current = runtime_model_from_candidate_toml(relink_blue_runtime_candidate_toml());
+        let candidate = runtime_candidate_from_toml(relink_green_runtime_candidate_toml());
+        let plan = current.plan_candidate(&candidate);
+        let current_instances = Arc::new(current.instances().clone());
+        let current_ip_vrfs = Arc::new(current.ip_vrfs().clone());
+        let vni100 = rustbgpd_evpn::EvpnInstanceId::new(100).unwrap();
+        assert!(
+            current_ip_vrfs
+                .referenced_l2vnis("tenant-blue")
+                .is_some_and(|v| v.contains(&vni100)),
+            "baseline links L2VNI 100 to tenant-blue"
+        );
+
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(8);
+        let (evpn_instances_tx, _evpn_instances_rx) = watch::channel(current_instances);
+        let (ip_vrfs_tx, ip_vrfs_rx) = watch::channel(current_ip_vrfs);
+        let (bum_enforcement_tx, _bum_rx) =
+            watch::channel(Arc::new(rustbgpd_evpn::BumEnforcementTable::new()));
+        let (_drop_counts_tx, remote_prefix_drop_counts_rx) =
+            watch::channel(Arc::new(evpn_dataplane::RemoteIpPrefixDropCounts::new()));
+        let (report_tx, _) = broadcast::channel::<rustbgpd_evpn::DataplaneReport>(1);
+        let dataplane_handle = evpn_dataplane::EvpnDataplaneHandle {
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            supervisor_join: tokio::spawn(async {}),
+            actor_join: tokio::spawn(async {}),
+            local_mac_rx: None,
+            report_tx,
+            bum_enforcement_tx,
+            evpn_instances_tx,
+            ip_vrfs_tx,
+            remote_prefix_drop_counts_rx,
+        };
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(
+                tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()),
+            ),
+            dataplane: Some(dataplane_handle.runtime_control()),
+            originator: None,
+            svi: None,
+            l3_originator: None,
+            segment: None,
+        };
+
+        converger
+            .converge(&current, &candidate, &plan)
+            .await
+            .unwrap();
+
+        let published = ip_vrfs_rx.borrow();
+        assert!(
+            published
+                .referenced_l2vnis("tenant-green")
+                .is_some_and(|v| v.contains(&vni100)),
+            "relink republishes ip_vrfs with L2VNI 100 now referencing tenant-green"
+        );
+        assert!(
+            !published.is_referenced("tenant-blue"),
+            "tenant-blue should no longer be referenced after the relink"
+        );
+        drop(published);
         dataplane_handle.shutdown().await;
     }
 

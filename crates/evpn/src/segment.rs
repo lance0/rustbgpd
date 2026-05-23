@@ -65,6 +65,13 @@ pub struct EthernetSegment {
     /// RFC 8584 §3. The election state machine handles
     /// algorithm-mismatch tiebreak.
     pub df_algorithm: DfAlgorithm,
+    /// RFC 9785 Don't-Preempt. When `true`, this PE advertises DP=1 in
+    /// the DF Election extended community — the wire signal for a
+    /// non-revertive DF. Origination only: rustbgpd's election does not
+    /// act on the DP bit yet (stateful non-preemption is deferred). Only
+    /// meaningful for the preference algorithms; the daemon config layer
+    /// rejects `true` for default-modulo / HRW.
+    pub df_dont_preempt: bool,
     /// Multi-homing redundancy mode signaled in the ESI Label
     /// extended community on the Type 1 EAD-per-ES route.
     pub redundancy_mode: RedundancyMode,

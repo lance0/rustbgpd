@@ -510,6 +510,7 @@ pub fn runtime_plan_to_proto(plan: &EvpnRuntimePlan) -> proto::EvpnRuntimePlanSu
         evpn_instances: Some(change_set_to_proto(&plan.evpn_instances)),
         evpn_ip_vrfs: Some(change_set_to_proto(&plan.ip_vrfs)),
         ethernet_segments: Some(change_set_to_proto(&plan.ethernet_segments)),
+        ip_vrf_references_changed: plan.ip_vrf_references_changed,
     }
 }
 

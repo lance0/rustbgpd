@@ -642,6 +642,7 @@ async fn run_election_with_candidates(
             state.esi_label,
             state.config.df_algorithm,
             state.config.df_preference,
+            state.config.df_dont_preempt,
             state.config.redundancy_mode,
             actions,
         )
@@ -734,7 +735,7 @@ fn gather_candidates_from_routes(
         DfCandidate {
             originator_ip: state.config.originator_ip,
             df_preference: state.config.df_preference,
-            df_dont_preempt: false,
+            df_dont_preempt: state.config.df_dont_preempt,
             df_algorithm: state.config.df_algorithm,
         },
     );
@@ -810,19 +811,25 @@ fn type4_es_extcomms(
     esi: EthernetSegmentIdentifier,
     df_algorithm: DfAlgorithm,
     df_preference: u32,
+    df_dont_preempt: bool,
 ) -> Vec<rustbgpd_wire::ExtendedCommunity> {
     let mut extcomms = vec![rustbgpd_wire::ExtendedCommunity::es_import_rt(
         es_import_rt_from_esi(esi),
     )];
-    if let Some(df) = df_election_extcomm(df_algorithm, df_preference) {
+    if let Some(df) = df_election_extcomm(df_algorithm, df_preference, df_dont_preempt) {
         extcomms.push(df);
     }
     extcomms
 }
 
+/// RFC 9785 §3 DF Election extcomm capabilities bitmask: bit 15 (`0x8000`)
+/// is the Don't-Preempt (DP) flag.
+const DF_ELECTION_DONT_PREEMPT: u16 = 0x8000;
+
 fn df_election_extcomm(
     df_algorithm: DfAlgorithm,
     df_preference: u32,
+    df_dont_preempt: bool,
 ) -> Option<rustbgpd_wire::ExtendedCommunity> {
     match df_algorithm {
         DfAlgorithm::DefaultModulo => None,
@@ -834,9 +841,16 @@ fn df_election_extcomm(
         DfAlgorithm::HighestPreference | DfAlgorithm::LowestPreference => {
             let preference =
                 u16::try_from(df_preference).expect("validated RFC 9785 df_preference fits u16");
+            // DP only applies to the preference algorithms (config validation
+            // rejects df_dont_preempt for default-modulo / HRW).
+            let capabilities = if df_dont_preempt {
+                DF_ELECTION_DONT_PREEMPT
+            } else {
+                0
+            };
             Some(rustbgpd_wire::ExtendedCommunity::df_election(
                 df_algorithm.algorithm_id(),
-                0,
+                capabilities,
                 Some(preference),
             ))
         }
@@ -878,6 +892,7 @@ async fn apply(runtime: &SegmentRuntime, state: &SegmentState, actions: Vec<Orig
         state.esi_label,
         state.config.df_algorithm,
         state.config.df_preference,
+        state.config.df_dont_preempt,
         state.config.redundancy_mode,
         actions,
     )
@@ -917,12 +932,17 @@ async fn apply_withdraws_only(runtime: &SegmentRuntime, actions: Vec<Origination
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "per-ES origination context (esi_label + DF algorithm/preference/don't-preempt + redundancy mode) is threaded positionally; bundling it is a larger refactor than this slice warrants"
+)]
 async fn apply_with_instance(
     runtime: &SegmentRuntime,
     inst: &EvpnInstance,
     esi_label: MplsLabel,
     df_algorithm: DfAlgorithm,
     df_preference: u32,
+    df_dont_preempt: bool,
     redundancy_mode: RedundancyMode,
     actions: Vec<OriginationAction>,
 ) {
@@ -935,6 +955,7 @@ async fn apply_with_instance(
                     esi_label,
                     df_algorithm,
                     df_preference,
+                    df_dont_preempt,
                     redundancy_mode,
                 );
                 let (reply_tx, reply_rx) = oneshot::channel();
@@ -996,8 +1017,8 @@ async fn apply_with_instance(
 ///   dataplane drops on non-DF receivers.
 /// - **Type 4 ES with RFC 8584/9785 DF extcomm**: non-default
 ///   algorithms advertise their algorithm ID; preference algorithms
-///   also advertise the configured DF Preference with local
-///   Don't-Preempt unset.
+///   also advertise the configured DF Preference, with the
+///   Don't-Preempt bit set when the ES is configured non-revertive.
 /// - **Type 1 EAD-per-EVI**: no extra extcomms (the per-EVI label
 ///   lives in the route's MPLS label field; aliasing extcomms are
 ///   Gate 8b territory).
@@ -1007,6 +1028,7 @@ fn build_es_route(
     esi_label: MplsLabel,
     df_algorithm: DfAlgorithm,
     df_preference: u32,
+    df_dont_preempt: bool,
     redundancy_mode: RedundancyMode,
 ) -> EvpnRibRoute {
     let (route, key_specific_extcomms): (EvpnRoute, Vec<rustbgpd_wire::ExtendedCommunity>) =
@@ -1026,7 +1048,7 @@ fn build_es_route(
                 // 10-byte wire encoding). Peers that filter Type 4
                 // imports on this RT can correlate the segment back
                 // to the ESI without RT preconfiguration.
-                type4_es_extcomms(*esi, df_algorithm, df_preference),
+                type4_es_extcomms(*esi, df_algorithm, df_preference, df_dont_preempt),
             ),
             EvpnRouteKey::EadPerEs {
                 rd,
@@ -1196,6 +1218,7 @@ mod tests {
             member_vnis: member_vnis.clone(),
             df_preference: 32_768,
             df_algorithm: DfAlgorithm::DefaultModulo,
+            df_dont_preempt: false,
             redundancy_mode: RedundancyMode::AllActive,
             originator_ip: ipa("10.0.0.1"),
         };
@@ -1217,6 +1240,7 @@ mod tests {
             member_vnis: members.iter().copied().map(vni).collect(),
             df_preference: 32_768,
             df_algorithm: DfAlgorithm::DefaultModulo,
+            df_dont_preempt: false,
             redundancy_mode: RedundancyMode::AllActive,
             originator_ip: ipa("10.0.0.1"),
         }
@@ -1337,6 +1361,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::DefaultModulo,
             32_768,
+            false,
             RedundancyMode::AllActive,
         );
         assert!(matches!(route.route, EvpnRoute::Es(_)));
@@ -1381,6 +1406,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::DefaultModulo,
             32_768,
+            false,
             RedundancyMode::AllActive,
         );
         match route.route {
@@ -1405,6 +1431,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::DefaultModulo,
             32_768,
+            false,
             RedundancyMode::AllActive,
         );
         match route.route {
@@ -1465,6 +1492,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::DefaultModulo,
             32_768,
+            false,
             RedundancyMode::AllActive,
         );
         let extcomms = route
@@ -1498,6 +1526,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::HighestRandomWeight,
             32_768,
+            false,
             RedundancyMode::AllActive,
         );
         let extcomms = route
@@ -1536,6 +1565,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::HighestPreference,
             500,
+            false,
             RedundancyMode::AllActive,
         );
         let extcomms = route
@@ -1560,6 +1590,85 @@ mod tests {
     }
 
     #[test]
+    fn preference_df_election_extcomm_sets_dont_preempt_bit_when_configured() {
+        let inst = instance(100);
+        let key = EvpnRouteKey::Es {
+            rd: rd(65000, 100),
+            esi: esi(0x24),
+            originator_ip: ipa("10.0.0.1"),
+        };
+        let route = build_es_route(
+            &inst,
+            &key,
+            MplsLabel::new(123),
+            DfAlgorithm::HighestPreference,
+            500,
+            true, // df_dont_preempt
+            RedundancyMode::AllActive,
+        );
+        let df = route
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(v) => Some(v.clone()),
+                _ => None,
+            })
+            .expect("ExtendedCommunities attribute present")
+            .iter()
+            .copied()
+            .find_map(ExtendedCommunity::as_df_election)
+            .expect("DF Election extcomm attached");
+        assert_eq!(df.capabilities, 0x8000, "RFC 9785 DP bit must be set");
+        assert_eq!(df.preference, Some(500));
+
+        // The decode path a peer would run must read DP=true back.
+        let (_pref, dont_preempt, _alg) =
+            decode_df_election_extcomm(&route.attributes).expect("decodes");
+        assert!(dont_preempt);
+    }
+
+    #[test]
+    fn lowest_preference_df_election_extcomm_carries_dont_preempt_and_algorithm() {
+        let inst = instance(100);
+        let key = EvpnRouteKey::Es {
+            rd: rd(65000, 100),
+            esi: esi(0x25),
+            originator_ip: ipa("10.0.0.1"),
+        };
+        let route = build_es_route(
+            &inst,
+            &key,
+            MplsLabel::new(123),
+            DfAlgorithm::LowestPreference,
+            42,
+            true, // df_dont_preempt
+            RedundancyMode::AllActive,
+        );
+        let df = route
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(v) => Some(v.clone()),
+                _ => None,
+            })
+            .expect("ExtendedCommunities attribute present")
+            .iter()
+            .copied()
+            .find_map(ExtendedCommunity::as_df_election)
+            .expect("DF Election extcomm attached");
+        assert_eq!(
+            df.algorithm_id,
+            DfAlgorithm::LowestPreference.algorithm_id()
+        );
+        assert_eq!(df.capabilities, 0x8000, "RFC 9785 DP bit must be set");
+        assert_eq!(df.preference, Some(42));
+        let (_pref, dont_preempt, alg) =
+            decode_df_election_extcomm(&route.attributes).expect("decodes");
+        assert!(dont_preempt);
+        assert_eq!(alg, DfAlgorithm::LowestPreference);
+    }
+
+    #[test]
     fn default_modulo_type_4_es_route_omits_df_election_extcomm() {
         let inst = instance(100);
         let id = esi(0x22);
@@ -1574,6 +1683,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::DefaultModulo,
             32_768,
+            false,
             RedundancyMode::AllActive,
         );
         let extcomms = route
@@ -1697,6 +1807,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::DefaultModulo,
             32_768,
+            false,
             RedundancyMode::AllActive,
         );
         let extcomms = route
@@ -1741,6 +1852,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::DefaultModulo,
             32_768,
+            false,
             RedundancyMode::SingleActive,
         );
         let extcomms = route
@@ -1774,6 +1886,7 @@ mod tests {
             MplsLabel::new(123),
             DfAlgorithm::DefaultModulo,
             32_768,
+            false,
             RedundancyMode::AllActive,
         );
         let extcomms = route

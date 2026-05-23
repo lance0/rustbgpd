@@ -272,6 +272,7 @@ impl EvpnRuntimeModel {
                 self.ethernet_segments.as_slice(),
                 candidate.ethernet_segments(),
             ),
+            ip_vrf_references_changed: self.ip_vrfs().references_differ(candidate.ip_vrfs()),
         }
     }
 }
@@ -625,6 +626,12 @@ pub struct EvpnRuntimePlan {
     pub ip_vrfs: EvpnRuntimeChangeSet<String>,
     /// Ethernet Segment changes keyed by ESI.
     pub ethernet_segments: EvpnRuntimeChangeSet<EthernetSegmentIdentifier>,
+    /// True when the L2VNI->IP-VRF link references changed (an `ip_vrf` relink).
+    /// This is derived metadata, not a row changeset: a pure relink leaves every
+    /// IP-VRF row identical, so without this flag the plan would look like a
+    /// no-op and never converge. May coexist with row changesets; the relink
+    /// converge path only fires when all row changesets are empty and this is set.
+    pub ip_vrf_references_changed: bool,
 }
 
 impl EvpnRuntimePlan {
@@ -633,7 +640,8 @@ impl EvpnRuntimePlan {
     pub fn is_noop(&self) -> bool {
         !(self.evpn_instances.has_changes()
             || self.ip_vrfs.has_changes()
-            || self.ethernet_segments.has_changes())
+            || self.ethernet_segments.has_changes()
+            || self.ip_vrf_references_changed)
     }
 }
 
@@ -833,6 +841,7 @@ mod tests {
                 .collect(),
             df_preference: 32_768,
             df_algorithm: DfAlgorithm::DefaultModulo,
+            df_dont_preempt: false,
             redundancy_mode: crate::RedundancyMode::AllActive,
             originator_ip: "10.0.0.1".parse().unwrap(),
         }

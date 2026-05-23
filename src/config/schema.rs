@@ -967,6 +967,10 @@ pub struct EthernetSegmentConfig {
     /// DF algorithm string. Default `"default-modulo"`.
     #[serde(default = "default_df_algorithm")]
     pub df_algorithm: String,
+    /// RFC 9785 Don't-Preempt (non-revertive DF). Default `false`. Only
+    /// valid with `highest-preference` / `lowest-preference`.
+    #[serde(default)]
+    pub df_dont_preempt: bool,
     /// Redundancy mode string. Default `"all-active"`.
     #[serde(default = "default_redundancy_mode")]
     pub redundancy_mode: String,

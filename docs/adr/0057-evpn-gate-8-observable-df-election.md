@@ -50,9 +50,15 @@ The Gate 8 surface is:
   `32768`; the HRW follow-up additionally accepts
   `HighestRandomWeight`; the RFC 9785 follow-up accepts
   `HighestPreference` and `LowestPreference` with an explicit
-  `df_preference` in the `0..=65535` range. Local Don't-Preempt /
-  non-revertive behavior remains deferred, while remote Don't-Preempt
-  is decoded and used as a tie-breaker for preference-DF election.
+  `df_preference` in the `0..=65535` range. Local Don't-Preempt
+  origination shipped (`df_dont_preempt`, preference algorithms only —
+  the Type 4 DF Election extcomm carries DP=1) and remote DP is decoded,
+  but the DP bit is intentionally NOT an election input: a stateless
+  `preference_winner` (preference, then lowest originator IP) has no
+  prior-DF/incumbent state, so it cannot implement RFC 9785 "don't preempt
+  the incumbent" — using DP as a static promotion key would make it
+  offensive extra preference weight. Stateful non-revertive election (and
+  single-active backup-path pre-install) remains deferred.
 - **Pure DF election state machine** in
   `crates/evpn/src/df_election.rs`: `DfElection::run` takes the
   candidate set + the local PE's originator IP and returns
@@ -80,9 +86,10 @@ The Gate 8 surface is:
   negotiation falls back to default service carving when candidates
   disagree or omit the DF Election Extended Community. RFC 9785
   Highest-/Lowest-Preference election selects the configured
-  preference order, then Don't-Preempt, then the numerically lowest PE
-  IP as tie-breakers; mixed algorithms likewise fall back to default
-  service carving.
+  preference order, tie-broken by the numerically lowest PE IP (the
+  Don't-Preempt bit is originated and parsed but is not an election
+  input — see the DP scoping note above); mixed algorithms likewise
+  fall back to default service carving.
 - **Three Type 1/4 originator state machines** in
   `crates/evpn/src/origination_es.rs`: `LocalEsOriginator` (Type 4
   ES), `LocalEadPerEsOriginator` (Type 1 EAD-per-ES with MAX_ET

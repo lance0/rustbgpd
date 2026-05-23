@@ -2618,6 +2618,19 @@ fn parse_ethernet_segment(
             ),
         });
     }
+    if cfg.df_dont_preempt
+        && !matches!(
+            df_algorithm,
+            DfAlgorithm::HighestPreference | DfAlgorithm::LowestPreference
+        )
+    {
+        return Err(ConfigError::InvalidEthernetSegment {
+            reason: "df_dont_preempt: RFC 9785 Don't-Preempt only applies to the \
+                     highest-/lowest-preference DF algorithms; remove it or set \
+                     df_algorithm to a preference algorithm"
+                .to_string(),
+        });
+    }
 
     let redundancy_mode = match cfg.redundancy_mode.as_str() {
         "all-active" => RedundancyMode::AllActive,
@@ -2643,6 +2656,7 @@ fn parse_ethernet_segment(
         member_vnis,
         df_preference: cfg.df_preference,
         df_algorithm,
+        df_dont_preempt: cfg.df_dont_preempt,
         redundancy_mode,
         originator_ip,
     })

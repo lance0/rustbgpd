@@ -2,7 +2,7 @@
 
 A feature comparison of open-source BGP daemon implementations.
 
-Last updated: 2026-05-22 (v0.26.0 + unreleased: ADR-0063 EVPN runtime convergence now commits nine live `ApplyEvpnRuntime` shapes — single L2VNI add/delete/redefine, single IP-VRF add/standalone-delete/redefine, and single Ethernet Segment add/delete/redefine, including ES binding of a runtime-added member VNI and ES-member L2VNI redefine with unchanged `ip_vrf` link metadata; EVPN Type 5 overlay-index receive-side recursion + bounded drop metrics/status + controller gateway injection; auto-derived Route Targets; typed EVPN/FIB/policy event categories. Built on the v0.24.0 ADR-0064 gRPC tier-enforcement default and EVPN duplicate-MAC quarantine.)
+Last updated: 2026-05-22 (v0.26.0 + unreleased: ADR-0063 EVPN runtime convergence is alpha-complete — the live `ApplyEvpnRuntime` shapes are single L2VNI/IP-VRF/Ethernet-Segment add/delete/redefine (IP-VRF with unchanged L3VNI/device/table identity), atomic tenant teardown, and `ip_vrf` relink, including ES binding of a runtime-added member VNI and ES-member L2VNI redefine with unchanged `ip_vrf` link metadata; only L3VNI/device/table IP-VRF identity changes (restart-required by design) and non-teardown mixed edits remain non-live; EVPN Type 5 overlay-index receive-side recursion + bounded drop metrics/status + controller gateway injection; auto-derived Route Targets; typed EVPN/FIB/policy event categories. Built on the v0.24.0 ADR-0064 gRPC tier-enforcement default and EVPN duplicate-MAC quarantine.)
 
 ## Overview
 
