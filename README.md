@@ -54,21 +54,13 @@ architecture diagrams, example configs, and API workflows.
 - Full general-purpose router deployments expecting default-on,
   fully policy-guarded FIB integration
 - Large-scale production EVPN fabrics that need the full feature
-  surface — VXLAN EVPN is functional and FRR-interop-tested (Route
-  Reflector, single-homed VTEP with bidirectional MAC / MAC+IP
-  origination, symmetric Interface-less IRB / Type 5, production-default
-  DF/non-DF BUM suppression and aliasing ECMP with opt-out flags) but
-  still **alpha**: VXLAN local-bias split-horizon remains the remaining
+  surface — VXLAN EVPN is functional and FRR-interop-tested but still
+  **alpha**. VXLAN local-bias split-horizon remains the one open
   all-active correctness gate (ASIC/offload-dependent on the Linux
-  softswitch — see ADR-0065); the runtime EVPN model-edit surface
-  (`ApplyEvpnRuntime`) is alpha-complete — single
-  L2VNI/IP-VRF/Ethernet-Segment add/delete/redefine, atomic tenant teardown, and
-  `ip_vrf` relink commit live, while L3VNI/device/table IP-VRF identity changes
-  are restart-required by design and non-teardown mixed edits stay fail-closed
-  (apply each as a separate request);
-  and MPLS / PBB / MVPN encapsulations are not implemented. See
-  [docs/evpn-enablement.md](docs/evpn-enablement.md) for the shipped
-  feature ladder
+  softswitch — see ADR-0065), and MPLS / PBB / MVPN encapsulations are
+  not implemented. See [Current limitations](#current-limitations) for
+  the alpha boundary and [docs/evpn-enablement.md](docs/evpn-enablement.md)
+  for the shipped feature ladder
 - VPNv4 / VPNv6 overlays
 - Environments that need the breadth of FRR's multi-decade feature surface
 - Operators who want a CLI-first operational model
@@ -214,7 +206,7 @@ Ten services cover the full operational surface:
 |---------|------|---------|
 | `GlobalService` | `GetGlobal`, `SetGlobal` | Daemon identity and configuration |
 | `ConfigService` | `DiffRuntimeConfig` | Compare a candidate TOML against live runtime config |
-| `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, and dynamic-range admin |
+| `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, RFC 8326 graceful-shutdown toggle, and dynamic-range admin |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `List/Get/Set/DeleteNeighborSet`, `Get*Chain`, `Set*Chain`, `Clear*Chain` | Named policy CRUD, neighbor sets, and global/per-neighbor chain attachment |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
 | `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListRouteEvents`, `WatchRoutes`, `WatchRouteEvents` | RIB queries (incl. EVPN), BLACKHOLE discard status, paginated FIB status, explain, recent route-event history with per-prefix drilldown, and streaming |
@@ -308,13 +300,12 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
   clear, and gRPC controller injection for Types 2 / 3 / 5. See
   ADR-0052 / 0054–0059 / 0063 and
   [docs/evpn-enablement.md](docs/evpn-enablement.md) for the full gate
-  ladder. Known gaps: runtime `[[evpn_instances]]` mutation is partial
-  (`ApplyEvpnRuntime` commits single L2VNI add/delete/redefine, single
-  IP-VRF add/standalone delete/redefine with unchanged L3VNI/device/table
-  identity, single Ethernet Segment add/delete/redefine, atomic tenant
-  teardown, and `ip_vrf` relink; only L3VNI/device/table IP-VRF identity
-  changes (restart-required by design) and non-teardown mixed edits stay
-  fail-closed — [#210](https://github.com/lance0/rustbgpd/issues/210)),
+  ladder. Known gaps: runtime `[[evpn_instances]]` mutation is
+  alpha-complete with two by-design exceptions — `ApplyEvpnRuntime`
+  commits L2VNI / IP-VRF / Ethernet-Segment add/delete/redefine, atomic
+  tenant teardown, and `ip_vrf` relink live, while L3VNI/device/table
+  IP-VRF identity changes (restart-required) and non-teardown mixed edits
+  fail closed ([#210](https://github.com/lance0/rustbgpd/issues/210));
   overlay-index IRB native local origination and protected recursion-path
   interop remain ahead, VLAN-aware bridges and bridge / VXLAN netdev
   creation are operator-provisioned, and EVPN over MPLS / PBB / MVPN
@@ -338,7 +329,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | **Runtime** | Rust 1.92+ (workspace MSRV — Tokio rolling-6-month policy), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | EVPN runtime instance L3VNI/device/table IP-VRF identity changes (restart-required by design) and non-teardown mixed edits (single L2VNI/IP-VRF/Ethernet-Segment add/delete/redefine, atomic tenant teardown, and `ip_vrf` relink commit live), RFC 9135 overlay-index IRB local origination, EVPN route types 6-11 / MPLS / PBB / MVPN, VPNv4/v6, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
+| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design) and non-teardown mixed edits, RFC 9135 overlay-index IRB local origination, EVPN route types 6-11 / MPLS / PBB / MVPN, VPNv4/v6, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
 | **Tests** | Workspace test suite, fuzz targets, an automated interop suite (see `docs/INTEROP.md`) primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (foundation tier gated on every PR; privileged kernel dataplane smokes run locally) |
 
 ## Documentation

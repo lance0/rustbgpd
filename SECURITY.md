@@ -1,5 +1,9 @@
 # Security Policy
 
+This is the vulnerability-reporting policy. For operational security
+guidance — deployment tiers, mTLS setup, gRPC authorization, and audit
+logging — see [docs/SECURITY.md](docs/SECURITY.md).
+
 ## Supported Versions
 
 | Version | Supported |
@@ -59,9 +63,10 @@ input from the network. It runs under continuous fuzzing in CI.
   `tls_key_file`, and `tls_client_ca_file` together on
   `[global.telemetry.grpc_tcp]` (partial config is rejected at config
   load). An mTLS proxy front-end (see `examples/envoy-mtls/`) remains a
-  valid alternative for multi-host fan-out. Fine-grained per-RPC
-  authorization beyond the read-only / read-write listener split is
-  not yet implemented.
+  valid alternative for multi-host fan-out. Per-RPC authorization tiers
+  (ADR-0064, enforced by default since v0.24.0) classify each method on
+  top of the listener split; see [docs/SECURITY.md](docs/SECURITY.md) and
+  [docs/grpc-method-inventory.md](docs/grpc-method-inventory.md).
 
 ### Rate Limiting
 

@@ -392,7 +392,61 @@ not a tactical feature. Only worth it if there's a specific use case
 |------|----------------|--------|
 | Daemon-level integration test booting with `[[evpn_instances]]` and round-tripping through `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances`. The tripwire that proves config → daemon → gRPC → CLI still works while internals get more dynamic. | `tests/evpn_instances_binary.rs` | landed |
 | Dataplane-boundary ADR — what `crates/evpn-linux` consumes from `crates/evpn`, what it observes from the kernel, what it returns. Diff loop semantics (push / pull / reconcile-on-event). Failure surfacing back to the domain layer. | `docs/adr/0054-evpn-linux-dataplane-boundary.md` | landed |
-| Runtime mutation surface for the startup-pinned EVPN model — ADR-0063 rejects a direct `ArcSwap` / `RwLock` table swap as the first implementation. The foundation exposes the committed generation through `GetEvpnRuntime` / `rustbgpctl evpn runtime`, includes the coordinator core / commit gate, and wires `EvpnService.ApplyEvpnRuntime` to daemon-owned candidate parsing, full EVPN table validation, plan summaries, validate-only mode, and no-op apply. A daemon actor converger now commits these live shapes: a **single L2VNI add** (IMET originate + effective-table republish to the dataplane supervisor, Type 2 MAC/MAC+IP originator, SVI task, and already-running segment actor instance view), a **single L2VNI delete** when the VNI is not an Ethernet Segment member, including IP-VRF deployments where only derived link metadata changes (IP-VRF metadata + effective-table republish to the dataplane supervisor, Type 2/SVI drain, IMET withdraw, and already-running segment actor instance view), a **single L2VNI redefine** including Ethernet Segment members when `ip_vrf` link metadata is unchanged (per-VNI Type 3 IMET withdraw-then-re-originate plus candidate-instance-table republish to the level-triggered Type 2 originator, SVI task, dataplane supervisor, and segment actor; ES-member redefine also drains/rebuilds Type 4 / EAD-per-ES / EAD-per-EVI while preserving the stable ESI label; this makes `apply_aliasing_ecmp` runtime-drivable via the dataplane `FdbNhg → SingleDst` transition), a **single IP-VRF add** (effective-table republish to the dataplane supervisor and Type 5 originator), a **single standalone IP-VRF delete** when no L2VNI references it (effective-table republish to the dataplane supervisor and Type 5 originator), a **single IP-VRF redefine** with unchanged L3VNI/device/table identity (effective-table republish plus Type 5 drain/replay for changed route/policy/egress fields), a **single Ethernet Segment add/delete/redefine** (full desired-ES snapshot republished to the segment actor, which drains/rebuilds Type 4 / EAD-per-ES / EAD-per-EVI / BUM state), and an **atomic tenant teardown** — a delete-only plan dropping an ES-member L2VNI together with its Ethernet Segment (delete or member-shrink) and/or a linked IP-VRF in one pass, validated for internal consistency then converged by withdrawing each deleted L2VNI's Type 3 IMET and republishing the candidate snapshots to every level-triggered actor with a rollback ladder (the segment actor emits Type 1/4 withdraws even for a member VNI removed in the same pass). Convergence is ordered with rollback, and the originator / SVI / Type 5 actors drain removed-or-redefined VNIs/IP-VRFs (including stale duplicate-MAC move-window state where applicable) before accepting a new model. Because the segment actor now consumes runtime instance snapshots, ES add/redefine can bind a member VNI added by an earlier live L2VNI add when the actor already exists. `ip_vrf` relink also commits live — a dataplane-only republish of the moved link reference (the link drives only RFC 9135 overlay-index recursion; RD is unchanged, so no Type 3 re-origination). The shapes that remain non-live — L3VNI/device/table IP-VRF identity changes (restart-required by design — kernel VRF lifecycle), non-teardown mixed edits (an add combined with a delete/redefine), an ES referencing an unknown member VNI, or an apply on an RR-only / no-actor daemon — fail closed with `FAILED_PRECONDITION` without advancing or degrading the committed generation. | `crates/evpn/src/runtime.rs`, `crates/api/src/evpn_service.rs`, `src/main.rs`, `src/evpn_imet.rs`, `src/evpn_originator.rs`, `src/evpn_svi.rs`, `src/evpn_l3_originator.rs`, `src/evpn_dataplane.rs`, `src/evpn_segment.rs` | single L2VNI add/delete/redefine + IP-VRF add/delete/redefine + ES add/delete/redefine + atomic tenant teardown + `ip_vrf` relink convergence landed (M47/M48 teardown + M49 preference-DF smokes); L3VNI/device/table IP-VRF identity redefine (restart-required by design) + non-teardown mixed edits remain tracked in [#210](https://github.com/lance0/rustbgpd/issues/210) |
+| Runtime mutation surface for the EVPN model (ADR-0063) — coordinator core + commit gate, with `EvpnService.ApplyEvpnRuntime` wired to daemon-owned candidate parsing, full EVPN table validation, plan summaries, validate-only mode, and no-op apply; a daemon actor converger commits the live shapes (ordered convergence + rollback), and ADR-0063 deliberately rejects a direct `ArcSwap` / `RwLock` table swap. **See the "ADR-0063 runtime convergence contract" subsection below the table for the full shape-by-shape breakdown.** | `crates/evpn/src/runtime.rs`, `crates/api/src/evpn_service.rs`, `src/main.rs`, `src/evpn_imet.rs`, `src/evpn_originator.rs`, `src/evpn_svi.rs`, `src/evpn_l3_originator.rs`, `src/evpn_dataplane.rs`, `src/evpn_segment.rs` | single L2VNI add/delete/redefine + IP-VRF add/delete/redefine + ES add/delete/redefine + atomic tenant teardown + `ip_vrf` relink convergence landed (M47/M48 teardown + M49 preference-DF smokes); L3VNI/device/table IP-VRF identity redefine (restart-required by design) + non-teardown mixed edits remain tracked in [#210](https://github.com/lance0/rustbgpd/issues/210) |
+
+**ADR-0063 runtime convergence contract.** The foundation exposes the
+committed generation through `GetEvpnRuntime` / `rustbgpctl evpn runtime`
+and rejects a direct `ArcSwap` / `RwLock` table swap. A daemon actor
+converger commits these shapes **live**:
+
+- **Single L2VNI add** — IMET originate + effective-table republish to the
+  dataplane supervisor, Type 2 MAC/MAC+IP originator, SVI task, and the
+  already-running segment actor's instance view.
+- **Single L2VNI delete** (when the VNI is not an Ethernet Segment member,
+  including IP-VRF deployments where only derived link metadata changes) —
+  IP-VRF metadata + effective-table republish, Type 2 / SVI drain, IMET
+  withdraw, segment actor instance view.
+- **Single L2VNI redefine** (including ES members when `ip_vrf` link
+  metadata is unchanged) — per-VNI Type 3 IMET withdraw-then-re-originate
+  plus candidate-instance-table republish to the level-triggered Type 2
+  originator, SVI task, dataplane supervisor, and segment actor. ES-member
+  redefine also drains/rebuilds Type 4 / EAD-per-ES / EAD-per-EVI while
+  preserving the stable ESI label — this makes `apply_aliasing_ecmp`
+  runtime-drivable via the dataplane `FdbNhg → SingleDst` transition.
+- **Single IP-VRF add** — effective-table republish to the dataplane
+  supervisor and Type 5 originator.
+- **Single standalone IP-VRF delete** (no L2VNI references it) —
+  effective-table republish to the dataplane supervisor and Type 5
+  originator.
+- **Single IP-VRF redefine** with unchanged L3VNI/device/table identity —
+  effective-table republish plus Type 5 drain/replay for changed
+  route/policy/egress fields.
+- **Single Ethernet Segment add/delete/redefine** — full desired-ES
+  snapshot republished to the segment actor, which drains/rebuilds Type 4
+  / EAD-per-ES / EAD-per-EVI / BUM state.
+- **Atomic tenant teardown** — a delete-only plan dropping an ES-member
+  L2VNI together with its Ethernet Segment (delete or member-shrink)
+  and/or a linked IP-VRF in one pass, validated for internal consistency
+  then converged by withdrawing each deleted L2VNI's Type 3 IMET and
+  republishing candidate snapshots to every level-triggered actor with a
+  rollback ladder (the segment actor emits Type 1/4 withdraws even for a
+  member VNI removed in the same pass).
+- **`ip_vrf` relink** — a dataplane-only republish of the moved link
+  reference (the link drives only RFC 9135 overlay-index recursion; RD is
+  unchanged, so no Type 3 re-origination).
+
+Convergence is ordered with rollback; the originator / SVI / Type 5 actors
+drain removed-or-redefined VNIs/IP-VRFs (including stale duplicate-MAC
+move-window state where applicable) before accepting a new model. Because
+the segment actor consumes runtime instance snapshots, ES add/redefine can
+bind a member VNI added by an earlier live L2VNI add when the actor
+already exists.
+
+Shapes that **fail closed** with `FAILED_PRECONDITION` (without advancing
+or degrading the committed generation): L3VNI/device/table IP-VRF identity
+changes (restart-required by design — kernel VRF lifecycle), non-teardown
+mixed edits (an add combined with a delete/redefine), an ES referencing an
+unknown member VNI, or an apply on an RR-only / no-actor daemon.
 
 **FDB reconciler (PR #34):**
 
