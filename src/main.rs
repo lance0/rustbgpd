@@ -1318,7 +1318,7 @@ fn validate_single_l2vni_add(
     }
     if !plan.evpn_instances.deleted.is_empty() || !plan.evpn_instances.redefined.is_empty() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only add-only L2VNI changes; mixed add/delete/redefine in one request is not supported yet",
+            "ApplyEvpnRuntime currently supports only add-only L2VNI changes; combining add/delete/redefine in one request is not supported — apply each change as a separate ApplyEvpnRuntime request (tracked in #210)",
         ));
     }
     if plan.evpn_instances.added.len() != 1 {
@@ -1363,7 +1363,7 @@ fn validate_single_l2vni_delete(
     }
     if !plan.evpn_instances.added.is_empty() || !plan.evpn_instances.redefined.is_empty() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only delete-only L2VNI changes; mixed add/delete/redefine in one request is not supported yet",
+            "ApplyEvpnRuntime currently supports only delete-only L2VNI changes; combining add/delete/redefine in one request is not supported — apply each change as a separate ApplyEvpnRuntime request (tracked in #210)",
         ));
     }
     if plan.evpn_instances.deleted.len() != 1 {
@@ -1418,7 +1418,7 @@ fn validate_single_l2vni_redefine(
     }
     if !plan.evpn_instances.added.is_empty() || !plan.evpn_instances.deleted.is_empty() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only redefine-only L2VNI changes; mixed add/delete/redefine in one request is not supported yet",
+            "ApplyEvpnRuntime currently supports only redefine-only L2VNI changes; combining add/delete/redefine in one request is not supported — apply each change as a separate ApplyEvpnRuntime request (tracked in #210)",
         ));
     }
     if plan.evpn_instances.redefined.len() != 1 {
@@ -1776,7 +1776,7 @@ fn validate_single_ip_vrf_add(
     }
     if !plan.ip_vrfs.deleted.is_empty() || !plan.ip_vrfs.redefined.is_empty() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only add-only IP-VRF changes; delete/redefine is not supported in the same request",
+            "ApplyEvpnRuntime currently supports only add-only IP-VRF changes — apply a delete/redefine as a separate ApplyEvpnRuntime request (tracked in #210)",
         ));
     }
     if plan.ip_vrfs.added.len() != 1 {
@@ -1804,7 +1804,7 @@ fn validate_single_ip_vrf_delete(
     }
     if !plan.ip_vrfs.added.is_empty() || !plan.ip_vrfs.redefined.is_empty() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only delete-only IP-VRF changes; add/redefine is not supported in the same request",
+            "ApplyEvpnRuntime currently supports only delete-only IP-VRF changes — apply an add/redefine as a separate ApplyEvpnRuntime request (tracked in #210)",
         ));
     }
     if plan.ip_vrfs.deleted.len() != 1 {
@@ -1850,7 +1850,7 @@ fn validate_single_ip_vrf_redefine(
     }
     if !plan.ip_vrfs.added.is_empty() || !plan.ip_vrfs.deleted.is_empty() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only redefine-only IP-VRF changes; add/delete is not supported in the same request",
+            "ApplyEvpnRuntime currently supports only redefine-only IP-VRF changes — apply an add/delete as a separate ApplyEvpnRuntime request (tracked in #210)",
         ));
     }
     if plan.ip_vrfs.redefined.len() != 1 {
@@ -1982,7 +1982,7 @@ fn validate_single_ethernet_segment_delete(
     }
     if !plan.ethernet_segments.added.is_empty() || !plan.ethernet_segments.redefined.is_empty() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only delete-only Ethernet Segment changes; add/redefine is not supported in the same request",
+            "ApplyEvpnRuntime currently supports only delete-only Ethernet Segment changes — apply an add/redefine as a separate ApplyEvpnRuntime request (tracked in #210)",
         ));
     }
     if plan.ethernet_segments.deleted.len() != 1 {
@@ -2031,7 +2031,7 @@ fn validate_single_ethernet_segment_redefine(
     }
     if !plan.ethernet_segments.added.is_empty() || !plan.ethernet_segments.deleted.is_empty() {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-            "ApplyEvpnRuntime currently supports only redefine-only Ethernet Segment changes; add/delete is not supported in the same request",
+            "ApplyEvpnRuntime currently supports only redefine-only Ethernet Segment changes — apply an add/delete as a separate ApplyEvpnRuntime request (tracked in #210)",
         ));
     }
     if plan.ethernet_segments.redefined.len() != 1 {
