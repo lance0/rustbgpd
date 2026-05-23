@@ -864,6 +864,12 @@ enum RibQueryError {
 
 async fn apply(runtime: &SegmentRuntime, state: &SegmentState, actions: Vec<OriginationAction>) {
     let Some(inst) = runtime.instances.get(state.reference_instance_id).cloned() else {
+        // The reference instance is gone — e.g. a tenant teardown removed the
+        // member L2VNI before this drain runs. Inject actions can't be built
+        // without the instance's path attributes, but Withdraw actions only
+        // need the route key, so still emit those; otherwise teardown would
+        // strand the segment's Type 1/4 routes in peers' RIBs.
+        apply_withdraws_only(runtime, actions).await;
         return;
     };
     apply_with_instance(
@@ -876,6 +882,39 @@ async fn apply(runtime: &SegmentRuntime, state: &SegmentState, actions: Vec<Orig
         actions,
     )
     .await;
+}
+
+/// Emit only the Withdraw actions from `actions`, dropping any Inject (which
+/// can't be built without the now-removed reference instance). Used when the
+/// member L2VNI has already been torn down but the segment's routes still need
+/// to be withdrawn from the RIB.
+async fn apply_withdraws_only(runtime: &SegmentRuntime, actions: Vec<OriginationAction>) {
+    for action in actions {
+        let OriginationAction::Withdraw { key, .. } = action else {
+            continue;
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if runtime
+            .rib_tx
+            .send(RibUpdate::WithdrawEvpn {
+                key,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            warn!(?key, "EVPN segment: RIB channel closed; cannot withdraw");
+            return;
+        }
+        match reply_rx.await {
+            Ok(Ok(())) => debug!(
+                ?key,
+                "EVPN segment: withdrew (member instance already removed)"
+            ),
+            Ok(Err(e)) => debug!(?key, error = %e, "EVPN segment: RIB withdraw declined"),
+            Err(_) => warn!(?key, "EVPN segment: RIB withdraw reply dropped"),
+        }
+    }
 }
 
 async fn apply_with_instance(
@@ -1838,6 +1877,60 @@ mod tests {
 
         handle.shutdown().await;
         assert!(!control.is_open());
+    }
+
+    #[tokio::test]
+    async fn runtime_control_drains_routes_when_member_instance_removed_with_segment() {
+        // Tenant teardown removes the member L2VNI and its Ethernet Segment in
+        // the same pass, so the segment actor sees an empty instance table when
+        // it drains. The drain must still withdraw the Type 1/4 routes — a
+        // missing reference instance only blocks (re-)origination, not withdraw.
+        let mut t = EvpnInstanceTable::new();
+        t.insert(instance(100)).unwrap();
+        let instances = Arc::new(t);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(32);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = rib_recorder(rib_rx, injects.clone(), withdraws.clone());
+
+        let handle = spawn(
+            &instances,
+            vec![segment(esi(0x21), &[100])],
+            rib_tx,
+            None,
+            BgpMetrics::new(),
+            CancellationToken::new(),
+        )
+        .expect("non-empty ES config should spawn segment actor");
+        let control = handle.runtime_control();
+        let _ = wait_for_keys(&injects, 3, "initial ES injections").await;
+
+        // Mirror the converge_tenant_teardown publish order: empty instances,
+        // then empty segments.
+        assert!(control.replace_instances(Arc::new(EvpnInstanceTable::new())));
+        assert!(control.replace_segments(Arc::new(Vec::new())));
+
+        let drained_keys = wait_for_keys(&withdraws, 3, "teardown ES withdraws").await;
+        assert!(
+            drained_keys
+                .iter()
+                .any(|key| matches!(key, EvpnRouteKey::Es { .. })),
+            "teardown should withdraw the Type 4 ES route; drained {drained_keys:?}"
+        );
+        assert!(
+            drained_keys
+                .iter()
+                .any(|key| matches!(key, EvpnRouteKey::EadPerEs { .. })),
+            "teardown should withdraw the EAD-per-ES route; drained {drained_keys:?}"
+        );
+        assert!(
+            drained_keys
+                .iter()
+                .any(|key| matches!(key, EvpnRouteKey::EadPerEvi { .. })),
+            "teardown should withdraw the EAD-per-EVI route; drained {drained_keys:?}"
+        );
+
+        handle.shutdown().await;
     }
 
     #[tokio::test]

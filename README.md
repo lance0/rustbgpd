@@ -62,10 +62,9 @@ architecture diagrams, example configs, and API workflows.
   all-active correctness gate (ASIC/offload-dependent on the Linux
   softswitch — see ADR-0065); runtime EVPN model edits are partial
   (`ApplyEvpnRuntime`
-  commits nine live shapes, while `ip_vrf` relink, linked IP-VRF delete /
-  tenant teardown, ES-aware L2VNI delete,
-  L3VNI/device/table IP-VRF redefine, mixed, and multi-element edits remain
-  restart-required),
+  commits single L2VNI/IP-VRF/Ethernet-Segment add/delete/redefine and atomic
+  tenant teardown, while `ip_vrf` relink, L3VNI/device/table IP-VRF redefine, and
+  non-teardown mixed edits remain restart-required),
   and MPLS / PBB / MVPN encapsulations are not implemented. See
   [docs/evpn-enablement.md](docs/evpn-enablement.md) for the shipped
   feature ladder

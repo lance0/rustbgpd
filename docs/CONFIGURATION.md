@@ -1733,8 +1733,9 @@ filter (see `apply_bum_enforcement` in `[global]`).
 
 Restart-required on SIGHUP: `[[ethernet_segments]]` is pinned for
 config reloads. `EvpnService.ApplyEvpnRuntime` can live-commit a single
-Ethernet Segment add, delete, or redefine when the segment actor exists;
-unsupported mixed / multi-element changes still fail closed.
+Ethernet Segment add, delete, or redefine when the segment actor exists, and
+drops an Ethernet Segment (delete or member-shrink) as part of an atomic tenant
+teardown alongside its member L2VNI; non-teardown mixed edits still fail closed.
 
 ---
 
@@ -1842,9 +1843,11 @@ the transition once per state change rather than every pass.
 - Every `[[evpn_instances]].ip_vrf` resolves to a declared IP-VRF.
 - `[[evpn_ip_vrfs]]` is restart-required — SIGHUP pins the in-memory
   snapshot back to the startup value, same lifecycle as `[[evpn_instances]]`.
-  `EvpnService.ApplyEvpnRuntime` can live-commit a single IP-VRF add or
-  standalone delete; IP-VRF redefine and linked tenant teardown remain
-  fail-closed #210 shapes.
+  `EvpnService.ApplyEvpnRuntime` can live-commit a single IP-VRF add,
+  standalone delete, or redefine with unchanged L3VNI/device/table identity, and
+  an atomic tenant teardown that drops a linked IP-VRF together with its L2VNI
+  (and any Ethernet Segment) in one pass; `ip_vrf` relink and L3VNI/device/table
+  IP-VRF redefine remain fail-closed #210 shapes.
 
 See [ADR-0058](adr/0058-evpn-gate-9-irb-l3vni.md) for the design rationale.
 
@@ -1914,7 +1917,8 @@ origination, and L3 FIB programming. The ADR-0061 `[[fib_tables]]`
 table is pinned for the same reason: the general FIB actor owns only the
 explicit tables resolved at startup. Runtime EVPN mutation is exposed
 through ADR-0063's full-candidate `EvpnService.ApplyEvpnRuntime` RPC for
-the supported nine live shapes; direct `AddEvpnInstance` /
+the supported live shapes (single L2VNI/IP-VRF/Ethernet-Segment
+add/delete/redefine and atomic tenant teardown); direct `AddEvpnInstance` /
 `DeleteEvpnInstance` RPCs and SIGHUP delta application remain out of
 scope. Unsupported shapes are tracked in
 <https://github.com/lance0/rustbgpd/issues/210>.

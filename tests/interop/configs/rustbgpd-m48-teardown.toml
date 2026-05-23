@@ -1,0 +1,33 @@
+# M48 teardown candidate — the `candidate_toml` body sent to
+# EvpnService/ApplyEvpnRuntime to remove the whole tenant.
+#
+# Identical to rustbgpd-m48-pe1.toml minus the [[evpn_instances]] and
+# [[evpn_ip_vrfs]] blocks. The coordinator diffs this candidate's empty
+# EVPN runtime model against the committed one, producing a delete-only
+# plan — L2VNI 10 + its referenced IP-VRF vrf1 — which routes through the
+# atomic tenant-teardown converger (a referenced IP-VRF can only be
+# dropped together with the L2VNI that links it). Global, telemetry,
+# gRPC, and neighbor config are unchanged: ApplyEvpnRuntime only mutates
+# the EVPN runtime model, not the session layer.
+
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "pe2"
+hold_time = 180
+families = ["l2vpn_evpn"]
+
+[security.grpc]
+enforcement = "legacy"
