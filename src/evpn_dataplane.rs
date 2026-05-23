@@ -924,14 +924,7 @@ async fn build_intent_tables(
     // single-active (suppress all-active aliasing ECMP). A last-wins
     // `.collect()` would make this nondeterministic across duplicate or
     // transient (e.g. RD-changing) EAD-per-ES rows for the same key.
-    let mut ead_per_es_modes: std::collections::BTreeMap<
-        (std::net::IpAddr, rustbgpd_wire::EthernetSegmentIdentifier),
-        bool,
-    > = std::collections::BTreeMap::new();
-    for (key, single_active) in routes.iter().filter_map(project_ead_per_es_reachability) {
-        let entry = ead_per_es_modes.entry(key).or_insert(false);
-        *entry = *entry || single_active;
-    }
+    let ead_per_es_modes = fold_ead_per_es_modes(&routes);
     let active_ead_per_es: std::collections::BTreeSet<(
         std::net::IpAddr,
         rustbgpd_wire::EthernetSegmentIdentifier,
@@ -1040,6 +1033,23 @@ fn project_type5(route: &EvpnRibRoute) -> Option<rustbgpd_evpn::ip_vrf::Projecte
         route_targets,
         router_mac,
     })
+}
+
+/// Fold the EAD-per-ES reachability snapshot into a per-`(next-hop, ESI)`
+/// single-active map. If ANY EAD-per-ES route for a key advertises
+/// single-active, the pair is single-active (OR-fold). This is deterministic
+/// across duplicate or transient (e.g. RD-changing) EAD-per-ES rows for the
+/// same key, unlike a last-wins `.collect()`.
+fn fold_ead_per_es_modes(
+    routes: &[EvpnRibRoute],
+) -> std::collections::BTreeMap<(std::net::IpAddr, rustbgpd_wire::EthernetSegmentIdentifier), bool>
+{
+    let mut modes = std::collections::BTreeMap::new();
+    for (key, single_active) in routes.iter().filter_map(project_ead_per_es_reachability) {
+        let entry = modes.entry(key).or_insert(false);
+        *entry = *entry || single_active;
+    }
+    modes
 }
 
 fn project_ead_per_es_reachability(
@@ -1682,6 +1692,30 @@ mod tests {
             project_ead_per_es_reachability(&single_active),
             Some(((ipa("10.0.0.3"), esi), true))
         );
+    }
+
+    #[test]
+    fn fold_ead_per_es_modes_or_folds_single_active_across_duplicates() {
+        // Two EAD-per-ES rows for the SAME (next-hop, ESI): one all-active, one
+        // single-active (e.g. a transient RD-changing duplicate). The OR-fold
+        // must yield single-active regardless of arrival order, so the receiver
+        // deterministically suppresses all-active aliasing ECMP.
+        let esi = EthernetSegmentIdentifier::new([9; 10]);
+        let nh = ipa("10.0.0.2");
+        let all_active = evpn_ead_per_es_route(esi, "10.0.0.2", false);
+        let single_active = evpn_ead_per_es_route(esi, "10.0.0.2", true);
+
+        for routes in [
+            vec![all_active.clone(), single_active.clone()],
+            vec![single_active, all_active],
+        ] {
+            let modes = fold_ead_per_es_modes(&routes);
+            assert_eq!(
+                modes.get(&(nh, esi)),
+                Some(&true),
+                "single-active must win the (next-hop, ESI) fold"
+            );
+        }
     }
 
     #[tokio::test]

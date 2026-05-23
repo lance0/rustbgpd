@@ -1871,13 +1871,21 @@ fn validate_single_ip_vrf_redefine(
         )));
     };
 
+    // The L3VNI, VRF device, L3VXLAN device, and table id are the IP-VRF's
+    // kernel-object identity; changing one is a VRF lifecycle operation (destroy
+    // + recreate the kernel VRF), which is restart-required by design — a runtime
+    // drain/recreate would risk a dual-state window (kernel on the old identity
+    // while the originator publishes the new). `router_mac` is NOT identity: it
+    // is an accepted live route/policy-field redefine (the Type 5 originator +
+    // dataplane self-diff it cleanly), so it is intentionally absent from this
+    // guard.
     if old.id != new.id
         || old.vrf_device != new.vrf_device
         || old.l3vxlan_device != new.l3vxlan_device
         || old.table_id != new.table_id
     {
         return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
-            "ApplyEvpnRuntime IP-VRF redefine currently supports only route/policy/egress field changes for {name:?}; L3VNI, vrf_device, l3vxlan_device, and table_id changes are not supported yet"
+            "ApplyEvpnRuntime IP-VRF redefine supports live route/policy/egress field changes (rd, route_targets, local_vtep_ip, router_mac) for {name:?}; changing the L3VNI, vrf_device, l3vxlan_device, or table_id is restart-required by design (kernel VRF identity lifecycle)"
         )));
     }
 

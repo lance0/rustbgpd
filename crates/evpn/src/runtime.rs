@@ -841,6 +841,7 @@ mod tests {
                 .collect(),
             df_preference: 32_768,
             df_algorithm: DfAlgorithm::DefaultModulo,
+            df_dont_preempt: false,
             redundancy_mode: crate::RedundancyMode::AllActive,
             originator_ip: "10.0.0.1".parse().unwrap(),
         }

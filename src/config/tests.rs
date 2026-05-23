@@ -5969,6 +5969,56 @@ originator_ip = "10.0.0.100"
 }
 
 #[test]
+fn ethernet_segment_accepts_df_dont_preempt_with_preference_algorithm() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+df_algorithm = "highest-preference"
+df_preference = 100
+df_dont_preempt = true
+originator_ip = "10.0.0.100"
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    let segments = config.resolve_ethernet_segments().unwrap();
+    assert!(segments[0].df_dont_preempt);
+}
+
+#[test]
+fn ethernet_segment_rejects_df_dont_preempt_without_preference_algorithm() {
+    // DP is meaningless for default-modulo (the default algorithm) — fail closed
+    // rather than silently ignore it.
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+df_dont_preempt = true
+originator_ip = "10.0.0.100"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::InvalidEthernetSegment { .. }),
+        "expected InvalidEthernetSegment, got {err:?}"
+    );
+}
+
+#[test]
 fn ethernet_segment_rejects_ambiguous_preference_df_algorithm_alias() {
     let toml = evpn_toml_with(
         r#"
