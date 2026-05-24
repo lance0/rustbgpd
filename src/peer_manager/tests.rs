@@ -218,6 +218,7 @@ fn make_dynamic_manager_config() -> Config {
         ethernet_segments: Vec::new(),
         evpn_ip_vrfs: Vec::new(),
         fib_tables: Vec::new(),
+        bfd_profiles: Vec::new(),
         apply_bum_enforcement: false,
     }
 }
@@ -428,6 +429,7 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         max_prefixes: None,
         md5_password: None,
         tcp_ao: None,
+        bfd: None,
         ttl_security: None,
         families: Vec::new(),
         graceful_restart: None,

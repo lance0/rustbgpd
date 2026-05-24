@@ -160,6 +160,7 @@ fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerGroupConfig 
         max_prefixes: definition.max_prefixes,
         md5_password: definition.md5_password,
         ttl_security: definition.ttl_security,
+        bfd: None,
         families: definition.families,
         graceful_restart: definition.graceful_restart,
         gr_restart_time: definition.gr_restart_time,
@@ -366,6 +367,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     max_prefixes: cfg.max_prefixes,
                     md5_password: cfg.md5_password.clone(),
                     tcp_ao: cfg.tcp_ao.as_ref().map(transport_tcp_ao_to_config),
+                    bfd: None,
                     ttl_security: Some(cfg.ttl_security),
                     families: cfg
                         .families

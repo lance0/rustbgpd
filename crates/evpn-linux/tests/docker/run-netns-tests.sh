@@ -12,6 +12,10 @@
 #     (`src/fib_runtime.rs`) — proves configured non-reserved
 #     Linux tables receive and drain daemon-owned routes, including
 #     ADR-0066 unicast multipath/ECMP install + failover.
+#   - ADR-0067 single-hop BFD actor validation (`src/bfd_runtime.rs`)
+#     — proves the real UDP socket path: TTL/Hop-Limit-255 discard
+#     (RFC 5881), decode/demux, the session reaching Up, and
+#     detection-timer expiry when the peer goes silent.
 #
 # Requires:
 #   - Docker daemon running on a Linux host with kernel >= 5.8 for
@@ -37,6 +41,8 @@
 #       (slice 3b CVE-2025-39851 guard negative path only)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh fib_runtime
 #       (ADR-0061 Slice 4 general unicast FIB runtime validation)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh bfd_runtime
+#       (ADR-0067 single-hop BFD actor netns validation)
 #
 # Exits 0 on green; surfaces the inner cargo exit code otherwise.
 
@@ -49,9 +55,12 @@ DOCKERFILE="$SCRIPT_DIR/Dockerfile"
 
 # Test selector. `bum_*` runs the Gate 8b harness; `fdb_nhg` runs
 # the ADR-0059 slice 3b FDB nexthop group integration test;
-# `fib_runtime` runs the ADR-0061 same-module daemon runtime test.
+# `fib_runtime` / `bfd_runtime` run same-module `-p rustbgpd` daemon
+# runtime tests (ADR-0061 FIB / ADR-0067 BFD).
 TEST_BIN="netns_bum_filter"
-FIB_RUNTIME_FILTER=""
+# Module-path filter for `-p rustbgpd` daemon netns tests (fib/bfd);
+# empty means the default `netns_*` evpn-linux integration binary.
+RUSTBGPD_TEST_FILTER=""
 case "${1:-all}" in
     spike)      FILTER="bum_filter_spike_validates_kernel_primitive" ;;
     roundtrip)  FILTER="linux_dataplane_set_bum_port_flags_round_trip" ;;
@@ -59,9 +68,10 @@ case "${1:-all}" in
     fdb_nhg)    TEST_BIN="netns_fdb_nhg"; FILTER="" ;;
     fdb_nhg_roundtrip)  TEST_BIN="netns_fdb_nhg"; FILTER="round_trip_install_and_remove_fdb_nhg" ;;
     fdb_nhg_cve)        TEST_BIN="netns_fdb_nhg"; FILTER="cve_guard_blocks_install_when_learning_enabled" ;;
-    fib_runtime)        FILTER=""; FIB_RUNTIME_FILTER="fib_runtime::tests::netns_general_unicast_fib_" ;;
+    fib_runtime)        FILTER=""; RUSTBGPD_TEST_FILTER="fib_runtime::tests::netns_general_unicast_fib_" ;;
+    bfd_runtime)        FILTER=""; RUSTBGPD_TEST_FILTER="bfd_runtime::tests::netns::" ;;
     *)
-        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime" >&2
+        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime" >&2
         exit 2
         ;;
 esac
@@ -139,7 +149,7 @@ DOCKER_ARGS=(
 # netnses and re-exec into them; running them in parallel inside
 # the same container risks them clobbering each other on the
 # `/proc/$$/ns` namespace inheritance the inner re-exec depends on.
-if [ -n "$FIB_RUNTIME_FILTER" ]; then
+if [ -n "$RUSTBGPD_TEST_FILTER" ]; then
     # The rustbgpd binary's gRPC types are generated from
     # `proto/rustbgpd.proto` by `rustbgpd-api`'s build script into that crate's
     # OUT_DIR. The persistent `$TARGET_CACHE_VOL` can retain a stale generated
@@ -152,7 +162,7 @@ if [ -n "$FIB_RUNTIME_FILTER" ]; then
     # `cargo test` verbatim even if it ever gains whitespace / shell
     # metacharacters (today it is a plain module path).
     TEST_ARGS=(
-        sh -c "cargo clean -p rustbgpd-api && cargo test -p rustbgpd '${FIB_RUNTIME_FILTER}' -- --test-threads=1 --nocapture"
+        sh -c "cargo clean -p rustbgpd-api && cargo test -p rustbgpd '${RUSTBGPD_TEST_FILTER}' -- --test-threads=1 --nocapture"
     )
 else
     TEST_ARGS=(

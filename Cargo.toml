@@ -55,6 +55,10 @@ tonic-prost-build = "0.14"
 prost = "0.14"
 prometheus = "0.14"
 socket2 = { version = "0.6", features = ["all"] }
+# `uio` gates recvmsg / ControlMessageOwned / cmsg_space! used by the BFD actor
+# to read IP_RECVTTL / IPV6_RECVHOPLIMIT + IP_PKTINFO / IPV6_PKTINFO ancillary
+# data (RFC 5881 TTL=255 receive check). Linux-only consumer.
+nix = { version = "0.30", features = ["socket", "net", "uio"] }
 tokio-stream = { version = "0.1", features = ["sync", "net"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 axum = "0.8"
@@ -94,6 +98,7 @@ dhat-heap = ["dhat"]
 tikv-jemallocator = { workspace = true, optional = true }
 dhat = { workspace = true, optional = true }
 rustbgpd-wire.workspace = true
+rustbgpd-bfd.workspace = true
 rustbgpd-fsm.workspace = true
 rustbgpd-transport.workspace = true
 rustbgpd-rib.workspace = true
@@ -117,12 +122,14 @@ bytes.workspace = true
 serde_json.workspace = true
 owo-colors.workspace = true
 axum.workspace = true
+socket2.workspace = true
 tokio-util = { version = "0.7", features = ["rt"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = "0.21"
 netlink-packet-route = "0.30"
 libc.workspace = true
+nix.workspace = true
 futures = "0.3"
 
 [dev-dependencies]

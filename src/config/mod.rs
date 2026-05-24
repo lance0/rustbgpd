@@ -664,6 +664,7 @@ impl Config {
             max_prefixes: None,
             md5_password: None,
             tcp_ao: None,
+            bfd: None,
             ttl_security: None,
             families: Vec::new(),
             graceful_restart: None,

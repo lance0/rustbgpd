@@ -3073,6 +3073,7 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         max_prefixes: None,
         md5_password: None,
         tcp_ao: None,
+        bfd: None,
         ttl_security: Some(false),
         families: Vec::new(),
         graceful_restart: None,
@@ -3566,6 +3567,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             max_prefixes: None,
             md5_password: None,
             ttl_security: None,
+            bfd: None,
             families: Vec::new(),
             graceful_restart: None,
             gr_restart_time: None,
@@ -3591,6 +3593,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         hold_time: None,
         max_prefixes: None,
         md5_password: None,
+        bfd: None,
         tcp_ao: Some(TcpAoConfig {
             key: "secret".into(),
             send_id: 1,
@@ -3625,6 +3628,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         max_prefixes: None,
         md5_password: None,
         tcp_ao: None,
+        bfd: None,
         ttl_security: None,
         families: Vec::new(),
         graceful_restart: None,
@@ -3669,6 +3673,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         hold_time: None,
         max_prefixes: None,
         md5_password: None,
+        bfd: None,
         tcp_ao: Some(TcpAoConfig {
             key: "secret".into(),
             send_id: 1,
@@ -5797,6 +5802,100 @@ allowed_peer_groups = ["transit", "transit"]
         reason.contains("duplicate allowed_peer_groups"),
         "unexpected error: {reason}"
     );
+}
+
+#[test]
+fn bfd_profiles_parse_and_neighbor_reference() {
+    let toml = format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+min_tx_interval = 250
+min_rx_interval = 250
+multiplier = 4
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+bfd = {{ profile = "fast", strict = true }}
+"#,
+        valid_toml()
+    );
+    let config = parse(&toml).unwrap();
+    assert_eq!(config.bfd_profiles.len(), 1);
+    assert_eq!(config.bfd_profiles[0].min_tx_interval, 250);
+    assert_eq!(config.bfd_profiles[0].multiplier, 4);
+    let n = config
+        .neighbors
+        .iter()
+        .find(|n| n.address == "10.0.0.3")
+        .unwrap();
+    let bfd = n.bfd.as_ref().unwrap();
+    assert_eq!(bfd.profile, "fast");
+    assert!(bfd.strict);
+}
+
+#[test]
+fn bfd_profile_defaults_are_300_300_3() {
+    let toml = format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "p"
+"#,
+        valid_toml()
+    );
+    let p = &parse(&toml).unwrap().bfd_profiles[0];
+    assert_eq!(
+        (p.min_tx_interval, p.min_rx_interval, p.multiplier),
+        (300, 300, 3)
+    );
+}
+
+#[test]
+fn bfd_rejects_invalid_profiles() {
+    let cases = [
+        ("name = \"p\"\nmin_tx_interval = 50", "must be >= 100"),
+        ("name = \"p\"\nmultiplier = 1", "multiplier must be >= 2"),
+        (
+            "name = \"dup\"\n\n[[bfd_profiles]]\nname = \"dup\"",
+            "duplicate bfd_profile",
+        ),
+    ];
+    for (body, expected) in cases {
+        let toml = format!("{}\n\n[[bfd_profiles]]\n{body}\n", valid_toml());
+        let err = parse(&toml).unwrap_err();
+        let ConfigError::InvalidBfd { reason } = err else {
+            panic!("expected InvalidBfd, got {err}");
+        };
+        assert!(
+            reason.contains(expected),
+            "expected {expected:?} in {reason:?}"
+        );
+    }
+}
+
+#[test]
+fn bfd_rejects_undefined_profile_reference() {
+    let toml = format!(
+        r#"
+{}
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+bfd = {{ profile = "nope" }}
+"#,
+        valid_toml()
+    );
+    let err = parse(&toml).unwrap_err();
+    let ConfigError::InvalidBfd { reason } = err else {
+        panic!("expected InvalidBfd, got {err}");
+    };
+    assert!(reason.contains("not defined"), "unexpected: {reason}");
 }
 
 #[test]

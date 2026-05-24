@@ -141,6 +141,7 @@ log_format = "json"
             max_prefixes: None,
             md5_password: None,
             tcp_ao: None,
+            bfd: None,
             ttl_security: Some(false),
             families: Vec::new(),
             graceful_restart: None,

@@ -602,6 +602,7 @@ impl Config {
         // `resolve_evpn_ip_vrfs` on demand.
         let _ = self.resolve_evpn_ip_vrfs()?;
         validate_fib_tables(self)?;
+        validate_bfd(self)?;
 
         Ok(())
     }
@@ -1161,6 +1162,74 @@ fn validate_grpc_token_file(path: Option<&str>, field_name: &str) -> Result<(), 
         return Err(ConfigError::InvalidGrpcConfig {
             reason: format!("{field_name} {path:?} must contain a non-empty token"),
         });
+    }
+    Ok(())
+}
+
+/// Minimum BFD interval (ms). Conservative for v1 — aggressive sub-100 ms
+/// timers risk false flaps that are worse than slightly slower detection.
+const BFD_MIN_INTERVAL_MS: u32 = 100;
+/// Minimum BFD detection multiplier.
+const BFD_MIN_MULTIPLIER: u32 = 2;
+
+/// Validate `[[bfd_profiles]]` and that every `bfd.profile` reference resolves.
+fn validate_bfd(config: &Config) -> Result<(), ConfigError> {
+    let mut names = std::collections::HashSet::new();
+    for profile in &config.bfd_profiles {
+        if profile.name.trim().is_empty() {
+            return Err(ConfigError::InvalidBfd {
+                reason: "bfd_profile name must not be empty".to_string(),
+            });
+        }
+        if !names.insert(profile.name.clone()) {
+            return Err(ConfigError::InvalidBfd {
+                reason: format!("duplicate bfd_profile name {:?}", profile.name),
+            });
+        }
+        if profile.min_tx_interval < BFD_MIN_INTERVAL_MS
+            || profile.min_rx_interval < BFD_MIN_INTERVAL_MS
+        {
+            return Err(ConfigError::InvalidBfd {
+                reason: format!(
+                    "bfd_profile {:?}: min_tx_interval and min_rx_interval must be >= {BFD_MIN_INTERVAL_MS} ms",
+                    profile.name
+                ),
+            });
+        }
+        if profile.multiplier < BFD_MIN_MULTIPLIER {
+            return Err(ConfigError::InvalidBfd {
+                reason: format!(
+                    "bfd_profile {:?}: multiplier must be >= {BFD_MIN_MULTIPLIER}",
+                    profile.name
+                ),
+            });
+        }
+    }
+
+    let profile_defined = |profile: &str| names.contains(profile);
+    for neighbor in &config.neighbors {
+        if let Some(bfd) = &neighbor.bfd
+            && !profile_defined(&bfd.profile)
+        {
+            return Err(ConfigError::InvalidBfd {
+                reason: format!(
+                    "neighbor {:?}: bfd.profile {:?} is not defined in [[bfd_profiles]]",
+                    neighbor.address, bfd.profile
+                ),
+            });
+        }
+    }
+    for (group_name, group) in &config.peer_groups {
+        if let Some(bfd) = &group.bfd
+            && !profile_defined(&bfd.profile)
+        {
+            return Err(ConfigError::InvalidBfd {
+                reason: format!(
+                    "peer_group {group_name:?}: bfd.profile {:?} is not defined in [[bfd_profiles]]",
+                    bfd.profile
+                ),
+            });
+        }
     }
     Ok(())
 }
