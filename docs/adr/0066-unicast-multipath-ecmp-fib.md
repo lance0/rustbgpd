@@ -91,7 +91,10 @@ It is orthogonal to `max_routes` — `max_routes` caps the number of prefixes
 both homogeneous eBGP and iBGP groups; per-class `maximum_paths_ebgp` /
 `maximum_paths_ibgp` (FRR parity) can be added later without a breaking change.
 The reconciler queries the RIB at the widest configured `maximum_paths` and
-re-caps per table, so a default config never pays for sibling gathering.
+re-caps per table, so a default config never pays for sibling gathering: when
+that width is `1` (no table opts into ECMP), the install-candidate handler
+short-circuits — it returns each Loc-RIB best directly, with no Adj-RIB-In
+sibling scan or sort.
 
 ## Consequences
 

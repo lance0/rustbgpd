@@ -378,8 +378,8 @@ async fn query_fib_install_candidates(
 
 /// Widest ECMP fan-out any configured table wants. The RIB returns candidates
 /// capped at this width; projection re-caps per table. Unset / 1 ⇒ today's
-/// single-next-hop behavior, so a default config never pays for sibling
-/// gathering.
+/// single-next-hop behavior: at width 1 the RIB handler short-circuits the
+/// equal-cost sibling scan, so a default config never pays for sibling gathering.
 fn max_install_paths(config: &FibRuntimeConfig) -> u32 {
     config
         .tables
