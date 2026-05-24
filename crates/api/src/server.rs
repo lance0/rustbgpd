@@ -113,6 +113,9 @@ pub struct ServeConfig {
     /// Live snapshot reader for ADR-0067 single-hop BFD session state.
     /// Returns an empty list when no BFD sessions are configured or off Linux.
     pub bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
+    /// Live ADR-0067 BFD session-event source (state transitions) for the
+    /// unified `WatchEvents` stream. `None` disables the BFD event stream.
+    pub bfd_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
 }
 
 /// Resolved gRPC listener configuration.
@@ -383,6 +386,7 @@ async fn run_listener(
     let fib_route_snapshot = config.fib_route_snapshot;
     let dataplane_route_events = config.dataplane_route_events;
     let bfd_session_snapshot = config.bfd_session_snapshot;
+    let bfd_events = config.bfd_events;
     let ListenerConfig {
         endpoint,
         access_mode,
@@ -427,6 +431,7 @@ async fn run_listener(
                 fib_route_snapshot,
                 dataplane_route_events,
                 bfd_session_snapshot,
+                bfd_events,
                 dataplane_events,
                 shutdown_rx,
                 rpc_shutdown_tx,
@@ -466,6 +471,7 @@ async fn run_listener(
                 fib_route_snapshot,
                 dataplane_route_events,
                 bfd_session_snapshot,
+                bfd_events,
                 dataplane_events,
                 shutdown_rx,
                 rpc_shutdown_tx,
@@ -512,6 +518,7 @@ async fn run_tcp_listener(
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
     dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
+    bfd_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     dataplane_events: DataplaneEventBroadcaster,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
@@ -571,6 +578,7 @@ async fn run_tcp_listener(
                 fib_route_snapshot.clone(),
                 dataplane_events,
                 dataplane_route_events,
+                bfd_events,
                 metrics.clone(),
             ),
             interceptor.clone(),
@@ -677,6 +685,7 @@ async fn run_uds_listener(
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
     dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
+    bfd_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     dataplane_events: DataplaneEventBroadcaster,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
@@ -718,6 +727,7 @@ async fn run_uds_listener(
                 fib_route_snapshot.clone(),
                 dataplane_events,
                 dataplane_route_events,
+                bfd_events,
                 metrics.clone(),
             ),
             interceptor.clone(),

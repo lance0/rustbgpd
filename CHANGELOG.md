@@ -59,7 +59,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`EVENT_CATEGORY_BFD`, `BGP_EVENT_TYPE_BFD_SESSION_{UP,DOWN,STATE_CHANGED}`,
   `BfdSessionEvent`, the `BgpEvent.bfd` oneof) so it is stable, but BFD events
   **do not yet stream** over `EventService.WatchEvents` — actor event emission
-  lands in a follow-up.
+  lands in a follow-up (the next entry).
+- **ADR-0067 BFD event emission.** The BFD actor now publishes session
+  state-change events into the unified `EventService.WatchEvents` stream as
+  `BfdSessionEvent` payloads (`EVENT_CATEGORY_BFD`,
+  `BGP_EVENT_TYPE_BFD_SESSION_{UP,DOWN,STATE_CHANGED}`). Opt-in like the
+  dataplane / EVPN categories (not in the default route+session set);
+  filterable by category, event type, and peer address. The actor stays
+  decoupled from the gRPC proto — it broadcasts an internal event that a daemon
+  bridge converts (mirrors the FIB dataplane bridge).
 - **ADR-0063 EVPN runtime convergence — `ip_vrf` relink.**
   `EvpnService.ApplyEvpnRuntime` now commits an L2VNI re-homed to a different
   IP-VRF (or its `ip_vrf` link added/removed) at runtime. A relink edits no

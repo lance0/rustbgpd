@@ -110,6 +110,22 @@ pub struct BfdStatus {
     pub strict: bool,
 }
 
+/// A BFD session state transition, broadcast for the operator event stream
+/// (ADR-0067 step 3b). The daemon bridges this into the unified
+/// `EventService.WatchEvents` stream; the actor itself stays decoupled from the
+/// gRPC proto (mirrors `fib_runtime`'s `FibRuntimeEvent`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BfdRuntimeEvent {
+    /// Peer IP address.
+    pub peer: IpAddr,
+    /// State before the transition.
+    pub old_state: rustbgpd_bfd::SessionState,
+    /// State after the transition.
+    pub new_state: rustbgpd_bfd::SessionState,
+    /// Local diagnostic accompanying the transition.
+    pub diagnostic: rustbgpd_bfd::Diagnostic,
+}
+
 #[cfg(target_os = "linux")]
 // `BfdRuntimeHandle` is the public return type of `spawn`; the name isn't
 // referenced directly in this binary crate, hence the allow.
@@ -121,9 +137,9 @@ pub use stub::{BfdRuntimeHandle, spawn};
 
 #[cfg(not(target_os = "linux"))]
 mod stub {
-    use super::{BfdRuntimeConfig, BfdStatus};
+    use super::{BfdRuntimeConfig, BfdRuntimeEvent, BfdStatus};
     use rustbgpd_telemetry::BgpMetrics;
-    use tokio::sync::watch;
+    use tokio::sync::{broadcast, watch};
     use tokio_util::sync::CancellationToken;
 
     /// Non-Linux placeholder handle (BFD sockets are Linux-only).
@@ -140,6 +156,7 @@ mod stub {
         _config: BfdRuntimeConfig,
         _metrics: BgpMetrics,
         _status_tx: watch::Sender<Vec<BfdStatus>>,
+        _event_tx: broadcast::Sender<BfdRuntimeEvent>,
         _shutdown: CancellationToken,
     ) -> Option<BfdRuntimeHandle> {
         None
@@ -163,12 +180,12 @@ mod linux {
     use socket2::{Domain, Protocol, Socket, Type};
     use tokio::io::unix::AsyncFd;
     use tokio::net::UdpSocket;
-    use tokio::sync::watch;
+    use tokio::sync::{broadcast, watch};
     use tokio::time::Instant;
     use tokio_util::sync::CancellationToken;
     use tracing::{debug, info, warn};
 
-    use super::{BfdRuntimeConfig, BfdSessionParams, BfdStatus};
+    use super::{BfdRuntimeConfig, BfdRuntimeEvent, BfdSessionParams, BfdStatus};
 
     /// BFD single-hop control port (RFC 5881 §4).
     const BFD_CONTROL_PORT: u16 = 3784;
@@ -198,6 +215,7 @@ mod linux {
         config: BfdRuntimeConfig,
         metrics: BgpMetrics,
         status_tx: watch::Sender<Vec<BfdStatus>>,
+        event_tx: broadcast::Sender<BfdRuntimeEvent>,
         shutdown: CancellationToken,
     ) -> Option<BfdRuntimeHandle> {
         if !config.enabled() {
@@ -205,7 +223,7 @@ mod linux {
         }
         let task_shutdown = shutdown.clone();
         let task = tokio::spawn(async move {
-            if let Err(e) = run(config, &metrics, &status_tx, &task_shutdown).await {
+            if let Err(e) = run(config, &metrics, &status_tx, &event_tx, &task_shutdown).await {
                 warn!(error = %e, "BFD actor exited with error");
             }
         });
@@ -267,6 +285,8 @@ mod linux {
         timers: BinaryHeap<Reverse<Deadline>>,
         tx_v4: UdpSocket,
         tx_v6: UdpSocket,
+        /// Broadcast sink for session state transitions (ADR-0067 step 3b).
+        event_tx: broadcast::Sender<BfdRuntimeEvent>,
         /// Simple deterministic PRNG for transmit jitter (RFC 5880 §6.8.7).
         jitter_state: u64,
     }
@@ -275,6 +295,7 @@ mod linux {
         config: BfdRuntimeConfig,
         metrics: &BgpMetrics,
         status_tx: &watch::Sender<Vec<BfdStatus>>,
+        event_tx: &broadcast::Sender<BfdRuntimeEvent>,
         shutdown: &CancellationToken,
     ) -> std::io::Result<()> {
         let rx_v4 = AsyncFd::new(rx_socket(false)?)?;
@@ -284,6 +305,7 @@ mod linux {
             timers: BinaryHeap::new(),
             tx_v4: UdpSocket::from_std(tx_socket(false)?)?,
             tx_v6: UdpSocket::from_std(tx_socket(true)?)?,
+            event_tx: event_tx.clone(),
             jitter_state: 0x9E37_79B9_7F4A_7C15,
         };
 
@@ -468,6 +490,15 @@ mod linux {
                             new == SessionState::Up,
                             old == SessionState::Up,
                         );
+                        // Broadcast for the unified event stream (ADR-0067 step
+                        // 3b). `send` errors only when there are no subscribers
+                        // — expected and ignorable.
+                        let _ = self.event_tx.send(BfdRuntimeEvent {
+                            peer,
+                            old_state: old,
+                            new_state: new,
+                            diagnostic,
+                        });
                     }
                 }
             }
@@ -943,7 +974,7 @@ remote_asn = 65002
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU16, Ordering};
         use std::time::Duration;
-        use tokio::sync::watch;
+        use tokio::sync::{broadcast, watch};
         use tokio_util::sync::CancellationToken;
 
         const PEER_DISC: u32 = 0x0A0B_0C0D;
@@ -1175,8 +1206,9 @@ remote_asn = 65002
             let registry = Registry::new();
             let metrics = BgpMetrics::with_registry(registry.clone());
             let (status_tx, status_rx) = watch::channel(Vec::new());
+            let (event_tx, mut event_rx) = broadcast::channel(64);
             let shutdown = CancellationToken::new();
-            let handle = spawn(config, metrics, status_tx, shutdown.clone())
+            let handle = spawn(config, metrics, status_tx, event_tx, shutdown.clone())
                 .expect("actor should start with one session");
 
             // The up gauge is seeded to 0 at session creation, before any
@@ -1226,6 +1258,21 @@ remote_asn = 65002
                 wait_for_gauge(&registry, PEER_ADDR, 1, Duration::from_secs(2)).await,
                 "bfd_session_up should be 1 once the session is Up"
             );
+
+            // The actor must broadcast a state-change event reaching Up (the
+            // signal the unified WatchEvents stream is bridged from).
+            let up_event = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Ok(ev) = event_rx.recv().await
+                        && ev.new_state == SessionState::Up
+                    {
+                        return ev;
+                    }
+                }
+            })
+            .await
+            .expect("actor should broadcast a BFD Up event");
+            assert_eq!(up_event.peer, peer_ip);
 
             // RFC 5881 §4: the actor's transmit source port must be in
             // 49152..=65535. By now the peer has observed several packets.
