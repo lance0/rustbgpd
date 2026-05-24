@@ -69,6 +69,10 @@ pub struct BfdStateChange {
     pub state: rustbgpd_bfd::SessionState,
     /// Local diagnostic accompanying the transition.
     pub diagnostic: rustbgpd_bfd::Diagnostic,
+    /// Whether this Down was caused by the remote signaling `AdminDown` (RFC
+    /// 5882 §4.2). The BGP coupling uses it to avoid tearing a non-strict BGP
+    /// session down when the peer merely disabled BFD administratively.
+    pub remote_admin_down: bool,
 }
 
 impl BfdRuntimeConfig {
@@ -660,8 +664,10 @@ mod linux {
                         diagnostic,
                     } => {
                         info!(peer = %peer, ?old, ?new, ?diagnostic, "BFD state change");
+                        let mut remote_admin_down = false;
                         if let Some(entry) = self.sessions.get_mut(&peer) {
                             entry.last_diagnostic = diagnostic;
+                            remote_admin_down = entry.session.remote_admin_down();
                         }
                         metrics.record_bfd_state(
                             &peer.to_string(),
@@ -682,6 +688,7 @@ mod linux {
                             peer,
                             state: new,
                             diagnostic,
+                            remote_admin_down,
                         });
                     }
                 }
