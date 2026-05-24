@@ -2,7 +2,7 @@
 
 A feature comparison of open-source BGP daemon implementations.
 
-Last updated: 2026-05-22. See [CHANGELOG.md](../CHANGELOG.md) for
+Last updated: 2026-05-24. See [CHANGELOG.md](../CHANGELOG.md) for
 per-release feature deltas and [evpn-enablement.md](evpn-enablement.md)
 for the EVPN gate ladder.
 
@@ -140,7 +140,19 @@ for the EVPN gate ladder.
 | Route server mode | Yes | Yes | Yes | Yes | Yes |
 | Dynamic neighbors | Yes | Yes | Yes | Yes | No |
 | Looking glass | Yes | No | Yes | No | Yes |
-| BFD integration | No | Yes | Yes | No | No |
+| BFD integration | Yes[^bfd] | Yes | Yes | No | No |
+
+[^bfd]: Single-hop **asynchronous** BFD ships (RFC 5880/5881, ADR-0067): an
+    in-process, no-GC actor runs sessions over UDP/3784 (TTL/Hop-Limit 255,
+    discard-on-receive if ≠ 255), config via `[[bfd_profiles]]` +
+    `[neighbors.bfd]`, observable through `GetBfdSessions` / `rustbgpctl bfd` /
+    events + Prometheus. RFC 5882 BGP coupling — **strict** (withhold BGP until
+    BFD Up) and **non-strict** (tear BGP down on BFD-down before the hold timer)
+    — is wired and proven against FRR `bfdd` by interop test M51. v1 is IPv4 +
+    IPv6 **global**, static neighbors only. Deferred: multihop (RFC 5883),
+    echo / demand mode, authentication, C-bit / GR-aware nuance, static-route
+    BFD tracking, dynamic-neighbor BFD, hardware / offload, and IPv6 link-local /
+    unnumbered → v1.1.
 
 ## Best-Path Selection
 

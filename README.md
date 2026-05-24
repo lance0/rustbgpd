@@ -314,6 +314,15 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
 - TCP-AO (RFC 5925) static-neighbor startup keys are supported on Linux;
   dynamic-neighbor TCP-AO, runtime key rotation, and multi-key rollover remain
   follow-up work. TCP MD5 and GTSM are also supported.
+- BFD (RFC 5880 / 5881 / 5882) single-hop **asynchronous** sessions are
+  supported: an in-process, no-GC actor runs sessions over UDP/3784, config via
+  `[[bfd_profiles]]` + `[neighbors.bfd]`, observable through
+  `BfdService.GetBfdSessions` / `rustbgpctl bfd` / events + Prometheus, with
+  RFC 5882 BGP coupling in both strict (withhold BGP until BFD Up) and
+  non-strict (tear BGP down on BFD-down before the hold timer) modes —
+  FRR-`bfdd`-interop-tested (M51). IPv4 + IPv6 global, static neighbors only;
+  multihop (RFC 5883), echo / demand, authentication, dynamic-neighbor BFD, and
+  IPv6 link-local (v1.1) remain follow-up work.
 - Published benchmarks: bgperf2 covers IPv4 unicast at 10 peers × 1k, 2 peers × 10k, and 2 peers × 100k prefixes; the in-tree `bench/evpn-load` M33 scale gate covers 50,000 reflected Type 2 routes with 60 s of 1,000-rps churn (5.1 s initial convergence, post-churn distinct-key count exact). Gate-specific 24h soak harnesses now ship in-tree under `tests/soak/`: a Gate 8b BUM-state harness and a Gate 9 slice 6 24h Type 5 churn harness, both with post-mortems under `docs/soak-*.md`. Continuous / multi-day soak automation outside those gates remains future work (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
 
 ## Project status

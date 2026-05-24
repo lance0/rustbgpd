@@ -12,6 +12,8 @@ name: Kernel Dataplane
 #                              netns fib_runtime selector)
 #   - CONFIG_TCP_AO          — TCP-AO protected BIRD 3.x session (M43,
 #                              conditional on runner kernel support)
+#   - UDP/3784 + TTL=255     — single-hop BFD against FRR bfdd, RFC 5882
+#                              BGP coupling failover (M51)
 #
 # Security: external / non-owner PRs target the protected
 # `kernel-dataplane` environment and require maintainer approval before
@@ -274,6 +276,23 @@ jobs:
           label: M50
           topology: tests/interop/m50-fib-ecmp-frr.clab.yml
           script: tests/interop/scripts/test-m50-fib-ecmp-frr.sh
+
+  m51:
+    name: M51 — ADR-0067 single-hop BFD + RFC 5882 coupling (FRR 10.3.1)
+    runs-on: [self-hosted, linux, kernel-dataplane]
+    needs: build-image
+    environment:
+      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run M51 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M51
+          topology: tests/interop/m51-bfd-frr.clab.yml
+          script: tests/interop/scripts/test-m51-bfd-frr.sh
 
   m43:
     name: M43 — ADR-0062 TCP-AO protected session (BIRD 3.2.1)

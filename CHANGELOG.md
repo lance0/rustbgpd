@@ -81,6 +81,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   session Idle and withholds `start()` (the create/start split), and the first
   BFD Up releases it through the same up→start path non-strict recovery uses.
   A strict peer whose BFD never comes Up never establishes BGP.
+- **ADR-0067 single-hop BFD — FRR interop + landed.** New interop test **M51**
+  (`tests/interop/m51-bfd-frr.clab.yml`) peers rustbgpd with a real FRR `bfdd`
+  (fast profile, 300 ms × 3 ≈ 900 ms detection, 90 s BGP hold) and proves the
+  full path against a third-party implementation: BGP Established **and** BFD Up
+  asserted from both sides (`GetBfdSessions` + FRR `show bfd peers`), a killed
+  `bfdd` drops BFD and tears the BGP session down far faster than the hold timer
+  (the RFC 5882 coupling, not a hold-timer expiry), and recovery re-establishes
+  both. Wired into the `kernel-dataplane` CI workflow. With this, single-hop
+  asynchronous BFD ships in v1 (IPv4 + IPv6 global, static neighbors, strict +
+  non-strict coupling) and `COMPARISON.md` moves BFD `No → Yes`. **Deferred to
+  follow-ups:** multihop (RFC 5883), echo / demand mode, authentication,
+  C-bit / GR-aware nuance, static-route BFD tracking, dynamic-neighbor BFD,
+  hardware / offload, and IPv6 link-local / unnumbered → v1.1.
 - **ADR-0063 EVPN runtime convergence — `ip_vrf` relink.**
   `EvpnService.ApplyEvpnRuntime` now commits an L2VNI re-homed to a different
   IP-VRF (or its `ip_vrf` link added/removed) at runtime. A relink edits no

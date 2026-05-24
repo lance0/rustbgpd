@@ -1,7 +1,7 @@
 # ADR-0067: Single-hop asynchronous BFD for BGP
 
-**Status:** Accepted — implementation staged across PRs (crate → actor →
-operator surface → BGP coupling → interop).
+**Status:** Accepted — implemented. Shipped across staged PRs (crate → actor →
+operator surface → BGP coupling → interop); all slices landed.
 **Date:** 2026-05-24
 
 ## Context
@@ -68,6 +68,11 @@ timing before arming the teardown. The staged delivery is:
    `start()`); the first BFD Up releases it through the same up→start path
    non-strict recovery uses. **[shipped]**
 5. **Interop (M51) + docs** — FRR `bfdd` cross-check, `COMPARISON.md` flip.
+   **[shipped]** M51 (`tests/interop/m51-bfd-frr.clab.yml`) peers rustbgpd with
+   a real FRR `bfdd`, asserts BGP + BFD Up from both sides, kills `bfdd` to prove
+   the RFC 5882 coupling drops BGP faster than the hold timer, and confirms
+   recovery; wired into the `kernel-dataplane` CI workflow. `COMPARISON.md`
+   moves BFD `No → Yes`.
 
 This ADR lands with slice 2 (the actor), not at the end, so the design record
 precedes the behavior change.
