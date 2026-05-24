@@ -59,11 +59,14 @@ pub struct FibRuntimeStatus {
     pub table_id: u32,
     pub metric: u32,
     pub prefix: Prefix,
-    /// Single representative next-hop, kept for back-compat. Equals
-    /// `next_hops[0]` for installed rows; `None` for drops with no next-hop.
+    /// Single representative next-hop, kept for back-compat — the selected best
+    /// route's next-hop, a member of `next_hops` for installed rows (not
+    /// necessarily `next_hops[0]`, which is canonically sorted). `None` for
+    /// drops with no next-hop.
     pub next_hop: Option<IpAddr>,
-    /// All equal-cost next-hops for this row (unicast multipath / ECMP).
-    /// One entry == single-path; empty for drops with no next-hop.
+    /// All equal-cost next-hops for this row (unicast multipath / ECMP),
+    /// canonically sorted. One entry == single-path; empty for drops with no
+    /// next-hop.
     pub next_hops: Vec<IpAddr>,
     pub peer: Option<IpAddr>,
     pub state: FibRuntimeState,

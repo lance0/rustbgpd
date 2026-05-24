@@ -92,20 +92,31 @@ wait_kernel_single() {
     return 1
 }
 
-# gRPC ListFibRoutes surfaces the full next-hop set for the row.
-assert_grpc_next_hops() {
+# Poll ListFibRoutes until the row's `next_hops` count matches. Mirrors the
+# M42 helpers: selects on prefix AND prefixLength (so it can't match the wrong
+# row), defaults a missing `nextHops` to `[]` so jq never errors under `set -e`
+# when the route hasn't appeared yet, and retries instead of asserting once.
+wait_grpc_next_hops() {
     local expected_count=$1
-    local json count
-    json=$(grpc_fib_routes 2>&1) || { fail "grpcurl ListFibRoutes failed: $json"; return 1; }
-    count=$(printf '%s\n' "$json" | jq -r --arg addr "${PREFIX%/*}" '
-        [.routes[]? | select(.prefix == $addr)] | .[0].nextHops | length // 0')
-    if [ "$count" = "$expected_count" ]; then
-        ok "$PREFIX gRPC status reports $count next-hop(s)"
-    else
-        fail "$PREFIX gRPC next_hops count is $count, expected $expected_count"
-        dump_state_on_failure
-        return 1
-    fi
+    local addr=${PREFIX%/*}
+    local plen=${PREFIX#*/}
+    log "Waiting for $PREFIX gRPC next_hops count -> $expected_count..."
+    for _ in $(seq 1 30); do
+        local json count
+        if json=$(grpc_fib_routes 2>/dev/null); then
+            count=$(printf '%s\n' "$json" | jq -r --arg addr "$addr" --argjson plen "$plen" '
+                [.routes[]? | select(.prefix == $addr and .prefixLength == $plen)]
+                | if length == 0 then -1 else (.[0].nextHops // [] | length) end' 2>/dev/null)
+            if [ "$count" = "$expected_count" ]; then
+                ok "$PREFIX gRPC reports $count next-hop(s)"
+                return 0
+            fi
+        fi
+        sleep 1
+    done
+    fail "$PREFIX gRPC next_hops count did not reach $expected_count"
+    dump_state_on_failure
+    return 1
 }
 
 frr_network() {
@@ -125,16 +136,16 @@ frr_network() {
 
 # Install: both equal-cost paths => kernel ECMP, gRPC reports two next-hops.
 wait_kernel_ecmp
-assert_grpc_next_hops 2
+wait_grpc_next_hops 2
 
 # Failover: frr2 withdraws => collapse to the frr1 survivor.
 frr_network "$FRR2" del
 wait_kernel_single "$NH1"
-assert_grpc_next_hops 1
+wait_grpc_next_hops 1
 
 # Restore: frr2 re-advertises => two-way ECMP returns.
 frr_network "$FRR2" add
 wait_kernel_ecmp
-assert_grpc_next_hops 2
+wait_grpc_next_hops 2
 
 print_summary

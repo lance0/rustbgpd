@@ -21,8 +21,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `QueryFibInstallCandidates` / `multipath_equal` (the equal-cost
   install-candidate view ADR-0061 deferred); crash-restart owned-state migrates
   v1 → v2 (loads and upgrades the legacy scalar next-hop); `ListFibRoutes` and
-  `rustbgpctl` surface the full `next_hops` set (scalar `next_hop` retained as
-  `next_hops[0]` for back-compat). Validated by projection / canonicalization /
+  `rustbgpctl` surface the full canonical `next_hops` set (scalar `next_hop`
+  retained for back-compat — the best/representative next-hop, a member of
+  `next_hops`). Validated by projection / canonicalization /
   owned-state unit tests, kernel encode→parse round-trips, a privileged netns
   install/failover test, and interop smoke **M50**
   (`tests/interop/m50-fib-ecmp-frr.clab.yml`) against two equal-cost FRR peers.

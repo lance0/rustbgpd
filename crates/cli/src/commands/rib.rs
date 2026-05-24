@@ -168,8 +168,9 @@ struct JsonFibRouteStatus {
     metric: u32,
     prefix: String,
     next_hop: String,
-    /// All equal-cost next-hops (unicast multipath / ECMP). One entry ==
-    /// single-path; `next_hop` mirrors `next_hops[0]` for back-compat.
+    /// All equal-cost next-hops (unicast multipath / ECMP), canonical. One
+    /// entry == single-path. `next_hop` is the best/representative next-hop and
+    /// is a member of this set when non-empty (not necessarily `next_hops[0]`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     next_hops: Vec<String>,
     peer_address: String,
