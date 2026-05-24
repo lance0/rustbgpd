@@ -254,6 +254,10 @@ pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
 /// has no IGP-metric step (the daemon carries a directly-usable next-hop and does
 /// no recursive resolution), so iBGP equal-cost is fully determined by the BGP
 /// decision chain above.
+///
+/// Locally injected (controller) routes never participate in maximum-paths — they
+/// install as the single best path — so a `RouteOrigin::Local` on either side
+/// disqualifies grouping (see `same_multipath_class`).
 #[must_use]
 pub fn multipath_equal(best: &Route, other: &Route) -> bool {
     stale_rank(best) == stale_rank(other)
@@ -263,7 +267,19 @@ pub fn multipath_equal(best: &Route, other: &Route) -> bool {
         && best.as_path() == other.as_path()
         && best.origin() == other.origin()
         && best.med() == other.med()
-        && best.is_ebgp() == other.is_ebgp()
+        && same_multipath_class(best, other)
+}
+
+/// eBGP groups only with eBGP and iBGP only with iBGP. `RouteOrigin::Local`
+/// (controller-injected) routes are *not* part of maximum-paths, so any Local on
+/// either side returns `false` — `best.is_ebgp() == other.is_ebgp()` would wrongly
+/// treat Local and iBGP as the same "not-eBGP" class and co-install them.
+fn same_multipath_class(a: &Route, b: &Route) -> bool {
+    use crate::route::RouteOrigin;
+    matches!(
+        (&a.origin_type, &b.origin_type),
+        (RouteOrigin::Ebgp, RouteOrigin::Ebgp) | (RouteOrigin::Ibgp, RouteOrigin::Ibgp)
+    )
 }
 
 #[cfg(test)]
@@ -332,6 +348,11 @@ mod tests {
         r
     }
 
+    const fn with_local(mut r: Route) -> Route {
+        r.origin_type = RouteOrigin::Local;
+        r
+    }
+
     // --- multipath_equal tests ---
 
     #[test]
@@ -385,6 +406,19 @@ mod tests {
         let ebgp = base_route(Ipv4Addr::new(1, 0, 0, 1));
         let ibgp = with_ibgp(base_route(Ipv4Addr::new(1, 0, 0, 2)));
         assert!(!multipath_equal(&ebgp, &ibgp));
+    }
+
+    #[test]
+    fn multipath_equal_false_for_local_routes() {
+        // Controller-injected (Local) routes are not part of maximum-paths.
+        // The class guard must not treat Local and iBGP as the same "not-eBGP"
+        // class (the bug `is_ebgp() == is_ebgp()` had), nor group two Locals.
+        let ibgp = with_ibgp(base_route(Ipv4Addr::new(1, 0, 0, 1)));
+        let local1 = with_local(base_route(Ipv4Addr::new(1, 0, 0, 2)));
+        let local2 = with_local(base_route(Ipv4Addr::new(1, 0, 0, 3)));
+        assert!(!multipath_equal(&local1, &ibgp));
+        assert!(!multipath_equal(&ibgp, &local1));
+        assert!(!multipath_equal(&local1, &local2));
     }
 
     // --- Decision step tests ---

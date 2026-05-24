@@ -653,8 +653,10 @@ impl RibManager {
     /// the equal-cost (ECMP) next-hop set, bounded by `max_paths`. Loc-RIB holds
     /// only the single best per prefix, so the equal-cost siblings are gathered
     /// from the Adj-RIB-In snapshots (the same source `distribute_multipath_prefix`
-    /// scans for Add-Path), filtered by `multipath_equal`, ordered
-    /// `(next_hop, peer, path_id)`, and deduped by next-hop *before* the cap.
+    /// scans for Add-Path), filtered by `multipath_equal`. Output ordering: the
+    /// best route's next-hop is always index 0; the remaining equal-cost siblings
+    /// follow ordered by `(next_hop, peer, path_id)`. Deduped by next-hop *before*
+    /// the `max_paths` cap.
     fn handle_query_fib_install_candidates(
         &mut self,
         max_paths: u32,

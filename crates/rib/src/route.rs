@@ -76,9 +76,11 @@ pub struct FibInstallNextHop {
 
 /// A prefix's FIB install candidate: the chosen best route plus the
 /// equal-cost next-hop set to program (length 1 = single-path, today's
-/// behavior). `next_hops[0]` is always the best route's next-hop; the
-/// remainder are equal-cost siblings (see `best_path::multipath_equal`),
-/// deduped by next-hop and bounded by the per-table `maximum_paths`.
+/// behavior). **Ordering contract** (FIB consumers may rely on it): `next_hops[0]`
+/// is always the best route's next-hop; the remaining entries are equal-cost
+/// siblings (see `best_path::multipath_equal`) ordered by
+/// `(next_hop, peer, path_id)`. Deduped by next-hop and bounded by the per-table
+/// `maximum_paths`.
 /// (No `PartialEq`/`Eq`: `Route` carries an `Instant` and is not `Eq`;
 /// compare the public fields in tests.)
 #[derive(Debug, Clone)]
