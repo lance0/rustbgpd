@@ -83,15 +83,17 @@ impl PeerManager {
             }
             if disabled {
                 c.disabled.insert(peer);
-                // Drop the last-known BFD state: the session is being drained to
-                // AdminDown, so a stale `Up` here must not survive into a later
-                // enable / (re-)add and let `bfd_should_withhold` start a strict
-                // peer's BGP before BFD comes Up again. The actor restarts the
-                // session from Down on re-enable, and the fresh Up re-records it.
-                c.last_state.remove(&peer);
             } else {
                 c.disabled.remove(&peer);
             }
+            // Deliberately do NOT clear `last_state` here. The desired set is
+            // delivered over a level-triggered `watch`, so a rapid
+            // disable→enable can coalesce — the actor may keep the existing
+            // session Up with no new transition. Clearing `last_state` in that
+            // case would leave `bfd_should_withhold` permanently true (no future
+            // Up to release it): a deadlock. The actor's drain emits an
+            // `AdminDown` over the lossless state-change channel, which updates
+            // `last_state` when the session genuinely goes away.
             true
         });
         if relevant {

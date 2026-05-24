@@ -4032,31 +4032,6 @@ async fn strict_enable_is_level_triggered_on_bfd_state() {
 }
 
 #[tokio::test]
-async fn strict_disable_clears_stale_bfd_up_so_reenable_withholds() {
-    // Regression: a strict peer that reached Up, then was disabled/deleted, must
-    // not carry a stale last_state=Up into a re-enable / re-add. Without clearing
-    // it, `bfd_should_withhold` would see the stale Up and start BGP before BFD
-    // comes Up again — defeating strict mode across a disable→enable cycle.
-    let peer: IpAddr = "10.0.0.2".parse().unwrap();
-    let counters = Arc::new(BfdCouplingCounters::default());
-    let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
-
-    // Strict peer reaches Up → records last-known Up; no longer withheld.
-    mgr.mark_bfd_withheld(peer);
-    mgr.handle_bfd_state_change(up(peer)).await;
-    assert!(!mgr.bfd_should_withhold(&peer), "BFD Up → no withhold");
-
-    // Operator disables (or deletes) the peer: the session drains to AdminDown.
-    mgr.set_bfd_peer_disabled(peer, true);
-
-    // A re-enable / re-add must withhold again until a *fresh* BFD Up.
-    assert!(
-        mgr.bfd_should_withhold(&peer),
-        "stale last_state=Up must be cleared on disable so strict re-enable withholds"
-    );
-}
-
-#[tokio::test]
 async fn strict_bfd_drops_inbound_until_up() {
     // Regression: strict withholding must cover the passive path. A strict peer
     // whose BFD is not Up must not accept an inbound connection — accepting it
