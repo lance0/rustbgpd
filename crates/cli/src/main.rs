@@ -539,7 +539,7 @@ enum FlowspecAction {
 enum EventsAction {
     /// Watch the unified live event stream
     Watch {
-        /// Event category filter: route, session, policy, dataplane, evpn
+        /// Event category filter: route, session, policy, dataplane, evpn, bfd
         #[arg(long = "category", value_delimiter = ',')]
         categories: Vec<String>,
 
@@ -560,7 +560,8 @@ enum EventsAction {
         /// notification_sent, notification_received, policy_changed,
         /// dataplane_status_changed, dataplane_route_installed,
         /// dataplane_route_withdrawn, dataplane_route_failed, evpn_added,
-        /// evpn_withdrawn, evpn_best_changed
+        /// evpn_withdrawn, evpn_best_changed, bfd_up, bfd_down,
+        /// bfd_state_changed
         #[arg(long = "type", value_delimiter = ',')]
         event_types: Vec<String>,
 

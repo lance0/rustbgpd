@@ -146,9 +146,10 @@ for the EVPN gate ladder.
     in-process, no-GC actor runs sessions over UDP/3784 (TTL/Hop-Limit 255,
     discard-on-receive if ≠ 255), config via `[[bfd_profiles]]` +
     `[neighbors.bfd]`, observable through `GetBfdSessions` / `rustbgpctl bfd` /
-    events + Prometheus. RFC 5882 BGP coupling — **strict** (withhold BGP until
-    BFD Up) and **non-strict** (tear BGP down on BFD-down before the hold timer)
-    — is wired and proven against FRR `bfdd` by interop test M51. v1 is IPv4 +
+    events + Prometheus. RFC 5882 BGP coupling ships in both **strict** (withhold
+    BGP until BFD Up) and **non-strict** (tear BGP down on BFD-down before the
+    hold timer) modes; the non-strict path is cross-checked against FRR `bfdd` by
+    interop test M51, and strict mode is covered by unit tests. v1 is IPv4 +
     IPv6 **global**, static neighbors only. Deferred: multihop (RFC 5883),
     echo / demand mode, authentication, C-bit / GR-aware nuance, static-route
     BFD tracking, dynamic-neighbor BFD, hardware / offload, and IPv6 link-local /
