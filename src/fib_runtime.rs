@@ -780,11 +780,14 @@ struct PersistedFibRoute {
     metric: u32,
     prefix_addr: IpAddr,
     prefix_len: u8,
-    /// Legacy v1 single next-hop. Read for back-compat; not written by v2.
+    /// The best route's next-hop. In a v1 file this was the *only* next-hop;
+    /// v2 still writes it (as the best-path scalar) so reloads and v1 readers
+    /// recover a representative consistent with `peer` / `path_id`. The full
+    /// equal-cost set rides in `next_hops`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     next_hop: Option<IpAddr>,
-    /// v2 equal-cost next-hop set. Empty on a v1 file (upgraded from
-    /// `next_hop` in `into_route`).
+    /// v2 equal-cost next-hop set (canonical). Empty on a v1 file, where
+    /// `into_route` upgrades the scalar `next_hop` into a one-element set.
     #[serde(default)]
     next_hops: Vec<IpAddr>,
     peer: IpAddr,
