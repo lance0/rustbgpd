@@ -267,18 +267,24 @@ pub(crate) enum FibOp {
 }
 
 /// Equal-cost next-hops to install for one candidate in one table: the
-/// candidate's best-first set, filtered to the prefix's address family and
-/// capped at `max_paths`. Empty means no installable next-hop (drop the row).
+/// candidate's best-first set, filtered to next-hops whose advertising peer
+/// passes the table allow-list and whose family matches the prefix, capped at
+/// `max_paths`. The per-hop peer filter matters for ECMP: equal-cost siblings
+/// can come from different peers than the best route, and a disallowed peer
+/// must not slip in as a sibling next-hop just because the best route's peer is
+/// allowed. Empty means no installable next-hop (drop the row).
 fn eligible_next_hops(
     candidate: &FibInstallCandidate,
     prefix: Prefix,
     max_paths: usize,
+    peer_allowed: impl Fn(IpAddr) -> bool,
 ) -> Vec<IpAddr> {
     candidate
         .next_hops
         .iter()
+        .filter(|next_hop| peer_allowed(next_hop.peer))
+        .filter(|next_hop| prefix_and_nexthop_same_family(prefix, next_hop.next_hop))
         .map(|next_hop| next_hop.next_hop)
-        .filter(|next_hop| prefix_and_nexthop_same_family(prefix, *next_hop))
         .take(max_paths)
         .collect()
 }
@@ -332,10 +338,13 @@ pub(crate) fn project_fib_intent_with_peer_groups(
                 });
                 continue;
             }
-            // Keep only equal-cost next-hops whose family matches the prefix,
-            // best-first, capped at this table's `maximum_paths`. Build the
-            // kernel target from the canonicalized (sorted/deduped) result.
-            let family_next_hops = eligible_next_hops(candidate, route.prefix, max_paths);
+            // Keep only equal-cost next-hops from allowed peers whose family
+            // matches the prefix, best-first, capped at this table's
+            // `maximum_paths`. Build the kernel target from the canonicalized
+            // (sorted/deduped) result.
+            let family_next_hops = eligible_next_hops(candidate, route.prefix, max_paths, |peer| {
+                table_allows_peer(table, &allowed_neighbors, peer, peer_groups)
+            });
             if family_next_hops.is_empty() {
                 intent.drops.push(FibDrop::NextHopFamilyUnsupported {
                     table_name: table.name.clone(),
@@ -1620,6 +1629,27 @@ mod tests {
             intent.drops.as_slice(),
             [FibDrop::NextHopFamilyUnsupported { .. }]
         ));
+    }
+
+    #[test]
+    fn ecmp_excludes_sibling_next_hops_from_disallowed_peers() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.maximum_paths = Some(4);
+        // Only the best route's peer is allowed. The equal-cost sibling comes
+        // from a different (disallowed) peer and must not slip in as an ECMP
+        // next-hop just because the best route's peer passed the allow-list.
+        table.allowed_neighbors = vec!["198.51.100.1".to_string()];
+        let candidate = multipath_candidate(
+            route(v4_prefix(2, 24), ip("203.0.113.1"), RouteOrigin::Ebgp, 0),
+            &["203.0.113.2"],
+        );
+
+        let intent = project_fib_intent(&[table], &[candidate]);
+
+        assert_eq!(intent.routes.len(), 1);
+        let projected = intent.routes.values().next().unwrap();
+        assert_eq!(projected.target.next_hops, vec![ip("203.0.113.1")]);
+        assert!(intent.drops.is_empty());
     }
 
     #[test]
