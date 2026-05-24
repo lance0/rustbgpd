@@ -114,6 +114,14 @@ pub struct ControlPacket {
 
 impl ControlPacket {
     /// Encode the mandatory 24-byte control section.
+    ///
+    /// This is a faithful codec: it serializes the struct verbatim (including
+    /// the `auth_present` / `multipoint` flags and any zero `detect_mult` /
+    /// `my_discriminator`), which lets tests round-trip and construct
+    /// deliberately-invalid inputs for [`ControlPacket::decode`]. Validity is
+    /// enforced on the *receive* side by `decode`, and on the *emit* side by the
+    /// session, which only ever builds packets with `auth_present`/`multipoint`
+    /// clear and non-zero discriminator/detect-mult.
     #[must_use]
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(CONTROL_PACKET_LEN as usize);

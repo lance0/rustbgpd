@@ -54,6 +54,11 @@ impl Session {
     /// Returns the initial actions the actor must perform.
     #[must_use]
     pub fn new(mut cfg: SessionConfig) -> (Session, Vec<Action>) {
+        debug_assert!(
+            cfg.local_discriminator != 0,
+            "local discriminator must be non-zero (RFC 5880 §6.8.6); the \
+             DiscriminatorAllocator guarantees this"
+        );
         cfg.detect_mult = cfg.detect_mult.max(1);
         let tx = max(
             slow_or_fast(SessionState::Down, cfg.desired_min_tx_interval_us),
@@ -142,6 +147,19 @@ impl Session {
         }
         // A session we have shut down ignores all incoming packets.
         if self.state == SessionState::AdminDown {
+            return Vec::new();
+        }
+
+        // RFC 5880 §6.8.6 demultiplexing, before touching any session state:
+        //  - a non-zero Your Discriminator must select *this* session;
+        //  - a zero Your Discriminator is only valid while the sender is still
+        //    Down/AdminDown (it hasn't learned us yet).
+        if pkt.your_discriminator != 0 && pkt.your_discriminator != self.cfg.local_discriminator {
+            return Vec::new();
+        }
+        if pkt.your_discriminator == 0
+            && !matches!(pkt.state, SessionState::Down | SessionState::AdminDown)
+        {
             return Vec::new();
         }
 
@@ -539,6 +557,34 @@ mod tests {
         let (mut s, _) = Session::new(cfg());
         assert!(s.handle(Event::DetectTimerExpires).is_empty());
         assert_eq!(s.state(), SessionState::Down);
+    }
+
+    #[test]
+    fn discards_packet_addressed_to_a_different_session() {
+        let (mut s, _) = bring_up();
+        // A packet whose Your Discriminator is some other session's local id is
+        // not for us: no actions, no state change, remote discr unchanged.
+        let mut stray = peer(SessionState::Down, 0x0000_0099);
+        stray.my_discriminator = 0x0000_0CCC;
+        assert!(s.handle(Event::PacketReceived(stray)).is_empty());
+        assert_eq!(s.state(), SessionState::Up);
+        assert_eq!(s.remote_discriminator(), 0x0000_00BB);
+    }
+
+    #[test]
+    fn discards_zero_your_discriminator_unless_sender_is_down() {
+        let (mut s, _) = Session::new(cfg());
+        // Your Discriminator 0 is only valid while the sender is Down/AdminDown;
+        // an Up/Init packet with Your Discr 0 must be ignored.
+        assert!(
+            s.handle(Event::PacketReceived(peer(SessionState::Up, 0)))
+                .is_empty()
+        );
+        assert_eq!(s.state(), SessionState::Down);
+        // The legitimate bootstrap (Down, Your Discr 0) is accepted.
+        let actions = s.handle(Event::PacketReceived(peer(SessionState::Down, 0)));
+        assert_eq!(s.state(), SessionState::Init);
+        assert!(!actions.is_empty());
     }
 
     /// Bring a fresh session to Up (Down→Init→Up) and return it.

@@ -1,5 +1,8 @@
-//! Property test: any control packet this crate would emit survives an
-//! encode → decode round-trip unchanged.
+//! Property test: any structurally-valid control packet (one that passes the
+//! decode "MUST discard" rules — non-multipoint, non-auth, non-zero detect-mult
+//! and my-discriminator) survives an encode → decode round-trip unchanged. This
+//! is broader than the subset the session emits, to exercise the codec against
+//! arbitrary field values it may receive.
 
 use proptest::prelude::*;
 use rustbgpd_bfd::{ControlPacket, Diagnostic, SessionState};

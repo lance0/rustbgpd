@@ -17,15 +17,15 @@ transmit jitter.
 
 ## Key types
 
-- [`ControlPacket`] — encode/decode the 24-byte RFC 5880 §4.1 mandatory section
+- `ControlPacket` — encode/decode the 24-byte RFC 5880 §4.1 mandatory section
   (`ControlPacket::encode` / `ControlPacket::decode`). Interval fields are in
   **microseconds**.
-- [`Diagnostic`] — the 5-bit diagnostic code.
-- [`SessionState`] — `AdminDown` / `Down` / `Init` / `Up`.
-- [`Session`] / [`SessionConfig`] — the sans-IO state machine
+- `Diagnostic` — the 5-bit diagnostic code.
+- `SessionState` — `AdminDown` / `Down` / `Init` / `Up`.
+- `Session` / `SessionConfig` — the sans-IO state machine
   (`Session::new`, `Session::handle`, `Session::administratively_down`).
-- [`Event`] / [`Action`] / [`TimerKind`] — the machine's inputs and outputs.
-- [`DiscriminatorAllocator`] — unique, non-zero local discriminators.
+- `Event` / `Action` / `TimerKind` — the machine's inputs and outputs.
+- `DiscriminatorAllocator` — unique, non-zero local discriminators.
 
 ## RFC references
 
