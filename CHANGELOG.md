@@ -76,11 +76,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   state changes over a lossless channel; the BFD actor remains a pure
   session-runner with no BGP knowledge. A deliberate disable/delete drains the
   session to `AdminDown` and is not treated as a failure. Per RFC 5882 §4.1, a
-  BFD session going `AdminDown` because the *remote* administratively disabled
-  BFD permits the BGP adjacency in **both** strict and non-strict mode (an
-  established session stays up; a withheld strict session is released) — BFD is
-  disabled, not failing. Genuine failures (a detection timeout or a
-  remote-signaled `Down`) still tear BGP down / keep strict withheld.
+  *remote* `AdminDown` (the peer administratively disabling BFD) permits the BGP
+  adjacency in **both** strict and non-strict mode (an established session stays
+  up; a withheld strict session is released) — BFD is disabled, not failing. (Our
+  local session state stays `Down`; the remote-AdminDown cause is tracked
+  separately and consumed by the coupling.) Genuine failures (a detection
+  timeout or a remote-signaled `Down`) still tear BGP down / keep strict
+  withheld. The coupling is **level-triggered**: the actor re-confirms each
+  session's current state to `PeerManager` on reconcile (an "ack"), so a strict
+  re-enable always withholds and is released only when BFD is confirmed to permit
+  BGP — it never trusts a stale cached state (no leak) and never waits for an
+  edge that won't come (no deadlock).
 - **ADR-0067 BFD/BGP coupling — strict (RFC 5882).** `[neighbors.bfd] strict =
   true` now withholds BGP establishment until BFD is Up: `add_peer` spawns the
   session Idle and withholds `start()` (the create/start split), and the first

@@ -2,10 +2,20 @@
 //!
 //! `PeerManager` owns the desired BFD session set and consumes session state
 //! changes; the BFD actor is a pure session-runner that reconciles the desired
-//! set and never learns BGP internals. This module holds the coupling state,
-//! the non-strict teardown logic, and the strict-mode withhold decision
-//! (`bfd_should_withhold`) — enforced on both the active-open lifecycle and the
-//! passive/inbound path.
+//! set and never learns BGP internals. This module holds the coupling state and
+//! the non-strict teardown / strict withhold logic.
+//!
+//! The coupling is **level-triggered**, not edge-triggered: a strict peer is
+//! always added/enabled withheld (`bfd_should_withhold`), and the actor
+//! re-confirms each session's current state on reconcile (a lossless "ack",
+//! [`BfdStateChange::resync`]). A withhold is released only when BFD is confirmed
+//! to permit BGP (Up, or a remote `AdminDown` per RFC 5882 §4.1) — via either a
+//! real transition or an ack. So `PeerManager` never trusts a cached BFD state:
+//! a strict re-enable can neither leak BGP across a coalesced disable→enable nor
+//! deadlock waiting for an edge that won't come. The active-open lifecycle gates
+//! on `bfd_should_withhold`; the passive/inbound path gates on the *current*
+//! held state (`bfd_withholding`) so an established strict peer still accepts
+//! inbound.
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
@@ -39,16 +49,12 @@ pub(super) struct BfdCoupling {
     /// enable / (re-)add.
     disabled: HashSet<IpAddr>,
     /// Peers whose BGP session is currently held down by a BFD-down event
-    /// (non-strict) or withheld pending the first Up (strict). Cleared when BFD
-    /// recovers.
+    /// (non-strict) or withheld pending BFD permitting BGP (strict). The actor's
+    /// reconcile "ack" (a level re-report of the current session state) or a
+    /// fresh transition releases the hold once BFD permits BGP — so the strict
+    /// withhold is level-triggered without `PeerManager` caching a (possibly
+    /// stale) BFD state.
     held_down: HashSet<IpAddr>,
-    /// Last-known BFD state per configured peer, recorded on every transition
-    /// even while the peer is unmanaged. This makes the strict add/enable
-    /// decision **level-triggered**: if BFD already reached Up before the peer
-    /// was added (the actor starts sessions at spawn, peers are added later),
-    /// `start()` happens immediately instead of waiting for a transition that
-    /// will never come.
-    last_state: HashMap<IpAddr, SessionState>,
 }
 
 impl PeerManager {
@@ -67,7 +73,6 @@ impl PeerManager {
             configured,
             disabled: HashSet::new(),
             held_down: HashSet::new(),
-            last_state: HashMap::new(),
         });
         self
     }
@@ -86,14 +91,6 @@ impl PeerManager {
             } else {
                 c.disabled.remove(&peer);
             }
-            // Deliberately do NOT clear `last_state` here. The desired set is
-            // delivered over a level-triggered `watch`, so a rapid
-            // disable→enable can coalesce — the actor may keep the existing
-            // session Up with no new transition. Clearing `last_state` in that
-            // case would leave `bfd_should_withhold` permanently true (no future
-            // Up to release it): a deadlock. The actor's drain emits an
-            // `AdminDown` over the lossless state-change channel, which updates
-            // `last_state` when the session genuinely goes away.
             true
         });
         if relevant {
@@ -110,26 +107,25 @@ impl PeerManager {
             .is_some_and(|params| params.strict)
     }
 
-    /// Whether the peer's last-known BFD status permits BGP: either Up, or
-    /// `AdminDown`. RFC 5882 §4.1: when local or remote BFD is administratively
-    /// down, the control-protocol adjacency MUST be allowed — BFD is disabled,
-    /// not failing. (A remote `AdminDown` is recorded here as `AdminDown` even
-    /// though our local FSM state is Down; see `handle_bfd_state_change`.) Used
-    /// to make the strict add/enable decision level-triggered.
-    pub(super) fn bfd_allows_bgp(&self, peer: &IpAddr) -> bool {
-        self.bfd_coupling
-            .as_ref()
-            .and_then(|c| c.last_state.get(peer))
-            .is_some_and(|state| matches!(state, SessionState::Up | SessionState::AdminDown))
+    /// Whether starting BGP should be **withheld** when this peer is added or
+    /// enabled: true for any strict BFD peer. A strict peer is always added
+    /// pre-held; the actor's reconcile **ack** (or a fresh transition) releases
+    /// it once BFD permits BGP (Up, or remote `AdminDown` per RFC 5882 §4.1).
+    /// `PeerManager` never trusts a cached BFD state for this decision, which is
+    /// what keeps a strict re-enable from leaking BGP across a coalesced
+    /// disable→enable (and never deadlocks: the ack always re-confirms).
+    pub(super) fn bfd_should_withhold(&self, peer: &IpAddr) -> bool {
+        self.is_strict_bfd_peer(peer)
     }
 
-    /// Whether a strict peer should be withheld from BGP establishment right
-    /// now: it is a strict BFD peer **and** BFD does not currently permit BGP
-    /// (i.e. it is failing or unknown — Down/Init/never-seen — but *not* Up and
-    /// *not* administratively down). If BFD already permits BGP, start
-    /// immediately; there is no future transition to release a withhold.
-    pub(super) fn bfd_should_withhold(&self, peer: &IpAddr) -> bool {
-        self.is_strict_bfd_peer(peer) && !self.bfd_allows_bgp(peer)
+    /// Whether this peer's BGP is **currently** withheld/held by BFD (so an
+    /// inbound connection must be dropped rather than establishing). Distinct
+    /// from [`Self::bfd_should_withhold`] (the add/enable-time decision): an
+    /// *established* strict peer is not held and must accept inbound normally.
+    pub(super) fn bfd_withholding(&self, peer: &IpAddr) -> bool {
+        self.bfd_coupling
+            .as_ref()
+            .is_some_and(|c| c.held_down.contains(peer))
     }
 
     /// Mark a strict peer's BGP session as withheld (pre-held) at add time so
@@ -189,39 +185,20 @@ impl PeerManager {
     /// *initial* withhold (strict peers are added pre-held by `add_peer`).
     pub(super) async fn handle_bfd_state_change(&mut self, change: BfdStateChange) {
         let peer = change.peer;
-        // Record last-known *effective* BFD status for every configured peer
-        // (even unmanaged ones), and read whether it is held — then release the
-        // borrow before touching `self.peers` / `self.bfd_coupling` mutably. A
-        // remote `AdminDown` is stored as `AdminDown` (it permits BGP) even
-        // though our local FSM state is Down, so the level-triggered withhold
-        // decision (`bfd_allows_bgp`) sees it correctly.
-        let effective_state = if change.remote_admin_down {
-            // Remote AdminDown permits BGP (RFC 5882 §4.1) — store AdminDown.
-            SessionState::AdminDown
-        } else if change.state == SessionState::AdminDown {
-            // A *local* AdminDown (our own drain on disable/delete) is not a
-            // remote BFD signal. Record it as Down so a later strict re-enable
-            // withholds until a fresh Up rather than treating it as "permits BGP"
-            // — this is the lifecycle that would otherwise leak BGP (#2).
-            SessionState::Down
-        } else {
-            change.state
-        };
-        let Some(already_held) = self.bfd_coupling.as_mut().and_then(|c| {
-            if !c.configured.contains_key(&peer) {
-                return None; // not a configured BFD peer
-            }
-            c.last_state.insert(peer, effective_state);
-            Some(c.held_down.contains(&peer))
-        }) else {
+        // Configured BFD peer? Read whether it is currently held.
+        let Some(already_held) = self
+            .bfd_coupling
+            .as_ref()
+            .filter(|c| c.configured.contains_key(&peer))
+            .map(|c| c.held_down.contains(&peer))
+        else {
             return; // not a configured BFD peer (or coupling off)
         };
 
         // Only act for a peer that is currently managed and admin-enabled. A
-        // disabled/deleted peer's session is being drained to AdminDown on
-        // purpose (PeerManager removed it from the desired set, a local
-        // operator action) — that is not a remote BFD signal, so ignore it and
-        // clear any stale hold; the disable/delete lifecycle path stops BGP.
+        // disabled/deleted peer's session is being drained on purpose (a local
+        // operator action; the disable/delete lifecycle path stops BGP), so
+        // ignore its changes and clear any stale hold.
         let active = self.peers.get(&peer).is_some_and(|p| p.enabled);
         if !active {
             if let Some(c) = self.bfd_coupling.as_mut() {
@@ -231,8 +208,11 @@ impl PeerManager {
         }
 
         // RFC 5882 §4.1/§4.2: BFD permits BGP when Up or when the remote is
-        // AdminDown. Release any withhold/hold and (re)start; leave an already
-        // established (unheld) session alone.
+        // AdminDown. Release any withhold/hold and (re)start the session; leave
+        // an already-established (unheld) one alone. This applies equally to a
+        // real transition and to a reconcile ack — an ack that finds BFD
+        // permitting BGP is exactly how a coalesced disable→re-enable releases a
+        // strict withhold.
         let permits_bgp = change.state == SessionState::Up || change.remote_admin_down;
         if permits_bgp {
             if !already_held {
@@ -253,7 +233,14 @@ impl PeerManager {
             return;
         }
 
-        // Genuine liveness failure: detection timeout or remote-signaled Down.
+        // BFD does not permit BGP (a Down/Init). An **ack** (level re-report) is
+        // release-only: it must not tear BGP down — a freshly (re)started session
+        // is Down, and an established non-strict peer's BGP must only fall to a
+        // real Up→Down *transition*, never a level report. So only a genuine
+        // transition (resync=false) to Down tears BGP down and holds it.
+        if change.resync {
+            return;
+        }
         match change.state {
             SessionState::Down | SessionState::AdminDown => {
                 if already_held {

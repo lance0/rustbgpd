@@ -199,15 +199,16 @@ impl PeerManager {
 
         // ADR-0067 step 4b — strict BFD withholding must cover the passive path
         // too. The active-open lifecycle (`add_peer` / `enable_peer`) withholds
-        // `start()` until BFD is Up, but every inbound sub-case below
-        // (`replace_with_inbound`, collision candidates) starts a session
-        // directly. Without this gate a strict peer whose BFD is Down could
-        // accept an inbound connection and establish BGP anyway — defeating
-        // strict mode. The peer is already marked held (at add / on BFD-down),
-        // so the eventual BFD Up starts the session through the normal
-        // up→start path.
-        if self.bfd_should_withhold(&peer_addr) {
-            info!(%peer_addr, "strict BFD — dropping inbound connection until BFD is Up");
+        // `start()` while BFD does not permit BGP, but every inbound sub-case
+        // below (`replace_with_inbound`, collision candidates) starts a session
+        // directly. Without this gate a strict peer that is currently withheld
+        // could accept an inbound connection and establish BGP anyway —
+        // defeating strict mode. Gate on the *current* held state (not the
+        // add-time decision) so an already-established strict peer still accepts
+        // inbound normally; a withheld peer's eventual release starts the
+        // session through the normal up→start path.
+        if self.bfd_withholding(&peer_addr) {
+            info!(%peer_addr, "strict BFD — dropping inbound connection while BGP is withheld");
             return;
         }
 
