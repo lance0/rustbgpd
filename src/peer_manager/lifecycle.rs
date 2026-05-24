@@ -117,6 +117,11 @@ impl PeerManager {
             self.current_config = next_config;
         }
 
+        // ADR-0067 step 4: (re-)arm this peer's BFD session. Critically covers
+        // the delete→add reconfigure cycle — a re-added BFD peer must clear its
+        // disabled mark so the actor restarts the session. A brand-new peer not
+        // in the startup-pinned BFD set is unaffected (BFD is restart-required).
+        self.set_bfd_peer_disabled(address, false);
         Ok(())
     }
 
@@ -177,7 +182,7 @@ impl PeerManager {
         }
 
         // ADR-0067 step 4: drain the deleted peer's BFD session.
-        self.republish_bfd_desired();
+        self.set_bfd_peer_disabled(address, true);
         Ok(())
     }
 
@@ -198,7 +203,7 @@ impl PeerManager {
             format!("peer {address} enabled"),
         );
         // ADR-0067 step 4: re-arm this peer's BFD session in the desired set.
-        self.republish_bfd_desired();
+        self.set_bfd_peer_disabled(address, false);
         info!(%address, "peer enabled");
         Ok(())
     }
@@ -234,7 +239,7 @@ impl PeerManager {
             format!("peer {address} disabled"),
         );
         // ADR-0067 step 4: drain this peer's BFD session (published disabled).
-        self.republish_bfd_desired();
+        self.set_bfd_peer_disabled(address, true);
         info!(%address, "peer disabled");
         Ok(())
     }

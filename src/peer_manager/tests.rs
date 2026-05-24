@@ -3959,43 +3959,37 @@ async fn bfd_change_ignored_for_strict_peer() {
 }
 
 #[tokio::test]
-async fn republish_reflects_enable_disable_and_delete() {
+async fn republish_reflects_disable_and_readd() {
     let peer: IpAddr = "10.0.0.2".parse().unwrap();
     let counters = Arc::new(BfdCouplingCounters::default());
     let (mut mgr, rx) = coupled_mgr(peer, false, fake_bfd_peer_handle(counters));
 
+    let enabled_now = |rx: &watch::Receiver<crate::bfd_runtime::BfdRuntimeConfig>| {
+        rx.borrow()
+            .sessions
+            .iter()
+            .find(|s| s.peer == peer)
+            .map(|s| s.enabled)
+    };
+
+    // A configured peer is enabled by default (disabled set empty) — crucially
+    // even before it is added to `self.peers`, since static peers arrive async.
     mgr.republish_bfd_desired();
-    let enabled = rx
-        .borrow()
-        .sessions
-        .iter()
-        .find(|s| s.peer == peer)
-        .map(|s| s.enabled);
     assert_eq!(
-        enabled,
+        enabled_now(&rx),
         Some(true),
-        "managed+enabled peer published enabled"
+        "configured peer enabled by default"
     );
 
-    // Disable → published disabled (actor drains to AdminDown), still present.
-    mgr.peers.get_mut(&peer).unwrap().enabled = false;
-    mgr.republish_bfd_desired();
-    let enabled = rx
-        .borrow()
-        .sessions
-        .iter()
-        .find(|s| s.peer == peer)
-        .map(|s| s.enabled);
-    assert_eq!(enabled, Some(false), "disabled peer published disabled");
+    // Disable / delete → published disabled (actor drains to AdminDown).
+    mgr.set_bfd_peer_disabled(peer, true);
+    assert_eq!(
+        enabled_now(&rx),
+        Some(false),
+        "disabled/deleted peer published disabled"
+    );
 
-    // Delete → published disabled (no longer managed).
-    mgr.peers.remove(&peer);
-    mgr.republish_bfd_desired();
-    let enabled = rx
-        .borrow()
-        .sessions
-        .iter()
-        .find(|s| s.peer == peer)
-        .map(|s| s.enabled);
-    assert_eq!(enabled, Some(false), "deleted peer published disabled");
+    // Re-add (reconfigure delete→add) → re-enabled so the actor restarts it.
+    mgr.set_bfd_peer_disabled(peer, false);
+    assert_eq!(enabled_now(&rx), Some(true), "re-added peer re-enabled");
 }
