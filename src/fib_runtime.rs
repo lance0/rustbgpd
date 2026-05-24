@@ -828,7 +828,10 @@ impl From<&FibRoute> for PersistedFibRoute {
             metric: route.key.metric,
             prefix_addr: prefix_addr(route.key.prefix),
             prefix_len: route.key.prefix.prefix_len(),
-            next_hop: None,
+            // Persist the best next-hop as the legacy scalar so a reload (and a
+            // v1 reader) recovers a representative consistent with the row's
+            // peer / path_id; `next_hops` carries the full canonical set.
+            next_hop: Some(route.target.primary()),
             next_hops: route.target.next_hops.clone(),
             peer: route.peer,
             origin_type: route.origin_type.into(),
@@ -855,10 +858,10 @@ impl From<&FibTableConfig> for PersistedFibTableSignature {
 impl PersistedFibRoute {
     fn into_route(self) -> Option<FibRoute> {
         let prefix = prefix_from_addr_len(self.prefix_addr, self.prefix_len)?;
-        // v2 carries `next_hops`; a v1 file carried a single scalar `next_hop`.
+        // v2 carries `next_hops` (the full set) plus `next_hop` (the best); a v1
+        // file carried only the single scalar `next_hop` (which is the best).
         // Upgrade v1 to a one-element set, then drop any next-hop whose family
-        // disagrees with the prefix. If that empties the set, the row is
-        // unusable.
+        // disagrees with the prefix. If that empties the set, the row is unusable.
         let next_hops: Vec<IpAddr> = if self.next_hops.is_empty() {
             self.next_hop.into_iter().collect()
         } else {
@@ -870,6 +873,12 @@ impl PersistedFibRoute {
         if next_hops.is_empty() {
             return None;
         }
+        // The persisted scalar is the best; fall back to the lowest surviving
+        // member if it is absent or was filtered out by the family check.
+        let best = self
+            .next_hop
+            .filter(|next_hop| next_hops.contains(next_hop))
+            .unwrap_or(next_hops[0]);
         let key = FibRouteKey {
             table_id: self.table_id,
             metric: self.metric,
@@ -878,7 +887,7 @@ impl PersistedFibRoute {
         Some(FibRoute {
             table_name: self.table_name,
             key,
-            target: FibRouteTarget::from_next_hops(next_hops),
+            target: FibRouteTarget::from_set_with_best(best, next_hops),
             peer: self.peer,
             origin_type: self.origin_type.into(),
             path_id: self.path_id,
@@ -2309,13 +2318,21 @@ mod tests {
         let mut config = config();
         config.owned_state_path = Some(path.clone());
         let mut route = fib_route(v4(24), ip("192.0.2.1"));
-        route.target = FibRouteTarget::from_next_hops([ip("192.0.2.1"), ip("192.0.2.2")]);
+        // Best is .2 even though .1 sorts lower, to prove the best survives the
+        // persist/reload round-trip (not just the canonical set).
+        route.target =
+            FibRouteTarget::from_set_with_best(ip("192.0.2.2"), [ip("192.0.2.1"), ip("192.0.2.2")]);
         let mut owned = FibOwnedState::default();
         owned.routes.insert(route.key, route);
 
         write_owned_state(&path, &config.tables, &owned).unwrap();
 
-        assert_eq!(load_owned_state(&config), owned);
+        let loaded = load_owned_state(&config);
+        assert_eq!(loaded, owned);
+        assert_eq!(
+            loaded.routes.values().next().unwrap().target.primary(),
+            ip("192.0.2.2")
+        );
     }
 
     #[test]

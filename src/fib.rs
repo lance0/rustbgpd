@@ -109,38 +109,81 @@ pub(crate) struct FibRoute {
 /// or as a one-element `RTA_MULTIPATH`. Length 1 is exactly today's
 /// single-next-hop behavior (emitted as `RTA_GATEWAY`); length >1 is ECMP
 /// (emitted as `RTA_MULTIPATH`). Never empty by construction.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `best` records the selected best route's next-hop (always a member of the
+/// set). It is the scalar representative for status / events / owned-state
+/// back-compat, so the surfaced `(next_hop, peer, path_id)` stays a consistent
+/// tuple even though ECMP siblings can come from different peers. It is
+/// **deliberately excluded from equality**: two targets with the same next-hop
+/// *set* are the same kernel route regardless of which member was best, so the
+/// reconcile diff must not flap when only best-path provenance moves.
+#[derive(Debug, Clone)]
 pub(crate) struct FibRouteTarget {
     /// Gateway / next-hop addresses, sorted ascending and deduplicated.
     pub next_hops: Vec<IpAddr>,
+    /// The selected best route's next-hop; the scalar surface representative.
+    best: IpAddr,
 }
+
+impl PartialEq for FibRouteTarget {
+    fn eq(&self, other: &Self) -> bool {
+        self.next_hops == other.next_hops
+    }
+}
+
+impl Eq for FibRouteTarget {}
 
 impl FibRouteTarget {
     /// Single-next-hop target — today's default forwarding shape.
     pub(crate) fn single(next_hop: IpAddr) -> Self {
         Self {
             next_hops: vec![next_hop],
+            best: next_hop,
         }
     }
 
-    /// Multi-next-hop target from an arbitrary iterator, canonicalized
-    /// (sorted ascending + deduplicated) so equality ignores input order.
+    /// Projection path: the input is **best-first** (index 0 is the selected
+    /// best route's next-hop). Records that as `best`, then canonicalizes the
+    /// set. Callers must ensure the input is non-empty.
+    pub(crate) fn from_best_first(next_hops: impl IntoIterator<Item = IpAddr>) -> Self {
+        let ordered: Vec<IpAddr> = next_hops.into_iter().collect();
+        let best = ordered[0];
+        Self::from_set_with_best(best, ordered)
+    }
+
+    /// Reconstruct from a known best plus an arbitrary set (e.g. persisted
+    /// owned-state). `best` is forced into the set if missing, then the set is
+    /// canonicalized.
+    pub(crate) fn from_set_with_best(
+        best: IpAddr,
+        next_hops: impl IntoIterator<Item = IpAddr>,
+    ) -> Self {
+        let mut next_hops: Vec<IpAddr> = next_hops.into_iter().collect();
+        if !next_hops.contains(&best) {
+            next_hops.push(best);
+        }
+        next_hops.sort_unstable();
+        next_hops.dedup();
+        Self { next_hops, best }
+    }
+
+    /// Kernel-observed path: a dumped route carries no BGP best-path metadata,
+    /// so the lowest-sorted member stands in as the representative. Equality
+    /// ignores `best`, so this never affects diffing against owned state.
     /// Callers must ensure the input is non-empty.
     pub(crate) fn from_next_hops(next_hops: impl IntoIterator<Item = IpAddr>) -> Self {
         let mut next_hops: Vec<IpAddr> = next_hops.into_iter().collect();
         next_hops.sort_unstable();
         next_hops.dedup();
-        Self { next_hops }
+        let best = next_hops[0];
+        Self { next_hops, best }
     }
 
-    /// A single representative next-hop for surface paths (per-route status,
-    /// owned-state scalar back-compat). Returns the lowest-sorted next-hop.
+    /// The single representative next-hop for surface paths (per-route status,
+    /// events, owned-state scalar back-compat) — the selected best route's
+    /// next-hop, consistent with the row's `peer` / `path_id` / `origin_type`.
     pub(crate) fn primary(&self) -> IpAddr {
-        debug_assert!(
-            !self.next_hops.is_empty(),
-            "FibRouteTarget must hold at least one next-hop"
-        );
-        self.next_hops[0]
+        self.best
     }
 }
 
@@ -397,7 +440,7 @@ pub(crate) fn project_fib_intent_with_peer_groups(
             let projected = FibRoute {
                 table_name: table.name.clone(),
                 key,
-                target: FibRouteTarget::from_next_hops(family_next_hops),
+                target: FibRouteTarget::from_best_first(family_next_hops),
                 peer: route.peer,
                 origin_type: route.origin_type,
                 path_id: route.path_id,
@@ -1556,6 +1599,29 @@ mod tests {
             projected.target.next_hops,
             vec![ip("203.0.113.1"), ip("203.0.113.2")]
         );
+    }
+
+    #[test]
+    fn projected_primary_is_best_route_next_hop_not_lowest() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.maximum_paths = Some(2);
+        // The best route's next-hop (.5) sorts after the sibling (.1). The
+        // canonical set is ascending, but the scalar representative must remain
+        // the best route's next-hop so it stays consistent with the row's
+        // peer / path_id / origin_type.
+        let candidate = multipath_candidate(
+            route(v4_prefix(2, 24), ip("203.0.113.5"), RouteOrigin::Ebgp, 0),
+            &["203.0.113.1"],
+        );
+
+        let intent = project_fib_intent(&[table], &[candidate]);
+
+        let projected = intent.routes.values().next().unwrap();
+        assert_eq!(
+            projected.target.next_hops,
+            vec![ip("203.0.113.1"), ip("203.0.113.5")]
+        );
+        assert_eq!(projected.target.primary(), ip("203.0.113.5"));
     }
 
     #[test]
