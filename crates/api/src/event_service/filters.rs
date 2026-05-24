@@ -371,6 +371,9 @@ fn bgp_event_type_to_session_event_type(
         | proto::BgpEventType::DataplaneRouteInstalled
         | proto::BgpEventType::DataplaneRouteWithdrawn
         | proto::BgpEventType::DataplaneRouteFailed
+        | proto::BgpEventType::BfdSessionUp
+        | proto::BgpEventType::BfdSessionDown
+        | proto::BgpEventType::BfdSessionStateChanged
         | proto::BgpEventType::StreamLagged => None,
     }
 }
@@ -385,7 +388,8 @@ fn parse_category_filter(categories: &[i32]) -> Result<BTreeSet<i32>, Status> {
             | proto::EventCategory::Session
             | proto::EventCategory::Policy
             | proto::EventCategory::Dataplane
-            | proto::EventCategory::Evpn => {
+            | proto::EventCategory::Evpn
+            | proto::EventCategory::Bfd => {
                 parsed.insert(category as i32);
             }
             proto::EventCategory::Unspecified => {
@@ -423,6 +427,9 @@ fn parse_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<i32>, Status>
             | proto::BgpEventType::EvpnRouteAdded
             | proto::BgpEventType::EvpnRouteWithdrawn
             | proto::BgpEventType::EvpnRouteBestChanged
+            | proto::BgpEventType::BfdSessionUp
+            | proto::BgpEventType::BfdSessionDown
+            | proto::BgpEventType::BfdSessionStateChanged
             | proto::BgpEventType::StreamLagged => {
                 parsed.insert(event_type as i32);
             }
@@ -487,6 +494,9 @@ fn parse_policy_event_type_filter(event_types: &[i32]) -> Result<(), Status> {
             | proto::BgpEventType::EvpnRouteAdded
             | proto::BgpEventType::EvpnRouteWithdrawn
             | proto::BgpEventType::EvpnRouteBestChanged
+            | proto::BgpEventType::BfdSessionUp
+            | proto::BgpEventType::BfdSessionDown
+            | proto::BgpEventType::BfdSessionStateChanged
             | proto::BgpEventType::StreamLagged => {
                 return Err(Status::invalid_argument(
                     "ListPolicyEvents only supports policy event types",
@@ -533,6 +543,9 @@ fn parse_evpn_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<RouteEve
             | proto::BgpEventType::DataplaneRouteInstalled
             | proto::BgpEventType::DataplaneRouteWithdrawn
             | proto::BgpEventType::DataplaneRouteFailed
+            | proto::BgpEventType::BfdSessionUp
+            | proto::BgpEventType::BfdSessionDown
+            | proto::BgpEventType::BfdSessionStateChanged
             | proto::BgpEventType::StreamLagged => {
                 return Err(Status::invalid_argument(
                     "ListEvpnEvents only supports EVPN event types",

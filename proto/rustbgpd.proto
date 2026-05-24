@@ -28,6 +28,15 @@ enum SessionState {
   SESSION_STATE_ESTABLISHED = 6;
 }
 
+// BFD session state (RFC 5880 section 6.8.1).
+enum BfdSessionState {
+  BFD_SESSION_STATE_UNSPECIFIED = 0;
+  BFD_SESSION_STATE_ADMIN_DOWN = 1;
+  BFD_SESSION_STATE_DOWN = 2;
+  BFD_SESSION_STATE_INIT = 3;
+  BFD_SESSION_STATE_UP = 4;
+}
+
 message ErrorDetail {
   oneof kind {
     BgpProtocolError bgp = 1;
@@ -580,6 +589,36 @@ service RibService {
 }
 
 // ---------------------------------------------------------------------------
+// BfdService — single-hop BFD session inspection (ADR-0067)
+// ---------------------------------------------------------------------------
+
+service BfdService {
+  rpc GetBfdSessions(GetBfdSessionsRequest) returns (GetBfdSessionsResponse);
+}
+
+message GetBfdSessionsRequest {
+  // Optional exact peer-address filter. Empty = all sessions.
+  string peer_address = 1;
+}
+
+message BfdSession {
+  string peer_address = 1;
+  BfdSessionState state = 2;
+  // Local diagnostic for the last state change (RFC 5880 section 4.1), as a
+  // stable snake_case name: "none", "control_detection_time_expired",
+  // "echo_function_failed", "neighbor_signaled_session_down",
+  // "forwarding_plane_reset", "path_down", "concatenated_path_down",
+  // "administratively_down", "reverse_concatenated_path_down".
+  string diagnostic = 3;
+  // RFC 5882 strict mode: BGP is withheld from Established until BFD is Up.
+  bool strict = 4;
+}
+
+message GetBfdSessionsResponse {
+  repeated BfdSession sessions = 1;
+}
+
+// ---------------------------------------------------------------------------
 // EventService — unified live event stream
 // ---------------------------------------------------------------------------
 
@@ -930,6 +969,7 @@ enum EventCategory {
   EVENT_CATEGORY_POLICY = 3;
   EVENT_CATEGORY_DATAPLANE = 4;
   EVENT_CATEGORY_EVPN = 5;
+  EVENT_CATEGORY_BFD = 6;
 }
 
 enum BgpEventType {
@@ -953,6 +993,9 @@ enum BgpEventType {
   BGP_EVENT_TYPE_EVPN_ROUTE_ADDED = 40;
   BGP_EVENT_TYPE_EVPN_ROUTE_WITHDRAWN = 41;
   BGP_EVENT_TYPE_EVPN_ROUTE_BEST_CHANGED = 42;
+  BGP_EVENT_TYPE_BFD_SESSION_UP = 50;
+  BGP_EVENT_TYPE_BFD_SESSION_DOWN = 51;
+  BGP_EVENT_TYPE_BFD_SESSION_STATE_CHANGED = 52;
   // A WatchEvents subscriber fell behind a bounded source stream and
   // missed one or more events. The payload identifies the source
   // category and missed count.
@@ -1180,6 +1223,20 @@ message EvpnRouteEvent {
   string reason = 10;
 }
 
+message BfdSessionEvent {
+  BgpEventType event_type = 1;
+  string peer_address = 2;
+  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
+  string timestamp = 3;
+  BfdSessionState old_state = 4;
+  BfdSessionState new_state = 5;
+  // Local diagnostic for this transition (RFC 5880 section 4.1), as a stable
+  // snake_case name (see BfdSession.diagnostic).
+  string diagnostic = 6;
+  // Stable operator-facing reason/summary string for this event.
+  string reason = 7;
+}
+
 message BgpEvent {
   // Unix epoch seconds, matching existing RouteEvent timestamp shape.
   string timestamp = 1;
@@ -1209,6 +1266,7 @@ message BgpEvent {
     DataplaneEvent dataplane = 16;
     EvpnRouteEvent evpn = 17;
     DataplaneRouteEvent dataplane_route = 18;
+    BfdSessionEvent bfd = 20;
   }
 }
 
