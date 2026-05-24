@@ -4032,6 +4032,71 @@ async fn strict_enable_is_level_triggered_on_bfd_state() {
 }
 
 #[tokio::test]
+async fn strict_disable_clears_stale_bfd_up_so_reenable_withholds() {
+    // Regression: a strict peer that reached Up, then was disabled/deleted, must
+    // not carry a stale last_state=Up into a re-enable / re-add. Without clearing
+    // it, `bfd_should_withhold` would see the stale Up and start BGP before BFD
+    // comes Up again — defeating strict mode across a disable→enable cycle.
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
+
+    // Strict peer reaches Up → records last-known Up; no longer withheld.
+    mgr.mark_bfd_withheld(peer);
+    mgr.handle_bfd_state_change(up(peer)).await;
+    assert!(!mgr.bfd_should_withhold(&peer), "BFD Up → no withhold");
+
+    // Operator disables (or deletes) the peer: the session drains to AdminDown.
+    mgr.set_bfd_peer_disabled(peer, true);
+
+    // A re-enable / re-add must withhold again until a *fresh* BFD Up.
+    assert!(
+        mgr.bfd_should_withhold(&peer),
+        "stale last_state=Up must be cleared on disable so strict re-enable withholds"
+    );
+}
+
+#[tokio::test]
+async fn strict_bfd_drops_inbound_until_up() {
+    // Regression: strict withholding must cover the passive path. A strict peer
+    // whose BFD is not Up must not accept an inbound connection — accepting it
+    // would start a session and establish BGP, bypassing the withhold the
+    // active-open path (`add_peer` / `enable_peer`) enforces.
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters));
+    mgr.mark_bfd_withheld(peer);
+    assert!(
+        mgr.bfd_should_withhold(&peer),
+        "strict + BFD down → withhold"
+    );
+
+    let session_id_before = mgr.peers.get(&peer).unwrap().session_id;
+
+    // A real inbound socket; the address we drive `handle_inbound` with is the
+    // configured strict peer's, not the loopback the socket actually came from.
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, _real_addr) = listener.accept().await.unwrap();
+    let _client_stream = client.await.unwrap();
+
+    mgr.handle_inbound(server_stream, peer).await;
+
+    // The inbound was dropped: the managed session was neither replaced nor
+    // given a pending collision candidate, so no BGP session started.
+    let managed = mgr.peers.get(&peer).unwrap();
+    assert_eq!(
+        managed.session_id, session_id_before,
+        "strict peer's session must not be replaced by an inbound while BFD is down"
+    );
+    assert!(
+        managed.pending_inbound.is_none(),
+        "no inbound collision candidate should start for a withheld strict peer"
+    );
+}
+
+#[tokio::test]
 async fn republish_reflects_disable_and_readd() {
     let peer: IpAddr = "10.0.0.2".parse().unwrap();
     let counters = Arc::new(BfdCouplingCounters::default());
