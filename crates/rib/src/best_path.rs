@@ -259,12 +259,21 @@ pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
 /// install as the single best path — so a `RouteOrigin::Local` on either side
 /// disqualifies grouping (see `same_multipath_class`).
 #[must_use]
-pub fn multipath_equal(best: &Route, other: &Route) -> bool {
+pub fn multipath_equal(best: &Route, other: &Route, relax: bool) -> bool {
+    // `relax` is ADR-0066 multipath-relax (FRR's `bgp bestpath as-path
+    // multipath-relax`): group by AS_PATH *length* rather than an exact AS_PATH
+    // match, so equal-length paths through different ASes co-install as ECMP.
+    // Off by default — the strict path compares the full AS_PATH.
+    let as_path_equal = if relax {
+        best.as_path().map_or(0, AsPath::len) == other.as_path().map_or(0, AsPath::len)
+    } else {
+        best.as_path() == other.as_path()
+    };
     stale_rank(best) == stale_rank(other)
         && rpki_preference(best.validation_state) == rpki_preference(other.validation_state)
         && aspa_preference(best.aspa_state) == aspa_preference(other.aspa_state)
         && best.local_pref() == other.local_pref()
-        && best.as_path() == other.as_path()
+        && as_path_equal
         && best.origin() == other.origin()
         && best.med() == other.med()
         && same_multipath_class(best, other)
@@ -361,30 +370,35 @@ mod tests {
         // (the tiebreakers we deliberately ignore) → co-installable.
         let best = base_route(Ipv4Addr::new(1, 0, 0, 1));
         let other = base_route(Ipv4Addr::new(1, 0, 0, 2));
-        assert!(multipath_equal(&best, &other));
+        assert!(multipath_equal(&best, &other, false));
     }
 
     #[test]
     fn multipath_equal_false_on_local_pref() {
         let best = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 1)), 200);
         let other = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 2)), 100);
-        assert!(!multipath_equal(&best, &other));
+        assert!(!multipath_equal(&best, &other, false));
+        // Relax only touches AS_PATH — LOCAL_PREF still disqualifies.
+        assert!(!multipath_equal(&best, &other, true));
     }
 
     #[test]
     fn multipath_equal_false_on_as_path_length() {
         let best = with_as_path(base_route(Ipv4Addr::new(1, 0, 0, 1)), vec![65001]);
         let other = with_as_path(base_route(Ipv4Addr::new(1, 0, 0, 2)), vec![65001, 65002]);
-        assert!(!multipath_equal(&best, &other));
+        assert!(!multipath_equal(&best, &other, false));
+        // Different *lengths* never group, even with relax.
+        assert!(!multipath_equal(&best, &other, true));
     }
 
     #[test]
-    fn multipath_equal_false_on_exact_as_path_same_length() {
-        // v1 requires *exact* AS_PATH: equal length but different ASNs do NOT
-        // group (this is the conservative default; multipath-relax is future).
+    fn multipath_equal_exact_as_path_strict_vs_relax() {
+        // Equal length, different ASNs: strict mode refuses (exact AS_PATH);
+        // multipath-relax groups them (ADR-0066, FRR's as-path multipath-relax).
         let best = with_as_path(base_route(Ipv4Addr::new(1, 0, 0, 1)), vec![65001, 65010]);
         let other = with_as_path(base_route(Ipv4Addr::new(1, 0, 0, 2)), vec![65001, 65020]);
-        assert!(!multipath_equal(&best, &other));
+        assert!(!multipath_equal(&best, &other, false));
+        assert!(multipath_equal(&best, &other, true));
     }
 
     #[test]
@@ -392,11 +406,13 @@ mod tests {
         let best = base_route(Ipv4Addr::new(1, 0, 0, 1));
         assert!(!multipath_equal(
             &best,
-            &with_origin(base_route(Ipv4Addr::new(1, 0, 0, 2)), Origin::Egp)
+            &with_origin(base_route(Ipv4Addr::new(1, 0, 0, 2)), Origin::Egp),
+            false
         ));
         assert!(!multipath_equal(
             &best,
-            &with_med(base_route(Ipv4Addr::new(1, 0, 0, 2)), 50)
+            &with_med(base_route(Ipv4Addr::new(1, 0, 0, 2)), 50),
+            false
         ));
     }
 
@@ -405,7 +421,9 @@ mod tests {
         // Groups are homogeneous: never bundle an eBGP path with an iBGP path.
         let ebgp = base_route(Ipv4Addr::new(1, 0, 0, 1));
         let ibgp = with_ibgp(base_route(Ipv4Addr::new(1, 0, 0, 2)));
-        assert!(!multipath_equal(&ebgp, &ibgp));
+        assert!(!multipath_equal(&ebgp, &ibgp, false));
+        // Relax does not cross the eBGP/iBGP class boundary.
+        assert!(!multipath_equal(&ebgp, &ibgp, true));
     }
 
     #[test]
@@ -416,9 +434,9 @@ mod tests {
         let ibgp = with_ibgp(base_route(Ipv4Addr::new(1, 0, 0, 1)));
         let local1 = with_local(base_route(Ipv4Addr::new(1, 0, 0, 2)));
         let local2 = with_local(base_route(Ipv4Addr::new(1, 0, 0, 3)));
-        assert!(!multipath_equal(&local1, &ibgp));
-        assert!(!multipath_equal(&ibgp, &local1));
-        assert!(!multipath_equal(&local1, &local2));
+        assert!(!multipath_equal(&local1, &ibgp, false));
+        assert!(!multipath_equal(&ibgp, &local1, false));
+        assert!(!multipath_equal(&local1, &local2, false));
     }
 
     // --- Decision step tests ---

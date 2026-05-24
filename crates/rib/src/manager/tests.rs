@@ -79,9 +79,18 @@ async fn query_fib_install_candidates(
     tx: &mpsc::Sender<RibUpdate>,
     max_paths: u32,
 ) -> Vec<crate::route::FibInstallCandidate> {
+    query_fib_install_candidates_relax(tx, max_paths, false).await
+}
+
+async fn query_fib_install_candidates_relax(
+    tx: &mpsc::Sender<RibUpdate>,
+    max_paths: u32,
+    relax: bool,
+) -> Vec<crate::route::FibInstallCandidate> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryFibInstallCandidates {
         max_paths,
+        relax,
         reply: reply_tx,
     })
     .await
@@ -10012,6 +10021,62 @@ async fn fib_install_candidates_groups_equal_cost_ecmp() {
     assert_eq!(c.next_hops[0].next_hop, c.best.next_hop);
     assert!(nhs.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
     assert!(nhs.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn fib_install_candidates_multipath_relax_groups_different_as_paths() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+    let peer1 = Ipv4Addr::new(1, 0, 0, 1);
+    let peer2 = Ipv4Addr::new(1, 0, 0, 2);
+    // Same AS_PATH *length* (2), different ASNs: strict refuses to group, relax
+    // (ADR-0066 multipath-relax) groups them as ECMP.
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer1),
+        announced: vec![make_route_with_as_path(prefix, peer1, vec![65001, 65010])],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer2),
+        announced: vec![make_route_with_as_path(prefix, peer2, vec![65001, 65020])],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Strict: exact AS_PATH required → only the best installs (1 next-hop).
+    let strict = query_fib_install_candidates_relax(&tx, 2, false).await;
+    assert_eq!(strict.len(), 1);
+    assert_eq!(
+        strict[0].next_hops.len(),
+        1,
+        "strict mode: different AS_PATHs do not group"
+    );
+
+    // Relax: equal-length AS_PATHs co-install (2 next-hops).
+    let relaxed = query_fib_install_candidates_relax(&tx, 2, true).await;
+    assert_eq!(relaxed.len(), 1);
+    assert_eq!(
+        relaxed[0].next_hops.len(),
+        2,
+        "multipath-relax: equal-length AS_PATHs group as ECMP"
+    );
 
     drop(tx);
     handle.await.unwrap();

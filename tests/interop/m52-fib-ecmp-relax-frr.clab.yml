@@ -1,0 +1,68 @@
+# Containerlab topology: rustbgpd ↔ 2× FRR (M52 — ADR-0066 multipath-relax)
+#
+# Validates the global `multipath_relax` knob against real FRR peers:
+#
+#   * Two FRR peers in DIFFERENT ASes (frr1 AS 65002, frr2 AS 65003), one per
+#     point-to-point link, both originate 203.0.113.52/32. As seen by rustbgpd
+#     the two paths have EQUAL AS_PATH *length* (1) but DIFFERENT ASNs
+#     ([65002] vs [65003]) — so exact-AS_PATH grouping would NOT bundle them.
+#   * rustbgpd (AS 65001) runs with [[fib_tables]] maximum_paths=2 AND
+#     [global] multipath_relax=true.
+#   * With multipath-relax, rustbgpd installs 203.0.113.52/32 into table 1000 as
+#     a kernel multipath route with both gateways (10.0.0.2 + 10.0.1.2),
+#     RTPROT_BGP, metric 200 — equal-length paths through different ASes group.
+#   * Failover: when one FRR withdraws, the route collapses to the survivor;
+#     re-advertising restores the two-way ECMP.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m52-fib-ecmp-relax-frr.clab.yml
+#   bash tests/interop/scripts/test-m52-fib-ecmp-relax-frr.sh
+#   containerlab destroy -t tests/interop/m52-fib-ecmp-relax-frr.clab.yml --cleanup
+
+name: m52-fib-ecmp-relax-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m52-fib-ecmp-relax.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    frr1:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m52-relax-1.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr2:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m52-relax-2.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr1:eth1"]
+    - endpoints: ["rustbgpd:eth2", "frr2:eth1"]
+
+# Networks: 10.0.0.0/24 — rustbgpd (10.0.0.1) ↔ frr1 (10.0.0.2, AS 65002);
+#           10.0.1.0/24 — rustbgpd (10.0.1.1) ↔ frr2 (10.0.1.2, AS 65003).
+# rustbgpd AS 65001. Equal AS_PATH length, different ASNs → multipath-relax.

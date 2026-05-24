@@ -32,6 +32,7 @@ Required. Defines the local BGP speaker identity.
 | `install_blackhole_discard` | bool | no | `false`              | Install kernel blackhole routes for accepted RFC 7999 host routes — see below |
 | `allow_blackhole_broad_prefixes` | bool | no | `false`           | Permit non-host BLACKHOLE discard installs when the FIB slice is enabled |
 | `apply_bum_enforcement` | bool | no   | `true` (since v0.23.0) | Apply Gate 8b BUM-suppression filters to the kernel per-port `IFLA_BRPORT_*_FLOOD` triplet. Restart-required. Default flipped to `true` after the Gate 8b 24 h MAC-churn soak (2026-05-16) and the M37 local-origination 24 h MAC-churn soak (2026-05-19) both passed. Operators who need the prior observe-only posture must set `apply_bum_enforcement = false` explicitly |
+| `multipath_relax`   | bool   | no       | `false`              | ADR-0066 multipath-relax: group unicast ECMP candidates by `AS_PATH` *length* instead of an exact `AS_PATH` match (FRR's `bgp bestpath as-path multipath-relax`). Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths > 1` |
 
 ```toml
 [global]

@@ -277,6 +277,23 @@ jobs:
           topology: tests/interop/m50-fib-ecmp-frr.clab.yml
           script: tests/interop/scripts/test-m50-fib-ecmp-frr.sh
 
+  m52:
+    name: M52 — ADR-0066 multipath-relax (FRR 10.3.1, mixed ASes)
+    runs-on: [self-hosted, linux, kernel-dataplane]
+    needs: build-image
+    environment:
+      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run M52 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M52
+          topology: tests/interop/m52-fib-ecmp-relax-frr.clab.yml
+          script: tests/interop/scripts/test-m52-fib-ecmp-relax-frr.sh
+
   m51:
     name: M51 — ADR-0067 single-hop BFD + RFC 5882 coupling (FRR 10.3.1)
     runs-on: [self-hosted, linux, kernel-dataplane]

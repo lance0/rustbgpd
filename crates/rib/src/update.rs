@@ -208,6 +208,9 @@ pub enum RibUpdate {
     QueryFibInstallCandidates {
         /// Max equal-cost next-hops per prefix (per-table `maximum_paths`).
         max_paths: u32,
+        /// ADR-0066 multipath-relax: group equal-cost candidates by `AS_PATH`
+        /// *length* rather than an exact `AS_PATH` match (global best-path knob).
+        relax: bool,
         /// Response channel.
         reply: oneshot::Sender<Vec<FibInstallCandidate>>,
     },

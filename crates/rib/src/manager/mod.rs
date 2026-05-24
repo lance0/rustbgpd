@@ -506,8 +506,12 @@ impl RibManager {
                 self.handle_query_received_routes(peer, reply);
             }
             RibUpdate::QueryBestRoutes { reply } => self.handle_query_best_routes(reply),
-            RibUpdate::QueryFibInstallCandidates { max_paths, reply } => {
-                self.handle_query_fib_install_candidates(max_paths, reply);
+            RibUpdate::QueryFibInstallCandidates {
+                max_paths,
+                relax,
+                reply,
+            } => {
+                self.handle_query_fib_install_candidates(max_paths, relax, reply);
             }
             RibUpdate::QueryPeerGroups { reply } => self.handle_query_peer_groups(reply),
             RibUpdate::QueryAdvertisedRoutes { peer, reply } => {
@@ -660,6 +664,7 @@ impl RibManager {
     fn handle_query_fib_install_candidates(
         &mut self,
         max_paths: u32,
+        relax: bool,
         reply: tokio::sync::oneshot::Sender<Vec<crate::route::FibInstallCandidate>>,
     ) {
         use crate::best_path::multipath_equal;
@@ -685,7 +690,7 @@ impl RibManager {
                     .ribs
                     .values()
                     .flat_map(|rib| rib.iter_prefix(&best.prefix))
-                    .filter(|r| multipath_equal(best, r))
+                    .filter(|r| multipath_equal(best, r, relax))
                     .collect();
                 siblings.sort_by(|a, b| {
                     a.next_hop

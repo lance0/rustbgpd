@@ -42,6 +42,9 @@ pub struct FibRuntimeConfig {
     /// Optional persisted owned-state file used to recover exact route
     /// ownership after an ungraceful process restart.
     pub owned_state_path: Option<PathBuf>,
+    /// ADR-0066 multipath-relax (global `[global].multipath_relax`): group
+    /// equal-cost ECMP candidates by `AS_PATH` length rather than exact match.
+    pub multipath_relax: bool,
 }
 
 impl FibRuntimeConfig {
@@ -353,10 +356,15 @@ async fn recv_route_event(
 async fn query_fib_install_candidates(
     rib_tx: &mpsc::Sender<RibUpdate>,
     max_paths: u32,
+    relax: bool,
 ) -> Result<Vec<FibInstallCandidate>, &'static str> {
     let (reply, rx) = oneshot::channel();
     if rib_tx
-        .send(RibUpdate::QueryFibInstallCandidates { max_paths, reply })
+        .send(RibUpdate::QueryFibInstallCandidates {
+            max_paths,
+            relax,
+            reply,
+        })
         .await
         .is_err()
     {
@@ -433,7 +441,7 @@ async fn reconcile_once_with_events<F>(
     let candidates = tokio::select! {
         biased;
         () = shutdown.cancelled() => return,
-        result = query_fib_install_candidates(rib_query_tx, max_install_paths(config)) => match result {
+        result = query_fib_install_candidates(rib_query_tx, max_install_paths(config), config.multipath_relax) => match result {
             Ok(candidates) => candidates,
             Err(reason) => {
                 status_tx.send_replace(failed_rib_query_statuses(owned, reason));
@@ -1782,6 +1790,7 @@ mod tests {
         FibRuntimeConfig {
             tables: vec![table("edge", 1000, 200, &["ipv4_unicast", "ipv6_unicast"])],
             owned_state_path: None,
+            multipath_relax: false,
         }
     }
 
@@ -1879,7 +1888,10 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         tokio::spawn(async move {
             while let Some(update) = rx.recv().await {
-                if let RibUpdate::QueryFibInstallCandidates { max_paths, reply } = update {
+                if let RibUpdate::QueryFibInstallCandidates {
+                    max_paths, reply, ..
+                } = update
+                {
                     let _ = reply.send(routes_to_candidates(&routes, max_paths));
                 }
             }
@@ -1895,7 +1907,9 @@ mod tests {
         tokio::spawn(async move {
             while let Some(update) = rx.recv().await {
                 match update {
-                    RibUpdate::QueryFibInstallCandidates { max_paths, reply } => {
+                    RibUpdate::QueryFibInstallCandidates {
+                        max_paths, reply, ..
+                    } => {
                         let _ = reply.send(routes_to_candidates(&routes, max_paths));
                     }
                     RibUpdate::QueryPeerGroups { reply } => {
@@ -1923,7 +1937,9 @@ mod tests {
         tokio::spawn(async move {
             while let Some(update) = rx.recv().await {
                 match update {
-                    RibUpdate::QueryFibInstallCandidates { max_paths, reply } => {
+                    RibUpdate::QueryFibInstallCandidates {
+                        max_paths, reply, ..
+                    } => {
                         query_count_task.fetch_add(1, Ordering::SeqCst);
                         let _ = reply.send(routes_to_candidates(&routes, max_paths));
                     }
@@ -2193,7 +2209,8 @@ mod tests {
         assert!(
             !FibRuntimeConfig {
                 tables: vec![],
-                owned_state_path: None
+                owned_state_path: None,
+                multipath_relax: false,
             }
             .enabled()
         );
@@ -2209,6 +2226,7 @@ mod tests {
             FibRuntimeConfig {
                 tables: vec![],
                 owned_state_path: None,
+                multipath_relax: false,
             },
             rib_tx,
             rib_query_tx,
@@ -2949,6 +2967,7 @@ mod tests {
         let config = FibRuntimeConfig {
             tables: vec![table],
             owned_state_path: None,
+            multipath_relax: false,
         };
         let rib_tx = rib_with_routes_and_peer_groups(
             vec![route(v4(24), ip("192.0.2.1"))],
@@ -2973,6 +2992,7 @@ mod tests {
         let config = FibRuntimeConfig {
             tables: vec![table],
             owned_state_path: None,
+            multipath_relax: false,
         };
         let rib_tx = rib_with_routes(vec![
             route(v4(24), ip("192.0.2.1")),
@@ -3009,6 +3029,7 @@ mod tests {
         let config = FibRuntimeConfig {
             tables: vec![table],
             owned_state_path: None,
+            multipath_relax: false,
         };
         let existing = FibRoute {
             table_name: "edge".to_string(),
@@ -3276,6 +3297,7 @@ mod tests {
             &FibRuntimeConfig {
                 tables: vec![],
                 owned_state_path: None,
+                multipath_relax: false,
             },
             &rib_with_routes(vec![route(prefix, ip("192.0.2.1"))]),
             &mut fib,
@@ -3516,6 +3538,7 @@ mod tests {
                 table
             }],
             owned_state_path: None,
+            multipath_relax: false,
         };
         // Both gateways are on-link in 192.0.2.0/24 (fib0), so the kernel can
         // resolve a via-only multipath route.

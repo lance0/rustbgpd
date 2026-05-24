@@ -173,12 +173,14 @@ for the EVPN gate ladder.
 
 [^multipath]: Classic unicast multipath/ECMP FIB install ships (ADR-0066):
     `[[fib_tables]].maximum_paths` selects N equal-cost BGP paths per prefix
-    (homogeneous eBGP **or** iBGP, exact-`AS_PATH` equality) and installs them
-    as a kernel `RTA_MULTIPATH` route — opt-in per table, default `1` (single
-    next-hop). Add-Path multi-path *send* (RFC 7911, route-server mode) and
-    EVPN aliasing ECMP (ADR-0059 FDB nexthop groups, default-on) also ship.
-    `AS_PATH`-length-only relaxation (`multipath-relax`) is the remaining
-    follow-up.
+    (homogeneous eBGP **or** iBGP) and installs them as a kernel `RTA_MULTIPATH`
+    route — opt-in per table, default `1` (single next-hop). The global
+    `[global].multipath_relax` knob relaxes the default exact-`AS_PATH` grouping
+    to `AS_PATH`-length-only (FRR's `bgp bestpath as-path multipath-relax`).
+    Add-Path multi-path *send* (RFC 7911, route-server mode) and EVPN aliasing
+    ECMP (ADR-0059 FDB nexthop groups, default-on) also ship. Per-class
+    `maximum_paths_ebgp`/`ibgp` and weighted/unequal-cost multipath are the
+    remaining follow-ups.
 
 ## Memory (200k prefixes, bgperf2)
 

@@ -259,6 +259,14 @@ pub struct Global {
     /// `honor_graceful_shutdown`.
     #[serde(default)]
     pub honor_blackhole: bool,
+    /// ADR-0066 multipath-relax (FRR's `bgp bestpath as-path multipath-relax`).
+    /// When `true`, unicast ECMP groups equal-cost candidates by `AS_PATH`
+    /// *length* instead of an exact `AS_PATH` match, so equal-length paths through
+    /// different ASes co-install as multipath. Off by default (exact match). It
+    /// is a best-path-wide knob, so it lives here rather than per
+    /// `[[fib_tables]]`; it is inert unless a table sets `maximum_paths > 1`.
+    #[serde(default)]
+    pub multipath_relax: bool,
     /// Install local kernel blackhole routes for accepted EBGP best
     /// routes carrying RFC 7999 `BLACKHOLE`. Off by default and only
     /// effective when `honor_blackhole = true`. The first FIB slice is
