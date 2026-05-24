@@ -12,6 +12,15 @@ use crate::state::SessionState;
 /// at least one second so idle sessions consume negligible bandwidth.
 pub const SLOW_TX_INTERVAL_US: u32 = 1_000_000;
 
+/// Error constructing a [`Session`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SessionError {
+    /// The local discriminator was zero. RFC 5880 §6.8.6 requires it to be
+    /// non-zero, or every packet we emit is discarded by a compliant peer.
+    #[error("local discriminator must be non-zero (RFC 5880 §6.8.6)")]
+    ZeroDiscriminator,
+}
+
 /// Static configuration for a session. Intervals are in microseconds.
 ///
 /// This implementation keeps the local intervals fixed for the session's life
@@ -43,6 +52,10 @@ pub struct Session {
     /// Peer's last Desired Min TX — feeds our detection time.
     remote_desired_min_tx_us: u32,
     remote_detect_mult: u8,
+    /// Whether any valid control packet has been received yet. Gates the
+    /// detection timer (which can't be inferred from the remote's interval
+    /// fields, since 0 is a legal advertisement).
+    remote_seen: bool,
     /// We are running a Poll Sequence (sending `P` until we get an `F`).
     poll_in_progress: bool,
     /// Last transmit interval we asked the actor to arm (`None` = tx stopped).
@@ -51,14 +64,16 @@ pub struct Session {
 
 impl Session {
     /// Create a session in the `Down` state and arm the (slow) transmit timer.
-    /// Returns the initial actions the actor must perform.
-    #[must_use]
-    pub fn new(mut cfg: SessionConfig) -> (Session, Vec<Action>) {
-        debug_assert!(
-            cfg.local_discriminator != 0,
-            "local discriminator must be non-zero (RFC 5880 §6.8.6); the \
-             DiscriminatorAllocator guarantees this"
-        );
+    /// Returns the session and the initial actions the actor must perform.
+    ///
+    /// # Errors
+    /// Returns [`SessionError::ZeroDiscriminator`] if `cfg.local_discriminator`
+    /// is 0 — a non-zero discriminator is required by RFC 5880 §6.8.6 (the
+    /// `DiscriminatorAllocator` guarantees it).
+    pub fn new(mut cfg: SessionConfig) -> Result<(Session, Vec<Action>), SessionError> {
+        if cfg.local_discriminator == 0 {
+            return Err(SessionError::ZeroDiscriminator);
+        }
         cfg.detect_mult = cfg.detect_mult.max(1);
         let tx = max(
             slow_or_fast(SessionState::Down, cfg.desired_min_tx_interval_us),
@@ -74,6 +89,7 @@ impl Session {
             remote_min_rx_us: 1,
             remote_desired_min_tx_us: 0,
             remote_detect_mult: 1,
+            remote_seen: false,
             poll_in_progress: false,
             current_tx_interval_us: Some(tx),
         };
@@ -81,7 +97,7 @@ impl Session {
             kind: TimerKind::Tx,
             interval_us: tx,
         }];
-        (session, actions)
+        Ok((session, actions))
     }
 
     /// Current session state.
@@ -163,6 +179,7 @@ impl Session {
             return Vec::new();
         }
 
+        self.remote_seen = true;
         self.remote_discriminator = pkt.my_discriminator;
         self.remote_state = pkt.state;
         self.remote_min_rx_us = pkt.required_min_rx_interval;
@@ -310,15 +327,21 @@ impl Session {
         max(max(local, self.remote_min_rx_us), 1)
     }
 
-    /// Detection time (microseconds), or `None` before any packet is received.
+    /// Detection time (microseconds), or `None` before any packet has been
+    /// received. RFC 5880 §6.8.4: `remote DetectMult × max(our RequiredMinRx,
+    /// remote's last Desired Min TX)`. A peer may legitimately advertise a
+    /// Desired Min TX of 0, so "have we heard from the peer" is tracked
+    /// separately (`remote_seen`) rather than inferred from that field; the
+    /// negotiated interval is clamped to ≥1 so the timer is never zero-duration.
     fn detect_time_us(&self) -> Option<u32> {
-        if self.remote_desired_min_tx_us == 0 {
+        if !self.remote_seen {
             return None;
         }
         let rx = max(
             self.cfg.required_min_rx_interval_us,
             self.remote_desired_min_tx_us,
-        );
+        )
+        .max(1);
         let detect = u64::from(self.remote_detect_mult) * u64::from(rx);
         Some(u32::try_from(detect).unwrap_or(u32::MAX))
     }
@@ -412,7 +435,7 @@ mod tests {
 
     #[test]
     fn new_session_starts_down_and_arms_slow_tx() {
-        let (s, actions) = Session::new(cfg());
+        let (s, actions) = Session::new(cfg()).expect("non-zero discriminator");
         assert_eq!(s.state(), SessionState::Down);
         assert_eq!(
             actions,
@@ -425,7 +448,7 @@ mod tests {
 
     #[test]
     fn three_way_handshake_down_then_init_then_up() {
-        let (mut s, _) = Session::new(cfg());
+        let (mut s, _) = Session::new(cfg()).expect("non-zero discriminator");
 
         // Peer is Down → we go Down→Init.
         let a1 = s.handle(Event::PacketReceived(peer(SessionState::Down, 0)));
@@ -554,7 +577,7 @@ mod tests {
 
     #[test]
     fn down_session_ignores_spurious_detect_timer() {
-        let (mut s, _) = Session::new(cfg());
+        let (mut s, _) = Session::new(cfg()).expect("non-zero discriminator");
         assert!(s.handle(Event::DetectTimerExpires).is_empty());
         assert_eq!(s.state(), SessionState::Down);
     }
@@ -572,8 +595,36 @@ mod tests {
     }
 
     #[test]
+    fn zero_local_discriminator_is_rejected() {
+        let mut bad = cfg();
+        bad.local_discriminator = 0;
+        assert!(matches!(
+            Session::new(bad),
+            Err(SessionError::ZeroDiscriminator)
+        ));
+    }
+
+    #[test]
+    fn detection_arms_even_when_peer_advertises_zero_desired_min_tx() {
+        let (mut s, _) = Session::new(cfg()).expect("non-zero discriminator");
+        // A peer may legitimately advertise Desired Min TX = 0; detection must
+        // still arm, falling back to our Required Min RX (300_000) × the peer's
+        // detect_mult (3) = 900_000.
+        let mut p = peer(SessionState::Down, 0);
+        p.desired_min_tx_interval = 0;
+        let actions = s.handle(Event::PacketReceived(p));
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            Action::StartTimer {
+                kind: TimerKind::Detect,
+                interval_us: 900_000
+            }
+        )));
+    }
+
+    #[test]
     fn discards_zero_your_discriminator_unless_sender_is_down() {
-        let (mut s, _) = Session::new(cfg());
+        let (mut s, _) = Session::new(cfg()).expect("non-zero discriminator");
         // Your Discriminator 0 is only valid while the sender is Down/AdminDown;
         // an Up/Init packet with Your Discr 0 must be ignored.
         assert!(
@@ -589,7 +640,7 @@ mod tests {
 
     /// Bring a fresh session to Up (Down→Init→Up) and return it.
     fn bring_up() -> (Session, Vec<Action>) {
-        let (mut s, _) = Session::new(cfg());
+        let (mut s, _) = Session::new(cfg()).expect("non-zero discriminator");
         let _ = s.handle(Event::PacketReceived(peer(SessionState::Down, 0)));
         let actions = s.handle(Event::PacketReceived(peer(SessionState::Init, 0x0000_00AA)));
         assert_eq!(s.state(), SessionState::Up);

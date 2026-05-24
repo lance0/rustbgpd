@@ -185,15 +185,23 @@ impl ControlPacket {
         }
         let auth_present = buf[1] & 0x04 != 0;
         let length = buf[3];
-        // With no authentication the length is exactly 24; with auth it may be
-        // longer (the trailing section is ignored here). Either way it must fit.
+        // With no authentication the length is exactly 24. With auth the
+        // mandatory section (24) is followed by an authentication section whose
+        // own header is at least Auth Type (1) + Auth Len (1), so the minimum
+        // correct length is 26 (RFC 5880 §4.1 / §6.8.6). The auth trailer itself
+        // is ignored — the session discards auth_present packets.
         if !auth_present && length != CONTROL_PACKET_LEN {
             return Err(DecodeError::InvalidLength {
                 length,
                 available: buf.len(),
             });
         }
-        if (length as usize) < CONTROL_PACKET_LEN as usize || length as usize > buf.len() {
+        let min_len: usize = if auth_present {
+            26
+        } else {
+            CONTROL_PACKET_LEN as usize
+        };
+        if (length as usize) < min_len || length as usize > buf.len() {
             return Err(DecodeError::InvalidLength {
                 length,
                 available: buf.len(),
@@ -326,6 +334,16 @@ mod tests {
         assert!(matches!(
             ControlPacket::decode(&mp.encode()),
             Err(DecodeError::MultipointSet)
+        ));
+    }
+
+    #[test]
+    fn rejects_auth_bit_packet_shorter_than_26() {
+        let mut bytes = sample().encode().to_vec();
+        bytes[1] |= 0x04; // set the A (auth present) bit; length field stays 24
+        assert!(matches!(
+            ControlPacket::decode(&bytes),
+            Err(DecodeError::InvalidLength { length: 24, .. })
         ));
     }
 

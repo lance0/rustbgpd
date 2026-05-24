@@ -36,5 +36,5 @@ pub use discriminator::DiscriminatorAllocator;
 pub use error::DecodeError;
 pub use event::Event;
 pub use packet::{CONTROL_PACKET_LEN, ControlPacket, Diagnostic};
-pub use session::{SLOW_TX_INTERVAL_US, Session, SessionConfig};
+pub use session::{SLOW_TX_INTERVAL_US, Session, SessionConfig, SessionError};
 pub use state::SessionState;
