@@ -40,11 +40,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`bfd_session_up`, `bfd_session_flaps_total`). This slice runs the sessions
   for observability **only**; BFD does not yet affect the BGP session (RFC 5882
   coupling lands in a later slice). IPv4 + IPv6 global, static neighbors only.
-  Validated by config parse/validation tests, `from_config` resolution tests,
-  and a privileged netns test (session reaches Up over real sockets, TTL≠255 is
-  discarded, detection drives Down when the peer goes silent). See ADR-0067 for
-  the staged plan and deferral list (multihop, echo/demand, auth, dynamic-peer
-  BFD, IPv6 link-local → v1.1).
+  Transmit source port is in the RFC 5881 §4 49152..=65535 range. BFD edits are
+  restart-required (the actor resolves its sessions once at startup): `--diff`
+  surfaces `bfd_changed` and SIGHUP pins `[[bfd_profiles]]` + neighbor/peer-group
+  `bfd` back to the live snapshot. Config **rejects** effective BFD on IPv6
+  link-local neighbors (deferred to v1.1). Validated by config parse/validation
+  tests, `from_config` resolution tests, a reload-pinning test, and a privileged
+  netns test (session reaches Up over real sockets, TTL≠255 is discarded,
+  transmit source port is in range, detection drives Down when the peer goes
+  silent). See ADR-0067 for the staged plan and deferral list (multihop,
+  echo/demand, auth, dynamic-peer BFD, IPv6 link-local → v1.1).
 - **ADR-0063 EVPN runtime convergence — `ip_vrf` relink.**
   `EvpnService.ApplyEvpnRuntime` now commits an L2VNI re-homed to a different
   IP-VRF (or its `ip_vrf` link added/removed) at runtime. A relink edits no

@@ -84,10 +84,12 @@ epoch invalidation so re-armed timers retire stale heap entries.
 
 ### Sockets
 
-One receive socket per AF bound to UDP **3784** (RFC 5881 §4), transmit from an
-ephemeral source port. Outgoing packets set **TTL / Hop-Limit = 255**; received
-packets are **discarded unless TTL / Hop-Limit == 255** (RFC 5881 §5, the
-GTSM-style single-hop guard — load-bearing). The TTL/Hop-Limit is read from
+One receive socket per AF bound to UDP **3784** (RFC 5881 §4), transmit from a
+source port in the **49152..=65535** range (RFC 5881 §4 — the actor scans the
+range and binds the first free port rather than letting the OS pick a
+possibly-lower ephemeral port). Outgoing packets set **TTL / Hop-Limit = 255**;
+received packets are **discarded unless TTL / Hop-Limit == 255** (RFC 5881 §5,
+the GTSM-style single-hop guard — load-bearing). The TTL/Hop-Limit is read from
 `recvmsg` ancillary data (`IP_RECVTTL` / `IPV6_RECVHOPLIMIT`). The
 `socket2::Socket` fd is registered with tokio `AsyncFd` and read via
 `nix::sys::socket::recvmsg` — this is why `nix` is added to the workspace deps
@@ -147,7 +149,19 @@ strict = false
 `tcp_ao: Option<TcpAoConfig>`; peer-group inheritance uses the existing resolve
 path (a neighbor's own `bfd` wins, else its peer-group's). Validation checks
 that the referenced profile name is defined and that the interval/multiplier
-bounds hold, mirroring the peer-group-reference validation.
+bounds hold, mirroring the peer-group-reference validation. It also **rejects
+effective BFD on an IPv6 link-local (`fe80::/10`) neighbor** — link-local BFD is
+deferred to v1.1 (see the spike), so the actor would otherwise send to an
+unscoped peer and never converge; failing config load is clearer than a session
+that silently stays Down.
+
+**Restart-required:** the actor resolves its session set once at startup, so
+BFD edits (`[[bfd_profiles]]`, neighbor/peer-group `bfd`) are restart-required —
+mirroring `[[fib_tables]]` and `tcp_ao`. `diff_config` surfaces them via
+`bfd_changed`, and a SIGHUP reload **pins** the profiles plus every
+neighbor/peer-group `bfd` field back to the live startup snapshot so the
+persisted config can't silently advance past the running actor. Runtime actor
+reconfiguration is a later enhancement.
 
 ## Consequences
 

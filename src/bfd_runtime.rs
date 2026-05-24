@@ -150,7 +150,7 @@ mod linux {
 
     use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
     use rustbgpd_bfd::{
-        Action, ControlPacket, Event, Session, SessionConfig, SessionState, TimerKind,
+        Action, ControlPacket, Diagnostic, Event, Session, SessionConfig, SessionState, TimerKind,
     };
     use rustbgpd_telemetry::BgpMetrics;
     use socket2::{Domain, Protocol, Socket, Type};
@@ -210,6 +210,10 @@ mod linux {
         session: Session,
         peer: IpAddr,
         strict: bool,
+        /// Local diagnostic from the most recent state change — surfaced in
+        /// `BfdStatus` so the operator surface (PR3) shows *why* a session is
+        /// in its current state (detection timeout, `AdminDown`, ...).
+        last_diagnostic: Diagnostic,
         /// Per-timer epoch; bumped on (re)arm/stop so stale heap entries are
         /// recognized and skipped when they pop.
         epochs: HashMap<TimerKind, u64>,
@@ -319,6 +323,7 @@ mod linux {
                 session,
                 peer: params.peer,
                 strict: params.strict,
+                last_diagnostic: Diagnostic::None,
                 epochs: HashMap::new(),
             };
             self.sessions.insert(params.peer, entry);
@@ -427,6 +432,9 @@ mod linux {
                         diagnostic,
                     } => {
                         info!(peer = %peer, ?old, ?new, ?diagnostic, "BFD state change");
+                        if let Some(entry) = self.sessions.get_mut(&peer) {
+                            entry.last_diagnostic = diagnostic;
+                        }
                         metrics.record_bfd_state(
                             &peer.to_string(),
                             new == SessionState::Up,
@@ -489,7 +497,7 @@ mod linux {
                 .map(|e| BfdStatus {
                     peer: e.peer,
                     state: e.session.state(),
-                    diagnostic: rustbgpd_bfd::Diagnostic::None,
+                    diagnostic: e.last_diagnostic,
                     strict: e.strict,
                 })
                 .collect();
@@ -604,26 +612,49 @@ mod linux {
         Ok(socket.into())
     }
 
+    /// RFC 5881 §4: single-hop BFD control packets MUST use a source port in
+    /// 49152..=65535.
+    const BFD_SRC_PORT_MIN: u16 = 49152;
+    const BFD_SRC_PORT_MAX: u16 = 65535;
+
     fn tx_socket(v6: bool) -> std::io::Result<std::net::UdpSocket> {
         let domain = if v6 { Domain::IPV6 } else { Domain::IPV4 };
         let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
-        // RFC 5881 §4: source port in the 49152–65535 range; binding to port 0
-        // with that range is not directly expressible, so bind ephemeral and
-        // rely on the OS (Linux picks from the ephemeral range, ≥ 32768).
-        let bind: SocketAddr = if v6 {
-            SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), 0)
-        } else {
-            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
-        };
         if v6 {
             socket.set_only_v6(true)?;
             socket.set_unicast_hops_v6(255)?;
         } else {
             socket.set_ttl_v4(255)?;
         }
-        socket.bind(&bind.into())?;
+        bind_source_port(&socket, v6)?;
         socket.set_nonblocking(true)?;
         Ok(socket.into())
+    }
+
+    /// Bind the transmit socket to a free port inside the RFC 5881 §4 source
+    /// range. `bind(port 0)` would let the OS pick from the ephemeral range
+    /// (Linux: ≥ 32768), which can fall below 49152 and break strict interop;
+    /// scan the range from a per-process pseudo-random offset and bind the
+    /// first free port instead.
+    fn bind_source_port(socket: &Socket, v6: bool) -> std::io::Result<()> {
+        let span = BFD_SRC_PORT_MAX - BFD_SRC_PORT_MIN; // 16383
+        // Pseudo-random start within the range, derived from the PID.
+        let start = u16::try_from(std::process::id() % u32::from(span + 1)).unwrap_or(0);
+        let unspec: IpAddr = if v6 {
+            IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        };
+        for i in 0..=span {
+            let port = BFD_SRC_PORT_MIN + (start + i) % (span + 1);
+            if socket.bind(&SocketAddr::new(unspec, port).into()).is_ok() {
+                return Ok(());
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            "no free BFD source port in 49152..=65535",
+        ))
     }
 
     // Raw setsockopt: socket2 / the safe wrappers don't expose IP_RECVTTL /
@@ -813,6 +844,8 @@ remote_asn = 65002
         use socket2::{Domain, Protocol, Socket, Type};
         use std::net::{IpAddr, SocketAddr};
         use std::process::Command;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU16, Ordering};
         use std::time::Duration;
         use tokio::sync::watch;
         use tokio_util::sync::CancellationToken;
@@ -926,6 +959,7 @@ remote_asn = 65002
         async fn peer_responder(
             sock: tokio::net::UdpSocket,
             mode_rx: watch::Receiver<u8>,
+            observed_src_port: Arc<AtomicU16>,
             stop: CancellationToken,
         ) {
             let actor: SocketAddr = format!("{ACTOR_ADDR}:{PORT}").parse().unwrap();
@@ -937,7 +971,10 @@ remote_asn = 65002
                     biased;
                     () = stop.cancelled() => return,
                     r = sock.recv_from(&mut buf) => {
-                        let Ok((n, _)) = r else { continue; };
+                        let Ok((n, src)) = r else { continue; };
+                        // RFC 5881 §4: record the actor's transmit source port
+                        // so the test can assert it is in 49152..=65535.
+                        observed_src_port.store(src.port(), Ordering::Relaxed);
                         if let Ok(pkt) = ControlPacket::decode(&buf[..n])
                             && pkt.my_discriminator != 0
                         {
@@ -1010,7 +1047,13 @@ remote_asn = 65002
 
             let (mode_tx, mode_rx) = watch::channel(MODE_TTL_BAD);
             let peer_stop = CancellationToken::new();
-            let peer_task = tokio::spawn(peer_responder(peer_socket(), mode_rx, peer_stop.clone()));
+            let observed_src_port = Arc::new(AtomicU16::new(0));
+            let peer_task = tokio::spawn(peer_responder(
+                peer_socket(),
+                mode_rx,
+                Arc::clone(&observed_src_port),
+                peer_stop.clone(),
+            ));
 
             // Phase A — TTL=1 replies must be discarded (RFC 5881 §5): the
             // session must NOT come Up no matter how many we send.
@@ -1037,6 +1080,14 @@ remote_asn = 65002
                 )
                 .await,
                 "session did not reach Up on valid TTL=255 packets"
+            );
+
+            // RFC 5881 §4: the actor's transmit source port must be in
+            // 49152..=65535. By now the peer has observed several packets.
+            let src_port = observed_src_port.load(Ordering::Relaxed);
+            assert!(
+                (49152u16..=65535).contains(&src_port),
+                "actor transmit source port {src_port} outside RFC 5881 range 49152..=65535"
             );
 
             // Phase C — peer goes silent: detection timer must drive Down.

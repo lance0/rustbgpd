@@ -1231,5 +1231,37 @@ fn validate_bfd(config: &Config) -> Result<(), ConfigError> {
             });
         }
     }
+
+    // v1 ships IPv4 + IPv6 global only. Link-local BFD needs a neighbor
+    // interface/scope the daemon cannot express today (the address parses as a
+    // bare `IpAddr` and `resolve_neighbor` builds an unscoped `SocketAddr`), so
+    // the actor would send to an unscoped fe80:: peer and the session would
+    // never come Up. Reject it up front with an actionable error rather than
+    // silently failing to converge (ADR-0067 defers link-local to v1.1).
+    for neighbor in &config.neighbors {
+        let has_effective_bfd = neighbor.bfd.is_some()
+            || neighbor
+                .peer_group
+                .as_ref()
+                .and_then(|g| config.peer_groups.get(g))
+                .is_some_and(|pg| pg.bfd.is_some());
+        if has_effective_bfd && is_ipv6_link_local(&neighbor.address) {
+            return Err(ConfigError::InvalidBfd {
+                reason: format!(
+                    "neighbor {:?}: BFD on IPv6 link-local addresses is not supported in v1 \
+                     (link-local BFD requires a neighbor interface; deferred to v1.1)",
+                    neighbor.address
+                ),
+            });
+        }
+    }
     Ok(())
+}
+
+/// Whether `addr` parses to an IPv6 link-local address (`fe80::/10`).
+fn is_ipv6_link_local(addr: &str) -> bool {
+    addr.parse::<std::net::Ipv6Addr>().is_ok_and(|a| {
+        let octets = a.octets();
+        octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80
+    })
 }

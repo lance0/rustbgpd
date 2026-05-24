@@ -5919,6 +5919,104 @@ metric = 200
     assert!(diff.has_restart_required_changes());
 }
 
+#[test]
+fn bfd_rejects_ipv6_link_local_neighbor() {
+    // v1 ships IPv4 + IPv6 global only; link-local BFD is deferred to v1.1
+    // (needs a neighbor interface/scope the daemon can't express yet).
+    let toml = format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+
+[[neighbors]]
+address = "fe80::1"
+remote_asn = 65003
+bfd = {{ profile = "fast" }}
+"#,
+        valid_toml()
+    );
+    let err = parse(&toml).unwrap_err();
+    let ConfigError::InvalidBfd { reason } = err else {
+        panic!("expected InvalidBfd, got {err}");
+    };
+    assert!(reason.contains("link-local"), "unexpected: {reason}");
+}
+
+#[test]
+fn bfd_link_local_rejected_via_peer_group_inheritance() {
+    // Inheriting BFD from a peer-group must also be rejected on a link-local
+    // neighbor — the effective config is what matters, not just the inline form.
+    let toml = format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+
+[peer_groups.rrc]
+bfd = {{ profile = "fast" }}
+
+[[neighbors]]
+address = "fe80::2"
+remote_asn = 65003
+peer_group = "rrc"
+"#,
+        valid_toml()
+    );
+    let err = parse(&toml).unwrap_err();
+    let ConfigError::InvalidBfd { reason } = err else {
+        panic!("expected InvalidBfd, got {err}");
+    };
+    assert!(reason.contains("link-local"), "unexpected: {reason}");
+}
+
+#[test]
+fn bfd_diff_marks_restart_required_and_pins() {
+    let old = parse(valid_toml()).unwrap();
+    let toml = format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+min_tx_interval = 200
+min_rx_interval = 200
+multiplier = 3
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+bfd = {{ profile = "fast" }}
+"#,
+        valid_toml()
+    );
+    let new = parse(&toml).unwrap();
+
+    // The effective BFD session set changed → restart-required + surfaced.
+    let diff = diff_config(&old, &new);
+    assert!(diff.bfd_changed);
+    assert!(diff.has_restart_required_changes());
+
+    // A SIGHUP reload pins the BFD config back to the live snapshot so the
+    // persisted config does not silently advance past the running actor.
+    let mut runtime = new.clone();
+    assert!(super::pin_bfd_startup_only_runtime(&mut runtime, &old));
+    assert!(runtime.bfd_profiles.is_empty(), "profiles pinned to live");
+    let pinned_neighbor = runtime
+        .neighbors
+        .iter()
+        .find(|n| n.address == "10.0.0.3")
+        .unwrap();
+    assert!(
+        pinned_neighbor.bfd.is_none(),
+        "hot-added neighbor's bfd pinned off until restart"
+    );
+    // After pinning, a re-diff against the live snapshot shows no BFD drift.
+    assert!(!diff_config(&old, &runtime).bfd_changed);
+}
+
 // ---------------------------------------------------------------------------
 // ADR-0057 — Ethernet Segment config. Validates Gate 8's operator-facing
 // `[[ethernet_segments]]` block before the daemon spawns the orchestrator.
