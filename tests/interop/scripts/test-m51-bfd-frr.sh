@@ -68,8 +68,8 @@ dump_state_on_failure() {
 }
 
 wait_grpc_bfd() {
-    local want=$1 label=$2
-    for _ in $(seq 1 30); do
+    local want=$1 label=$2 attempts=${3:-30}
+    for _ in $(seq 1 "$attempts"); do
         [ "$(grpc_bfd_state)" = "$want" ] && {
             ok "rustbgpd BFD session $label"
             return 0
@@ -96,10 +96,12 @@ fi
 
 # --- 2. Failover: BFD down → BGP torn down faster than the hold timer --------
 
-log "Killing FRR bfdd (kept dead briefly so the failover is observable)..."
-# Keep bfdd dead for ~6 s so rustbgpd's detection + teardown completes before
-# watchfrr restarts it. The background loop re-kills any watchfrr respawn.
-docker exec -d "$FRR1" sh -c 'for _ in $(seq 1 12); do killall -9 bfdd 2>/dev/null; sleep 0.5; done'
+log "Killing FRR bfdd (single SIGKILL; watchfrr restarts it for recovery)..."
+# A single kill is enough: rustbgpd's ~900 ms detection window fires long before
+# watchfrr respawns bfdd, so the down/teardown below is observable. Re-killing in
+# a loop would trip watchfrr's crash-loop backoff and bfdd would never come back
+# (recovery leg). This mirrors the M11/M16 `killall -9 <daemon>` idiom.
+docker exec "$FRR1" killall -9 bfdd 2>/dev/null || true
 
 # rustbgpd's BFD must drop within a few detection windows — well under 90 s.
 START=$(date +%s)
@@ -141,7 +143,9 @@ fi
 # --- 3. Recovery: watchfrr restarts bfdd → BFD + BGP re-establish -----------
 
 log "Waiting for BFD + BGP to recover (watchfrr restarts bfdd)..."
-wait_grpc_bfd "BFD_SESSION_STATE_UP" "Up again"
+# Recovery is a full daemon cold-start: watchfrr respawn + bfdd init + zebra
+# registration + the BFD three-way handshake, so allow a generous window.
+wait_grpc_bfd "BFD_SESSION_STATE_UP" "Up again" 60
 wait_frr_established "$FRR1" "10.0.0.1" "rustbgpd ↔ frr1 (recovered)"
 
 print_summary
