@@ -42,6 +42,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 8326 | `GRACEFUL_SHUTDOWN` well-known community (`0xFFFF_0000`) |
 | 8365 | EVPN over VXLAN encapsulation |
 | 8538 | Notification GR (N-bit) |
+| 8584 §2.2 | DF Election Extended Community (type 0x06, subtype 0x06): decode + construct of the algorithm / capabilities / DF-preference fields |
 | 8654 | Extended messages (up to 65535 bytes) |
 | 8950 | Extended next hop (IPv4 NLRI over IPv6 NH) |
 | 8955/8956 | FlowSpec: 13 component types, numeric/bitmask operators; §6.1-compliant `NEXT_HOP` validation (the irrelevant-next-hop case is accepted, not rejected); `FlowSpecRule::validate_encoded_len` rejects rules above the 12-bit `MAX_FLOWSPEC_NLRI_RULE_LEN` (4095 bytes) before they reach the wire |
@@ -49,6 +50,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 9135 | EVPN integrated routing for IRB |
 | 9136 | EVPN Type 5: IP Prefix advertisement |
 | 9494 | Long-lived graceful restart capability |
+| 9785 §3 | DF Election preference algorithms + Don't-Preempt bit, extending the RFC 8584 DF Election Extended Community |
 
 ## Usage
 
@@ -115,6 +117,7 @@ let bytes = encode_message(&Message::Open(open));
 - **`EvpnRoute`** / **`EvpnRouteKey`** — typed EVPN routes (Types 1–5) with full payloads (RFC 7432, RFC 9136)
 - **`PmsiTunnel`** / **`PmsiTunnelType`** / **`PmsiTunnelIdentifier`** — PMSI Tunnel attribute (RFC 6514 §5) carried on EVPN Type 3 IMET routes for ingress-replication BUM. Constructor `PmsiTunnel::for_evpn_ingress_replication(vni, ip)` emits the RFC 8365 §5.1.3 wire shape (raw 24-bit VNI in the label field, originator IP as the tunnel identifier).
 - **`RouteDistinguisher`** — RFC 4364 §4.2 8-byte RD, used by EVPN and VPNv4/v6. Implements `Display` + `FromStr` for the standard `asn:val` / `ipv4:val` textual encodings
+- **`DfElectionExtendedCommunity`** (`attribute`) — RFC 8584 §2.2 / RFC 9785 §3 DF Election Extended Community: `ExtendedCommunity::as_df_election()` decodes one, `ExtendedCommunity::df_election(algorithm, capabilities, preference)` constructs it (EVPN DF election algorithm, capabilities, and the RFC 9785 preference / Don't-Preempt fields)
 - **`DecodeError`** / **`EncodeError`** — structured error types via `thiserror`
 - **Well-known community constants** — `u32` values for matching and setting
   standard communities: `COMMUNITY_NO_EXPORT` / `COMMUNITY_NO_ADVERTISE` /
