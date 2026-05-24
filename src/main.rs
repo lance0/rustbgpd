@@ -1026,6 +1026,14 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // Spawn PeerManager (keep JoinHandle for coordinated shutdown)
     let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
     let (peer_mgr_internal_tx, peer_mgr_internal_rx) = mpsc::unbounded_channel();
+    // ADR-0067 step 4 — BFD/BGP coupling channels. Created here so PeerManager
+    // (the desired-set owner) can take the sender + state-change receiver; the
+    // BFD actor takes the matching receiver + sender when it spawns below.
+    let bfd_initial = bfd_runtime::BfdRuntimeConfig::from_config(&config);
+    let (bfd_desired_tx, bfd_desired_rx) = tokio::sync::watch::channel(bfd_initial.clone());
+    let (bfd_state_change_tx, bfd_state_change_rx) =
+        tokio::sync::mpsc::unbounded_channel::<bfd_runtime::BfdStateChange>();
+
     let peer_mgr = PeerManager::new_with_config(
         peer_mgr_rx,
         peer_mgr_internal_rx,
@@ -1039,6 +1047,22 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         Some(validation_watch_rx),
         config.clone(),
     );
+    // Wire BFD coupling only when BFD is configured; otherwise the unused ends
+    // are dropped (the actor won't spawn either). PeerManager holds the desired
+    // sender for life and never recreates it (the actor treats sender drop as
+    // shutdown).
+    let peer_mgr = if bfd_initial.enabled() {
+        let configured: std::collections::HashMap<_, _> = bfd_initial
+            .sessions
+            .iter()
+            .map(|s| (s.peer, s.clone()))
+            .collect();
+        peer_mgr.with_bfd_coupling(bfd_desired_tx, bfd_state_change_rx, configured)
+    } else {
+        drop(bfd_desired_tx);
+        drop(bfd_state_change_rx);
+        peer_mgr
+    };
     let peer_mgr_handle = tokio::spawn(peer_mgr.run());
 
     // Spawn config persister (converts gRPC config events → disk writes).
@@ -1518,9 +1542,10 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         fib_runtime_shutdown.clone(),
     );
 
-    // Spawn the BFD actor (single-hop async, ADR-0067). Runs sessions for
-    // BFD-enabled neighbors and publishes their state; BGP coupling is a later
-    // slice. No-op when no neighbor has BFD configured (or off Linux).
+    // Spawn the BFD actor (single-hop async, ADR-0067). Runs the sessions in the
+    // PeerManager-owned desired set, publishes their state, and emits state
+    // changes that PeerManager couples to BGP (non-strict RFC 5882 teardown).
+    // No-op when no neighbor has BFD configured (or off Linux).
     let (bfd_status_tx, bfd_status_rx) =
         tokio::sync::watch::channel(Vec::<bfd_runtime::BfdStatus>::new());
     // Actor state-change events (ADR-0067 step 3b): the actor broadcasts
@@ -1535,12 +1560,15 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     let (bfd_bgp_event_tx, _) =
         tokio::sync::broadcast::channel::<rustbgpd_api::proto::BgpEvent>(1024);
     let _bfd_event_bridge = spawn_bfd_event_bridge(bfd_event_rx, bfd_bgp_event_tx.clone());
+    // The desired-set receiver + state-change sender are the actor's ends of the
+    // coupling channels created above (PeerManager owns the other ends).
     let bfd_runtime_shutdown = tokio_util::sync::CancellationToken::new();
     let bfd_runtime_handle = bfd_runtime::spawn(
-        bfd_runtime::BfdRuntimeConfig::from_config(&config),
+        bfd_desired_rx,
         metrics.clone(),
         bfd_status_tx,
         bfd_event_tx,
+        bfd_state_change_tx,
         bfd_runtime_shutdown.clone(),
     );
 

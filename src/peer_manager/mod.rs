@@ -27,6 +27,7 @@ use crate::policy_admin::{
     named_policies_from_config, named_policy_from_config, neighbor_policy_chains_from_config,
 };
 
+mod bfd;
 mod dynamic;
 mod events;
 mod inbound;
@@ -178,6 +179,10 @@ pub struct PeerManager {
     /// cap insert evicts an arbitrary existing entry with a `warn!`.
     dead_lettered_pending: HashMap<IpAddr, DeadLetteredPending>,
     next_session_id: u64,
+    /// ADR-0067 step 4 — RFC 5882 coupling. `PeerManager` owns the desired BFD
+    /// session set; the BFD actor is a pure session-runner that reconciles it.
+    /// `None` when no neighbor configures BFD.
+    bfd_coupling: Option<bfd::BfdCoupling>,
 }
 
 impl PeerManager {
@@ -306,6 +311,7 @@ impl PeerManager {
             dead_lettered_pending: HashMap::new(),
             next_session_id: 1,
             current_config,
+            bfd_coupling: None,
         }
     }
 
@@ -378,6 +384,15 @@ impl PeerManager {
         // after one full interval.
         if let Some(interval) = bmp_stats_interval.as_mut() {
             interval.tick().await;
+        }
+
+        // Take the BFD state-change receiver into a local so the select! arm
+        // captures the local (not `self`), and publish the initial desired set
+        // (the configured set overlaid with the disabled/deleted set — empty at
+        // startup, so every configured peer starts enabled).
+        let mut bfd_state_change_rx = self.take_bfd_state_change_rx();
+        if bfd_state_change_rx.is_some() {
+            self.republish_bfd_desired();
         }
 
         loop {
@@ -675,6 +690,20 @@ impl PeerManager {
                 event = self.session_notification_event_rx.recv() => {
                     if let Some(event) = event {
                         self.publish_notification_event(event);
+                    }
+                }
+                change = async {
+                    match bfd_state_change_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match change {
+                        Some(change) => self.handle_bfd_state_change(change).await,
+                        // The actor's state-change sender is gone; stop polling
+                        // a closed channel (recv would return None in a tight
+                        // loop otherwise).
+                        None => bfd_state_change_rx = None,
                     }
                 }
                 () = async {

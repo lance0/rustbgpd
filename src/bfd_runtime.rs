@@ -1,10 +1,13 @@
 //! Single-hop asynchronous BFD actor (ADR-0067).
 //!
 //! Owns the UDP sockets, the real per-session timers, and transmit jitter, and
-//! drives the pure [`rustbgpd_bfd::Session`] state machine for each configured
-//! neighbor. This slice runs the sessions and publishes their state via a
-//! `watch` channel + Prometheus metrics; it does **not** yet affect the BGP
-//! session (RFC 5882 coupling lands in a later slice).
+//! drives the pure [`rustbgpd_bfd::Session`] state machine. It is a **pure
+//! session-runner**: it reconciles a desired session set owned and published by
+//! `PeerManager` (a `watch` channel) and never derives lifecycle from BGP
+//! itself. It publishes status via a `watch` channel + Prometheus metrics, a
+//! lossy [`BfdRuntimeEvent`] broadcast for the operator event stream, and a
+//! lossless [`BfdStateChange`] channel that `PeerManager` consumes for RFC 5882
+//! BGP coupling (non-strict teardown shipped; strict withholding lands next).
 //!
 //! Design: a single actor task `select!`s over the shared per-AF receive
 //! sockets and a min-deadline timer heap covering every session's transmit and
@@ -17,6 +20,11 @@ use std::net::IpAddr;
 use crate::config::{BfdConfig, Config};
 
 /// Resolved parameters for one BFD session (one per BFD-enabled neighbor).
+///
+/// This is one entry of the **desired session set** that `PeerManager` owns and
+/// publishes to the actor once BGP coupling is active (ADR-0067 step 4). The
+/// actor is a pure session-runner: it reconciles this set onto its sockets and
+/// timers and never derives lifecycle from BGP itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BfdSessionParams {
     /// Peer IP address (the BGP neighbor).
@@ -30,13 +38,35 @@ pub struct BfdSessionParams {
     /// RFC 5882 strict mode (consumed by the BGP-coupling slice; carried here so
     /// the surface can report it).
     pub strict: bool,
+    /// Whether the session should actively run. `false` (e.g. a disabled
+    /// neighbor) is reconciled the same as an absent entry — the actor drains
+    /// the session to `AdminDown` and drops it.
+    pub enabled: bool,
 }
 
-/// Runtime config for the BFD actor: the set of sessions to run.
+/// The desired BFD session set the actor reconciles toward. Owned and published
+/// by `PeerManager` (level-triggered via a `watch` channel once coupling is
+/// active); at startup it is derived from config via [`BfdRuntimeConfig::from_config`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BfdRuntimeConfig {
     /// One entry per BFD-enabled neighbor.
     pub sessions: Vec<BfdSessionParams>,
+}
+
+/// A BFD session state change delivered to `PeerManager` (ADR-0067 step 4) over
+/// a lossless `mpsc` channel — distinct from the lossy [`BfdRuntimeEvent`]
+/// broadcast that feeds the operator event stream, because a missed Down would
+/// leave BGP up. (A monotonic generation can be added here if strict-mode
+/// lifecycle needs to discard changes from a stale session incarnation after a
+/// peer delete/re-add; not required for the non-strict slice.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BfdStateChange {
+    /// Peer IP address.
+    pub peer: IpAddr,
+    /// New session state.
+    pub state: rustbgpd_bfd::SessionState,
+    /// Local diagnostic accompanying the transition.
+    pub diagnostic: rustbgpd_bfd::Diagnostic,
 }
 
 impl BfdRuntimeConfig {
@@ -79,6 +109,7 @@ impl BfdRuntimeConfig {
                 // so these conversions are exact (the fallbacks never fire).
                 detect_mult: u8::try_from(profile.multiplier).unwrap_or(u8::MAX),
                 strict: bfd.strict,
+                enabled: true,
             });
         }
         BfdRuntimeConfig { sessions }
@@ -137,9 +168,9 @@ pub use stub::{BfdRuntimeHandle, spawn};
 
 #[cfg(not(target_os = "linux"))]
 mod stub {
-    use super::{BfdRuntimeConfig, BfdRuntimeEvent, BfdStatus};
+    use super::{BfdRuntimeConfig, BfdRuntimeEvent, BfdStateChange, BfdStatus};
     use rustbgpd_telemetry::BgpMetrics;
-    use tokio::sync::{broadcast, watch};
+    use tokio::sync::{broadcast, mpsc, watch};
     use tokio_util::sync::CancellationToken;
 
     /// Non-Linux placeholder handle (BFD sockets are Linux-only).
@@ -153,10 +184,11 @@ mod stub {
     /// BFD is unsupported off Linux; the actor never starts.
     #[must_use]
     pub fn spawn(
-        _config: BfdRuntimeConfig,
+        _desired_rx: watch::Receiver<BfdRuntimeConfig>,
         _metrics: BgpMetrics,
         _status_tx: watch::Sender<Vec<BfdStatus>>,
         _event_tx: broadcast::Sender<BfdRuntimeEvent>,
+        _state_change_tx: mpsc::UnboundedSender<BfdStateChange>,
         _shutdown: CancellationToken,
     ) -> Option<BfdRuntimeHandle> {
         None
@@ -180,12 +212,12 @@ mod linux {
     use socket2::{Domain, Protocol, Socket, Type};
     use tokio::io::unix::AsyncFd;
     use tokio::net::UdpSocket;
-    use tokio::sync::{broadcast, watch};
+    use tokio::sync::{broadcast, mpsc, watch};
     use tokio::time::Instant;
     use tokio_util::sync::CancellationToken;
     use tracing::{debug, info, warn};
 
-    use super::{BfdRuntimeConfig, BfdRuntimeEvent, BfdSessionParams, BfdStatus};
+    use super::{BfdRuntimeConfig, BfdRuntimeEvent, BfdSessionParams, BfdStateChange, BfdStatus};
 
     /// BFD single-hop control port (RFC 5881 §4).
     const BFD_CONTROL_PORT: u16 = 3784;
@@ -209,21 +241,34 @@ mod linux {
         }
     }
 
-    /// Spawn the BFD actor. Returns `None` if no sessions are configured.
+    /// Spawn the BFD actor. Returns `None` when the initial desired set is
+    /// empty (no BFD-configured neighbors at startup) — BFD config is
+    /// restart-required, so the actor's existence is fixed at startup; the
+    /// `desired_rx` watch then drives enable/disable/strict among that set.
     #[must_use]
     pub fn spawn(
-        config: BfdRuntimeConfig,
+        desired_rx: watch::Receiver<BfdRuntimeConfig>,
         metrics: BgpMetrics,
         status_tx: watch::Sender<Vec<BfdStatus>>,
         event_tx: broadcast::Sender<BfdRuntimeEvent>,
+        state_change_tx: mpsc::UnboundedSender<BfdStateChange>,
         shutdown: CancellationToken,
     ) -> Option<BfdRuntimeHandle> {
-        if !config.enabled() {
+        if !desired_rx.borrow().enabled() {
             return None;
         }
         let task_shutdown = shutdown.clone();
         let task = tokio::spawn(async move {
-            if let Err(e) = run(config, &metrics, &status_tx, &event_tx, &task_shutdown).await {
+            if let Err(e) = run(
+                desired_rx,
+                &metrics,
+                &status_tx,
+                &event_tx,
+                &state_change_tx,
+                &task_shutdown,
+            )
+            .await
+            {
                 warn!(error = %e, "BFD actor exited with error");
             }
         });
@@ -285,17 +330,22 @@ mod linux {
         timers: BinaryHeap<Reverse<Deadline>>,
         tx_v4: UdpSocket,
         tx_v6: UdpSocket,
-        /// Broadcast sink for session state transitions (ADR-0067 step 3b).
+        /// Broadcast sink for session state transitions (ADR-0067 step 3b) —
+        /// lossy, feeds the operator event stream.
         event_tx: broadcast::Sender<BfdRuntimeEvent>,
+        /// Lossless sink for session state changes consumed by `PeerManager`
+        /// (ADR-0067 step 4 — BGP coupling).
+        state_change_tx: mpsc::UnboundedSender<BfdStateChange>,
         /// Simple deterministic PRNG for transmit jitter (RFC 5880 §6.8.7).
         jitter_state: u64,
     }
 
     async fn run(
-        config: BfdRuntimeConfig,
+        mut desired_rx: watch::Receiver<BfdRuntimeConfig>,
         metrics: &BgpMetrics,
         status_tx: &watch::Sender<Vec<BfdStatus>>,
         event_tx: &broadcast::Sender<BfdRuntimeEvent>,
+        state_change_tx: &mpsc::UnboundedSender<BfdStateChange>,
         shutdown: &CancellationToken,
     ) -> std::io::Result<()> {
         let rx_v4 = AsyncFd::new(rx_socket(false)?)?;
@@ -306,14 +356,16 @@ mod linux {
             tx_v4: UdpSocket::from_std(tx_socket(false)?)?,
             tx_v6: UdpSocket::from_std(tx_socket(true)?)?,
             event_tx: event_tx.clone(),
+            state_change_tx: state_change_tx.clone(),
             jitter_state: 0x9E37_79B9_7F4A_7C15,
         };
 
-        for params in &config.sessions {
-            actor.start_session(params, metrics).await;
-        }
-        actor.publish_status(status_tx);
-        info!(sessions = config.sessions.len(), "BFD actor started");
+        // Reconcile the initial desired set, then on every change. Bind the
+        // clone before awaiting so the watch `Ref` guard isn't held across the
+        // await point (it is not `Send`).
+        let initial = desired_rx.borrow_and_update().clone();
+        actor.reconcile(&initial, metrics, status_tx).await;
+        info!(sessions = actor.sessions.len(), "BFD actor started");
 
         loop {
             let sleep = next_timer_sleep(&actor.timers);
@@ -322,6 +374,15 @@ mod linux {
                 () = shutdown.cancelled() => {
                     actor.drain(metrics, status_tx).await;
                     return Ok(());
+                }
+                changed = desired_rx.changed() => {
+                    if changed.is_err() {
+                        // The desired-set sender is gone (daemon shutting down).
+                        actor.drain(metrics, status_tx).await;
+                        return Ok(());
+                    }
+                    let desired = desired_rx.borrow_and_update().clone();
+                    actor.reconcile(&desired, metrics, status_tx).await;
                 }
                 guard = rx_v4.readable() => {
                     if let Ok(mut g) = guard {
@@ -379,6 +440,58 @@ mod linux {
             metrics.record_bfd_state(&params.peer.to_string(), false, false);
             // Apply the session's initial actions (arms the slow tx timer).
             self.apply(params.peer, actions, metrics).await;
+        }
+
+        /// Reconcile running sessions toward the desired set (level-triggered):
+        /// start missing enabled sessions, drain (`AdminDown` + remove) sessions
+        /// no longer desired or now disabled, and refresh mutable metadata
+        /// (`strict`) on the rest. Interval/multiplier changes are
+        /// restart-required and intentionally ignored here.
+        async fn reconcile(
+            &mut self,
+            desired: &BfdRuntimeConfig,
+            metrics: &BgpMetrics,
+            status_tx: &watch::Sender<Vec<BfdStatus>>,
+        ) {
+            let wanted: BTreeMap<IpAddr, &BfdSessionParams> = desired
+                .sessions
+                .iter()
+                .filter(|s| s.enabled)
+                .map(|s| (s.peer, s))
+                .collect();
+
+            // Drain sessions no longer desired (absent or disabled).
+            let stale: Vec<IpAddr> = self
+                .sessions
+                .keys()
+                .copied()
+                .filter(|peer| !wanted.contains_key(peer))
+                .collect();
+            for peer in stale {
+                self.admin_down_and_remove(peer, metrics).await;
+            }
+
+            // Start missing sessions; refresh metadata on existing ones.
+            for (peer, params) in wanted {
+                if let Some(entry) = self.sessions.get_mut(&peer) {
+                    entry.strict = params.strict;
+                } else {
+                    self.start_session(params, metrics).await;
+                }
+            }
+            self.publish_status(status_tx);
+        }
+
+        /// Drain one session to `AdminDown` (RFC 5880 §6.8.16 — emit the final
+        /// `AdminDown` packet so the peer goes Down promptly) and drop it.
+        async fn admin_down_and_remove(&mut self, peer: IpAddr, metrics: &BgpMetrics) {
+            let actions = self
+                .sessions
+                .get_mut(&peer)
+                .map(|e| e.session.administratively_down())
+                .unwrap_or_default();
+            self.apply(peer, actions, metrics).await;
+            self.sessions.remove(&peer);
         }
 
         async fn on_packet(
@@ -497,6 +610,12 @@ mod linux {
                             peer,
                             old_state: old,
                             new_state: new,
+                            diagnostic,
+                        });
+                        // Lossless notify for PeerManager BGP coupling (step 4).
+                        let _ = self.state_change_tx.send(BfdStateChange {
+                            peer,
+                            state: new,
                             diagnostic,
                         });
                     }
@@ -974,7 +1093,7 @@ remote_asn = 65002
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU16, Ordering};
         use std::time::Duration;
-        use tokio::sync::{broadcast, watch};
+        use tokio::sync::{broadcast, mpsc, watch};
         use tokio_util::sync::CancellationToken;
 
         const PEER_DISC: u32 = 0x0A0B_0C0D;
@@ -1182,6 +1301,7 @@ remote_asn = 65002
         }
 
         #[tokio::test]
+        #[expect(clippy::too_many_lines, reason = "end-to-end netns scenario")]
         async fn session_reaches_up_and_detects_down() {
             if !netns_gate() {
                 eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run the privileged BFD netns test");
@@ -1201,15 +1321,25 @@ remote_asn = 65002
                     required_min_rx_us: 100_000,
                     detect_mult: 3,
                     strict: false,
+                    enabled: true,
                 }],
             };
             let registry = Registry::new();
             let metrics = BgpMetrics::with_registry(registry.clone());
             let (status_tx, status_rx) = watch::channel(Vec::new());
             let (event_tx, mut event_rx) = broadcast::channel(64);
+            let (_desired_tx, desired_rx) = watch::channel(config);
+            let (state_change_tx, mut state_change_rx) = mpsc::unbounded_channel();
             let shutdown = CancellationToken::new();
-            let handle = spawn(config, metrics, status_tx, event_tx, shutdown.clone())
-                .expect("actor should start with one session");
+            let handle = spawn(
+                desired_rx,
+                metrics,
+                status_tx,
+                event_tx,
+                state_change_tx,
+                shutdown.clone(),
+            )
+            .expect("actor should start with one session");
 
             // The up gauge is seeded to 0 at session creation, before any
             // packet exchange — a never-up session must still be observable.
@@ -1263,16 +1393,33 @@ remote_asn = 65002
             // signal the unified WatchEvents stream is bridged from).
             let up_event = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
-                    if let Ok(ev) = event_rx.recv().await
-                        && ev.new_state == SessionState::Up
-                    {
-                        return ev;
+                    match event_rx.recv().await {
+                        Ok(ev) if ev.new_state == SessionState::Up => return ev,
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => {
+                            panic!("BFD event channel closed before Up")
+                        }
                     }
                 }
             })
             .await
             .expect("actor should broadcast a BFD Up event");
             assert_eq!(up_event.peer, peer_ip);
+
+            // The actor must also deliver a lossless state change to PeerManager
+            // (the BGP-coupling channel, ADR-0067 step 4).
+            let up_change = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    match state_change_rx.recv().await {
+                        Some(change) if change.state == SessionState::Up => return change,
+                        Some(_) => {}
+                        None => panic!("BFD state-change channel closed before Up"),
+                    }
+                }
+            })
+            .await
+            .expect("actor should deliver a BFD Up state change");
+            assert_eq!(up_change.peer, peer_ip);
 
             // RFC 5881 §4: the actor's transmit source port must be in
             // 49152..=65535. By now the peer has observed several packets.
