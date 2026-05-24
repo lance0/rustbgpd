@@ -102,9 +102,19 @@ sibling scan or sort.
 - M42's behavior is unchanged: a single best path still emits `RTA_GATEWAY`,
   never `MultiPath`. Tests assert the **semantic shape** (single gateway, no
   multipath) rather than byte-identical netlink internals.
-- The Adj-RIB-In re-scan in the install-candidate query has a known cost
-  proportional to siblings per prefix; it only runs when a table sets
-  `maximum_paths > 1`.
+- **Cost of the install-candidate query.** When ECMP is off (`maximum_paths`
+  unset / 1 — the default) the handler short-circuits: it returns each Loc-RIB
+  best directly, with no sibling work. When a table sets `maximum_paths > 1`
+  the query re-scans the per-peer Adj-RIB-In and sorts equal-cost siblings for
+  **every** Loc-RIB best on **every** reconcile pass — roughly
+  `O(best_routes × peers)` lookups plus a sort per prefix, with no incremental
+  or cached sibling index. That is acceptable for the moderate-table deployments
+  this alpha targets, but a full-table multipath deployment with many peers
+  would want an incremental equal-cost index (rescan only changed prefixes) — a
+  named future optimization, not shipped here.
+- **Equal-weight only.** ECMP next-hops are emitted with `hops = 0` (equal
+  weight). Unequal-cost / weighted multipath (FRR's `bgp bestpath ... weight`)
+  is not supported; it is future work.
 - Validation: projection / canonicalization / owned-state unit tests; kernel
   encode→parse round-trip tests; a privileged netns test (install, failover to a
   single survivor, widen back, withdraw); and **M50** containerlab interop —
