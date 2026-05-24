@@ -20,6 +20,7 @@ use tracing::{error, info, warn};
 
 use crate::authz::{AuthEnforcement, AuthTier, PrincipalRole};
 use crate::authz_runtime::{BearerAuthSecret, GrpcAuthAuditContext, GrpcAuthnKind, GrpcAuthzLayer};
+use crate::bfd_service::BfdService;
 use crate::config_service::ConfigService;
 use crate::connect_info::RustbgpdTcpStream;
 use crate::control_service::{ControlService, MrtTriggerTx};
@@ -34,6 +35,7 @@ use crate::neighbor_service::NeighborService;
 use crate::peer_group_service::PeerGroupService;
 use crate::peer_types::{ConfigEvent, PeerManagerCommand};
 use crate::policy_service::PolicyService;
+use crate::proto::bfd_service_server::BfdServiceServer;
 use crate::proto::config_service_server::ConfigServiceServer;
 use crate::proto::control_service_server::ControlServiceServer;
 use crate::proto::event_service_server::EventServiceServer;
@@ -108,6 +110,9 @@ pub struct ServeConfig {
     /// separate from the aggregate dataplane poller so route events
     /// are not delayed by snapshot polling.
     pub dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
+    /// Live snapshot reader for ADR-0067 single-hop BFD session state.
+    /// Returns an empty list when no BFD sessions are configured or off Linux.
+    pub bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
 }
 
 /// Resolved gRPC listener configuration.
@@ -377,6 +382,7 @@ async fn run_listener(
     let blackhole_discard_snapshot = config.blackhole_discard_snapshot;
     let fib_route_snapshot = config.fib_route_snapshot;
     let dataplane_route_events = config.dataplane_route_events;
+    let bfd_session_snapshot = config.bfd_session_snapshot;
     let ListenerConfig {
         endpoint,
         access_mode,
@@ -420,6 +426,7 @@ async fn run_listener(
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
                 dataplane_route_events,
+                bfd_session_snapshot,
                 dataplane_events,
                 shutdown_rx,
                 rpc_shutdown_tx,
@@ -458,6 +465,7 @@ async fn run_listener(
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
                 dataplane_route_events,
+                bfd_session_snapshot,
                 dataplane_events,
                 shutdown_rx,
                 rpc_shutdown_tx,
@@ -503,6 +511,7 @@ async fn run_tcp_listener(
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
     dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
+    bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
     dataplane_events: DataplaneEventBroadcaster,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
@@ -564,6 +573,10 @@ async fn run_tcp_listener(
                 dataplane_route_events,
                 metrics.clone(),
             ),
+            interceptor.clone(),
+        ))
+        .add_service(BfdServiceServer::with_interceptor(
+            BfdService::with_snapshot(bfd_session_snapshot),
             interceptor.clone(),
         ))
         .add_service(InjectionServiceServer::with_interceptor(
@@ -663,6 +676,7 @@ async fn run_uds_listener(
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
     dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
+    bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
     dataplane_events: DataplaneEventBroadcaster,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
@@ -706,6 +720,10 @@ async fn run_uds_listener(
                 dataplane_route_events,
                 metrics.clone(),
             ),
+            interceptor.clone(),
+        ))
+        .add_service(BfdServiceServer::with_interceptor(
+            BfdService::with_snapshot(bfd_session_snapshot),
             interceptor.clone(),
         ))
         .add_service(InjectionServiceServer::with_interceptor(

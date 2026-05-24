@@ -506,6 +506,37 @@ fn fatal_startup_error(message: &'static str, error: impl std::fmt::Display) -> 
     process::exit(1);
 }
 
+/// Map a BFD session state to its gRPC proto enum (ADR-0067).
+fn bfd_session_state_to_proto(
+    state: rustbgpd_bfd::SessionState,
+) -> rustbgpd_api::proto::BfdSessionState {
+    use rustbgpd_api::proto::BfdSessionState;
+    match state {
+        rustbgpd_bfd::SessionState::AdminDown => BfdSessionState::AdminDown,
+        rustbgpd_bfd::SessionState::Down => BfdSessionState::Down,
+        rustbgpd_bfd::SessionState::Init => BfdSessionState::Init,
+        rustbgpd_bfd::SessionState::Up => BfdSessionState::Up,
+    }
+}
+
+/// Stable `snake_case` name for a BFD diagnostic (RFC 5880 §4.1), for the gRPC
+/// surface. Mirrors the names documented on `BfdSession.diagnostic`.
+fn bfd_diagnostic_to_str(diag: rustbgpd_bfd::Diagnostic) -> &'static str {
+    use rustbgpd_bfd::Diagnostic;
+    match diag {
+        Diagnostic::None => "none",
+        Diagnostic::ControlDetectionTimeExpired => "control_detection_time_expired",
+        Diagnostic::EchoFailed => "echo_function_failed",
+        Diagnostic::NeighborSignaledDown => "neighbor_signaled_session_down",
+        Diagnostic::ForwardingPlaneReset => "forwarding_plane_reset",
+        Diagnostic::PathDown => "path_down",
+        Diagnostic::ConcatenatedPathDown => "concatenated_path_down",
+        Diagnostic::AdministrativelyDown => "administratively_down",
+        Diagnostic::ReverseConcatenatedPathDown => "reverse_concatenated_path_down",
+        Diagnostic::Reserved(_) => "reserved",
+    }
+}
+
 #[expect(clippy::too_many_lines)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -1416,7 +1447,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // Spawn the BFD actor (single-hop async, ADR-0067). Runs sessions for
     // BFD-enabled neighbors and publishes their state; BGP coupling is a later
     // slice. No-op when no neighbor has BFD configured (or off Linux).
-    let (bfd_status_tx, _bfd_status_rx) =
+    let (bfd_status_tx, bfd_status_rx) =
         tokio::sync::watch::channel(Vec::<bfd_runtime::BfdStatus>::new());
     let bfd_runtime_shutdown = tokio_util::sync::CancellationToken::new();
     let bfd_runtime_handle = bfd_runtime::spawn(
@@ -1610,6 +1641,20 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             })
         },
         dataplane_route_events: Some(fib_bgp_event_tx),
+        bfd_session_snapshot: {
+            let rx = bfd_status_rx.clone();
+            Arc::new(move || {
+                rx.borrow()
+                    .iter()
+                    .map(|status| rustbgpd_api::proto::BfdSession {
+                        peer_address: status.peer.to_string(),
+                        state: bfd_session_state_to_proto(status.state) as i32,
+                        diagnostic: bfd_diagnostic_to_str(status.diagnostic).to_string(),
+                        strict: status.strict,
+                    })
+                    .collect()
+            })
+        },
     };
     let mut grpc_handle = tokio::spawn(async move {
         rustbgpd_api::server::serve(

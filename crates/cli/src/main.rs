@@ -70,6 +70,12 @@ enum Command {
         action: Option<NeighborAction>,
     },
 
+    /// Inspect single-hop BFD sessions (ADR-0067)
+    Bfd {
+        #[command(subcommand)]
+        action: Option<BfdAction>,
+    },
+
     /// Query and manage the RIB
     Rib {
         #[command(subcommand)]
@@ -404,6 +410,17 @@ enum NeighborAction {
         /// Address family to refresh
         #[arg(short = 'a', long)]
         family: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum BfdAction {
+    /// List all BFD sessions (default)
+    List,
+    /// Show a single BFD session by peer address
+    Show {
+        /// Peer address
+        address: String,
     },
 }
 
@@ -869,6 +886,13 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
     match cli.command {
         Command::Global => commands::global::run(connection, json).await,
+
+        Command::Bfd { action } => match action {
+            Some(BfdAction::Show { address }) => {
+                commands::bfd::show(connection, &address, json).await
+            }
+            Some(BfdAction::List) | None => commands::bfd::list(connection, json).await,
+        },
 
         Command::Config {
             action: ConfigAction::Diff { from_file },

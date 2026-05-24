@@ -13,6 +13,7 @@ mod audit;
 pub mod authz;
 pub mod authz_principal;
 pub mod authz_runtime;
+pub mod bfd_service;
 mod config_service;
 mod connect_info;
 mod control_service;

@@ -51,6 +51,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   transmit source port is in range, detection drives Down when the peer goes
   silent). See ADR-0067 for the staged plan and deferral list (multihop,
   echo/demand, auth, dynamic-peer BFD, IPv6 link-local → v1.1).
+- **ADR-0067 BFD operator inspection surface.** New `BfdService.GetBfdSessions`
+  gRPC RPC (`BfdSession` { peer, state, diagnostic, strict }, optional
+  peer-address filter) reading the actor's status snapshot, and
+  `rustbgpctl bfd [list | show <peer>]` (JSON + table). Read-only, ADR-0064
+  tier `sensitive_read`. This slice also lands the **event proto contract**
+  (`EVENT_CATEGORY_BFD`, `BGP_EVENT_TYPE_BFD_SESSION_{UP,DOWN,STATE_CHANGED}`,
+  `BfdSessionEvent`, the `BgpEvent.bfd` oneof) so it is stable, but BFD events
+  **do not yet stream** over `EventService.WatchEvents` — actor event emission
+  lands in a follow-up.
 - **ADR-0063 EVPN runtime convergence — `ip_vrf` relink.**
   `EvpnService.ApplyEvpnRuntime` now commits an L2VNI re-homed to a different
   IP-VRF (or its `ip_vrf` link added/removed) at runtime. A relink edits no

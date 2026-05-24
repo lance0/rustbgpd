@@ -371,6 +371,9 @@ fn bgp_event_type_to_session_event_type(
         | proto::BgpEventType::DataplaneRouteInstalled
         | proto::BgpEventType::DataplaneRouteWithdrawn
         | proto::BgpEventType::DataplaneRouteFailed
+        | proto::BgpEventType::BfdSessionUp
+        | proto::BgpEventType::BfdSessionDown
+        | proto::BgpEventType::BfdSessionStateChanged
         | proto::BgpEventType::StreamLagged => None,
     }
 }
@@ -387,6 +390,14 @@ fn parse_category_filter(categories: &[i32]) -> Result<BTreeSet<i32>, Status> {
             | proto::EventCategory::Dataplane
             | proto::EventCategory::Evpn => {
                 parsed.insert(category as i32);
+            }
+            // The BFD event proto contract exists, but the actor does not yet
+            // emit into WatchEvents (ADR-0067 step 3b). Reject the filter rather
+            // than hand back an empty/immediately-closed stream.
+            proto::EventCategory::Bfd => {
+                return Err(Status::invalid_argument(
+                    "BFD event streaming is not yet available",
+                ));
             }
             proto::EventCategory::Unspecified => {
                 return Err(Status::invalid_argument(
@@ -425,6 +436,15 @@ fn parse_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<i32>, Status>
             | proto::BgpEventType::EvpnRouteBestChanged
             | proto::BgpEventType::StreamLagged => {
                 parsed.insert(event_type as i32);
+            }
+            // BFD event types are defined but not yet streamed (ADR-0067 step
+            // 3b); reject rather than silently match nothing.
+            proto::BgpEventType::BfdSessionUp
+            | proto::BgpEventType::BfdSessionDown
+            | proto::BgpEventType::BfdSessionStateChanged => {
+                return Err(Status::invalid_argument(
+                    "BFD event streaming is not yet available",
+                ));
             }
             proto::BgpEventType::Unspecified => {
                 return Err(Status::invalid_argument(
@@ -487,6 +507,9 @@ fn parse_policy_event_type_filter(event_types: &[i32]) -> Result<(), Status> {
             | proto::BgpEventType::EvpnRouteAdded
             | proto::BgpEventType::EvpnRouteWithdrawn
             | proto::BgpEventType::EvpnRouteBestChanged
+            | proto::BgpEventType::BfdSessionUp
+            | proto::BgpEventType::BfdSessionDown
+            | proto::BgpEventType::BfdSessionStateChanged
             | proto::BgpEventType::StreamLagged => {
                 return Err(Status::invalid_argument(
                     "ListPolicyEvents only supports policy event types",
@@ -533,6 +556,9 @@ fn parse_evpn_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<RouteEve
             | proto::BgpEventType::DataplaneRouteInstalled
             | proto::BgpEventType::DataplaneRouteWithdrawn
             | proto::BgpEventType::DataplaneRouteFailed
+            | proto::BgpEventType::BfdSessionUp
+            | proto::BgpEventType::BfdSessionDown
+            | proto::BgpEventType::BfdSessionStateChanged
             | proto::BgpEventType::StreamLagged => {
                 return Err(Status::invalid_argument(
                     "ListEvpnEvents only supports EVPN event types",
