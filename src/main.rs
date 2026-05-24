@@ -17,6 +17,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+mod bfd_runtime;
 mod blackhole;
 mod config;
 mod config_persister;
@@ -1412,6 +1413,19 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         fib_runtime_shutdown.clone(),
     );
 
+    // Spawn the BFD actor (single-hop async, ADR-0067). Runs sessions for
+    // BFD-enabled neighbors and publishes their state; BGP coupling is a later
+    // slice. No-op when no neighbor has BFD configured (or off Linux).
+    let (bfd_status_tx, _bfd_status_rx) =
+        tokio::sync::watch::channel(Vec::<bfd_runtime::BfdStatus>::new());
+    let bfd_runtime_shutdown = tokio_util::sync::CancellationToken::new();
+    let bfd_runtime_handle = bfd_runtime::spawn(
+        bfd_runtime::BfdRuntimeConfig::from_config(&config),
+        metrics.clone(),
+        bfd_status_tx,
+        bfd_runtime_shutdown.clone(),
+    );
+
     // Spawn gRPC API server (keep JoinHandle for supervision)
     let grpc_rib_tx = rib_tx.clone();
     let grpc_rib_query_tx = rib_query_tx;
@@ -1939,6 +1953,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         handle.shutdown().await;
     }
 
+    // Drain BFD sessions (emits AdminDown so peers go Down promptly).
+    if let Some(handle) = bfd_runtime_handle {
+        info!("draining BFD sessions");
+        handle.shutdown().await;
+    }
+
     // 2.5 Drain the EVPN Linux dataplane reconciler. The actor
     // withdraws every owned remote-MAC FDB entry under a bounded
     // 5 s drain (ADR-0054 §7) and exits; foreign entries
@@ -2104,6 +2124,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
                     max_prefixes: None,
                     md5_password: None,
                     tcp_ao: None,
+                    bfd: None,
                     ttl_security: Some(false),
                     families: Vec::new(),
                     graceful_restart: Some(true),
@@ -2130,6 +2151,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
                     max_prefixes: None,
                     md5_password: None,
                     tcp_ao: None,
+                    bfd: None,
                     ttl_security: Some(false),
                     families: Vec::new(),
                     graceful_restart: Some(true),
@@ -2156,6 +2178,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
                     max_prefixes: None,
                     md5_password: None,
                     tcp_ao: None,
+                    bfd: None,
                     ttl_security: Some(false),
                     families: Vec::new(),
                     graceful_restart: Some(false),
@@ -2185,6 +2208,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
             ethernet_segments: Vec::new(),
             evpn_ip_vrfs: Vec::new(),
             fib_tables: Vec::new(),
+            bfd_profiles: Vec::new(),
             apply_bum_enforcement: false,
         };
 

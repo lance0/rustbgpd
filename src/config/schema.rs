@@ -59,6 +59,10 @@ pub struct Config {
     /// routes into the configured non-reserved tables. Restart-required.
     #[serde(default)]
     pub fib_tables: Vec<FibTableConfig>,
+    /// Named BFD timing profiles (RFC 5880/5881, ADR-0067) referenced by
+    /// `[neighbors.bfd]` / `[peer_groups.<name>.bfd]`.
+    #[serde(default)]
+    pub bfd_profiles: Vec<BfdProfileConfig>,
     /// Apply Gate 8b BUM-suppression filters to the kernel
     /// (per-port `IFLA_BRPORT_*_FLOOD` triplet on CE-facing bridge
     /// ports). **Default `true` since v0.23.0** — kernel enforcement
@@ -446,6 +450,9 @@ pub struct Neighbor {
     /// Static-neighbor TCP-AO (RFC 5925) configuration. Installed on
     /// startup active-open sockets and the passive listener when configured.
     pub tcp_ao: Option<TcpAoConfig>,
+    /// Single-hop BFD (RFC 5880/5881) attachment, referencing a
+    /// `[[bfd_profiles]]` entry. Presence enables BFD for this neighbor.
+    pub bfd: Option<BfdConfig>,
     pub ttl_security: Option<bool>,
     /// Address families to negotiate (e.g., `["ipv4_unicast", "ipv6_unicast"]`).
     /// Default: `["ipv4_unicast"]`. If the neighbor address is IPv6, `"ipv6_unicast"`
@@ -542,6 +549,9 @@ pub struct PeerGroupConfig {
     pub max_prefixes: Option<u32>,
     pub md5_password: Option<String>,
     pub ttl_security: Option<bool>,
+    /// Single-hop BFD attachment inherited by neighbors in this group (unless
+    /// the neighbor sets its own `bfd`). References a `[[bfd_profiles]]` entry.
+    pub bfd: Option<BfdConfig>,
     /// Address families to negotiate (e.g., `["ipv4_unicast", "ipv6_unicast"]`).
     #[serde(default)]
     pub families: Vec<String>,
@@ -577,6 +587,62 @@ pub struct AddPathConfig {
     pub send: bool,
     /// Maximum number of paths to advertise per prefix (0 or absent = unlimited).
     pub send_max: Option<u32>,
+}
+
+/// Per-neighbor / per-peer-group BFD attachment (RFC 5880/5881, ADR-0067).
+///
+/// The presence of this block enables single-hop asynchronous BFD for the
+/// neighbor; it references a `[[bfd_profiles]]` entry for the timers. Static
+/// neighbors only — dynamic-neighbor BFD is deferred (see ADR-0067).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BfdConfig {
+    /// Name of the `[[bfd_profiles]]` entry providing the timers.
+    pub profile: String,
+    /// Whether BFD is enabled. Defaults to `true`; the field exists so a
+    /// neighbor can override an inherited peer-group `bfd` block to *disable*
+    /// BFD (`bfd = { profile = "...", enabled = false }`). A disabled block runs
+    /// no session — the actor skips it — so the effective session set is fully
+    /// expressible inline, which the restart-required reload pin relies on.
+    #[serde(default = "default_bfd_enabled")]
+    pub enabled: bool,
+    /// RFC 5882 strict mode: when true, the BGP session is not allowed to reach
+    /// Established until the BFD session is Up. Default false — BGP may
+    /// establish first, and a later BFD-down tears it down faster than the hold
+    /// timer.
+    #[serde(default)]
+    pub strict: bool,
+}
+
+fn default_bfd_enabled() -> bool {
+    true
+}
+
+/// A named BFD timing profile referenced by `[neighbors.bfd]` /
+/// `[peer_groups.<name>.bfd]`. Intervals are in **milliseconds**.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BfdProfileConfig {
+    /// Unique profile name (referenced by `bfd.profile`).
+    pub name: String,
+    /// Desired minimum transmit interval (ms). Default 300; validated ≥ 100.
+    #[serde(default = "default_bfd_interval_ms")]
+    pub min_tx_interval: u32,
+    /// Required minimum receive interval (ms). Default 300; validated ≥ 100.
+    #[serde(default = "default_bfd_interval_ms")]
+    pub min_rx_interval: u32,
+    /// Detection multiplier — detection time is `multiplier × negotiated
+    /// interval`. Default 3; validated ≥ 2.
+    #[serde(default = "default_bfd_multiplier")]
+    pub multiplier: u32,
+}
+
+fn default_bfd_interval_ms() -> u32 {
+    300
+}
+
+fn default_bfd_multiplier() -> u32 {
+    3
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1059,4 +1125,6 @@ pub enum ConfigError {
     InvalidEvpnIpVrf { reason: String },
     #[error("invalid FIB table config: {reason}")]
     InvalidFibTable { reason: String },
+    #[error("invalid BFD config: {reason}")]
+    InvalidBfd { reason: String },
 }

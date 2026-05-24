@@ -253,6 +253,7 @@ impl PeerManager {
                 ethernet_segments: Vec::new(),
                 evpn_ip_vrfs: Vec::new(),
                 fib_tables: Vec::new(),
+                bfd_profiles: Vec::new(),
                 apply_bum_enforcement: false,
             },
         )

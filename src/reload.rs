@@ -431,6 +431,16 @@ pub(crate) async fn reload_config(
         );
     }
 
+    if config::pin_bfd_startup_only_runtime(&mut new_config, current) {
+        error!(
+            "BFD config differs from the live session set: the ADR-0067 BFD actor \
+             resolves [[bfd_profiles]] and neighbor/peer-group bfd once at startup. \
+             Restart rustbgpd to add, remove, or retune BFD sessions. The profiles \
+             and per-neighbor/peer-group bfd fields are kept at their live startup \
+             values for this reload."
+        );
+    }
+
     let policy_diff = config::diff_policy(&current.policy, &new_config.policy);
     let peer_group_diff = config::diff_peer_groups(&current.peer_groups, &new_config.peer_groups);
     let diff = config::diff_neighbors(&current.neighbors, &new_config.neighbors);
@@ -2119,6 +2129,43 @@ hold_time = 90
         );
         assert!(rendered.contains("honor_graceful_shutdown"), "{rendered}");
         assert!(rendered.contains("honor_blackhole"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn reload_pins_bfd_edits_to_startup_snapshot() {
+        // Adding a profile + a neighbor bfd block is restart-required (the
+        // ADR-0067 actor resolves its sessions once at startup), so a SIGHUP
+        // must pin the BFD config back to the live snapshot — but preserve the
+        // operator's edit in the desired TOML for the next restart.
+        let initial = baseline_toml();
+        let new_toml = format!(
+            "{}\n[[bfd_profiles]]\nname = \"fast\"\n",
+            baseline_toml().replace(
+                "hold_time = 90",
+                "hold_time = 90\nbfd = { profile = \"fast\", strict = true }",
+            )
+        );
+
+        let (returned, tags) = drive_reload(initial, &new_toml).await;
+        let returned = returned.expect("reload should return pinned runtime config");
+
+        assert!(
+            tags.is_empty(),
+            "bfd-only edits are restart-required and must not reconcile peers: {tags:?}"
+        );
+        assert!(
+            returned.neighbors[0].bfd.is_none(),
+            "runtime snapshot must keep the (empty) startup BFD config"
+        );
+        assert!(
+            returned.bfd_profiles.is_empty(),
+            "runtime snapshot must keep the startup profile set"
+        );
+        assert_eq!(
+            returned.desired.neighbors[0].bfd.as_ref().unwrap().profile,
+            "fast",
+            "desired TOML must preserve the operator's BFD edit for restart"
+        );
     }
 
     #[tokio::test]

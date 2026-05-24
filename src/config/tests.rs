@@ -3073,6 +3073,7 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         max_prefixes: None,
         md5_password: None,
         tcp_ao: None,
+        bfd: None,
         ttl_security: Some(false),
         families: Vec::new(),
         graceful_restart: None,
@@ -3566,6 +3567,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             max_prefixes: None,
             md5_password: None,
             ttl_security: None,
+            bfd: None,
             families: Vec::new(),
             graceful_restart: None,
             gr_restart_time: None,
@@ -3591,6 +3593,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         hold_time: None,
         max_prefixes: None,
         md5_password: None,
+        bfd: None,
         tcp_ao: Some(TcpAoConfig {
             key: "secret".into(),
             send_id: 1,
@@ -3625,6 +3628,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         max_prefixes: None,
         md5_password: None,
         tcp_ao: None,
+        bfd: None,
         ttl_security: None,
         families: Vec::new(),
         graceful_restart: None,
@@ -3669,6 +3673,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         hold_time: None,
         max_prefixes: None,
         md5_password: None,
+        bfd: None,
         tcp_ao: Some(TcpAoConfig {
             key: "secret".into(),
             send_id: 1,
@@ -5800,6 +5805,107 @@ allowed_peer_groups = ["transit", "transit"]
 }
 
 #[test]
+fn bfd_profiles_parse_and_neighbor_reference() {
+    let toml = format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+min_tx_interval = 250
+min_rx_interval = 250
+multiplier = 4
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+bfd = {{ profile = "fast", strict = true }}
+"#,
+        valid_toml()
+    );
+    let config = parse(&toml).unwrap();
+    assert_eq!(config.bfd_profiles.len(), 1);
+    assert_eq!(config.bfd_profiles[0].min_tx_interval, 250);
+    assert_eq!(config.bfd_profiles[0].multiplier, 4);
+    let n = config
+        .neighbors
+        .iter()
+        .find(|n| n.address == "10.0.0.3")
+        .unwrap();
+    let bfd = n.bfd.as_ref().unwrap();
+    assert_eq!(bfd.profile, "fast");
+    assert!(bfd.strict);
+}
+
+#[test]
+fn bfd_profile_defaults_are_300_300_3() {
+    let toml = format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "p"
+"#,
+        valid_toml()
+    );
+    let p = &parse(&toml).unwrap().bfd_profiles[0];
+    assert_eq!(
+        (p.min_tx_interval, p.min_rx_interval, p.multiplier),
+        (300, 300, 3)
+    );
+}
+
+#[test]
+fn bfd_rejects_invalid_profiles() {
+    let cases = [
+        ("name = \"p\"\nmin_tx_interval = 50", "must be >= 100"),
+        ("name = \"p\"\nmultiplier = 1", "multiplier must be >= 2"),
+        // Upper bounds: out-of-range values must be rejected, not silently
+        // clamped by the actor's u8 / microsecond conversions.
+        (
+            "name = \"p\"\nmultiplier = 1000",
+            "multiplier must be <= 255",
+        ),
+        ("name = \"p\"\nmin_rx_interval = 5000000", "must be <= "),
+        (
+            "name = \"dup\"\n\n[[bfd_profiles]]\nname = \"dup\"",
+            "duplicate bfd_profile",
+        ),
+    ];
+    for (body, expected) in cases {
+        let toml = format!("{}\n\n[[bfd_profiles]]\n{body}\n", valid_toml());
+        let err = parse(&toml).unwrap_err();
+        let ConfigError::InvalidBfd { reason } = err else {
+            panic!("expected InvalidBfd, got {err}");
+        };
+        assert!(
+            reason.contains(expected),
+            "expected {expected:?} in {reason:?}"
+        );
+    }
+}
+
+#[test]
+fn bfd_rejects_undefined_profile_reference() {
+    let toml = format!(
+        r#"
+{}
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+bfd = {{ profile = "nope" }}
+"#,
+        valid_toml()
+    );
+    let err = parse(&toml).unwrap_err();
+    let ConfigError::InvalidBfd { reason } = err else {
+        panic!("expected InvalidBfd, got {err}");
+    };
+    assert!(reason.contains("not defined"), "unexpected: {reason}");
+}
+
+#[test]
 fn fib_tables_diff_marks_restart_required() {
     let old = parse(valid_toml()).unwrap();
     let toml = format!(
@@ -5818,6 +5924,259 @@ metric = 200
 
     assert!(diff.fib_tables_changed);
     assert!(diff.has_restart_required_changes());
+}
+
+#[test]
+fn bfd_rejects_ipv6_link_local_neighbor() {
+    // v1 ships IPv4 + IPv6 global only; link-local BFD is deferred to v1.1
+    // (needs a neighbor interface/scope the daemon can't express yet).
+    let toml = format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+
+[[neighbors]]
+address = "fe80::1"
+remote_asn = 65003
+bfd = {{ profile = "fast" }}
+"#,
+        valid_toml()
+    );
+    let err = parse(&toml).unwrap_err();
+    let ConfigError::InvalidBfd { reason } = err else {
+        panic!("expected InvalidBfd, got {err}");
+    };
+    assert!(reason.contains("link-local"), "unexpected: {reason}");
+}
+
+#[test]
+fn bfd_link_local_rejected_via_peer_group_inheritance() {
+    // Inheriting BFD from a peer-group must also be rejected on a link-local
+    // neighbor — the effective config is what matters, not just the inline form.
+    let toml = format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+
+[peer_groups.rrc]
+bfd = {{ profile = "fast" }}
+
+[[neighbors]]
+address = "fe80::2"
+remote_asn = 65003
+peer_group = "rrc"
+"#,
+        valid_toml()
+    );
+    let err = parse(&toml).unwrap_err();
+    let ConfigError::InvalidBfd { reason } = err else {
+        panic!("expected InvalidBfd, got {err}");
+    };
+    assert!(reason.contains("link-local"), "unexpected: {reason}");
+}
+
+#[test]
+fn bfd_diff_marks_restart_required_and_pins() {
+    let old = parse(valid_toml()).unwrap();
+    let toml = format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+min_tx_interval = 200
+min_rx_interval = 200
+multiplier = 3
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+bfd = {{ profile = "fast" }}
+"#,
+        valid_toml()
+    );
+    let new = parse(&toml).unwrap();
+
+    // The effective BFD session set changed → restart-required + surfaced.
+    let diff = diff_config(&old, &new);
+    assert!(diff.bfd_changed);
+    assert!(diff.has_restart_required_changes());
+
+    // A SIGHUP reload pins the BFD config back to the live snapshot so the
+    // persisted config does not silently advance past the running actor.
+    let mut runtime = new.clone();
+    assert!(super::pin_bfd_startup_only_runtime(&mut runtime, &old));
+    assert!(runtime.bfd_profiles.is_empty(), "profiles pinned to live");
+    let pinned_neighbor = runtime
+        .neighbors
+        .iter()
+        .find(|n| n.address == "10.0.0.3")
+        .unwrap();
+    assert!(
+        pinned_neighbor.bfd.is_none(),
+        "hot-added neighbor's bfd pinned off until restart"
+    );
+    // After pinning, a re-diff against the live snapshot shows no BFD drift.
+    assert!(!diff_config(&old, &runtime).bfd_changed);
+}
+
+/// The effective BFD session set must survive peer-group *membership* changes,
+/// not just raw `neighbor.bfd` edits — BFD can be inherited, so moving a
+/// neighbor between groups (or in/out of a BFD-bearing one) changes its
+/// effective session without touching `neighbor.bfd`. The pin must restore the
+/// live effective attachment for an existing neighbor in all three shapes.
+#[test]
+fn bfd_pin_restores_effective_set_across_peer_group_membership_changes() {
+    // Live config: neighbor 10.0.0.3 inherits BFD from peer-group `rrc`.
+    let live = parse(&format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+
+[peer_groups.rrc]
+bfd = {{ profile = "fast" }}
+
+[peer_groups.plain]
+hold_time = 30
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "rrc"
+"#,
+        valid_toml()
+    ))
+    .unwrap();
+
+    // Detach: move the neighbor to a non-BFD group. Effective BFD would drop to
+    // None, but the actor still runs the session → pin must keep it.
+    let detached = parse(&format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+
+[peer_groups.rrc]
+bfd = {{ profile = "fast" }}
+
+[peer_groups.plain]
+hold_time = 30
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "plain"
+"#,
+        valid_toml()
+    ))
+    .unwrap();
+    assert!(diff_config(&live, &detached).bfd_changed);
+    let mut runtime = detached.clone();
+    assert!(super::pin_bfd_startup_only_runtime(&mut runtime, &live));
+    assert!(
+        !diff_config(&live, &runtime).bfd_changed,
+        "detach via peer-group membership must be pinned back to the live session"
+    );
+
+    // Attach: a neighbor with no BFD moves into the BFD group. The actor has no
+    // session → pin must keep effective BFD off.
+    let plain_live = parse(&format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+
+[peer_groups.rrc]
+bfd = {{ profile = "fast" }}
+
+[peer_groups.plain]
+hold_time = 30
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "plain"
+"#,
+        valid_toml()
+    ))
+    .unwrap();
+    let attached = live.clone(); // same file: neighbor in `rrc` (BFD) group
+    assert!(diff_config(&plain_live, &attached).bfd_changed);
+    let mut runtime = attached.clone();
+    assert!(super::pin_bfd_startup_only_runtime(
+        &mut runtime,
+        &plain_live
+    ));
+    assert!(
+        !diff_config(&plain_live, &runtime).bfd_changed,
+        "attach via peer-group membership must be pinned off until restart"
+    );
+}
+
+/// A neighbor *added* in the same reload that *inherits* BFD from a pre-existing
+/// BFD peer-group has no live actor session; the pin must materialize a disabled
+/// inline block so the runtime's effective set still matches the live actor
+/// (the `BfdConfig.enabled` tri-state makes "inherit-but-off" expressible).
+#[test]
+fn bfd_pin_disables_inherited_bfd_on_newly_added_neighbor() {
+    let live = parse(&format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+
+[peer_groups.rrc]
+bfd = {{ profile = "fast" }}
+"#,
+        valid_toml()
+    ))
+    .unwrap();
+    // Candidate adds a brand-new neighbor into the BFD-bearing peer-group.
+    let added = parse(&format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+
+[peer_groups.rrc]
+bfd = {{ profile = "fast" }}
+
+[[neighbors]]
+address = "10.0.0.9"
+remote_asn = 65009
+peer_group = "rrc"
+"#,
+        valid_toml()
+    ))
+    .unwrap();
+    assert!(diff_config(&live, &added).bfd_changed);
+
+    let mut runtime = added.clone();
+    assert!(super::pin_bfd_startup_only_runtime(&mut runtime, &live));
+    let pinned = runtime
+        .neighbors
+        .iter()
+        .find(|n| n.address == "10.0.0.9")
+        .unwrap();
+    assert_eq!(
+        pinned.bfd.as_ref().map(|b| b.enabled),
+        Some(false),
+        "added neighbor's inherited BFD must be pinned to a disabled inline block"
+    );
+    assert!(
+        !diff_config(&live, &runtime).bfd_changed,
+        "after pinning, the added neighbor must contribute no effective session"
+    );
 }
 
 // ---------------------------------------------------------------------------

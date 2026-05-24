@@ -23,6 +23,10 @@ pub struct BgpMetrics {
     session_established: IntCounterVec,
     stale_timer_events: IntCounterVec,
 
+    // ── BFD (RFC 5880, ADR-0067) ───────────────────────────────────
+    bfd_session_up: IntGaugeVec,
+    bfd_session_flaps_total: IntCounterVec,
+
     // ── Notifications ──────────────────────────────────────────────
     notifications_sent: IntCounterVec,
     notifications_received: IntCounterVec,
@@ -142,6 +146,24 @@ impl BgpMetrics {
             Opts::new(
                 "bgp_session_established_total",
                 "Total times a BGP session reached Established",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let bfd_session_up = IntGaugeVec::new(
+            Opts::new(
+                "bfd_session_up",
+                "BFD session state per peer (1 = Up, 0 = not Up)",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let bfd_session_flaps_total = IntCounterVec::new(
+            Opts::new(
+                "bfd_session_flaps_total",
+                "Total BFD session flaps (transitions out of Up)",
             ),
             &["peer"],
         )
@@ -616,6 +638,12 @@ impl BgpMetrics {
             .register(Box::new(session_established.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(bfd_session_up.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(bfd_session_flaps_total.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(stale_timer_events.clone()))
             .expect("metric not already registered");
         registry
@@ -781,6 +809,8 @@ impl BgpMetrics {
             session_flaps,
             session_established,
             stale_timer_events,
+            bfd_session_up,
+            bfd_session_flaps_total,
             notifications_sent,
             notifications_received,
             messages_sent,
@@ -858,6 +888,19 @@ impl BgpMetrics {
         }
         if to == "established" {
             self.session_established.with_label_values(&[peer]).inc();
+        }
+    }
+
+    /// Record a BFD session state change: set the per-peer up gauge and count a
+    /// flap on any transition out of Up.
+    pub fn record_bfd_state(&self, peer: &str, is_up: bool, was_up: bool) {
+        self.bfd_session_up
+            .with_label_values(&[peer])
+            .set(i64::from(is_up));
+        if was_up && !is_up {
+            self.bfd_session_flaps_total
+                .with_label_values(&[peer])
+                .inc();
         }
     }
 

@@ -325,7 +325,7 @@ jobs:
           script: tests/interop/scripts/test-m43-tcp-ao-bird.sh
 
   netns:
-    name: Privileged netns selectors (fdb_nhg + fib_runtime)
+    name: Privileged netns selectors (fdb_nhg + fib_runtime + bfd_runtime)
     runs-on: [self-hosted, linux, kernel-dataplane]
     environment:
       name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
@@ -346,3 +346,6 @@ jobs:
 
       - name: ADR-0061 FIB runtime netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh fib_runtime
+
+      - name: ADR-0067 BFD runtime netns test
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh bfd_runtime

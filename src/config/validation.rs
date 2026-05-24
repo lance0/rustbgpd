@@ -602,6 +602,7 @@ impl Config {
         // `resolve_evpn_ip_vrfs` on demand.
         let _ = self.resolve_evpn_ip_vrfs()?;
         validate_fib_tables(self)?;
+        validate_bfd(self)?;
 
         Ok(())
     }
@@ -1163,4 +1164,136 @@ fn validate_grpc_token_file(path: Option<&str>, field_name: &str) -> Result<(), 
         });
     }
     Ok(())
+}
+
+/// Minimum BFD interval (ms). Conservative for v1 — aggressive sub-100 ms
+/// timers risk false flaps that are worse than slightly slower detection.
+const BFD_MIN_INTERVAL_MS: u32 = 100;
+/// Maximum BFD interval (ms). The actor converts ms → microseconds (`* 1000`)
+/// into the `u32` wire field, so anything above this would overflow / be
+/// silently clamped. Reject it instead.
+const BFD_MAX_INTERVAL_MS: u32 = u32::MAX / 1000;
+/// Minimum BFD detection multiplier.
+const BFD_MIN_MULTIPLIER: u32 = 2;
+/// Maximum BFD detection multiplier — the RFC 5880 §4.1 Detect Mult field is a
+/// single octet, so values above 255 cannot be represented on the wire.
+const BFD_MAX_MULTIPLIER: u32 = 255;
+
+/// Validate `[[bfd_profiles]]` and that every `bfd.profile` reference resolves.
+fn validate_bfd(config: &Config) -> Result<(), ConfigError> {
+    let mut names = std::collections::HashSet::new();
+    for profile in &config.bfd_profiles {
+        if profile.name.trim().is_empty() {
+            return Err(ConfigError::InvalidBfd {
+                reason: "bfd_profile name must not be empty".to_string(),
+            });
+        }
+        if !names.insert(profile.name.clone()) {
+            return Err(ConfigError::InvalidBfd {
+                reason: format!("duplicate bfd_profile name {:?}", profile.name),
+            });
+        }
+        if profile.min_tx_interval < BFD_MIN_INTERVAL_MS
+            || profile.min_rx_interval < BFD_MIN_INTERVAL_MS
+        {
+            return Err(ConfigError::InvalidBfd {
+                reason: format!(
+                    "bfd_profile {:?}: min_tx_interval and min_rx_interval must be >= {BFD_MIN_INTERVAL_MS} ms",
+                    profile.name
+                ),
+            });
+        }
+        if profile.min_tx_interval > BFD_MAX_INTERVAL_MS
+            || profile.min_rx_interval > BFD_MAX_INTERVAL_MS
+        {
+            return Err(ConfigError::InvalidBfd {
+                reason: format!(
+                    "bfd_profile {:?}: min_tx_interval and min_rx_interval must be <= {BFD_MAX_INTERVAL_MS} ms",
+                    profile.name
+                ),
+            });
+        }
+        if profile.multiplier < BFD_MIN_MULTIPLIER {
+            return Err(ConfigError::InvalidBfd {
+                reason: format!(
+                    "bfd_profile {:?}: multiplier must be >= {BFD_MIN_MULTIPLIER}",
+                    profile.name
+                ),
+            });
+        }
+        if profile.multiplier > BFD_MAX_MULTIPLIER {
+            return Err(ConfigError::InvalidBfd {
+                reason: format!(
+                    "bfd_profile {:?}: multiplier must be <= {BFD_MAX_MULTIPLIER}",
+                    profile.name
+                ),
+            });
+        }
+    }
+
+    let profile_defined = |profile: &str| names.contains(profile);
+    for neighbor in &config.neighbors {
+        if let Some(bfd) = &neighbor.bfd
+            && !profile_defined(&bfd.profile)
+        {
+            return Err(ConfigError::InvalidBfd {
+                reason: format!(
+                    "neighbor {:?}: bfd.profile {:?} is not defined in [[bfd_profiles]]",
+                    neighbor.address, bfd.profile
+                ),
+            });
+        }
+    }
+    for (group_name, group) in &config.peer_groups {
+        if let Some(bfd) = &group.bfd
+            && !profile_defined(&bfd.profile)
+        {
+            return Err(ConfigError::InvalidBfd {
+                reason: format!(
+                    "peer_group {group_name:?}: bfd.profile {:?} is not defined in [[bfd_profiles]]",
+                    bfd.profile
+                ),
+            });
+        }
+    }
+
+    // v1 ships IPv4 + IPv6 global only. Link-local BFD needs a neighbor
+    // interface/scope the daemon cannot express today (the address parses as a
+    // bare `IpAddr` and `resolve_neighbor` builds an unscoped `SocketAddr`), so
+    // the actor would send to an unscoped fe80:: peer and the session would
+    // never come Up. Reject it up front with an actionable error rather than
+    // silently failing to converge (ADR-0067 defers link-local to v1.1).
+    for neighbor in &config.neighbors {
+        // Effective BFD = own block, else inherited from the peer group; a
+        // disabled (`enabled = false`) block runs no session, so it does not
+        // count.
+        let effective_bfd = if neighbor.bfd.is_some() {
+            neighbor.bfd.as_ref()
+        } else {
+            neighbor
+                .peer_group
+                .as_ref()
+                .and_then(|g| config.peer_groups.get(g))
+                .and_then(|pg| pg.bfd.as_ref())
+        };
+        let has_effective_bfd = effective_bfd.is_some_and(|b| b.enabled);
+        if has_effective_bfd && is_ipv6_link_local(&neighbor.address) {
+            return Err(ConfigError::InvalidBfd {
+                reason: format!(
+                    "neighbor {:?}: BFD on IPv6 link-local addresses is not supported in v1 \
+                     (link-local BFD requires a neighbor interface; deferred to v1.1)",
+                    neighbor.address
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Whether `addr` parses to an IPv6 link-local address (`fe80::/10`).
+fn is_ipv6_link_local(addr: &str) -> bool {
+    addr.parse::<std::net::Ipv6Addr>().is_ok_and(|a| {
+        let octets = a.octets();
+        octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80
+    })
 }
