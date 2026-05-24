@@ -59,7 +59,12 @@ timing before arming the teardown. The staged delivery is:
    events** — see 3b.
 3b. **Event emission** — the actor publishes state-change events into the
    unified `EventService.WatchEvents` stream (category/type filtered). **[shipped]**
-4. **BGP coupling** (RFC 5882) — behavior change, config-gated.
+4a. **BGP coupling — non-strict** (RFC 5882) — BFD down tears an established
+   session down before the hold timer; recovery re-establishes. `PeerManager`
+   owns the desired session set (`watch`) and consumes the lossless state-change
+   `mpsc`; the actor stays a pure session-runner. **[shipped]**
+4b. **BGP coupling — strict** — BGP withheld from establishment until BFD is Up
+   (the `add_peer` create/start split). **[next]**
 5. **Interop (M51) + docs** — FRR `bfdd` cross-check, `COMPARISON.md` flip.
 
 This ADR lands with slice 2 (the actor), not at the end, so the design record

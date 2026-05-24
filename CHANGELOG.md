@@ -68,6 +68,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   filterable by category, event type, and peer address. The actor stays
   decoupled from the gRPC proto — it broadcasts an internal event that a daemon
   bridge converts (mirrors the FIB dataplane bridge).
+- **ADR-0067 BFD/BGP coupling — non-strict (RFC 5882).** A BFD session going
+  **down** now tears the BGP session down before the hold timer expires, and
+  recovery lets it re-establish — sub-second failover for BFD-enabled neighbors.
+  `PeerManager` owns the desired BFD session set (published to the actor over a
+  `watch`, updated on neighbor enable/disable/delete) and consumes session
+  state changes over a lossless channel; the BFD actor remains a pure
+  session-runner with no BGP knowledge. A deliberate disable/delete drains the
+  session to `AdminDown` and is not treated as a failure. Strict mode (withhold
+  BGP until BFD Up) lands next.
 - **ADR-0063 EVPN runtime convergence — `ip_vrf` relink.**
   `EvpnService.ApplyEvpnRuntime` now commits an L2VNI re-homed to a different
   IP-VRF (or its `ip_vrf` link added/removed) at runtime. A relink edits no

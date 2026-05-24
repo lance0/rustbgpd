@@ -176,6 +176,8 @@ impl PeerManager {
             .map_err(|e| e.to_string())?;
         }
 
+        // ADR-0067 step 4: drain the deleted peer's BFD session.
+        self.republish_bfd_desired();
         Ok(())
     }
 
@@ -195,6 +197,8 @@ impl PeerManager {
             SessionLifecycleEventType::PeerEnabled,
             format!("peer {address} enabled"),
         );
+        // ADR-0067 step 4: re-arm this peer's BFD session in the desired set.
+        self.republish_bfd_desired();
         info!(%address, "peer enabled");
         Ok(())
     }
@@ -229,6 +233,8 @@ impl PeerManager {
             SessionLifecycleEventType::PeerDisabled,
             format!("peer {address} disabled"),
         );
+        // ADR-0067 step 4: drain this peer's BFD session (published disabled).
+        self.republish_bfd_desired();
         info!(%address, "peer disabled");
         Ok(())
     }

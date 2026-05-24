@@ -3810,3 +3810,192 @@ fn build_transport_config_carries_tcp_ao_key() {
         rustbgpd_transport::TcpAoAlgorithm::HmacSha256
     );
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0067 step 4 — RFC 5882 BFD/BGP coupling (non-strict). Adversarial around
+// stale state changes and lifecycle drops: a deliberate disable/delete drains
+// the BFD session (AdminDown) and must NOT look like a failure.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct BfdCouplingCounters {
+    stop: AtomicU32,
+    start: AtomicU32,
+}
+
+/// Fake peer handle that counts Stop/Start without exiting (unlike
+/// `fake_peer_handle`, which breaks on Stop) so a down→up cycle is observable.
+fn fake_bfd_peer_handle(counters: Arc<BfdCouplingCounters>) -> PeerHandle {
+    use rustbgpd_transport::PeerCommand;
+    let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                PeerCommand::Stop { .. } => {
+                    counters.stop.fetch_add(1, Ordering::SeqCst);
+                }
+                PeerCommand::Start => {
+                    counters.start.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(tx, task)
+}
+
+fn bfd_params(peer: IpAddr, strict: bool) -> crate::bfd_runtime::BfdSessionParams {
+    crate::bfd_runtime::BfdSessionParams {
+        peer,
+        desired_min_tx_us: 300_000,
+        required_min_rx_us: 300_000,
+        detect_mult: 3,
+        strict,
+        enabled: true,
+    }
+}
+
+/// Build a coupled `PeerManager` with one managed peer, returning the
+/// desired-set receiver so tests can inspect what `PeerManager` publishes.
+fn coupled_mgr(
+    peer: IpAddr,
+    strict: bool,
+    handle: PeerHandle,
+) -> (
+    PeerManager,
+    watch::Receiver<crate::bfd_runtime::BfdRuntimeConfig>,
+) {
+    let mut mgr = test_peer_manager();
+    insert_test_managed_peer(&mut mgr, peer, handle, false);
+    let configured = std::collections::HashMap::from([(peer, bfd_params(peer, strict))]);
+    let (desired_tx, desired_rx) = watch::channel(crate::bfd_runtime::BfdRuntimeConfig::default());
+    let (_state_tx, state_rx) = mpsc::unbounded_channel();
+    let mgr = mgr.with_bfd_coupling(desired_tx, state_rx, configured);
+    (mgr, desired_rx)
+}
+
+fn down(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
+    crate::bfd_runtime::BfdStateChange {
+        peer,
+        state: rustbgpd_bfd::SessionState::Down,
+        diagnostic: rustbgpd_bfd::Diagnostic::ControlDetectionTimeExpired,
+    }
+}
+
+fn up(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
+    crate::bfd_runtime::BfdStateChange {
+        peer,
+        state: rustbgpd_bfd::SessionState::Up,
+        diagnostic: rustbgpd_bfd::Diagnostic::None,
+    }
+}
+
+#[tokio::test]
+async fn bfd_down_then_up_tears_down_and_restores_enabled_peer() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, false, fake_bfd_peer_handle(counters.clone()));
+
+    mgr.handle_bfd_state_change(down(peer)).await;
+    wait_counter(&counters.stop, 1).await; // BFD down must stop BGP
+    // A duplicate Down while already held must not re-stop.
+    mgr.handle_bfd_state_change(down(peer)).await;
+    assert_eq!(counters.stop.load(Ordering::SeqCst), 1);
+
+    mgr.handle_bfd_state_change(up(peer)).await;
+    wait_counter(&counters.start, 1).await; // BFD up must restart BGP
+}
+
+#[tokio::test]
+async fn bfd_up_without_prior_down_is_noop() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, false, fake_bfd_peer_handle(counters.clone()));
+
+    // Not held down → an Up must not spuriously (re)start the session.
+    mgr.handle_bfd_state_change(up(peer)).await;
+    assert_eq!(counters.start.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn bfd_down_ignored_for_disabled_peer() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, false, fake_bfd_peer_handle(counters.clone()));
+    // Operator disabled the peer; the actor's resulting AdminDown/Down must not
+    // be treated as a failure.
+    mgr.peers.get_mut(&peer).unwrap().enabled = false;
+
+    mgr.handle_bfd_state_change(down(peer)).await;
+    assert_eq!(
+        counters.stop.load(Ordering::SeqCst),
+        0,
+        "disabled peer Down ignored"
+    );
+}
+
+#[tokio::test]
+async fn bfd_change_ignored_for_absent_peer() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, false, fake_bfd_peer_handle(counters.clone()));
+    // Peer deleted; a stale state change from the draining session is ignored.
+    mgr.peers.remove(&peer);
+
+    mgr.handle_bfd_state_change(down(peer)).await;
+    assert_eq!(counters.stop.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn bfd_change_ignored_for_strict_peer() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    // Strict coupling is a later slice — strict peers are untouched here.
+    let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
+
+    mgr.handle_bfd_state_change(down(peer)).await;
+    assert_eq!(counters.stop.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn republish_reflects_enable_disable_and_delete() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, rx) = coupled_mgr(peer, false, fake_bfd_peer_handle(counters));
+
+    mgr.republish_bfd_desired();
+    let enabled = rx
+        .borrow()
+        .sessions
+        .iter()
+        .find(|s| s.peer == peer)
+        .map(|s| s.enabled);
+    assert_eq!(
+        enabled,
+        Some(true),
+        "managed+enabled peer published enabled"
+    );
+
+    // Disable → published disabled (actor drains to AdminDown), still present.
+    mgr.peers.get_mut(&peer).unwrap().enabled = false;
+    mgr.republish_bfd_desired();
+    let enabled = rx
+        .borrow()
+        .sessions
+        .iter()
+        .find(|s| s.peer == peer)
+        .map(|s| s.enabled);
+    assert_eq!(enabled, Some(false), "disabled peer published disabled");
+
+    // Delete → published disabled (no longer managed).
+    mgr.peers.remove(&peer);
+    mgr.republish_bfd_desired();
+    let enabled = rx
+        .borrow()
+        .sessions
+        .iter()
+        .find(|s| s.peer == peer)
+        .map(|s| s.enabled);
+    assert_eq!(enabled, Some(false), "deleted peer published disabled");
+}
