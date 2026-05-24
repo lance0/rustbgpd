@@ -85,7 +85,12 @@ impl PeerManager {
             SessionIdentity::primary(session_id),
         );
 
-        if let Err(e) = handle.start().await {
+        // ADR-0067 step 4b — strict BFD: create/store the peer but withhold BGP
+        // establishment until BFD is Up. Non-strict (the default) starts now.
+        // The handle is spawned Idle either way; `start()` is what begins the
+        // FSM, so withholding is simply not sending it yet.
+        let withhold = self.is_strict_bfd_peer(&address);
+        if !withhold && let Err(e) = handle.start().await {
             warn!(%address, error = %e, "failed to start peer session");
             return Err(format!("failed to start peer: {e}"));
         }
@@ -122,6 +127,12 @@ impl PeerManager {
         // disabled mark so the actor restarts the session. A brand-new peer not
         // in the startup-pinned BFD set is unaffected (BFD is restart-required).
         self.set_bfd_peer_disabled(address, false);
+        // For a strict peer, mark it pre-held so the first BFD Up releases the
+        // withhold via the normal up→start path.
+        if withhold {
+            self.mark_bfd_withheld(address);
+            info!(%address, "strict BFD — withholding BGP establishment until BFD is Up");
+        }
         Ok(())
     }
 

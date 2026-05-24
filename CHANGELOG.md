@@ -75,8 +75,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `watch`, updated on neighbor enable/disable/delete) and consumes session
   state changes over a lossless channel; the BFD actor remains a pure
   session-runner with no BGP knowledge. A deliberate disable/delete drains the
-  session to `AdminDown` and is not treated as a failure. Strict mode (withhold
-  BGP until BFD Up) lands next.
+  session to `AdminDown` and is not treated as a failure.
+- **ADR-0067 BFD/BGP coupling — strict (RFC 5882).** `[neighbors.bfd] strict =
+  true` now withholds BGP establishment until BFD is Up: `add_peer` spawns the
+  session Idle and withholds `start()` (the create/start split), and the first
+  BFD Up releases it through the same up→start path non-strict recovery uses.
+  A strict peer whose BFD never comes Up never establishes BGP.
 - **ADR-0063 EVPN runtime convergence — `ip_vrf` relink.**
   `EvpnService.ApplyEvpnRuntime` now commits an L2VNI re-homed to a different
   IP-VRF (or its `ip_vrf` link added/removed) at runtime. A relink edits no

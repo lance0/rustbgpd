@@ -64,7 +64,9 @@ timing before arming the teardown. The staged delivery is:
    owns the desired session set (`watch`) and consumes the lossless state-change
    `mpsc`; the actor stays a pure session-runner. **[shipped]**
 4b. **BGP coupling — strict** — BGP withheld from establishment until BFD is Up
-   (the `add_peer` create/start split). **[next]**
+   via the `add_peer` create/start split (spawn the session Idle, withhold
+   `start()`); the first BFD Up releases it through the same up→start path
+   non-strict recovery uses. **[shipped]**
 5. **Interop (M51) + docs** — FRR `bfdd` cross-check, `COMPARISON.md` flip.
 
 This ADR lands with slice 2 (the actor), not at the end, so the design record

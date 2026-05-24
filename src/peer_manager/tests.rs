@@ -3948,14 +3948,43 @@ async fn bfd_change_ignored_for_absent_peer() {
 }
 
 #[tokio::test]
-async fn bfd_change_ignored_for_strict_peer() {
+async fn strict_peer_started_on_first_bfd_up_then_coupled() {
     let peer: IpAddr = "10.0.0.2".parse().unwrap();
     let counters = Arc::new(BfdCouplingCounters::default());
-    // Strict coupling is a later slice — strict peers are untouched here.
     let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
+    assert!(mgr.is_strict_bfd_peer(&peer));
+    // add_peer marks strict peers pre-held (withheld); simulate that here.
+    mgr.mark_bfd_withheld(peer);
 
+    // First BFD Up releases the withhold → BGP starts.
+    mgr.handle_bfd_state_change(up(peer)).await;
+    wait_counter(&counters.start, 1).await;
+
+    // Once up, a later BFD down couples like non-strict → teardown.
     mgr.handle_bfd_state_change(down(peer)).await;
-    assert_eq!(counters.stop.load(Ordering::SeqCst), 0);
+    wait_counter(&counters.stop, 1).await;
+}
+
+#[tokio::test]
+async fn strict_peer_stays_withheld_without_bfd_up() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
+    mgr.mark_bfd_withheld(peer);
+
+    // While withheld, a Down (or anything but Up) must not start BGP, and the
+    // already-held guard means no spurious stop either.
+    mgr.handle_bfd_state_change(down(peer)).await;
+    assert_eq!(
+        counters.start.load(Ordering::SeqCst),
+        0,
+        "withheld peer not started"
+    );
+    assert_eq!(
+        counters.stop.load(Ordering::SeqCst),
+        0,
+        "already-held peer not re-stopped"
+    );
 }
 
 #[tokio::test]
