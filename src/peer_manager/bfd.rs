@@ -38,8 +38,16 @@ pub(super) struct BfdCoupling {
     /// enable / (re-)add.
     disabled: HashSet<IpAddr>,
     /// Peers whose BGP session is currently held down by a BFD-down event
-    /// (non-strict). Cleared when BFD recovers.
+    /// (non-strict) or withheld pending the first Up (strict). Cleared when BFD
+    /// recovers.
     held_down: HashSet<IpAddr>,
+    /// Last-known BFD state per configured peer, recorded on every transition
+    /// even while the peer is unmanaged. This makes the strict add/enable
+    /// decision **level-triggered**: if BFD already reached Up before the peer
+    /// was added (the actor starts sessions at spawn, peers are added later),
+    /// `start()` happens immediately instead of waiting for a transition that
+    /// will never come.
+    last_state: HashMap<IpAddr, SessionState>,
 }
 
 impl PeerManager {
@@ -58,6 +66,7 @@ impl PeerManager {
             configured,
             disabled: HashSet::new(),
             held_down: HashSet::new(),
+            last_state: HashMap::new(),
         });
         self
     }
@@ -80,6 +89,41 @@ impl PeerManager {
         });
         if relevant {
             self.republish_bfd_desired();
+        }
+    }
+
+    /// Whether `peer` is a configured **strict**-mode BFD peer (RFC 5882): its
+    /// BGP session must be withheld from establishment until BFD reaches Up.
+    pub(super) fn is_strict_bfd_peer(&self, peer: &IpAddr) -> bool {
+        self.bfd_coupling
+            .as_ref()
+            .and_then(|c| c.configured.get(peer))
+            .is_some_and(|params| params.strict)
+    }
+
+    /// Whether the peer's last-known BFD state is Up. Used to make the strict
+    /// add/enable decision level-triggered (start now vs. withhold).
+    pub(super) fn bfd_is_up(&self, peer: &IpAddr) -> bool {
+        self.bfd_coupling
+            .as_ref()
+            .and_then(|c| c.last_state.get(peer))
+            .is_some_and(|state| *state == SessionState::Up)
+    }
+
+    /// Whether a strict peer should be withheld from BGP establishment right
+    /// now: it is a strict BFD peer **and** BFD is not already Up. (If BFD is
+    /// already Up, start immediately — there is no future transition to release
+    /// a withhold.)
+    pub(super) fn bfd_should_withhold(&self, peer: &IpAddr) -> bool {
+        self.is_strict_bfd_peer(peer) && !self.bfd_is_up(peer)
+    }
+
+    /// Mark a strict peer's BGP session as withheld (pre-held) at add time so
+    /// the first BFD Up releases it through the normal `handle_bfd_state_change`
+    /// up→start path. No-op when coupling is off.
+    pub(super) fn mark_bfd_withheld(&mut self, peer: IpAddr) {
+        if let Some(c) = self.bfd_coupling.as_mut() {
+            c.held_down.insert(peer);
         }
     }
 
@@ -120,24 +164,26 @@ impl PeerManager {
         let _ = coupling.desired_tx.send(BfdRuntimeConfig { sessions });
     }
 
-    /// Handle one BFD session state change (ADR-0067 step 4). Non-strict: a BFD
-    /// **down** tears the BGP session down before the hold timer (RFC 5882),
-    /// and recovery allows it to re-establish. Strict withholding is a later
-    /// slice — strict peers are left untouched here.
+    /// Handle one BFD session state change (ADR-0067 step 4). Uniform across
+    /// strict and non-strict: a BFD **down** tears the BGP session down before
+    /// the hold timer (RFC 5882) and marks it held; BFD **up** clears the hold
+    /// and (re)starts the session. The strict/non-strict difference is purely
+    /// the *initial* state — strict peers are added pre-held (withheld) by
+    /// `add_peer`, so their first Up releases the withhold via the same path.
     pub(super) async fn handle_bfd_state_change(&mut self, change: BfdStateChange) {
         let peer = change.peer;
-        // Read coupling metadata up front, then release the borrow before
+        // Record last-known state for every configured peer (even unmanaged
+        // ones), and read whether it is held — then release the borrow before
         // touching `self.peers` / `self.bfd_coupling` mutably.
-        let Some((strict, already_held)) = self.bfd_coupling.as_ref().and_then(|c| {
-            c.configured
-                .get(&peer)
-                .map(|p| (p.strict, c.held_down.contains(&peer)))
+        let Some(already_held) = self.bfd_coupling.as_mut().and_then(|c| {
+            if !c.configured.contains_key(&peer) {
+                return None; // not a configured BFD peer
+            }
+            c.last_state.insert(peer, change.state);
+            Some(c.held_down.contains(&peer))
         }) else {
             return; // not a configured BFD peer (or coupling off)
         };
-        if strict {
-            return; // strict-mode withholding handled in a later slice
-        }
 
         // Only act for a peer that is currently managed and admin-enabled. A
         // disabled/deleted peer's session is being drained to AdminDown on

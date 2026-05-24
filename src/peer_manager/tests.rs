@@ -3948,14 +3948,87 @@ async fn bfd_change_ignored_for_absent_peer() {
 }
 
 #[tokio::test]
-async fn bfd_change_ignored_for_strict_peer() {
+async fn strict_peer_started_on_first_bfd_up_then_coupled() {
     let peer: IpAddr = "10.0.0.2".parse().unwrap();
     let counters = Arc::new(BfdCouplingCounters::default());
-    // Strict coupling is a later slice — strict peers are untouched here.
+    let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
+    assert!(mgr.is_strict_bfd_peer(&peer));
+    // add_peer marks strict peers pre-held (withheld); simulate that here.
+    mgr.mark_bfd_withheld(peer);
+
+    // First BFD Up releases the withhold → BGP starts.
+    mgr.handle_bfd_state_change(up(peer)).await;
+    wait_counter(&counters.start, 1).await;
+
+    // Once up, a later BFD down couples like non-strict → teardown.
+    mgr.handle_bfd_state_change(down(peer)).await;
+    wait_counter(&counters.stop, 1).await;
+}
+
+#[tokio::test]
+async fn strict_peer_stays_withheld_without_bfd_up() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
+    mgr.mark_bfd_withheld(peer);
+
+    // While withheld, a Down (or anything but Up) must not start BGP, and the
+    // already-held guard means no spurious stop either.
+    mgr.handle_bfd_state_change(down(peer)).await;
+    assert_eq!(
+        counters.start.load(Ordering::SeqCst),
+        0,
+        "withheld peer not started"
+    );
+    assert_eq!(
+        counters.stop.load(Ordering::SeqCst),
+        0,
+        "already-held peer not re-stopped"
+    );
+}
+
+#[tokio::test]
+async fn strict_does_not_withhold_when_bfd_already_up() {
+    // Deadlock guard: if BFD reached Up before the peer was added/marked held
+    // (the actor starts sessions at spawn, peers are added later), the strict
+    // add/enable decision must be level-triggered — start now, since no future
+    // transition would release a withhold.
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters));
+    assert!(mgr.bfd_should_withhold(&peer), "down/unknown → withhold");
+
+    // The Up arrives before the peer is marked held (not yet held → no start
+    // here), but it records last-known state...
+    mgr.handle_bfd_state_change(up(peer)).await;
+    // ...so a strict add/enable now must NOT withhold.
+    assert!(
+        !mgr.bfd_should_withhold(&peer),
+        "BFD already Up → do not withhold"
+    );
+}
+
+#[tokio::test]
+async fn strict_enable_is_level_triggered_on_bfd_state() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
     let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
 
-    mgr.handle_bfd_state_change(down(peer)).await;
-    assert_eq!(counters.stop.load(Ordering::SeqCst), 0);
+    // BFD down/unknown: re-enable must withhold (no start), then a later Up
+    // releases it.
+    mgr.enable_peer(peer).await.unwrap();
+    assert_eq!(
+        counters.start.load(Ordering::SeqCst),
+        0,
+        "withheld while BFD down"
+    );
+    mgr.handle_bfd_state_change(up(peer)).await;
+    wait_counter(&counters.start, 1).await; // released on Up
+
+    // Now BFD is Up: a subsequent re-enable must start immediately (no withhold,
+    // no waiting for a transition that won't come).
+    mgr.enable_peer(peer).await.unwrap();
+    wait_counter(&counters.start, 2).await;
 }
 
 #[tokio::test]
