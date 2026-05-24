@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
-use rustbgpd_rib::{RibUpdate, Route, RouteOrigin};
+use rustbgpd_rib::{FibInstallCandidate, RibUpdate, RouteOrigin};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, Prefix};
 use serde::{Deserialize, Serialize};
@@ -342,27 +342,43 @@ async fn recv_route_event(
     }
 }
 
-async fn query_best_routes(rib_tx: &mpsc::Sender<RibUpdate>) -> Result<Vec<Route>, &'static str> {
+async fn query_fib_install_candidates(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    max_paths: u32,
+) -> Result<Vec<FibInstallCandidate>, &'static str> {
     let (reply, rx) = oneshot::channel();
     if rib_tx
-        .send(RibUpdate::QueryBestRoutes { reply })
+        .send(RibUpdate::QueryFibInstallCandidates { max_paths, reply })
         .await
         .is_err()
     {
-        warn!("general FIB task could not query best routes");
+        warn!("general FIB task could not query install candidates");
         return Err("send_failed");
     }
     match tokio::time::timeout(RIB_QUERY_TIMEOUT, rx).await {
-        Ok(Ok(routes)) => Ok(routes),
+        Ok(Ok(candidates)) => Ok(candidates),
         Ok(Err(_)) => {
-            warn!("general FIB task best-route reply dropped");
+            warn!("general FIB task install-candidate reply dropped");
             Err("reply_dropped")
         }
         Err(_) => {
-            warn!("general FIB task best-route query timed out");
+            warn!("general FIB task install-candidate query timed out");
             Err("timeout")
         }
     }
+}
+
+/// Widest ECMP fan-out any configured table wants. The RIB returns candidates
+/// capped at this width; projection re-caps per table. Unset / 1 ⇒ today's
+/// single-next-hop behavior, so a default config never pays for sibling
+/// gathering.
+fn max_install_paths(config: &FibRuntimeConfig) -> u32 {
+    config
+        .tables
+        .iter()
+        .map(|table| table.maximum_paths.unwrap_or(1).max(1))
+        .max()
+        .unwrap_or(1)
 }
 
 async fn query_peer_groups(
@@ -406,11 +422,11 @@ async fn reconcile_once_with_events<F>(
 ) where
     F: UnicastFib,
 {
-    let routes = tokio::select! {
+    let candidates = tokio::select! {
         biased;
         () = shutdown.cancelled() => return,
-        result = query_best_routes(rib_query_tx) => match result {
-            Ok(routes) => routes,
+        result = query_fib_install_candidates(rib_query_tx, max_install_paths(config)) => match result {
+            Ok(candidates) => candidates,
             Err(reason) => {
                 status_tx.send_replace(failed_rib_query_statuses(owned, reason));
                 return;
@@ -436,7 +452,7 @@ async fn reconcile_once_with_events<F>(
     } else {
         BTreeMap::new()
     };
-    let intent = project_fib_intent_with_peer_groups(&config.tables, &routes, &peer_groups);
+    let intent = project_fib_intent_with_peer_groups(&config.tables, &candidates, &peer_groups);
     let kernel = tokio::select! {
         biased;
         () = shutdown.cancelled() => return,
@@ -519,7 +535,7 @@ where
                 table_id = route.key.table_id,
                 metric = route.key.metric,
                 prefix = %route.key.prefix,
-                next_hop = %route.target.next_hop,
+                next_hop = %route.target.primary(),
                 "refreshed general FIB route metadata"
             );
             continue;
@@ -555,7 +571,7 @@ where
                             table_id = route.key.table_id,
                             metric = route.key.metric,
                             prefix = %route.key.prefix,
-                            next_hop = %route.target.next_hop,
+                            next_hop = %route.target.primary(),
                             "installed general FIB route"
                         );
                     }
@@ -574,7 +590,7 @@ where
                             table_id = desired.key.table_id,
                             metric = desired.key.metric,
                             prefix = %desired.key.prefix,
-                            next_hop = %desired.target.next_hop,
+                            next_hop = %desired.target.primary(),
                             "replaced general FIB route"
                         );
                     }
@@ -655,8 +671,8 @@ async fn drain_owned_with_events<F>(
                     table_id = route.key.table_id,
                     metric = route.key.metric,
                     prefix = %route.key.prefix,
-                    owned_next_hop = %route.target.next_hop,
-                    kernel_next_hop = %kernel_route.target.next_hop,
+                    owned_next_hop = %route.target.primary(),
+                    kernel_next_hop = %kernel_route.target.primary(),
                     "preserving foreign general FIB route during shutdown drain"
                 );
                 owned.routes.remove(&route.key);
@@ -720,12 +736,18 @@ fn emit_fib_event(
         table_id: route.key.table_id,
         metric: route.key.metric,
         prefix: route.key.prefix,
-        next_hop: Some(route.target.next_hop),
+        next_hop: Some(route.target.primary()),
         peer: Some(route.peer),
         timestamp: rustbgpd_rib::event::unix_timestamp_now(),
         reason: reason.into(),
     });
 }
+
+/// Current owned-state envelope version. v2 persists the equal-cost
+/// `next_hops` set; v1 persisted a single `next_hop` scalar.
+const OWNED_STATE_VERSION: u32 = 2;
+/// Oldest owned-state version this build can still load (and upgrade).
+const OWNED_STATE_MIN_VERSION: u32 = 1;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistedFibOwnedState {
@@ -743,6 +765,12 @@ struct PersistedFibTableSignature {
     allowed_peer_groups: Vec<String>,
     allowed_neighbors: Vec<String>,
     max_routes: Option<u32>,
+    /// ECMP width. `#[serde(default)]` so a v1 file (which lacked the field)
+    /// deserializes as `None`, matching a config with `maximum_paths` unset —
+    /// preserving crash-restart owned-state across the v1→v2 upgrade. Changing
+    /// `maximum_paths` changes this signature and forces a clean re-projection.
+    #[serde(default)]
+    maximum_paths: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -752,7 +780,16 @@ struct PersistedFibRoute {
     metric: u32,
     prefix_addr: IpAddr,
     prefix_len: u8,
-    next_hop: IpAddr,
+    /// The best route's next-hop. In a v1 file this was the *only* next-hop;
+    /// v2 still writes it (as the best-path scalar) so reloads and v1 readers
+    /// recover a representative consistent with `peer` / `path_id`. The full
+    /// equal-cost set rides in `next_hops`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    next_hop: Option<IpAddr>,
+    /// v2 equal-cost next-hop set (canonical). Empty on a v1 file, where
+    /// `into_route` upgrades the scalar `next_hop` into a one-element set.
+    #[serde(default)]
+    next_hops: Vec<IpAddr>,
     peer: IpAddr,
     origin_type: PersistedRouteOrigin,
     path_id: u32,
@@ -794,7 +831,11 @@ impl From<&FibRoute> for PersistedFibRoute {
             metric: route.key.metric,
             prefix_addr: prefix_addr(route.key.prefix),
             prefix_len: route.key.prefix.prefix_len(),
-            next_hop: route.target.next_hop,
+            // Persist the best next-hop as the legacy scalar so a reload (and a
+            // v1 reader) recovers a representative consistent with the row's
+            // peer / path_id; `next_hops` carries the full canonical set.
+            next_hop: Some(route.target.primary()),
+            next_hops: route.target.next_hops.clone(),
             peer: route.peer,
             origin_type: route.origin_type.into(),
             path_id: route.path_id,
@@ -812,6 +853,7 @@ impl From<&FibTableConfig> for PersistedFibTableSignature {
             allowed_peer_groups: table.allowed_peer_groups.clone(),
             allowed_neighbors: table.allowed_neighbors.clone(),
             max_routes: table.max_routes,
+            maximum_paths: table.maximum_paths,
         }
     }
 }
@@ -819,9 +861,27 @@ impl From<&FibTableConfig> for PersistedFibTableSignature {
 impl PersistedFibRoute {
     fn into_route(self) -> Option<FibRoute> {
         let prefix = prefix_from_addr_len(self.prefix_addr, self.prefix_len)?;
-        if !prefix_and_nexthop_same_family(prefix, self.next_hop) {
+        // v2 carries `next_hops` (the full set) plus `next_hop` (the best); a v1
+        // file carried only the single scalar `next_hop` (which is the best).
+        // Upgrade v1 to a one-element set, then drop any next-hop whose family
+        // disagrees with the prefix. If that empties the set, the row is unusable.
+        let next_hops: Vec<IpAddr> = if self.next_hops.is_empty() {
+            self.next_hop.into_iter().collect()
+        } else {
+            self.next_hops
+        }
+        .into_iter()
+        .filter(|next_hop| prefix_and_nexthop_same_family(prefix, *next_hop))
+        .collect();
+        if next_hops.is_empty() {
             return None;
         }
+        // The persisted scalar is the best; fall back to the lowest surviving
+        // member if it is absent or was filtered out by the family check.
+        let best = self
+            .next_hop
+            .filter(|next_hop| next_hops.contains(next_hop))
+            .unwrap_or(next_hops[0]);
         let key = FibRouteKey {
             table_id: self.table_id,
             metric: self.metric,
@@ -830,9 +890,7 @@ impl PersistedFibRoute {
         Some(FibRoute {
             table_name: self.table_name,
             key,
-            target: FibRouteTarget {
-                next_hop: self.next_hop,
-            },
+            target: FibRouteTarget::from_set_with_best(best, next_hops),
             peer: self.peer,
             origin_type: self.origin_type.into(),
             path_id: self.path_id,
@@ -859,10 +917,16 @@ fn load_owned_state(config: &FibRuntimeConfig) -> FibOwnedState {
             return FibOwnedState::default();
         }
     };
-    if persisted.version != 1 {
+    // Accept every owned-state version this build understands. v1 (single
+    // `next_hop` scalar) and v2 (`next_hops` set) are both upgraded on load by
+    // `into_route`. A hard reject would orphan crash-restart state and turn
+    // our own rows into a foreign-route storm, so only quarantine versions
+    // newer than we can parse.
+    if !(OWNED_STATE_MIN_VERSION..=OWNED_STATE_VERSION).contains(&persisted.version) {
         warn!(
             path = %path.display(),
             version = persisted.version,
+            supported_max = OWNED_STATE_VERSION,
             "ignoring unsupported general FIB owned-state version"
         );
         quarantine_owned_state_file(config, "unsupported_version");
@@ -962,7 +1026,7 @@ fn write_owned_state(
     owned: &FibOwnedState,
 ) -> Result<(), String> {
     let persisted = PersistedFibOwnedState {
-        version: 1,
+        version: OWNED_STATE_VERSION,
         tables: table_signatures(tables),
         routes: owned.routes.values().map(PersistedFibRoute::from).collect(),
     };
@@ -1222,7 +1286,7 @@ fn status_for_route(route: &FibRoute, state: FibRuntimeState, reason: String) ->
         table_id: route.key.table_id,
         metric: route.key.metric,
         prefix: route.key.prefix,
-        next_hop: Some(route.target.next_hop),
+        next_hop: Some(route.target.primary()),
         peer: Some(route.peer),
         state,
         reason,
@@ -1355,17 +1419,22 @@ fn build_route_message(
 ) -> Result<netlink_packet_route::route::RouteMessage, String> {
     use netlink_packet_route::AddressFamily;
     use netlink_packet_route::route::{
-        RouteAttribute, RouteFlags, RouteHeader, RouteProtocol, RouteScope, RouteType,
+        RouteAttribute, RouteFlags, RouteHeader, RouteNextHop, RouteProtocol, RouteScope, RouteType,
     };
 
     let family = match route.key.prefix {
         Prefix::V4(_) => AddressFamily::Inet,
         Prefix::V6(_) => AddressFamily::Inet6,
     };
-    if !prefix_and_nexthop_same_family(route.key.prefix, route.target.next_hop) {
+    if let Some(next_hop) = route
+        .target
+        .next_hops
+        .iter()
+        .find(|next_hop| !prefix_and_nexthop_same_family(route.key.prefix, **next_hop))
+    {
         return Err(format!(
-            "prefix family does not match next-hop family for {} via {}",
-            route.key.prefix, route.target.next_hop
+            "prefix family does not match next-hop family for {} via {next_hop}",
+            route.key.prefix
         ));
     }
 
@@ -1392,10 +1461,29 @@ fn build_route_message(
             )));
     }
     if matches!(gateway, RouteMessageGateway::Include) {
-        msg.attributes
-            .push(RouteAttribute::Gateway(ip_to_route_address(
-                route.target.next_hop,
-            )));
+        match route.target.next_hops.as_slice() {
+            // A single next-hop stays a plain RTA_GATEWAY — byte-for-byte
+            // today's shape, so default (`maximum_paths` unset/1) is unchanged.
+            [next_hop] => {
+                msg.attributes
+                    .push(RouteAttribute::Gateway(ip_to_route_address(*next_hop)));
+            }
+            // Two or more program a kernel RTA_MULTIPATH (ECMP). Each hop
+            // carries only a gateway; `hops = 0` ⇒ equal weight, and the
+            // kernel resolves the output interface from the gateway's route.
+            next_hops => {
+                let hops = next_hops
+                    .iter()
+                    .map(|next_hop| {
+                        let mut hop = RouteNextHop::default();
+                        hop.attributes
+                            .push(RouteAttribute::Gateway(ip_to_route_address(*next_hop)));
+                        hop
+                    })
+                    .collect();
+                msg.attributes.push(RouteAttribute::MultiPath(hops));
+            }
+        }
     }
     Ok(msg)
 }
@@ -1427,9 +1515,8 @@ fn ingest_route_message(
     } else {
         FibKernelProtocol::Other
     };
-    let target = extract_gateway(msg).unwrap_or_else(|| FibRouteTarget {
-        next_hop: unspecified_for_prefix(prefix),
-    });
+    let target = extract_gateway(msg)
+        .unwrap_or_else(|| FibRouteTarget::single(unspecified_for_prefix(prefix)));
     snapshot
         .routes
         .insert(key, FibKernelRoute { target, protocol });
@@ -1489,18 +1576,51 @@ fn extract_prefix(msg: &netlink_packet_route::route::RouteMessage) -> Option<Pre
     }
 }
 
+/// Read the kernel forwarding value of a route message as a canonical
+/// next-hop set. Both a single `RTA_GATEWAY` and an `RTA_MULTIPATH` (ECMP)
+/// reduce to a sorted/deduped set, so `Gateway(x)` and `MultiPath([x])` compare
+/// equal and the diff never flaps when the kernel echoes a different-but-
+/// equivalent representation than we emitted.
 #[cfg(target_os = "linux")]
 fn extract_gateway(msg: &netlink_packet_route::route::RouteMessage) -> Option<FibRouteTarget> {
-    use netlink_packet_route::route::{RouteAddress, RouteAttribute};
-    msg.attributes.iter().find_map(|attr| match attr {
-        RouteAttribute::Gateway(RouteAddress::Inet(addr)) => Some(FibRouteTarget {
-            next_hop: IpAddr::V4(*addr),
-        }),
-        RouteAttribute::Gateway(RouteAddress::Inet6(addr)) => Some(FibRouteTarget {
-            next_hop: IpAddr::V6(*addr),
-        }),
+    use netlink_packet_route::route::RouteAttribute;
+    for attr in &msg.attributes {
+        match attr {
+            RouteAttribute::MultiPath(next_hops) => {
+                let gateways: Vec<IpAddr> = next_hops.iter().filter_map(next_hop_gateway).collect();
+                if !gateways.is_empty() {
+                    return Some(FibRouteTarget::from_next_hops(gateways));
+                }
+            }
+            RouteAttribute::Gateway(addr) => {
+                if let Some(next_hop) = route_address_ip(addr) {
+                    return Some(FibRouteTarget::single(next_hop));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Pull the gateway IP out of one multipath next-hop's attributes.
+#[cfg(target_os = "linux")]
+fn next_hop_gateway(hop: &netlink_packet_route::route::RouteNextHop) -> Option<IpAddr> {
+    use netlink_packet_route::route::RouteAttribute;
+    hop.attributes.iter().find_map(|attr| match attr {
+        RouteAttribute::Gateway(addr) => route_address_ip(addr),
         _ => None,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn route_address_ip(addr: &netlink_packet_route::route::RouteAddress) -> Option<IpAddr> {
+    use netlink_packet_route::route::RouteAddress;
+    match addr {
+        RouteAddress::Inet(addr) => Some(IpAddr::V4(*addr)),
+        RouteAddress::Inet6(addr) => Some(IpAddr::V6(*addr)),
+        _ => None,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1560,7 +1680,7 @@ fn netlink_errno(err: &rtnetlink::Error) -> Option<i32> {
 mod tests {
     use super::*;
     use prometheus::Registry;
-    use rustbgpd_rib::{RouteEvent, RouteEventType, RouteOrigin};
+    use rustbgpd_rib::{FibInstallNextHop, Route, RouteEvent, RouteEventType, RouteOrigin};
     use rustbgpd_wire::{AsPath, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, RpkiValidation};
     use std::collections::BTreeMap;
     use std::net::{Ipv4Addr, Ipv6Addr};
@@ -1608,7 +1728,7 @@ mod tests {
                         self.kernel.routes.insert(
                             route.key,
                             FibKernelRoute {
-                                target: route.target,
+                                target: route.target.clone(),
                                 protocol: FibKernelProtocol::Bgp,
                             },
                         );
@@ -1617,7 +1737,7 @@ mod tests {
                         self.kernel.routes.insert(
                             desired.key,
                             FibKernelRoute {
-                                target: desired.target,
+                                target: desired.target.clone(),
                                 protocol: FibKernelProtocol::Bgp,
                             },
                         );
@@ -1641,6 +1761,7 @@ mod tests {
             allowed_peer_groups: Vec::new(),
             allowed_neighbors: Vec::new(),
             max_routes: None,
+            maximum_paths: None,
         }
     }
 
@@ -1699,19 +1820,54 @@ mod tests {
         FibRoute {
             table_name: "edge".to_string(),
             key: key(prefix),
-            target: FibRouteTarget { next_hop },
+            target: FibRouteTarget::single(next_hop),
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         }
     }
 
+    /// Stand-in for the RIB's install-candidate handler: group best routes by
+    /// prefix (first-seen is the best, index 0), append same-prefix routes as
+    /// equal-cost siblings deduped by next-hop, capped at `max_paths`.
+    fn routes_to_candidates(routes: &[Route], max_paths: u32) -> Vec<FibInstallCandidate> {
+        let cap = max_paths.max(1) as usize;
+        let mut candidates: Vec<FibInstallCandidate> = Vec::new();
+        for route in routes {
+            let next_hop = FibInstallNextHop {
+                next_hop: route.next_hop,
+                link_local_next_hop: route.link_local_next_hop,
+                peer: route.peer,
+                path_id: route.path_id,
+            };
+            if let Some(existing) = candidates
+                .iter_mut()
+                .find(|candidate| candidate.best.prefix == route.prefix)
+            {
+                if existing.next_hops.len() < cap
+                    && existing
+                        .next_hops
+                        .iter()
+                        .all(|hop| hop.next_hop != route.next_hop)
+                {
+                    existing.next_hops.push(next_hop);
+                }
+            } else {
+                candidates.push(FibInstallCandidate {
+                    best: route.clone(),
+                    next_hops: vec![next_hop],
+                });
+            }
+        }
+        candidates
+    }
+
     fn rib_with_routes(routes: Vec<Route>) -> mpsc::Sender<RibUpdate> {
         let (tx, mut rx) = mpsc::channel(8);
         tokio::spawn(async move {
             while let Some(update) = rx.recv().await {
-                if let RibUpdate::QueryBestRoutes { reply } = update {
-                    let _ = reply.send(routes.clone());
+                if let RibUpdate::QueryFibInstallCandidates { max_paths, reply } = update {
+                    let _ = reply.send(routes_to_candidates(&routes, max_paths));
                 }
             }
         });
@@ -1726,8 +1882,8 @@ mod tests {
         tokio::spawn(async move {
             while let Some(update) = rx.recv().await {
                 match update {
-                    RibUpdate::QueryBestRoutes { reply } => {
-                        let _ = reply.send(routes.clone());
+                    RibUpdate::QueryFibInstallCandidates { max_paths, reply } => {
+                        let _ = reply.send(routes_to_candidates(&routes, max_paths));
                     }
                     RibUpdate::QueryPeerGroups { reply } => {
                         let _ = reply.send(peer_groups.clone().into_iter().collect());
@@ -1754,9 +1910,9 @@ mod tests {
         tokio::spawn(async move {
             while let Some(update) = rx.recv().await {
                 match update {
-                    RibUpdate::QueryBestRoutes { reply } => {
+                    RibUpdate::QueryFibInstallCandidates { max_paths, reply } => {
                         query_count_task.fetch_add(1, Ordering::SeqCst);
-                        let _ = reply.send(routes.clone());
+                        let _ = reply.send(routes_to_candidates(&routes, max_paths));
                     }
                     RibUpdate::SubscribeRouteEvents { reply } => {
                         let _ = reply.send(events_task.subscribe());
@@ -2111,6 +2267,97 @@ mod tests {
     }
 
     #[test]
+    fn owned_state_v1_scalar_next_hop_loads_and_upgrades() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let mut config = config();
+        config.owned_state_path = Some(path.clone());
+        // A v1 file: envelope version 1, a table signature without the
+        // `maximum_paths` field, and a route carrying the legacy scalar
+        // `next_hop` (no `next_hops`). It must load and upgrade, not quarantine.
+        let v1 = r#"{
+          "version": 1,
+          "tables": [
+            {
+              "name": "edge",
+              "table_id": 1000,
+              "metric": 200,
+              "families": ["ipv4_unicast", "ipv6_unicast"],
+              "allowed_peer_groups": [],
+              "allowed_neighbors": [],
+              "max_routes": null
+            }
+          ],
+          "routes": [
+            {
+              "table_name": "edge",
+              "table_id": 1000,
+              "metric": 200,
+              "prefix_addr": "203.0.113.0",
+              "prefix_len": 24,
+              "next_hop": "192.0.2.1",
+              "peer": "198.51.100.1",
+              "origin_type": "ebgp",
+              "path_id": 0
+            }
+          ]
+        }"#;
+        std::fs::write(&path, v1).unwrap();
+
+        let owned = load_owned_state(&config);
+
+        let expected = fib_route(v4(24), ip("192.0.2.1"));
+        assert_eq!(owned.routes.len(), 1);
+        assert_eq!(owned.routes.get(&expected.key), Some(&expected));
+        // Accepted in place, not quarantined.
+        assert!(path.exists());
+        assert!(!stale_owned_state_path(&path).exists());
+    }
+
+    #[test]
+    fn owned_state_round_trips_multipath_next_hops() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let mut config = config();
+        config.owned_state_path = Some(path.clone());
+        let mut route = fib_route(v4(24), ip("192.0.2.1"));
+        // Best is .2 even though .1 sorts lower, to prove the best survives the
+        // persist/reload round-trip (not just the canonical set).
+        route.target =
+            FibRouteTarget::from_set_with_best(ip("192.0.2.2"), [ip("192.0.2.1"), ip("192.0.2.2")]);
+        let mut owned = FibOwnedState::default();
+        owned.routes.insert(route.key, route);
+
+        write_owned_state(&path, &config.tables, &owned).unwrap();
+
+        let loaded = load_owned_state(&config);
+        assert_eq!(loaded, owned);
+        assert_eq!(
+            loaded.routes.values().next().unwrap().target.primary(),
+            ip("192.0.2.2")
+        );
+    }
+
+    #[test]
+    fn changing_maximum_paths_invalidates_owned_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let mut config = config();
+        config.owned_state_path = Some(path.clone());
+        let route = fib_route(v4(24), ip("192.0.2.1"));
+        let mut owned = FibOwnedState::default();
+        owned.routes.insert(route.key, route);
+        write_owned_state(&path, &config.tables, &owned).unwrap();
+        assert_eq!(load_owned_state(&config), owned);
+
+        // Flipping `maximum_paths` changes the table signature, so the prior
+        // owned-state is treated as foreign config and quarantined.
+        let mut changed = config.clone();
+        changed.tables[0].maximum_paths = Some(2);
+        assert!(load_owned_state(&changed).routes.is_empty());
+    }
+
+    #[test]
     fn loaded_owned_state_allows_crash_restart_replace_when_kernel_still_matches() {
         let previous = fib_route(v4(24), ip("192.0.2.1"));
         let desired = fib_route(v4(24), ip("192.0.2.2"));
@@ -2124,7 +2371,7 @@ mod tests {
             routes: BTreeMap::from([(
                 previous.key,
                 FibKernelRoute {
-                    target: previous.target,
+                    target: previous.target.clone(),
                     protocol: FibKernelProtocol::Bgp,
                 },
             )]),
@@ -2150,9 +2397,7 @@ mod tests {
             routes: BTreeMap::from([(
                 previous.key,
                 FibKernelRoute {
-                    target: FibRouteTarget {
-                        next_hop: ip("192.0.2.99"),
-                    },
+                    target: FibRouteTarget::single(ip("192.0.2.99")),
                     protocol: FibKernelProtocol::Bgp,
                 },
             )]),
@@ -2267,9 +2512,7 @@ mod tests {
         fib.kernel.routes.insert(
             key(v4(24)),
             FibKernelRoute {
-                target: FibRouteTarget {
-                    next_hop: ip("192.0.2.99"),
-                },
+                target: FibRouteTarget::single(ip("192.0.2.99")),
                 protocol: FibKernelProtocol::Other,
             },
         );
@@ -2290,9 +2533,7 @@ mod tests {
         fib.kernel.routes.insert(
             key(v4(24)),
             FibKernelRoute {
-                target: FibRouteTarget {
-                    next_hop: ip("192.0.2.1"),
-                },
+                target: FibRouteTarget::single(ip("192.0.2.1")),
                 protocol: FibKernelProtocol::Bgp,
             },
         );
@@ -2374,9 +2615,7 @@ mod tests {
         let existing = FibRoute {
             table_name: "edge".to_string(),
             key: key(v4(24)),
-            target: FibRouteTarget {
-                next_hop: ip("192.0.2.1"),
-            },
+            target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
@@ -2409,9 +2648,7 @@ mod tests {
         let previous = FibRoute {
             table_name: "edge".to_string(),
             key: key(prefix),
-            target: FibRouteTarget {
-                next_hop: ip("192.0.2.1"),
-            },
+            target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
@@ -2423,7 +2660,7 @@ mod tests {
         fib.kernel.routes.insert(
             previous.key,
             FibKernelRoute {
-                target: previous.target,
+                target: previous.target.clone(),
                 protocol: FibKernelProtocol::Bgp,
             },
         );
@@ -2445,9 +2682,7 @@ mod tests {
         let owned_route = FibRoute {
             table_name: "edge".to_string(),
             key: key(prefix),
-            target: FibRouteTarget {
-                next_hop: ip("192.0.2.1"),
-            },
+            target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
@@ -2456,9 +2691,7 @@ mod tests {
         fib.kernel.routes.insert(
             owned_route.key,
             FibKernelRoute {
-                target: FibRouteTarget {
-                    next_hop: ip("192.0.2.99"),
-                },
+                target: FibRouteTarget::single(ip("192.0.2.99")),
                 protocol: FibKernelProtocol::Other,
             },
         );
@@ -2481,9 +2714,7 @@ mod tests {
         let route = FibRoute {
             table_name: "edge".to_string(),
             key: key(prefix),
-            target: FibRouteTarget {
-                next_hop: ip("192.0.2.1"),
-            },
+            target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
@@ -2492,7 +2723,7 @@ mod tests {
         fib.kernel.routes.insert(
             route.key,
             FibKernelRoute {
-                target: route.target,
+                target: route.target.clone(),
                 protocol: FibKernelProtocol::Bgp,
             },
         );
@@ -2513,9 +2744,7 @@ mod tests {
         let route = FibRoute {
             table_name: "edge".to_string(),
             key: key(prefix),
-            target: FibRouteTarget {
-                next_hop: ip("192.0.2.1"),
-            },
+            target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
@@ -2524,7 +2753,7 @@ mod tests {
         fib.kernel.routes.insert(
             route.key,
             FibKernelRoute {
-                target: route.target,
+                target: route.target.clone(),
                 protocol: FibKernelProtocol::Bgp,
             },
         );
@@ -2547,9 +2776,7 @@ mod tests {
         let route = FibRoute {
             table_name: "edge".to_string(),
             key: key(prefix),
-            target: FibRouteTarget {
-                next_hop: ip("192.0.2.1"),
-            },
+            target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
@@ -2558,9 +2785,7 @@ mod tests {
         fib.kernel.routes.insert(
             route.key,
             FibKernelRoute {
-                target: FibRouteTarget {
-                    next_hop: ip("192.0.2.99"),
-                },
+                target: FibRouteTarget::single(ip("192.0.2.99")),
                 protocol: FibKernelProtocol::Bgp,
             },
         );
@@ -2583,9 +2808,7 @@ mod tests {
         let route = FibRoute {
             table_name: "edge".to_string(),
             key: key(prefix),
-            target: FibRouteTarget {
-                next_hop: ip("192.0.2.1"),
-            },
+            target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
@@ -2608,9 +2831,7 @@ mod tests {
         let route = FibRoute {
             table_name: "edge".to_string(),
             key: key(prefix),
-            target: FibRouteTarget {
-                next_hop: ip("192.0.2.1"),
-            },
+            target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
@@ -2619,7 +2840,7 @@ mod tests {
         fib.kernel.routes.insert(
             route.key,
             FibKernelRoute {
-                target: route.target,
+                target: route.target.clone(),
                 protocol: FibKernelProtocol::Bgp,
             },
         );
@@ -2650,9 +2871,7 @@ mod tests {
         let route = FibRoute {
             table_name: "edge".to_string(),
             key: key(prefix),
-            target: FibRouteTarget {
-                next_hop: ip("192.0.2.1"),
-            },
+            target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
@@ -2661,9 +2880,7 @@ mod tests {
         fib.kernel.routes.insert(
             route.key,
             FibKernelRoute {
-                target: FibRouteTarget {
-                    next_hop: ip("192.0.2.99"),
-                },
+                target: FibRouteTarget::single(ip("192.0.2.99")),
                 protocol: FibKernelProtocol::Bgp,
             },
         );
@@ -2688,10 +2905,11 @@ mod tests {
         assert!(owned.routes.is_empty());
         assert!(status_rx.borrow().is_empty());
         assert_eq!(
-            fib.kernel.routes.get(&route.key).map(|route| route.target),
-            Some(FibRouteTarget {
-                next_hop: ip("192.0.2.99")
-            })
+            fib.kernel
+                .routes
+                .get(&route.key)
+                .map(|route| route.target.clone()),
+            Some(FibRouteTarget::single(ip("192.0.2.99")))
         );
     }
 
@@ -2780,9 +2998,7 @@ mod tests {
         let existing = FibRoute {
             table_name: "edge".to_string(),
             key: key(v4(24)),
-            target: FibRouteTarget {
-                next_hop: ip("192.0.2.1"),
-            },
+            target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
@@ -2791,7 +3007,7 @@ mod tests {
         fib.kernel.routes.insert(
             existing.key,
             FibKernelRoute {
-                target: existing.target,
+                target: existing.target.clone(),
                 protocol: FibKernelProtocol::Bgp,
             },
         );
@@ -2828,9 +3044,7 @@ mod tests {
         let route = FibRoute {
             table_name: "edge".to_string(),
             key: key(v6(64)),
-            target: FibRouteTarget {
-                next_hop: ip("2001:db8:ffff::1"),
-            },
+            target: FibRouteTarget::single(ip("2001:db8:ffff::1")),
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
@@ -2863,9 +3077,7 @@ mod tests {
         let route = FibRoute {
             table_name: "edge".to_string(),
             key: key(v4(32)),
-            target: FibRouteTarget {
-                next_hop: ip("192.0.2.1"),
-            },
+            target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
@@ -2892,6 +3104,130 @@ mod tests {
                 .iter()
                 .any(|attr| matches!(attr, RouteAttribute::Gateway(_))),
             "delete messages must not include stale next-hop value"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn build_route_message_single_next_hop_uses_gateway_not_multipath() {
+        use netlink_packet_route::route::{RouteAddress, RouteAttribute};
+        let route = FibRoute {
+            table_name: "edge".to_string(),
+            key: key(v4(24)),
+            target: FibRouteTarget::single(ip("192.0.2.1")),
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        };
+
+        let msg = build_route_message(&route, RouteMessageGateway::Include).unwrap();
+
+        assert!(msg.attributes.iter().any(|attr| matches!(
+            attr,
+            RouteAttribute::Gateway(RouteAddress::Inet(addr))
+                if *addr == "192.0.2.1".parse::<Ipv4Addr>().unwrap()
+        )));
+        assert!(
+            !msg.attributes
+                .iter()
+                .any(|attr| matches!(attr, RouteAttribute::MultiPath(_))),
+            "a single next-hop must stay RTA_GATEWAY, never RTA_MULTIPATH"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn build_route_message_multi_next_hop_emits_equal_weight_multipath() {
+        use netlink_packet_route::route::RouteAttribute;
+        let route = FibRoute {
+            table_name: "edge".to_string(),
+            key: key(v4(24)),
+            target: FibRouteTarget::from_next_hops([ip("192.0.2.1"), ip("192.0.2.2")]),
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        };
+
+        let msg = build_route_message(&route, RouteMessageGateway::Include).unwrap();
+
+        let hops = msg
+            .attributes
+            .iter()
+            .find_map(|attr| match attr {
+                RouteAttribute::MultiPath(hops) => Some(hops),
+                _ => None,
+            })
+            .expect("expected RTA_MULTIPATH");
+        let gateways: Vec<IpAddr> = hops.iter().filter_map(next_hop_gateway).collect();
+        assert_eq!(gateways, vec![ip("192.0.2.1"), ip("192.0.2.2")]);
+        // hops == 0 ⇒ equal weight; no explicit oif for via-only ECMP.
+        assert!(
+            hops.iter()
+                .all(|hop| hop.hops == 0 && hop.interface_index == 0)
+        );
+        assert!(
+            !msg.attributes
+                .iter()
+                .any(|attr| matches!(attr, RouteAttribute::Gateway(_))),
+            "a multipath route must not also carry a plain RTA_GATEWAY"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn build_then_extract_round_trips_multipath_set() {
+        let route = FibRoute {
+            table_name: "edge".to_string(),
+            key: key(v4(24)),
+            target: FibRouteTarget::from_next_hops([ip("192.0.2.2"), ip("192.0.2.1")]),
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        };
+
+        let msg = build_route_message(&route, RouteMessageGateway::Include).unwrap();
+
+        assert_eq!(extract_gateway(&msg), Some(route.target));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gateway_and_singleton_multipath_canonicalize_equal() {
+        use netlink_packet_route::route::{RouteAttribute, RouteNextHop};
+        // A one-hop RTA_MULTIPATH and a plain RTA_GATEWAY for the same address
+        // must extract to the same canonical target, so the kernel echoing one
+        // form when we emitted the other never flaps the diff.
+        let gateway_route = FibRoute {
+            table_name: "edge".to_string(),
+            key: key(v4(24)),
+            target: FibRouteTarget::single(ip("192.0.2.1")),
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        };
+        let gateway_msg =
+            build_route_message(&gateway_route, RouteMessageGateway::Include).unwrap();
+
+        let mut multipath_msg = gateway_msg.clone();
+        multipath_msg
+            .attributes
+            .retain(|attr| !matches!(attr, RouteAttribute::Gateway(_)));
+        let mut hop = RouteNextHop::default();
+        hop.attributes
+            .push(RouteAttribute::Gateway(ip_to_route_address(ip(
+                "192.0.2.1",
+            ))));
+        multipath_msg
+            .attributes
+            .push(RouteAttribute::MultiPath(vec![hop]));
+
+        assert_eq!(
+            extract_gateway(&gateway_msg),
+            extract_gateway(&multipath_msg)
+        );
+        assert_eq!(
+            extract_gateway(&multipath_msg),
+            Some(FibRouteTarget::single(ip("192.0.2.1")))
         );
     }
 
@@ -3002,7 +3338,7 @@ mod tests {
             .expect("dump_configured_routes");
         let key = key(prefix);
         assert_eq!(
-            dumped.routes.get(&key).map(|r| r.target.next_hop),
+            dumped.routes.get(&key).map(|r| r.target.primary()),
             Some(ip("192.0.2.1"))
         );
         assert_eq!(
@@ -3135,5 +3471,125 @@ mod tests {
             foreign_after_drain.contains("proto static"),
             "shutdown drain removed foreign route: {foreign_after_drain}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn netns_general_unicast_fib_ecmp_round_trip() {
+        if !netns_gate() {
+            eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged ECMP FIB netns test");
+            return;
+        }
+        if !is_inner_netns() {
+            let ns = NetnsFixture::create("ecmp");
+            setup_unicast_netns(&ns);
+            run_inner_netns(&ns, "netns_general_unicast_fib_ecmp_round_trip");
+            return;
+        }
+
+        let prefix = v4(24);
+        let prefix_text = "203.0.113.0/24";
+        let mut fib = LinuxUnicastFib::connect().expect("LinuxUnicastFib::connect");
+        let mut owned = FibOwnedState::default();
+        let metrics = metrics();
+        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let config = FibRuntimeConfig {
+            tables: vec![{
+                let mut table = table("edge", 1000, 200, &["ipv4_unicast", "ipv6_unicast"]);
+                table.maximum_paths = Some(2);
+                table
+            }],
+            owned_state_path: None,
+        };
+        // Both gateways are on-link in 192.0.2.0/24 (fib0), so the kernel can
+        // resolve a via-only multipath route.
+        let two_paths = || {
+            vec![
+                route(prefix, ip("192.0.2.1")),
+                route(prefix, ip("192.0.2.3")),
+            ]
+        };
+
+        // Install two equal-cost next-hops → kernel RTA_MULTIPATH route.
+        reconcile_once(
+            &config,
+            &rib_with_routes(two_paths()),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+            &CancellationToken::new(),
+        )
+        .await;
+        let installed = route_show(1000, prefix_text);
+        assert!(
+            installed.contains("nexthop via 192.0.2.1"),
+            "first ECMP nexthop missing: {installed}"
+        );
+        assert!(
+            installed.contains("nexthop via 192.0.2.3"),
+            "second ECMP nexthop missing: {installed}"
+        );
+        assert!(
+            installed.contains("proto bgp"),
+            "proto bgp missing: {installed}"
+        );
+
+        // Failover: drop one path → collapses to the survivor as a single
+        // RTA_GATEWAY (no `nexthop` stanzas).
+        reconcile_once(
+            &config,
+            &rib_with_routes(vec![route(prefix, ip("192.0.2.1"))]),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+            &CancellationToken::new(),
+        )
+        .await;
+        let survivor = route_show(1000, prefix_text);
+        assert!(
+            survivor.contains("via 192.0.2.1"),
+            "survivor nexthop missing: {survivor}"
+        );
+        assert!(
+            !survivor.contains("nexthop"),
+            "shrunk route should not be multipath: {survivor}"
+        );
+
+        // Widen back to two paths.
+        reconcile_once(
+            &config,
+            &rib_with_routes(two_paths()),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+            &CancellationToken::new(),
+        )
+        .await;
+        let widened = route_show(1000, prefix_text);
+        assert!(
+            widened.contains("nexthop via 192.0.2.1") && widened.contains("nexthop via 192.0.2.3"),
+            "widen back to ECMP failed: {widened}"
+        );
+
+        // Withdraw removes the owned multipath route.
+        reconcile_once(
+            &config,
+            &rib_with_routes(Vec::new()),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            route_show(1000, prefix_text).trim().is_empty(),
+            "withdraw left ECMP route installed"
+        );
+        assert!(owned.routes.is_empty());
     }
 }

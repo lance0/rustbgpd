@@ -10,7 +10,8 @@
 #     (`netns_fdb_nhg`) — requires kernel >= 5.8 for NDA_NH_ID.
 #   - ADR-0061 Slice 4 general unicast FIB runtime validation
 #     (`src/fib_runtime.rs`) — proves configured non-reserved
-#     Linux tables receive and drain daemon-owned routes.
+#     Linux tables receive and drain daemon-owned routes, including
+#     ADR-0066 unicast multipath/ECMP install + failover.
 #
 # Requires:
 #   - Docker daemon running on a Linux host with kernel >= 5.8 for
@@ -58,7 +59,7 @@ case "${1:-all}" in
     fdb_nhg)    TEST_BIN="netns_fdb_nhg"; FILTER="" ;;
     fdb_nhg_roundtrip)  TEST_BIN="netns_fdb_nhg"; FILTER="round_trip_install_and_remove_fdb_nhg" ;;
     fdb_nhg_cve)        TEST_BIN="netns_fdb_nhg"; FILTER="cve_guard_blocks_install_when_learning_enabled" ;;
-    fib_runtime)        FILTER=""; FIB_RUNTIME_FILTER="fib_runtime::tests::netns_general_unicast_fib_runtime_round_trip" ;;
+    fib_runtime)        FILTER=""; FIB_RUNTIME_FILTER="fib_runtime::tests::netns_general_unicast_fib_" ;;
     *)
         echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime" >&2
         exit 2

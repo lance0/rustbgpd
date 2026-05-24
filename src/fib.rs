@@ -15,7 +15,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
-use rustbgpd_rib::{Route, RouteOrigin};
+use rustbgpd_rib::{FibInstallCandidate, RouteOrigin};
 use rustbgpd_wire::Prefix;
 
 use crate::config::FibTableConfig;
@@ -101,10 +101,81 @@ pub(crate) struct FibRoute {
 }
 
 /// Kernel forwarding value for a route row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Holds one or more equal-cost next-hops. The set is always canonically
+/// sorted and deduplicated so that set-equality (used throughout
+/// [`compute_fib_diff`]) is independent of input order, and so a single
+/// next-hop compares equal whether the kernel reports it as `RTA_GATEWAY`
+/// or as a one-element `RTA_MULTIPATH`. Length 1 is exactly today's
+/// single-next-hop behavior (emitted as `RTA_GATEWAY`); length >1 is ECMP
+/// (emitted as `RTA_MULTIPATH`). Never empty by construction.
+///
+/// `best` records the selected best route's next-hop (always a member of the
+/// set). It is the scalar representative for status / events / owned-state
+/// back-compat, so the surfaced `(next_hop, peer, path_id)` stays a consistent
+/// tuple even though ECMP siblings can come from different peers. It is
+/// **deliberately excluded from equality**: two targets with the same next-hop
+/// *set* are the same kernel route regardless of which member was best, so the
+/// reconcile diff must not flap when only best-path provenance moves.
+#[derive(Debug, Clone)]
 pub(crate) struct FibRouteTarget {
-    /// Gateway / next-hop address.
-    pub next_hop: IpAddr,
+    /// Gateway / next-hop addresses, sorted ascending and deduplicated.
+    pub next_hops: Vec<IpAddr>,
+    /// The selected best route's next-hop; the scalar surface representative.
+    best: IpAddr,
+}
+
+impl PartialEq for FibRouteTarget {
+    fn eq(&self, other: &Self) -> bool {
+        self.next_hops == other.next_hops
+    }
+}
+
+impl Eq for FibRouteTarget {}
+
+impl FibRouteTarget {
+    /// Single-next-hop target — today's default forwarding shape.
+    pub(crate) fn single(next_hop: IpAddr) -> Self {
+        Self {
+            next_hops: vec![next_hop],
+            best: next_hop,
+        }
+    }
+
+    /// Build from a known best plus an arbitrary set (e.g. projection or
+    /// persisted owned-state). `best` is forced into the set if missing, then
+    /// the set is canonicalized.
+    pub(crate) fn from_set_with_best(
+        best: IpAddr,
+        next_hops: impl IntoIterator<Item = IpAddr>,
+    ) -> Self {
+        let mut next_hops: Vec<IpAddr> = next_hops.into_iter().collect();
+        if !next_hops.contains(&best) {
+            next_hops.push(best);
+        }
+        next_hops.sort_unstable();
+        next_hops.dedup();
+        Self { next_hops, best }
+    }
+
+    /// Kernel-observed path: a dumped route carries no BGP best-path metadata,
+    /// so the lowest-sorted member stands in as the representative. Equality
+    /// ignores `best`, so this never affects diffing against owned state.
+    /// Callers must ensure the input is non-empty.
+    pub(crate) fn from_next_hops(next_hops: impl IntoIterator<Item = IpAddr>) -> Self {
+        let mut next_hops: Vec<IpAddr> = next_hops.into_iter().collect();
+        next_hops.sort_unstable();
+        next_hops.dedup();
+        let best = next_hops[0];
+        Self { next_hops, best }
+    }
+
+    /// The single representative next-hop for surface paths (per-route status,
+    /// events, owned-state scalar back-compat) — the selected best route's
+    /// next-hop, consistent with the row's `peer` / `path_id` / `origin_type`.
+    pub(crate) fn primary(&self) -> IpAddr {
+        self.best
+    }
 }
 
 /// Daemon-owned route state. Updated only after successful apply ops.
@@ -122,7 +193,7 @@ pub(crate) struct FibKernelSnapshot {
 }
 
 /// Observed kernel route value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FibKernelRoute {
     /// Kernel forwarding value.
     pub target: FibRouteTarget,
@@ -229,18 +300,47 @@ pub(crate) enum FibOp {
     Forget(FibRouteKey),
 }
 
-/// Project configured FIB tables and Loc-RIB best routes into desired state.
-#[must_use]
-pub(crate) fn project_fib_intent(tables: &[FibTableConfig], routes: &[Route]) -> FibIntent {
-    project_fib_intent_with_peer_groups(tables, routes, &BTreeMap::new())
+/// Equal-cost next-hops to install for one candidate in one table: the
+/// candidate's best-first set, filtered to next-hops whose advertising peer
+/// passes the table allow-list and whose family matches the prefix, capped at
+/// `max_paths`. The per-hop peer filter matters for ECMP: equal-cost siblings
+/// can come from different peers than the best route, and a disallowed peer
+/// must not slip in as a sibling next-hop just because the best route's peer is
+/// allowed. Empty means no installable next-hop (drop the row).
+fn eligible_next_hops(
+    candidate: &FibInstallCandidate,
+    prefix: Prefix,
+    max_paths: usize,
+    peer_allowed: impl Fn(IpAddr) -> bool,
+) -> Vec<IpAddr> {
+    candidate
+        .next_hops
+        .iter()
+        .filter(|next_hop| peer_allowed(next_hop.peer))
+        .filter(|next_hop| prefix_and_nexthop_same_family(prefix, next_hop.next_hop))
+        .map(|next_hop| next_hop.next_hop)
+        .take(max_paths)
+        .collect()
 }
 
-/// Project configured FIB tables and Loc-RIB best routes using the current
-/// RIB peer-group map for table allow-list checks.
+/// Project configured FIB tables and Loc-RIB install candidates into desired
+/// state. Each candidate carries the chosen best route plus its equal-cost
+/// next-hop set (see [`rustbgpd_rib::FibInstallCandidate`]); a length-1 set is
+/// exactly today's single-next-hop behavior.
+#[must_use]
+pub(crate) fn project_fib_intent(
+    tables: &[FibTableConfig],
+    candidates: &[FibInstallCandidate],
+) -> FibIntent {
+    project_fib_intent_with_peer_groups(tables, candidates, &BTreeMap::new())
+}
+
+/// Project configured FIB tables and Loc-RIB install candidates using the
+/// current RIB peer-group map for table allow-list checks.
 #[must_use]
 pub(crate) fn project_fib_intent_with_peer_groups(
     tables: &[FibTableConfig],
-    routes: &[Route],
+    candidates: &[FibInstallCandidate],
     peer_groups: &BTreeMap<IpAddr, String>,
 ) -> FibIntent {
     let mut intent = FibIntent::default();
@@ -250,12 +350,17 @@ pub(crate) fn project_fib_intent_with_peer_groups(
         let mut table_frozen = false;
         let mut route_limit_drops = RouteLimitDropCounters::default();
         let route_limit_drop_start = intent.drops.len();
+        // Per-table ECMP width. Unset / 1 == single-next-hop (today). The RIB
+        // already capped each candidate at the widest table's `maximum_paths`,
+        // so this re-caps to *this* table's value over the best-first set.
+        let max_paths = table.maximum_paths.unwrap_or(1).max(1) as usize;
         let allowed_neighbors = table
             .allowed_neighbors
             .iter()
             .filter_map(|neighbor| neighbor.parse::<IpAddr>().ok())
             .collect::<Vec<_>>();
-        for route in routes {
+        for candidate in candidates {
+            let route = &candidate.best;
             if !table_allows_prefix(table, route.prefix) {
                 continue;
             }
@@ -267,7 +372,20 @@ pub(crate) fn project_fib_intent_with_peer_groups(
                 });
                 continue;
             }
-            if !prefix_and_nexthop_same_family(route.prefix, route.next_hop) {
+            // Keep only equal-cost next-hops from allowed peers whose family
+            // matches the prefix, best-first, capped at this table's
+            // `maximum_paths`.
+            let eligible = eligible_next_hops(candidate, route.prefix, max_paths, |peer| {
+                table_allows_peer(table, &allowed_neighbors, peer, peer_groups)
+            });
+            // Fail closed if the *selected best route's* own next-hop did not
+            // survive the eligibility filters (e.g. an IPv4 prefix advertised
+            // with an IPv6 best next-hop). Installing only the surviving
+            // siblings would leave the row's `peer` / `path_id` / `origin_type`
+            // (all best-route metadata) describing a path we never programmed —
+            // and matches today's single-path behavior, which drops a
+            // wrong-family best outright.
+            if !eligible.contains(&route.next_hop) {
                 intent.drops.push(FibDrop::NextHopFamilyUnsupported {
                     table_name: table.name.clone(),
                     prefix: route.prefix,
@@ -319,9 +437,10 @@ pub(crate) fn project_fib_intent_with_peer_groups(
             let projected = FibRoute {
                 table_name: table.name.clone(),
                 key,
-                target: FibRouteTarget {
-                    next_hop: route.next_hop,
-                },
+                // Pin `best` to the selected best route's next-hop (guaranteed
+                // present by the check above) so the scalar surface stays
+                // consistent with the row's best-route metadata.
+                target: FibRouteTarget::from_set_with_best(route.next_hop, eligible),
                 peer: route.peer,
                 origin_type: route.origin_type,
                 path_id: route.path_id,
@@ -353,7 +472,7 @@ fn push_route_limit_drop(
         intent,
         table_name,
         route.key,
-        route.target.next_hop,
+        route.target.primary(),
         route.peer,
         limit,
         counters,
@@ -576,13 +695,53 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use rustbgpd_rib::{Route, RouteOrigin};
+    use rustbgpd_rib::{FibInstallNextHop, Route, RouteOrigin};
     use rustbgpd_wire::{
         AsPath, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix, RpkiValidation,
     };
 
     use super::*;
     use crate::config::FibTableConfig;
+
+    /// Wrap a single best route as a one-next-hop install candidate (the
+    /// shape the RIB returns when `maximum_paths` is unset / 1).
+    fn candidate(route: Route) -> FibInstallCandidate {
+        FibInstallCandidate {
+            next_hops: vec![FibInstallNextHop {
+                next_hop: route.next_hop,
+                link_local_next_hop: route.link_local_next_hop,
+                peer: route.peer,
+                path_id: route.path_id,
+            }],
+            best: route,
+        }
+    }
+
+    /// Wrap a slice of best routes as single-next-hop install candidates.
+    fn candidates(routes: Vec<Route>) -> Vec<FibInstallCandidate> {
+        routes.into_iter().map(candidate).collect()
+    }
+
+    /// Build a multi-next-hop install candidate: `best` keeps its own
+    /// next-hop, and `extra` next-hops are appended as equal-cost siblings
+    /// (best-first ordering, matching the RIB contract).
+    fn multipath_candidate(best: Route, extra: &[&str]) -> FibInstallCandidate {
+        let mut next_hops = vec![FibInstallNextHop {
+            next_hop: best.next_hop,
+            link_local_next_hop: best.link_local_next_hop,
+            peer: best.peer,
+            path_id: best.path_id,
+        }];
+        for (idx, nh) in extra.iter().enumerate() {
+            next_hops.push(FibInstallNextHop {
+                next_hop: ip(nh),
+                link_local_next_hop: None,
+                peer: ip("198.51.100.2"),
+                path_id: u32::try_from(idx).unwrap() + 1,
+            });
+        }
+        FibInstallCandidate { next_hops, best }
+    }
 
     fn table(name: &str, table_id: u32, metric: u32, families: &[&str]) -> FibTableConfig {
         FibTableConfig {
@@ -596,6 +755,7 @@ mod tests {
             allowed_peer_groups: Vec::new(),
             allowed_neighbors: Vec::new(),
             max_routes: None,
+            maximum_paths: None,
         }
     }
 
@@ -649,9 +809,7 @@ mod tests {
         FibRoute {
             table_name: "edge".to_string(),
             key,
-            target: FibRouteTarget {
-                next_hop: ip(next_hop),
-            },
+            target: FibRouteTarget::single(ip(next_hop)),
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
@@ -668,9 +826,7 @@ mod tests {
 
     fn kernel(next_hop: &str, protocol: FibKernelProtocol) -> FibKernelRoute {
         FibKernelRoute {
-            target: FibRouteTarget {
-                next_hop: ip(next_hop),
-            },
+            target: FibRouteTarget::single(ip(next_hop)),
             protocol,
         }
     }
@@ -684,7 +840,7 @@ mod tests {
             0,
         )];
 
-        let intent = project_fib_intent(&[], &routes);
+        let intent = project_fib_intent(&[], &candidates(routes));
 
         assert!(intent.routes.is_empty());
         assert!(intent.drops.is_empty());
@@ -703,7 +859,7 @@ mod tests {
             ),
         ];
 
-        let intent = project_fib_intent(&tables, &routes);
+        let intent = project_fib_intent(&tables, &candidates(routes));
 
         assert_eq!(intent.routes.len(), 2);
         assert!(intent.drops.is_empty());
@@ -728,7 +884,7 @@ mod tests {
             ),
         ];
 
-        let intent = project_fib_intent(&tables, &routes);
+        let intent = project_fib_intent(&tables, &candidates(routes));
 
         assert_eq!(intent.routes.len(), 1);
         assert!(matches!(
@@ -751,7 +907,7 @@ mod tests {
             7,
         )];
 
-        let intent = project_fib_intent(&tables, &routes);
+        let intent = project_fib_intent(&tables, &candidates(routes));
 
         assert_eq!(intent.routes.len(), 2);
         assert!(
@@ -784,7 +940,7 @@ mod tests {
             0,
         )];
 
-        let intent = project_fib_intent(&tables, &routes);
+        let intent = project_fib_intent(&tables, &candidates(routes));
 
         assert!(intent.routes.is_empty());
         assert!(matches!(
@@ -814,7 +970,7 @@ mod tests {
             ),
         ];
 
-        let intent = project_fib_intent(&[table], &routes);
+        let intent = project_fib_intent(&[table], &candidates(routes));
 
         assert_eq!(intent.routes.len(), 1);
         assert!(
@@ -854,7 +1010,8 @@ mod tests {
             (ip("198.51.100.2"), "transit".to_string()),
         ]);
 
-        let intent = project_fib_intent_with_peer_groups(&[table], &routes, &peer_groups);
+        let intent =
+            project_fib_intent_with_peer_groups(&[table], &candidates(routes), &peer_groups);
 
         assert_eq!(intent.routes.len(), 1);
         assert!(
@@ -878,7 +1035,7 @@ mod tests {
             route(v4_prefix(3, 24), ip("203.0.113.2"), RouteOrigin::Ebgp, 0),
         ];
 
-        let intent = project_fib_intent(&[table], &routes);
+        let intent = project_fib_intent(&[table], &candidates(routes));
 
         assert!(intent.routes.is_empty());
         assert_eq!(intent.drops.len(), 2);
@@ -907,7 +1064,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let intent = project_fib_intent(&[table], &routes);
+        let intent = project_fib_intent(&[table], &candidates(routes));
 
         assert!(intent.routes.is_empty());
         assert!(intent.frozen_tables.contains(&FibTableKey {
@@ -956,7 +1113,7 @@ mod tests {
             route(v4_prefix(2, 24), ip("203.0.113.1"), RouteOrigin::Ebgp, 0),
             route(v4_prefix(3, 24), ip("203.0.113.2"), RouteOrigin::Ebgp, 0),
         ];
-        let intent = project_fib_intent(&[table], &routes);
+        let intent = project_fib_intent(&[table], &candidates(routes));
         let owned = FibOwnedState {
             routes: BTreeMap::from([(existing.key, existing.clone())]),
         };
@@ -984,7 +1141,7 @@ mod tests {
             route(v4_prefix(3, 24), ip("203.0.113.2"), RouteOrigin::Ebgp, 0),
             route(v4_prefix(4, 24), ip("203.0.113.3"), RouteOrigin::Ebgp, 0),
         ];
-        let intent = project_fib_intent(&[table], &routes);
+        let intent = project_fib_intent(&[table], &candidates(routes));
         let owned = FibOwnedState {
             routes: BTreeMap::from([(withdrawn.key, withdrawn.clone())]),
         };
@@ -1018,7 +1175,7 @@ mod tests {
             route(v4_prefix(2, 24), ip("203.0.113.9"), RouteOrigin::Ebgp, 0),
             route(v4_prefix(3, 24), ip("203.0.113.2"), RouteOrigin::Ebgp, 0),
         ];
-        let intent = project_fib_intent(&[table], &routes);
+        let intent = project_fib_intent(&[table], &candidates(routes));
         let owned = FibOwnedState {
             routes: BTreeMap::from([(existing.key, existing.clone())]),
         };
@@ -1047,7 +1204,7 @@ mod tests {
             route(v4_prefix(2, 24), ip("203.0.113.9"), RouteOrigin::Ebgp, 0),
             route(v4_prefix(3, 24), ip("203.0.113.2"), RouteOrigin::Ebgp, 0),
         ];
-        let intent = project_fib_intent(&[table], &routes);
+        let intent = project_fib_intent(&[table], &candidates(routes));
         let owned = FibOwnedState {
             routes: BTreeMap::from([(existing.key, existing.clone())]),
         };
@@ -1070,7 +1227,7 @@ mod tests {
             route(v4_prefix(3, 24), ip("203.0.113.2"), RouteOrigin::Ebgp, 0),
         ];
 
-        let intent = project_fib_intent(&[table], &routes);
+        let intent = project_fib_intent(&[table], &candidates(routes));
 
         assert_eq!(intent.routes.len(), 2);
         assert!(intent.drops.is_empty());
@@ -1401,5 +1558,254 @@ mod tests {
         assert_eq!(owned.routes.get(&route.key), Some(&route));
         record_fib_success(&mut owned, &FibOp::Forget(route.key));
         assert!(owned.routes.is_empty());
+    }
+
+    #[test]
+    fn target_from_next_hops_is_sorted_deduped_and_order_independent() {
+        let target = FibRouteTarget::from_next_hops([
+            ip("203.0.113.3"),
+            ip("203.0.113.1"),
+            ip("203.0.113.3"),
+            ip("203.0.113.2"),
+        ]);
+        assert_eq!(
+            target.next_hops,
+            vec![ip("203.0.113.1"), ip("203.0.113.2"), ip("203.0.113.3")]
+        );
+        // Canonical form is independent of input order.
+        let reordered = FibRouteTarget::from_next_hops([
+            ip("203.0.113.2"),
+            ip("203.0.113.3"),
+            ip("203.0.113.1"),
+        ]);
+        assert_eq!(target, reordered);
+        assert_eq!(target.primary(), ip("203.0.113.1"));
+    }
+
+    #[test]
+    fn ecmp_candidate_projects_multipath_target_when_enabled() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.maximum_paths = Some(2);
+        let candidate = multipath_candidate(
+            route(v4_prefix(2, 24), ip("203.0.113.1"), RouteOrigin::Ebgp, 0),
+            &["203.0.113.2"],
+        );
+
+        let intent = project_fib_intent(&[table], &[candidate]);
+
+        assert_eq!(intent.routes.len(), 1);
+        let projected = intent.routes.values().next().unwrap();
+        assert_eq!(
+            projected.target.next_hops,
+            vec![ip("203.0.113.1"), ip("203.0.113.2")]
+        );
+    }
+
+    #[test]
+    fn projected_primary_is_best_route_next_hop_not_lowest() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.maximum_paths = Some(2);
+        // The best route's next-hop (.5) sorts after the sibling (.1). The
+        // canonical set is ascending, but the scalar representative must remain
+        // the best route's next-hop so it stays consistent with the row's
+        // peer / path_id / origin_type.
+        let candidate = multipath_candidate(
+            route(v4_prefix(2, 24), ip("203.0.113.5"), RouteOrigin::Ebgp, 0),
+            &["203.0.113.1"],
+        );
+
+        let intent = project_fib_intent(&[table], &[candidate]);
+
+        let projected = intent.routes.values().next().unwrap();
+        assert_eq!(
+            projected.target.next_hops,
+            vec![ip("203.0.113.1"), ip("203.0.113.5")]
+        );
+        assert_eq!(projected.target.primary(), ip("203.0.113.5"));
+    }
+
+    #[test]
+    fn maximum_paths_caps_next_hop_set_best_first() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.maximum_paths = Some(2);
+        // best .5, siblings .1 then .9 (best-first). Cap 2 keeps best + first
+        // sibling (.5, .1); .9 is dropped. Canonical sort orders them ascending.
+        let candidate = multipath_candidate(
+            route(v4_prefix(2, 24), ip("203.0.113.5"), RouteOrigin::Ebgp, 0),
+            &["203.0.113.1", "203.0.113.9"],
+        );
+
+        let intent = project_fib_intent(&[table], &[candidate]);
+
+        let projected = intent.routes.values().next().unwrap();
+        assert_eq!(
+            projected.target.next_hops,
+            vec![ip("203.0.113.1"), ip("203.0.113.5")]
+        );
+    }
+
+    #[test]
+    fn default_maximum_paths_keeps_single_best_next_hop() {
+        // `maximum_paths` unset == today: even with equal-cost siblings present,
+        // only the best next-hop is programmed (single-gateway shape).
+        let table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        let candidate = multipath_candidate(
+            route(v4_prefix(2, 24), ip("203.0.113.1"), RouteOrigin::Ebgp, 0),
+            &["203.0.113.2", "203.0.113.3"],
+        );
+
+        let intent = project_fib_intent(&[table], &[candidate]);
+
+        let projected = intent.routes.values().next().unwrap();
+        assert_eq!(projected.target.next_hops, vec![ip("203.0.113.1")]);
+    }
+
+    #[test]
+    fn family_filter_keeps_only_matching_family_next_hops() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.maximum_paths = Some(4);
+        // v4 prefix with a v4 best and a v6 sibling: only the v4 hop survives,
+        // and the row is still installed (no drop).
+        let candidate = multipath_candidate(
+            route(v4_prefix(2, 24), ip("203.0.113.1"), RouteOrigin::Ebgp, 0),
+            &["2001:db8::1"],
+        );
+
+        let intent = project_fib_intent(&[table], &[candidate]);
+
+        assert_eq!(intent.routes.len(), 1);
+        let projected = intent.routes.values().next().unwrap();
+        assert_eq!(projected.target.next_hops, vec![ip("203.0.113.1")]);
+        assert!(intent.drops.is_empty());
+    }
+
+    #[test]
+    fn all_wrong_family_next_hops_drops_the_row() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.maximum_paths = Some(4);
+        let candidate = multipath_candidate(
+            route(v4_prefix(2, 24), ip("2001:db8::1"), RouteOrigin::Ebgp, 0),
+            &[],
+        );
+
+        let intent = project_fib_intent(&[table], &[candidate]);
+
+        assert!(intent.routes.is_empty());
+        assert!(matches!(
+            intent.drops.as_slice(),
+            [FibDrop::NextHopFamilyUnsupported { .. }]
+        ));
+    }
+
+    #[test]
+    fn ecmp_excludes_sibling_next_hops_from_disallowed_peers() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.maximum_paths = Some(4);
+        // Only the best route's peer is allowed. The equal-cost sibling comes
+        // from a different (disallowed) peer and must not slip in as an ECMP
+        // next-hop just because the best route's peer passed the allow-list.
+        table.allowed_neighbors = vec!["198.51.100.1".to_string()];
+        let candidate = multipath_candidate(
+            route(v4_prefix(2, 24), ip("203.0.113.1"), RouteOrigin::Ebgp, 0),
+            &["203.0.113.2"],
+        );
+
+        let intent = project_fib_intent(&[table], &[candidate]);
+
+        assert_eq!(intent.routes.len(), 1);
+        let projected = intent.routes.values().next().unwrap();
+        assert_eq!(projected.target.next_hops, vec![ip("203.0.113.1")]);
+        assert!(intent.drops.is_empty());
+    }
+
+    #[test]
+    fn row_dropped_when_best_next_hop_filtered_even_if_sibling_survives() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.maximum_paths = Some(4);
+        // The selected best route's next-hop is the wrong family for the v4
+        // prefix; a sibling is a valid v4 next-hop. Because the *best* path
+        // can't be installed, the whole row is dropped (fail-closed) rather
+        // than installing the sibling under best-route metadata that would then
+        // describe an unprogrammed path.
+        let candidate = multipath_candidate(
+            route(v4_prefix(2, 24), ip("2001:db8::1"), RouteOrigin::Ebgp, 0),
+            &["203.0.113.1"],
+        );
+
+        let intent = project_fib_intent(&[table], &[candidate]);
+
+        assert!(intent.routes.is_empty());
+        assert!(matches!(
+            intent.drops.as_slice(),
+            [FibDrop::NextHopFamilyUnsupported { next_hop, .. }] if *next_hop == ip("2001:db8::1")
+        ));
+    }
+
+    #[test]
+    fn reordered_multipath_set_does_not_trigger_replace() {
+        // Owned, desired, and kernel all hold the same ECMP set in different
+        // pre-canonical orders. Canonicalization must make them compare equal,
+        // so the diff is a no-op.
+        let key = key(v4_prefix(2, 24));
+        let owned_route = FibRoute {
+            table_name: "edge".to_string(),
+            key,
+            target: FibRouteTarget::from_next_hops([ip("203.0.113.1"), ip("203.0.113.2")]),
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        };
+        let mut desired = owned_route.clone();
+        desired.target = FibRouteTarget::from_next_hops([ip("203.0.113.2"), ip("203.0.113.1")]);
+        let owned = FibOwnedState {
+            routes: BTreeMap::from([(key, owned_route)]),
+        };
+        let kernel = FibKernelSnapshot {
+            routes: BTreeMap::from([(
+                key,
+                FibKernelRoute {
+                    target: FibRouteTarget::from_next_hops([ip("203.0.113.2"), ip("203.0.113.1")]),
+                    protocol: FibKernelProtocol::Bgp,
+                },
+            )]),
+        };
+        let intent = FibIntent {
+            routes: BTreeMap::from([(key, desired)]),
+            drops: vec![],
+            ..FibIntent::default()
+        };
+
+        let plan = compute_fib_diff(&intent, &owned, &kernel);
+
+        assert!(
+            plan.ops.is_empty(),
+            "reordered-but-equal set should be a no-op: {:?}",
+            plan.ops
+        );
+        assert!(plan.drops.is_empty());
+    }
+
+    #[test]
+    fn multipath_set_growth_emits_replace() {
+        let key = key(v4_prefix(2, 24));
+        let previous = one_route(key, "203.0.113.1");
+        let mut desired = previous.clone();
+        desired.target = FibRouteTarget::from_next_hops([ip("203.0.113.1"), ip("203.0.113.2")]);
+        let owned = FibOwnedState {
+            routes: BTreeMap::from([(key, previous.clone())]),
+        };
+        let kernel = FibKernelSnapshot {
+            routes: BTreeMap::from([(key, kernel("203.0.113.1", FibKernelProtocol::Bgp))]),
+        };
+        let intent = FibIntent {
+            routes: BTreeMap::from([(key, desired.clone())]),
+            drops: vec![],
+            ..FibIntent::default()
+        };
+
+        let plan = compute_fib_diff(&intent, &owned, &kernel);
+
+        assert_eq!(plan.ops, vec![FibOp::Replace { previous, desired }]);
+        assert!(plan.drops.is_empty());
     }
 }
