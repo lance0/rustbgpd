@@ -56,6 +56,39 @@ pub struct Route {
     pub aspa_state: AspaValidation,
 }
 
+/// One equal-cost next-hop in a multipath/ECMP install candidate.
+///
+/// Carries the global next-hop plus the IPv6 link-local next-hop and the
+/// provenance (advertising peer + Add-Path id) rather than a bare `IpAddr`,
+/// so IPv6 link-local forwarding works today and recursive next-hop
+/// resolution can be added later without reshaping the RIB→FIB contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FibInstallNextHop {
+    /// Global next-hop address (IPv4 or IPv6).
+    pub next_hop: IpAddr,
+    /// IPv6 link-local next-hop carried alongside the global one, if any.
+    pub link_local_next_hop: Option<Ipv6Addr>,
+    /// The peer that advertised the path this next-hop came from.
+    pub peer: IpAddr,
+    /// Add-Path path id of the source path (0 = no Add-Path).
+    pub path_id: u32,
+}
+
+/// A prefix's FIB install candidate: the chosen best route plus the
+/// equal-cost next-hop set to program (length 1 = single-path, today's
+/// behavior). `next_hops[0]` is always the best route's next-hop; the
+/// remainder are equal-cost siblings (see `best_path::multipath_equal`),
+/// deduped by next-hop and bounded by the per-table `maximum_paths`.
+/// (No `PartialEq`/`Eq`: `Route` carries an `Instant` and is not `Eq`;
+/// compare the public fields in tests.)
+#[derive(Debug, Clone)]
+pub struct FibInstallCandidate {
+    /// The selected best route (drives metadata: prefix, origin, etc.).
+    pub best: Route,
+    /// Equal-cost next-hops to install as ECMP, canonically ordered.
+    pub next_hops: Vec<FibInstallNextHop>,
+}
+
 impl Route {
     /// Whether this route was learned via an eBGP session.
     #[must_use]

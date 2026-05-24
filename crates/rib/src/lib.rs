@@ -25,11 +25,13 @@ pub mod route;
 /// RIB update messages and outbound route structures.
 pub mod update;
 
-pub use best_path::{BestPathReason, best_path_cmp};
+pub use best_path::{BestPathReason, best_path_cmp, multipath_equal};
 pub use event::{EvpnRouteEvent, RouteEvent, RouteEventType};
 pub use loc_rib::LocRib;
 pub use manager::RibManager;
-pub use route::{EvpnRibRoute, FlowSpecRoute, Route, RouteOrigin};
+pub use route::{
+    EvpnRibRoute, FibInstallCandidate, FibInstallNextHop, FlowSpecRoute, Route, RouteOrigin,
+};
 pub use update::{
     BestPathCandidate, ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision, ExplainReason,
     MrtPeerEntry, MrtSnapshotData, OutboundRouteUpdate, RibUpdate,
