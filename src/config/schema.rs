@@ -907,6 +907,15 @@ pub struct FibTableConfig {
     /// this value, rustbgpd freezes table growth and replacement while still
     /// allowing already-owned rows to be repaired or withdrawn.
     pub max_routes: Option<u32>,
+    /// Optional maximum number of equal-cost next-hops to install per prefix
+    /// (unicast multipath / ECMP, ADR-0066). Unset or `1` programs a single
+    /// next-hop — exactly today's behavior. Higher values install up to this
+    /// many equal-cost paths as a kernel `RTA_MULTIPATH` route. Applies
+    /// uniformly to homogeneous eBGP and iBGP equal-cost groups. Distinct from
+    /// `max_routes`, which caps the number of prefixes (rows), not the
+    /// next-hops per row. Validated `>= 1`, capped at 256.
+    #[serde(default)]
+    pub maximum_paths: Option<u32>,
 }
 
 fn default_fib_families() -> Vec<String> {

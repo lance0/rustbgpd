@@ -683,6 +683,11 @@ fn validate_fib_tables(config: &Config) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Upper bound on `[[fib_tables]].maximum_paths`. Kernel `RTA_MULTIPATH`
+/// supports more, but 256 is a generous practical ceiling that keeps a
+/// misconfiguration from generating pathologically wide route messages.
+const FIB_MAX_MAXIMUM_PATHS: u32 = 256;
+
 fn validate_fib_table_guardrails(
     config: &Config,
     table: &super::FibTableConfig,
@@ -694,6 +699,24 @@ fn validate_fib_table_guardrails(
                 table.name
             ),
         });
+    }
+    if let Some(maximum_paths) = table.maximum_paths {
+        if maximum_paths == 0 {
+            return Err(ConfigError::InvalidFibTable {
+                reason: format!(
+                    "name {:?}: maximum_paths must be greater than zero",
+                    table.name
+                ),
+            });
+        }
+        if maximum_paths > FIB_MAX_MAXIMUM_PATHS {
+            return Err(ConfigError::InvalidFibTable {
+                reason: format!(
+                    "name {:?}: maximum_paths {maximum_paths} exceeds the supported cap of {FIB_MAX_MAXIMUM_PATHS}",
+                    table.name
+                ),
+            });
+        }
     }
     let mut seen_groups = std::collections::HashSet::new();
     for group in &table.allowed_peer_groups {

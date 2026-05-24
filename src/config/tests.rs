@@ -5696,6 +5696,7 @@ families = ["ipv4_unicast"]
 allowed_peer_groups = ["transit"]
 allowed_neighbors = ["198.51.100.1", "2001:db8::1"]
 max_routes = 1000
+maximum_paths = 4
 "#,
         valid_toml()
     );
@@ -5705,6 +5706,24 @@ max_routes = 1000
     assert_eq!(table.allowed_peer_groups, ["transit"]);
     assert_eq!(table.allowed_neighbors, ["198.51.100.1", "2001:db8::1"]);
     assert_eq!(table.max_routes, Some(1000));
+    assert_eq!(table.maximum_paths, Some(4));
+}
+
+#[test]
+fn fib_tables_maximum_paths_defaults_to_none() {
+    let toml = format!(
+        r#"
+{}
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+"#,
+        valid_toml()
+    );
+    let config = parse(&toml).unwrap();
+    assert_eq!(config.fib_tables[0].maximum_paths, None);
 }
 
 #[test]
@@ -5723,6 +5742,11 @@ fn fib_tables_reject_invalid_guardrails() {
             "duplicate allowed_neighbors",
         ),
         (r"max_routes = 0", "max_routes must be greater than zero"),
+        (
+            r"maximum_paths = 0",
+            "maximum_paths must be greater than zero",
+        ),
+        (r"maximum_paths = 9999", "exceeds the supported cap"),
     ];
 
     for (line, expected) in cases {
