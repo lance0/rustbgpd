@@ -142,18 +142,9 @@ impl FibRouteTarget {
         }
     }
 
-    /// Projection path: the input is **best-first** (index 0 is the selected
-    /// best route's next-hop). Records that as `best`, then canonicalizes the
-    /// set. Callers must ensure the input is non-empty.
-    pub(crate) fn from_best_first(next_hops: impl IntoIterator<Item = IpAddr>) -> Self {
-        let ordered: Vec<IpAddr> = next_hops.into_iter().collect();
-        let best = ordered[0];
-        Self::from_set_with_best(best, ordered)
-    }
-
-    /// Reconstruct from a known best plus an arbitrary set (e.g. persisted
-    /// owned-state). `best` is forced into the set if missing, then the set is
-    /// canonicalized.
+    /// Build from a known best plus an arbitrary set (e.g. projection or
+    /// persisted owned-state). `best` is forced into the set if missing, then
+    /// the set is canonicalized.
     pub(crate) fn from_set_with_best(
         best: IpAddr,
         next_hops: impl IntoIterator<Item = IpAddr>,
@@ -383,12 +374,18 @@ pub(crate) fn project_fib_intent_with_peer_groups(
             }
             // Keep only equal-cost next-hops from allowed peers whose family
             // matches the prefix, best-first, capped at this table's
-            // `maximum_paths`. Build the kernel target from the canonicalized
-            // (sorted/deduped) result.
-            let family_next_hops = eligible_next_hops(candidate, route.prefix, max_paths, |peer| {
+            // `maximum_paths`.
+            let eligible = eligible_next_hops(candidate, route.prefix, max_paths, |peer| {
                 table_allows_peer(table, &allowed_neighbors, peer, peer_groups)
             });
-            if family_next_hops.is_empty() {
+            // Fail closed if the *selected best route's* own next-hop did not
+            // survive the eligibility filters (e.g. an IPv4 prefix advertised
+            // with an IPv6 best next-hop). Installing only the surviving
+            // siblings would leave the row's `peer` / `path_id` / `origin_type`
+            // (all best-route metadata) describing a path we never programmed —
+            // and matches today's single-path behavior, which drops a
+            // wrong-family best outright.
+            if !eligible.contains(&route.next_hop) {
                 intent.drops.push(FibDrop::NextHopFamilyUnsupported {
                     table_name: table.name.clone(),
                     prefix: route.prefix,
@@ -440,7 +437,10 @@ pub(crate) fn project_fib_intent_with_peer_groups(
             let projected = FibRoute {
                 table_name: table.name.clone(),
                 key,
-                target: FibRouteTarget::from_best_first(family_next_hops),
+                // Pin `best` to the selected best route's next-hop (guaranteed
+                // present by the check above) so the scalar surface stays
+                // consistent with the row's best-route metadata.
+                target: FibRouteTarget::from_set_with_best(route.next_hop, eligible),
                 peer: route.peer,
                 origin_type: route.origin_type,
                 path_id: route.path_id,
@@ -1716,6 +1716,29 @@ mod tests {
         let projected = intent.routes.values().next().unwrap();
         assert_eq!(projected.target.next_hops, vec![ip("203.0.113.1")]);
         assert!(intent.drops.is_empty());
+    }
+
+    #[test]
+    fn row_dropped_when_best_next_hop_filtered_even_if_sibling_survives() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.maximum_paths = Some(4);
+        // The selected best route's next-hop is the wrong family for the v4
+        // prefix; a sibling is a valid v4 next-hop. Because the *best* path
+        // can't be installed, the whole row is dropped (fail-closed) rather
+        // than installing the sibling under best-route metadata that would then
+        // describe an unprogrammed path.
+        let candidate = multipath_candidate(
+            route(v4_prefix(2, 24), ip("2001:db8::1"), RouteOrigin::Ebgp, 0),
+            &["203.0.113.1"],
+        );
+
+        let intent = project_fib_intent(&[table], &[candidate]);
+
+        assert!(intent.routes.is_empty());
+        assert!(matches!(
+            intent.drops.as_slice(),
+            [FibDrop::NextHopFamilyUnsupported { next_hop, .. }] if *next_hop == ip("2001:db8::1")
+        ));
     }
 
     #[test]
