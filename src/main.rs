@@ -181,6 +181,80 @@ fn spawn_fib_dataplane_event_bridge(
     })
 }
 
+/// Convert a BFD actor state-change event into a unified gRPC `BgpEvent`
+/// (ADR-0067 step 3b). Up → `BfdSessionUp`, any down (Down/`AdminDown`) →
+/// `BfdSessionDown`, otherwise `BfdSessionStateChanged`; the full old/new
+/// states are always carried in the `BfdSessionEvent` payload.
+fn bfd_runtime_event_to_bgp_event(
+    event: &bfd_runtime::BfdRuntimeEvent,
+) -> rustbgpd_api::proto::BgpEvent {
+    use rustbgpd_api::proto;
+    let (event_type, severity) = match event.new_state {
+        rustbgpd_bfd::SessionState::Up => (
+            proto::BgpEventType::BfdSessionUp,
+            proto::EventSeverity::Info,
+        ),
+        rustbgpd_bfd::SessionState::Down | rustbgpd_bfd::SessionState::AdminDown => (
+            proto::BgpEventType::BfdSessionDown,
+            proto::EventSeverity::Warning,
+        ),
+        rustbgpd_bfd::SessionState::Init => (
+            proto::BgpEventType::BfdSessionStateChanged,
+            proto::EventSeverity::Info,
+        ),
+    };
+    let timestamp = rustbgpd_rib::event::unix_timestamp_now();
+    let peer_address = event.peer.to_string();
+    let old_state = bfd_session_state_to_proto(event.old_state);
+    let new_state = bfd_session_state_to_proto(event.new_state);
+    let diagnostic = bfd_diagnostic_to_str(event.diagnostic).to_string();
+    let summary = format!("bfd {peer_address} {old_state:?} → {new_state:?} ({diagnostic})");
+    proto::BgpEvent {
+        timestamp: timestamp.clone(),
+        category: proto::EventCategory::Bfd as i32,
+        event_type: event_type as i32,
+        severity: severity as i32,
+        peer_address: peer_address.clone(),
+        previous_peer_address: String::new(),
+        prefix: String::new(),
+        prefix_length: 0,
+        afi_safi: proto::AddressFamily::Unspecified as i32,
+        summary,
+        target_peer_address: String::new(),
+        payload: Some(proto::bgp_event::Payload::Bfd(proto::BfdSessionEvent {
+            event_type: event_type as i32,
+            peer_address,
+            timestamp,
+            old_state: old_state as i32,
+            new_state: new_state as i32,
+            diagnostic,
+            reason: String::new(),
+        })),
+    }
+}
+
+fn spawn_bfd_event_bridge(
+    mut bfd_events: broadcast::Receiver<bfd_runtime::BfdRuntimeEvent>,
+    bgp_events: broadcast::Sender<rustbgpd_api::proto::BgpEvent>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match bfd_events.recv().await {
+                Ok(event) => {
+                    let _ = bgp_events.send(bfd_runtime_event_to_bgp_event(&event));
+                }
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    warn!(
+                        missed,
+                        "BFD event bridge lagged; dropping stale session events"
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
 const fn grpc_enforcement_to_auth_enforcement(
     value: GrpcEnforcementConfig,
 ) -> rustbgpd_api::authz::AuthEnforcement {
@@ -1449,11 +1523,24 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // slice. No-op when no neighbor has BFD configured (or off Linux).
     let (bfd_status_tx, bfd_status_rx) =
         tokio::sync::watch::channel(Vec::<bfd_runtime::BfdStatus>::new());
+    // Actor state-change events (ADR-0067 step 3b): the actor broadcasts
+    // BfdRuntimeEvent; a bridge converts each to a proto BgpEvent that
+    // EventService surfaces over WatchEvents. The proto `bfd_bgp_event_tx`
+    // (held in ServeConfig) is the long-lived sink, so the WatchEvents BFD
+    // stream stays open even when no sessions are configured. The actor event
+    // channel (`bfd_event_tx`) is dropped if the actor doesn't start (no
+    // sessions / off Linux), which simply ends the bridge task.
+    let (bfd_event_tx, bfd_event_rx) =
+        tokio::sync::broadcast::channel::<bfd_runtime::BfdRuntimeEvent>(1024);
+    let (bfd_bgp_event_tx, _) =
+        tokio::sync::broadcast::channel::<rustbgpd_api::proto::BgpEvent>(1024);
+    let _bfd_event_bridge = spawn_bfd_event_bridge(bfd_event_rx, bfd_bgp_event_tx.clone());
     let bfd_runtime_shutdown = tokio_util::sync::CancellationToken::new();
     let bfd_runtime_handle = bfd_runtime::spawn(
         bfd_runtime::BfdRuntimeConfig::from_config(&config),
         metrics.clone(),
         bfd_status_tx,
+        bfd_event_tx,
         bfd_runtime_shutdown.clone(),
     );
 
@@ -1655,6 +1742,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                     .collect()
             })
         },
+        bfd_events: Some(bfd_bgp_event_tx),
     };
     let mut grpc_handle = tokio::spawn(async move {
         rustbgpd_api::server::serve(

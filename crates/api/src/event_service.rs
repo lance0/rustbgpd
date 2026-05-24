@@ -41,6 +41,9 @@ const DATAPLANE_EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::
 
 pub(crate) type DataplaneEventBroadcaster = Arc<Mutex<Option<broadcast::Sender<proto::BgpEvent>>>>;
 pub(crate) type DataplaneRouteEventBroadcaster = Option<broadcast::Sender<proto::BgpEvent>>;
+/// Live ADR-0067 BFD session-event source for `WatchEvents`. `None` disables
+/// the BFD event stream.
+pub(crate) type BfdEventBroadcaster = Option<broadcast::Sender<proto::BgpEvent>>;
 
 #[must_use]
 pub(crate) fn dataplane_event_broadcaster() -> DataplaneEventBroadcaster {
@@ -56,6 +59,7 @@ pub struct EventService {
     fib_route_snapshot: FibRouteSnapshotFn,
     dataplane_events: DataplaneEventBroadcaster,
     dataplane_route_events: DataplaneRouteEventBroadcaster,
+    bfd_events: BfdEventBroadcaster,
     metrics: BgpMetrics,
 }
 
@@ -105,11 +109,16 @@ impl EventService {
             fib_route_snapshot,
             dataplane_events,
             None,
+            None,
             BgpMetrics::new(),
         )
     }
 
     #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "EventService aggregates several independent event sources + snapshots"
+    )]
     pub(crate) fn with_dataplane_snapshots_broadcaster_and_metrics(
         rib_tx: tokio::sync::mpsc::Sender<RibUpdate>,
         peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
@@ -117,6 +126,7 @@ impl EventService {
         fib_route_snapshot: FibRouteSnapshotFn,
         dataplane_events: DataplaneEventBroadcaster,
         dataplane_route_events: DataplaneRouteEventBroadcaster,
+        bfd_events: BfdEventBroadcaster,
         metrics: BgpMetrics,
     ) -> Self {
         Self {
@@ -126,6 +136,7 @@ impl EventService {
             fib_route_snapshot,
             dataplane_events,
             dataplane_route_events,
+            bfd_events,
             metrics,
         }
     }
@@ -421,12 +432,52 @@ impl proto::event_service_server::EventService for EventService {
                 Box::pin(tokio_stream::empty())
             };
 
+        let bfd_stream: Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send>> =
+            if filter.wants_bfd_events() {
+                if let Some(bfd_rx) = self
+                    .bfd_events
+                    .as_ref()
+                    .map(tokio::sync::broadcast::Sender::subscribe)
+                {
+                    let bfd_filter = filter.clone();
+                    let bfd_metrics = self.metrics.clone();
+                    let bfd_subscriber_guard =
+                        bfd_metrics.event_stream_subscriber_guard("watch_events", "bfd");
+                    Box::pin(BroadcastStream::new(bfd_rx).filter_map(
+                        move |result| match result {
+                            Err(BroadcastStreamRecvError::Lagged(missed)) => {
+                                let _subscriber_guard = &bfd_subscriber_guard;
+                                bfd_metrics.record_event_stream_lagged("watch_events", "bfd", missed);
+                                debug!(
+                                    missed,
+                                    "WatchEvents BFD subscriber lagged, emitting missed-event signal"
+                                );
+                                Some(Ok(stream_lag_bgp_event(proto::EventCategory::Bfd, missed)))
+                            }
+                            Ok(event) => {
+                                let _subscriber_guard = &bfd_subscriber_guard;
+                                if bfd_filter.matches_bfd_event(&event) {
+                                    Some(Ok(event))
+                                } else {
+                                    None
+                                }
+                            }
+                        },
+                    ))
+                } else {
+                    Box::pin(tokio_stream::empty())
+                }
+            } else {
+                Box::pin(tokio_stream::empty())
+            };
+
         Ok(Response::new(Box::pin(
             route_stream
                 .merge(session_stream)
                 .merge(policy_stream)
                 .merge(dataplane_stream)
-                .merge(evpn_stream),
+                .merge(evpn_stream)
+                .merge(bfd_stream),
         )))
     }
 
@@ -1251,6 +1302,7 @@ mod tests {
             Arc::new(Vec::new),
             dataplane_event_broadcaster(),
             Some(route_tx.clone()),
+            None,
             BgpMetrics::new(),
         );
         let response = service
@@ -1307,6 +1359,112 @@ mod tests {
         };
         assert_eq!(payload.source, "fib");
         assert_eq!(payload.table_name, "blue");
+    }
+
+    fn bfd_bgp_event(event_type: proto::BgpEventType, peer: &str) -> proto::BgpEvent {
+        proto::BgpEvent {
+            timestamp: "0".to_string(),
+            category: proto::EventCategory::Bfd as i32,
+            event_type: event_type as i32,
+            severity: proto::EventSeverity::Info as i32,
+            peer_address: peer.to_string(),
+            previous_peer_address: String::new(),
+            prefix: String::new(),
+            prefix_length: 0,
+            afi_safi: proto::AddressFamily::Unspecified as i32,
+            summary: format!("bfd {peer}"),
+            target_peer_address: String::new(),
+            payload: Some(proto::bgp_event::Payload::Bfd(proto::BfdSessionEvent {
+                event_type: event_type as i32,
+                peer_address: peer.to_string(),
+                timestamp: "0".to_string(),
+                old_state: proto::BfdSessionState::Down as i32,
+                new_state: proto::BfdSessionState::Up as i32,
+                diagnostic: "none".to_string(),
+                reason: String::new(),
+            })),
+        }
+    }
+
+    #[tokio::test]
+    async fn bfd_events_stream_filtered_by_category_and_peer() {
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
+        let (bfd_tx, _) = broadcast::channel(16);
+        let service = EventService::with_dataplane_snapshots_broadcaster_and_metrics(
+            rib_tx,
+            peer_tx,
+            Arc::new(Vec::new),
+            Arc::new(Vec::new),
+            dataplane_event_broadcaster(),
+            None,
+            Some(bfd_tx.clone()),
+            BgpMetrics::new(),
+        );
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Bfd as i32],
+                event_types: vec![],
+                neighbor_address: "10.0.0.1".to_string(),
+                afi_safi: proto::AddressFamily::Unspecified as i32,
+                prefix: String::new(),
+                prefix_length: 0,
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        // Wrong peer — filtered out.
+        bfd_tx
+            .send(bfd_bgp_event(proto::BgpEventType::BfdSessionUp, "10.0.0.2"))
+            .unwrap();
+        // Matching peer — delivered.
+        bfd_tx
+            .send(bfd_bgp_event(proto::BgpEventType::BfdSessionUp, "10.0.0.1"))
+            .unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.category, proto::EventCategory::Bfd as i32);
+        assert_eq!(event.event_type, proto::BgpEventType::BfdSessionUp as i32);
+        assert_eq!(event.peer_address, "10.0.0.1");
+        let Some(proto::bgp_event::Payload::Bfd(payload)) = event.payload else {
+            panic!("expected bfd payload");
+        };
+        assert_eq!(payload.new_state, proto::BfdSessionState::Up as i32);
+    }
+
+    #[tokio::test]
+    async fn bfd_events_not_in_default_route_session_stream() {
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
+        let (bfd_tx, _) = broadcast::channel(16);
+        let service = EventService::with_dataplane_snapshots_broadcaster_and_metrics(
+            rib_tx,
+            peer_tx,
+            Arc::new(Vec::new),
+            Arc::new(Vec::new),
+            dataplane_event_broadcaster(),
+            None,
+            Some(bfd_tx.clone()),
+            BgpMetrics::new(),
+        );
+        // Default request (no categories) = route + session only; BFD opt-in.
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest::default()))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+        // The default stream never subscribes to BFD, so `send` may report no
+        // receivers — that absence is exactly the property under test.
+        let _ = bfd_tx.send(bfd_bgp_event(proto::BgpEventType::BfdSessionUp, "10.0.0.1"));
+        // The BFD event must not leak into the default stream.
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(300), stream.next()).await;
+        assert!(result.is_err(), "BFD event leaked into the default stream");
     }
 
     #[test]
@@ -1998,6 +2156,7 @@ mod tests {
             Arc::new(Vec::new),
             dataplane_event_broadcaster(),
             None,
+            None,
             metrics.clone(),
         );
         let response = service
@@ -2037,6 +2196,7 @@ mod tests {
             Arc::new(Vec::new),
             Arc::new(Vec::new),
             dataplane_event_broadcaster(),
+            None,
             None,
             metrics.clone(),
         );

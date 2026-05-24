@@ -152,6 +152,40 @@ impl WatchEventsFilter {
         evpn_selected && self.afi.is_none() && self.prefix.is_none() && evpn_type_allowed
     }
 
+    pub(super) fn wants_bfd_events(&self) -> bool {
+        // BFD events are peer-scoped but carry no family/prefix, so a
+        // family/prefix-filtered request never selects them (like session /
+        // EVPN). Opt-in: not part of the default route+session set.
+        let bfd_category_requested = self
+            .categories
+            .contains(&(proto::EventCategory::Bfd as i32));
+        let bfd_type_allowed = self.event_types_match_bfd_category();
+        let bfd_selected = bfd_category_requested
+            || (self.categories.is_empty() && !self.event_types.is_empty() && bfd_type_allowed);
+        bfd_selected && self.afi.is_none() && self.prefix.is_none() && bfd_type_allowed
+    }
+
+    pub(super) fn matches_bfd_event(&self, event: &proto::BgpEvent) -> bool {
+        if !self.wants_bfd_events() || event.category != proto::EventCategory::Bfd as i32 {
+            return false;
+        }
+        let Ok(event_type) = proto::BgpEventType::try_from(event.event_type) else {
+            return false;
+        };
+        if !bfd_bgp_event_type_allowed(event_type) {
+            return false;
+        }
+        if !self.event_types.is_empty() && !self.event_types.contains(&event.event_type) {
+            return false;
+        }
+        if let Some(peer) = self.peer
+            && event.peer_address.parse::<IpAddr>().ok() != Some(peer)
+        {
+            return false;
+        }
+        true
+    }
+
     pub(super) fn matches_session_event(&self, event: &SessionEvent) -> bool {
         if !self.wants_session_events() {
             return false;
@@ -284,6 +318,23 @@ impl WatchEventsFilter {
                 )
             })
     }
+
+    fn event_types_match_bfd_category(&self) -> bool {
+        self.event_types.is_empty()
+            || self.event_types.iter().any(|event_type| {
+                proto::BgpEventType::try_from(*event_type).is_ok_and(bfd_bgp_event_type_allowed)
+            })
+    }
+}
+
+fn bfd_bgp_event_type_allowed(event_type: proto::BgpEventType) -> bool {
+    matches!(
+        event_type,
+        proto::BgpEventType::BfdSessionUp
+            | proto::BgpEventType::BfdSessionDown
+            | proto::BgpEventType::BfdSessionStateChanged
+            | proto::BgpEventType::StreamLagged
+    )
 }
 
 fn dataplane_bgp_event_type_allowed(event_type: proto::BgpEventType) -> bool {
@@ -388,16 +439,9 @@ fn parse_category_filter(categories: &[i32]) -> Result<BTreeSet<i32>, Status> {
             | proto::EventCategory::Session
             | proto::EventCategory::Policy
             | proto::EventCategory::Dataplane
-            | proto::EventCategory::Evpn => {
+            | proto::EventCategory::Evpn
+            | proto::EventCategory::Bfd => {
                 parsed.insert(category as i32);
-            }
-            // The BFD event proto contract exists, but the actor does not yet
-            // emit into WatchEvents (ADR-0067 step 3b). Reject the filter rather
-            // than hand back an empty/immediately-closed stream.
-            proto::EventCategory::Bfd => {
-                return Err(Status::invalid_argument(
-                    "BFD event streaming is not yet available",
-                ));
             }
             proto::EventCategory::Unspecified => {
                 return Err(Status::invalid_argument(
@@ -434,17 +478,11 @@ fn parse_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<i32>, Status>
             | proto::BgpEventType::EvpnRouteAdded
             | proto::BgpEventType::EvpnRouteWithdrawn
             | proto::BgpEventType::EvpnRouteBestChanged
+            | proto::BgpEventType::BfdSessionUp
+            | proto::BgpEventType::BfdSessionDown
+            | proto::BgpEventType::BfdSessionStateChanged
             | proto::BgpEventType::StreamLagged => {
                 parsed.insert(event_type as i32);
-            }
-            // BFD event types are defined but not yet streamed (ADR-0067 step
-            // 3b); reject rather than silently match nothing.
-            proto::BgpEventType::BfdSessionUp
-            | proto::BgpEventType::BfdSessionDown
-            | proto::BgpEventType::BfdSessionStateChanged => {
-                return Err(Status::invalid_argument(
-                    "BFD event streaming is not yet available",
-                ));
             }
             proto::BgpEventType::Unspecified => {
                 return Err(Status::invalid_argument(

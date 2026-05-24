@@ -58,7 +58,7 @@ timing before arming the teardown. The staged delivery is:
    oneof) at the same time so it is stable, but **does not yet stream live BFD
    events** — see 3b.
 3b. **Event emission** — the actor publishes state-change events into the
-   unified `EventService.WatchEvents` stream (category/type filtered). **[next]**
+   unified `EventService.WatchEvents` stream (category/type filtered). **[shipped]**
 4. **BGP coupling** (RFC 5882) — behavior change, config-gated.
 5. **Interop (M51) + docs** — FRR `bfdd` cross-check, `COMPARISON.md` flip.
 
