@@ -1,0 +1,19 @@
+[package]
+publish = false
+name = "rustbgpd-bfd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "RFC 5880 BFD control-packet codec and single-hop session state machine — pure, no I/O, no async runtime"
+readme = "README.md"
+
+[dependencies]
+bytes.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest = "1"

@@ -2457,6 +2457,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustbgpd-bfd"
+version = "0.27.0"
+dependencies = [
+ "bytes",
+ "proptest",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "rustbgpd-bmp"
 version = "0.27.0"
 dependencies = [

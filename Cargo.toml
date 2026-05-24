@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/wire",
+    "crates/bfd",
     "crates/fsm",
     "crates/transport",
     "crates/rib",
@@ -29,6 +30,7 @@ categories = ["network-programming"]
 [workspace.dependencies]
 # Internal crates
 rustbgpd-wire = { path = "crates/wire" }
+rustbgpd-bfd = { path = "crates/bfd", version = "0.27.0" }
 rustbgpd-fsm = { path = "crates/fsm", version = "0.27.0" }
 rustbgpd-transport = { path = "crates/transport", version = "0.27.0" }
 rustbgpd-rib = { path = "crates/rib", version = "0.27.0" }
