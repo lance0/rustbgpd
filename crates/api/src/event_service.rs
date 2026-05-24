@@ -41,6 +41,9 @@ const DATAPLANE_EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::
 
 pub(crate) type DataplaneEventBroadcaster = Arc<Mutex<Option<broadcast::Sender<proto::BgpEvent>>>>;
 pub(crate) type DataplaneRouteEventBroadcaster = Option<broadcast::Sender<proto::BgpEvent>>;
+/// Live ADR-0067 BFD session-event source for `WatchEvents`. `None` disables
+/// the BFD event stream.
+pub(crate) type BfdEventBroadcaster = Option<broadcast::Sender<proto::BgpEvent>>;
 
 #[must_use]
 pub(crate) fn dataplane_event_broadcaster() -> DataplaneEventBroadcaster {
@@ -56,7 +59,7 @@ pub struct EventService {
     fib_route_snapshot: FibRouteSnapshotFn,
     dataplane_events: DataplaneEventBroadcaster,
     dataplane_route_events: DataplaneRouteEventBroadcaster,
-    bfd_events: DataplaneRouteEventBroadcaster,
+    bfd_events: BfdEventBroadcaster,
     metrics: BgpMetrics,
 }
 
@@ -123,7 +126,7 @@ impl EventService {
         fib_route_snapshot: FibRouteSnapshotFn,
         dataplane_events: DataplaneEventBroadcaster,
         dataplane_route_events: DataplaneRouteEventBroadcaster,
-        bfd_events: DataplaneRouteEventBroadcaster,
+        bfd_events: BfdEventBroadcaster,
         metrics: BgpMetrics,
     ) -> Self {
         Self {

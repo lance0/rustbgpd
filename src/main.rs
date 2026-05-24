@@ -182,9 +182,9 @@ fn spawn_fib_dataplane_event_bridge(
 }
 
 /// Convert a BFD actor state-change event into a unified gRPC `BgpEvent`
-/// (ADR-0067 step 3b). Up → `SESSION_UP`, any down (Down/`AdminDown`) →
-/// `SESSION_DOWN`, otherwise `STATE_CHANGED`; the full old/new states are
-/// always carried in the `BfdSessionEvent` payload.
+/// (ADR-0067 step 3b). Up → `BfdSessionUp`, any down (Down/`AdminDown`) →
+/// `BfdSessionDown`, otherwise `BfdSessionStateChanged`; the full old/new
+/// states are always carried in the `BfdSessionEvent` payload.
 fn bfd_runtime_event_to_bgp_event(
     event: &bfd_runtime::BfdRuntimeEvent,
 ) -> rustbgpd_api::proto::BgpEvent {
@@ -1525,9 +1525,11 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         tokio::sync::watch::channel(Vec::<bfd_runtime::BfdStatus>::new());
     // Actor state-change events (ADR-0067 step 3b): the actor broadcasts
     // BfdRuntimeEvent; a bridge converts each to a proto BgpEvent that
-    // EventService surfaces over WatchEvents. Both channels are created
-    // unconditionally so the EventService stream is long-lived even when no BFD
-    // sessions are configured (it just stays empty).
+    // EventService surfaces over WatchEvents. The proto `bfd_bgp_event_tx`
+    // (held in ServeConfig) is the long-lived sink, so the WatchEvents BFD
+    // stream stays open even when no sessions are configured. The actor event
+    // channel (`bfd_event_tx`) is dropped if the actor doesn't start (no
+    // sessions / off Linux), which simply ends the bridge task.
     let (bfd_event_tx, bfd_event_rx) =
         tokio::sync::broadcast::channel::<bfd_runtime::BfdRuntimeEvent>(1024);
     let (bfd_bgp_event_tx, _) =
