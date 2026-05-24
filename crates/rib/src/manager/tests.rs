@@ -75,6 +75,20 @@ async fn query_best_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<Route> {
     reply_rx.await.unwrap()
 }
 
+async fn query_fib_install_candidates(
+    tx: &mpsc::Sender<RibUpdate>,
+    max_paths: u32,
+) -> Vec<crate::route::FibInstallCandidate> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryFibInstallCandidates {
+        max_paths,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx.await.unwrap()
+}
+
 async fn query_received_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Vec<Route> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryReceivedRoutes {
@@ -9949,6 +9963,189 @@ async fn evpn_route_event_withdrawn_on_last_removed() {
         .previous_best
         .expect("Withdrawn must carry the prior best so consumers recover VNI");
     assert_eq!(prior.peer, peer);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+// --- FIB install-candidate view (multipath/ECMP) ---
+
+#[tokio::test]
+async fn fib_install_candidates_groups_equal_cost_ecmp() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+    let peer1 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1));
+    let peer2 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2));
+    // Two equal-cost eBGP paths (empty attrs ⇒ same LP/AS/origin/MED/class).
+    tx.send(RibUpdate::RoutesReceived {
+        peer: peer1,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        peer: peer2,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 2))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let cands = query_fib_install_candidates(&tx, 2).await;
+    assert_eq!(cands.len(), 1);
+    let c = &cands[0];
+    let nhs: Vec<IpAddr> = c.next_hops.iter().map(|n| n.next_hop).collect();
+    assert_eq!(nhs.len(), 2, "both equal-cost next-hops installed");
+    // best (lower peer addr tiebreak) is index 0
+    assert_eq!(c.next_hops[0].next_hop, c.best.next_hop);
+    assert!(nhs.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+    assert!(nhs.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn fib_install_candidates_respects_max_paths() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+    for (peer, nh) in [
+        (
+            IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)),
+            Ipv4Addr::new(10, 0, 0, 1),
+        ),
+        (
+            IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2)),
+            Ipv4Addr::new(10, 0, 0, 2),
+        ),
+    ] {
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![make_route(prefix, nh)],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    // max_paths=1 ⇒ single best next-hop only (today's behavior).
+    let cands = query_fib_install_candidates(&tx, 1).await;
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].next_hops.len(), 1);
+    assert_eq!(cands[0].next_hops[0].next_hop, cands[0].best.next_hop);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn fib_install_candidates_dedupes_same_next_hop_before_cap() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+    let shared_nh = Ipv4Addr::new(10, 0, 0, 9);
+    // Two peers advertising the SAME next-hop ⇒ collapses to one ECMP member.
+    let peer1 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1));
+    let peer2 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2));
+    let mut r1 = make_route(prefix, shared_nh);
+    r1.peer = peer1;
+    let mut r2 = make_route(prefix, shared_nh);
+    r2.peer = peer2;
+    tx.send(RibUpdate::RoutesReceived {
+        peer: peer1,
+        announced: vec![r1],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        peer: peer2,
+        announced: vec![r2],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let cands = query_fib_install_candidates(&tx, 2).await;
+    assert_eq!(cands.len(), 1);
+    assert_eq!(
+        cands[0].next_hops.len(),
+        1,
+        "same next-hop deduped before cap"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn fib_install_candidates_excludes_non_equal_cost() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+    // peer2 has higher LOCAL_PREF ⇒ it is the sole best; peer1 is not equal-cost.
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)),
+        announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 1), 100)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2)),
+        announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 2), 200)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let cands = query_fib_install_candidates(&tx, 4).await;
+    assert_eq!(cands.len(), 1);
+    assert_eq!(
+        cands[0].next_hops.len(),
+        1,
+        "lower-LP path is not co-installed"
+    );
+    assert_eq!(cands[0].best.peer, IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2)));
 
     drop(tx);
     handle.await.unwrap();

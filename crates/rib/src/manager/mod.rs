@@ -506,6 +506,9 @@ impl RibManager {
                 self.handle_query_received_routes(peer, reply);
             }
             RibUpdate::QueryBestRoutes { reply } => self.handle_query_best_routes(reply),
+            RibUpdate::QueryFibInstallCandidates { max_paths, reply } => {
+                self.handle_query_fib_install_candidates(max_paths, reply);
+            }
             RibUpdate::QueryPeerGroups { reply } => self.handle_query_peer_groups(reply),
             RibUpdate::QueryAdvertisedRoutes { peer, reply } => {
                 self.handle_query_advertised_routes(peer, reply);
@@ -642,6 +645,64 @@ impl RibManager {
     ) {
         let routes: Vec<_> = self.loc_rib.iter().cloned().collect();
         if reply.send(routes).is_err() {
+            warn!("query caller dropped before receiving response");
+        }
+    }
+
+    /// Build the per-prefix FIB install-candidate view: each Loc-RIB best plus
+    /// the equal-cost (ECMP) next-hop set, bounded by `max_paths`. Loc-RIB holds
+    /// only the single best per prefix, so the equal-cost siblings are gathered
+    /// from the Adj-RIB-In snapshots (the same source `distribute_multipath_prefix`
+    /// scans for Add-Path), filtered by `multipath_equal`. Output ordering: the
+    /// best route's next-hop is always index 0; the remaining equal-cost siblings
+    /// follow ordered by `(next_hop, peer, path_id)`. Deduped by next-hop *before*
+    /// the `max_paths` cap.
+    fn handle_query_fib_install_candidates(
+        &mut self,
+        max_paths: u32,
+        reply: tokio::sync::oneshot::Sender<Vec<crate::route::FibInstallCandidate>>,
+    ) {
+        use crate::best_path::multipath_equal;
+        use crate::route::{FibInstallCandidate, FibInstallNextHop};
+
+        let cap = max_paths.max(1) as usize;
+        let mut out = Vec::with_capacity(self.loc_rib.len());
+        for best in self.loc_rib.iter() {
+            let mut siblings: Vec<&crate::route::Route> = self
+                .ribs
+                .values()
+                .flat_map(|rib| rib.iter_prefix(&best.prefix))
+                .filter(|r| multipath_equal(best, r))
+                .collect();
+            siblings.sort_by(|a, b| {
+                a.next_hop
+                    .cmp(&b.next_hop)
+                    .then(a.peer.cmp(&b.peer))
+                    .then(a.path_id.cmp(&b.path_id))
+            });
+
+            let mut next_hops: Vec<FibInstallNextHop> = Vec::new();
+            let mut seen: std::collections::BTreeSet<IpAddr> = std::collections::BTreeSet::new();
+            // best next-hop is always index 0
+            for r in std::iter::once(best).chain(siblings.iter().copied()) {
+                if next_hops.len() >= cap {
+                    break;
+                }
+                if seen.insert(r.next_hop) {
+                    next_hops.push(FibInstallNextHop {
+                        next_hop: r.next_hop,
+                        link_local_next_hop: r.link_local_next_hop,
+                        peer: r.peer,
+                        path_id: r.path_id,
+                    });
+                }
+            }
+            out.push(FibInstallCandidate {
+                best: best.clone(),
+                next_hops,
+            });
+        }
+        if reply.send(out).is_err() {
             warn!("query caller dropped before receiving response");
         }
     }

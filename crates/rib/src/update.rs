@@ -9,7 +9,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::best_path::BestPathReason;
 use crate::event::{EvpnRouteEvent, RouteEvent};
-use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
+use crate::route::{EvpnRibRoute, FibInstallCandidate, FlowSpecRoute, Route};
 
 /// Routes to be sent outbound to a peer.
 pub struct OutboundRouteUpdate {
@@ -201,6 +201,15 @@ pub enum RibUpdate {
     QueryBestRoutes {
         /// Response channel.
         reply: oneshot::Sender<Vec<Route>>,
+    },
+    /// Query: return per-prefix FIB install candidates — the best route plus
+    /// its equal-cost (ECMP) next-hop set, bounded by `max_paths`. The
+    /// deliberate install-candidate view ADR-0066 builds multipath on.
+    QueryFibInstallCandidates {
+        /// Max equal-cost next-hops per prefix (per-table `maximum_paths`).
+        max_paths: u32,
+        /// Response channel.
+        reply: oneshot::Sender<Vec<FibInstallCandidate>>,
     },
     /// Query: return the current per-peer peer-group map.
     QueryPeerGroups {

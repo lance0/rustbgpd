@@ -233,6 +233,55 @@ pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
     a.peer.cmp(&b.peer)
 }
 
+/// Whether `other` is co-installable with the best route `best` as an
+/// equal-cost (ECMP) sibling.
+///
+/// Two paths group together iff they tie on every decision step *above* the
+/// next-hop-distinguishing tiebreakers — stale tier, RPKI, ASPA, `LOCAL_PREF`,
+/// `AS_PATH`, `ORIGIN`, `MED` — **and** are the same eBGP/iBGP class (a group is
+/// never mixed; forwarding across an eBGP and an iBGP path at once is not a
+/// thing operators expect). The tiebreakers `best_path_cmp` applies below this
+/// point (`CLUSTER_LIST` length, `ORIGINATOR_ID`, peer address) are deliberately
+/// *not* compared: those exist precisely to pick one winner among otherwise
+/// co-equal paths, which are exactly the paths we want to bundle.
+///
+/// `AS_PATH` is compared for **full equality** (not just length) — the
+/// conservative `maximum-paths` default (matches FRR without
+/// `as-path multipath-relax`). Loosening to length-only is a deliberate future
+/// knob, not the v1 behavior.
+///
+/// iBGP grouping is well-defined here despite the lack of an IGP: `best_path_cmp`
+/// has no IGP-metric step (the daemon carries a directly-usable next-hop and does
+/// no recursive resolution), so iBGP equal-cost is fully determined by the BGP
+/// decision chain above.
+///
+/// Locally injected (controller) routes never participate in maximum-paths — they
+/// install as the single best path — so a `RouteOrigin::Local` on either side
+/// disqualifies grouping (see `same_multipath_class`).
+#[must_use]
+pub fn multipath_equal(best: &Route, other: &Route) -> bool {
+    stale_rank(best) == stale_rank(other)
+        && rpki_preference(best.validation_state) == rpki_preference(other.validation_state)
+        && aspa_preference(best.aspa_state) == aspa_preference(other.aspa_state)
+        && best.local_pref() == other.local_pref()
+        && best.as_path() == other.as_path()
+        && best.origin() == other.origin()
+        && best.med() == other.med()
+        && same_multipath_class(best, other)
+}
+
+/// eBGP groups only with eBGP and iBGP only with iBGP. `RouteOrigin::Local`
+/// (controller-injected) routes are *not* part of maximum-paths, so any Local on
+/// either side returns `false` — `best.is_ebgp() == other.is_ebgp()` would wrongly
+/// treat Local and iBGP as the same "not-eBGP" class and co-install them.
+fn same_multipath_class(a: &Route, b: &Route) -> bool {
+    use crate::route::RouteOrigin;
+    matches!(
+        (&a.origin_type, &b.origin_type),
+        (RouteOrigin::Ebgp, RouteOrigin::Ebgp) | (RouteOrigin::Ibgp, RouteOrigin::Ibgp)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
@@ -292,6 +341,84 @@ mod tests {
         Arc::make_mut(&mut r.attributes).retain(|a| !matches!(a, PathAttribute::Med(_)));
         Arc::make_mut(&mut r.attributes).push(PathAttribute::Med(med));
         r
+    }
+
+    const fn with_ibgp(mut r: Route) -> Route {
+        r.origin_type = RouteOrigin::Ibgp;
+        r
+    }
+
+    const fn with_local(mut r: Route) -> Route {
+        r.origin_type = RouteOrigin::Local;
+        r
+    }
+
+    // --- multipath_equal tests ---
+
+    #[test]
+    fn multipath_equal_true_for_co_equal_paths_differing_only_on_tiebreakers() {
+        // Same LP/AS_PATH/ORIGIN/MED/class; differ only on peer + next-hop
+        // (the tiebreakers we deliberately ignore) → co-installable.
+        let best = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        let other = base_route(Ipv4Addr::new(1, 0, 0, 2));
+        assert!(multipath_equal(&best, &other));
+    }
+
+    #[test]
+    fn multipath_equal_false_on_local_pref() {
+        let best = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 1)), 200);
+        let other = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 2)), 100);
+        assert!(!multipath_equal(&best, &other));
+    }
+
+    #[test]
+    fn multipath_equal_false_on_as_path_length() {
+        let best = with_as_path(base_route(Ipv4Addr::new(1, 0, 0, 1)), vec![65001]);
+        let other = with_as_path(base_route(Ipv4Addr::new(1, 0, 0, 2)), vec![65001, 65002]);
+        assert!(!multipath_equal(&best, &other));
+    }
+
+    #[test]
+    fn multipath_equal_false_on_exact_as_path_same_length() {
+        // v1 requires *exact* AS_PATH: equal length but different ASNs do NOT
+        // group (this is the conservative default; multipath-relax is future).
+        let best = with_as_path(base_route(Ipv4Addr::new(1, 0, 0, 1)), vec![65001, 65010]);
+        let other = with_as_path(base_route(Ipv4Addr::new(1, 0, 0, 2)), vec![65001, 65020]);
+        assert!(!multipath_equal(&best, &other));
+    }
+
+    #[test]
+    fn multipath_equal_false_on_origin_and_med() {
+        let best = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        assert!(!multipath_equal(
+            &best,
+            &with_origin(base_route(Ipv4Addr::new(1, 0, 0, 2)), Origin::Egp)
+        ));
+        assert!(!multipath_equal(
+            &best,
+            &with_med(base_route(Ipv4Addr::new(1, 0, 0, 2)), 50)
+        ));
+    }
+
+    #[test]
+    fn multipath_equal_false_mixing_ebgp_and_ibgp() {
+        // Groups are homogeneous: never bundle an eBGP path with an iBGP path.
+        let ebgp = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        let ibgp = with_ibgp(base_route(Ipv4Addr::new(1, 0, 0, 2)));
+        assert!(!multipath_equal(&ebgp, &ibgp));
+    }
+
+    #[test]
+    fn multipath_equal_false_for_local_routes() {
+        // Controller-injected (Local) routes are not part of maximum-paths.
+        // The class guard must not treat Local and iBGP as the same "not-eBGP"
+        // class (the bug `is_ebgp() == is_ebgp()` had), nor group two Locals.
+        let ibgp = with_ibgp(base_route(Ipv4Addr::new(1, 0, 0, 1)));
+        let local1 = with_local(base_route(Ipv4Addr::new(1, 0, 0, 2)));
+        let local2 = with_local(base_route(Ipv4Addr::new(1, 0, 0, 3)));
+        assert!(!multipath_equal(&local1, &ibgp));
+        assert!(!multipath_equal(&ibgp, &local1));
+        assert!(!multipath_equal(&local1, &local2));
     }
 
     // --- Decision step tests ---
