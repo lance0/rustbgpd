@@ -227,6 +227,7 @@ impl PeerManager {
                     dynamic_neighbor_limit: None,
                     honor_graceful_shutdown: false,
                     honor_blackhole: false,
+                    multipath_relax: false,
                     install_blackhole_discard: false,
                     allow_blackhole_broad_prefixes: false,
                 },

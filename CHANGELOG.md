@@ -9,6 +9,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **ADR-0066 multipath-relax.** New global `[global].multipath_relax` (default
+  `false`) relaxes unicast ECMP grouping from an exact `AS_PATH` match to
+  `AS_PATH`-*length* equality, so equal-length paths through different ASes
+  co-install as multipath (FRR's `bgp bestpath as-path multipath-relax`). It is
+  a best-path-wide knob (the FIB install-candidate query groups once at the
+  widest `maximum_paths`), threaded into `multipath_equal`; eBGP/iBGP class
+  homogeneity and all other best-path tie conditions are unchanged. Inert unless
+  a `[[fib_tables]]` sets `maximum_paths > 1`.
+
 ## [0.28.0] — 2026-05-24
 
 ### Added

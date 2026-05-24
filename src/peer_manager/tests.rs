@@ -197,6 +197,7 @@ fn make_dynamic_manager_config() -> Config {
             dynamic_neighbor_limit: Some(100),
             honor_graceful_shutdown: false,
             honor_blackhole: false,
+            multipath_relax: false,
             install_blackhole_discard: false,
             allow_blackhole_broad_prefixes: false,
         },

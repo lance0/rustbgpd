@@ -1,0 +1,41 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+# ADR-0066 multipath-relax: group equal-cost candidates by AS_PATH *length*
+# rather than an exact AS_PATH match. The two FRR peers are in different ASes
+# ([65002] vs [65003]) of equal path length, so this knob is what lets them
+# co-install as ECMP.
+multipath_relax = true
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+families = ["ipv4_unicast"]
+maximum_paths = 2
+
+# Two eBGP neighbors in DIFFERENT remote ASes — equal AS_PATH length, distinct
+# ASNs. Exact-AS_PATH grouping would refuse to bundle them; multipath_relax
+# groups them.
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr1-m52"
+hold_time = 90
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65003
+description = "frr2-m52"
+hold_time = 90
+
+[security.grpc]
+enforcement = "legacy"

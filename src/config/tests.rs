@@ -5775,6 +5775,28 @@ metric = 200
 }
 
 #[test]
+fn multipath_relax_parses_and_defaults_false() {
+    // ADR-0066 multipath-relax is a global best-path knob, default off.
+    let base = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+"#;
+    assert!(
+        !parse(base).unwrap().global.multipath_relax,
+        "multipath_relax defaults to false"
+    );
+    let on = base.replace(
+        "listen_port = 179",
+        "listen_port = 179\nmultipath_relax = true",
+    );
+    assert!(parse(&on).unwrap().global.multipath_relax);
+}
+
+#[test]
 fn fib_tables_reject_invalid_guardrails() {
     let cases = [
         (
@@ -6545,6 +6567,22 @@ fn m51_interop_config_describes_non_strict_bfd_with_fast_profile() {
     assert_eq!(bfd.profile, "fast");
     assert!(bfd.enabled);
     assert!(!bfd.strict);
+}
+
+#[test]
+fn m52_interop_config_enables_multipath_relax_with_mixed_asns() {
+    // Pin the M52 interop fixture: multipath_relax on, maximum_paths 2, and two
+    // neighbors in *different* ASes (65002 / 65003) — the whole point of the
+    // smoke is that only multipath-relax co-installs the equal-length,
+    // different-AS paths.
+    let config = parse(include_str!(
+        "../../tests/interop/configs/rustbgpd-m52-fib-ecmp-relax.toml"
+    ))
+    .unwrap();
+    assert!(config.global.multipath_relax);
+    assert_eq!(config.fib_tables[0].maximum_paths, Some(2));
+    let asns: Vec<u32> = config.neighbors.iter().map(|n| n.remote_asn).collect();
+    assert_eq!(asns, vec![65002, 65003], "peers must be in different ASes");
 }
 
 #[test]

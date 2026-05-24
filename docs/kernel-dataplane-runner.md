@@ -25,7 +25,7 @@ runner.
 
 5. If several runner services are registered, keep them on the same host and
    Docker daemon. The workflow builds `rustbgpd:dev` once, then fans out the
-   M36–M51 EVPN / FIB / TCP-AO / BFD jobs against that shared local image.
+   M36–M52 EVPN / FIB / TCP-AO / BFD jobs against that shared local image.
 
 ## Host Requirements
 
@@ -60,6 +60,7 @@ The protected workflow currently runs:
 - M40: EVPN aliasing dataplane ECMP via FDB nexthop groups against FRR EVPN-MH.
 - M42: ADR-0061 configured-table unicast FIB runtime against FRR.
 - M50: ADR-0066 unicast multipath/ECMP FIB install against two FRR peers.
+- M52: ADR-0066 multipath-relax against two FRR peers in different ASes.
 - M51: ADR-0067 single-hop BFD + RFC 5882 coupling against FRR `bfdd`.
 - M43: ADR-0062 static-neighbor TCP-AO protected session against BIRD 3.2.1
   (conditional on the runner advertising `CONFIG_TCP_AO=y`).

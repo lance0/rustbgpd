@@ -1533,6 +1533,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         fib_runtime::FibRuntimeConfig {
             tables: config.fib_tables.clone(),
             owned_state_path: Some(config.runtime_state_dir().join("fib-owned.json")),
+            multipath_relax: config.global.multipath_relax,
         },
         rib_tx.clone(),
         rib_query_tx.clone(),
@@ -2271,6 +2272,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
                 dynamic_neighbor_limit: None,
                 honor_graceful_shutdown: false,
                 honor_blackhole: false,
+                multipath_relax: false,
                 install_blackhole_discard: false,
                 allow_blackhole_broad_prefixes: false,
             },
