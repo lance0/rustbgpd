@@ -11,6 +11,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0066 unicast multipath / ECMP FIB install.** A new per-table knob
+  `[[fib_tables]].maximum_paths` (default `1`, validated `>= 1`, capped at 256)
+  selects up to N equal-cost BGP paths per prefix and installs them as a kernel
+  `RTA_MULTIPATH` route. Groups are homogeneous (eBGP **or** iBGP, never mixed)
+  and require exact `AS_PATH` equality; locally-originated routes never group. A
+  single next-hop still emits a plain `RTA_GATEWAY`, so the default is
+  byte-for-byte today's behavior. The RIB gained
+  `QueryFibInstallCandidates` / `multipath_equal` (the equal-cost
+  install-candidate view ADR-0061 deferred); crash-restart owned-state migrates
+  v1 → v2 (loads and upgrades the legacy scalar next-hop); `ListFibRoutes` and
+  `rustbgpctl` surface the full `next_hops` set (scalar `next_hop` retained as
+  `next_hops[0]` for back-compat). Validated by projection / canonicalization /
+  owned-state unit tests, kernel encode→parse round-trips, a privileged netns
+  install/failover test, and interop smoke **M50**
+  (`tests/interop/m50-fib-ecmp-frr.clab.yml`) against two equal-cost FRR peers.
+  Supersedes ADR-0061's ECMP deferral.
 - **ADR-0063 EVPN runtime convergence — `ip_vrf` relink.**
   `EvpnService.ApplyEvpnRuntime` now commits an L2VNI re-homed to a different
   IP-VRF (or its `ip_vrf` link added/removed) at runtime. A relink edits no

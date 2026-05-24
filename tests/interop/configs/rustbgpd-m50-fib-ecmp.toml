@@ -1,0 +1,38 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# ADR-0066 unicast multipath/ECMP: two equal-cost eBGP paths to the same
+# prefix install as a kernel RTA_MULTIPATH route.
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+families = ["ipv4_unicast"]
+maximum_paths = 2
+
+# Two eBGP neighbors in the SAME remote AS so both advertise 203.0.113.50/32
+# with an identical AS_PATH ([65002]) — the exact-AS_PATH equality v1 requires
+# to treat them as equal-cost multipath candidates.
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr1-m50"
+hold_time = 90
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65002
+description = "frr2-m50"
+hold_time = 90
+
+[security.grpc]
+enforcement = "legacy"

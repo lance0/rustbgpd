@@ -21,7 +21,7 @@ name: Kernel Dataplane
 #
 # The runner pool is expected to be multiple runner services on the same
 # host, sharing one Docker daemon. The build job creates `rustbgpd:dev`
-# once; M39/M40/M42 and the netns selectors can fan out. M43 also fans
+# once; M39/M40/M42/M50 and the netns selectors can fan out. M43 also fans
 # out when the selected runner advertises CONFIG_TCP_AO=y; otherwise it
 # records a warning and exits cleanly so runner-kernel rollout does not
 # block unrelated dataplane gates. M36-M38 are ordered below to reduce
@@ -257,6 +257,23 @@ jobs:
           label: M42
           topology: tests/interop/m42-fib-runtime-frr.clab.yml
           script: tests/interop/scripts/test-m42-fib-runtime-frr.sh
+
+  m50:
+    name: M50 — ADR-0066 unicast multipath/ECMP FIB install (FRR 10.3.1)
+    runs-on: [self-hosted, linux, kernel-dataplane]
+    needs: build-image
+    environment:
+      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run M50 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M50
+          topology: tests/interop/m50-fib-ecmp-frr.clab.yml
+          script: tests/interop/scripts/test-m50-fib-ecmp-frr.sh
 
   m43:
     name: M43 — ADR-0062 TCP-AO protected session (BIRD 3.2.1)

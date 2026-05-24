@@ -824,6 +824,11 @@ message FibRouteStatus {
   uint32 sampling_sample_limit = 14;
   // True when no rows were suppressed for this sampled status set.
   bool sampling_complete = 15;
+  // All equal-cost next-hops installed for this row (unicast multipath /
+  // ECMP, ADR-0066). One entry == single-path; more == kernel RTA_MULTIPATH.
+  // The scalar `next_hop` above stays populated as `next_hops[0]` for
+  // back-compat with clients that predate multipath.
+  repeated string next_hops = 16;
 }
 
 message ListFibRoutesResponse {

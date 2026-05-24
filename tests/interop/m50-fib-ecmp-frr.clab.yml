@@ -1,0 +1,66 @@
+# Containerlab topology: rustbgpd ↔ 2× FRR (M50 — ADR-0066 unicast ECMP)
+#
+# Validates classic unicast multipath/ECMP FIB install against real FRR peers:
+#
+#   * Two FRR peers in the SAME AS (65002), one per point-to-point link, both
+#     originate 203.0.113.50/32 with an identical AS_PATH ([65002]).
+#   * rustbgpd (AS 65001) runs with [[fib_tables]] table_id=1000 metric=200
+#     maximum_paths=2.
+#   * rustbgpd must install 203.0.113.50/32 into table 1000 as a kernel
+#     multipath route with both gateways (10.0.0.2 + 10.0.1.2), RTPROT_BGP,
+#     metric 200.
+#   * Failover: when one FRR withdraws the prefix, the route collapses to the
+#     surviving single next-hop; re-advertising restores the two-way ECMP.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m50-fib-ecmp-frr.clab.yml
+#   bash tests/interop/scripts/test-m50-fib-ecmp-frr.sh
+#   containerlab destroy -t tests/interop/m50-fib-ecmp-frr.clab.yml --cleanup
+
+name: m50-fib-ecmp-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m50-fib-ecmp.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    frr1:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m50-fib-ecmp-1.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr2:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m50-fib-ecmp-2.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr1:eth1"]
+    - endpoints: ["rustbgpd:eth2", "frr2:eth1"]
+
+# Networks: 10.0.0.0/24 — rustbgpd (10.0.0.1) ↔ frr1 (10.0.0.2);
+#           10.0.1.0/24 — rustbgpd (10.0.1.1) ↔ frr2 (10.0.1.2).
+# rustbgpd AS 65001; both FRR peers AS 65002.
