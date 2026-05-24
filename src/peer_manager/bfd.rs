@@ -2,9 +2,10 @@
 //!
 //! `PeerManager` owns the desired BFD session set and consumes session state
 //! changes; the BFD actor is a pure session-runner that reconciles the desired
-//! set and never learns BGP internals. This module holds the coupling state and
-//! the non-strict teardown logic; strict-mode withholding lands in a later
-//! slice.
+//! set and never learns BGP internals. This module holds the coupling state,
+//! the non-strict teardown logic, and the strict-mode withhold decision
+//! (`bfd_should_withhold`) — enforced on both the active-open lifecycle and the
+//! passive/inbound path.
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
@@ -85,6 +86,14 @@ impl PeerManager {
             } else {
                 c.disabled.remove(&peer);
             }
+            // Deliberately do NOT clear `last_state` here. The desired set is
+            // delivered over a level-triggered `watch`, so a rapid
+            // disable→enable can coalesce — the actor may keep the existing
+            // session Up with no new transition. Clearing `last_state` in that
+            // case would leave `bfd_should_withhold` permanently true (no future
+            // Up to release it): a deadlock. The actor's drain emits an
+            // `AdminDown` over the lossless state-change channel, which updates
+            // `last_state` when the session genuinely goes away.
             true
         });
         if relevant {
