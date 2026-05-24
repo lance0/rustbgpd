@@ -58,9 +58,7 @@ pub struct BfdRuntimeConfig {
 /// A BFD session state change delivered to `PeerManager` (ADR-0067 step 4) over
 /// a lossless `mpsc` channel — distinct from the lossy [`BfdRuntimeEvent`]
 /// broadcast that feeds the operator event stream, because a missed Down would
-/// leave BGP up. (A monotonic generation can be added here if strict-mode
-/// lifecycle needs to discard changes from a stale session incarnation after a
-/// peer delete/re-add; not required for the non-strict slice.)
+/// leave BGP up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BfdStateChange {
     /// Peer IP address.
@@ -70,9 +68,20 @@ pub struct BfdStateChange {
     /// Local diagnostic accompanying the transition.
     pub diagnostic: rustbgpd_bfd::Diagnostic,
     /// Whether this Down was caused by the remote signaling `AdminDown` (RFC
-    /// 5882 §4.2). The BGP coupling uses it to avoid tearing a non-strict BGP
-    /// session down when the peer merely disabled BFD administratively.
+    /// 5882 §4.1/§4.2). The BGP coupling uses it to keep BGP up (and release a
+    /// withheld strict session) when the peer merely disabled BFD
+    /// administratively, rather than tearing BGP down.
     pub remote_admin_down: bool,
+    /// `true` for a **level re-report** (an "ack") emitted on reconcile rather
+    /// than a real state *transition*. The coupling treats an ack as
+    /// release-only — it may release a withheld session when BFD now permits BGP
+    /// but never tears BGP down. This re-confirms a session's current state to
+    /// `PeerManager` across a coalesced disable→re-enable (where the session may
+    /// stay Up with no new transition), so the strict withhold can be released
+    /// without ever trusting a possibly-stale cached state — and without a
+    /// deadlock when no fresh edge is coming. (A single-task actor + FIFO
+    /// channel guarantee ordering, so a monotonic generation is unnecessary.)
+    pub resync: bool,
 }
 
 impl BfdRuntimeConfig {
@@ -533,6 +542,29 @@ mod linux {
                 }
             }
             self.publish_status(status_tx);
+
+            // Re-confirm each running session's current state to PeerManager as
+            // an "ack" (resync=true), on the lossless coupling channel only (not
+            // the operator broadcast). This is what lets the strict BGP coupling
+            // release a withhold across a coalesced disable→re-enable — where the
+            // session may stay Up with no fresh transition — without ever
+            // trusting a stale cached state, and without deadlocking. The
+            // consumer treats an ack as release-only, so re-confirming a Down
+            // (e.g. a freshly (re)started session) never tears BGP down.
+            let acks: Vec<BfdStateChange> = self
+                .sessions
+                .values()
+                .map(|e| BfdStateChange {
+                    peer: e.peer,
+                    state: e.session.state(),
+                    diagnostic: e.last_diagnostic,
+                    remote_admin_down: e.session.remote_admin_down(),
+                    resync: true,
+                })
+                .collect();
+            for ack in acks {
+                let _ = self.state_change_tx.send(ack);
+            }
         }
 
         /// Drain one session to `AdminDown` (RFC 5880 §6.8.16 — emit the final
@@ -684,11 +716,14 @@ mod linux {
                             diagnostic,
                         });
                         // Lossless notify for PeerManager BGP coupling (step 4).
+                        // A real transition (resync=false): the consumer may tear
+                        // BGP down on a genuine Down, not just release.
                         let _ = self.state_change_tx.send(BfdStateChange {
                             peer,
                             state: new,
                             diagnostic,
                             remote_admin_down,
+                            resync: false,
                         });
                     }
                 }

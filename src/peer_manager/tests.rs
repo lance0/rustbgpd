@@ -3881,6 +3881,7 @@ fn down(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
         state: rustbgpd_bfd::SessionState::Down,
         diagnostic: rustbgpd_bfd::Diagnostic::ControlDetectionTimeExpired,
         remote_admin_down: false,
+        resync: false,
     }
 }
 
@@ -3891,6 +3892,7 @@ fn remote_admin_down(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
         state: rustbgpd_bfd::SessionState::Down,
         diagnostic: rustbgpd_bfd::Diagnostic::NeighborSignaledDown,
         remote_admin_down: true,
+        resync: false,
     }
 }
 
@@ -3902,6 +3904,30 @@ fn local_admin_down(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
         state: rustbgpd_bfd::SessionState::AdminDown,
         diagnostic: rustbgpd_bfd::Diagnostic::AdministrativelyDown,
         remote_admin_down: false,
+        resync: false,
+    }
+}
+
+/// A reconcile "ack" (resync) re-reporting a session that is currently Up.
+fn up_ack(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
+    crate::bfd_runtime::BfdStateChange {
+        peer,
+        state: rustbgpd_bfd::SessionState::Up,
+        diagnostic: rustbgpd_bfd::Diagnostic::None,
+        remote_admin_down: false,
+        resync: true,
+    }
+}
+
+/// A reconcile "ack" (resync) re-reporting a session that is currently Down
+/// (e.g. a freshly (re)started session) — must never tear BGP down.
+fn down_ack(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
+    crate::bfd_runtime::BfdStateChange {
+        peer,
+        state: rustbgpd_bfd::SessionState::Down,
+        diagnostic: rustbgpd_bfd::Diagnostic::ControlDetectionTimeExpired,
+        remote_admin_down: false,
+        resync: true,
     }
 }
 
@@ -3911,6 +3937,7 @@ fn up(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
         state: rustbgpd_bfd::SessionState::Up,
         diagnostic: rustbgpd_bfd::Diagnostic::None,
         remote_admin_down: false,
+        resync: false,
     }
 }
 
@@ -4009,10 +4036,10 @@ async fn strict_remote_admin_down_releases_withheld_bgp() {
         0,
         "strict remote AdminDown must not stop BGP"
     );
-    // And the strict add/enable decision now permits BGP (AdminDown, not Up).
+    // The hold was released (RFC 5882 §4.1 — AdminDown permits BGP).
     assert!(
-        !mgr.bfd_should_withhold(&peer),
-        "remote AdminDown permits BGP (RFC 5882 §4.1) — no withhold"
+        !mgr.bfd_withholding(&peer),
+        "remote AdminDown released the withhold"
     );
 }
 
@@ -4118,46 +4145,113 @@ async fn strict_peer_stays_withheld_without_bfd_up() {
 }
 
 #[tokio::test]
-async fn strict_does_not_withhold_when_bfd_already_up() {
-    // Deadlock guard: if BFD reached Up before the peer was added/marked held
-    // (the actor starts sessions at spawn, peers are added later), the strict
-    // add/enable decision must be level-triggered — start now, since no future
-    // transition would release a withhold.
+async fn strict_ack_releases_withhold_when_bfd_already_up() {
+    // "BFD already Up before the peer was added" case: a strict peer is always
+    // added withheld, and the actor's reconcile ack (re-reporting the session
+    // already Up) releases it — no transition needed, no deadlock, and no
+    // trusting of a cached state.
     let peer: IpAddr = "10.0.0.2".parse().unwrap();
     let counters = Arc::new(BfdCouplingCounters::default());
-    let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters));
-    assert!(mgr.bfd_should_withhold(&peer), "down/unknown → withhold");
-
-    // The Up arrives before the peer is marked held (not yet held → no start
-    // here), but it records last-known state...
-    mgr.handle_bfd_state_change(up(peer)).await;
-    // ...so a strict add/enable now must NOT withhold.
+    let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
     assert!(
-        !mgr.bfd_should_withhold(&peer),
-        "BFD already Up → do not withhold"
+        mgr.bfd_should_withhold(&peer),
+        "strict always withholds at add/enable"
     );
+    mgr.mark_bfd_withheld(peer);
+    assert!(mgr.bfd_withholding(&peer));
+
+    mgr.handle_bfd_state_change(up_ack(peer)).await;
+    wait_counter(&counters.start, 1).await;
+    assert!(!mgr.bfd_withholding(&peer), "ack of an Up session releases");
 }
 
 #[tokio::test]
-async fn strict_enable_is_level_triggered_on_bfd_state() {
+async fn strict_enable_withholds_then_ack_or_edge_releases() {
     let peer: IpAddr = "10.0.0.2".parse().unwrap();
     let counters = Arc::new(BfdCouplingCounters::default());
     let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
 
-    // BFD down/unknown: re-enable must withhold (no start), then a later Up
-    // releases it.
+    // enable_peer always withholds a strict peer; a fresh Up (edge) releases it.
     mgr.enable_peer(peer).await.unwrap();
     assert_eq!(
         counters.start.load(Ordering::SeqCst),
         0,
-        "withheld while BFD down"
+        "withheld at enable"
     );
+    assert!(mgr.bfd_withholding(&peer));
     mgr.handle_bfd_state_change(up(peer)).await;
-    wait_counter(&counters.start, 1).await; // released on Up
+    wait_counter(&counters.start, 1).await; // released on the Up edge
 
-    // Now BFD is Up: a subsequent re-enable must start immediately (no withhold,
-    // no waiting for a transition that won't come).
+    // Re-enabling after release withholds again — never trusting a stale state —
+    // and the reconcile ack (BFD still Up) releases it.
     mgr.enable_peer(peer).await.unwrap();
+    assert!(
+        mgr.bfd_withholding(&peer),
+        "re-enable re-withholds (no stale trust)"
+    );
+    assert_eq!(
+        counters.start.load(Ordering::SeqCst),
+        1,
+        "not started before the ack confirms BFD"
+    );
+    mgr.handle_bfd_state_change(up_ack(peer)).await;
+    wait_counter(&counters.start, 2).await;
+}
+
+#[tokio::test]
+async fn ack_is_release_only_never_tears_down() {
+    // A reconcile ack re-reporting Down (e.g. a freshly (re)started session)
+    // must NOT tear BGP down — only a real Up→Down transition does.
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, false, fake_bfd_peer_handle(counters.clone()));
+
+    mgr.handle_bfd_state_change(down_ack(peer)).await;
+    assert_eq!(
+        counters.stop.load(Ordering::SeqCst),
+        0,
+        "ack-Down must not tear down BGP"
+    );
+
+    // A real Down transition still does.
+    mgr.handle_bfd_state_change(down(peer)).await;
+    wait_counter(&counters.stop, 1).await;
+}
+
+#[tokio::test]
+async fn strict_reenable_withholds_until_ack_no_leak_no_deadlock() {
+    // The #2 tight-race fix: a strict re-enable always withholds (never trusts a
+    // possibly-stale Up), so it cannot leak BGP before the fresh state; and the
+    // reconcile ack re-reporting the still-Up session (the coalesced case, where
+    // no fresh edge will come) releases it — so it does not deadlock either.
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
+
+    // Established.
+    mgr.mark_bfd_withheld(peer);
+    mgr.handle_bfd_state_change(up(peer)).await;
+    wait_counter(&counters.start, 1).await;
+
+    // Disable then re-enable, coalesced: the actor never drained, the session
+    // stays Up, and no fresh edge will arrive.
+    mgr.peers.get_mut(&peer).unwrap().enabled = false;
+    mgr.set_bfd_peer_disabled(peer, true);
+    mgr.peers.get_mut(&peer).unwrap().enabled = true;
+    mgr.set_bfd_peer_disabled(peer, false);
+    mgr.enable_peer(peer).await.unwrap();
+    assert!(
+        mgr.bfd_withholding(&peer),
+        "re-enable withholds — no premature start"
+    );
+    assert_eq!(
+        counters.start.load(Ordering::SeqCst),
+        1,
+        "did not leak a start trusting the old Up"
+    );
+
+    // The reconcile ack re-reports the still-Up session → release (no deadlock).
+    mgr.handle_bfd_state_change(up_ack(peer)).await;
     wait_counter(&counters.start, 2).await;
 }
 
@@ -4199,6 +4293,41 @@ async fn strict_bfd_drops_inbound_until_up() {
         managed.pending_inbound.is_none(),
         "no inbound collision candidate should start for a withheld strict peer"
     );
+}
+
+#[tokio::test]
+async fn nonstrict_bfd_down_drops_inbound_while_held() {
+    // A non-strict peer torn down by a BFD-down is held; an inbound connection
+    // must be dropped while held — re-establishing BGP over a presumed-dead path
+    // would undo the BFD-driven teardown. (The hold releases on the BFD-up edge,
+    // which reconnects via the normal active-open path.)
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, false, fake_bfd_peer_handle(counters.clone()));
+
+    // BFD goes down → BGP torn down and held.
+    mgr.handle_bfd_state_change(down(peer)).await;
+    wait_counter(&counters.stop, 1).await;
+    assert!(
+        mgr.bfd_withholding(&peer),
+        "non-strict peer is held while BFD is down"
+    );
+
+    let session_id_before = mgr.peers.get(&peer).unwrap().session_id;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, _real_addr) = listener.accept().await.unwrap();
+    let _client_stream = client.await.unwrap();
+
+    mgr.handle_inbound(server_stream, peer).await;
+
+    let managed = mgr.peers.get(&peer).unwrap();
+    assert_eq!(
+        managed.session_id, session_id_before,
+        "inbound must be dropped while a non-strict peer is BFD-held"
+    );
+    assert!(managed.pending_inbound.is_none());
 }
 
 #[tokio::test]
