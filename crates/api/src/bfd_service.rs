@@ -49,7 +49,7 @@ impl proto::bfd_service_server::BfdService for BfdService {
             // peer addresses are already `IpAddr::to_string()` (canonical).
             let wanted = filter
                 .parse::<std::net::IpAddr>()
-                .map_err(|_| Status::invalid_argument(format!("invalid peer_address {filter:?}")))?
+                .map_err(|e| Status::invalid_argument(format!("invalid peer_address: {e}")))?
                 .to_string();
             sessions.retain(|s| s.peer_address == wanted);
         }
