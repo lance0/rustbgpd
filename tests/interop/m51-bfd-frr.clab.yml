@@ -1,0 +1,53 @@
+# Containerlab topology: rustbgpd ↔ FRR (M51 — ADR-0067 single-hop BFD)
+#
+# Validates RFC 5880/5881/5882 single-hop BFD coupling against a real FRR peer
+# running bfdd:
+#
+#   * rustbgpd (AS 65001) and FRR (AS 65002) peer over 10.0.0.0/24 with BFD
+#     enabled (fast profile: 300 ms × 3 ≈ 900 ms detection) and a 90 s BGP
+#     hold timer.
+#   * BGP reaches Established AND BFD reaches Up (asserted from both sides:
+#     rustbgpd GetBfdSessions + FRR `vtysh show bfd peers`).
+#   * Failover: killing FRR's bfdd (`killall -9 bfdd`) makes BFD fail; rustbgpd
+#     tears the BGP session down within the BFD detection window — far faster
+#     than the 90 s hold timer — proving the RFC 5882 coupling.
+#   * Recovery: watchfrr restarts bfdd and the session re-establishes.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m51-bfd-frr.clab.yml
+#   bash tests/interop/scripts/test-m51-bfd-frr.sh
+#   containerlab destroy -t tests/interop/m51-bfd-frr.clab.yml --cleanup
+
+name: m51-bfd-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m51-bfd.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    frr1:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons-bfd:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m51-bfd.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr1:eth1"]
+
+# Network: 10.0.0.0/24 — rustbgpd (10.0.0.1) ↔ frr1 (10.0.0.2).
+# rustbgpd AS 65001; FRR AS 65002. BFD fast profile, BGP hold timer 90 s.

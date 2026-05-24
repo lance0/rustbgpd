@@ -6477,6 +6477,34 @@ fn m49_interop_configs_describe_preference_df_with_dont_preempt() {
 }
 
 #[test]
+fn m51_interop_config_describes_non_strict_bfd_with_fast_profile() {
+    // Pin the M51 interop fixture: a single eBGP neighbor with non-strict BFD on
+    // a "fast" 300/300/3 profile (detection ≈ 900 ms) and a 90 s BGP hold timer.
+    // Guards the smoke against drift in the config or the BFD config surface —
+    // the whole point of M51 is that a BFD-down failover beats the hold timer.
+    let config = parse(include_str!(
+        "../../tests/interop/configs/rustbgpd-m51-bfd.toml"
+    ))
+    .unwrap();
+    let profile = &config.bfd_profiles[0];
+    assert_eq!(profile.name, "fast");
+    assert_eq!(profile.min_tx_interval, 300);
+    assert_eq!(profile.min_rx_interval, 300);
+    assert_eq!(profile.multiplier, 3);
+
+    let n = config
+        .neighbors
+        .iter()
+        .find(|n| n.address == "10.0.0.2")
+        .unwrap();
+    assert_eq!(n.hold_time, Some(90));
+    let bfd = n.bfd.as_ref().unwrap();
+    assert_eq!(bfd.profile, "fast");
+    assert!(bfd.enabled);
+    assert!(!bfd.strict);
+}
+
+#[test]
 fn ethernet_segment_rejects_ambiguous_preference_df_algorithm_alias() {
     let toml = evpn_toml_with(
         r#"

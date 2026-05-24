@@ -1,0 +1,32 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# ADR-0067 single-hop BFD: a fast profile so the detection window (300 ms × 3 ≈
+# 900 ms) is comfortably under the BGP hold timer (90 s) — the whole point of
+# the M51 test is that a BFD-down failover beats the hold timer.
+[[bfd_profiles]]
+name = "fast"
+min_tx_interval = 300
+min_rx_interval = 300
+multiplier = 3
+
+# One eBGP neighbor with BFD enabled (non-strict): BGP establishes normally and
+# a later BFD-down tears it down before the hold timer.
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr1-m51"
+hold_time = 90
+bfd = { profile = "fast" }
+
+[security.grpc]
+enforcement = "legacy"
