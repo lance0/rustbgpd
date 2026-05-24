@@ -204,6 +204,10 @@ mod stub {
 /// initial bootstrap packet before the peer has learned our discriminator (RFC
 /// 5881 §5 warns against identifying an established single-hop session by source
 /// address). Returns the peer key, or `None` if no session matches.
+///
+/// Gated to Linux (where the actor runs) plus test builds; the non-Linux stub
+/// has no receive path, so without this gate it would be dead code there.
+#[cfg(any(test, target_os = "linux"))]
 fn demux_target(
     by_discriminator: &std::collections::HashMap<u32, std::net::IpAddr>,
     src: std::net::IpAddr,
