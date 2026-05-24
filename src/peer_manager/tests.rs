@@ -4296,6 +4296,41 @@ async fn strict_bfd_drops_inbound_until_up() {
 }
 
 #[tokio::test]
+async fn nonstrict_bfd_down_drops_inbound_while_held() {
+    // A non-strict peer torn down by a BFD-down is held; an inbound connection
+    // must be dropped while held — re-establishing BGP over a presumed-dead path
+    // would undo the BFD-driven teardown. (The hold releases on the BFD-up edge,
+    // which reconnects via the normal active-open path.)
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, false, fake_bfd_peer_handle(counters.clone()));
+
+    // BFD goes down → BGP torn down and held.
+    mgr.handle_bfd_state_change(down(peer)).await;
+    wait_counter(&counters.stop, 1).await;
+    assert!(
+        mgr.bfd_withholding(&peer),
+        "non-strict peer is held while BFD is down"
+    );
+
+    let session_id_before = mgr.peers.get(&peer).unwrap().session_id;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, _real_addr) = listener.accept().await.unwrap();
+    let _client_stream = client.await.unwrap();
+
+    mgr.handle_inbound(server_stream, peer).await;
+
+    let managed = mgr.peers.get(&peer).unwrap();
+    assert_eq!(
+        managed.session_id, session_id_before,
+        "inbound must be dropped while a non-strict peer is BFD-held"
+    );
+    assert!(managed.pending_inbound.is_none());
+}
+
+#[tokio::test]
 async fn republish_reflects_disable_and_readd() {
     let peer: IpAddr = "10.0.0.2".parse().unwrap();
     let counters = Arc::new(BfdCouplingCounters::default());

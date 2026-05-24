@@ -197,18 +197,21 @@ impl PeerManager {
             return;
         }
 
-        // ADR-0067 step 4b — strict BFD withholding must cover the passive path
-        // too. The active-open lifecycle (`add_peer` / `enable_peer`) withholds
-        // `start()` while BFD does not permit BGP, but every inbound sub-case
-        // below (`replace_with_inbound`, collision candidates) starts a session
-        // directly. Without this gate a strict peer that is currently withheld
-        // could accept an inbound connection and establish BGP anyway —
-        // defeating strict mode. Gate on the *current* held state (not the
-        // add-time decision) so an already-established strict peer still accepts
-        // inbound normally; a withheld peer's eventual release starts the
-        // session through the normal up→start path.
+        // ADR-0067 step 4 — BFD withholding must cover the passive path too. The
+        // active-open lifecycle (`add_peer` / `enable_peer`) withholds `start()`
+        // while BFD does not permit BGP, but every inbound sub-case below
+        // (`replace_with_inbound`, collision candidates) starts a session
+        // directly. Without this gate a peer whose BGP is currently held by BFD
+        // could accept an inbound connection and establish BGP anyway. This
+        // covers both holds: a strict peer withheld pending BFD-up, and a
+        // (strict or non-strict) peer torn down by a BFD-down — in both cases
+        // BFD does not currently permit BGP, so we must not re-establish it over
+        // a presumed-dead path. Gate on the *current* held state (not the
+        // add-time decision) so an established, BFD-up peer still accepts inbound
+        // normally; the hold's eventual release starts the session via the
+        // normal up→start path.
         if self.bfd_withholding(&peer_addr) {
-            info!(%peer_addr, "strict BFD — dropping inbound connection while BGP is withheld");
+            info!(%peer_addr, "BFD — dropping inbound connection while BGP is held");
             return;
         }
 
