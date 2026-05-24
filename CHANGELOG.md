@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.28.0] — 2026-05-24
+
 ### Added
 
 - **ADR-0066 unicast multipath / ECMP FIB install.** A new per-table knob
@@ -221,6 +223,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   teardown (and `ip_vrf` relink on its own path); only non-teardown mixed edits
   and L3VNI/device/table IP-VRF identity changes remain non-live under
   [#210](https://github.com/lance0/rustbgpd/issues/210).
+
+### Changed
+
+- **`rustbgpd-wire` 0.9.2 → 0.9.3** (additive, non-breaking). Adds the DF
+  Election Extended Community (type 0x06, subtype 0x06):
+  `ExtendedCommunity::as_df_election()` / `::df_election(...)` and the typed
+  `attribute::DfElectionExtendedCommunity`, covering the RFC 8584 §2.2
+  algorithm/capabilities fields and the RFC 9785 §3 preference / Don't-Preempt
+  fields. No existing public item changed.
 
 ## [0.27.0] — 2026-05-22
 

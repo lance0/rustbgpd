@@ -333,7 +333,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | Dimension | Current state |
 |-----------|---------------|
 | **Target use case** | IXP route servers, programmable BGP control planes, lab/test environments |
-| **Maturity** | Public alpha (v0.27.0) |
+| **Maturity** | Public alpha (v0.28.0) |
 | **Supported OS** | Linux (primary target). Requires `CAP_NET_BIND_SERVICE` for port 179. |
 | **Runtime** | Rust 1.92+ (workspace MSRV — Tokio rolling-6-month policy), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
