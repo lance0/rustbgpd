@@ -59,6 +59,12 @@ pub struct Session {
     poll_in_progress: bool,
     /// Last transmit interval we asked the actor to arm (`None` = tx stopped).
     current_tx_interval_us: Option<u32>,
+    /// Whether the most recent reason this session is not Up is the remote
+    /// signaling `AdminDown` (vs a detection timeout or a remote-signaled
+    /// `Down`). RFC 5882 §4.2: a client with its own liveness should take no
+    /// control-protocol action on a remote `AdminDown`, so the BGP coupling uses
+    /// this to distinguish "peer disabled BFD" from a genuine liveness failure.
+    remote_admin_down: bool,
 }
 
 impl Session {
@@ -90,6 +96,7 @@ impl Session {
             remote_seen: false,
             poll_in_progress: false,
             current_tx_interval_us: Some(tx),
+            remote_admin_down: false,
         };
         let actions = vec![Action::StartTimer {
             kind: TimerKind::Tx,
@@ -116,6 +123,15 @@ impl Session {
         self.remote_discriminator
     }
 
+    /// Whether this session is down because the remote signaled `AdminDown`
+    /// (rather than a detection timeout or remote-signaled `Down`). RFC 5882
+    /// §4.2: the BGP coupling uses this to avoid tearing a non-strict BGP
+    /// session down when the peer merely disabled BFD administratively.
+    #[must_use]
+    pub fn remote_admin_down(&self) -> bool {
+        self.remote_admin_down
+    }
+
     /// Drive the state machine with a runtime event.
     #[must_use]
     pub fn handle(&mut self, event: Event) -> Vec<Action> {
@@ -136,6 +152,8 @@ impl Session {
         let old = self.state;
         self.state = SessionState::AdminDown;
         self.local_diag = Diagnostic::AdministrativelyDown;
+        // This is our own administrative shutdown, not the remote's.
+        self.remote_admin_down = false;
         self.poll_in_progress = false;
         self.current_tx_interval_us = None;
         vec![
@@ -246,6 +264,9 @@ impl Session {
         let old = self.state;
         self.state = SessionState::Down;
         self.local_diag = Diagnostic::ControlDetectionTimeExpired;
+        // A detection timeout is a genuine liveness failure, not a remote
+        // AdminDown — the BGP coupling must tear the session down.
+        self.remote_admin_down = false;
         self.remote_discriminator = 0;
         self.poll_in_progress = false;
         let mut actions = vec![
@@ -265,6 +286,10 @@ impl Session {
 
     /// RFC 5880 §6.8.6 state transitions (async, no demand).
     fn apply_fsm(&mut self, received: SessionState) {
+        // Track whether the remote is signaling AdminDown (RFC 5882 §4.2). This
+        // reflects the last received remote state: true for AdminDown, false for
+        // any liveness-bearing state (Down/Init/Up).
+        self.remote_admin_down = received == SessionState::AdminDown;
         if received == SessionState::AdminDown {
             if self.state != SessionState::Down {
                 self.local_diag = Diagnostic::NeighborSignaledDown;

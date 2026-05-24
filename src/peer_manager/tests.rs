@@ -3880,6 +3880,28 @@ fn down(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
         peer,
         state: rustbgpd_bfd::SessionState::Down,
         diagnostic: rustbgpd_bfd::Diagnostic::ControlDetectionTimeExpired,
+        remote_admin_down: false,
+    }
+}
+
+/// A Down caused by the remote signaling `AdminDown` (RFC 5882 §4.1).
+fn remote_admin_down(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
+    crate::bfd_runtime::BfdStateChange {
+        peer,
+        state: rustbgpd_bfd::SessionState::Down,
+        diagnostic: rustbgpd_bfd::Diagnostic::NeighborSignaledDown,
+        remote_admin_down: true,
+    }
+}
+
+/// The actor draining our own session to `AdminDown` on a local disable/delete
+/// (`remote_admin_down = false`) — distinct from a remote `AdminDown`.
+fn local_admin_down(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
+    crate::bfd_runtime::BfdStateChange {
+        peer,
+        state: rustbgpd_bfd::SessionState::AdminDown,
+        diagnostic: rustbgpd_bfd::Diagnostic::AdministrativelyDown,
+        remote_admin_down: false,
     }
 }
 
@@ -3888,6 +3910,7 @@ fn up(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
         peer,
         state: rustbgpd_bfd::SessionState::Up,
         diagnostic: rustbgpd_bfd::Diagnostic::None,
+        remote_admin_down: false,
     }
 }
 
@@ -3945,6 +3968,113 @@ async fn bfd_change_ignored_for_absent_peer() {
 
     mgr.handle_bfd_state_change(down(peer)).await;
     assert_eq!(counters.stop.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn nonstrict_remote_admin_down_does_not_tear_down_bgp() {
+    // RFC 5882 §4.2: a remote-signaled BFD AdminDown is administrative, not a
+    // liveness failure. A non-strict peer keeps its BGP session (BGP carries its
+    // own hold-timer liveness).
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, false, fake_bfd_peer_handle(counters.clone()));
+
+    mgr.handle_bfd_state_change(remote_admin_down(peer)).await;
+    assert_eq!(
+        counters.stop.load(Ordering::SeqCst),
+        0,
+        "remote AdminDown must not tear down a non-strict BGP session"
+    );
+
+    // A genuine detection-timeout Down still tears it down (the coupling still
+    // reacts to real liveness failures).
+    mgr.handle_bfd_state_change(down(peer)).await;
+    wait_counter(&counters.stop, 1).await;
+}
+
+#[tokio::test]
+async fn strict_remote_admin_down_releases_withheld_bgp() {
+    // RFC 5882 §4.1: when the remote BFD is AdminDown the adjacency MUST be
+    // allowed — even in strict mode. A strict peer withheld pending BFD Up is
+    // released (BGP started), never torn down, on a remote AdminDown.
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
+    mgr.mark_bfd_withheld(peer);
+
+    mgr.handle_bfd_state_change(remote_admin_down(peer)).await;
+    wait_counter(&counters.start, 1).await; // released → BGP started
+    assert_eq!(
+        counters.stop.load(Ordering::SeqCst),
+        0,
+        "strict remote AdminDown must not stop BGP"
+    );
+    // And the strict add/enable decision now permits BGP (AdminDown, not Up).
+    assert!(
+        !mgr.bfd_should_withhold(&peer),
+        "remote AdminDown permits BGP (RFC 5882 §4.1) — no withhold"
+    );
+}
+
+#[tokio::test]
+async fn strict_disable_drain_reenable_does_not_leak_bgp_before_fresh_up() {
+    // #2 lifecycle: a strict peer that was Up, then disabled (the actor drains
+    // its session to a *local* AdminDown), then re-enabled, must NOT establish
+    // BGP until a fresh BFD Up. The local drain must not be mistaken for a remote
+    // AdminDown (which would permit BGP per RFC 5882 §4.1). This proves the
+    // in-order lifecycle does not leak establishment before the fresh state.
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
+
+    // Strict peer reaches Up and establishes.
+    mgr.mark_bfd_withheld(peer);
+    mgr.handle_bfd_state_change(up(peer)).await;
+    wait_counter(&counters.start, 1).await;
+
+    // Operator disables; the actor drains the session to a local AdminDown.
+    mgr.peers.get_mut(&peer).unwrap().enabled = false;
+    mgr.set_bfd_peer_disabled(peer, true);
+    mgr.handle_bfd_state_change(local_admin_down(peer)).await; // drained, ignored
+
+    // Re-enable: BFD has not come Up again, so strict must withhold — the local
+    // drain's AdminDown must not be read as "permits BGP".
+    mgr.peers.get_mut(&peer).unwrap().enabled = true;
+    mgr.set_bfd_peer_disabled(peer, false);
+    assert!(
+        mgr.bfd_should_withhold(&peer),
+        "strict re-enable after a local drain must withhold until fresh BFD Up"
+    );
+    mgr.enable_peer(peer).await.unwrap();
+    assert_eq!(
+        counters.start.load(Ordering::SeqCst),
+        1,
+        "no BGP (re)start before a fresh BFD Up"
+    );
+
+    // The fresh session comes Up → BGP is released.
+    mgr.handle_bfd_state_change(up(peer)).await;
+    wait_counter(&counters.start, 2).await;
+}
+
+#[tokio::test]
+async fn strict_remote_admin_down_keeps_established_bgp() {
+    // A strict peer that is up and established (not held) is left alone on a
+    // remote AdminDown — no stop, no spurious restart.
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
+    mgr.mark_bfd_withheld(peer);
+    mgr.handle_bfd_state_change(up(peer)).await; // established
+    wait_counter(&counters.start, 1).await;
+
+    mgr.handle_bfd_state_change(remote_admin_down(peer)).await;
+    assert_eq!(counters.stop.load(Ordering::SeqCst), 0, "no teardown");
+    assert_eq!(
+        counters.start.load(Ordering::SeqCst),
+        1,
+        "no spurious restart of an established session"
+    );
 }
 
 #[tokio::test]
