@@ -13,7 +13,9 @@
 //! sockets and a min-deadline timer heap covering every session's transmit and
 //! detection timers. The receive path validates the RFC 5881 TTL/Hop-Limit-255
 //! requirement via `recvmsg` ancillary data, decodes, demultiplexes to the
-//! session by peer address, and executes the resulting [`rustbgpd_bfd::Action`]s.
+//! session by Your Discriminator (RFC 5880 §6.8.6; source address only for the
+//! zero-discriminator bootstrap), and executes the resulting
+//! [`rustbgpd_bfd::Action`]s.
 
 use std::net::IpAddr;
 
@@ -195,6 +197,28 @@ mod stub {
     }
 }
 
+/// RFC 5880 §6.8.6 demultiplexing decision (pure, testable): pick the session a
+/// received packet belongs to. A non-zero Your Discriminator selects the session
+/// by *our* local discriminator (which the peer echoes back in that field); a
+/// zero Your Discriminator falls back to the source address, valid only for the
+/// initial bootstrap packet before the peer has learned our discriminator (RFC
+/// 5881 §5 warns against identifying an established single-hop session by source
+/// address). Returns the peer key, or `None` if no session matches.
+fn demux_target(
+    by_discriminator: &std::collections::HashMap<u32, std::net::IpAddr>,
+    src: std::net::IpAddr,
+    your_discriminator: u32,
+    have_session_for_src: bool,
+) -> Option<std::net::IpAddr> {
+    if your_discriminator != 0 {
+        by_discriminator.get(&your_discriminator).copied()
+    } else if have_session_for_src {
+        Some(src)
+    } else {
+        None
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use std::cmp::Reverse;
@@ -206,7 +230,8 @@ mod linux {
 
     use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
     use rustbgpd_bfd::{
-        Action, ControlPacket, Diagnostic, Event, Session, SessionConfig, SessionState, TimerKind,
+        Action, ControlPacket, Diagnostic, DiscriminatorAllocator, Event, Session, SessionConfig,
+        SessionState, TimerKind,
     };
     use rustbgpd_telemetry::BgpMetrics;
     use socket2::{Domain, Protocol, Socket, Type};
@@ -217,7 +242,10 @@ mod linux {
     use tokio_util::sync::CancellationToken;
     use tracing::{debug, info, warn};
 
-    use super::{BfdRuntimeConfig, BfdRuntimeEvent, BfdSessionParams, BfdStateChange, BfdStatus};
+    use super::{
+        BfdRuntimeConfig, BfdRuntimeEvent, BfdSessionParams, BfdStateChange, BfdStatus,
+        demux_target,
+    };
 
     /// BFD single-hop control port (RFC 5881 §4).
     const BFD_CONTROL_PORT: u16 = 3784;
@@ -280,6 +308,10 @@ mod linux {
         session: Session,
         peer: IpAddr,
         strict: bool,
+        /// Our local discriminator for this session (RFC 5880 §6.8.1) — held so
+        /// it can be released back to the allocator and removed from the
+        /// `by_discriminator` demux index when the session is torn down.
+        local_discriminator: u32,
         /// Local diagnostic from the most recent state change — surfaced in
         /// `BfdStatus` so the operator surface (PR3) shows *why* a session is
         /// in its current state (detection timeout, `AdminDown`, ...).
@@ -327,6 +359,13 @@ mod linux {
 
     struct Actor {
         sessions: BTreeMap<IpAddr, Entry>,
+        /// Allocates unique non-zero local discriminators (RFC 5880 §6.8.1).
+        /// Replaces an address hash, which could collide across peers.
+        discriminators: DiscriminatorAllocator,
+        /// Reverse index: our local discriminator → peer, for RFC 5880 §6.8.6
+        /// demultiplexing (a packet's non-zero Your Discriminator selects the
+        /// session, not the source address).
+        by_discriminator: HashMap<u32, IpAddr>,
         timers: BinaryHeap<Reverse<Deadline>>,
         tx_v4: UdpSocket,
         tx_v6: UdpSocket,
@@ -352,6 +391,8 @@ mod linux {
         let rx_v6 = AsyncFd::new(rx_socket(true)?)?;
         let mut actor = Actor {
             sessions: BTreeMap::new(),
+            discriminators: DiscriminatorAllocator::new(),
+            by_discriminator: HashMap::new(),
             timers: BinaryHeap::new(),
             tx_v4: UdpSocket::from_std(tx_socket(false)?)?,
             tx_v6: UdpSocket::from_std(tx_socket(true)?)?,
@@ -411,9 +452,10 @@ mod linux {
 
     impl Actor {
         async fn start_session(&mut self, params: &BfdSessionParams, metrics: &BgpMetrics) {
-            // A stable non-zero discriminator derived from the peer address —
-            // unique per peer within this daemon.
-            let discr = discriminator_for(params.peer);
+            // A unique non-zero local discriminator (RFC 5880 §6.8.1) from the
+            // allocator — guaranteed distinct across peers, unlike an address
+            // hash which can collide.
+            let discr = self.discriminators.allocate();
             let (session, actions) = match Session::new(SessionConfig {
                 local_discriminator: discr,
                 desired_min_tx_interval_us: params.desired_min_tx_us,
@@ -423,6 +465,7 @@ mod linux {
                 Ok(pair) => pair,
                 Err(e) => {
                     warn!(peer = %params.peer, error = %e, "skipping invalid BFD session");
+                    self.discriminators.release(discr);
                     return;
                 }
             };
@@ -430,9 +473,11 @@ mod linux {
                 session,
                 peer: params.peer,
                 strict: params.strict,
+                local_discriminator: discr,
                 last_diagnostic: Diagnostic::None,
                 epochs: HashMap::new(),
             };
+            self.by_discriminator.insert(discr, params.peer);
             self.sessions.insert(params.peer, entry);
             // Seed the up gauge at 0 so a session that never comes Up (peer
             // absent, TTL-blocked, misconfigured) still has an observable
@@ -491,7 +536,11 @@ mod linux {
                 .map(|e| e.session.administratively_down())
                 .unwrap_or_default();
             self.apply(peer, actions, metrics).await;
-            self.sessions.remove(&peer);
+            if let Some(entry) = self.sessions.remove(&peer) {
+                // Free the discriminator and drop the demux index entry.
+                self.by_discriminator.remove(&entry.local_discriminator);
+                self.discriminators.release(entry.local_discriminator);
+            }
         }
 
         async fn on_packet(
@@ -501,14 +550,26 @@ mod linux {
             metrics: &BgpMetrics,
             status_tx: &watch::Sender<Vec<BfdStatus>>,
         ) {
-            let Some(entry) = self.sessions.get_mut(&src) else {
-                debug!(peer = %src, "BFD packet for unconfigured peer; ignoring");
+            let Some(peer) = demux_target(
+                &self.by_discriminator,
+                src,
+                pkt.your_discriminator,
+                self.sessions.contains_key(&src),
+            ) else {
+                debug!(
+                    peer = %src,
+                    your_discriminator = pkt.your_discriminator,
+                    "BFD packet not matched to a session; ignoring"
+                );
+                return;
+            };
+            let Some(entry) = self.sessions.get_mut(&peer) else {
                 return;
             };
             let before = entry.session.state();
             let actions = entry.session.handle(Event::PacketReceived(pkt.clone()));
             let changed = entry.session.state() != before;
-            self.apply(src, actions, metrics).await;
+            self.apply(peer, actions, metrics).await;
             if changed {
                 self.publish_status(status_tx);
             }
@@ -856,23 +917,6 @@ mod linux {
         }
     }
 
-    /// A stable, non-zero per-peer local discriminator.
-    fn discriminator_for(peer: IpAddr) -> u32 {
-        // FNV-1a over the address bytes, forced non-zero.
-        let mut hash: u32 = 0x811C_9DC5;
-        let apply = |hash: &mut u32, bytes: &[u8]| {
-            for b in bytes {
-                *hash ^= u32::from(*b);
-                *hash = hash.wrapping_mul(0x0100_0193);
-            }
-        };
-        match peer {
-            IpAddr::V4(v4) => apply(&mut hash, &v4.octets()),
-            IpAddr::V6(v6) => apply(&mut hash, &v6.octets()),
-        }
-        hash | 1
-    }
-
     #[cfg(test)]
     mod unit {
         use super::{Deadline, kind_key};
@@ -1070,12 +1114,41 @@ remote_asn = 65002
         assert!(!rc.enabled());
     }
 
+    #[test]
+    fn demux_prefers_your_discriminator_then_source() {
+        use super::demux_target;
+        use std::collections::HashMap;
+
+        let peer_a = ip("10.0.0.2");
+        let peer_b = ip("10.0.0.3");
+        let by_disc = HashMap::from([(7u32, peer_a), (8u32, peer_b)]);
+
+        // RFC 5880 §6.8.6: a non-zero Your Discriminator selects the session by
+        // discriminator, independent of the packet's source address.
+        assert_eq!(
+            demux_target(&by_disc, ip("203.0.113.9"), 7, false),
+            Some(peer_a),
+            "your_discriminator routes to its session regardless of source"
+        );
+        assert_eq!(demux_target(&by_disc, peer_b, 8, true), Some(peer_b));
+
+        // A non-zero Your Discriminator with no matching session is dropped even
+        // when a session exists for the source address — the discriminator, not
+        // the source, is authoritative once set.
+        assert_eq!(demux_target(&by_disc, peer_a, 999, true), None);
+
+        // A zero Your Discriminator (initial bootstrap) falls back to the source
+        // address, and only matches when a session for that source exists.
+        assert_eq!(demux_target(&by_disc, peer_a, 0, true), Some(peer_a));
+        assert_eq!(demux_target(&by_disc, ip("198.51.100.1"), 0, false), None);
+    }
+
     // --- Privileged netns integration test (Linux, gated) ---------------
     //
     // Runs the real BFD actor on real UDP sockets inside a network
     // namespace and drives it from a hand-rolled BFD peer (the test
     // itself), proving the full receive path: TTL/Hop-Limit-255 discard
-    // (RFC 5881), decode, source-IP demux, the session FSM reaching Up,
+    // (RFC 5881), decode, Your-Discriminator demux, the session FSM reaching Up,
     // and detection-timer expiry when the peer goes silent.
     //
     // Gated by EVPN_LINUX_NETNS=1 (set by the Docker netns harness); the
