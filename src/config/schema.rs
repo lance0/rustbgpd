@@ -599,12 +599,23 @@ pub struct AddPathConfig {
 pub struct BfdConfig {
     /// Name of the `[[bfd_profiles]]` entry providing the timers.
     pub profile: String,
+    /// Whether BFD is enabled. Defaults to `true`; the field exists so a
+    /// neighbor can override an inherited peer-group `bfd` block to *disable*
+    /// BFD (`bfd = { profile = "...", enabled = false }`). A disabled block runs
+    /// no session — the actor skips it — so the effective session set is fully
+    /// expressible inline, which the restart-required reload pin relies on.
+    #[serde(default = "default_bfd_enabled")]
+    pub enabled: bool,
     /// RFC 5882 strict mode: when true, the BGP session is not allowed to reach
     /// Established until the BFD session is Up. Default false — BGP may
     /// establish first, and a later BFD-down tears it down faster than the hold
     /// timer.
     #[serde(default)]
     pub strict: bool,
+}
+
+fn default_bfd_enabled() -> bool {
+    true
 }
 
 /// A named BFD timing profile referenced by `[neighbors.bfd]` /

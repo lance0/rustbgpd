@@ -60,6 +60,11 @@ impl BfdRuntimeConfig {
             ) else {
                 continue;
             };
+            // A `bfd = { enabled = false }` block (often a neighbor overriding
+            // an inherited peer-group block) runs no session.
+            if !bfd.enabled {
+                continue;
+            }
             let Ok(peer) = neighbor.address.parse::<IpAddr>() else {
                 continue;
             };
@@ -70,6 +75,8 @@ impl BfdRuntimeConfig {
                 peer,
                 desired_min_tx_us: profile.min_tx_interval.saturating_mul(1000),
                 required_min_rx_us: profile.min_rx_interval.saturating_mul(1000),
+                // Validation rejects multiplier > 255 / interval > u32::MAX/1000,
+                // so these conversions are exact (the fallbacks never fire).
                 detect_mult: u8::try_from(profile.multiplier).unwrap_or(u8::MAX),
                 strict: bfd.strict,
             });
@@ -835,6 +842,34 @@ peer_group = "rrc"
         assert_eq!(rc.sessions.len(), 1);
         assert_eq!(rc.sessions[0].peer, ip("10.0.0.2"));
         assert!(!rc.sessions[0].strict);
+    }
+
+    #[test]
+    fn neighbor_can_disable_inherited_peer_group_bfd() {
+        let config = config_with(
+            r#"
+[[bfd_profiles]]
+name = "p"
+
+[peer_groups.rrc]
+bfd = { profile = "p" }
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "rrc"
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "rrc"
+bfd = { profile = "p", enabled = false }
+"#,
+        );
+        let rc = BfdRuntimeConfig::from_config(&config);
+        // Only the inheriting neighbor runs a session; the override disables it.
+        assert_eq!(rc.sessions.len(), 1);
+        assert_eq!(rc.sessions[0].peer, ip("10.0.0.2"));
     }
 
     #[test]

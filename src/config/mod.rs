@@ -1758,14 +1758,19 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
 
 /// Effective BFD config for a neighbor: its own `bfd`, else its peer-group's.
 fn neighbor_effective_bfd<'a>(neighbor: &'a Neighbor, config: &'a Config) -> Option<&'a BfdConfig> {
-    if neighbor.bfd.is_some() {
-        return neighbor.bfd.as_ref();
-    }
-    config
-        .peer_groups
-        .get(neighbor.peer_group.as_deref()?)?
-        .bfd
-        .as_ref()
+    let resolved = if neighbor.bfd.is_some() {
+        neighbor.bfd.as_ref()
+    } else {
+        config
+            .peer_groups
+            .get(neighbor.peer_group.as_deref()?)?
+            .bfd
+            .as_ref()
+    };
+    // A disabled block (`enabled = false`) runs no session, so it is not part of
+    // the effective set — this is how a neighbor overrides an inherited
+    // peer-group block to turn BFD off.
+    resolved.filter(|bfd| bfd.enabled)
 }
 
 /// The effective BFD session set: one tuple per neighbor whose own or inherited
@@ -1858,8 +1863,25 @@ pub(crate) fn pin_bfd_startup_only_runtime(new_config: &mut Config, current: &Co
             neighbor.bfd.clone_from(&live.bfd);
             neighbor.peer_group.clone_from(&live.peer_group);
         } else {
-            // Newly added neighbor — no live session to preserve.
-            neighbor.bfd = None;
+            // Newly added neighbor — no live session exists. If it carries its
+            // own inline bfd, dropping it removes the effective session. If it
+            // has no inline bfd but would *inherit* an enabled block, materialize
+            // a disabled inline override so the pinned runtime's effective set
+            // matches the actor (no session) — the `BfdConfig.enabled` tri-state
+            // makes this expressible without editing peer-group membership.
+            let pinned_bfd = if neighbor.bfd.is_some() {
+                None
+            } else {
+                match new_effective.get(addr) {
+                    Some(Some(inherited)) => Some(BfdConfig {
+                        profile: inherited.profile.clone(),
+                        enabled: false,
+                        strict: inherited.strict,
+                    }),
+                    _ => None,
+                }
+            };
+            neighbor.bfd = pinned_bfd;
         }
     }
     true

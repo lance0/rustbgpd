@@ -1264,12 +1264,19 @@ fn validate_bfd(config: &Config) -> Result<(), ConfigError> {
     // never come Up. Reject it up front with an actionable error rather than
     // silently failing to converge (ADR-0067 defers link-local to v1.1).
     for neighbor in &config.neighbors {
-        let has_effective_bfd = neighbor.bfd.is_some()
-            || neighbor
+        // Effective BFD = own block, else inherited from the peer group; a
+        // disabled (`enabled = false`) block runs no session, so it does not
+        // count.
+        let effective_bfd = if neighbor.bfd.is_some() {
+            neighbor.bfd.as_ref()
+        } else {
+            neighbor
                 .peer_group
                 .as_ref()
                 .and_then(|g| config.peer_groups.get(g))
-                .is_some_and(|pg| pg.bfd.is_some());
+                .and_then(|pg| pg.bfd.as_ref())
+        };
+        let has_effective_bfd = effective_bfd.is_some_and(|b| b.enabled);
         if has_effective_bfd && is_ipv6_link_local(&neighbor.address) {
             return Err(ConfigError::InvalidBfd {
                 reason: format!(

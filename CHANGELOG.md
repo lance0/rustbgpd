@@ -31,8 +31,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **ADR-0067 single-hop asynchronous BFD — config + actor (observability,
   no BGP coupling yet).** New `[[bfd_profiles]]` blocks
   (`min_tx_interval` / `min_rx_interval` ms, floor 100; `multiplier`, min 2;
-  defaults 300/300/3) plus opt-in `[neighbors.bfd]` / `[peer_groups.bfd]`
-  (`profile`, `strict`), validated for profile-reference + bounds. An in-process
+  defaults 300/300/3) plus opt-in `[neighbors.bfd]` / `[peer_groups.<name>.bfd]`
+  (`profile`, `enabled` (default true — set false to override an inherited
+  peer-group block off), `strict`), validated for profile-reference + bounds. An in-process
   BFD actor (`src/bfd_runtime.rs`) runs single-hop async sessions (RFC 5880 /
   5881) over real UDP/3784 sockets — TTL/Hop-Limit 255 on send, discard on
   receive if ≠ 255 — driving the pure `rustbgpd-bfd` sans-IO session FSM, and

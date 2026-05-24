@@ -6121,6 +6121,64 @@ peer_group = "plain"
     );
 }
 
+/// A neighbor *added* in the same reload that *inherits* BFD from a pre-existing
+/// BFD peer-group has no live actor session; the pin must materialize a disabled
+/// inline block so the runtime's effective set still matches the live actor
+/// (the `BfdConfig.enabled` tri-state makes "inherit-but-off" expressible).
+#[test]
+fn bfd_pin_disables_inherited_bfd_on_newly_added_neighbor() {
+    let live = parse(&format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+
+[peer_groups.rrc]
+bfd = {{ profile = "fast" }}
+"#,
+        valid_toml()
+    ))
+    .unwrap();
+    // Candidate adds a brand-new neighbor into the BFD-bearing peer-group.
+    let added = parse(&format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+
+[peer_groups.rrc]
+bfd = {{ profile = "fast" }}
+
+[[neighbors]]
+address = "10.0.0.9"
+remote_asn = 65009
+peer_group = "rrc"
+"#,
+        valid_toml()
+    ))
+    .unwrap();
+    assert!(diff_config(&live, &added).bfd_changed);
+
+    let mut runtime = added.clone();
+    assert!(super::pin_bfd_startup_only_runtime(&mut runtime, &live));
+    let pinned = runtime
+        .neighbors
+        .iter()
+        .find(|n| n.address == "10.0.0.9")
+        .unwrap();
+    assert_eq!(
+        pinned.bfd.as_ref().map(|b| b.enabled),
+        Some(false),
+        "added neighbor's inherited BFD must be pinned to a disabled inline block"
+    );
+    assert!(
+        !diff_config(&live, &runtime).bfd_changed,
+        "after pinning, the added neighbor must contribute no effective session"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // ADR-0057 — Ethernet Segment config. Validates Gate 8's operator-facing
 // `[[ethernet_segments]]` block before the daemon spawns the orchestrator.

@@ -142,12 +142,18 @@ multiplier = 3          # min 2
 # ...
 [neighbors.bfd]
 profile = "fast"
+enabled = true   # default; set false to override an inherited peer-group block
 strict = false
 ```
 
 `Neighbor.bfd` and `PeerGroupConfig.bfd` are `Option<BfdConfig>`, modelled on
 `tcp_ao: Option<TcpAoConfig>`; peer-group inheritance uses the existing resolve
-path (a neighbor's own `bfd` wins, else its peer-group's). Validation checks
+path (a neighbor's own `bfd` wins, else its peer-group's). `BfdConfig.enabled`
+(default `true`) lets a neighbor override an inherited peer-group block to turn
+BFD **off** — a disabled block runs no session. Beyond the operator ergonomics,
+this makes the *effective* session set fully expressible inline, which the
+restart-required reload pin (below) relies on to represent "inherits the group
+but BFD is off" without editing peer-group membership. Validation checks
 that the referenced profile name is defined and that the interval/multiplier
 bounds hold, mirroring the peer-group-reference validation. It also **rejects
 effective BFD on an IPv6 link-local (`fe80::/10`) neighbor** — link-local BFD is
