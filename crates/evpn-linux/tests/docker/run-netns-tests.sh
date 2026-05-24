@@ -140,10 +140,19 @@ DOCKER_ARGS=(
 # the same container risks them clobbering each other on the
 # `/proc/$$/ns` namespace inheritance the inner re-exec depends on.
 if [ -n "$FIB_RUNTIME_FILTER" ]; then
+    # The rustbgpd binary's gRPC types are generated from
+    # `proto/rustbgpd.proto` by `rustbgpd-api`'s build script into that crate's
+    # OUT_DIR. The persistent `$TARGET_CACHE_VOL` can retain a stale generated
+    # module when the proto changes but cargo's incremental fingerprint does not
+    # re-run the build script (the proto lives outside the crate dir), which
+    # surfaces as "struct FibRouteStatus has no field named ..." compile errors.
+    # Force a regeneration of just that crate before building so the cached
+    # volume can't ship a stale proto. Cheap: only `rustbgpd-api` is rebuilt.
+    # Single-quote the filter inside the `sh -c` program so it reaches
+    # `cargo test` verbatim even if it ever gains whitespace / shell
+    # metacharacters (today it is a plain module path).
     TEST_ARGS=(
-        cargo test -p rustbgpd "$FIB_RUNTIME_FILTER"
-        --
-        --test-threads=1 --nocapture
+        sh -c "cargo clean -p rustbgpd-api && cargo test -p rustbgpd '${FIB_RUNTIME_FILTER}' -- --test-threads=1 --nocapture"
     )
 else
     TEST_ARGS=(

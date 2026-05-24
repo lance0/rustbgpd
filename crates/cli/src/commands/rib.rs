@@ -168,6 +168,11 @@ struct JsonFibRouteStatus {
     metric: u32,
     prefix: String,
     next_hop: String,
+    /// All equal-cost next-hops (unicast multipath / ECMP), canonical. One
+    /// entry == single-path. `next_hop` is the best/representative next-hop and
+    /// is a member of this set when non-empty (not necessarily `next_hops[0]`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    next_hops: Vec<String>,
     peer_address: String,
     state: String,
     reason: String,
@@ -261,7 +266,7 @@ fn print_fib_routes(resp: &ListFibRoutesResponse, json: bool, include_page_meta:
                 r.table_name,
                 r.metric,
                 format!("{}/{}", r.prefix, r.prefix_length),
-                r.next_hop,
+                fib_next_hop_display(r),
                 fib_state_label(r.state),
                 r.reason
             );
@@ -313,10 +318,22 @@ fn fib_route_status_to_json(r: &crate::proto::FibRouteStatus) -> JsonFibRouteSta
         metric: r.metric,
         prefix: format!("{}/{}", r.prefix, r.prefix_length),
         next_hop: r.next_hop.clone(),
+        next_hops: r.next_hops.clone(),
         peer_address: r.peer_address.clone(),
         state: fib_state_label(r.state).to_string(),
         reason: r.reason.clone(),
         sampling: fib_route_sampling_metadata(r),
+    }
+}
+
+/// Render the next-hop column: comma-joined ECMP set when multipath, else the
+/// scalar. Falls back to the scalar `next_hop` when an older server returns no
+/// `next_hops` list.
+fn fib_next_hop_display(r: &crate::proto::FibRouteStatus) -> String {
+    if r.next_hops.len() > 1 {
+        r.next_hops.join(", ")
+    } else {
+        r.next_hop.clone()
     }
 }
 
@@ -1088,6 +1105,40 @@ mod tests {
     }
 
     #[test]
+    fn fib_json_and_display_render_multipath_next_hops() {
+        let route = crate::proto::FibRouteStatus {
+            table_name: "edge".to_string(),
+            table_id: 1000,
+            metric: 200,
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+            next_hop: "192.0.2.1".to_string(),
+            next_hops: vec!["192.0.2.1".to_string(), "192.0.2.2".to_string()],
+            peer_address: "198.51.100.1".to_string(),
+            state: crate::proto::FibRouteState::Installed as i32,
+            reason: "owned".to_string(),
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(fib_route_status_to_json(&route)).unwrap();
+        assert_eq!(value["next_hop"], "192.0.2.1");
+        assert_eq!(value["next_hops"][0], "192.0.2.1");
+        assert_eq!(value["next_hops"][1], "192.0.2.2");
+        assert_eq!(fib_next_hop_display(&route), "192.0.2.1, 192.0.2.2");
+
+        // A single-path row keeps the scalar shape and omits the list from JSON
+        // only when the server sent an empty list (older server back-compat).
+        let mut single = route.clone();
+        single.next_hops = vec!["192.0.2.1".to_string()];
+        assert_eq!(fib_next_hop_display(&single), "192.0.2.1");
+        let mut legacy = route;
+        legacy.next_hops = vec![];
+        assert_eq!(fib_next_hop_display(&legacy), "192.0.2.1");
+        let legacy_value = serde_json::to_value(fib_route_status_to_json(&legacy)).unwrap();
+        assert!(legacy_value.get("next_hops").is_none());
+    }
+
+    #[test]
     fn fib_json_includes_sampling_metadata_when_present() {
         let route = crate::proto::FibRouteStatus {
             table_name: "edge".to_string(),
@@ -1096,6 +1147,7 @@ mod tests {
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
             next_hop: "192.0.2.1".to_string(),
+            next_hops: vec!["192.0.2.1".to_string()],
             peer_address: "198.51.100.1".to_string(),
             state: crate::proto::FibRouteState::Rejected as i32,
             reason: "route_limit_exceeded".to_string(),

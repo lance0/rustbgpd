@@ -1570,6 +1570,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                             next_hop: status
                                 .next_hop
                                 .map_or_else(String::new, |ip| ip.to_string()),
+                            next_hops: status.next_hops.iter().map(ToString::to_string).collect(),
                             peer_address: status.peer.map_or_else(String::new, |ip| ip.to_string()),
                             state: match status.state {
                                 fib_runtime::FibRuntimeState::Installed => {

@@ -156,15 +156,16 @@ for the EVPN gate ladder.
 | Stale route demotion (GR) | Yes | Yes | Yes | Yes | Yes |
 | RPKI preference | Yes | Yes | Yes | Yes | Yes |
 | AIGP | No | Yes | No | Yes | No |
-| Multipath/ECMP | Partial[^multipath] | Yes | Yes | Yes | Yes |
+| Multipath/ECMP | Yes[^multipath] | Yes | Yes | Yes | Yes |
 
-[^multipath]: Add-Path multi-path *send* (RFC 7911, route-server mode) and
-    EVPN aliasing ECMP (ADR-0059 FDB nexthop groups, default-on) are
-    shipped. Classic unicast multipath best-path with multi-nexthop ECMP
-    FIB install (`maximum-paths`-style forwarding load-balancing) is not
-    yet implemented — best-path selects a single path and the FIB programs
-    one next-hop per prefix. Tracked as future work (ROADMAP P0, ADR-0061
-    FIB hardening).
+[^multipath]: Classic unicast multipath/ECMP FIB install ships (ADR-0066):
+    `[[fib_tables]].maximum_paths` selects N equal-cost BGP paths per prefix
+    (homogeneous eBGP **or** iBGP, exact-`AS_PATH` equality) and installs them
+    as a kernel `RTA_MULTIPATH` route — opt-in per table, default `1` (single
+    next-hop). Add-Path multi-path *send* (RFC 7911, route-server mode) and
+    EVPN aliasing ECMP (ADR-0059 FDB nexthop groups, default-on) also ship.
+    `AS_PATH`-length-only relaxation (`multipath-relax`) is the remaining
+    follow-up.
 
 ## Memory (200k prefixes, bgperf2)
 
