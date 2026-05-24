@@ -48,10 +48,17 @@ Up and flap on a live network with zero BGP impact, building confidence in the
 timing before arming the teardown. The staged delivery is:
 
 1. **Pure crate** (`crates/bfd`) — codec + sans-IO session FSM, unit-tested with
-   synthetic time, no sockets.
+   synthetic time, no sockets. **[shipped]**
 2. **Actor + config + status** — sessions run on real sockets and report Up/Down
    via a status `watch` channel + Prometheus metrics, but do **not** affect BGP.
-3. **Operator surface** — gRPC `GetBfdSessions`, `rustbgpctl bfd`, events.
+   **[shipped]**
+3a. **Operator inspection surface** — gRPC `GetBfdSessions`, `rustbgpctl bfd`,
+   read from the actor's status snapshot. **[shipped]** Lands the **event proto
+   contract** (`EVENT_CATEGORY_BFD`, `BfdSessionEvent`, the `BgpEvent.bfd`
+   oneof) at the same time so it is stable, but **does not yet stream live BFD
+   events** — see 3b.
+3b. **Event emission** — the actor publishes state-change events into the
+   unified `EventService.WatchEvents` stream (category/type filtered). **[next]**
 4. **BGP coupling** (RFC 5882) — behavior change, config-gated.
 5. **Interop (M51) + docs** — FRR `bfdd` cross-check, `COMPARISON.md` flip.
 
