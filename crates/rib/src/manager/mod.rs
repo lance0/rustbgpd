@@ -668,33 +668,47 @@ impl RibManager {
         let cap = max_paths.max(1) as usize;
         let mut out = Vec::with_capacity(self.loc_rib.len());
         for best in self.loc_rib.iter() {
-            let mut siblings: Vec<&crate::route::Route> = self
-                .ribs
-                .values()
-                .flat_map(|rib| rib.iter_prefix(&best.prefix))
-                .filter(|r| multipath_equal(best, r))
-                .collect();
-            siblings.sort_by(|a, b| {
-                a.next_hop
-                    .cmp(&b.next_hop)
-                    .then(a.peer.cmp(&b.peer))
-                    .then(a.path_id.cmp(&b.path_id))
-            });
-
             let mut next_hops: Vec<FibInstallNextHop> = Vec::new();
-            let mut seen: std::collections::BTreeSet<IpAddr> = std::collections::BTreeSet::new();
-            // best next-hop is always index 0
-            for r in std::iter::once(best).chain(siblings.iter().copied()) {
-                if next_hops.len() >= cap {
-                    break;
-                }
-                if seen.insert(r.next_hop) {
-                    next_hops.push(FibInstallNextHop {
-                        next_hop: r.next_hop,
-                        link_local_next_hop: r.link_local_next_hop,
-                        peer: r.peer,
-                        path_id: r.path_id,
-                    });
+            if cap <= 1 {
+                // ECMP off (the default `maximum_paths` of 1): skip the
+                // equal-cost sibling scan + sort entirely and program just the
+                // best next-hop. This keeps default FIB deployments off the new
+                // multipath query cost — they pay nothing for sibling gathering.
+                next_hops.push(FibInstallNextHop {
+                    next_hop: best.next_hop,
+                    link_local_next_hop: best.link_local_next_hop,
+                    peer: best.peer,
+                    path_id: best.path_id,
+                });
+            } else {
+                let mut siblings: Vec<&crate::route::Route> = self
+                    .ribs
+                    .values()
+                    .flat_map(|rib| rib.iter_prefix(&best.prefix))
+                    .filter(|r| multipath_equal(best, r))
+                    .collect();
+                siblings.sort_by(|a, b| {
+                    a.next_hop
+                        .cmp(&b.next_hop)
+                        .then(a.peer.cmp(&b.peer))
+                        .then(a.path_id.cmp(&b.path_id))
+                });
+
+                let mut seen: std::collections::BTreeSet<IpAddr> =
+                    std::collections::BTreeSet::new();
+                // best next-hop is always index 0
+                for r in std::iter::once(best).chain(siblings.iter().copied()) {
+                    if next_hops.len() >= cap {
+                        break;
+                    }
+                    if seen.insert(r.next_hop) {
+                        next_hops.push(FibInstallNextHop {
+                            next_hop: r.next_hop,
+                            link_local_next_hop: r.link_local_next_hop,
+                            peer: r.peer,
+                            path_id: r.path_id,
+                        });
+                    }
                 }
             }
             out.push(FibInstallCandidate {
