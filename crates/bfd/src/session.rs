@@ -46,7 +46,6 @@ pub struct Session {
     state: SessionState,
     local_diag: Diagnostic,
     remote_discriminator: u32,
-    remote_state: SessionState,
     /// Peer's Required Min RX — bounds how fast *we* transmit.
     remote_min_rx_us: u32,
     /// Peer's last Desired Min TX — feeds our detection time.
@@ -84,7 +83,6 @@ impl Session {
             state: SessionState::Down,
             local_diag: Diagnostic::None,
             remote_discriminator: 0,
-            remote_state: SessionState::Down,
             // RFC 5880 §6.8.1: RemoteMinRxInterval is initialized to 1.
             remote_min_rx_us: 1,
             remote_desired_min_tx_us: 0,
@@ -181,7 +179,6 @@ impl Session {
 
         self.remote_seen = true;
         self.remote_discriminator = pkt.my_discriminator;
-        self.remote_state = pkt.state;
         self.remote_min_rx_us = pkt.required_min_rx_interval;
         self.remote_desired_min_tx_us = pkt.desired_min_tx_interval;
         self.remote_detect_mult = pkt.detect_mult.max(1);

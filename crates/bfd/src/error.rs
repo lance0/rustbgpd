@@ -22,8 +22,9 @@ pub enum DecodeError {
         version: u8,
     },
 
-    /// The `Length` field disagrees with the buffer.
-    #[error("invalid BFD length {length} (have {available} bytes, minimum 24)")]
+    /// The `Length` field disagrees with the buffer or the per-packet minimum
+    /// (24 without authentication, 26 with the `A` bit set).
+    #[error("invalid BFD length {length} (have {available} bytes)")]
     InvalidLength {
         /// The `Length` field value from the wire.
         length: u8,
