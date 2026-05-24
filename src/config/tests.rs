@@ -4156,6 +4156,49 @@ peer_group = "ix-members"
 }
 
 #[test]
+fn dynamic_neighbor_peer_group_with_bfd_rejected() {
+    // v1 BFD is static-neighbors only (ADR-0067). A dynamic range whose peer
+    // group enables BFD must be rejected so the operator isn't misled into
+    // thinking dynamic peers are BFD-protected.
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[bfd_profiles]]
+name = "fast"
+
+[peer_groups.ix-members]
+hold_time = 90
+bfd = { profile = "fast" }
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "ix-members"
+"#;
+    let err = parse(toml).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("BFD is not supported for dynamic neighbors"),
+        "unexpected error: {err}"
+    );
+
+    // The same group with BFD explicitly disabled is accepted.
+    let ok = toml.replace(
+        r#"bfd = { profile = "fast" }"#,
+        r#"bfd = { profile = "fast", enabled = false }"#,
+    );
+    assert!(
+        parse(&ok).is_ok(),
+        "explicitly-disabled BFD should be allowed"
+    );
+}
+
+#[test]
 fn dynamic_neighbor_ipv4_prefix_too_long_rejected() {
     let toml = r#"
 [global]

@@ -125,9 +125,14 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
         "evpn_best_changed" | "evpn_route_best_changed" => {
             Ok(BgpEventType::EvpnRouteBestChanged as i32)
         }
+        "bfd_up" | "bfd_session_up" => Ok(BgpEventType::BfdSessionUp as i32),
+        "bfd_down" | "bfd_session_down" => Ok(BgpEventType::BfdSessionDown as i32),
+        "bfd_state_changed" | "bfd_session_state_changed" => {
+            Ok(BgpEventType::BfdSessionStateChanged as i32)
+        }
         "stream_lagged" | "lagged" => Ok(BgpEventType::StreamLagged as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported event type {other:?}; expected added, withdrawn, best_changed, policy_filtered, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, dataplane_status_changed, dataplane_route_installed, dataplane_route_withdrawn, dataplane_route_failed, evpn_added, evpn_withdrawn, evpn_best_changed, or stream_lagged"
+            "unsupported event type {other:?}; expected added, withdrawn, best_changed, policy_filtered, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, dataplane_status_changed, dataplane_route_installed, dataplane_route_withdrawn, dataplane_route_failed, evpn_added, evpn_withdrawn, evpn_best_changed, bfd_up, bfd_down, bfd_state_changed, or stream_lagged"
         ))),
     }
 }
@@ -175,8 +180,9 @@ fn parse_event_category(s: &str) -> Result<i32, CliError> {
         "policy" => Ok(EventCategory::Policy as i32),
         "dataplane" => Ok(EventCategory::Dataplane as i32),
         "evpn" => Ok(EventCategory::Evpn as i32),
+        "bfd" => Ok(EventCategory::Bfd as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported event category {other:?}; expected route, session, policy, dataplane, or evpn"
+            "unsupported event category {other:?}; expected route, session, policy, dataplane, evpn, or bfd"
         ))),
     }
 }
@@ -249,6 +255,9 @@ fn bgp_event_type_json_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::EvpnRouteAdded) => "evpn_route_added",
         Ok(BgpEventType::EvpnRouteWithdrawn) => "evpn_route_withdrawn",
         Ok(BgpEventType::EvpnRouteBestChanged) => "evpn_route_best_changed",
+        Ok(BgpEventType::BfdSessionUp) => "bfd_session_up",
+        Ok(BgpEventType::BfdSessionDown) => "bfd_session_down",
+        Ok(BgpEventType::BfdSessionStateChanged) => "bfd_session_state_changed",
         Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
@@ -275,6 +284,9 @@ fn bgp_event_type_display_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::EvpnRouteAdded) => "evpn_added",
         Ok(BgpEventType::EvpnRouteWithdrawn) => "evpn_withdrawn",
         Ok(BgpEventType::EvpnRouteBestChanged) => "evpn_best_changed",
+        Ok(BgpEventType::BfdSessionUp) => "bfd_up",
+        Ok(BgpEventType::BfdSessionDown) => "bfd_down",
+        Ok(BgpEventType::BfdSessionStateChanged) => "bfd_state_changed",
         Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
@@ -322,6 +334,7 @@ fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
             Ok(EventCategory::Policy) => "policy",
             Ok(EventCategory::Dataplane) => "dataplane",
             Ok(EventCategory::Evpn) => "evpn",
+            Ok(EventCategory::Bfd) => "bfd",
             _ => "unknown",
         },
         "event_type": bgp_event_type_json_label(event.event_type),
@@ -521,6 +534,7 @@ fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
                     Ok(EventCategory::Policy) => "policy",
                     Ok(EventCategory::Dataplane) => "dataplane",
                     Ok(EventCategory::Evpn) => "evpn",
+                    Ok(EventCategory::Bfd) => "bfd",
                     _ => "unknown",
                 }
                 .to_string(),
@@ -1199,6 +1213,38 @@ mod tests {
             BgpEventType::RoutePolicyFiltered as i32
         );
         assert!(parse_bgp_event_type("not_an_event").is_err());
+    }
+
+    #[test]
+    fn parse_bfd_category_and_event_types() {
+        // The API already filters BFD events; the CLI must accept the `bfd`
+        // category and the bfd_* event types (and their aliases) so
+        // `rustbgpctl events watch --category bfd` works.
+        assert_eq!(
+            parse_event_category("bfd").unwrap(),
+            EventCategory::Bfd as i32
+        );
+        assert_eq!(
+            parse_bgp_event_type("bfd_up").unwrap(),
+            BgpEventType::BfdSessionUp as i32
+        );
+        assert_eq!(
+            parse_bgp_event_type("bfd_session_down").unwrap(),
+            BgpEventType::BfdSessionDown as i32
+        );
+        assert_eq!(
+            parse_bgp_event_type("bfd_state_changed").unwrap(),
+            BgpEventType::BfdSessionStateChanged as i32
+        );
+        // Round-trips through the display + JSON labels.
+        assert_eq!(
+            bgp_event_type_display_label(BgpEventType::BfdSessionUp as i32),
+            "bfd_up"
+        );
+        assert_eq!(
+            bgp_event_type_json_label(BgpEventType::BfdSessionStateChanged as i32),
+            "bfd_session_state_changed"
+        );
     }
 
     #[test]

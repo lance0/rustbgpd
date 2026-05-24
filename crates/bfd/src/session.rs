@@ -274,13 +274,25 @@ impl Session {
         }
         match self.state {
             SessionState::Down => match received {
-                SessionState::Down => self.state = SessionState::Init,
-                SessionState::Init => self.state = SessionState::Up,
+                // Recovering: the most recent state change is now to Init/Up, so
+                // the local diagnostic (RFC 5880 §6.8.1) is no longer the prior
+                // failure cause. Clear it so a recovered session and its outgoing
+                // packets don't keep reporting the stale "detection time expired"
+                // / "neighbor signaled down".
+                SessionState::Down => {
+                    self.state = SessionState::Init;
+                    self.local_diag = Diagnostic::None;
+                }
+                SessionState::Init => {
+                    self.state = SessionState::Up;
+                    self.local_diag = Diagnostic::None;
+                }
                 _ => {}
             },
             SessionState::Init => {
                 if matches!(received, SessionState::Init | SessionState::Up) {
                     self.state = SessionState::Up;
+                    self.local_diag = Diagnostic::None;
                 }
             }
             SessionState::Up => {
@@ -642,5 +654,46 @@ mod tests {
         let actions = s.handle(Event::PacketReceived(peer(SessionState::Init, 0x0000_00AA)));
         assert_eq!(s.state(), SessionState::Up);
         (s, actions)
+    }
+
+    fn first_state_change_diag(actions: &[Action]) -> Option<Diagnostic> {
+        actions.iter().find_map(|a| match a {
+            Action::StateChanged { diagnostic, .. } => Some(*diagnostic),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn recovery_clears_stale_failure_diagnostic() {
+        // A detection timeout sets the local diagnostic to "detection time
+        // expired".
+        let (mut s, _) = bring_up();
+        let down = s.handle(Event::DetectTimerExpires);
+        assert_eq!(s.state(), SessionState::Down);
+        assert_eq!(
+            first_state_change_diag(&down),
+            Some(Diagnostic::ControlDetectionTimeExpired)
+        );
+
+        // Recovering Down→Init→Up must clear the diagnostic so the recovered
+        // state — and the session's outgoing packets — stop reporting the stale
+        // failure cause (RFC 5880 §6.8.1: the diagnostic reflects the *most
+        // recent* state change).
+        let init = s.handle(Event::PacketReceived(peer(SessionState::Down, 0)));
+        assert_eq!(s.state(), SessionState::Init);
+        assert_eq!(
+            first_state_change_diag(&init),
+            Some(Diagnostic::None),
+            "Down→Init clears the failure diagnostic"
+        );
+
+        let up = s.handle(Event::PacketReceived(peer(SessionState::Init, 0x0000_00AA)));
+        assert_eq!(s.state(), SessionState::Up);
+        assert!(state_changes(&up).contains(&(SessionState::Init, SessionState::Up)));
+        assert_eq!(
+            sent(&s.handle(Event::TxTimerExpires))[0].diagnostic,
+            Diagnostic::None,
+            "recovered Up packets carry no stale diagnostic"
+        );
     }
 }

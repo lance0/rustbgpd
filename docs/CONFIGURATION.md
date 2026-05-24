@@ -395,6 +395,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `max_prefixes`         | u32      | no       | --      | Maximum prefixes accepted before session teardown |
 | `md5_password`         | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
 | `tcp_ao`               | table    | no       | --      | TCP-AO key for static neighbors (RFC 5925; Linux startup sockets, restart-required edits) |
+| `bfd`                  | table    | no       | --      | Single-hop BFD attachment referencing a `[[bfd_profiles]]` entry (RFC 5880/5881/5882; static neighbors only, restart-required edits) |
 | `ttl_security`         | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only) |
 | `families`             | [string] | no       | (auto)  | Address families to negotiate (see below)        |
 | `graceful_restart`     | bool     | no       | true    | Enable Graceful Restart receiving speaker (RFC 4724) |
@@ -462,6 +463,59 @@ rollover metadata for future multi-key support; with the current single-key
 runtime, active-open sockets install the configured key as the initial current
 / receive-next key, while listener MKTs are installed without current /
 receive-next flags. `preferred` and `deprecated` cannot both be true.
+
+### BFD (RFC 5880 / 5881 / 5882)
+
+Single-hop asynchronous BFD (ADR-0067) gives sub-second peer-failure detection
+and, via RFC 5882, tears the BGP session down on a BFD-down event before the
+hold timer expires. Timers live in named profiles; neighbors (or peer groups)
+attach to a profile.
+
+```toml
+# A named timing profile. Intervals are milliseconds.
+[[bfd_profiles]]
+name = "fast"
+min_tx_interval = 300   # default 300, floor 100
+min_rx_interval = 300   # default 300, floor 100
+multiplier = 3          # default 3, min 2 (detection ≈ interval × multiplier)
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+# Attach BFD. `strict` is optional (default false).
+bfd = { profile = "fast" }
+
+# Peer groups can carry a default; a neighbor can override it off:
+[peer_groups.edge]
+bfd = { profile = "fast" }
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "edge"
+bfd = { profile = "fast", enabled = false }   # opt this neighbor out
+```
+
+`[neighbors.bfd]` / `[peer_groups.<name>.bfd]` fields:
+
+| Field     | Type   | Default | Description                                                       |
+|-----------|--------|---------|-------------------------------------------------------------------|
+| `profile` | string | --      | Name of a `[[bfd_profiles]]` entry (must exist)                   |
+| `enabled` | bool   | true    | Set `false` to disable BFD (e.g. override an inherited group block) |
+| `strict`  | bool   | false   | RFC 5882 strict mode: withhold BGP establishment until BFD is Up   |
+
+In **non-strict** mode (default) BGP establishes normally and a later BFD-down
+tears it down faster than the hold timer; recovery re-establishes. In **strict**
+mode the BGP session is withheld (on both the active-open and inbound paths)
+until BFD first reaches Up.
+
+BFD is **static-neighbors only** in v1 — a `[[dynamic_neighbors]]` range whose
+peer group enables BFD is rejected at config time. v1 covers IPv4 + IPv6
+**global** addresses (IPv6 link-local / unnumbered is deferred to v1.1). Like
+TCP-AO, BFD edits are **restart-required**: on SIGHUP rustbgpd pins
+`[[bfd_profiles]]` and neighbor / peer-group `bfd` back to the live snapshot and
+reports them as restart-required in `--diff`. Inspect sessions with
+`rustbgpctl bfd` / `BfdService.GetBfdSessions` (see [API.md](API.md)).
 
 ### Address families
 

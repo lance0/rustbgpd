@@ -5,9 +5,10 @@
 # timer. The test proves:
 #   1. BGP reaches Established AND BFD reaches Up — asserted from BOTH sides
 #      (rustbgpd GetBfdSessions + FRR `show bfd peers`).
-#   2. Failover: killing FRR's bfdd makes BFD fail; rustbgpd tears the BGP
-#      session down within the BFD detection window (~900 ms) — far under the
-#      90 s hold timer — proving the coupling, not a hold-timer expiry.
+#   2. Failover: killing FRR's bfdd makes BFD fail; rustbgpd's BFD detection
+#      window is ~900 ms (300 ms × 3), and the RFC 5882 coupling tears the BGP
+#      session down far under the 90 s hold timer — proving the coupling, not a
+#      hold-timer expiry. (The assertions poll up to 10 s for CI headroom.)
 #   3. Recovery: watchfrr restarts bfdd; BFD and BGP re-establish.
 #
 # Prerequisites:

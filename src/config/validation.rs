@@ -563,10 +563,26 @@ impl Config {
             }
 
             // Peer group must exist
-            if !self.peer_groups.contains_key(&dn.peer_group) {
+            let Some(group) = self.peer_groups.get(&dn.peer_group) else {
                 return Err(ConfigError::InvalidDynamicNeighbor {
                     reason: format!(
                         "dynamic_neighbors[{i}]: peer_group {:?} not defined",
+                        dn.peer_group
+                    ),
+                });
+            };
+
+            // v1 BFD is static-neighbors only (ADR-0067). A dynamic range whose
+            // peer group enables BFD would silently get no BFD session — reject
+            // it at config time rather than mislead the operator into thinking
+            // dynamic peers are BFD-protected.
+            if group.bfd.as_ref().is_some_and(|b| b.enabled) {
+                return Err(ConfigError::InvalidDynamicNeighbor {
+                    reason: format!(
+                        "dynamic_neighbors[{i}]: peer_group {:?} enables BFD, but BFD is not \
+                         supported for dynamic neighbors (static neighbors only in v1; \
+                         set `bfd = {{ enabled = false }}` on the group or use static \
+                         neighbors — see ADR-0067)",
                         dn.peer_group
                     ),
                 });

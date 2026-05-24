@@ -134,6 +134,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `RibService` | All RPCs | None |
 | `EventService` | All RPCs | None |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`, `GetIpVrf` | `ClearDuplicateMacQuarantine`, `ApplyEvpnRuntime` |
+| `BfdService` | `GetBfdSessions` | None |
 | `InjectionService` | None | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` |
 | `ControlService` | `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
 
@@ -474,6 +475,8 @@ through one RPC shape.
 | ADR-0061 general Linux FIB programming | `ListFibRoutes` / `rustbgpctl rib fib` | Snapshot | Current reconcile snapshot plus persisted owned-state semantics |
 | ADR-0061 FIB route apply outcomes | `EventService.WatchEvents` with `EVENT_CATEGORY_DATAPLANE` and `BGP_EVENT_TYPE_DATAPLANE_ROUTE_*` / `rustbgpctl events watch --category dataplane` | Streaming event feed | Live-only; no history API |
 | EVPN L2/L3 dataplane readiness | `EvpnService` (`ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`) / `rustbgpctl evpn ...` | Snapshot | Latest daemon or dataplane report snapshot |
+| ADR-0067 BFD session state | `BfdService.GetBfdSessions` / `rustbgpctl bfd` | Snapshot | Current BFD actor snapshot |
+| Live BFD session state changes | `EventService.WatchEvents` with `EVENT_CATEGORY_BFD` and `BGP_EVENT_TYPE_BFD_SESSION_*` / `rustbgpctl events watch --category bfd` | Streaming event feed | Live-only; opt-in (not in the default route+session set); slow subscribers can lag |
 | Alerting / counters | Prometheus `/metrics` | Cumulative counters and gauges | Process lifetime, scrape-dependent |
 
 Use a live stream when you need a tail, `ListRouteEvents` when you need recent
@@ -1462,6 +1465,37 @@ a non-teardown mixed L2VNI + IP-VRF request,
 an ES referencing an unknown member
 VNI, or an ES apply with no running segment actor) is
 rejected with `FAILED_PRECONDITION`, leaving the prior generation committed.
+
+---
+
+## BfdService
+
+Read-only inspection of single-hop BFD sessions (ADR-0067, RFC 5880/5881).
+Sessions themselves are configured via `[[bfd_profiles]]` + `[neighbors.bfd]`
+(see [CONFIGURATION.md](CONFIGURATION.md)) — BFD config is restart-required, so
+there is no mutating RPC here.
+
+| RPC | Description |
+|-----|-------------|
+| `GetBfdSessions` | List BFD sessions (peer address, state, last diagnostic, strict flag), optionally filtered to one `peer_address` |
+
+```bash
+# All BFD sessions
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.BfdService/GetBfdSessions
+
+# One peer
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"peer_address": "10.0.0.2"}' \
+  localhost:50051 rustbgpd.v1.BfdService/GetBfdSessions
+```
+
+`state` is a `BfdSessionState` (`BFD_SESSION_STATE_{ADMIN_DOWN,DOWN,INIT,UP}`).
+Live state-change events are available on `EventService.WatchEvents` with
+`EVENT_CATEGORY_BFD` (opt-in). RFC 5882 BGP coupling — strict (withhold BGP
+until BFD Up) and non-strict (tear BGP down on BFD-down before the hold timer) —
+is driven by `PeerManager` from these sessions; it is not exposed as a separate
+RPC.
 
 ---
 
