@@ -43,7 +43,15 @@ impl proto::bfd_service_server::BfdService for BfdService {
         let filter = request.into_inner().peer_address;
         let mut sessions = (self.snapshot)();
         if !filter.is_empty() {
-            sessions.retain(|s| s.peer_address == filter);
+            // Parse to IpAddr and compare canonicalized forms so equivalent
+            // textual representations (notably IPv6) match — mirrors the
+            // address-filter handling in NeighborService / RibService. Snapshot
+            // peer addresses are already `IpAddr::to_string()` (canonical).
+            let wanted = filter
+                .parse::<std::net::IpAddr>()
+                .map_err(|_| Status::invalid_argument(format!("invalid peer_address {filter:?}")))?
+                .to_string();
+            sessions.retain(|s| s.peer_address == wanted);
         }
         Ok(Response::new(proto::GetBfdSessionsResponse { sessions }))
     }
@@ -96,6 +104,34 @@ mod tests {
             .into_inner();
         assert_eq!(resp.sessions.len(), 1);
         assert_eq!(resp.sessions[0].peer_address, "10.0.0.2");
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_peer_address() {
+        let svc = BfdService::default();
+        let err = svc
+            .get_bfd_sessions(Request::new(proto::GetBfdSessionsRequest {
+                peer_address: "not-an-ip".to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn ipv6_filter_matches_canonical_form() {
+        // Snapshot stores the canonical form; a non-canonical request still matches.
+        let svc = BfdService::with_snapshot(std::sync::Arc::new(|| {
+            vec![session("2001:db8::1", proto::BfdSessionState::Up)]
+        }));
+        let resp = svc
+            .get_bfd_sessions(Request::new(proto::GetBfdSessionsRequest {
+                peer_address: "2001:DB8:0:0:0:0:0:1".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.sessions.len(), 1);
     }
 
     #[tokio::test]

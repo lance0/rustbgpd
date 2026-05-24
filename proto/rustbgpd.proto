@@ -608,7 +608,8 @@ message BfdSession {
   // stable snake_case name: "none", "control_detection_time_expired",
   // "echo_function_failed", "neighbor_signaled_session_down",
   // "forwarding_plane_reset", "path_down", "concatenated_path_down",
-  // "administratively_down", "reverse_concatenated_path_down".
+  // "administratively_down", "reverse_concatenated_path_down", or "reserved"
+  // for an unassigned RFC 5880 diagnostic code.
   string diagnostic = 3;
   // RFC 5882 strict mode: BGP is withheld from Established until BFD is Up.
   bool strict = 4;
