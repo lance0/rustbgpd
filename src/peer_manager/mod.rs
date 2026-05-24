@@ -388,7 +388,8 @@ impl PeerManager {
 
         // Take the BFD state-change receiver into a local so the select! arm
         // captures the local (not `self`), and publish the initial desired set
-        // so it matches the live managed/enabled peers.
+        // (the configured set overlaid with the disabled/deleted set — empty at
+        // startup, so every configured peer starts enabled).
         let mut bfd_state_change_rx = self.take_bfd_state_change_rx();
         if bfd_state_change_rx.is_some() {
             self.republish_bfd_desired();

@@ -1,10 +1,13 @@
 //! Single-hop asynchronous BFD actor (ADR-0067).
 //!
 //! Owns the UDP sockets, the real per-session timers, and transmit jitter, and
-//! drives the pure [`rustbgpd_bfd::Session`] state machine for each configured
-//! neighbor. This slice runs the sessions and publishes their state via a
-//! `watch` channel + Prometheus metrics; it does **not** yet affect the BGP
-//! session (RFC 5882 coupling lands in a later slice).
+//! drives the pure [`rustbgpd_bfd::Session`] state machine. It is a **pure
+//! session-runner**: it reconciles a desired session set owned and published by
+//! `PeerManager` (a `watch` channel) and never derives lifecycle from BGP
+//! itself. It publishes status via a `watch` channel + Prometheus metrics, a
+//! lossy [`BfdRuntimeEvent`] broadcast for the operator event stream, and a
+//! lossless [`BfdStateChange`] channel that `PeerManager` consumes for RFC 5882
+//! BGP coupling (non-strict teardown shipped; strict withholding lands next).
 //!
 //! Design: a single actor task `select!`s over the shared per-AF receive
 //! sockets and a min-deadline timer heap covering every session's transmit and
@@ -1390,10 +1393,12 @@ remote_asn = 65002
             // signal the unified WatchEvents stream is bridged from).
             let up_event = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
-                    if let Ok(ev) = event_rx.recv().await
-                        && ev.new_state == SessionState::Up
-                    {
-                        return ev;
+                    match event_rx.recv().await {
+                        Ok(ev) if ev.new_state == SessionState::Up => return ev,
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => {
+                            panic!("BFD event channel closed before Up")
+                        }
                     }
                 }
             })
@@ -1405,10 +1410,10 @@ remote_asn = 65002
             // (the BGP-coupling channel, ADR-0067 step 4).
             let up_change = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
-                    if let Some(change) = state_change_rx.recv().await
-                        && change.state == SessionState::Up
-                    {
-                        return change;
+                    match state_change_rx.recv().await {
+                        Some(change) if change.state == SessionState::Up => return change,
+                        Some(_) => {}
+                        None => panic!("BFD state-change channel closed before Up"),
                     }
                 }
             })

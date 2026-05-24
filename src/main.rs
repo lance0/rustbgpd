@@ -1542,9 +1542,10 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         fib_runtime_shutdown.clone(),
     );
 
-    // Spawn the BFD actor (single-hop async, ADR-0067). Runs sessions for
-    // BFD-enabled neighbors and publishes their state; BGP coupling is a later
-    // slice. No-op when no neighbor has BFD configured (or off Linux).
+    // Spawn the BFD actor (single-hop async, ADR-0067). Runs the sessions in the
+    // PeerManager-owned desired set, publishes their state, and emits state
+    // changes that PeerManager couples to BGP (non-strict RFC 5882 teardown).
+    // No-op when no neighbor has BFD configured (or off Linux).
     let (bfd_status_tx, bfd_status_rx) =
         tokio::sync::watch::channel(Vec::<bfd_runtime::BfdStatus>::new());
     // Actor state-change events (ADR-0067 step 3b): the actor broadcasts
