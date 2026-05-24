@@ -8,10 +8,10 @@
 #     hold timer.
 #   * BGP reaches Established AND BFD reaches Up (asserted from both sides:
 #     rustbgpd GetBfdSessions + FRR `vtysh show bfd peers`).
-#   * Failover: dropping BFD control packets (UDP/3784) on FRR makes BFD fail;
-#     rustbgpd tears the BGP session down within the BFD detection window —
-#     far faster than the 90 s hold timer — proving the RFC 5882 coupling.
-#   * Recovery: restoring BFD lets the session re-establish.
+#   * Failover: killing FRR's bfdd (`killall -9 bfdd`) makes BFD fail; rustbgpd
+#     tears the BGP session down within the BFD detection window — far faster
+#     than the 90 s hold timer — proving the RFC 5882 coupling.
+#   * Recovery: watchfrr restarts bfdd and the session re-establishes.
 #
 # Usage:
 #   docker build -t rustbgpd:dev .

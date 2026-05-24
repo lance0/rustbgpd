@@ -58,6 +58,14 @@ preflight() {
         errors=$((errors + 1))
     fi
 
+    # jq parses every grpcurl JSON response in the shared helpers; without it the
+    # failures are opaque (empty fields, polls timing out) rather than a clear
+    # missing-dependency error.
+    if ! command -v jq &>/dev/null; then
+        echo "ERROR: jq not found in PATH" >&2
+        errors=$((errors + 1))
+    fi
+
     if ! docker inspect "$RUSTBGPD" &>/dev/null; then
         echo "ERROR: container $RUSTBGPD not running — deploy topology first:" >&2
         echo "  containerlab deploy -t tests/interop/${TOPO}.clab.yml" >&2
