@@ -1169,8 +1169,15 @@ fn validate_grpc_token_file(path: Option<&str>, field_name: &str) -> Result<(), 
 /// Minimum BFD interval (ms). Conservative for v1 — aggressive sub-100 ms
 /// timers risk false flaps that are worse than slightly slower detection.
 const BFD_MIN_INTERVAL_MS: u32 = 100;
+/// Maximum BFD interval (ms). The actor converts ms → microseconds (`* 1000`)
+/// into the `u32` wire field, so anything above this would overflow / be
+/// silently clamped. Reject it instead.
+const BFD_MAX_INTERVAL_MS: u32 = u32::MAX / 1000;
 /// Minimum BFD detection multiplier.
 const BFD_MIN_MULTIPLIER: u32 = 2;
+/// Maximum BFD detection multiplier — the RFC 5880 §4.1 Detect Mult field is a
+/// single octet, so values above 255 cannot be represented on the wire.
+const BFD_MAX_MULTIPLIER: u32 = 255;
 
 /// Validate `[[bfd_profiles]]` and that every `bfd.profile` reference resolves.
 fn validate_bfd(config: &Config) -> Result<(), ConfigError> {
@@ -1196,10 +1203,28 @@ fn validate_bfd(config: &Config) -> Result<(), ConfigError> {
                 ),
             });
         }
+        if profile.min_tx_interval > BFD_MAX_INTERVAL_MS
+            || profile.min_rx_interval > BFD_MAX_INTERVAL_MS
+        {
+            return Err(ConfigError::InvalidBfd {
+                reason: format!(
+                    "bfd_profile {:?}: min_tx_interval and min_rx_interval must be <= {BFD_MAX_INTERVAL_MS} ms",
+                    profile.name
+                ),
+            });
+        }
         if profile.multiplier < BFD_MIN_MULTIPLIER {
             return Err(ConfigError::InvalidBfd {
                 reason: format!(
                     "bfd_profile {:?}: multiplier must be >= {BFD_MIN_MULTIPLIER}",
+                    profile.name
+                ),
+            });
+        }
+        if profile.multiplier > BFD_MAX_MULTIPLIER {
+            return Err(ConfigError::InvalidBfd {
+                reason: format!(
+                    "bfd_profile {:?}: multiplier must be <= {BFD_MAX_MULTIPLIER}",
                     profile.name
                 ),
             });

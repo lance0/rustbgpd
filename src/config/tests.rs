@@ -5860,6 +5860,13 @@ fn bfd_rejects_invalid_profiles() {
     let cases = [
         ("name = \"p\"\nmin_tx_interval = 50", "must be >= 100"),
         ("name = \"p\"\nmultiplier = 1", "multiplier must be >= 2"),
+        // Upper bounds: out-of-range values must be rejected, not silently
+        // clamped by the actor's u8 / microsecond conversions.
+        (
+            "name = \"p\"\nmultiplier = 1000",
+            "multiplier must be <= 255",
+        ),
+        ("name = \"p\"\nmin_rx_interval = 5000000", "must be <= "),
         (
             "name = \"dup\"\n\n[[bfd_profiles]]\nname = \"dup\"",
             "duplicate bfd_profile",
@@ -6015,6 +6022,103 @@ bfd = {{ profile = "fast" }}
     );
     // After pinning, a re-diff against the live snapshot shows no BFD drift.
     assert!(!diff_config(&old, &runtime).bfd_changed);
+}
+
+/// The effective BFD session set must survive peer-group *membership* changes,
+/// not just raw `neighbor.bfd` edits — BFD can be inherited, so moving a
+/// neighbor between groups (or in/out of a BFD-bearing one) changes its
+/// effective session without touching `neighbor.bfd`. The pin must restore the
+/// live effective attachment for an existing neighbor in all three shapes.
+#[test]
+fn bfd_pin_restores_effective_set_across_peer_group_membership_changes() {
+    // Live config: neighbor 10.0.0.3 inherits BFD from peer-group `rrc`.
+    let live = parse(&format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+
+[peer_groups.rrc]
+bfd = {{ profile = "fast" }}
+
+[peer_groups.plain]
+hold_time = 30
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "rrc"
+"#,
+        valid_toml()
+    ))
+    .unwrap();
+
+    // Detach: move the neighbor to a non-BFD group. Effective BFD would drop to
+    // None, but the actor still runs the session → pin must keep it.
+    let detached = parse(&format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+
+[peer_groups.rrc]
+bfd = {{ profile = "fast" }}
+
+[peer_groups.plain]
+hold_time = 30
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "plain"
+"#,
+        valid_toml()
+    ))
+    .unwrap();
+    assert!(diff_config(&live, &detached).bfd_changed);
+    let mut runtime = detached.clone();
+    assert!(super::pin_bfd_startup_only_runtime(&mut runtime, &live));
+    assert!(
+        !diff_config(&live, &runtime).bfd_changed,
+        "detach via peer-group membership must be pinned back to the live session"
+    );
+
+    // Attach: a neighbor with no BFD moves into the BFD group. The actor has no
+    // session → pin must keep effective BFD off.
+    let plain_live = parse(&format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+
+[peer_groups.rrc]
+bfd = {{ profile = "fast" }}
+
+[peer_groups.plain]
+hold_time = 30
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "plain"
+"#,
+        valid_toml()
+    ))
+    .unwrap();
+    let attached = live.clone(); // same file: neighbor in `rrc` (BFD) group
+    assert!(diff_config(&plain_live, &attached).bfd_changed);
+    let mut runtime = attached.clone();
+    assert!(super::pin_bfd_startup_only_runtime(
+        &mut runtime,
+        &plain_live
+    ));
+    assert!(
+        !diff_config(&plain_live, &runtime).bfd_changed,
+        "attach via peer-group membership must be pinned off until restart"
+    );
 }
 
 // ---------------------------------------------------------------------------

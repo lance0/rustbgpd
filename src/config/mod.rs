@@ -1635,7 +1635,7 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
         restart_sections.push("[[neighbors]].tcp_ao");
     }
     if diff.bfd_changed {
-        restart_sections.push("[[bfd_profiles]] / neighbor.bfd / peer_group.bfd");
+        restart_sections.push("[[bfd_profiles]] / [neighbors.bfd] / [peer_groups.*.bfd]");
     }
     if p.import_changed {
         restart_sections.push("[policy.import] (inline)");
@@ -1798,31 +1798,69 @@ fn bfd_restart_required_changed(old: &Config, new: &Config) -> bool {
     effective_bfd_sessions(old) != effective_bfd_sessions(new)
 }
 
+/// Resolved (effective) BFD per neighbor address — its own `bfd`, else its
+/// peer-group's. Used to pin/compare the *effective* session set, which
+/// peer-group inheritance makes irreducible to raw field comparison.
+fn effective_bfd_by_addr(config: &Config) -> HashMap<String, Option<BfdConfig>> {
+    config
+        .neighbors
+        .iter()
+        .map(|n| {
+            (
+                n.address.clone(),
+                neighbor_effective_bfd(n, config).cloned(),
+            )
+        })
+        .collect()
+}
+
 /// Pin BFD startup-only runtime state to the live snapshot. When the effective
-/// session set differs, restore `bfd_profiles` plus every neighbor and
-/// peer-group `bfd` field from `current`, so a SIGHUP reload does not silently
-/// advance the persisted snapshot past what the running actor is using. Returns
-/// whether anything was pinned. (A neighbor removed while it had BFD still
-/// leaves a session running in the actor until restart — that drift is surfaced
-/// by `bfd_changed`, not repaired here, since re-adding the neighbor would
-/// clobber the operator's BGP-removal intent.)
+/// session set differs, restore `bfd_profiles` and every peer-group `bfd`
+/// field, and — for each neighbor whose *effective* BFD attachment changed —
+/// pin its `bfd` and `peer_group` membership back to the live values, so a
+/// SIGHUP reload cannot advance the persisted snapshot past what the running
+/// actor is using. Pinning membership (not just the raw `bfd` field) is
+/// required because BFD can be inherited from a peer group: a reload that moves
+/// a neighbor between peer groups, or in/out of a BFD-bearing one, changes the
+/// effective session without touching `neighbor.bfd`. This mirrors the
+/// whole-neighbor `tcp_ao` pin — a neighbor with a changed startup-only
+/// attachment is restart-required this reload. Returns whether anything was
+/// pinned.
+///
+/// Residual: a neighbor *added* in the same reload that *inherits* BFD has no
+/// live session to preserve; its inline `bfd` is dropped, but inherited BFD
+/// will only start on the next restart (surfaced by `bfd_changed`). A neighbor
+/// *removed* while it had BFD likewise leaves a session running until restart.
 pub(crate) fn pin_bfd_startup_only_runtime(new_config: &mut Config, current: &Config) -> bool {
     if !bfd_restart_required_changed(current, new_config) {
         return false;
     }
+    // Snapshot effective BFD per address for both configs before mutating.
+    let live_effective = effective_bfd_by_addr(current);
+    let new_effective = effective_bfd_by_addr(new_config);
+
     new_config.bfd_profiles.clone_from(&current.bfd_profiles);
+    for (name, group) in &mut new_config.peer_groups {
+        group.bfd = current.peer_groups.get(name).and_then(|g| g.bfd.clone());
+    }
+
     let current_by_addr: HashMap<&str, &Neighbor> = current
         .neighbors
         .iter()
         .map(|n| (n.address.as_str(), n))
         .collect();
     for neighbor in &mut new_config.neighbors {
-        neighbor.bfd = current_by_addr
-            .get(neighbor.address.as_str())
-            .and_then(|c| c.bfd.clone());
-    }
-    for (name, group) in &mut new_config.peer_groups {
-        group.bfd = current.peer_groups.get(name).and_then(|g| g.bfd.clone());
+        let addr = neighbor.address.as_str();
+        if live_effective.get(addr) == new_effective.get(addr) {
+            continue;
+        }
+        if let Some(live) = current_by_addr.get(addr) {
+            neighbor.bfd.clone_from(&live.bfd);
+            neighbor.peer_group.clone_from(&live.peer_group);
+        } else {
+            // Newly added neighbor — no live session to preserve.
+            neighbor.bfd = None;
+        }
     }
     true
 }

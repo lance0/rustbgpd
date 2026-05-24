@@ -220,7 +220,7 @@ mod linux {
     }
 
     /// A scheduled timer firing.
-    #[derive(PartialEq, Eq)]
+    #[derive(Debug, PartialEq, Eq)]
     struct Deadline {
         at: Instant,
         peer: IpAddr,
@@ -234,7 +234,24 @@ mod linux {
     }
     impl Ord for Deadline {
         fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-            self.at.cmp(&other.at)
+            // The heap only cares about `at`; the remaining fields are
+            // deterministic tie-breakers so the total order is consistent with
+            // the derived `Eq` (Ord contract: `cmp == Equal` ⇔ `eq`), which
+            // matters when several deadlines share the same `Instant`.
+            self.at
+                .cmp(&other.at)
+                .then_with(|| self.epoch.cmp(&other.epoch))
+                .then_with(|| self.peer.cmp(&other.peer))
+                .then_with(|| kind_key(self.kind).cmp(&kind_key(other.kind)))
+        }
+    }
+
+    /// Stable ordering key for `TimerKind` (which has no `Ord`), used only as a
+    /// `Deadline` tie-breaker.
+    fn kind_key(kind: TimerKind) -> u8 {
+        match kind {
+            TimerKind::Tx => 0,
+            TimerKind::Detect => 1,
         }
     }
 
@@ -327,6 +344,10 @@ mod linux {
                 epochs: HashMap::new(),
             };
             self.sessions.insert(params.peer, entry);
+            // Seed the up gauge at 0 so a session that never comes Up (peer
+            // absent, TTL-blocked, misconfigured) still has an observable
+            // `bfd_session_up{peer}=0` series, not a missing one.
+            metrics.record_bfd_state(&params.peer.to_string(), false, false);
             // Apply the session's initial actions (arms the slow tx timer).
             self.apply(params.peer, actions, metrics).await;
         }
@@ -694,6 +715,46 @@ mod linux {
         }
         hash | 1
     }
+
+    #[cfg(test)]
+    mod unit {
+        use super::{Deadline, kind_key};
+        use rustbgpd_bfd::TimerKind;
+        use std::net::IpAddr;
+        use tokio::time::Instant;
+
+        fn deadline(at: Instant, peer: &str, kind: TimerKind, epoch: u64) -> Deadline {
+            Deadline {
+                at,
+                peer: peer.parse::<IpAddr>().unwrap(),
+                kind,
+                epoch,
+            }
+        }
+
+        #[test]
+        fn deadline_ord_is_consistent_with_eq() {
+            let now = Instant::now();
+            let later = now + std::time::Duration::from_millis(1);
+            let a = deadline(now, "10.0.0.1", TimerKind::Tx, 0);
+            // Same `at`, different fields: Ord must NOT report Equal (that would
+            // violate the Ord/Eq contract for the BinaryHeap).
+            let same_at = deadline(now, "10.0.0.2", TimerKind::Detect, 1);
+            assert_ne!(a, same_at);
+            assert_ne!(a.cmp(&same_at), std::cmp::Ordering::Equal);
+            // Identical fields compare Equal and are Eq.
+            let clone = deadline(now, "10.0.0.1", TimerKind::Tx, 0);
+            assert_eq!(a, clone);
+            assert_eq!(a.cmp(&clone), std::cmp::Ordering::Equal);
+            // `at` is still the primary key.
+            assert!(a < deadline(later, "10.0.0.0", TimerKind::Tx, 0));
+        }
+
+        #[test]
+        fn kind_key_is_injective() {
+            assert_ne!(kind_key(TimerKind::Tx), kind_key(TimerKind::Detect));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -999,6 +1060,22 @@ remote_asn = 65002
             statuses.iter().find(|s| s.peer == peer).map(|s| s.state)
         }
 
+        /// Read the `bfd_session_up{peer}` gauge value from the registry by
+        /// encoding to the Prometheus text format (version-stable), or `None`
+        /// if the series does not exist yet.
+        fn bfd_up_gauge(registry: &Registry, peer: &str) -> Option<i64> {
+            use prometheus::Encoder;
+            let mut buf = Vec::new();
+            prometheus::TextEncoder::new()
+                .encode(&registry.gather(), &mut buf)
+                .ok()?;
+            let text = String::from_utf8(buf).ok()?;
+            let needle = format!("bfd_session_up{{peer=\"{peer}\"}}");
+            text.lines()
+                .find_map(|line| line.strip_prefix(&needle))
+                .and_then(|rest| rest.trim().parse::<i64>().ok())
+        }
+
         async fn wait_for(
             rx: &watch::Receiver<Vec<BfdStatus>>,
             peer: IpAddr,
@@ -1008,6 +1085,27 @@ remote_asn = 65002
             let deadline = tokio::time::Instant::now() + timeout;
             loop {
                 if state_of(&rx.borrow(), peer) == Some(want) {
+                    return true;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return false;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+
+        /// Poll until `bfd_session_up{peer}` reaches `want`, or the timeout
+        /// elapses. The actor runs on its own task, so the gauge appears (and
+        /// changes) asynchronously after spawn / state transitions.
+        async fn wait_for_gauge(
+            registry: &Registry,
+            peer: &str,
+            want: i64,
+            timeout: Duration,
+        ) -> bool {
+            let deadline = tokio::time::Instant::now() + timeout;
+            loop {
+                if bfd_up_gauge(registry, peer) == Some(want) {
                     return true;
                 }
                 if tokio::time::Instant::now() >= deadline {
@@ -1039,11 +1137,19 @@ remote_asn = 65002
                     strict: false,
                 }],
             };
-            let metrics = BgpMetrics::with_registry(Registry::new());
+            let registry = Registry::new();
+            let metrics = BgpMetrics::with_registry(registry.clone());
             let (status_tx, status_rx) = watch::channel(Vec::new());
             let shutdown = CancellationToken::new();
             let handle = spawn(config, metrics, status_tx, shutdown.clone())
                 .expect("actor should start with one session");
+
+            // The up gauge is seeded to 0 at session creation, before any
+            // packet exchange — a never-up session must still be observable.
+            assert!(
+                wait_for_gauge(&registry, PEER_ADDR, 0, Duration::from_secs(2)).await,
+                "bfd_session_up should be seeded to 0 for a Down session"
+            );
 
             let (mode_tx, mode_rx) = watch::channel(MODE_TTL_BAD);
             let peer_stop = CancellationToken::new();
@@ -1080,6 +1186,10 @@ remote_asn = 65002
                 )
                 .await,
                 "session did not reach Up on valid TTL=255 packets"
+            );
+            assert!(
+                wait_for_gauge(&registry, PEER_ADDR, 1, Duration::from_secs(2)).await,
+                "bfd_session_up should be 1 once the session is Up"
             );
 
             // RFC 5881 §4: the actor's transmit source port must be in

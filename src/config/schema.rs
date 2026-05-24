@@ -60,7 +60,7 @@ pub struct Config {
     #[serde(default)]
     pub fib_tables: Vec<FibTableConfig>,
     /// Named BFD timing profiles (RFC 5880/5881, ADR-0067) referenced by
-    /// `[[neighbors]].bfd` / `[[peer_groups]].bfd`.
+    /// `[neighbors.bfd]` / `[peer_groups.<name>.bfd]`.
     #[serde(default)]
     pub bfd_profiles: Vec<BfdProfileConfig>,
     /// Apply Gate 8b BUM-suppression filters to the kernel
@@ -607,8 +607,8 @@ pub struct BfdConfig {
     pub strict: bool,
 }
 
-/// A named BFD timing profile referenced by `[[neighbors]].bfd` /
-/// `[[peer_groups]].bfd`. Intervals are in **milliseconds**.
+/// A named BFD timing profile referenced by `[neighbors.bfd]` /
+/// `[peer_groups.<name>.bfd]`. Intervals are in **milliseconds**.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BfdProfileConfig {
