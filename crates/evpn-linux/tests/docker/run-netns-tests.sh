@@ -148,8 +148,11 @@ if [ -n "$FIB_RUNTIME_FILTER" ]; then
     # surfaces as "struct FibRouteStatus has no field named ..." compile errors.
     # Force a regeneration of just that crate before building so the cached
     # volume can't ship a stale proto. Cheap: only `rustbgpd-api` is rebuilt.
+    # Single-quote the filter inside the `sh -c` program so it reaches
+    # `cargo test` verbatim even if it ever gains whitespace / shell
+    # metacharacters (today it is a plain module path).
     TEST_ARGS=(
-        sh -c "cargo clean -p rustbgpd-api && cargo test -p rustbgpd ${FIB_RUNTIME_FILTER} -- --test-threads=1 --nocapture"
+        sh -c "cargo clean -p rustbgpd-api && cargo test -p rustbgpd '${FIB_RUNTIME_FILTER}' -- --test-threads=1 --nocapture"
     )
 else
     TEST_ARGS=(

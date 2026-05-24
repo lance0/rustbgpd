@@ -80,6 +80,7 @@ wait_kernel_single() {
         local route
         route=$(kernel_route)
         if echo "$route" | grep -q "proto bgp" \
+            && echo "$route" | grep -q "metric $METRIC" \
             && echo "$route" | grep -q "via $survivor" \
             && ! echo "$route" | grep -q "nexthop"; then
             ok "$PREFIX collapsed to single next-hop via $survivor"
