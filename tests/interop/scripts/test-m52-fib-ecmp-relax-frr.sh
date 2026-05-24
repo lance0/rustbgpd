@@ -116,19 +116,20 @@ wait_grpc_next_hops() {
     return 1
 }
 
-# Withdraw / re-advertise on a given FRR (its own ASN — frr1 65002, frr2 65003).
-frr_network() {
-    local frr=$1 asn=$2 action=$3 cmd
+# Shut / un-shut frr2's session to rustbgpd (AS 65003, peer 10.0.1.1). Session
+# shutdown is a deterministic withdraw of frr2's contribution — more reliable
+# here than `no network`, and it still exercises the FIB collapse/restore path.
+frr2_session() {
+    local action=$1 cmd
     case "$action" in
-        add) cmd="network $PREFIX" ;;
-        del) cmd="no network $PREFIX" ;;
-        *) fail "invalid FRR network action: $action"; return 1 ;;
+        down) cmd="neighbor 10.0.1.1 shutdown" ;;
+        up) cmd="no neighbor 10.0.1.1 shutdown" ;;
+        *) fail "invalid frr2 session action: $action"; return 1 ;;
     esac
-    log "$frr (AS $asn): $cmd..."
-    docker exec "$frr" vtysh \
+    log "frr2 (AS 65003): $cmd..."
+    docker exec "$FRR2" vtysh \
         -c 'configure terminal' \
-        -c "router bgp $asn" \
-        -c 'address-family ipv4 unicast' \
+        -c 'router bgp 65003' \
         -c "$cmd" >/dev/null 2>&1
 }
 
@@ -136,13 +137,14 @@ frr_network() {
 wait_kernel_ecmp
 wait_grpc_next_hops 2
 
-# Failover: frr2 (AS 65003) withdraws => collapse to the frr1 survivor.
-frr_network "$FRR2" 65003 del
+# Failover: shut frr2's session => its path withdraws => collapse to frr1.
+frr2_session down
 wait_kernel_single "$NH1"
 wait_grpc_next_hops 1
 
-# Restore: frr2 re-advertises => relaxed two-way ECMP returns.
-frr_network "$FRR2" 65003 add
+# Restore: bring frr2 back => relaxed two-way ECMP returns.
+frr2_session up
+wait_frr_established "$FRR2" "10.0.1.1" "rustbgpd ↔ frr2 (restored)"
 wait_kernel_ecmp
 wait_grpc_next_hops 2
 
