@@ -3988,6 +3988,50 @@ async fn strict_peer_stays_withheld_without_bfd_up() {
 }
 
 #[tokio::test]
+async fn strict_does_not_withhold_when_bfd_already_up() {
+    // Deadlock guard: if BFD reached Up before the peer was added/marked held
+    // (the actor starts sessions at spawn, peers are added later), the strict
+    // add/enable decision must be level-triggered — start now, since no future
+    // transition would release a withhold.
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters));
+    assert!(mgr.bfd_should_withhold(&peer), "down/unknown → withhold");
+
+    // The Up arrives before the peer is marked held (not yet held → no start
+    // here), but it records last-known state...
+    mgr.handle_bfd_state_change(up(peer)).await;
+    // ...so a strict add/enable now must NOT withhold.
+    assert!(
+        !mgr.bfd_should_withhold(&peer),
+        "BFD already Up → do not withhold"
+    );
+}
+
+#[tokio::test]
+async fn strict_enable_is_level_triggered_on_bfd_state() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
+
+    // BFD down/unknown: re-enable must withhold (no start), then a later Up
+    // releases it.
+    mgr.enable_peer(peer).await.unwrap();
+    assert_eq!(
+        counters.start.load(Ordering::SeqCst),
+        0,
+        "withheld while BFD down"
+    );
+    mgr.handle_bfd_state_change(up(peer)).await;
+    wait_counter(&counters.start, 1).await; // released on Up
+
+    // Now BFD is Up: a subsequent re-enable must start immediately (no withhold,
+    // no waiting for a transition that won't come).
+    mgr.enable_peer(peer).await.unwrap();
+    wait_counter(&counters.start, 2).await;
+}
+
+#[tokio::test]
 async fn republish_reflects_disable_and_readd() {
     let peer: IpAddr = "10.0.0.2".parse().unwrap();
     let counters = Arc::new(BfdCouplingCounters::default());

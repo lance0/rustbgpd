@@ -88,8 +88,11 @@ impl PeerManager {
         // ADR-0067 step 4b — strict BFD: create/store the peer but withhold BGP
         // establishment until BFD is Up. Non-strict (the default) starts now.
         // The handle is spawned Idle either way; `start()` is what begins the
-        // FSM, so withholding is simply not sending it yet.
-        let withhold = self.is_strict_bfd_peer(&address);
+        // FSM, so withholding is simply not sending it yet. Level-triggered: if
+        // BFD already reached Up before this add (the actor starts sessions at
+        // spawn), we do NOT withhold — start now, since no future transition
+        // would release the hold.
+        let withhold = self.bfd_should_withhold(&address);
         if !withhold && let Err(e) = handle.start().await {
             warn!(%address, error = %e, "failed to start peer session");
             return Err(format!("failed to start peer: {e}"));
@@ -198,23 +201,35 @@ impl PeerManager {
     }
 
     pub(super) async fn enable_peer(&mut self, address: IpAddr) -> Result<(), String> {
-        let managed = self
-            .peers
-            .get_mut(&address)
-            .ok_or_else(|| format!("peer {address} not found"))?;
-        managed.enabled = true;
-        managed
-            .handle
-            .start()
-            .await
-            .map_err(|e| format!("failed to start peer: {e}"))?;
+        if !self.peers.contains_key(&address) {
+            return Err(format!("peer {address} not found"));
+        }
+        self.peers.get_mut(&address).expect("peer present").enabled = true;
+        // ADR-0067 step 4b: re-enabling a strict peer must re-apply the withhold
+        // — start BGP only if BFD is already Up, else withhold until it is.
+        // (A freshly-restarted BFD session begins Down with no transition, so an
+        // unconditional start here would establish BGP with BFD down.)
+        let withhold = self.bfd_should_withhold(&address);
+        if !withhold {
+            self.peers
+                .get(&address)
+                .expect("peer present")
+                .handle
+                .start()
+                .await
+                .map_err(|e| format!("failed to start peer: {e}"))?;
+        }
         self.publish_peer_lifecycle_event(
             address,
             SessionLifecycleEventType::PeerEnabled,
             format!("peer {address} enabled"),
         );
-        // ADR-0067 step 4: re-arm this peer's BFD session in the desired set.
+        // Re-arm this peer's BFD session in the desired set.
         self.set_bfd_peer_disabled(address, false);
+        if withhold {
+            self.mark_bfd_withheld(address);
+            info!(%address, "strict BFD — withholding BGP until BFD Up (re-enable)");
+        }
         info!(%address, "peer enabled");
         Ok(())
     }
