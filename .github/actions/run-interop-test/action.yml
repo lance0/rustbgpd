@@ -98,7 +98,7 @@ runs:
           {
             echo "### Interop retry telemetry — ${label}"
             echo ""
-            echo "| topology | attempts | result | retry absorbed transient failure |"
+            echo "| label | attempts | result | retry absorbed transient failure |"
             echo "|---|---|---|---|"
             echo "| ${label} | ${attempt}/${max_attempts} | ${result} | ${absorbed} |"
           } >> "$GITHUB_STEP_SUMMARY"

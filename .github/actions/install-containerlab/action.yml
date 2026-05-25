@@ -22,19 +22,25 @@ runs:
         set -euo pipefail
         url="https://github.com/srl-labs/containerlab/releases/download/v${CLAB_VERSION}/containerlab_${CLAB_VERSION}_linux_amd64.deb"
         deb=/tmp/clab.deb
+        # Single retry mechanism: the outer loop owns retry + backoff, because
+        # the load-bearing failure (#208) is a 200-OK truncated/HTML body that
+        # `curl --retry` treats as success — only the `dpkg-deb --info` check
+        # after each download catches it. No `curl --retry` (which would nest
+        # retries and risk exceeding the 15-min interop job timeout).
         ok=0
-        for attempt in 1 2 3 4 5; do
+        attempts=4
+        for attempt in $(seq 1 "$attempts"); do
           rm -f "$deb"
-          if curl -fsSL --connect-timeout 15 --max-time 180 --retry 3 --retry-delay 3 "$url" -o "$deb" \
+          if curl -fsSL --connect-timeout 15 --max-time 90 "$url" -o "$deb" \
              && dpkg-deb --info "$deb" >/dev/null 2>&1; then
             ok=1
             break
           fi
-          echo "::warning::containerlab download/validate attempt ${attempt}/5 failed: $(file -b "$deb" 2>/dev/null | head -c 80)"
+          echo "::warning::containerlab download/validate attempt ${attempt}/${attempts} failed: $(file -b "$deb" 2>/dev/null | head -c 80)"
           sleep $((attempt * 5))
         done
         if [ "$ok" != 1 ]; then
-          echo "::error::containerlab .deb download/validation failed after 5 attempts (issue #208)"
+          echo "::error::containerlab .deb download/validation failed after ${attempts} attempts (issue #208)"
           exit 1
         fi
         sudo dpkg -i "$deb"
