@@ -322,6 +322,17 @@ fn run_server_role() {
                 v6.scope_id()
             );
             assert_eq!(*v6.ip(), parse_v6(CLIENT_LL));
+            // Load-bearing for ADR-0069: a wildcard listener can match a scoped
+            // link-local peer only if the accepted address carries the arrival
+            // interface as a non-zero scope id. If this ever regresses to 0, the
+            // production slice would need per-interface listener binding instead
+            // of (peer_ll, scope_id) matching — so gate the assumption, don't
+            // just observe it.
+            assert_ne!(
+                v6.scope_id(),
+                0,
+                "accepted link-local peer must carry a non-zero arrival scope id"
+            );
         }
         SocketAddr::V4(v4) => panic!("expected IPv6 accepted peer, got {v4}"),
     }
