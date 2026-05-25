@@ -18,7 +18,7 @@ none of them block the current release on their own.
 
 - [x] **M36 / M37 / M37+IP / M38 on protected privileged CI.**
   The earlier VTEP and DF-election smokes now run in the protected
-  self-hosted `.github/workflows/kernel-dataplane.yml` workflow
+  `.github/workflows/kernel-dataplane.yml` workflow (GitHub-hosted)
   alongside M39 / M40 / M42 and the Docker netns selectors. This
   closes the reviewer-run coverage gap tracked in
   <https://github.com/lance0/rustbgpd/issues/130>.
@@ -377,7 +377,7 @@ landing, tracked here for visibility)
     within the expected window.
     `IpVrfState.installed_routes_count` + install-error counters
     expose the surface to operators.
-  - **M39 protected self-hosted kernel-dataplane smoke** at
+  - **M39 hosted kernel-dataplane smoke** at
     `tests/interop/m39-evpn-type5-symmetric-irb.clab.yml`
     validates the bidirectional Type 5 path against FRR 10.3.1:
     BGP Established, Type 5 origination both directions, PE1

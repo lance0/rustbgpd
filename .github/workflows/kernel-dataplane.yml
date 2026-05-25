@@ -254,6 +254,48 @@ jobs:
           topology: tests/interop/m43-tcp-ao-bird.clab.yml
           script: tests/interop/scripts/test-m43-tcp-ao-bird.sh
 
+  m46:
+    name: M46 — EVPN HRW DF election (rustbgpd ×2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-dataplane-host
+      - name: Run M46 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M46
+          topology: tests/interop/m46-evpn-df-hrw.clab.yml
+          script: tests/interop/scripts/test-m46-evpn-df-hrw.sh
+
+  m47:
+    name: M47 — EVPN runtime tenant teardown (FRR 10.3.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-dataplane-host
+      - name: Run M47 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M47
+          topology: tests/interop/m47-evpn-tenant-teardown.clab.yml
+          script: tests/interop/scripts/test-m47-evpn-tenant-teardown.sh
+
+  m49:
+    name: M49 — EVPN preference-DF election (rustbgpd ×2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-dataplane-host
+      - name: Run M49 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M49
+          topology: tests/interop/m49-evpn-preference-df.clab.yml
+          script: tests/interop/scripts/test-m49-evpn-preference-df.sh
+
   netns:
     name: Privileged netns selectors (fdb_nhg + fib_runtime + bfd_runtime)
     runs-on: ubuntu-latest

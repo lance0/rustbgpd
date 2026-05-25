@@ -1,7 +1,7 @@
 # M46 PE1: lower-IP candidate of a 2-PE Ethernet Segment running the
-# RFC 8584 §3.2 Highest Random Weight DF algorithm. For VNI 200 the
+# RFC 8584 §3.2 Highest Random Weight DF algorithm. For VNI 10 the
 # HRW weights elect the HIGHER-IP PE (10.0.0.2) as DF — the opposite
-# of default service carving (`200 mod 2` = slot 0 → lower IP). So
+# of default service carving (`10 mod 2` = slot 0 → lower IP). So
 # this PE (10.0.0.1) should be NonDF, which only holds if HRW (not
 # modulo) is actually running end-to-end.
 [global]
@@ -17,16 +17,16 @@ prometheus_addr = "0.0.0.0:9179"
 address = "0.0.0.0:50051"
 
 [[evpn_instances]]
-vni = 200
-rd = "10.0.0.1:200"
-route_targets = ["65000:200"]
+vni = 10
+rd = "10.0.0.1:10"
+route_targets = ["65000:10"]
 local_vtep_ip = "10.0.0.1"
-bridge = "br200"
+bridge = "br10"
 advertise_svi_mac = false
 
 [[ethernet_segments]]
 esi = "00:00:00:00:00:00:00:00:00:01"
-member_vnis = [200]
+member_vnis = [10]
 df_preference = 32768
 df_algorithm = "highest-random-weight"
 originator_ip = "10.0.0.1"

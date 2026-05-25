@@ -50,7 +50,7 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   sub-second withdraw, `ListIpVrfs`/`GetIpVrf` gRPC +
   `rustbgpctl evpn vrfs` CLI. ADR-0059 (v0.19.0) adds
   receive-path aliasing-ECMP via FDB nexthop groups, validated
-  against FRR EVPN-MH by the protected self-hosted M40 smoke.
+  against FRR EVPN-MH by the hosted M40 smoke.
   Remaining big investments are the remaining ADR-0063 runtime
   convergence shapes, native overlay-index origination / protected
   recursion-path interop, and lower-priority VTEP operability gaps
@@ -613,7 +613,7 @@ Shipped pieces:
    Type 2 entries program an FDB nexthop group via `NDA_NH_ID` /
    `NHA_FDB`, with members keyed by per-VTEP IP and the group
    keyed by `(VNI, ESI, EthernetTag)`. Receive-path ECMP fans out
-   across every observed alias VTEP. M40 protected self-hosted smoke
+   across every observed alias VTEP. M40 hosted smoke
    validates the end-to-end path against FRR EVPN-MH 10.3.1.
 6. **Mass-withdraw receive-side filter** — every supervisor pass
    snapshots EAD-per-ES routes and drops non-zero-ESI Type 2 routes

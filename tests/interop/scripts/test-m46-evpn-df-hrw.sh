@@ -3,8 +3,8 @@
 # 2-PE rustbgpd Ethernet Segment.
 #
 # Both PEs run `df_algorithm = "highest-random-weight"`. For
-# (ESI 00:..:01, VNI 200) the HRW weights elect the HIGHER-IP PE
-# (PE2, 10.0.0.2). Default service carving would elect PE1 (200 mod 2
+# (ESI 00:..:01, VNI 10) the HRW weights elect the HIGHER-IP PE
+# (PE2, 10.0.0.2). Default service carving would elect PE1 (10 mod 2
 # = slot 0 → lower IP), so PE2 winning is only possible if the HRW
 # algorithm — negotiated unanimously over the DF Election Extended
 # Community — actually drives the election. That makes assertion (2)
@@ -12,10 +12,10 @@
 #
 # Asserts:
 #   1. Both PEs exchange both Type 4 ES candidates.
-#   2. PE2 reports DF=1 / NonDF=0 for (esi, vni=200) — the HRW winner.
+#   2. PE2 reports DF=1 / NonDF=0 for (esi, vni=10) — the HRW winner.
 #   3. PE1 reports DF=0 / NonDF=1 — loser under HRW (modulo winner).
 #   4. After PE2 (the DF) shuts down, PE1 promotes to DF and
-#      `evpn_df_role_changes_total{...,vni="200"}` increments.
+#      `evpn_df_role_changes_total{...,vni="10"}` increments.
 #
 # Usage:
 #   docker build -t rustbgpd:dev .
@@ -29,7 +29,7 @@ TOPO="m46-evpn-df-hrw"
 PE1="clab-${TOPO}-pe1"
 PE2="clab-${TOPO}-pe2"
 ESI="00:00:00:00:00:00:00:00:00:01"
-VNI="200"
+VNI="10"
 PROTO="proto/rustbgpd.proto"
 
 resolve_ip() {
@@ -139,7 +139,7 @@ assert "PE2 LocRib has both Type 4 ES candidates" 'wait_for_route_count "$PE2" 4
 
 echo "Waiting up to 60s for HRW DF election to land (PE2 wins under HRW)..."
 # Positive proof of HRW: PE2 (higher IP) is DF. Default modulo carving
-# for VNI 200 would have elected PE1, so this can only hold under HRW.
+# for VNI 10 would have elected PE1, so this can only hold under HRW.
 assert "PE2 reports DF=1 for (esi=$ESI, vni=$VNI) — the HRW winner" \
     'wait_for_role "$PE2" df 1 60'
 assert "PE2 reports NonDF=0 for the same key" \
