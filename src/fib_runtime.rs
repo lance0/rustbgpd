@@ -916,7 +916,14 @@ impl PersistedFibRoute {
             self.next_hops
                 .iter()
                 .enumerate()
-                .map(|(i, &addr)| (addr, self.weights.get(i).copied().unwrap_or(1).max(1)))
+                // Clamp to the kernel-representable 1..=256 at the persistence
+                // boundary (the canonicalizer enforces it again downstream).
+                .map(|(i, &addr)| {
+                    (
+                        addr,
+                        self.weights.get(i).copied().unwrap_or(1).clamp(1, 256),
+                    )
+                })
                 .collect()
         };
         let next_hops: Vec<FibNextHop> = paired

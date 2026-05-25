@@ -145,23 +145,28 @@ impl FibNextHop {
     }
 }
 
-/// Enforce the canonical weight invariants on a `FibRouteTarget`'s next-hops
-/// (ADR-0068), at every constructor, so a target can never *desire* a weight the
-/// kernel cannot store — which would diff forever against the dumped route:
+/// Canonicalize a `FibRouteTarget`'s next-hops (ADR-0068) so equality is
+/// order-independent and a target can never *desire* something the kernel cannot
+/// store — which would diff forever against the dumped route:
 ///
-/// 1. Every weight is clamped to the kernel-representable `1..=256` (`rtnh_hops`
-///    is a `u8`, so the kernel holds `weight - 1` in `0..=255`). This guards
-///    corrupt/hand-edited persisted state and any future writer; RIB-computed
-///    weights are already in range.
-/// 2. A lone next-hop is forced to weight 1: it carries all traffic regardless,
-///    and the kernel emits it as a weightless `RTA_GATEWAY`, so a dumped single
-///    route always reads back weight 1. This keeps the diff stable when a
-///    per-table cap (or a lone best) reduces a weighted group to one next-hop.
-fn canonicalize_next_hop_weights(next_hops: &mut [FibNextHop]) {
+/// 1. Sort by address. On a duplicate address (only possible from corrupt
+///    persisted state or a malformed kernel dump — the RIB never emits one) keep
+///    the **larger** weight, so a recovered target never silently under-weights
+///    a path. One entry per address, addr-ascending, is the canonical order.
+/// 2. Clamp every weight to the kernel-representable `1..=256` (`rtnh_hops` is a
+///    `u8`, so the kernel holds `weight - 1` in `0..=255`). Guards corrupt state
+///    and any future writer; RIB-computed weights are already in range.
+/// 3. Force a lone next-hop to weight 1: it carries all traffic regardless, and
+///    the kernel emits it as a weightless `RTA_GATEWAY`, so a dumped single route
+///    always reads back weight 1. Keeps the diff stable when a per-table cap (or
+///    a lone best) reduces a weighted group to one next-hop.
+fn canonicalize_next_hops(next_hops: &mut Vec<FibNextHop>) {
+    next_hops.sort_unstable_by(|a, b| a.addr.cmp(&b.addr).then(b.weight.cmp(&a.weight)));
+    next_hops.dedup_by_key(|nh| nh.addr);
     for nh in next_hops.iter_mut() {
         nh.weight = nh.weight.clamp(1, 256);
     }
-    if let [only] = next_hops {
+    if let [only] = next_hops.as_mut_slice() {
         only.weight = 1;
     }
 }
@@ -196,9 +201,7 @@ impl FibRouteTarget {
         if !next_hops.iter().any(|nh| nh.addr == best) {
             next_hops.push(FibNextHop::equal(best));
         }
-        next_hops.sort_unstable();
-        next_hops.dedup_by_key(|nh| nh.addr);
-        canonicalize_next_hop_weights(&mut next_hops);
+        canonicalize_next_hops(&mut next_hops);
         Self { next_hops, best }
     }
 
@@ -208,9 +211,7 @@ impl FibRouteTarget {
     /// Callers must ensure the input is non-empty.
     pub(crate) fn from_next_hops(next_hops: impl IntoIterator<Item = FibNextHop>) -> Self {
         let mut next_hops: Vec<FibNextHop> = next_hops.into_iter().collect();
-        next_hops.sort_unstable();
-        next_hops.dedup_by_key(|nh| nh.addr);
-        canonicalize_next_hop_weights(&mut next_hops);
+        canonicalize_next_hops(&mut next_hops);
         let best = next_hops[0].addr;
         Self { next_hops, best }
     }
@@ -1810,6 +1811,31 @@ mod tests {
         assert_eq!(
             addr_weights(&t),
             vec![(ip("203.0.113.1"), 256), (ip("203.0.113.2"), 1)]
+        );
+    }
+
+    #[test]
+    fn target_dedup_keeps_larger_weight_on_duplicate_address() {
+        // Duplicate addresses only arise from corrupt persisted state or a
+        // malformed kernel dump; canonicalization keeps the larger weight per
+        // address (deterministic, never silently under-weights a path).
+        let t = FibRouteTarget::from_next_hops([
+            FibNextHop {
+                addr: ip("203.0.113.1"),
+                weight: 64,
+            },
+            FibNextHop {
+                addr: ip("203.0.113.1"),
+                weight: 200,
+            },
+            FibNextHop {
+                addr: ip("203.0.113.2"),
+                weight: 100,
+            },
+        ]);
+        assert_eq!(
+            addr_weights(&t),
+            vec![(ip("203.0.113.1"), 200), (ip("203.0.113.2"), 100)]
         );
     }
 
