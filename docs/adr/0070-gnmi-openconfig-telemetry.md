@@ -61,7 +61,7 @@ internal snapshot, never from CLI text.
 
 | RPC | v1 behaviour |
 |-----|--------------|
-| `Capabilities` | Advertise gNMI version `0.10.0`, the supported OpenConfig model(s) as a deliberately scoped subset, and encodings `JSON` + `JSON_IETF`. |
+| `Capabilities` | Advertise gNMI version `0.10.0`, the **OpenConfig modules** (name / organization / version, via `ModelData`) backing the supported paths, and encodings `JSON` + `JSON_IETF`. `ModelData` is module-level, not per-path — the path subset is enforced at `Get` / `Subscribe`, not advertised here. |
 | `Get` | OpenConfig BGP operational-state subset (below). |
 | `Subscribe` | `ONCE`, `POLL`, and `STREAM` with `SAMPLE`. `ON_CHANGE` deferred. |
 | `Set` | Always returns a stable `Unimplemented` status. gNMI requires an explicit answer; rustbgpd has no config-transaction model, so mutation stays closed. |
@@ -71,25 +71,45 @@ internal snapshot, never from CLI text.
 All paths hang off the standard network-instance mount of `openconfig-bgp`:
 
 ```
-/network-instances/network-instance[name=default]
+/network-instances/network-instance[name=DEFAULT]
   /protocols/protocol[identifier=BGP][name=BGP]/bgp/...
 ```
+
+Key conventions: the default network instance uses the OpenConfig name `DEFAULT`
+(the model's default-instance name); the BGP protocol `identifier` is the `BGP`
+identity (gNMI path keys use the bare identity value, not the YANG-qualified
+`oc-pol-types:BGP`) and `name` is the operator-assigned instance name (commonly
+`BGP`). The target keys by the configured protocol name and may accept lowercase
+`default` / a module-qualified `identifier` as aliases. OpenConfig keys neighbors
+by **bare IP** `neighbor-address` (not a `fe80::x%ifname` zone string); v1
+deliberately keys scoped IPv6 link-local peers by their bare address, which is
+safe because config forbids the same link-local address on more than one
+interface (ADR-0069).
 
 v1 supports exactly these leaves (each is backed by a verified internal source):
 
 - **Global** — `bgp/global/state/`:
   - `as`, `router-id` (static config via `GlobalService`).
-  - `total-prefixes` mapped to the Loc-RIB best-path count
-    (`RibUpdate::QueryLocRibCount`). `total-paths` is **deferred** — there is no
-    pre-best-path aggregate count today; advertising it would be a guess.
+  - `total-prefixes` / `total-paths` are **deferred**: OpenConfig defines
+    `total-prefixes` as BGP prefixes *received* in context, which the available
+    Loc-RIB best-path count (`RibUpdate::QueryLocRibCount`) does not represent,
+    and there is no pre-best-path total-paths aggregate — faking either would
+    misstate the counter.
 - **Neighbors** — `bgp/neighbors/neighbor[neighbor-address=X]/state/`:
   - `neighbor-address`, `enabled`, `peer-as`, `local-as`, `session-state`
-    (the FSM maps 1:1 onto OpenConfig's six states), `last-established`
-    (derived from the elapsed-since-Established uptime), `established-transitions`
+    (the FSM maps 1:1 onto OpenConfig's six states), `established-transitions`
     (the flap counter), and `messages` UPDATE / NOTIFICATION in/out counters.
+  - `last-established` is **deferred**: OpenConfig defines it as the absolute
+    timestamp of the last transition *into or out of* Established, but the peer
+    snapshot tracks only elapsed-since-Established (correct only while currently
+    Established, and it loses the out-of-Established case). It needs a real
+    last-transition timestamp on the peer snapshot first.
 
-The path set is a **strict whitelist**. `Capabilities` advertises only what is
-implemented; nothing is silently half-supported.
+The path set is a **strict whitelist enforced at `Get` / `Subscribe`** — a valid
+OpenConfig model path outside the whitelist returns `UNIMPLEMENTED`.
+`Capabilities` advertises the OpenConfig *modules* backing these paths
+(`ModelData` is module-level, not per-path), so the whitelist is the runtime
+contract, not a capability-level claim.
 
 ### What v1 does **not** expose (and why)
 
@@ -132,11 +152,13 @@ cannot turn into an accidental full route-table dump (v1 does not stream the RIB
 gNMI mandates TLS with no plaintext fallback, which folds into the existing
 listener model rather than adding a new one:
 
-- The gNMI service registers on the **same** gRPC listeners as every other
-  service. The TCP listener carries gNMI **only with mTLS** (matching the gNMI
-  TLS-MUST rule); the UDS listener is local-only and appropriate for a
-  co-located collector. **Non-local deployments must use the mTLS TCP listener,
-  never plaintext TCP.**
+- gNMI is served **only** on a TCP listener that has mTLS configured
+  (`tls.is_some()`) — registration is gated on the listener's TLS config, and a
+  plaintext or token-only TCP listener never carries gNMI — matching the spec's
+  TLS-MUST / no-plaintext-fallback rule. The UDS listener may also serve gNMI as
+  a **local-only extension** for a co-located collector; this is a deliberate
+  convenience, *not* standards-compliant network gNMI (which requires TLS).
+  **Non-local deployments must use the mTLS TCP listener, never plaintext TCP.**
 - `Get`, `Subscribe`, and `Capabilities` are classified at the **`SensitiveRead`**
   tier (ADR-0064) — identical to `GetGlobal` / `ListNeighbors` / the RIB reads,
   because they disclose topology, neighbor, and routing state. They are governed
@@ -156,7 +178,7 @@ listener model rather than adding a new one:
 
 | PR | Scope | Verification |
 |----|-------|--------------|
-| **PR1** | Vendor `gnmi.proto` (+ `gnmi_ext.proto`), wire codegen, add `GnmiService`; implement `Capabilities`; `Get`/`Subscribe` return `Unimplemented`; `Set` returns a stable `Unimplemented`. Register on **both** the TCP and UDS listener chains. Add the gNMI methods to the ADR-0064 authz matrix + `grpc-method-inventory.json` at `SensitiveRead` and fix the count tests. | `gnmic capabilities` returns version `0.10.0`, the advertised model subset, and `JSON`/`JSON_IETF`. |
+| **PR1** | Vendor `gnmi.proto` (+ `gnmi_ext.proto`), wire codegen, add `GnmiService`; implement `Capabilities`; `Get`/`Subscribe` return `Unimplemented`; `Set` returns a stable `Unimplemented`. Register on the UDS listener and on the TCP listener **only when mTLS is configured** (both `.add_service` chains in `server.rs`). Add the gNMI methods to the ADR-0064 authz matrix + `grpc-method-inventory.json` at `SensitiveRead` and fix the count tests. | `gnmic capabilities` returns version `0.10.0`, the advertised model subset, and `JSON`/`JSON_IETF`. |
 | **PR2** | `Get` for the OpenConfig BGP global + neighbor subset above. Structured `PathElem` parser (not legacy string elements), strict supported-path whitelist. Error mapping: `INVALID_ARGUMENT` for malformed paths, `UNIMPLEMENTED` for valid-but-unsupported OpenConfig paths, `NOT_FOUND` for valid-but-absent keyed objects. | `gnmic get` against global + a keyed neighbor renders correct JSON_IETF. |
 | **PR3** | `Subscribe` `ONCE` / `POLL` / `STREAM SAMPLE` reusing the PR2 snapshot renderer; stream limits + sample-interval floors; no full route-table dumps. | `gnmic subscribe --mode once`, `--mode poll`, and stream/sample against the subset. |
 | **PR4** (post-v1) | Per-AFI-SAFI counters once per-family counts are plumbed; `supported-capabilities` once the peer snapshot is extended; BFD / FIB / EVPN OpenConfig-adjacent (or native-origin) telemetry. | — |
@@ -185,8 +207,9 @@ Grounded against the current checkout:
   `crates/api/src/authz_runtime/layer.rs` (runtime enforcement, fail-closed),
   `docs/grpc-method-inventory.json`. See ADR-0064.
 - **Global state:** `crates/api/src/global_service.rs` (ASN / router-id /
-  listen-port) + `crates/api/src/control_service.rs` `get_health`
-  (`RibUpdate::QueryLocRibCount` for the Loc-RIB count).
+  listen-port). The only aggregate count is `crates/api/src/control_service.rs`
+  `get_health` → `RibUpdate::QueryLocRibCount` (Loc-RIB best-path count);
+  `total-prefixes` / `total-paths` are deferred (see Deferred).
 - **Neighbor state:** `src/peer_manager/snapshot.rs` (`build_peer_info`),
   `crates/api/src/peer_types.rs` (`PeerInfo`, `PeerManagerCommand::ListPeers`),
   `crates/api/src/neighbor_service.rs` (`peer_info_to_proto`).
@@ -223,7 +246,12 @@ Grounded against the current checkout:
   best-path count exists.
 - **`supported-capabilities` / negotiated AFI-SAFI state** — needs a peer
   snapshot extension to surface negotiated capabilities.
-- **`global/state/total-paths`** — no pre-best-path aggregate count.
+- **`global/state/total-prefixes` and `total-paths`** — `total-prefixes` means
+  prefixes *received* in context, which the Loc-RIB best-path count we have does
+  not represent; `total-paths` has no pre-best-path aggregate.
+- **`neighbors/neighbor[...]/state/last-established`** — needs an absolute
+  last-transition (into/out of Established) timestamp on the peer snapshot; only
+  elapsed-since-Established is tracked today.
 - **`PROTO` / `ASCII` encodings**, multicast / VPN AFIs, and full OpenConfig BGP
   model coverage.
 - **BFD / FIB / EVPN OpenConfig(-adjacent) telemetry** — after the BGP subset
