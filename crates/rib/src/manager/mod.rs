@@ -684,6 +684,7 @@ impl RibManager {
                 next_hops.push(FibInstallNextHop {
                     next_hop: best.next_hop,
                     link_local_next_hop: best.link_local_next_hop,
+                    next_hop_scope: best.next_hop_scope.clone(),
                     peer: best.peer,
                     path_id: best.path_id,
                     weight: 1,
@@ -716,6 +717,7 @@ impl RibManager {
                         next_hops.push(FibInstallNextHop {
                             next_hop: r.next_hop,
                             link_local_next_hop: r.link_local_next_hop,
+                            next_hop_scope: r.next_hop_scope.clone(),
                             peer: r.peer,
                             path_id: r.path_id,
                             weight: 1,

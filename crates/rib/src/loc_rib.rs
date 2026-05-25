@@ -425,6 +425,7 @@ mod tests {
             prefix: Prefix::V4(prefix),
             next_hop: IpAddr::V4(peer),
             link_local_next_hop: None,
+            next_hop_scope: None,
             peer: IpAddr::V4(peer),
             attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),

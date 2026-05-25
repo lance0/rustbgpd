@@ -6,7 +6,7 @@ use super::{
     IpAddr, Ipv4Addr, Ipv4NlriEntry, Ipv4UnicastMode, Ipv6Addr, Message, MpReachNlri,
     MpUnreachNlri, NlriEntry, OutboundRouteUpdate, PathAttribute, PeerSession, Prefix,
     RemovePrivateAs, Route, RouteRefreshMessage, RouteRefreshSubtype, Safi, UpdateMessage, info,
-    is_private_asn, warn,
+    is_ipv6_link_local, is_private_asn, warn,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -48,6 +48,7 @@ struct PreparedAttrCacheValue {
 struct AttrGroupKey {
     attrs_ptr: usize,
     next_hop: Option<IpAddr>,
+    link_local_next_hop: Option<Ipv6Addr>,
 }
 
 struct V4BodyGroup {
@@ -58,10 +59,35 @@ struct V4BodyGroup {
 struct MpGroup {
     attrs: Arc<Vec<PathAttribute>>,
     next_hop: IpAddr,
+    link_local_next_hop: Option<Ipv6Addr>,
     prefixes: Vec<NlriEntry>,
 }
 
 impl PeerSession {
+    fn usable_ipv4_extended_nexthop_ipv6(&self, candidate: Option<Ipv6Addr>) -> Option<Ipv6Addr> {
+        candidate.filter(|addr| {
+            rustbgpd_wire::is_valid_ipv6_nexthop(addr)
+                || (self.is_scoped_link_local_peer() && is_ipv6_link_local(addr))
+        })
+    }
+
+    fn usable_ipv6_unicast_next_hop(candidate: Option<Ipv6Addr>) -> Option<Ipv6Addr> {
+        candidate.filter(rustbgpd_wire::is_valid_ipv6_nexthop)
+    }
+
+    fn ipv4_mp_reach_link_local_next_hop(
+        &self,
+        next_hop: IpAddr,
+        existing: Option<Ipv6Addr>,
+    ) -> Option<Ipv6Addr> {
+        existing.or(match next_hop {
+            IpAddr::V6(v6) if self.is_scoped_link_local_peer() && is_ipv6_link_local(&v6) => {
+                Some(v6)
+            }
+            _ => None,
+        })
+    }
+
     fn peer_accepts_llgr_stale(&self, family: (Afi, Safi)) -> bool {
         self.negotiated.as_ref().is_some_and(|neg| {
             neg.peer_llgr_capable
@@ -266,45 +292,52 @@ impl PeerSession {
         // Send IPv4 withdrawals via body NLRI or IPv4 MP_UNREACH_NLRI,
         // depending on Extended Next Hop negotiation.
         if !v4_withdraw.is_empty() {
-            let msg = if use_extended_nexthop_ipv4 {
-                let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
-                    afi: Afi::Ipv4,
-                    safi: Safi::Unicast,
-                    withdrawn: v4_withdraw
-                        .iter()
-                        .map(|entry| NlriEntry {
-                            path_id: entry.path_id,
-                            prefix: Prefix::V4(entry.prefix),
-                        })
-                        .collect(),
-                    flowspec_withdrawn: vec![],
-                    evpn_withdrawn: vec![],
-                })];
-                UpdateMessage::build(
-                    &[],
-                    &[],
-                    &attrs,
-                    four_octet_as,
-                    add_path_ipv4_send,
-                    Ipv4UnicastMode::MpReach,
-                )
+            if self.is_scoped_link_local_peer() && !use_extended_nexthop_ipv4 {
+                warn!(
+                    peer = %self.peer_label,
+                    "not sending IPv4 withdrawals to scoped link-local peer without negotiated Extended Next Hop"
+                );
             } else {
-                UpdateMessage::build(
-                    &[],
-                    &v4_withdraw,
-                    &[],
-                    four_octet_as,
-                    add_path_ipv4_send,
-                    Ipv4UnicastMode::Body,
-                )
-            };
-            let wire_msg = Message::Update(msg);
-            if let Err(e) = self.enqueue_bulk(&wire_msg) {
-                warn!(peer = %self.peer_label, error = %e, "failed to send withdrawal UPDATE");
-                return;
+                let msg = if use_extended_nexthop_ipv4 {
+                    let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
+                        afi: Afi::Ipv4,
+                        safi: Safi::Unicast,
+                        withdrawn: v4_withdraw
+                            .iter()
+                            .map(|entry| NlriEntry {
+                                path_id: entry.path_id,
+                                prefix: Prefix::V4(entry.prefix),
+                            })
+                            .collect(),
+                        flowspec_withdrawn: vec![],
+                        evpn_withdrawn: vec![],
+                    })];
+                    UpdateMessage::build(
+                        &[],
+                        &[],
+                        &attrs,
+                        four_octet_as,
+                        add_path_ipv4_send,
+                        Ipv4UnicastMode::MpReach,
+                    )
+                } else {
+                    UpdateMessage::build(
+                        &[],
+                        &v4_withdraw,
+                        &[],
+                        four_octet_as,
+                        add_path_ipv4_send,
+                        Ipv4UnicastMode::Body,
+                    )
+                };
+                let wire_msg = Message::Update(msg);
+                if let Err(e) = self.enqueue_bulk(&wire_msg) {
+                    warn!(peer = %self.peer_label, error = %e, "failed to send withdrawal UPDATE");
+                    return;
+                }
+                self.updates_sent += 1;
+                self.metrics.record_message_sent(&self.peer_label, "update");
             }
-            self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
         }
 
         // Send IPv6 withdrawals via `MP_UNREACH_NLRI`
@@ -351,10 +384,7 @@ impl PeerSession {
         // depending on Extended Next Hop negotiation.
         if use_extended_nexthop_ipv4 {
             let ebgp_ipv6_nh = self
-                .config
-                .local_ipv6_nexthop
-                .or(local_ipv6)
-                .filter(rustbgpd_wire::is_valid_ipv6_nexthop);
+                .usable_ipv4_extended_nexthop_ipv6(self.config.local_ipv6_nexthop.or(local_ipv6));
             let mut v4_group_index: HashMap<AttrGroupKey, usize> = HashMap::new();
             let mut v4_groups: Vec<MpGroup> = Vec::new();
             for (route, nh_override_ref) in &v4_routes {
@@ -392,9 +422,12 @@ impl PeerSession {
                     path_id: route.path_id,
                     prefix: route.prefix,
                 };
+                let link_local_next_hop =
+                    self.ipv4_mp_reach_link_local_next_hop(next_hop, route.link_local_next_hop);
                 let key = AttrGroupKey {
                     attrs_ptr: Arc::as_ptr(&attrs) as usize,
                     next_hop: Some(next_hop),
+                    link_local_next_hop,
                 };
                 if let Some(&idx) = v4_group_index.get(&key) {
                     v4_groups[idx].prefixes.push(entry);
@@ -403,6 +436,7 @@ impl PeerSession {
                     v4_groups.push(MpGroup {
                         attrs,
                         next_hop,
+                        link_local_next_hop,
                         prefixes: vec![entry],
                     });
                 }
@@ -414,7 +448,7 @@ impl PeerSession {
                     afi: Afi::Ipv4,
                     safi: Safi::Unicast,
                     next_hop: group.next_hop,
-                    link_local_next_hop: None,
+                    link_local_next_hop: group.link_local_next_hop,
                     announced: group.prefixes,
                     flowspec_announced: vec![],
                     evpn_announced: vec![],
@@ -434,6 +468,13 @@ impl PeerSession {
                 }
                 self.updates_sent += 1;
                 self.metrics.record_message_sent(&self.peer_label, "update");
+            }
+        } else if self.is_scoped_link_local_peer() {
+            if !v4_routes.is_empty() {
+                warn!(
+                    peer = %self.peer_label,
+                    "not sending IPv4 routes to scoped link-local peer without negotiated Extended Next Hop"
+                );
             }
         } else {
             let mut v4_group_index: HashMap<AttrGroupKey, usize> = HashMap::new();
@@ -458,6 +499,7 @@ impl PeerSession {
                     let key = AttrGroupKey {
                         attrs_ptr: Arc::as_ptr(&attrs) as usize,
                         next_hop: None,
+                        link_local_next_hop: None,
                     };
                     if let Some(&idx) = v4_group_index.get(&key) {
                         v4_groups[idx].prefixes.push(entry);
@@ -494,11 +536,8 @@ impl PeerSession {
         // The RIB already filters unsendable families via sendable_families, so
         // v6_routes should be empty here for eBGP peers without a valid IPv6 NH.
         // The is_family_negotiated filter above is retained as a safety net.
-        let ebgp_ipv6_nh: Option<Ipv6Addr> = self
-            .config
-            .local_ipv6_nexthop
-            .or(local_ipv6)
-            .filter(rustbgpd_wire::is_valid_ipv6_nexthop);
+        let ebgp_ipv6_nh: Option<Ipv6Addr> =
+            Self::usable_ipv6_unicast_next_hop(self.config.local_ipv6_nexthop.or(local_ipv6));
 
         // Group by (attributes, next-hop) so routes with different next-hops
         // get separate UPDATEs with correct MP_REACH_NLRI next-hop values.
@@ -557,6 +596,7 @@ impl PeerSession {
             let key = AttrGroupKey {
                 attrs_ptr: Arc::as_ptr(&attrs) as usize,
                 next_hop: Some(nh),
+                link_local_next_hop: route.link_local_next_hop,
             };
             if let Some(&idx) = v6_group_index.get(&key) {
                 v6_groups[idx].prefixes.push(nlri_entry);
@@ -565,6 +605,7 @@ impl PeerSession {
                 v6_groups.push(MpGroup {
                     attrs,
                     next_hop: nh,
+                    link_local_next_hop: route.link_local_next_hop,
                     prefixes: vec![nlri_entry],
                 });
             }
@@ -576,7 +617,7 @@ impl PeerSession {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: group.next_hop,
-                link_local_next_hop: None,
+                link_local_next_hop: group.link_local_next_hop,
                 announced: group.prefixes,
                 flowspec_announced: vec![],
                 evpn_announced: vec![],

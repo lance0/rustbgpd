@@ -106,6 +106,25 @@ versions, is a **spike question** (below), not an assumption.
 
 Existing global-IPv6 Extended Next Hop behavior remains unchanged.
 
+### Tranche 3 production behavior
+
+After scoped static peer identity exists, unnumbered IPv4 route exchange follows
+these fail-closed rules:
+
+- a scoped IPv6 link-local peer configured for `ipv4_unicast` never imports or
+  falls back to IPv4 body NLRI; RFC 8950 `MP_REACH_NLRI` is required;
+- inbound IPv4 `MP_REACH_NLRI` with a link-local primary next-hop is accepted
+  only when the session is a configured scoped link-local peer and Extended Next
+  Hop was negotiated;
+- outbound unnumbered IPv4 routes use the FRR-proven 32-byte shape where the
+  primary IPv6 next-hop and companion link-local next-hop are both the local
+  link-local address;
+- accepted link-local primary next-hops carry the configured interface/scope in
+  the RIB install-candidate metadata for the later Linux FIB `dev`/OIF slice.
+
+The FIB tranche remains separate: until it lands, forwarding projection still
+rejects IPv4 routes whose next-hop family is IPv6.
+
 ### FIB install is part of the feature
 
 BGP unnumbered is not complete if the daemon can establish the session and

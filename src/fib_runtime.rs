@@ -1884,6 +1884,7 @@ mod tests {
             prefix,
             next_hop,
             link_local_next_hop: None,
+            next_hop_scope: None,
             peer: ip("198.51.100.1"),
             attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -1929,6 +1930,7 @@ mod tests {
             let next_hop = FibInstallNextHop {
                 next_hop: route.next_hop,
                 link_local_next_hop: route.link_local_next_hop,
+                next_hop_scope: None,
                 peer: route.peer,
                 path_id: route.path_id,
                 weight: 1,
@@ -3877,6 +3879,7 @@ mod tests {
                 FibInstallNextHop {
                     next_hop: ip("192.0.2.1"),
                     link_local_next_hop: None,
+                    next_hop_scope: None,
                     peer: ip("198.51.100.1"),
                     path_id: 0,
                     weight: 256,
@@ -3884,6 +3887,7 @@ mod tests {
                 FibInstallNextHop {
                     next_hop: ip("192.0.2.3"),
                     link_local_next_hop: None,
+                    next_hop_scope: None,
                     peer: ip("198.51.100.1"),
                     path_id: 0,
                     weight: 64,

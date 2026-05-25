@@ -15,7 +15,9 @@ use bytes::Bytes;
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType, PeerDownReason};
 use rustbgpd_fsm::{Action, Event, NegotiatedSession, Session, SessionState};
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_rib::{EvpnRibRoute, FlowSpecRoute, OutboundRouteUpdate, RibUpdate, Route};
+use rustbgpd_rib::{
+    EvpnRibRoute, FlowSpecRoute, NextHopScope, OutboundRouteUpdate, RibUpdate, Route,
+};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
 use rustbgpd_wire::{
@@ -214,6 +216,10 @@ fn resolve_import_nexthop(
         Some(rustbgpd_policy::NextHopAction::Specific(addr)) => *addr,
         None => original,
     }
+}
+
+fn is_ipv6_link_local(addr: &Ipv6Addr) -> bool {
+    (addr.segments()[0] & 0xffc0) == 0xfe80
 }
 
 impl PeerSession {

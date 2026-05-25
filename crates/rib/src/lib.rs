@@ -30,7 +30,8 @@ pub use event::{EvpnRouteEvent, RouteEvent, RouteEventType};
 pub use loc_rib::LocRib;
 pub use manager::RibManager;
 pub use route::{
-    EvpnRibRoute, FibInstallCandidate, FibInstallNextHop, FlowSpecRoute, Route, RouteOrigin,
+    EvpnRibRoute, FibInstallCandidate, FibInstallNextHop, FlowSpecRoute, NextHopScope, Route,
+    RouteOrigin,
 };
 pub use update::{
     BestPathCandidate, ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision, ExplainReason,
