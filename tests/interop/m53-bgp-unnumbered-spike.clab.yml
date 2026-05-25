@@ -1,0 +1,37 @@
+# Containerlab topology: FRR ↔ FRR (M53 spike — ADR-0069 BGP unnumbered)
+#
+# This is a proof topology for ADR-0069, not the final rustbgpd M53 interop.
+# It observes the target FRR behavior before rustbgpd grows scoped link-local
+# peer identity:
+#
+#   * no IPv4 addresses on the fabric link;
+#   * BGP peers over IPv6 link-local interface neighbors;
+#   * IPv4 routes exchange with IPv6 link-local next-hop;
+#   * FRR capability output is inspected for RFC 8950 and capability 77.
+
+name: m53-bgp-unnumbered-spike
+
+topology:
+  nodes:
+    frr-left:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m53-left.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip -4 addr flush dev eth1
+        - ip link set eth1 up
+
+    frr-right:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m53-right.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip -4 addr flush dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["frr-left:eth1", "frr-right:eth1"]

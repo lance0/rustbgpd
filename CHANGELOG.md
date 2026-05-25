@@ -47,6 +47,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   change reprograms and an unchanged set never flaps. Inert unless a
   `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or
   `maximum_paths_ibgp` above `1`.
+- **ADR-0069 BGP unnumbered spike artifacts.** Added a privileged netns proof
+  for scoped IPv6 link-local TCP, IPv6 Hop-Limit/GTSM socket options, and IPv4
+  route install via `fe80::/10` gateway + `dev`, plus an FRR↔FRR containerlab
+  observation topology for BGP unnumbered / RFC 8950 behavior. The FRR 10.3.1
+  observation establishes over link-local-only fabric links, exchanges IPv4
+  routes with visible `fe80::/10` next-hops, captures 32-byte MP_REACH next-hop
+  encoding, reports Extended Next Hop, and does not expose Link-Local Next Hop
+  capability 77.
 
 ## [0.28.0] — 2026-05-24
 

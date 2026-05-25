@@ -139,6 +139,30 @@ proves the kernel, socket, and wire primitives:
 If the FIB primitive fails on the supported Linux baseline, this ADR must be
 revisited before shipping a control-plane-only feature.
 
+### Spike findings (2026-05-25)
+
+The Tranche 1 proof artifacts pin the Linux primitives and the current FRR
+target behavior:
+
+- `crates/evpn-linux/tests/netns_bgp_unnumbered.rs` proves active TCP connect
+  to `fe80::peer%ifindex`, passive wildcard accept reporting a non-zero peer
+  scope (`scope_id=3` in the two-netns proof), IPv6 TCP Hop-Limit / minimum-hop
+  socket options (`IPV6_UNICAST_HOPS=255`, `IPV6_MINHOPCOUNT=254`), and Linux
+  IPv4 route install via an IPv6 link-local gateway with `dev`.
+- `tests/interop/m53-bgp-unnumbered-spike.clab.yml` proves FRR 10.3.1
+  interface peers establish over IPv6 link-local only, with no IPv4 addresses on
+  the fabric link, and exchange IPv4 unicast routes whose visible next-hop is
+  `fe80::/10`.
+- The M53 spike packet capture proves FRR 10.3.1 sends IPv4 MP_REACH over this
+  link-local-only session with `nh-length: 32`: the two 16-byte IPv6 next-hop
+  segments are both link-local. FRR exposes RFC 8950 Extended Next Hop in
+  neighbor state and the packet capture / `vtysh` JSON did **not** expose
+  Link-Local Next Hop Capability code 77. For the v1 rustbgpd target this means
+  capability 77 is not a prerequisite to interoperate with the pinned FRR
+  version; the production slices should support scoped link-local next-hops
+  under RFC 8950's extended-next-hop negotiation. Capability 77 remains a
+  follow-up unless a newer FRR/Cumulus target advertises or requires it.
+
 ### Interop gate
 
 Add an M-series FRR interop smoke after the production slices:
