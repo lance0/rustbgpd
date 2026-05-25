@@ -9,6 +9,7 @@
 
 ```
 wire           (no internal deps)
+bfd            (no internal deps)
 fsm            ──► wire
 policy         ──► wire
 rpki           ──► wire
@@ -16,11 +17,16 @@ bmp            (no internal deps)
 mrt            ──► wire, rib
 telemetry      (no internal deps)
 evpn           ──► wire
+evpn-linux     ──► evpn
 rib            ──► wire, policy, telemetry, rpki
-transport      ──► wire, fsm, rib, policy, telemetry, bmp
+transport      ──► wire, fsm, rib, policy, rpki, telemetry, bmp
 api            ──► wire, fsm, rib, policy, transport, telemetry, evpn
 cli            (no internal deps — uses tonic codegen directly)
 ```
+
+The daemon binary (`src/`) depends on every crate above; it wires them
+together and owns the runtime actors that are not themselves crates (the
+unicast Linux FIB, the BFD socket actor, and the EVPN dataplane glue).
 
 ### Crate summary
 
@@ -28,6 +34,7 @@ cli            (no internal deps — uses tonic codegen directly)
 |-------|-------------|
 | `rustbgpd-wire` | BGP message codec. Zero internal deps. Independently publishable and fuzzed. |
 | `rustbgpd-fsm` | RFC 4271 state machine. Pure -- no tokio, no sockets, no tasks. |
+| `rustbgpd-bfd` | RFC 5880/5881 single-hop BFD: control-packet codec + sans-IO session state machine. Pure -- no tokio, no sockets (ADR-0067). The UDP/timer actor that drives it lives in the daemon binary (`src/bfd_runtime.rs`). |
 | `rustbgpd-transport` | Tokio TCP glue. Owns BGP peer session I/O and drives the FSM. |
 | `rustbgpd-rib` | Adj-RIB-In, Loc-RIB best-path, Adj-RIB-Out. Single-task ownership, no locks. |
 | `rustbgpd-policy` | Policy engine: prefix/community/AS_PATH matching, route modifications. |
@@ -44,6 +51,7 @@ cli            (no internal deps — uses tonic codegen directly)
 
 - `wire` depends on nothing internal. It is a pure codec library, independently publishable.
 - `fsm` depends on `wire` types (message enums, capability structs) and nothing else. It never imports tokio, never touches a socket, never spawns a task.
+- `bfd` is a pure sans-IO crate with zero internal deps: RFC 5880 control-packet codec plus the session state machine. Like `fsm`, it never imports tokio or touches a socket — the daemon binary's `src/bfd_runtime.rs` owns the UDP sockets, per-session timers, and discriminator demux (ADR-0067).
 - `transport` is the only crate that owns BGP peer TCP session I/O and drives the FSM. Other crates (`api`, `bmp`, `rpki`, `mrt`) run their own async tasks for gRPC serving, collector connections, RTR sessions, and dump I/O respectively.
 - `rib` and `policy` are independent of transport and fsm — they consume route update events.
 - `evpn` is the local-VTEP domain crate (ADR-0052, ADR-0055, ADR-0058). It depends only on `wire`. It does **not** depend on `rib` or `transport`, and it never programs the kernel — kernel reconciliation lives in `crates/evpn-linux` (ADR-0054, shipped Gate 7b/7b+1; Gate 9 IP-VRF readiness probe + Linux netlink dumps + `probe_ip_vrfs` trait surface). The bidirectional VTEP loop is wired in the daemon binary by `src/evpn_dataplane.rs` (downward: RIB best-path → kernel FDB; also publishes the `IpVrfTable` through `DataplaneIntent` so the reconciler can probe IRB readiness every pass) and `src/evpn_originator.rs` + `src/evpn_imet.rs` (upward: kernel local-MAC observations → BGP Type 2 / Type 3 originations). RR-only deployments (empty `[[evpn_instances]]` and empty `[[evpn_ip_vrfs]]`) spawn no background tasks for either direction.
@@ -98,6 +106,8 @@ Each component is the single source of truth for its domain. No overlapping auth
 | **FSM** | Protocol state transitions | What state each peer session is actually in |
 | **RIB** | Routing state | What routes exist, which is best, what to advertise |
 | **Transport** | Socket I/O, wire framing | TCP connections, message encode/decode, session runtime |
+| **FIB runtime** | Kernel forwarding state (`src/fib_runtime.rs`) | Which unicast routes are installed in Linux and their owned-state across restart; the sole owner of netlink route programming |
+| **BFD actor** | BFD session liveness (`src/bfd_runtime.rs`) | Whether each BFD-tracked peer's forwarding path is up; the sole owner of BFD sockets, timers, and discriminators (drives RFC 5882 coupling) |
 | **API** | Request/response adaptation | Nothing — it translates gRPC into commands and queries |
 
 The API layer is explicitly *not* a source of truth. It is an adapter between gRPC callers and the authoritative components.
@@ -136,6 +146,7 @@ These types define the contracts between crates. They are the key interfaces to 
 | `Route` | `rib::route` | Transport → RIB → distribution. Carries prefix, next-hop (`IpAddr`), attributes, origin, validation state, staleness. |
 | `RibUpdate` | `rib::update` | Transport → RIB. Enum: `RoutesReceived`, `PeerUp`, `PeerDown`, `PeerGracefulRestart`, `InjectRoute`, `QueryRoutes`, `RpkiCacheUpdate`, FlowSpec variants, etc. |
 | `OutboundRouteUpdate` | `rib::update` | RIB → Transport. Announces + withdrawals + FlowSpec changes for a single peer, after export policy. |
+| `PeerKey` | `api::peer_types` | API ↔ PeerManager. Stable peer identity: `address` plus an optional `interface` for scoped IPv6 link-local peers (RFC 4007 — a `fe80::/10` address is not globally unique). Numbered peers carry `interface: None`; renders as `fe80::x%ifname` (ADR-0069). |
 | `PeerManagerCommand` | `api::peer_types` | API → PeerManager. Enum: `AddPeer`, `DeletePeer`, `EnablePeer`, `DisablePeer`, `QueryState`, `ReconcilePeers`, etc. |
 | `NegotiatedSession` | `fsm::action` | FSM → Transport. Capabilities, peer ASN/ID, negotiated families, GR state, Add-Path modes. Produced on `Established`. |
 | `PathAttribute` | `wire::attribute` | Wire → everything. Typed + raw hybrid enum. Known attrs decoded to Rust types; unknown optional-transitive preserved as `RawAttribute` for byte-exact re-emission. |
@@ -195,6 +206,10 @@ gRPC request
 | Route distribution | `crates/rib/src/manager/distribution.rs` |
 | Peer lifecycle (GR, LLGR, ERR) | `crates/rib/src/manager/graceful_restart.rs`, `route_refresh.rs` |
 | RIB event loop | `crates/rib/src/manager/mod.rs` — `run()` |
+| FIB install candidates (best + ECMP siblings, weights, scoped next-hop dedup) | `crates/rib/src/manager/mod.rs` — `handle_query_fib_install_candidates` |
+| Unicast Linux FIB install (ECMP, weighted multipath, scoped link-local `dev`) | `src/fib.rs` (intent projection, diff, next-hop canonicalize/identity by `(addr, ifindex)`), `src/fib_runtime.rs` (netlink reconcile actor, owned-state persistence) — ADR-0061 / 0066 / 0068 / 0069 |
+| BFD codec + sans-IO session FSM | `crates/bfd/src/` — `packet.rs`, `session.rs` (RFC 5880/5881, ADR-0067) |
+| BFD socket/timer actor + BGP coupling | `src/bfd_runtime.rs` (UDP sockets, per-session timers, discriminator demux), `src/peer_manager/bfd.rs` (RFC 5882 session coupling) |
 | gRPC service handlers | `crates/api/src/` — one file per service |
 | RPKI / RTR | `crates/rpki/src/` |
 | BMP export | `crates/bmp/src/` |
@@ -205,6 +220,7 @@ gRPC request
 | EVPN daemon glue | `src/evpn_dataplane.rs` (RIB → reconciler supervisor), `src/evpn_originator.rs` (kernel local-MAC → Type 2 actor), `src/evpn_imet.rs` (Type 3 IMET startup-inject + shutdown-withdraw) |
 | CLI tool | `crates/cli/src/` |
 | Config loading + validation | `src/config/` |
+| Scoped link-local / unnumbered neighbor identity | `src/config/validation.rs` + `src/config/mod.rs` (`interface` / `scope_id` parse + resolve), `crates/api/src/peer_types.rs` (`PeerKey`), `crates/transport/src/config.rs` (`peer_interface` / `peer_scope_id`), `crates/transport/src/socket_opts.rs` (scoped connect, AF-aware GTSM), `src/peer_manager/inbound.rs` (passive scope match) — ADR-0069 |
 | Startup wiring | `src/main.rs` |
 | Looking glass (REST API) | `src/looking_glass.rs` |
 | Prometheus metrics | `crates/telemetry/src/lib.rs` |

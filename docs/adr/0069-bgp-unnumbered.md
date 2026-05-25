@@ -56,9 +56,15 @@ address_families = ["ipv4_unicast"]
 ### Scoped peer identity
 
 Link-local peers are identified by address plus interface/scope, not by bare
-`IpAddr`. The configured interface is required for any IPv6 link-local neighbor.
-The daemon may accept the same link-local address on multiple interfaces, but a
-duplicate `(address, interface)` is still a duplicate neighbor.
+`IpAddr`. The configured interface is required for any IPv6 link-local neighbor,
+and a duplicate `(address, interface)` is a duplicate neighbor.
+
+In this release each link-local address must additionally be unique across
+neighbors: the same link-local address bound to two interfaces is rejected at
+config validation (on initial load and on SIGHUP reload). The reason is that the
+RIB still keys peers by bare address, so two same-address peers would alias into
+one Adj-RIB-In/Out entry. Lifting this restriction requires a scoped RIB peer
+key and is deferred (see Deferred).
 
 The scoped identity must be preserved through:
 
@@ -232,6 +238,12 @@ rustbgpd ↔ FRR gate for the v1 scope:
 
 - FRR-style `neighbor swp1 interface remote-as external` autodiscovery via
   interface/ND lifecycle.
+- The same IPv6 link-local address bound to more than one interface. v1 keys the
+  RIB peer (and ECMP next-hop dedup) by bare address, so this is rejected at
+  config validation; supporting it requires threading the scoped
+  `(address, interface)` key through the Adj-RIB-In/Out and `RibUpdate` paths.
+  The FIB next-hop layer already keys link-local gateways by
+  `(address, ifindex)`, so it is ready for the scoped RIB key once it lands.
 - IPv6 link-local BFD for unnumbered peers. This follows naturally once scoped
   BGP peer identity exists.
 - Link-Local Next Hop Capability (code 77) for the 16-byte link-local-only

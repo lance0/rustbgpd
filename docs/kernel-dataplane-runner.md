@@ -62,6 +62,8 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 - M42: ADR-0061 configured-table unicast FIB runtime against FRR.
 - M50: ADR-0066 unicast multipath/ECMP FIB install against two FRR peers.
 - M52: ADR-0066 multipath-relax against two FRR peers in different ASes.
+- M53: ADR-0069 BGP unnumbered / IPv6 link-local peering with scoped FIB ECMP
+  against two FRR peers over unnumbered links.
 - M51: ADR-0067 single-hop BFD + RFC 5882 coupling against FRR `bfdd`.
 - M43: ADR-0062 static-neighbor TCP-AO protected session against BIRD 3.2.1
   (conditional on the runner advertising `CONFIG_TCP_AO=y`).
