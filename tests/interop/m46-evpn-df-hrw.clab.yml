@@ -2,11 +2,11 @@
 # RFC 8584 §3.2 Highest Random Weight (HRW) DF algorithm (M46 — Gate 8
 # HRW smoke).
 #
-# Two rustbgpd PEs share the same ESI for VNI 200 and peer iBGP
+# Two rustbgpd PEs share the same ESI for VNI 10 and peer iBGP
 # L2VPN/EVPN, both configured `df_algorithm = "highest-random-weight"`.
-# The HRW weights for (ESI 00:..:01, VNI 200) elect the HIGHER-IP PE
+# The HRW weights for (ESI 00:..:01, VNI 10) elect the HIGHER-IP PE
 # (PE2, 10.0.0.2) as DF. Default service carving would instead elect
-# PE1 (`200 mod 2` = slot 0 → lower IP). So asserting PE2 is the DF
+# PE1 (`10 mod 2` = slot 0 → lower IP). So asserting PE2 is the DF
 # proves the HRW algorithm — negotiated over the DF Election Extended
 # Community on Type 4 ES routes — is actually running, not modulo.
 #
@@ -22,7 +22,7 @@
 #   PE1 (10.0.0.1, AS 65000) ── iBGP L2VPN/EVPN ── PE2 (10.0.0.2, AS 65000)
 #
 # Control-plane focused (Type 4 visibility + Prometheus surface); the
-# minimal startup script creates br200 so the EVPN instance reaches
+# minimal startup script creates br10 so the EVPN instance reaches
 # Ready. No VXLAN data-plane forwarding.
 #
 # Usage:
@@ -45,7 +45,7 @@ topology:
       exec:
         - ip addr add 10.0.0.1/24 dev eth1
         - ip link set eth1 up
-        - /usr/local/bin/start-rustbgpd-segment.sh 200
+        - /usr/local/bin/start-rustbgpd-segment.sh 10
       env:
         RUST_LOG: info,rustbgpd::evpn_segment=debug,rustbgpd_evpn::df_election=debug
 
@@ -59,7 +59,7 @@ topology:
       exec:
         - ip addr add 10.0.0.2/24 dev eth1
         - ip link set eth1 up
-        - /usr/local/bin/start-rustbgpd-segment.sh 200
+        - /usr/local/bin/start-rustbgpd-segment.sh 10
       env:
         RUST_LOG: info,rustbgpd::evpn_segment=debug,rustbgpd_evpn::df_election=debug
 

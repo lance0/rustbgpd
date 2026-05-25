@@ -637,6 +637,45 @@ mod tests {
     }
 
     #[test]
+    fn hrw_m46_interop_premise_pins_winner() {
+        // Pin the M46 interop smoke's premise to the real HRW algorithm so it
+        // cannot silently drift again. M46's ESI is 00:..:01 (last octet only),
+        // candidates 10.0.0.1 (PE1) and 10.0.0.2 (PE2). The smoke is a positive
+        // proof of "HRW, not modulo" only when HRW elects the HIGHER-IP PE2
+        // while default modulo carving (even VNI -> slot 0 -> lowest IP) would
+        // elect PE1.
+        let m46_esi = EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let candidates = [
+            candidate("10.0.0.1", DfAlgorithm::HighestRandomWeight),
+            candidate("10.0.0.2", DfAlgorithm::HighestRandomWeight),
+        ];
+
+        // VNI 10 (the corrected member VNI): modulo -> PE1, HRW -> PE2.
+        assert_eq!(
+            vni(10).as_u32() % 2,
+            0,
+            "even VNI: modulo would carve to PE1"
+        );
+        assert_eq!(
+            hrw_winner(m46_esi, vni(10), &candidates)
+                .unwrap()
+                .originator_ip,
+            ip("10.0.0.2"),
+            "VNI 10: HRW must elect PE2 (else the smoke proves nothing)"
+        );
+
+        // VNI 200 (the original, broken pick): HRW also elects PE1 — identical
+        // to modulo — so the old smoke asserted an impossible PE2 win.
+        assert_eq!(
+            hrw_winner(m46_esi, vni(200), &candidates)
+                .unwrap()
+                .originator_ip,
+            ip("10.0.0.1"),
+            "VNI 200: HRW elects PE1, same as modulo — not a valid HRW proof"
+        );
+    }
+
+    #[test]
     fn hrw_weight_ipv6_uses_low_order_31_bits() {
         // `::a00:1` has low 32 bits 0x0A000001 — the same integer as 10.0.0.1
         // and within 31 bits, so Si (and therefore the whole weight) matches
