@@ -13,9 +13,9 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 
-use rustbgpd_rib::{FibInstallCandidate, RouteOrigin};
+use rustbgpd_rib::{FibInstallCandidate, FibInstallNextHop, RouteOrigin};
 use rustbgpd_wire::Prefix;
 
 use crate::config::FibTableConfig;
@@ -125,15 +125,25 @@ pub(crate) struct FibRouteTarget {
     best: IpAddr,
 }
 
-/// One forwarding next-hop in a [`FibRouteTarget`]: the gateway address plus its
-/// ADR-0068 multipath weight. The weight is the Linux kernel weight (`1..=256`,
-/// encoded as `rtnh_hops = weight - 1`); `1` everywhere means equal cost. Weight
-/// is part of equality/ordering so a bandwidth change reprograms the kernel, and
-/// it round-trips through `rtnh_hops` so a dumped route diffs stably.
+/// Linux output-interface scope for a link-local next-hop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct FibNextHopScope {
+    /// Kernel interface index required to resolve an IPv6 link-local gateway.
+    pub ifindex: u32,
+}
+
+/// One forwarding next-hop in a [`FibRouteTarget`]: the gateway address, optional
+/// output-interface scope, plus its ADR-0068 multipath weight. The weight is the
+/// Linux kernel weight (`1..=256`, encoded as `rtnh_hops = weight - 1`); `1`
+/// everywhere means equal cost. Weight and scope are part of equality/ordering so
+/// a bandwidth or egress-interface change reprograms the kernel, and they
+/// round-trip through netlink so a dumped route diffs stably.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct FibNextHop {
-    /// Gateway / next-hop address (sort key — ordered before `weight`).
+    /// Gateway / next-hop address (primary sort key).
     pub addr: IpAddr,
+    /// Output interface required for scoped link-local gateways.
+    pub scope: Option<FibNextHopScope>,
     /// Kernel multipath weight, `1..=256` (`1` = equal cost).
     pub weight: u16,
 }
@@ -141,7 +151,20 @@ pub(crate) struct FibNextHop {
 impl FibNextHop {
     /// An equal-cost (weight-1) next-hop — the ADR-0066 default shape.
     pub(crate) fn equal(addr: IpAddr) -> Self {
-        Self { addr, weight: 1 }
+        Self {
+            addr,
+            scope: None,
+            weight: 1,
+        }
+    }
+
+    /// An equal-cost link-local next-hop with a required output interface.
+    pub(crate) fn scoped(addr: IpAddr, ifindex: u32) -> Self {
+        Self {
+            addr,
+            scope: Some(FibNextHopScope { ifindex }),
+            weight: 1,
+        }
     }
 }
 
@@ -149,10 +172,10 @@ impl FibNextHop {
 /// order-independent and a target can never *desire* something the kernel cannot
 /// store — which would diff forever against the dumped route:
 ///
-/// 1. Sort by address. On a duplicate address (only possible from corrupt
+/// 1. Sort by address and scope. On a duplicate address+scope (only possible from corrupt
 ///    persisted state or a malformed kernel dump — the RIB never emits one) keep
 ///    the **larger** weight, so a recovered target never silently under-weights
-///    a path. One entry per address, addr-ascending, is the canonical order.
+///    a path. One entry per address+scope, addr/scope-ascending, is canonical.
 /// 2. Clamp every weight to the kernel-representable `1..=256` (`rtnh_hops` is a
 ///    `u8`, so the kernel holds `weight - 1` in `0..=255`). Guards corrupt state
 ///    and any future writer; RIB-computed weights are already in range.
@@ -161,8 +184,13 @@ impl FibNextHop {
 ///    always reads back weight 1. Keeps the diff stable when a per-table cap (or
 ///    a lone best) reduces a weighted group to one next-hop.
 fn canonicalize_next_hops(next_hops: &mut Vec<FibNextHop>) {
-    next_hops.sort_unstable_by(|a, b| a.addr.cmp(&b.addr).then(b.weight.cmp(&a.weight)));
-    next_hops.dedup_by_key(|nh| nh.addr);
+    next_hops.sort_unstable_by(|a, b| {
+        a.addr
+            .cmp(&b.addr)
+            .then(a.scope.cmp(&b.scope))
+            .then(b.weight.cmp(&a.weight))
+    });
+    next_hops.dedup_by(|a, b| a.addr == b.addr && a.scope == b.scope);
     for nh in next_hops.iter_mut() {
         nh.weight = nh.weight.clamp(1, 256);
     }
@@ -268,6 +296,16 @@ pub(crate) enum FibDrop {
         /// Unsupported next-hop.
         next_hop: IpAddr,
     },
+    /// An IPv6 link-local next-hop was selected without the egress interface
+    /// needed to resolve it in the Linux FIB.
+    LinkLocalNextHopScopeMissing {
+        /// Table that would have received the route.
+        table_name: String,
+        /// Destination prefix.
+        prefix: Prefix,
+        /// Link-local next-hop missing scope.
+        next_hop: IpAddr,
+    },
     /// A desired route key already exists in the kernel but is not daemon-owned.
     ForeignRouteExists {
         /// Conflicting key.
@@ -363,13 +401,73 @@ fn eligible_next_hops(
         .next_hops
         .iter()
         .filter(|next_hop| peer_allowed(next_hop.peer))
-        .filter(|next_hop| prefix_and_nexthop_same_family(prefix, next_hop.next_hop))
-        .map(|next_hop| FibNextHop {
-            addr: next_hop.next_hop,
-            weight: next_hop.weight,
-        })
+        .filter_map(|next_hop| fib_next_hop_from_install(prefix, next_hop).ok())
         .take(max_paths)
         .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FibNextHopIneligible {
+    FamilyUnsupported,
+    LinkLocalScopeMissing,
+}
+
+pub(crate) fn fib_next_hop_installable(
+    prefix: Prefix,
+    next_hop: &FibNextHop,
+) -> Result<(), FibNextHopIneligible> {
+    if is_ipv6_link_local(next_hop.addr) && next_hop.scope.is_none() {
+        return Err(FibNextHopIneligible::LinkLocalScopeMissing);
+    }
+    if prefix_and_nexthop_same_family(prefix, next_hop.addr) {
+        return Ok(());
+    }
+    if matches!((prefix, next_hop.addr), (Prefix::V4(_), IpAddr::V6(addr)) if is_ipv6_link_local_addr(&addr))
+        && next_hop.scope.is_some()
+    {
+        return Ok(());
+    }
+    Err(FibNextHopIneligible::FamilyUnsupported)
+}
+
+fn fib_next_hop_from_install(
+    prefix: Prefix,
+    next_hop: &FibInstallNextHop,
+) -> Result<FibNextHop, FibNextHopIneligible> {
+    let scope = next_hop
+        .next_hop_scope
+        .as_ref()
+        .filter(|scope| scope.ifindex != 0)
+        .map(|scope| FibNextHopScope {
+            ifindex: scope.ifindex,
+        });
+    let fib_next_hop = FibNextHop {
+        addr: next_hop.next_hop,
+        scope,
+        weight: next_hop.weight,
+    };
+    fib_next_hop_installable(prefix, &fib_next_hop)?;
+    Ok(fib_next_hop)
+}
+
+fn best_fib_next_hop(
+    candidate: &FibInstallCandidate,
+    prefix: Prefix,
+) -> Result<FibNextHop, FibNextHopIneligible> {
+    candidate
+        .next_hops
+        .first()
+        .map_or(Err(FibNextHopIneligible::FamilyUnsupported), |next_hop| {
+            fib_next_hop_from_install(prefix, next_hop)
+        })
+}
+
+pub(crate) fn is_ipv6_link_local(addr: IpAddr) -> bool {
+    matches!(addr, IpAddr::V6(addr) if is_ipv6_link_local_addr(&addr))
+}
+
+fn is_ipv6_link_local_addr(addr: &Ipv6Addr) -> bool {
+    addr.segments()[0] & 0xffc0 == 0xfe80
 }
 
 /// Project configured FIB tables and Loc-RIB install candidates into desired
@@ -400,6 +498,10 @@ fn per_class_max_paths(table: &FibTableConfig, is_ebgp: bool) -> usize {
 /// Project configured FIB tables and Loc-RIB install candidates using the
 /// current RIB peer-group map for table allow-list checks.
 #[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps per-table projection, route-limit, and fail-closed next-hop handling together"
+)]
 pub(crate) fn project_fib_intent_with_peer_groups(
     tables: &[FibTableConfig],
     candidates: &[FibInstallCandidate],
@@ -439,6 +541,13 @@ pub(crate) fn project_fib_intent_with_peer_groups(
             let eligible = eligible_next_hops(candidate, route.prefix, max_paths, |peer| {
                 table_allows_peer(table, &allowed_neighbors, peer, peer_groups)
             });
+            let best_next_hop = match best_fib_next_hop(candidate, route.prefix) {
+                Ok(next_hop) => next_hop,
+                Err(reason) => {
+                    push_next_hop_ineligible_drop(&mut intent, &table.name, route, reason);
+                    continue;
+                }
+            };
             // Fail closed if the *selected best route's* own next-hop did not
             // survive the eligibility filters (e.g. an IPv4 prefix advertised
             // with an IPv6 best next-hop). Installing only the surviving
@@ -446,7 +555,7 @@ pub(crate) fn project_fib_intent_with_peer_groups(
             // (all best-route metadata) describing a path we never programmed —
             // and matches today's single-path behavior, which drops a
             // wrong-family best outright.
-            if !eligible.iter().any(|nh| nh.addr == route.next_hop) {
+            if !eligible.contains(&best_next_hop) {
                 intent.drops.push(FibDrop::NextHopFamilyUnsupported {
                     table_name: table.name.clone(),
                     prefix: route.prefix,
@@ -520,6 +629,27 @@ pub(crate) fn project_fib_intent_with_peer_groups(
     }
 
     intent
+}
+
+fn push_next_hop_ineligible_drop(
+    intent: &mut FibIntent,
+    table_name: &str,
+    route: &rustbgpd_rib::Route,
+    reason: FibNextHopIneligible,
+) {
+    let drop = match reason {
+        FibNextHopIneligible::FamilyUnsupported => FibDrop::NextHopFamilyUnsupported {
+            table_name: table_name.to_string(),
+            prefix: route.prefix,
+            next_hop: route.next_hop,
+        },
+        FibNextHopIneligible::LinkLocalScopeMissing => FibDrop::LinkLocalNextHopScopeMissing {
+            table_name: table_name.to_string(),
+            prefix: route.prefix,
+            next_hop: route.next_hop,
+        },
+    };
+    intent.drops.push(drop);
 }
 
 fn push_route_limit_drop(
@@ -756,7 +886,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use rustbgpd_rib::{FibInstallNextHop, Route, RouteOrigin};
+    use rustbgpd_rib::{FibInstallNextHop, NextHopScope, Route, RouteOrigin};
     use rustbgpd_wire::{
         AsPath, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix, RpkiValidation,
     };
@@ -771,7 +901,7 @@ mod tests {
             next_hops: vec![FibInstallNextHop {
                 next_hop: route.next_hop,
                 link_local_next_hop: route.link_local_next_hop,
-                next_hop_scope: None,
+                next_hop_scope: route.next_hop_scope.clone(),
                 peer: route.peer,
                 path_id: route.path_id,
                 weight: 1,
@@ -792,7 +922,7 @@ mod tests {
         let mut next_hops = vec![FibInstallNextHop {
             next_hop: best.next_hop,
             link_local_next_hop: best.link_local_next_hop,
-            next_hop_scope: None,
+            next_hop_scope: best.next_hop_scope.clone(),
             peer: best.peer,
             path_id: best.path_id,
             weight: 1,
@@ -821,7 +951,7 @@ mod tests {
         let mut next_hops = vec![FibInstallNextHop {
             next_hop: best.next_hop,
             link_local_next_hop: best.link_local_next_hop,
-            next_hop_scope: None,
+            next_hop_scope: best.next_hop_scope.clone(),
             peer: best.peer,
             path_id: best.path_id,
             weight: best_weight,
@@ -887,6 +1017,15 @@ mod tests {
         target.next_hops.iter().map(|nh| nh.addr).collect()
     }
 
+    /// The (address, ifindex) pairs of a target, in canonical order.
+    fn addr_scopes(target: &FibRouteTarget) -> Vec<(IpAddr, Option<u32>)> {
+        target
+            .next_hops
+            .iter()
+            .map(|nh| (nh.addr, nh.scope.map(|scope| scope.ifindex)))
+            .collect()
+    }
+
     /// The (address, weight) pairs of a target, in canonical order.
     fn addr_weights(target: &FibRouteTarget) -> Vec<(IpAddr, u16)> {
         target
@@ -926,6 +1065,15 @@ mod tests {
             validation_state: RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         }
+    }
+
+    fn scoped_route(prefix: Prefix, next_hop: IpAddr, ifindex: u32) -> Route {
+        let mut route = route(prefix, next_hop, RouteOrigin::Ebgp, 0);
+        route.next_hop_scope = Some(NextHopScope {
+            interface: Arc::from("fib0"),
+            ifindex,
+        });
+        route
     }
 
     fn one_route(key: FibRouteKey, next_hop: &str) -> FibRoute {
@@ -1069,6 +1217,37 @@ mod tests {
         assert!(matches!(
             intent.drops.as_slice(),
             [FibDrop::NextHopFamilyUnsupported { table_name, .. }] if table_name == "edge"
+        ));
+    }
+
+    #[test]
+    fn scoped_link_local_next_hop_projects_for_ipv4_prefix() {
+        let tables = vec![table("edge", 1000, 200, &["ipv4_unicast"])];
+        let route = scoped_route(v4_prefix(2, 24), ip("fe80::1"), 7);
+
+        let intent = project_fib_intent(&tables, &candidates(vec![route]));
+
+        assert_eq!(intent.routes.len(), 1);
+        let projected = intent.routes.values().next().unwrap();
+        assert_eq!(
+            addr_scopes(&projected.target),
+            vec![(ip("fe80::1"), Some(7))]
+        );
+        assert!(intent.drops.is_empty());
+    }
+
+    #[test]
+    fn link_local_next_hop_without_scope_is_dropped_explicitly() {
+        let tables = vec![table("edge", 1000, 200, &["ipv4_unicast"])];
+        let routes = vec![route(v4_prefix(2, 24), ip("fe80::1"), RouteOrigin::Ebgp, 0)];
+
+        let intent = project_fib_intent(&tables, &candidates(routes));
+
+        assert!(intent.routes.is_empty());
+        assert!(matches!(
+            intent.drops.as_slice(),
+            [FibDrop::LinkLocalNextHopScopeMissing { table_name, next_hop, .. }]
+                if table_name == "edge" && *next_hop == ip("fe80::1")
         ));
     }
 
@@ -1698,6 +1877,19 @@ mod tests {
     }
 
     #[test]
+    fn target_keeps_same_link_local_address_on_distinct_ifindexes() {
+        let target = FibRouteTarget::from_next_hops([
+            FibNextHop::scoped(ip("fe80::1"), 7),
+            FibNextHop::scoped(ip("fe80::1"), 9),
+        ]);
+
+        assert_eq!(
+            addr_scopes(&target),
+            vec![(ip("fe80::1"), Some(7)), (ip("fe80::1"), Some(9))]
+        );
+    }
+
+    #[test]
     fn ecmp_candidate_projects_multipath_target_when_enabled() {
         let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
         table.maximum_paths = Some(2);
@@ -1767,20 +1959,24 @@ mod tests {
         let a = FibRouteTarget::from_next_hops([
             FibNextHop {
                 addr: ip("203.0.113.1"),
+                scope: None,
                 weight: 256,
             },
             FibNextHop {
                 addr: ip("203.0.113.2"),
+                scope: None,
                 weight: 64,
             },
         ]);
         let b = FibRouteTarget::from_next_hops([
             FibNextHop {
                 addr: ip("203.0.113.1"),
+                scope: None,
                 weight: 128,
             },
             FibNextHop {
                 addr: ip("203.0.113.2"),
+                scope: None,
                 weight: 128,
             },
         ]);
@@ -1789,10 +1985,12 @@ mod tests {
         let c = FibRouteTarget::from_next_hops([
             FibNextHop {
                 addr: ip("203.0.113.2"),
+                scope: None,
                 weight: 64,
             },
             FibNextHop {
                 addr: ip("203.0.113.1"),
+                scope: None,
                 weight: 256,
             },
         ]);
@@ -1807,10 +2005,12 @@ mod tests {
         let t = FibRouteTarget::from_next_hops([
             FibNextHop {
                 addr: ip("203.0.113.1"),
+                scope: None,
                 weight: 5000,
             },
             FibNextHop {
                 addr: ip("203.0.113.2"),
+                scope: None,
                 weight: 0,
             },
         ]);
@@ -1828,14 +2028,17 @@ mod tests {
         let t = FibRouteTarget::from_next_hops([
             FibNextHop {
                 addr: ip("203.0.113.1"),
+                scope: None,
                 weight: 64,
             },
             FibNextHop {
                 addr: ip("203.0.113.1"),
+                scope: None,
                 weight: 200,
             },
             FibNextHop {
                 addr: ip("203.0.113.2"),
+                scope: None,
                 weight: 100,
             },
         ]);

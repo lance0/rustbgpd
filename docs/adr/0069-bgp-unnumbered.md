@@ -120,10 +120,27 @@ these fail-closed rules:
   primary IPv6 next-hop and companion link-local next-hop are both the local
   link-local address;
 - accepted link-local primary next-hops carry the configured interface/scope in
-  the RIB install-candidate metadata for the later Linux FIB `dev`/OIF slice.
+  the RIB install-candidate metadata for Linux FIB projection.
 
-The FIB tranche remains separate: until it lands, forwarding projection still
-rejects IPv4 routes whose next-hop family is IPv6.
+### Tranche 4 production behavior
+
+Linux FIB projection accepts IPv4 routes whose selected next-hop is an IPv6
+link-local address only when the RIB install candidate carries a non-zero
+egress ifindex from the scoped peer identity. The FIB target includes that
+ifindex as part of next-hop identity, so two equal `fe80::/10` gateways on
+different interfaces remain distinct and diff-stable.
+
+Netlink encoding preserves existing behavior for ordinary same-family routes:
+single-path routes still use `RTA_GATEWAY`, and multipath routes still use
+`RTA_MULTIPATH` with weights. Scoped cross-family link-local routes use
+`RTA_VIA` plus `RTA_OIF` for single-path, or per-next-hop `rtnh_ifindex` inside
+`RTA_MULTIPATH`. Kernel dumps reconstruct the same scoped target, and owned-state
+v4 persists positional link-local ifindexes so crash restart does not forget
+which `dev` belongs to a daemon-owned row.
+
+If a link-local next-hop lacks scope, the FIB layer rejects the row with an
+explicit `link_local_next_hop_scope_missing` reason. IPv4 routes via non
+link-local IPv6 gateways remain rejected as unsupported.
 
 ### FIB install is part of the feature
 

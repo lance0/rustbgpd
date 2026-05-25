@@ -69,7 +69,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   link-local primary IPv4 `MP_REACH_NLRI` only for scoped
   ENHE-negotiated sessions, emits the FRR-proven 32-byte link-local/link-local
   next-hop form, and carries next-hop scope metadata through RIB install
-  candidates for the later Linux FIB `dev`/OIF slice.
+  candidates for Linux FIB projection.
+- **ADR-0069 Linux FIB scoped link-local installs.** General unicast FIB
+  projection now accepts IPv4 routes via IPv6 link-local next-hops only when the
+  RIB install candidate carries a non-zero egress ifindex. Linux netlink emits
+  scoped link-local routes as `RTA_VIA` plus `RTA_OIF` for single-path routes, or
+  per-hop `rtnh_ifindex` inside `RTA_MULTIPATH` for ECMP / weighted multipath.
+  Kernel dumps and owned-state v4 preserve the ifindex, so scoped rows remain
+  diff-stable across reconciles and crash restart; missing link-local scope is
+  rejected explicitly as `link_local_next_hop_scope_missing`.
 
 ## [0.28.0] — 2026-05-24
 

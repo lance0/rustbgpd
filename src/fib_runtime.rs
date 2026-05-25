@@ -23,8 +23,9 @@ use tracing::{debug, info, warn};
 
 use crate::config::FibTableConfig;
 use crate::fib::{
-    FibDrop, FibIntent, FibKernelProtocol, FibKernelRoute, FibKernelSnapshot, FibNextHop, FibOp,
-    FibOwnedState, FibPlan, FibRoute, FibRouteKey, FibRouteTarget, FibTableKey, compute_fib_diff,
+    FibDrop, FibIntent, FibKernelProtocol, FibKernelRoute, FibKernelSnapshot, FibNextHop,
+    FibNextHopScope, FibOp, FibOwnedState, FibPlan, FibRoute, FibRouteKey, FibRouteTarget,
+    FibTableKey, compute_fib_diff, fib_next_hop_installable, is_ipv6_link_local,
     project_fib_intent_with_peer_groups, record_fib_success,
 };
 use crate::fib_common::{prefix_and_nexthop_same_family, table_allows_prefix};
@@ -777,11 +778,12 @@ fn emit_fib_event(
     });
 }
 
-/// Current owned-state envelope version. v3 persists per-next-hop multipath
-/// `weights` (ADR-0068); v2 persisted the equal-cost `next_hops` set; v1
-/// persisted a single `next_hop` scalar. A v2 file loads with all weights = 1
-/// (equal cost), matching the only shape v2 could have produced.
-const OWNED_STATE_VERSION: u32 = 3;
+/// Current owned-state envelope version. v4 persists per-next-hop link-local
+/// output ifindexes (ADR-0069); v3 persisted per-next-hop multipath `weights`
+/// (ADR-0068); v2 persisted the equal-cost `next_hops` set; v1 persisted a
+/// single `next_hop` scalar. Older files load with no scoped ifindex and all
+/// missing weights defaulting to 1.
+const OWNED_STATE_VERSION: u32 = 4;
 /// Oldest owned-state version this build can still load (and upgrade).
 const OWNED_STATE_MIN_VERSION: u32 = 1;
 
@@ -838,6 +840,10 @@ struct PersistedFibRoute {
     /// all-equal: `into_route` fills weight 1 for any next-hop without a weight.
     #[serde(default)]
     weights: Vec<u16>,
+    /// v4 per-next-hop output ifindexes for IPv6 link-local gateways (ADR-0069),
+    /// positionally aligned with `next_hops`. Zero/missing means unscoped.
+    #[serde(default)]
+    next_hop_ifindexes: Vec<u32>,
     peer: IpAddr,
     origin_type: PersistedRouteOrigin,
     path_id: u32,
@@ -886,6 +892,13 @@ impl From<&FibRoute> for PersistedFibRoute {
             next_hops: route.target.next_hops.iter().map(|nh| nh.addr).collect(),
             // ADR-0068: persist weights positionally aligned with `next_hops`.
             weights: route.target.next_hops.iter().map(|nh| nh.weight).collect(),
+            // ADR-0069: persist link-local output ifindexes positionally.
+            next_hop_ifindexes: route
+                .target
+                .next_hops
+                .iter()
+                .map(|nh| nh.scope.map_or(0, |scope| scope.ifindex))
+                .collect(),
             peer: route.peer,
             origin_type: route.origin_type.into(),
             path_id: route.path_id,
@@ -915,12 +928,14 @@ impl PersistedFibRoute {
         let prefix = prefix_from_addr_len(self.prefix_addr, self.prefix_len)?;
         // v2/v3 carry `next_hops` (the full set) plus `next_hop` (the best); a v1
         // file carried only the single scalar `next_hop` (which is the best).
-        // v3 also carries `weights` positionally aligned with `next_hops`; a
-        // v1/v2 file has none, so every next-hop defaults to weight 1 (equal
-        // cost). Upgrade v1 to a one-element set, then drop any next-hop whose
-        // family disagrees with the prefix. If that empties it, the row is unusable.
-        let paired: Vec<(IpAddr, u16)> = if self.next_hops.is_empty() {
-            self.next_hop.into_iter().map(|addr| (addr, 1)).collect()
+        // v3 also carries `weights` positionally aligned with `next_hops`; v4
+        // adds positional link-local ifindexes. Upgrade v1 to a one-element set,
+        // then drop any next-hop that is not installable for this prefix.
+        let paired: Vec<(IpAddr, u16, Option<FibNextHopScope>)> = if self.next_hops.is_empty() {
+            self.next_hop
+                .into_iter()
+                .map(|addr| (addr, 1, None))
+                .collect()
         } else {
             self.next_hops
                 .iter()
@@ -928,17 +943,28 @@ impl PersistedFibRoute {
                 // Clamp to the kernel-representable 1..=256 at the persistence
                 // boundary (the canonicalizer enforces it again downstream).
                 .map(|(i, &addr)| {
+                    let scope = self
+                        .next_hop_ifindexes
+                        .get(i)
+                        .copied()
+                        .filter(|ifindex| *ifindex != 0)
+                        .map(|ifindex| FibNextHopScope { ifindex });
                     (
                         addr,
                         self.weights.get(i).copied().unwrap_or(1).clamp(1, 256),
+                        scope,
                     )
                 })
                 .collect()
         };
         let next_hops: Vec<FibNextHop> = paired
             .into_iter()
-            .filter(|(addr, _)| prefix_and_nexthop_same_family(prefix, *addr))
-            .map(|(addr, weight)| FibNextHop { addr, weight })
+            .map(|(addr, weight, scope)| FibNextHop {
+                addr,
+                scope,
+                weight,
+            })
+            .filter(|next_hop| fib_next_hop_installable(prefix, next_hop).is_ok())
             .collect();
         if next_hops.is_empty() {
             return None;
@@ -1136,6 +1162,7 @@ fn op_route(op: &FibOp) -> &FibRoute {
 fn drop_reason(drop: &FibDrop) -> &'static str {
     match drop {
         FibDrop::NextHopFamilyUnsupported { .. } => "next_hop_family_unsupported",
+        FibDrop::LinkLocalNextHopScopeMissing { .. } => "link_local_next_hop_scope_missing",
         FibDrop::ForeignRouteExists { .. } => "foreign_route_exists",
         FibDrop::OwnedRouteDrifted { .. } => "owned_route_drifted",
         FibDrop::PeerNotAllowed { .. } => "peer_not_allowed",
@@ -1158,6 +1185,7 @@ fn build_statuses(
             FibDrop::ForeignRouteExists { key } => Some(*key),
             FibDrop::OwnedRouteDrifted { route } => Some(route.key),
             FibDrop::NextHopFamilyUnsupported { .. }
+            | FibDrop::LinkLocalNextHopScopeMissing { .. }
             | FibDrop::PeerNotAllowed { .. }
             | FibDrop::RouteLimitExceeded { .. } => None,
         })
@@ -1192,21 +1220,24 @@ fn status_for_drop(
             table_name,
             prefix,
             next_hop,
-        } => {
-            let table = config.tables.iter().find(|table| table.name == *table_name);
-            FibRuntimeStatus {
-                table_name: table_name.clone(),
-                table_id: table.map_or(0, |table| table.table_id),
-                metric: table.map_or(0, |table| table.metric),
-                prefix: *prefix,
-                next_hop: Some(*next_hop),
-                next_hops: vec![*next_hop],
-                peer: None,
-                state: FibRuntimeState::Rejected,
-                reason: "next_hop_family_unsupported".to_string(),
-                sampling: None,
-            }
-        }
+        } => status_for_next_hop_drop(
+            config,
+            table_name,
+            *prefix,
+            *next_hop,
+            "next_hop_family_unsupported",
+        ),
+        FibDrop::LinkLocalNextHopScopeMissing {
+            table_name,
+            prefix,
+            next_hop,
+        } => status_for_next_hop_drop(
+            config,
+            table_name,
+            *prefix,
+            *next_hop,
+            "link_local_next_hop_scope_missing",
+        ),
         FibDrop::ForeignRouteExists { key } => {
             let route = intent.routes.get(key).or_else(|| owned.routes.get(key));
             if let Some(route) = route {
@@ -1270,6 +1301,28 @@ fn status_for_drop(
             reason: "route_limit_exceeded".to_string(),
             sampling: route_limit_sampling(drop),
         },
+    }
+}
+
+fn status_for_next_hop_drop(
+    config: &FibRuntimeConfig,
+    table_name: &str,
+    prefix: Prefix,
+    next_hop: IpAddr,
+    reason: &str,
+) -> FibRuntimeStatus {
+    let table = config.tables.iter().find(|table| table.name == table_name);
+    FibRuntimeStatus {
+        table_name: table_name.to_string(),
+        table_id: table.map_or(0, |table| table.table_id),
+        metric: table.map_or(0, |table| table.metric),
+        prefix,
+        next_hop: Some(next_hop),
+        next_hops: vec![next_hop],
+        peer: None,
+        state: FibRuntimeState::Rejected,
+        reason: reason.to_string(),
+        sampling: None,
     }
 }
 
@@ -1498,14 +1551,21 @@ fn build_route_message(
         Prefix::V4(_) => AddressFamily::Inet,
         Prefix::V6(_) => AddressFamily::Inet6,
     };
-    if let Some(next_hop) = route
-        .target
-        .next_hops
-        .iter()
-        .find(|next_hop| !prefix_and_nexthop_same_family(route.key.prefix, next_hop.addr))
-    {
+    if let Some((next_hop, reason)) = route.target.next_hops.iter().find_map(|next_hop| {
+        fib_next_hop_installable(route.key.prefix, next_hop)
+            .err()
+            .map(|reason| (next_hop, reason))
+    }) {
+        let detail = match reason {
+            crate::fib::FibNextHopIneligible::FamilyUnsupported => {
+                "prefix family does not match next-hop family"
+            }
+            crate::fib::FibNextHopIneligible::LinkLocalScopeMissing => {
+                "IPv6 link-local next-hop is missing an output interface"
+            }
+        };
         return Err(format!(
-            "prefix family does not match next-hop family for {} via {}",
+            "{detail} for {} via {}",
             route.key.prefix, next_hop.addr
         ));
     }
@@ -1540,7 +1600,10 @@ fn build_route_message(
             // never emitted.
             [next_hop] => {
                 msg.attributes
-                    .push(RouteAttribute::Gateway(ip_to_route_address(next_hop.addr)));
+                    .push(route_next_hop_attribute(route.key.prefix, next_hop));
+                if let Some(scope) = next_hop.scope {
+                    msg.attributes.push(RouteAttribute::Oif(scope.ifindex));
+                }
             }
             // Two or more program a kernel RTA_MULTIPATH (ECMP). Each hop carries
             // a gateway and its weight as `rtnh_hops = weight - 1` (ADR-0068);
@@ -1556,8 +1619,9 @@ fn build_route_message(
                         // is unreachable defense.
                         hop.hops =
                             u8::try_from(next_hop.weight.saturating_sub(1)).unwrap_or(u8::MAX);
+                        hop.interface_index = next_hop.scope.map_or(0, |scope| scope.ifindex);
                         hop.attributes
-                            .push(RouteAttribute::Gateway(ip_to_route_address(next_hop.addr)));
+                            .push(route_next_hop_attribute(route.key.prefix, next_hop));
                         hop
                     })
                     .collect();
@@ -1566,6 +1630,20 @@ fn build_route_message(
         }
     }
     Ok(msg)
+}
+
+#[cfg(target_os = "linux")]
+fn route_next_hop_attribute(
+    prefix: Prefix,
+    next_hop: &FibNextHop,
+) -> netlink_packet_route::route::RouteAttribute {
+    use netlink_packet_route::route::{RouteAttribute, RouteVia};
+
+    if prefix_and_nexthop_same_family(prefix, next_hop.addr) {
+        RouteAttribute::Gateway(ip_to_route_address(next_hop.addr))
+    } else {
+        RouteAttribute::Via(RouteVia::from(next_hop.addr))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1664,6 +1742,10 @@ fn extract_prefix(msg: &netlink_packet_route::route::RouteMessage) -> Option<Pre
 #[cfg(target_os = "linux")]
 fn extract_gateway(msg: &netlink_packet_route::route::RouteMessage) -> Option<FibRouteTarget> {
     use netlink_packet_route::route::RouteAttribute;
+    let oif = msg.attributes.iter().find_map(|attr| match attr {
+        RouteAttribute::Oif(ifindex) if *ifindex != 0 => Some(*ifindex),
+        _ => None,
+    });
     for attr in &msg.attributes {
         match attr {
             RouteAttribute::MultiPath(next_hops) => {
@@ -1675,7 +1757,16 @@ fn extract_gateway(msg: &netlink_packet_route::route::RouteMessage) -> Option<Fi
             }
             RouteAttribute::Gateway(addr) => {
                 if let Some(next_hop) = route_address_ip(addr) {
-                    return Some(FibRouteTarget::single(next_hop));
+                    return Some(FibRouteTarget::from_next_hops([next_hop_from_dump(
+                        next_hop, 1, oif,
+                    )]));
+                }
+            }
+            RouteAttribute::Via(via) => {
+                if let Some(next_hop) = route_via_ip(via) {
+                    return Some(FibRouteTarget::from_next_hops([next_hop_from_dump(
+                        next_hop, 1, oif,
+                    )]));
                 }
             }
             _ => {}
@@ -1693,12 +1784,27 @@ fn next_hop_gateway(hop: &netlink_packet_route::route::RouteNextHop) -> Option<F
     use netlink_packet_route::route::RouteAttribute;
     let addr = hop.attributes.iter().find_map(|attr| match attr {
         RouteAttribute::Gateway(addr) => route_address_ip(addr),
+        RouteAttribute::Via(via) => route_via_ip(via),
         _ => None,
     })?;
-    Some(FibNextHop {
+    Some(next_hop_from_dump(
         addr,
-        weight: u16::from(hop.hops) + 1,
-    })
+        u16::from(hop.hops) + 1,
+        (hop.interface_index != 0).then_some(hop.interface_index),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn next_hop_from_dump(addr: IpAddr, weight: u16, ifindex: Option<u32>) -> FibNextHop {
+    FibNextHop {
+        addr,
+        scope: if is_ipv6_link_local(addr) {
+            ifindex.map(|ifindex| FibNextHopScope { ifindex })
+        } else {
+            None
+        },
+        weight,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1707,6 +1813,16 @@ fn route_address_ip(addr: &netlink_packet_route::route::RouteAddress) -> Option<
     match addr {
         RouteAddress::Inet(addr) => Some(IpAddr::V4(*addr)),
         RouteAddress::Inet6(addr) => Some(IpAddr::V6(*addr)),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn route_via_ip(via: &netlink_packet_route::route::RouteVia) -> Option<IpAddr> {
+    use netlink_packet_route::route::RouteVia;
+    match via {
+        RouteVia::Inet(addr) => Some(IpAddr::V4(*addr)),
+        RouteVia::Inet6(addr) => Some(IpAddr::V6(*addr)),
         _ => None,
     }
 }
@@ -1768,7 +1884,9 @@ fn netlink_errno(err: &rtnetlink::Error) -> Option<i32> {
 mod tests {
     use super::*;
     use prometheus::Registry;
-    use rustbgpd_rib::{FibInstallNextHop, Route, RouteEvent, RouteEventType, RouteOrigin};
+    use rustbgpd_rib::{
+        FibInstallNextHop, NextHopScope, Route, RouteEvent, RouteEventType, RouteOrigin,
+    };
     use rustbgpd_wire::{AsPath, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, RpkiValidation};
     use std::collections::BTreeMap;
     use std::net::{Ipv4Addr, Ipv6Addr};
@@ -1901,6 +2019,15 @@ mod tests {
         }
     }
 
+    fn scoped_route(prefix: Prefix, next_hop: IpAddr, ifindex: u32) -> Route {
+        let mut route = route(prefix, next_hop);
+        route.next_hop_scope = Some(NextHopScope {
+            interface: Arc::from("fib0"),
+            ifindex,
+        });
+        route
+    }
+
     fn key(prefix: Prefix) -> FibRouteKey {
         FibRouteKey {
             table_id: 1000,
@@ -1930,7 +2057,7 @@ mod tests {
             let next_hop = FibInstallNextHop {
                 next_hop: route.next_hop,
                 link_local_next_hop: route.link_local_next_hop,
-                next_hop_scope: None,
+                next_hop_scope: route.next_hop_scope.clone(),
                 peer: route.peer,
                 path_id: route.path_id,
                 weight: 1,
@@ -2144,6 +2271,51 @@ mod tests {
         ns.exec("ip", &["addr", "add", "192.0.2.2/24", "dev", "fib0"]);
         ns.exec("ip", &["link", "set", "fib0", "up"]);
         ns.exec("ip", &["link", "set", "fib-peer", "up"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn setup_link_local_unicast_netns(ns: &NetnsFixture) {
+        ns.exec(
+            "ip",
+            &[
+                "link", "add", "fib0", "type", "veth", "peer", "name", "fib-peer",
+            ],
+        );
+        ns.exec("ip", &["link", "set", "fib0", "up"]);
+        ns.exec("ip", &["link", "set", "fib-peer", "up"]);
+        ns.exec(
+            "ip",
+            &[
+                "-6",
+                "addr",
+                "replace",
+                "fe80::1/64",
+                "dev",
+                "fib0",
+                "nodad",
+            ],
+        );
+        ns.exec(
+            "ip",
+            &[
+                "-6",
+                "addr",
+                "replace",
+                "fe80::2/64",
+                "dev",
+                "fib-peer",
+                "nodad",
+            ],
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ifindex(name: &str) -> u32 {
+        std::fs::read_to_string(format!("/sys/class/net/{name}/ifindex"))
+            .expect("read ifindex")
+            .trim()
+            .parse()
+            .expect("parse ifindex")
     }
 
     #[cfg(target_os = "linux")]
@@ -2475,10 +2647,12 @@ mod tests {
         route.target = FibRouteTarget::from_next_hops([
             FibNextHop {
                 addr: ip("192.0.2.1"),
+                scope: None,
                 weight: 256,
             },
             FibNextHop {
                 addr: ip("192.0.2.2"),
+                scope: None,
                 weight: 64,
             },
         ]);
@@ -2489,6 +2663,26 @@ mod tests {
 
         let loaded = load_owned_state(&config);
         assert_eq!(loaded, owned, "v3 persists per-next-hop weights");
+    }
+
+    #[test]
+    fn owned_state_round_trips_scoped_link_local_next_hops() {
+        // ADR-0069: scoped link-local next-hops must survive crash-restart owned
+        // state; otherwise the reconciler would treat its own kernel route as
+        // drifted after reload.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let mut config = config();
+        config.owned_state_path = Some(path.clone());
+        let mut route = fib_route(v4(24), ip("fe80::2"));
+        route.target = FibRouteTarget::from_next_hops([FibNextHop::scoped(ip("fe80::2"), 7)]);
+        let mut owned = FibOwnedState::default();
+        owned.routes.insert(route.key, route);
+
+        write_owned_state(&path, &config.tables, &owned).unwrap();
+
+        let loaded = load_owned_state(&config);
+        assert_eq!(loaded, owned, "v4 persists link-local output ifindex");
     }
 
     #[test]
@@ -3326,6 +3520,39 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn build_route_message_scoped_link_local_uses_via_and_oif() {
+        use netlink_packet_route::route::{RouteAttribute, RouteVia};
+        let route = FibRoute {
+            table_name: "edge".to_string(),
+            key: key(v4(24)),
+            target: FibRouteTarget::from_next_hops([FibNextHop::scoped(ip("fe80::2"), 7)]),
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        };
+
+        let msg = build_route_message(&route, RouteMessageGateway::Include).unwrap();
+
+        assert!(msg.attributes.iter().any(|attr| matches!(
+            attr,
+            RouteAttribute::Via(RouteVia::Inet6(addr))
+                if *addr == "fe80::2".parse::<Ipv6Addr>().unwrap()
+        )));
+        assert!(
+            msg.attributes
+                .iter()
+                .any(|attr| matches!(attr, RouteAttribute::Oif(7)))
+        );
+        assert!(
+            !msg.attributes
+                .iter()
+                .any(|attr| matches!(attr, RouteAttribute::Gateway(_))),
+            "cross-family link-local route must use RTA_VIA, not RTA_GATEWAY"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn build_route_message_multi_next_hop_emits_equal_weight_multipath() {
         use netlink_packet_route::route::RouteAttribute;
         let route = FibRoute {
@@ -3370,6 +3597,51 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn build_route_message_scoped_multipath_sets_per_hop_ifindex_and_weights() {
+        use netlink_packet_route::route::{RouteAttribute, RouteVia};
+        let route = FibRoute {
+            table_name: "edge".to_string(),
+            key: key(v4(24)),
+            target: FibRouteTarget::from_next_hops([
+                FibNextHop {
+                    addr: ip("fe80::2"),
+                    scope: Some(FibNextHopScope { ifindex: 7 }),
+                    weight: 256,
+                },
+                FibNextHop {
+                    addr: ip("fe80::3"),
+                    scope: Some(FibNextHopScope { ifindex: 9 }),
+                    weight: 64,
+                },
+            ]),
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        };
+
+        let msg = build_route_message(&route, RouteMessageGateway::Include).unwrap();
+
+        let hops = msg
+            .attributes
+            .iter()
+            .find_map(|attr| match attr {
+                RouteAttribute::MultiPath(hops) => Some(hops),
+                _ => None,
+            })
+            .expect("expected RTA_MULTIPATH");
+        assert_eq!(hops[0].interface_index, 7);
+        assert_eq!(hops[0].hops, 255);
+        assert!(hops[0].attributes.iter().any(|attr| matches!(
+            attr,
+            RouteAttribute::Via(RouteVia::Inet6(addr))
+                if *addr == "fe80::2".parse::<Ipv6Addr>().unwrap()
+        )));
+        assert_eq!(hops[1].interface_index, 9);
+        assert_eq!(hops[1].hops, 63);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn build_then_extract_round_trips_multipath_set() {
         let route = FibRoute {
             table_name: "edge".to_string(),
@@ -3377,6 +3649,23 @@ mod tests {
             target: FibRouteTarget::from_next_hops(
                 [ip("192.0.2.2"), ip("192.0.2.1")].map(FibNextHop::equal),
             ),
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        };
+
+        let msg = build_route_message(&route, RouteMessageGateway::Include).unwrap();
+
+        assert_eq!(extract_gateway(&msg), Some(route.target));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn build_then_extract_round_trips_scoped_link_local() {
+        let route = FibRoute {
+            table_name: "edge".to_string(),
+            key: key(v4(24)),
+            target: FibRouteTarget::from_next_hops([FibNextHop::scoped(ip("fe80::2"), 7)]),
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
@@ -3400,10 +3689,12 @@ mod tests {
             target: FibRouteTarget::from_next_hops([
                 FibNextHop {
                     addr: ip("192.0.2.1"),
+                    scope: None,
                     weight: 256,
                 },
                 FibNextHop {
                     addr: ip("192.0.2.2"),
+                    scope: None,
                     weight: 64,
                 },
             ]),
@@ -3715,6 +4006,91 @@ mod tests {
             foreign_after_drain.contains("proto static"),
             "shutdown drain removed foreign route: {foreign_after_drain}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn netns_general_unicast_fib_ipv4_via_ipv6_link_local_round_trip() {
+        if !netns_gate() {
+            eprintln!(
+                "skipping: set EVPN_LINUX_NETNS=1 to run privileged link-local FIB netns test"
+            );
+            return;
+        }
+        if !is_inner_netns() {
+            let ns = NetnsFixture::create("llfib");
+            setup_link_local_unicast_netns(&ns);
+            run_inner_netns(
+                &ns,
+                "netns_general_unicast_fib_ipv4_via_ipv6_link_local_round_trip",
+            );
+            return;
+        }
+
+        let prefix = v4(24);
+        let prefix_text = "203.0.113.0/24";
+        let scope_ifindex = ifindex("fib0");
+        let mut fib = LinuxUnicastFib::connect().expect("LinuxUnicastFib::connect");
+        let mut owned = FibOwnedState::default();
+        let metrics = metrics();
+        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let route = scoped_route(prefix, ip("fe80::2"), scope_ifindex);
+
+        reconcile_once(
+            &config(),
+            &rib_with_routes(vec![route]),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+            &CancellationToken::new(),
+        )
+        .await;
+        let installed = route_show(1000, prefix_text);
+        assert!(
+            installed.contains("via inet6 fe80::2"),
+            "link-local gateway missing: {installed}"
+        );
+        assert!(
+            installed.contains("dev fib0"),
+            "egress device missing: {installed}"
+        );
+        assert!(
+            installed.contains("proto bgp"),
+            "proto bgp missing: {installed}"
+        );
+        assert!(
+            installed.contains("metric 200"),
+            "metric missing: {installed}"
+        );
+        let dumped = dump_configured_routes(&fib.handle, &config().tables)
+            .await
+            .expect("dump_configured_routes");
+        let dumped_target = &dumped
+            .routes
+            .get(&key(prefix))
+            .expect("dumped route")
+            .target;
+        assert_eq!(
+            dumped_target.next_hops.as_slice(),
+            &[FibNextHop::scoped(ip("fe80::2"), scope_ifindex)]
+        );
+
+        reconcile_once(
+            &config(),
+            &rib_with_routes(Vec::new()),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            route_show(1000, prefix_text).trim().is_empty(),
+            "withdraw left link-local route installed"
+        );
+        assert!(owned.routes.is_empty());
     }
 
     #[cfg(target_os = "linux")]
