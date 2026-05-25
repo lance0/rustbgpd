@@ -78,6 +78,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0067](0067-bfd-single-hop.md) | Single-hop asynchronous BFD for BGP | Accepted | 2026-05-24 |
 | [0068](0068-weighted-multipath.md) | Weighted (unequal-cost) multipath via Link Bandwidth | Accepted | 2026-05-24 |
 | [0069](0069-bgp-unnumbered.md) | BGP unnumbered and IPv6 link-local peering | Accepted | 2026-05-25 |
+| [0070](0070-gnmi-openconfig-telemetry.md) | Read-only gNMI / OpenConfig telemetry adapter | Accepted | 2026-05-25 |
 
 ## Template
 
