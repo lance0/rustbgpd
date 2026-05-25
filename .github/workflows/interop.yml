@@ -91,10 +91,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install containerlab
-        run: |
-          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
-            -o /tmp/clab.deb
-          sudo dpkg -i /tmp/clab.deb
+        uses: ./.github/actions/install-containerlab
 
       - name: Install grpcurl
         run: |
@@ -128,10 +125,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install containerlab
-        run: |
-          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
-            -o /tmp/clab.deb
-          sudo dpkg -i /tmp/clab.deb
+        uses: ./.github/actions/install-containerlab
 
       - name: Install grpcurl
         run: |
@@ -165,10 +159,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install containerlab
-        run: |
-          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
-            -o /tmp/clab.deb
-          sudo dpkg -i /tmp/clab.deb
+        uses: ./.github/actions/install-containerlab
 
       - name: Install grpcurl
         run: |
@@ -202,10 +193,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install containerlab
-        run: |
-          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
-            -o /tmp/clab.deb
-          sudo dpkg -i /tmp/clab.deb
+        uses: ./.github/actions/install-containerlab
 
       - name: Install grpcurl
         run: |
@@ -239,10 +227,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install containerlab
-        run: |
-          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
-            -o /tmp/clab.deb
-          sudo dpkg -i /tmp/clab.deb
+        uses: ./.github/actions/install-containerlab
 
       - name: Install grpcurl
         run: |
@@ -276,10 +261,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install containerlab
-        run: |
-          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
-            -o /tmp/clab.deb
-          sudo dpkg -i /tmp/clab.deb
+        uses: ./.github/actions/install-containerlab
 
       - name: Install grpcurl
         run: |
@@ -313,10 +295,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install containerlab
-        run: |
-          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
-            -o /tmp/clab.deb
-          sudo dpkg -i /tmp/clab.deb
+        uses: ./.github/actions/install-containerlab
 
       - name: Install grpcurl + jq
         # jq parses FRR's `show bgp ipv4 flowspec json` output for
@@ -354,10 +333,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install containerlab
-        run: |
-          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
-            -o /tmp/clab.deb
-          sudo dpkg -i /tmp/clab.deb
+        uses: ./.github/actions/install-containerlab
 
       - name: Install grpcurl
         run: |
@@ -391,10 +367,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install containerlab
-        run: |
-          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
-            -o /tmp/clab.deb
-          sudo dpkg -i /tmp/clab.deb
+        uses: ./.github/actions/install-containerlab
 
       - name: Install grpcurl
         run: |
@@ -431,13 +404,10 @@ jobs:
       # both are cheap (single Go binaries). Pinned versions to keep the
       # gate reproducible — bumping is a deliberate change.
       - name: Install containerlab
-        # Pinned to the version we develop against locally. Bumping is
-        # a deliberate change; verify a clean M29 run on the new
-        # version before merging.
-        run: |
-          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
-            -o /tmp/clab.deb
-          sudo dpkg -i /tmp/clab.deb
+        # Version is pinned in the install-containerlab composite (default
+        # input). Bumping is a deliberate change; verify a clean M29 run on the
+        # new version before merging.
+        uses: ./.github/actions/install-containerlab
 
       - name: Install grpcurl
         run: |
@@ -476,10 +446,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install containerlab
-        run: |
-          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
-            -o /tmp/clab.deb
-          sudo dpkg -i /tmp/clab.deb
+        uses: ./.github/actions/install-containerlab
 
       - name: Install grpcurl + jq
         # jq is required for M30 test 6's strict next_hop assertion
@@ -517,10 +484,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install containerlab
-        run: |
-          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
-            -o /tmp/clab.deb
-          sudo dpkg -i /tmp/clab.deb
+        uses: ./.github/actions/install-containerlab
 
       - name: Install grpcurl + jq
         # jq is required for the strict per-prefix counting + session
@@ -557,10 +521,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install containerlab
-        run: |
-          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
-            -o /tmp/clab.deb
-          sudo dpkg -i /tmp/clab.deb
+        uses: ./.github/actions/install-containerlab
 
       - name: Install grpcurl + jq
         # jq parses NeighborState.localPref + FRR's `show ip bgp` JSON
@@ -597,10 +558,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install containerlab
-        run: |
-          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
-            -o /tmp/clab.deb
-          sudo dpkg -i /tmp/clab.deb
+        uses: ./.github/actions/install-containerlab
 
       - name: Install grpcurl + jq
         # jq parses FRR's `show bgp ipv4 flowspec json` output for
@@ -637,10 +595,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install containerlab
-        run: |
-          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
-            -o /tmp/clab.deb
-          sudo dpkg -i /tmp/clab.deb
+        uses: ./.github/actions/install-containerlab
 
       - name: Install grpcurl + jq
         # jq pretty-prints EVPN diagnostics and parses grpcurl JSON.
@@ -676,10 +631,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install containerlab
-        run: |
-          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
-            -o /tmp/clab.deb
-          sudo dpkg -i /tmp/clab.deb
+        uses: ./.github/actions/install-containerlab
 
       - name: Install grpcurl + jq
         # jq parses `ListReceivedRoutes` JSON for the per-prefix
@@ -717,10 +669,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install containerlab
-        run: |
-          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
-            -o /tmp/clab.deb
-          sudo dpkg -i /tmp/clab.deb
+        uses: ./.github/actions/install-containerlab
 
       - name: Install grpcurl
         run: |
@@ -761,10 +710,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install containerlab
-        run: |
-          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
-            -o /tmp/clab.deb
-          sudo dpkg -i /tmp/clab.deb
+        uses: ./.github/actions/install-containerlab
 
       - name: Install grpcurl
         run: |
