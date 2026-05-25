@@ -152,8 +152,9 @@ for the EVPN gate ladder.
     interop test M51, and strict mode is covered by unit tests. v1 is IPv4 +
     IPv6 **global**, static neighbors only. Deferred: multihop (RFC 5883),
     echo / demand mode, authentication, C-bit / GR-aware nuance, static-route
-    BFD tracking, dynamic-neighbor BFD, hardware / offload, and IPv6 link-local /
-    unnumbered → v1.1.
+    BFD tracking, dynamic-neighbor BFD, hardware / offload, and BFD over
+    IPv6 link-local / unnumbered peers → v1.1 (BGP unnumbered itself shipped —
+    ADR-0069 / M53).
 
 ## Best-Path Selection
 

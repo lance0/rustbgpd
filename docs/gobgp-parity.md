@@ -40,6 +40,7 @@ Last updated: 2026-05-25 (post-v0.28.0 main, including ADR-0067 BFD, ADR-0066/00
 | Confederation (RFC 5065) | Yes | No | |
 | Extended Messages (RFC 8654) | No | Yes | rustbgpd supports it; GoBGP does not |
 | Extended Nexthop (RFC 8950) | Yes | Yes | IPv4 unicast over IPv6 next hop |
+| BGP unnumbered (interface-scoped IPv6 link-local) | No | Yes | rustbgpd peers over IPv6 link-local on an interface-bound neighbor (`address` + `interface`), carries IPv4 unicast via RFC 8950, and installs the Linux FIB next-hop with the egress `dev`; M53 validates against FRR. GoBGP has no interface/unnumbered neighbor model (IP-addressed neighbors only). ADR-0069 |
 | Admin Shutdown Comm (RFC 8203) | Yes | Yes | Reason text in NOTIFICATION |
 
 ## Path Attributes
@@ -218,6 +219,7 @@ Competing head-to-head with GoBGP for all use cases:
 - **ASPA upstream path verification** — RTR v2, best-path step 0.7, export policy matching; GoBGP has no ASPA support
 - **BFD integration (RFC 5880/5881/5882)** — rustbgpd has in-process single-hop async BFD with strict and non-strict RFC 5882 BGP coupling; GoBGP has no BFD integration
 - **Unicast FIB ECMP beyond Add-Path** — rustbgpd installs kernel `RTA_MULTIPATH` routes with `maximum_paths`, per-class eBGP/iBGP caps, `multipath_relax`, and Link Bandwidth weighted multipath
+- **BGP unnumbered / IPv6 link-local fabric peering (ADR-0069)** — interface-bound link-local neighbors carrying IPv4 unicast over RFC 8950 with scoped Linux FIB install (egress `dev`); the standard whitebox / Cumulus data-center fabric model, validated against FRR by M53. GoBGP has no interface/unnumbered neighbor support
 - **Config persistence** — gRPC mutations atomically persisted to TOML; GoBGP doesn't persist runtime changes
 - **Operator packaging** — systemd unit, example configs, operations guide, release checklist, container image CI out of the box
 - **Secure-by-default gRPC** — UDS default listener, optional token auth per listener, read-only/read-write split; GoBGP defaults to open TCP

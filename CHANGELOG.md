@@ -60,8 +60,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `(address, interface)`, and can be addressed through gRPC / `rustbgpctl` as
   `fe80::...%ifname`. Active opens use scoped `SocketAddrV6`; passive accepts
   match the accepted scope id back to the configured interface; IPv6 GTSM uses
-  Hop-Limit / Min-Hop. RFC 8950 route exchange and FIB `dev` propagation remain
-  the next ADR-0069 slices.
+  Hop-Limit / Min-Hop. The same link-local address bound to more than one
+  interface is rejected in this release (on load and SIGHUP) because the RIB
+  still keys peers by bare address; scoped multi-interface peering is deferred.
+  RFC 8950 route exchange and Linux FIB `dev` propagation ship in the companion
+  ADR-0069 entries below.
 - **ADR-0069 RFC 8950 unnumbered route exchange core.** Scoped IPv6 link-local
   peers now fail closed for `ipv4_unicast` unless RFC 8950 Extended Next Hop is
   negotiated: rustbgpd no longer falls back to IPv4 body NLRI on unnumbered
