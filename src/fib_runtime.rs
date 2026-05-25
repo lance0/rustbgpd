@@ -778,12 +778,13 @@ fn emit_fib_event(
     });
 }
 
-/// Current owned-state envelope version. v5 persists the selected best
-/// next-hop's link-local ifindex; v4 persisted per-next-hop link-local output
-/// ifindexes (ADR-0069); v3 persisted per-next-hop multipath `weights`
-/// (ADR-0068); v2 persisted the equal-cost `next_hops` set; v1 persisted a
-/// single `next_hop` scalar. Older files load with no scoped ifindex and all
-/// missing weights defaulting to 1.
+/// Current owned-state envelope version. v4 and v5 landed together in the
+/// ADR-0069 link-local FIB slice — no on-disk v4 shipped on its own — and add
+/// the per-next-hop link-local output ifindexes (positional, conceptually v4)
+/// and the selected best next-hop's link-local ifindex (scalar, v5). v3
+/// persisted per-next-hop multipath `weights` (ADR-0068); v2 persisted the
+/// equal-cost `next_hops` set; v1 persisted a single `next_hop` scalar. Older
+/// files load with no scoped ifindex and all missing weights defaulting to 1.
 const OWNED_STATE_VERSION: u32 = 5;
 /// Oldest owned-state version this build can still load (and upgrade).
 const OWNED_STATE_MIN_VERSION: u32 = 1;
@@ -1634,8 +1635,13 @@ fn build_route_message(
             }
             // Two or more program a kernel RTA_MULTIPATH (ECMP). Each hop carries
             // a gateway and its weight as `rtnh_hops = weight - 1` (ADR-0068);
-            // weight 1 ⇒ `hops = 0`, i.e. ADR-0066's equal-weight shape. The
-            // kernel resolves each output interface from the gateway's route.
+            // weight 1 ⇒ `hops = 0`, i.e. ADR-0066's equal-weight shape. Per hop
+            // the gateway is RTA_GATEWAY for a same-family next-hop, or RTA_VIA
+            // plus `rtnh_ifindex` for a cross-family IPv6 link-local next-hop
+            // (ADR-0069). The two forms may coexist in one multipath set (e.g. an
+            // IPv4 prefix reachable both same-family and over an unnumbered link);
+            // the kernel resolves each output interface from the gateway's own
+            // route (same-family) or from the per-hop ifindex (link-local).
             next_hops => {
                 let hops = next_hops
                     .iter()
@@ -3764,6 +3770,61 @@ mod tests {
         )));
         assert_eq!(hops[1].interface_index, 9);
         assert_eq!(hops[1].hops, 63);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn build_route_message_mixed_family_multipath_emits_per_hop_gateway_and_via() {
+        use netlink_packet_route::route::{RouteAttribute, RouteVia};
+        // An IPv4 prefix reachable both same-family (IPv4-via-IPv4) and over an
+        // unnumbered link (IPv4-via-IPv6-link-local, RFC 8950) lands as one
+        // equal-cost set. The multipath mixes RTA_GATEWAY (same-family) with
+        // RTA_VIA + per-hop ifindex (cross-family); the kernel accepts this.
+        let route = FibRoute {
+            table_name: "edge".to_string(),
+            key: key(v4(24)),
+            target: FibRouteTarget::from_next_hops([
+                FibNextHop::equal(ip("192.0.2.1")),
+                FibNextHop {
+                    addr: ip("fe80::2"),
+                    scope: Some(FibNextHopScope { ifindex: 7 }),
+                    weight: 1,
+                },
+            ]),
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        };
+
+        let msg = build_route_message(&route, RouteMessageGateway::Include).unwrap();
+
+        let hops = msg
+            .attributes
+            .iter()
+            .find_map(|attr| match attr {
+                RouteAttribute::MultiPath(hops) => Some(hops),
+                _ => None,
+            })
+            .expect("expected RTA_MULTIPATH");
+        assert_eq!(hops.len(), 2);
+        // `IpAddr` orders V4 before V6, so the same-family gateway sorts first.
+        assert_eq!(hops[0].interface_index, 0);
+        assert!(
+            hops[0]
+                .attributes
+                .iter()
+                .any(|attr| matches!(attr, RouteAttribute::Gateway(_))),
+            "same-family hop must carry RTA_GATEWAY with no per-hop ifindex"
+        );
+        assert_eq!(hops[1].interface_index, 7);
+        assert!(
+            hops[1].attributes.iter().any(|attr| matches!(
+                attr,
+                RouteAttribute::Via(RouteVia::Inet6(addr))
+                    if *addr == "fe80::2".parse::<Ipv6Addr>().unwrap()
+            )),
+            "cross-family link-local hop must carry RTA_VIA + ifindex"
+        );
     }
 
     #[cfg(target_os = "linux")]
