@@ -204,6 +204,7 @@ impl Config {
         // keyed by bare address; link-local peers are scoped by interface.
         {
             let mut seen = std::collections::HashSet::new();
+            let mut seen_link_local_addrs = std::collections::HashSet::new();
             for neighbor in &self.neighbors {
                 let addr = neighbor.address.parse::<IpAddr>().map_err(|e| {
                     ConfigError::InvalidNeighborAddress {
@@ -249,6 +250,22 @@ impl Config {
                     return Err(ConfigError::InvalidNeighborAddress {
                         value: neighbor.address.clone(),
                         reason: "duplicate neighbor address/interface".to_string(),
+                    });
+                }
+                // v1 limitation: the RIB still keys peers by bare address, so the
+                // same link-local address bound to two interfaces would alias into
+                // one Adj-RIB-In/Out entry (a PeerDown on one would wipe the
+                // other's routes). Require each link-local address to be unique
+                // across neighbors until the RIB carries scoped peer identity.
+                // See ADR-0069 "Deferred".
+                if is_link_local && !seen_link_local_addrs.insert(addr) {
+                    return Err(ConfigError::InvalidNeighborConfig {
+                        address: neighbor.address.clone(),
+                        field: "interface".to_string(),
+                        reason: "the same IPv6 link-local address on multiple \
+                                 interfaces is not supported in this release; use a \
+                                 distinct link-local address per interface"
+                            .to_string(),
                     });
                 }
             }

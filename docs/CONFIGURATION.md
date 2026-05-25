@@ -414,11 +414,13 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `add_path`             | table    | no       | --      | Add-Path (RFC 7911) config table (see below)                         |
 | `log_level`            | string   | no       | --      | Override log level for this peer: `"error"`, `"warn"`, `"info"`, `"debug"`, or `"trace"` |
 
-IPv6 link-local neighbors (`fe80::/10`) must set `interface`, because the same
-address is valid on multiple links. Numbered IPv4 / IPv6 neighbors must not set
-`interface`. Duplicate numbered peers are rejected by address; duplicate
-link-local peers are allowed only when the `(address, interface)` pair is
-unique.
+IPv6 link-local neighbors (`fe80::/10`) must set `interface`, because a
+link-local address is not globally unique (RFC 4007). Numbered IPv4 / IPv6
+neighbors must not set `interface`. Duplicate numbered peers are rejected by
+address. In this release each link-local address must also be unique across
+neighbors: the same link-local address may not be bound to more than one
+interface, because the RIB still keys peers by address. Scoped multi-interface
+link-local peering is deferred (see ADR-0069).
 
 ```toml
 [[neighbors]]
@@ -2032,6 +2034,7 @@ starting:
 | Each `address` in `[[neighbors]]` must be a valid IP address (IPv4 or IPv6) | `invalid neighbor address` |
 | IPv6 link-local `[[neighbors]]` must set `interface`; numbered neighbors must not | `invalid neighbor config` |
 | `[[neighbors]]` identity must be unique by address for numbered peers and by `(address, interface)` for IPv6 link-local peers | `duplicate neighbor address/interface` |
+| An IPv6 link-local address may not be bound to more than one interface in this release (the RIB keys peers by address; deferred per ADR-0069) | `not supported in this release` |
 | `prometheus_addr` must be a valid `ip:port` | `invalid prometheus_addr` |
 | `grpc_tcp.address` must be a valid `ip:port` when `grpc_tcp` is enabled | `invalid gRPC config` |
 | `grpc_uds.path` must be absolute when configured | `invalid gRPC config` |

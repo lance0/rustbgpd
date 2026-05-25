@@ -1416,7 +1416,7 @@ async fn policy_events_publish_successful_policy_mutations() {
 }
 
 #[tokio::test]
-async fn apply_policy_change_fans_out_to_scoped_peers_with_same_address() {
+async fn apply_policy_change_fans_out_to_scoped_peers() {
     use rustbgpd_api::peer_types::NeighborSetDefinition;
 
     let (_tx, rx) = mpsc::channel(16);
@@ -1438,30 +1438,35 @@ async fn apply_policy_change_fans_out_to_scoped_peers_with_same_address() {
         rib_tx,
         None,
     );
-    let peer = IpAddr::V6("fe80::2".parse().unwrap());
+    // Distinct link-local addresses per interface: v1 config requires link-local
+    // addresses to be unique across neighbors (ADR-0069), but the scoped PeerKey
+    // still keys each peer by (address, interface), so this exercises policy
+    // fan-out across two separately-keyed scoped peers.
+    let peer0 = IpAddr::V6("fe80::2".parse().unwrap());
+    let peer1 = IpAddr::V6("fe80::3".parse().unwrap());
     let eth0 = Arc::new(FakePeerCounters::default());
     let eth1 = Arc::new(FakePeerCounters::default());
 
     insert_test_scoped_managed_peer(
         &mut mgr,
-        peer,
+        peer0,
         "eth0",
         10,
         1,
-        fake_peer_handle(peer, SessionState::Established, None, eth0.clone()),
+        fake_peer_handle(peer0, SessionState::Established, None, eth0.clone()),
     );
     insert_test_scoped_managed_peer(
         &mut mgr,
-        peer,
+        peer1,
         "eth1",
         11,
         2,
-        fake_peer_handle(peer, SessionState::Established, None, eth1.clone()),
+        fake_peer_handle(peer1, SessionState::Established, None, eth1.clone()),
     );
 
-    let mut n0 = config_neighbor(peer, 65002);
+    let mut n0 = config_neighbor(peer0, 65002);
     n0.interface = Some("eth0".to_string());
-    let mut n1 = config_neighbor(peer, 65002);
+    let mut n1 = config_neighbor(peer1, 65002);
     n1.interface = Some("eth1".to_string());
     mgr.current_config.neighbors = vec![n0, n1];
 
@@ -3821,6 +3826,60 @@ async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
         "dynamic peer should be removed when it goes idle"
     );
     assert!(mgr.peers.is_empty(), "dynamic peer table should be empty");
+
+    drop(client_stream);
+}
+
+#[tokio::test]
+async fn inbound_link_local_is_not_accepted_as_dynamic_peer() {
+    // ADR-0069: a link-local inbound that matches no configured scoped peer must
+    // be dropped, not promoted to a dynamic peer. Dynamic peers are keyed by
+    // bare address (`PeerKey::new(ip, None)`), so accepting a `fe80::` source
+    // would create an unscoped link-local peer and re-introduce the RFC 4007
+    // scope ambiguity that scoped static peers exist to remove. The dynamic
+    // range below covers `fe80::/10`, so without the guard this inbound would
+    // succeed — the guard must reject it first.
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut config = make_dynamic_manager_config();
+    config.dynamic_neighbors = vec![crate::config::DynamicNeighborConfig {
+        prefix: "fe80::/10".to_string(),
+        peer_group: "ix-members".to_string(),
+        remote_asn: 0,
+        description: Some("ll-auto".to_string()),
+    }];
+    let mut mgr = PeerManager::new_with_config(
+        rx,
+        mpsc::unbounded_channel().1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, _remote_addr) = listener.accept().await.unwrap();
+    let client_stream = client.await.unwrap();
+
+    let link_local: IpAddr = "fe80::1".parse().unwrap();
+    mgr.handle_inbound(server_stream, sock(link_local)).await;
+
+    assert_eq!(
+        mgr.dynamic_peer_count, 0,
+        "link-local inbound must not create a dynamic peer"
+    );
+    assert!(
+        mgr.peers.is_empty(),
+        "link-local inbound must not be added to the peer table"
+    );
 
     drop(client_stream);
 }

@@ -206,7 +206,10 @@ fn link_local_neighbor_requires_interface() {
 }
 
 #[test]
-fn link_local_neighbor_allows_same_address_on_different_interfaces() {
+fn link_local_neighbor_rejects_same_address_on_different_interfaces() {
+    // v1 limitation (ADR-0069 Deferred): the RIB keys peers by bare address, so
+    // the same link-local address on two interfaces would alias in the RIB.
+    // Validation rejects it until the RIB carries scoped peer identity.
     let base = valid_toml().replace(
         r#"address = "10.0.0.2""#,
         r#"address = "fe80::1"
@@ -222,8 +225,14 @@ interface = "eth0"
 remote_asn = 65099
 "#
     );
-    let config = parse(&toml_str).unwrap();
-    assert_eq!(config.neighbors.len(), 2);
+    let err = parse(&toml_str).unwrap_err();
+    match err {
+        ConfigError::InvalidNeighborConfig { field, reason, .. } => {
+            assert_eq!(field, "interface");
+            assert!(reason.contains("multiple"), "unexpected reason: {reason}");
+        }
+        other => panic!("expected InvalidNeighborConfig, got {other}"),
+    }
 }
 
 #[test]

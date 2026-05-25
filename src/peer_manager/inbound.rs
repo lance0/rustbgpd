@@ -100,6 +100,22 @@ impl PeerManager {
         let peer_key = self.inbound_peer_key(peer_addr);
         // If peer is not statically configured, try dynamic range matching.
         if peer_key.is_none() {
+            // A link-local inbound that did not match a configured scoped peer
+            // must not fall through to dynamic acceptance: dynamic peers are
+            // keyed by bare address (`PeerKey::new(ip, None)`), so accepting a
+            // `fe80::` source here would create an unscoped link-local peer and
+            // re-introduce the RFC 4007 ambiguity that scoped static peers exist
+            // to remove. v1 requires link-local peers to be statically
+            // configured with an interface (ADR-0069).
+            if let SocketAddr::V6(v6) = peer_addr
+                && v6.ip().segments()[0] & 0xffc0 == 0xfe80
+            {
+                warn!(
+                    %peer_addr,
+                    "inbound IPv6 link-local connection did not match a configured scoped neighbor; dynamic acceptance of link-local peers is not supported, dropping"
+                );
+                return;
+            }
             if let Some(range) = self.match_dynamic_range(peer_ip) {
                 // Check dynamic peer limit
                 if self.dynamic_peer_count >= self.dynamic_neighbor_limit as usize {
