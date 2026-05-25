@@ -196,10 +196,18 @@ fn peer_key(address: &str, interface: &str) -> Result<PeerKey, Status> {
         .parse()
         .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
     let interface = (!interface.trim().is_empty()).then(|| interface.to_string());
-    if is_ipv6_link_local(address) && interface.is_none() {
-        return Err(Status::invalid_argument(
-            "interface is required for IPv6 link-local neighbors",
-        ));
+    match (is_ipv6_link_local(address), interface.as_ref()) {
+        (true, None) => {
+            return Err(Status::invalid_argument(
+                "interface is required for IPv6 link-local neighbors",
+            ));
+        }
+        (false, Some(_)) => {
+            return Err(Status::invalid_argument(
+                "interface is only valid for IPv6 link-local neighbors",
+            ));
+        }
+        _ => {}
     }
     Ok(PeerKey::new(address, interface))
 }
@@ -615,8 +623,8 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
                 // PeerNotFound is the operator-typo case — distinguish
                 // from session/RIB dispatch failures so clients can
                 // react appropriately.
-                crate::peer_types::SetGshutError::PeerNotFound(addr) => {
-                    Status::not_found(format!("peer {addr} not found"))
+                crate::peer_types::SetGshutError::PeerNotFound(peer) => {
+                    Status::not_found(format!("peer {peer} not found"))
                 }
                 crate::peer_types::SetGshutError::Internal(msg) => Status::internal(msg),
             })?;
@@ -649,6 +657,13 @@ mod tests {
         let key = peer_key("fe80::1", "eth0").unwrap();
         assert_eq!(key.address, "fe80::1".parse::<IpAddr>().unwrap());
         assert_eq!(key.interface.as_deref(), Some("eth0"));
+    }
+
+    #[test]
+    fn peer_key_rejects_numbered_with_interface() {
+        let err = peer_key("192.0.2.1", "eth0").unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("only valid"));
     }
 
     #[tokio::test]

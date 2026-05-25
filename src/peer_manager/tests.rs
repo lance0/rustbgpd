@@ -334,8 +334,9 @@ fn insert_test_managed_peer_with_asn(
     let peer_config = make_config(addr, remote_asn);
     let transport = mgr.build_transport_config(&peer_config);
     let hold = transport.peer.hold_time;
+    let peer_key = key(addr);
     mgr.peers.insert(
-        key(addr),
+        peer_key.clone(),
         ManagedPeer {
             handle,
             session_id: 1,
@@ -355,6 +356,7 @@ fn insert_test_managed_peer_with_asn(
             advertise_graceful_shutdown: false,
         },
     );
+    mgr.register_session(1, &peer_key);
 }
 
 fn insert_test_scoped_managed_peer(
@@ -370,8 +372,9 @@ fn insert_test_scoped_managed_peer(
     peer_config.scope_id = Some(scope_id);
     let transport = mgr.build_transport_config(&peer_config);
     let hold = transport.peer.hold_time;
+    let peer_key = scoped_key(addr, interface);
     mgr.peers.insert(
-        scoped_key(addr, interface),
+        peer_key.clone(),
         ManagedPeer {
             handle,
             session_id,
@@ -391,6 +394,7 @@ fn insert_test_scoped_managed_peer(
             advertise_graceful_shutdown: false,
         },
     );
+    mgr.register_session(session_id, &peer_key);
 }
 
 #[derive(Default)]
@@ -461,6 +465,7 @@ fn attach_test_pending_inbound(
         .get_mut(&key(peer_addr))
         .expect("managed peer")
         .pending_inbound = Some(PendingInbound { handle, session_id });
+    mgr.register_session(session_id, &key(peer_addr));
 }
 
 async fn wait_counter(counter: &AtomicU32, expected: u32) {
@@ -708,6 +713,7 @@ async fn lifecycle_notification_matches_scoped_static_peer_by_session_id() {
         panic!("expected lifecycle event");
     };
     assert_eq!(event.peer, peer);
+    assert_eq!(event.peer_label.as_deref(), Some("fe80::2%eth1"));
     assert_eq!(event.session_role.as_deref(), Some("primary"));
 }
 
@@ -773,7 +779,7 @@ async fn session_event_history_records_events_without_subscriber() {
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
 
     mgr.publish_peer_lifecycle_event(
-        addr,
+        &key(addr),
         SessionLifecycleEventType::PeerEnabled,
         "peer enabled".to_string(),
     );
@@ -791,27 +797,27 @@ async fn session_event_history_filters_peer_type_and_limit_in_order() {
     let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
 
     mgr.publish_peer_lifecycle_event(
-        peer1,
+        &key(peer1),
         SessionLifecycleEventType::PeerEnabled,
         "old match".to_string(),
     );
     mgr.publish_peer_lifecycle_event(
-        peer2,
+        &key(peer2),
         SessionLifecycleEventType::PeerEnabled,
         "wrong peer".to_string(),
     );
     mgr.publish_peer_lifecycle_event(
-        peer1,
+        &key(peer1),
         SessionLifecycleEventType::PeerDisabled,
         "wrong type".to_string(),
     );
     mgr.publish_peer_lifecycle_event(
-        peer1,
+        &key(peer1),
         SessionLifecycleEventType::PeerEnabled,
         "middle match".to_string(),
     );
     mgr.publish_peer_lifecycle_event(
-        peer1,
+        &key(peer1),
         SessionLifecycleEventType::PeerEnabled,
         "newest match".to_string(),
     );
@@ -836,7 +842,7 @@ async fn session_event_history_capacity_evicts_oldest() {
 
     for idx in 0..=SESSION_EVENT_HISTORY_CAPACITY {
         mgr.publish_peer_lifecycle_event(
-            addr,
+            &key(addr),
             SessionLifecycleEventType::StateChanged,
             format!("event-{idx}"),
         );
@@ -990,6 +996,57 @@ async fn delete_peer_removes() {
 
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn delete_peer_drains_pending_inbound_candidate() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let primary = Arc::new(FakePeerCounters::default());
+    let pending = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::OpenConfirm,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            primary.clone(),
+        ),
+        false,
+    );
+    attach_test_pending_inbound(
+        &mut mgr,
+        peer_addr,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::OpenConfirm,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            pending.clone(),
+        ),
+        2,
+    );
+
+    mgr.delete_peer(key(peer_addr), false).await.unwrap();
+
+    wait_counter(&primary.shutdown, 1).await;
+    wait_counter(&pending.shutdown, 1).await;
+    assert!(mgr.peers.is_empty());
+    assert!(mgr.peer_key_for_session(1).is_none());
+    assert!(mgr.peer_key_for_session(2).is_none());
 }
 
 #[tokio::test]
@@ -1883,6 +1940,31 @@ async fn peer_deletion_after_failed_update_drops_pending_retry_cleanly() {
         "a queued or follow-up policy update for a peer deleted during the failure window \
          must no-op cleanly, not resurrect stale pending state: {retry_after_delete:?}"
     );
+}
+
+#[tokio::test]
+async fn gshut_not_found_preserves_scoped_peer_label() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let peer = scoped_key(IpAddr::V6("fe80::2".parse().unwrap()), "eth1");
+
+    let err = mgr
+        .set_graceful_shutdown(Some(peer), true)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.to_string(), "peer fe80::2%eth1 not found");
 }
 
 #[allow(clippy::too_many_lines)]
@@ -3741,6 +3823,64 @@ async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
     assert!(mgr.peers.is_empty(), "dynamic peer table should be empty");
 
     drop(client_stream);
+}
+
+#[tokio::test]
+async fn dynamic_peer_auto_removal_drains_pending_inbound_candidate() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let primary = Arc::new(FakePeerCounters::default());
+    let pending = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::Established,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            primary,
+        ),
+        false,
+    );
+    mgr.peers.get_mut(&key(peer_addr)).unwrap().is_dynamic = true;
+    mgr.dynamic_peer_count = 1;
+    attach_test_pending_inbound(
+        &mut mgr,
+        peer_addr,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::OpenConfirm,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            pending.clone(),
+        ),
+        2,
+    );
+
+    mgr.handle_session_notification(SessionNotification::BackToIdle {
+        session_id: 1,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr,
+    })
+    .await;
+
+    wait_counter(&pending.shutdown, 1).await;
+    assert!(mgr.peers.is_empty());
+    assert_eq!(mgr.dynamic_peer_count, 0);
+    assert!(mgr.peer_key_for_session(1).is_none());
+    assert!(mgr.peer_key_for_session(2).is_none());
 }
 
 #[tokio::test]

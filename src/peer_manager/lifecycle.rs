@@ -145,6 +145,7 @@ impl PeerManager {
                 advertise_graceful_shutdown: false,
             },
         );
+        self.register_session(session_id, &peer_key);
 
         if let Some(next_config) = next_config {
             self.current_config = next_config;
@@ -202,10 +203,15 @@ impl PeerManager {
             ));
         }
 
-        let managed = self
+        let mut managed = self
             .peers
             .remove(&peer)
             .ok_or_else(|| format!("peer {peer} not found"))?;
+        self.unregister_session(managed.session_id);
+        if let Some(pending) = managed.pending_inbound.take() {
+            self.unregister_session(pending.session_id);
+            let _ = pending.handle.shutdown().await;
+        }
 
         match managed.handle.shutdown().await {
             Ok(Ok(())) => info!(%address, "peer deleted"),
@@ -247,7 +253,7 @@ impl PeerManager {
                 .map_err(|e| format!("failed to start peer: {e}"))?;
         }
         self.publish_peer_lifecycle_event(
-            address,
+            &peer,
             SessionLifecycleEventType::PeerEnabled,
             format!("peer {address} enabled"),
         );
@@ -276,6 +282,7 @@ impl PeerManager {
             managed.pending_inbound.take()
         };
         if let Some(pending) = pending {
+            self.unregister_session(pending.session_id);
             let _ = pending.handle.shutdown().await;
         }
         let managed = self
@@ -288,7 +295,7 @@ impl PeerManager {
             .await
             .map_err(|e| format!("failed to stop peer: {e}"))?;
         self.publish_peer_lifecycle_event(
-            address,
+            &peer,
             SessionLifecycleEventType::PeerDisabled,
             format!("peer {address} disabled"),
         );
@@ -318,7 +325,7 @@ impl PeerManager {
     ///    routes would see no change until something else triggered a
     ///    re-advertise.
     ///
-    /// `Some(addr)` for a missing peer surfaces as `SetGshutError::PeerNotFound`
+    /// `Some(peer)` for a missing peer surfaces as `SetGshutError::PeerNotFound`
     /// so callers can distinguish that from a session/RIB failure.
     /// Per-peer dispatch failures aggregate into `Internal`. The
     /// authoritative state is updated even when the live-session
@@ -332,7 +339,7 @@ impl PeerManager {
         let targets: Vec<PeerKey> = match peer {
             Some(peer) => {
                 if !self.peers.contains_key(&peer) {
-                    return Err(SetGshutError::PeerNotFound(peer.address));
+                    return Err(SetGshutError::PeerNotFound(peer));
                 }
                 vec![peer]
             }

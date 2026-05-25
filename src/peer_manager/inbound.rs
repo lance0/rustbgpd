@@ -68,6 +68,7 @@ impl PeerManager {
             return false;
         }
         managed.pending_inbound = Some(PendingInbound { handle, session_id });
+        self.register_session(session_id, &peer_key);
         true
     }
 
@@ -195,7 +196,9 @@ impl PeerManager {
                     pending_export_apply: false,
                     advertise_graceful_shutdown,
                 };
-                self.peers.insert(PeerKey::new(peer_ip, None), managed);
+                let peer_key = PeerKey::new(peer_ip, None);
+                self.peers.insert(peer_key.clone(), managed);
+                self.register_session(session_id, &peer_key);
                 self.dynamic_peer_count += 1;
 
                 // Restore any dead-lettered hot-apply / Route Refresh
@@ -320,6 +323,7 @@ impl PeerManager {
                     .get_mut(&peer_key)
                     .and_then(|m| m.pending_inbound.take())
                 {
+                    self.unregister_session(pending.session_id);
                     let _ = pending.handle.collision_dump().await;
                 }
             }
@@ -347,6 +351,7 @@ impl PeerManager {
                     .get_mut(&peer_key)
                     .and_then(|m| m.pending_inbound.take())
                 {
+                    self.unregister_session(pending.session_id);
                     let _ = pending.handle.collision_dump().await;
                 }
             }
@@ -357,10 +362,16 @@ impl PeerManager {
         &mut self,
         peer_key: &PeerKey,
     ) -> Option<PeerHandle> {
-        let managed = self.peers.get_mut(peer_key)?;
-        let pending = managed.pending_inbound.take()?;
-        let old_handle = std::mem::replace(&mut managed.handle, pending.handle);
-        managed.session_id = pending.session_id;
+        let (old_handle, old_session_id, new_session_id) = {
+            let managed = self.peers.get_mut(peer_key)?;
+            let pending = managed.pending_inbound.take()?;
+            let old_handle = std::mem::replace(&mut managed.handle, pending.handle);
+            let old_session_id = managed.session_id;
+            managed.session_id = pending.session_id;
+            (old_handle, old_session_id, pending.session_id)
+        };
+        self.unregister_session(old_session_id);
+        self.register_session(new_session_id, peer_key);
         Some(old_handle)
     }
 
@@ -375,38 +386,49 @@ impl PeerManager {
     pub(super) async fn replace_with_inbound(&mut self, peer_key: PeerKey, stream: TcpStream) {
         let peer_addr = peer_key.address;
         let session_id = self.allocate_session_id();
-        let Some(managed) = self.peers.get_mut(&peer_key) else {
+        let Some((old_handle, old_session_id)) = ({
+            let Some(managed) = self.peers.get_mut(&peer_key) else {
+                return;
+            };
+
+            // Replay the operator-driven RFC 8326 toggle on the new
+            // session so a flap or collision-replace doesn't silently
+            // drop the GShut state mid-maintenance.
+            let advertise_graceful_shutdown = managed.advertise_graceful_shutdown;
+            let old_session_id = managed.session_id;
+            let old_handle = std::mem::replace(
+                &mut managed.handle,
+                PeerHandle::spawn_inbound_with_identity_and_lifecycle(
+                    managed.transport_config.clone(),
+                    self.metrics.clone(),
+                    self.rib_tx.clone(),
+                    managed.import_policy.clone(),
+                    managed.export_policy.clone(),
+                    stream,
+                    Some(self.session_notify_tx.clone()),
+                    Some(self.session_notification_event_tx.clone()),
+                    Some(self.session_lifecycle_tx.clone()),
+                    self.bmp_tx.clone(),
+                    self.validation_rx.clone(),
+                    advertise_graceful_shutdown,
+                    SessionIdentity::primary(session_id),
+                ),
+            );
+            managed.session_id = session_id;
+            Some((old_handle, old_session_id))
+        }) else {
             return;
         };
-
-        // Replay the operator-driven RFC 8326 toggle on the new
-        // session so a flap or collision-replace doesn't silently
-        // drop the GShut state mid-maintenance.
-        let advertise_graceful_shutdown = managed.advertise_graceful_shutdown;
-        let old_handle = std::mem::replace(
-            &mut managed.handle,
-            PeerHandle::spawn_inbound_with_identity_and_lifecycle(
-                managed.transport_config.clone(),
-                self.metrics.clone(),
-                self.rib_tx.clone(),
-                managed.import_policy.clone(),
-                managed.export_policy.clone(),
-                stream,
-                Some(self.session_notify_tx.clone()),
-                Some(self.session_notification_event_tx.clone()),
-                Some(self.session_lifecycle_tx.clone()),
-                self.bmp_tx.clone(),
-                self.validation_rx.clone(),
-                advertise_graceful_shutdown,
-                SessionIdentity::primary(session_id),
-            ),
-        );
-        managed.session_id = session_id;
+        self.unregister_session(old_session_id);
+        self.register_session(session_id, &peer_key);
 
         // Shut down the old session
         let _ = old_handle.shutdown().await;
 
         // Start the new inbound session — trigger TcpConnectionConfirmed
+        let Some(managed) = self.peers.get(&peer_key) else {
+            return;
+        };
         if let Err(e) = managed.handle.start().await {
             warn!(%peer_addr, error = %e, "failed to start inbound session");
         } else {

@@ -165,7 +165,10 @@ pub(super) fn session_event_to_bgp_event(event: SessionEvent) -> proto::BgpEvent
 
 fn session_lifecycle_event_to_bgp_event(event: SessionLifecycleEvent) -> proto::BgpEvent {
     let event_type = session_lifecycle_event_type_to_bgp_event_type(event.event_type);
-    let peer_address = event.peer.to_string();
+    let peer_address = event
+        .peer_label
+        .clone()
+        .unwrap_or_else(|| event.peer.to_string());
     let old_state = event
         .old_state
         .map_or_else(String::new, |state| state.as_str().to_string());

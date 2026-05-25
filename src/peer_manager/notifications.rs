@@ -7,6 +7,10 @@ use tracing::{debug, info};
 use super::PeerManager;
 
 impl PeerManager {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "notification handling keeps collision, dynamic-peer removal, and lifecycle ordering together"
+    )]
     pub(super) async fn handle_session_notification(&mut self, notification: SessionNotification) {
         match notification {
             SessionNotification::StateChanged {
@@ -67,6 +71,7 @@ impl PeerManager {
                 });
                 if let Some(pending) = pending {
                     debug!(%peer_addr, session_id, ?role, "inbound collision candidate went idle, dropping");
+                    self.unregister_session(pending.session_id);
                     let _ = pending.handle.shutdown().await;
                     return;
                 }
@@ -95,7 +100,13 @@ impl PeerManager {
                     // when handle_inbound recreates the ManagedPeer.
                     self.dead_letter_pending_for(peer_addr);
                     info!(%peer_addr, "dynamic peer session went idle, removing");
-                    self.peers.remove(&peer_key);
+                    if let Some(mut managed) = self.peers.remove(&peer_key) {
+                        self.unregister_session(managed.session_id);
+                        if let Some(pending) = managed.pending_inbound.take() {
+                            self.unregister_session(pending.session_id);
+                            let _ = pending.handle.shutdown().await;
+                        }
+                    }
                     self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
                     // Skip pending inbound logic for removed dynamic peers
                 } else {
@@ -111,6 +122,7 @@ impl PeerManager {
                         .get_mut(&peer_key)
                         .and_then(|m| m.pending_inbound.take())
                     {
+                        self.unregister_session(pending.session_id);
                         let _ = pending.handle.shutdown().await;
                     }
                 }
@@ -161,6 +173,6 @@ impl PeerManager {
             debug!(%peer_addr, session_id, ?role, "ignoring stale StateChanged lifecycle notification");
             return;
         }
-        self.publish_state_lifecycle_event(peer_addr, role, old, new);
+        self.publish_state_lifecycle_event(&peer_key, role, old, new);
     }
 }

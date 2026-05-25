@@ -117,6 +117,9 @@ pub struct SessionLifecycleEvent {
     pub event_type: SessionLifecycleEventType,
     /// Peer address associated with the event.
     pub peer: IpAddr,
+    /// Operator-facing peer label. Scoped IPv6 link-local peers render as
+    /// `address%interface`; numbered peers may leave this absent.
+    pub peer_label: Option<String>,
     /// Unix epoch seconds, string-shaped to match `RouteEvent`.
     pub timestamp: String,
     /// Previous BGP FSM state, when this is a session transition.
@@ -199,7 +202,7 @@ pub enum SessionEvent {
 pub enum SetGshutError {
     /// Operator addressed a specific peer that isn't currently managed.
     /// Maps to gRPC `NOT_FOUND`.
-    PeerNotFound(IpAddr),
+    PeerNotFound(PeerKey),
     /// Live-session command, RIB refresh, or aggregated per-peer
     /// failure during a broadcast. Maps to gRPC `INTERNAL`.
     /// Authoritative state on `ManagedPeer` has been updated regardless
@@ -211,7 +214,7 @@ pub enum SetGshutError {
 impl std::fmt::Display for SetGshutError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::PeerNotFound(addr) => write!(f, "peer {addr} not found"),
+            Self::PeerNotFound(peer) => write!(f, "peer {peer} not found"),
             Self::Internal(msg) => f.write_str(msg),
         }
     }

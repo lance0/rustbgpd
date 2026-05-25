@@ -872,6 +872,7 @@ mod tests {
         SessionLifecycleEvent {
             event_type,
             peer,
+            peer_label: None,
             timestamp: "456".to_string(),
             old_state: Some(SessionState::OpenConfirm),
             new_state: Some(SessionState::Established),

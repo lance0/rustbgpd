@@ -140,6 +140,10 @@ struct PendingInbound {
 /// Same single-task ownership pattern as `RibManager`.
 pub struct PeerManager {
     peers: HashMap<PeerKey, ManagedPeer>,
+    /// Reverse lookup from transport session id to configured peer identity.
+    /// Session lifecycle notifications are keyed by session id, and scoped
+    /// link-local peers can share the same address on different interfaces.
+    session_index: HashMap<u64, PeerKey>,
     rx: mpsc::Receiver<PeerManagerCommand>,
     internal_rx: mpsc::UnboundedReceiver<InternalCommand>,
     local_asn: u32,
@@ -287,6 +291,7 @@ impl PeerManager {
         let (policy_events_tx, _) = broadcast::channel(4096);
         Self {
             peers: HashMap::new(),
+            session_index: HashMap::new(),
             rx,
             internal_rx,
             local_asn,
@@ -325,6 +330,14 @@ impl PeerManager {
         // remains visibly outside the peer-manager allocated range.
         self.next_session_id = self.next_session_id.wrapping_add(1).max(1);
         id
+    }
+
+    pub(super) fn register_session(&mut self, session_id: u64, peer: &PeerKey) {
+        self.session_index.insert(session_id, peer.clone());
+    }
+
+    pub(super) fn unregister_session(&mut self, session_id: u64) {
+        self.session_index.remove(&session_id);
     }
 
     fn build_transport_config(&self, config: &PeerManagerNeighborConfig) -> TransportConfig {
@@ -398,16 +411,7 @@ impl PeerManager {
     }
 
     pub(super) fn peer_key_for_session(&self, session_id: u64) -> Option<PeerKey> {
-        self.peers
-            .iter()
-            .find(|(_, managed)| {
-                managed.session_id == session_id
-                    || managed
-                        .pending_inbound
-                        .as_ref()
-                        .is_some_and(|pending| pending.session_id == session_id)
-            })
-            .map(|(key, _)| key.clone())
+        self.session_index.get(&session_id).cloned()
     }
 
     /// Run the `PeerManager` event loop until shutdown or channel close.
