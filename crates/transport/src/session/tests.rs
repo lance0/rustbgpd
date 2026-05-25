@@ -150,6 +150,8 @@ fn configure_scoped_link_local_peer(session: &mut PeerSession) {
     session.peer_ip = IpAddr::V6("fe80::2".parse().unwrap());
     session.config.peer_interface = Some("eth1".to_string());
     session.config.peer_scope_id = Some(7);
+    session.link_local_next_hop_scope =
+        PeerSession::link_local_next_hop_scope_from_config(&session.config);
 }
 
 fn make_route(local_pref: u32) -> Route {
@@ -702,7 +704,7 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
     session.test_install_stream(client);
     session.config.route_server_client = true;
 
-    let mut negotiated = negotiated_session(65001, false);
+    let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
     session
         .negotiated_families
@@ -1144,6 +1146,79 @@ async fn process_update_accepts_ipv4_mp_link_local_for_scoped_unnumbered_peer() 
         .expect("link-local next-hop must carry scope toward FIB");
     assert_eq!(scope.interface.as_ref(), "eth1");
     assert_eq!(scope.ifindex, 7);
+}
+
+#[tokio::test]
+async fn import_policy_next_hop_rewrite_clears_ipv4_mp_link_local_companion() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    configure_scoped_link_local_peer(&mut session);
+    let negotiated = negotiated_session(65002, true);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let replacement_next_hop: IpAddr = "2001:db8::99".parse().unwrap();
+    session.import_policy = Some(PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: PolicyAction::Permit,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: RouteModifications {
+                set_next_hop: Some(rustbgpd_policy::NextHopAction::Specific(
+                    replacement_next_hop,
+                )),
+                ..Default::default()
+            },
+        }],
+        default_action: PolicyAction::Deny,
+    }]));
+
+    let received_next_hop: Ipv6Addr = "fe80::1".parse().unwrap();
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            next_hop: IpAddr::V6(received_next_hop),
+            link_local_next_hop: Some(received_next_hop),
+            announced: vec![NlriEntry {
+                path_id: 0,
+                prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            }],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+        }),
+    ];
+    let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
+
+    session.process_update(update).await;
+
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].next_hop, replacement_next_hop);
+    assert_eq!(announced[0].link_local_next_hop, None);
+    assert_eq!(announced[0].next_hop_scope, None);
 }
 
 #[tokio::test]

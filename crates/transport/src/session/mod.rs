@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::ops::ControlFlow;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
@@ -101,6 +102,9 @@ pub(crate) struct PeerSession {
     rib_tx: mpsc::Sender<RibUpdate>,
     peer_label: String,
     peer_ip: IpAddr,
+    /// Cached scope for IPv6 link-local next-hop recursion on static
+    /// interface-bound peers. Built once from immutable transport config.
+    link_local_next_hop_scope: Option<NextHopScope>,
     /// Negotiated session parameters (set when `SessionEstablished`).
     negotiated: Option<NegotiatedSession>,
     /// Address families negotiated via MP-BGP capabilities. Used to filter
@@ -254,6 +258,13 @@ impl PeerSession {
         unicast.len() + self.known_flowspec.len() + self.known_evpn.len()
     }
 
+    fn link_local_next_hop_scope_from_config(config: &TransportConfig) -> Option<NextHopScope> {
+        Some(NextHopScope {
+            interface: Arc::from(config.peer_interface.as_deref()?),
+            ifindex: config.peer_scope_id?,
+        })
+    }
+
     #[cfg(test)]
     #[expect(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -303,6 +314,7 @@ impl PeerSession {
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
+        let link_local_next_hop_scope = Self::link_local_next_hop_scope_from_config(&config);
         let fsm = Session::new(config.peer.clone());
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
         Self {
@@ -319,6 +331,7 @@ impl PeerSession {
             rib_tx,
             peer_label,
             peer_ip,
+            link_local_next_hop_scope,
             negotiated: None,
             negotiated_families: Vec::new(),
             stop_requested: false,
@@ -373,6 +386,7 @@ impl PeerSession {
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
+        let link_local_next_hop_scope = Self::link_local_next_hop_scope_from_config(&config);
         let fsm = Session::new(config.peer.clone());
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
         // Split the inbound stream and spawn the writer immediately —
@@ -395,6 +409,7 @@ impl PeerSession {
             rib_tx,
             peer_label,
             peer_ip,
+            link_local_next_hop_scope,
             negotiated: None,
             negotiated_families: Vec::new(),
             stop_requested: false,

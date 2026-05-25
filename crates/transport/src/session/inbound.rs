@@ -62,10 +62,7 @@ impl PeerSession {
 
     fn link_local_next_hop_scope(&self, next_hop: IpAddr) -> Option<NextHopScope> {
         match next_hop {
-            IpAddr::V6(v6) if is_ipv6_link_local(&v6) => Some(NextHopScope {
-                interface: Arc::from(self.config.peer_interface.as_deref()?),
-                ifindex: self.config.peer_scope_id?,
-            }),
+            IpAddr::V6(v6) if is_ipv6_link_local(&v6) => self.link_local_next_hop_scope.clone(),
             _ => None,
         }
     }
@@ -723,10 +720,15 @@ impl PeerSession {
                                 self.read_half.as_ref(),
                                 &self.config,
                             );
+                            let link_local_next_hop = if next_hop == mp.next_hop {
+                                mp.link_local_next_hop
+                            } else {
+                                None
+                            };
                             announced.push(Route {
                                 prefix: entry.prefix,
                                 next_hop,
-                                link_local_next_hop: mp.link_local_next_hop,
+                                link_local_next_hop,
                                 next_hop_scope: self.link_local_next_hop_scope(next_hop),
                                 peer: self.peer_ip,
                                 attributes: Arc::new(attrs),
