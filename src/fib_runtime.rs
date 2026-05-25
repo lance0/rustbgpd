@@ -23,8 +23,8 @@ use tracing::{debug, info, warn};
 
 use crate::config::FibTableConfig;
 use crate::fib::{
-    FibDrop, FibIntent, FibKernelProtocol, FibKernelRoute, FibKernelSnapshot, FibOp, FibOwnedState,
-    FibPlan, FibRoute, FibRouteKey, FibRouteTarget, FibTableKey, compute_fib_diff,
+    FibDrop, FibIntent, FibKernelProtocol, FibKernelRoute, FibKernelSnapshot, FibNextHop, FibOp,
+    FibOwnedState, FibPlan, FibRoute, FibRouteKey, FibRouteTarget, FibTableKey, compute_fib_diff,
     project_fib_intent_with_peer_groups, record_fib_success,
 };
 use crate::fib_common::{prefix_and_nexthop_same_family, table_allows_prefix};
@@ -45,6 +45,10 @@ pub struct FibRuntimeConfig {
     /// ADR-0066 multipath-relax (global `[global].multipath_relax`): group
     /// equal-cost ECMP candidates by `AS_PATH` length rather than exact match.
     pub multipath_relax: bool,
+    /// ADR-0068 weighted multipath (global `[global].link_bandwidth_weighted`):
+    /// weight ECMP next-hops by their Link Bandwidth Extended Community when the
+    /// whole group carries one; otherwise equal-cost.
+    pub link_bandwidth_weighted: bool,
 }
 
 impl FibRuntimeConfig {
@@ -357,12 +361,14 @@ async fn query_fib_install_candidates(
     rib_tx: &mpsc::Sender<RibUpdate>,
     max_paths: u32,
     relax: bool,
+    weighted: bool,
 ) -> Result<Vec<FibInstallCandidate>, &'static str> {
     let (reply, rx) = oneshot::channel();
     if rib_tx
         .send(RibUpdate::QueryFibInstallCandidates {
             max_paths,
             relax,
+            weighted,
             reply,
         })
         .await
@@ -453,7 +459,7 @@ async fn reconcile_once_with_events<F>(
     let candidates = tokio::select! {
         biased;
         () = shutdown.cancelled() => return,
-        result = query_fib_install_candidates(rib_query_tx, max_install_paths(config), config.multipath_relax) => match result {
+        result = query_fib_install_candidates(rib_query_tx, max_install_paths(config), config.multipath_relax, config.link_bandwidth_weighted) => match result {
             Ok(candidates) => candidates,
             Err(reason) => {
                 status_tx.send_replace(failed_rib_query_statuses(owned, reason));
@@ -771,9 +777,11 @@ fn emit_fib_event(
     });
 }
 
-/// Current owned-state envelope version. v2 persists the equal-cost
-/// `next_hops` set; v1 persisted a single `next_hop` scalar.
-const OWNED_STATE_VERSION: u32 = 2;
+/// Current owned-state envelope version. v3 persists per-next-hop multipath
+/// `weights` (ADR-0068); v2 persisted the equal-cost `next_hops` set; v1
+/// persisted a single `next_hop` scalar. A v2 file loads with all weights = 1
+/// (equal cost), matching the only shape v2 could have produced.
+const OWNED_STATE_VERSION: u32 = 3;
 /// Oldest owned-state version this build can still load (and upgrade).
 const OWNED_STATE_MIN_VERSION: u32 = 1;
 
@@ -818,6 +826,11 @@ struct PersistedFibRoute {
     /// `into_route` upgrades the scalar `next_hop` into a one-element set.
     #[serde(default)]
     next_hops: Vec<IpAddr>,
+    /// v3 per-next-hop multipath weights (ADR-0068), positionally aligned with
+    /// `next_hops`. `#[serde(default)]` so a v1/v2 file (no weights) loads as
+    /// all-equal: `into_route` fills weight 1 for any next-hop without a weight.
+    #[serde(default)]
+    weights: Vec<u16>,
     peer: IpAddr,
     origin_type: PersistedRouteOrigin,
     path_id: u32,
@@ -863,7 +876,9 @@ impl From<&FibRoute> for PersistedFibRoute {
             // v1 reader) recovers a representative consistent with the row's
             // peer / path_id; `next_hops` carries the full canonical set.
             next_hop: Some(route.target.primary()),
-            next_hops: route.target.next_hops.clone(),
+            next_hops: route.target.next_hops.iter().map(|nh| nh.addr).collect(),
+            // ADR-0068: persist weights positionally aligned with `next_hops`.
+            weights: route.target.next_hops.iter().map(|nh| nh.weight).collect(),
             peer: route.peer,
             origin_type: route.origin_type.into(),
             path_id: route.path_id,
@@ -889,18 +904,26 @@ impl From<&FibTableConfig> for PersistedFibTableSignature {
 impl PersistedFibRoute {
     fn into_route(self) -> Option<FibRoute> {
         let prefix = prefix_from_addr_len(self.prefix_addr, self.prefix_len)?;
-        // v2 carries `next_hops` (the full set) plus `next_hop` (the best); a v1
+        // v2/v3 carry `next_hops` (the full set) plus `next_hop` (the best); a v1
         // file carried only the single scalar `next_hop` (which is the best).
-        // Upgrade v1 to a one-element set, then drop any next-hop whose family
-        // disagrees with the prefix. If that empties the set, the row is unusable.
-        let next_hops: Vec<IpAddr> = if self.next_hops.is_empty() {
-            self.next_hop.into_iter().collect()
+        // v3 also carries `weights` positionally aligned with `next_hops`; a
+        // v1/v2 file has none, so every next-hop defaults to weight 1 (equal
+        // cost). Upgrade v1 to a one-element set, then drop any next-hop whose
+        // family disagrees with the prefix. If that empties it, the row is unusable.
+        let paired: Vec<(IpAddr, u16)> = if self.next_hops.is_empty() {
+            self.next_hop.into_iter().map(|addr| (addr, 1)).collect()
         } else {
             self.next_hops
-        }
-        .into_iter()
-        .filter(|next_hop| prefix_and_nexthop_same_family(prefix, *next_hop))
-        .collect();
+                .iter()
+                .enumerate()
+                .map(|(i, &addr)| (addr, self.weights.get(i).copied().unwrap_or(1).max(1)))
+                .collect()
+        };
+        let next_hops: Vec<FibNextHop> = paired
+            .into_iter()
+            .filter(|(addr, _)| prefix_and_nexthop_same_family(prefix, *addr))
+            .map(|(addr, weight)| FibNextHop { addr, weight })
+            .collect();
         if next_hops.is_empty() {
             return None;
         }
@@ -908,8 +931,8 @@ impl PersistedFibRoute {
         // member if it is absent or was filtered out by the family check.
         let best = self
             .next_hop
-            .filter(|next_hop| next_hops.contains(next_hop))
-            .unwrap_or(next_hops[0]);
+            .filter(|next_hop| next_hops.iter().any(|nh| nh.addr == *next_hop))
+            .unwrap_or(next_hops[0].addr);
         let key = FibRouteKey {
             table_id: self.table_id,
             metric: self.metric,
@@ -1319,7 +1342,7 @@ fn status_for_route(route: &FibRoute, state: FibRuntimeState, reason: String) ->
         metric: route.key.metric,
         prefix: route.key.prefix,
         next_hop: Some(route.target.primary()),
-        next_hops: route.target.next_hops.clone(),
+        next_hops: route.target.next_hops.iter().map(|nh| nh.addr).collect(),
         peer: Some(route.peer),
         state,
         reason,
@@ -1463,11 +1486,11 @@ fn build_route_message(
         .target
         .next_hops
         .iter()
-        .find(|next_hop| !prefix_and_nexthop_same_family(route.key.prefix, **next_hop))
+        .find(|next_hop| !prefix_and_nexthop_same_family(route.key.prefix, next_hop.addr))
     {
         return Err(format!(
-            "prefix family does not match next-hop family for {} via {next_hop}",
-            route.key.prefix
+            "prefix family does not match next-hop family for {} via {}",
+            route.key.prefix, next_hop.addr
         ));
     }
 
@@ -1497,20 +1520,25 @@ fn build_route_message(
         match route.target.next_hops.as_slice() {
             // A single next-hop stays a plain RTA_GATEWAY — byte-for-byte
             // today's shape, so default (`maximum_paths` unset/1) is unchanged.
+            // A lone next-hop takes all traffic, so its weight is irrelevant and
+            // never emitted.
             [next_hop] => {
                 msg.attributes
-                    .push(RouteAttribute::Gateway(ip_to_route_address(*next_hop)));
+                    .push(RouteAttribute::Gateway(ip_to_route_address(next_hop.addr)));
             }
-            // Two or more program a kernel RTA_MULTIPATH (ECMP). Each hop
-            // carries only a gateway; `hops = 0` ⇒ equal weight, and the
-            // kernel resolves the output interface from the gateway's route.
+            // Two or more program a kernel RTA_MULTIPATH (ECMP). Each hop carries
+            // a gateway and its weight as `rtnh_hops = weight - 1` (ADR-0068);
+            // weight 1 ⇒ `hops = 0`, i.e. ADR-0066's equal-weight shape. The
+            // kernel resolves each output interface from the gateway's route.
             next_hops => {
                 let hops = next_hops
                     .iter()
                     .map(|next_hop| {
                         let mut hop = RouteNextHop::default();
+                        hop.hops =
+                            u8::try_from(next_hop.weight.saturating_sub(1)).unwrap_or(u8::MAX);
                         hop.attributes
-                            .push(RouteAttribute::Gateway(ip_to_route_address(*next_hop)));
+                            .push(RouteAttribute::Gateway(ip_to_route_address(next_hop.addr)));
                         hop
                     })
                     .collect();
@@ -1620,7 +1648,8 @@ fn extract_gateway(msg: &netlink_packet_route::route::RouteMessage) -> Option<Fi
     for attr in &msg.attributes {
         match attr {
             RouteAttribute::MultiPath(next_hops) => {
-                let gateways: Vec<IpAddr> = next_hops.iter().filter_map(next_hop_gateway).collect();
+                let gateways: Vec<FibNextHop> =
+                    next_hops.iter().filter_map(next_hop_gateway).collect();
                 if !gateways.is_empty() {
                     return Some(FibRouteTarget::from_next_hops(gateways));
                 }
@@ -1636,13 +1665,20 @@ fn extract_gateway(msg: &netlink_packet_route::route::RouteMessage) -> Option<Fi
     None
 }
 
-/// Pull the gateway IP out of one multipath next-hop's attributes.
+/// Pull the gateway IP and weight out of one multipath next-hop's attributes.
+/// The kernel's `rtnh_hops` is the weight minus one (ADR-0068), so the weight is
+/// `hops + 1` — the exact inverse of `build_route_message`'s encoding, keeping
+/// the reconcile diff weight-stable.
 #[cfg(target_os = "linux")]
-fn next_hop_gateway(hop: &netlink_packet_route::route::RouteNextHop) -> Option<IpAddr> {
+fn next_hop_gateway(hop: &netlink_packet_route::route::RouteNextHop) -> Option<FibNextHop> {
     use netlink_packet_route::route::RouteAttribute;
-    hop.attributes.iter().find_map(|attr| match attr {
+    let addr = hop.attributes.iter().find_map(|attr| match attr {
         RouteAttribute::Gateway(addr) => route_address_ip(addr),
         _ => None,
+    })?;
+    Some(FibNextHop {
+        addr,
+        weight: u16::from(hop.hops) + 1,
     })
 }
 
@@ -1805,6 +1841,7 @@ mod tests {
             tables: vec![table("edge", 1000, 200, &["ipv4_unicast", "ipv6_unicast"])],
             owned_state_path: None,
             multipath_relax: false,
+            link_bandwidth_weighted: false,
         }
     }
 
@@ -1875,6 +1912,7 @@ mod tests {
                 link_local_next_hop: route.link_local_next_hop,
                 peer: route.peer,
                 path_id: route.path_id,
+                weight: 1,
             };
             if let Some(existing) = candidates
                 .iter_mut()
@@ -1907,6 +1945,22 @@ mod tests {
                 } = update
                 {
                     let _ = reply.send(routes_to_candidates(&routes, max_paths));
+                }
+            }
+        });
+        tx
+    }
+
+    /// A fake RIB that replies to install-candidate queries with a fixed,
+    /// pre-built candidate set — used to drive weighted multipath into a live
+    /// kernel without re-deriving weights in the test stand-in.
+    #[cfg(target_os = "linux")]
+    fn rib_with_candidates(candidates: Vec<FibInstallCandidate>) -> mpsc::Sender<RibUpdate> {
+        let (tx, mut rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(update) = rx.recv().await {
+                if let RibUpdate::QueryFibInstallCandidates { reply, .. } = update {
+                    let _ = reply.send(candidates.clone());
                 }
             }
         });
@@ -2225,6 +2279,7 @@ mod tests {
                 tables: vec![],
                 owned_state_path: None,
                 multipath_relax: false,
+                link_bandwidth_weighted: false,
             }
             .enabled()
         );
@@ -2241,6 +2296,7 @@ mod tests {
                 tables: vec![],
                 owned_state_path: None,
                 multipath_relax: false,
+                link_bandwidth_weighted: false,
             },
             rib_tx,
             rib_query_tx,
@@ -2368,8 +2424,10 @@ mod tests {
         let mut route = fib_route(v4(24), ip("192.0.2.1"));
         // Best is .2 even though .1 sorts lower, to prove the best survives the
         // persist/reload round-trip (not just the canonical set).
-        route.target =
-            FibRouteTarget::from_set_with_best(ip("192.0.2.2"), [ip("192.0.2.1"), ip("192.0.2.2")]);
+        route.target = FibRouteTarget::from_set_with_best(
+            ip("192.0.2.2"),
+            [ip("192.0.2.1"), ip("192.0.2.2")].map(FibNextHop::equal),
+        );
         let mut owned = FibOwnedState::default();
         owned.routes.insert(route.key, route);
 
@@ -2381,6 +2439,35 @@ mod tests {
             loaded.routes.values().next().unwrap().target.primary(),
             ip("192.0.2.2")
         );
+    }
+
+    #[test]
+    fn owned_state_round_trips_weighted_next_hops() {
+        // ADR-0068: the v3 envelope persists per-next-hop weights, so a
+        // crash-restart recovers the exact weighted set and does not flatten it
+        // to equal-cost (which would briefly mis-balance before the RIB re-syncs).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let mut config = config();
+        config.owned_state_path = Some(path.clone());
+        let mut route = fib_route(v4(24), ip("192.0.2.1"));
+        route.target = FibRouteTarget::from_next_hops([
+            FibNextHop {
+                addr: ip("192.0.2.1"),
+                weight: 256,
+            },
+            FibNextHop {
+                addr: ip("192.0.2.2"),
+                weight: 64,
+            },
+        ]);
+        let mut owned = FibOwnedState::default();
+        owned.routes.insert(route.key, route);
+
+        write_owned_state(&path, &config.tables, &owned).unwrap();
+
+        let loaded = load_owned_state(&config);
+        assert_eq!(loaded, owned, "v3 persists per-next-hop weights");
     }
 
     #[test]
@@ -2982,6 +3069,7 @@ mod tests {
             tables: vec![table],
             owned_state_path: None,
             multipath_relax: false,
+            link_bandwidth_weighted: false,
         };
         let rib_tx = rib_with_routes_and_peer_groups(
             vec![route(v4(24), ip("192.0.2.1"))],
@@ -3007,6 +3095,7 @@ mod tests {
             tables: vec![table],
             owned_state_path: None,
             multipath_relax: false,
+            link_bandwidth_weighted: false,
         };
         let rib_tx = rib_with_routes(vec![
             route(v4(24), ip("192.0.2.1")),
@@ -3044,6 +3133,7 @@ mod tests {
             tables: vec![table],
             owned_state_path: None,
             multipath_relax: false,
+            link_bandwidth_weighted: false,
         };
         let existing = FibRoute {
             table_name: "edge".to_string(),
@@ -3192,7 +3282,9 @@ mod tests {
         let route = FibRoute {
             table_name: "edge".to_string(),
             key: key(v4(24)),
-            target: FibRouteTarget::from_next_hops([ip("192.0.2.1"), ip("192.0.2.2")]),
+            target: FibRouteTarget::from_next_hops(
+                [ip("192.0.2.1"), ip("192.0.2.2")].map(FibNextHop::equal),
+            ),
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
@@ -3208,7 +3300,11 @@ mod tests {
                 _ => None,
             })
             .expect("expected RTA_MULTIPATH");
-        let gateways: Vec<IpAddr> = hops.iter().filter_map(next_hop_gateway).collect();
+        let gateways: Vec<IpAddr> = hops
+            .iter()
+            .filter_map(next_hop_gateway)
+            .map(|nh| nh.addr)
+            .collect();
         assert_eq!(gateways, vec![ip("192.0.2.1"), ip("192.0.2.2")]);
         // hops == 0 ⇒ equal weight; no explicit oif for via-only ECMP.
         assert!(
@@ -3229,7 +3325,9 @@ mod tests {
         let route = FibRoute {
             table_name: "edge".to_string(),
             key: key(v4(24)),
-            target: FibRouteTarget::from_next_hops([ip("192.0.2.2"), ip("192.0.2.1")]),
+            target: FibRouteTarget::from_next_hops(
+                [ip("192.0.2.2"), ip("192.0.2.1")].map(FibNextHop::equal),
+            ),
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
@@ -3237,6 +3335,51 @@ mod tests {
 
         let msg = build_route_message(&route, RouteMessageGateway::Include).unwrap();
 
+        assert_eq!(extract_gateway(&msg), Some(route.target));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn build_then_extract_round_trips_weights() {
+        use netlink_packet_route::route::RouteAttribute;
+        // ADR-0068: a weight encodes as rtnh_hops = weight - 1 and decodes back as
+        // hops + 1, so a dumped route reconstructs the exact weighted target and
+        // the reconcile diff is weight-stable.
+        let route = FibRoute {
+            table_name: "edge".to_string(),
+            key: key(v4(24)),
+            target: FibRouteTarget::from_next_hops([
+                FibNextHop {
+                    addr: ip("192.0.2.1"),
+                    weight: 256,
+                },
+                FibNextHop {
+                    addr: ip("192.0.2.2"),
+                    weight: 64,
+                },
+            ]),
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        };
+
+        let msg = build_route_message(&route, RouteMessageGateway::Include).unwrap();
+
+        // Canonical order is by address (.1 then .2); hops = weight - 1.
+        let hops: Vec<u8> = msg
+            .attributes
+            .iter()
+            .find_map(|attr| match attr {
+                RouteAttribute::MultiPath(hops) => Some(hops),
+                _ => None,
+            })
+            .expect("expected RTA_MULTIPATH")
+            .iter()
+            .map(|hop| hop.hops)
+            .collect();
+        assert_eq!(hops, vec![255, 63]);
+
+        // Decode reconstructs the exact weighted target.
         assert_eq!(extract_gateway(&msg), Some(route.target));
     }
 
@@ -3312,6 +3455,7 @@ mod tests {
                 tables: vec![],
                 owned_state_path: None,
                 multipath_relax: false,
+                link_bandwidth_weighted: false,
             },
             &rib_with_routes(vec![route(prefix, ip("192.0.2.1"))]),
             &mut fib,
@@ -3553,6 +3697,7 @@ mod tests {
             }],
             owned_state_path: None,
             multipath_relax: false,
+            link_bandwidth_weighted: false,
         };
         // Both gateways are on-link in 192.0.2.0/24 (fib0), so the kernel can
         // resolve a via-only multipath route.
@@ -3641,6 +3786,117 @@ mod tests {
         assert!(
             route_show(1000, prefix_text).trim().is_empty(),
             "withdraw left ECMP route installed"
+        );
+        assert!(owned.routes.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn netns_general_unicast_fib_weighted_round_trip() {
+        if !netns_gate() {
+            eprintln!(
+                "skipping: set EVPN_LINUX_NETNS=1 to run privileged weighted-ECMP FIB netns test"
+            );
+            return;
+        }
+        if !is_inner_netns() {
+            let ns = NetnsFixture::create("wecmp");
+            setup_unicast_netns(&ns);
+            run_inner_netns(&ns, "netns_general_unicast_fib_weighted_round_trip");
+            return;
+        }
+
+        let prefix = v4(24);
+        let prefix_text = "203.0.113.0/24";
+        let mut fib = LinuxUnicastFib::connect().expect("LinuxUnicastFib::connect");
+        let mut owned = FibOwnedState::default();
+        let metrics = metrics();
+        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let config = FibRuntimeConfig {
+            tables: vec![{
+                let mut table = table("edge", 1000, 200, &["ipv4_unicast", "ipv6_unicast"]);
+                table.maximum_paths = Some(2);
+                table
+            }],
+            owned_state_path: None,
+            multipath_relax: false,
+            link_bandwidth_weighted: true,
+        };
+        // Best .1 weighted 256, sibling .3 weighted 64 (a 4:1 bandwidth ratio).
+        // Both gateways are on-link in 192.0.2.0/24 (fib0).
+        let weighted_candidate = || FibInstallCandidate {
+            next_hops: vec![
+                FibInstallNextHop {
+                    next_hop: ip("192.0.2.1"),
+                    link_local_next_hop: None,
+                    peer: ip("198.51.100.1"),
+                    path_id: 0,
+                    weight: 256,
+                },
+                FibInstallNextHop {
+                    next_hop: ip("192.0.2.3"),
+                    link_local_next_hop: None,
+                    peer: ip("198.51.100.1"),
+                    path_id: 0,
+                    weight: 64,
+                },
+            ],
+            best: route(prefix, ip("192.0.2.1")),
+        };
+
+        // Install a weighted RTA_MULTIPATH route and confirm the kernel stored
+        // the per-next-hop weights (iproute2 prints `weight = rtnh_hops + 1`).
+        reconcile_once(
+            &config,
+            &rib_with_candidates(vec![weighted_candidate()]),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+            &CancellationToken::new(),
+        )
+        .await;
+        let installed = route_show(1000, prefix_text);
+        assert!(
+            installed.contains("nexthop via 192.0.2.1") && installed.contains("weight 256"),
+            "high-bandwidth nexthop missing its weight: {installed}"
+        );
+        assert!(
+            installed.contains("nexthop via 192.0.2.3") && installed.contains("weight 64"),
+            "low-bandwidth nexthop missing its weight: {installed}"
+        );
+
+        // Re-running the identical weighted set must not reprogram (diff stable).
+        reconcile_once(
+            &config,
+            &rib_with_candidates(vec![weighted_candidate()]),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            route_show(1000, prefix_text).contains("weight 256"),
+            "weighted route disappeared on idempotent re-reconcile"
+        );
+
+        // Withdraw removes the owned weighted route.
+        reconcile_once(
+            &config,
+            &rib_with_routes(Vec::new()),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            route_show(1000, prefix_text).trim().is_empty(),
+            "withdraw left weighted route installed"
         );
         assert!(owned.routes.is_empty());
     }

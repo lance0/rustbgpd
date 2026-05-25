@@ -76,6 +76,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0065](0065-evpn-localbias-split-horizon.md) | EVPN VXLAN local-bias split-horizon (spike-gated) | Accepted | 2026-05-22 |
 | [0066](0066-unicast-multipath-ecmp-fib.md) | Unicast multipath / ECMP FIB install | Accepted | 2026-05-24 |
 | [0067](0067-bfd-single-hop.md) | Single-hop asynchronous BFD for BGP | Accepted | 2026-05-24 |
+| [0068](0068-weighted-multipath.md) | Weighted (unequal-cost) multipath via Link Bandwidth | Accepted | 2026-05-24 |
 
 ## Template
 

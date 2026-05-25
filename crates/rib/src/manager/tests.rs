@@ -79,7 +79,7 @@ async fn query_fib_install_candidates(
     tx: &mpsc::Sender<RibUpdate>,
     max_paths: u32,
 ) -> Vec<crate::route::FibInstallCandidate> {
-    query_fib_install_candidates_relax(tx, max_paths, false).await
+    query_fib_install_candidates_opts(tx, max_paths, false, false).await
 }
 
 async fn query_fib_install_candidates_relax(
@@ -87,10 +87,28 @@ async fn query_fib_install_candidates_relax(
     max_paths: u32,
     relax: bool,
 ) -> Vec<crate::route::FibInstallCandidate> {
+    query_fib_install_candidates_opts(tx, max_paths, relax, false).await
+}
+
+async fn query_fib_install_candidates_weighted(
+    tx: &mpsc::Sender<RibUpdate>,
+    max_paths: u32,
+    weighted: bool,
+) -> Vec<crate::route::FibInstallCandidate> {
+    query_fib_install_candidates_opts(tx, max_paths, false, weighted).await
+}
+
+async fn query_fib_install_candidates_opts(
+    tx: &mpsc::Sender<RibUpdate>,
+    max_paths: u32,
+    relax: bool,
+    weighted: bool,
+) -> Vec<crate::route::FibInstallCandidate> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryFibInstallCandidates {
         max_paths,
         relax,
+        weighted,
         reply: reply_tx,
     })
     .await
@@ -10076,6 +10094,123 @@ async fn fib_install_candidates_multipath_relax_groups_different_as_paths() {
         relaxed[0].next_hops.len(),
         2,
         "multipath-relax: equal-length AS_PATHs group as ECMP"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Attach a Link Bandwidth Extended Community (bytes/second) to a route.
+fn make_route_with_link_bw(
+    prefix: Ipv4Prefix,
+    peer: Ipv4Addr,
+    asns: Vec<u32>,
+    bw: Option<f32>,
+) -> Route {
+    let mut route = make_route_with_as_path(prefix, peer, asns);
+    if let Some(bw) = bw {
+        Arc::make_mut(&mut route.attributes).push(PathAttribute::ExtendedCommunities(vec![
+            ExtendedCommunity::link_bandwidth(65001, bw),
+        ]));
+    }
+    route
+}
+
+#[tokio::test]
+async fn fib_install_candidates_weighted_proportional_to_link_bandwidth() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+    let peer1 = Ipv4Addr::new(1, 0, 0, 1); // best (lowest peer), 40G
+    let peer2 = Ipv4Addr::new(1, 0, 0, 2); // sibling, 10G
+    for (peer, bw) in [(peer1, 40e9), (peer2, 10e9)] {
+        tx.send(RibUpdate::RoutesReceived {
+            peer: IpAddr::V4(peer),
+            announced: vec![make_route_with_link_bw(
+                prefix,
+                peer,
+                vec![65001, 65010],
+                Some(bw),
+            )],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    // Weighting on: 40G best maps to 256, the 10G sibling to 64 (ratio 1:4).
+    let weighted = query_fib_install_candidates_weighted(&tx, 2, true).await;
+    assert_eq!(weighted.len(), 1);
+    let nhs = &weighted[0].next_hops;
+    assert_eq!(nhs.len(), 2);
+    assert_eq!(nhs[0].next_hop, IpAddr::V4(peer1));
+    assert_eq!(nhs[0].weight, 256);
+    assert_eq!(nhs[1].next_hop, IpAddr::V4(peer2));
+    assert_eq!(nhs[1].weight, 64);
+
+    // Weighting off: same group, every next-hop equal-cost (weight 1).
+    let equal = query_fib_install_candidates_weighted(&tx, 2, false).await;
+    assert!(equal[0].next_hops.iter().all(|nh| nh.weight == 1));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn fib_install_candidates_weighted_all_or_nothing_on_missing_bandwidth() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+    let peer1 = Ipv4Addr::new(1, 0, 0, 1);
+    let peer2 = Ipv4Addr::new(1, 0, 0, 2);
+    // peer1 carries a Link Bandwidth community; peer2 does not.
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer1),
+        announced: vec![make_route_with_link_bw(
+            prefix,
+            peer1,
+            vec![65001, 65010],
+            Some(40e9),
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer2),
+        announced: vec![make_route_with_link_bw(
+            prefix,
+            peer2,
+            vec![65001, 65010],
+            None,
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // A single path missing the community ⇒ the whole prefix stays equal-cost.
+    let weighted = query_fib_install_candidates_weighted(&tx, 2, true).await;
+    assert_eq!(weighted[0].next_hops.len(), 2);
+    assert!(
+        weighted[0].next_hops.iter().all(|nh| nh.weight == 1),
+        "all-or-nothing: one missing bandwidth disables weighting for the group"
     );
 
     drop(tx);

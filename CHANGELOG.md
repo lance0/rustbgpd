@@ -33,6 +33,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   advertising AS and an IEEE-754 bytes/second bandwidth, and
   `Route::link_bandwidth()` surfaces it from a route's extended communities.
   Parse-only for now; consumed by weighted unequal-cost multipath in a follow-up.
+- **ADR-0068 weighted (unequal-cost) multipath.** New global
+  `[global].link_bandwidth_weighted` (default `false`) weights unicast ECMP
+  next-hops by their Link Bandwidth Extended Community
+  (draft-ietf-idr-link-bandwidth, FRR's `bgp bestpath bandwidth`). When the whole
+  equal-cost group advertises a bandwidth, weights are normalized in proportion
+  (largest → kernel weight 256) and programmed as per-next-hop `rtnh_hops` in the
+  `RTA_MULTIPATH` route; if any path lacks the community, or the knob is off, the
+  group stays equal-cost — byte-for-byte ADR-0066. A lone next-hop is always
+  weight 1 (it carries all traffic and the kernel emits it weightless). Weights
+  round-trip through the kernel and the v3 owned-state envelope, so a bandwidth
+  change reprograms and an unchanged set never flaps. Inert unless a
+  `[[fib_tables]]` sets `maximum_paths > 1`.
 
 ## [0.28.0] — 2026-05-24
 
