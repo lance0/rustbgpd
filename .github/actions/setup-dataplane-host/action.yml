@@ -1,0 +1,67 @@
+name: "Set up dataplane host"
+description: >-
+  Prepare an `ubuntu-latest` runner for a containerlab kernel-dataplane interop
+  job: hardened containerlab install (#208), grpcurl + jq, the kernel modules the
+  dataplane tests need (incl. `vrf`, which the slim hosted Azure kernel ships only
+  via `linux-modules-extra`), and a built `rustbgpd:dev` image with a GHA layer
+  cache. Each hosted job is isolated, so it builds its own image rather than
+  sharing a persistent daemon as the old self-hosted runner did.
+inputs:
+  containerlab-version:
+    required: false
+    default: "0.74.3"
+  grpcurl-version:
+    required: false
+    default: "1.9.1"
+  build-image:
+    description: "Build rustbgpd:dev (set 'false' for jobs that build their own)."
+    required: false
+    default: "true"
+runs:
+  using: "composite"
+  steps:
+    - name: Install containerlab (hardened)
+      uses: ./.github/actions/install-containerlab
+      with:
+        version: ${{ inputs.containerlab-version }}
+
+    - name: Install grpcurl + jq
+      shell: bash
+      env:
+        GRPCURL_VERSION: ${{ inputs.grpcurl-version }}
+      run: |
+        set -euo pipefail
+        sudo apt-get update -y
+        sudo apt-get install -y jq
+        curl -fsSL --retry 3 --retry-delay 3 \
+          "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz" \
+          | sudo tar -xz -C /usr/local/bin grpcurl
+        grpcurl -version
+
+    - name: Load kernel dataplane modules (vrf / vxlan / bridge / bonding)
+      shell: bash
+      run: |
+        set -uo pipefail
+        # vrf is absent from the base hosted Azure kernel; pull it from
+        # linux-modules-extra for the running kernel only when it's missing
+        # (a no-op on runners that already have it, e.g. a self-hosted host).
+        if ! sudo modprobe vrf 2>/dev/null; then
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)" || \
+            echo "::warning::linux-modules-extra-$(uname -r) unavailable; vrf-dependent tests may fail"
+          sudo modprobe vrf || echo "::warning::vrf module still not loadable"
+        fi
+        sudo modprobe vxlan bridge bonding || true
+
+    - name: Set up Docker Buildx
+      if: ${{ inputs.build-image == 'true' }}
+      uses: docker/setup-buildx-action@v4
+
+    - name: Build rustbgpd:dev
+      if: ${{ inputs.build-image == 'true' }}
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        load: true
+        tags: rustbgpd:dev
+        cache-from: type=gha
+        cache-to: type=gha,mode=max

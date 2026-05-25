@@ -1,35 +1,17 @@
 name: Kernel Dataplane
 
-# Privileged Linux kernel dataplane interop suite. Runs on the
-# self-hosted `kernel-dataplane` runner because these tests need kernel
-# features the hosted ubuntu-latest image lacks:
-#   - bridge + VXLAN FDB   — real VTEP receive/origination (M36/M37/M37+IP)
-#   - shared ESI + metrics — DF election and Type 1/4 origination (M38)
-#   - `vrf` module           — L3VNI / symmetric IRB (M39)
-#   - bond ES + FDB-NHG      — aliasing dataplane ECMP (M40)
-#   - FDB nexthop groups     — kernel >= 5.8 (netns fdb_nhg selectors)
-#   - real netns route table — configured-table FIB runtime (M42,
-#                              netns fib_runtime selector)
-#   - CONFIG_TCP_AO          — TCP-AO protected BIRD 3.x session (M43,
-#                              conditional on runner kernel support)
-#   - UDP/3784 + TTL=255     — single-hop BFD against FRR bfdd, RFC 5882
-#                              BGP coupling failover (M51)
+# Privileged Linux kernel dataplane interop suite. Runs on GitHub-hosted
+# `ubuntu-latest`: a spike (2026-05-25) confirmed the hosted Azure kernel + a
+# `docker run --cap-add` / passwordless-sudo VM provides everything these tests
+# need — bridge + VXLAN FDB, FDB nexthop groups (kernel >= 5.8), real netns
+# route tables, CONFIG_TCP_AO, and UDP/3784 BFD. The one gap, the `vrf` module
+# (L3VNI / symmetric IRB), is supplied by `linux-modules-extra-<kver>`; the
+# `setup-dataplane-host` action loads it. This retired the self-hosted runner.
 #
-# Security: external / non-owner PRs target the protected
-# `kernel-dataplane` environment and require maintainer approval before
-# code reaches the persistent self-hosted runner. Trusted runs (main,
-# schedule, workflow_dispatch, and same-repository PRs opened by lance0)
-# use the unprotected `kernel-dataplane-auto` environment.
-#
-# The runner pool is expected to be multiple runner services on the same
-# host, sharing one Docker daemon. The build job creates `rustbgpd:dev`
-# once; M39/M40/M42/M50 and the netns selectors can fan out. M43 also fans
-# out when the selected runner advertises CONFIG_TCP_AO=y; otherwise it
-# records a warning and exits cleanly so runner-kernel rollout does not
-# block unrelated dataplane gates. M36-M38 are ordered below to reduce
-# shared-host load while still reporting each milestone independently
-# after an earlier smoke fails; each job pre-cleans its own topology
-# before deploy.
+# Each hosted job is an isolated VM, so it runs `setup-dataplane-host` to install
+# containerlab (hardened, issue #208) + grpcurl + jq + kernel modules and build
+# its own `rustbgpd:dev` (GHA layer cache) — there is no shared persistent daemon
+# to fan out from, and stale-topology accumulation (issue #188) can't happen.
 
 on:
   push:
@@ -42,78 +24,28 @@ on:
       - "**/*.md"
       - "docs/**"
   schedule:
-    # 07:00 UTC nightly — catches dataplane regressions even if a PR
-    # author's privileged run was never approved.
+    # 07:00 UTC nightly — catches dataplane regressions even if a PR was
+    # never re-run.
     - cron: '0 7 * * *'
   workflow_dispatch:
 
 concurrency:
-  # The jobs inside one run may execute in parallel across multiple
-  # self-hosted runner services, but only one kernel-dataplane workflow
-  # run should own the persistent Docker daemon / containerlab namespace
-  # at a time.
-  group: kernel-dataplane
-  cancel-in-progress: false
+  # Cancel superseded runs of this workflow for the same ref; hosted jobs are
+  # isolated VMs so there is no shared-daemon reason to serialize anymore.
+  group: kernel-dataplane-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  build-image:
-    name: Build rustbgpd:dev image
-    runs-on: [self-hosted, linux, kernel-dataplane]
-    environment:
-      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Verify host tooling and kernel support
-        run: |
-          set -euo pipefail
-          for t in docker containerlab grpcurl jq sudo ip; do
-            command -v "$t" >/dev/null \
-              || { echo "::error::$t not found on the kernel-dataplane runner — see docs/kernel-dataplane-runner.md"; exit 1; }
-          done
-          sudo -n true
-          uname -a
-          ip -V
-          docker version
-          containerlab version
-          sudo modprobe vrf vxlan bridge bonding || true
-          cleanup_preflight() {
-            sudo ip link del vx-ci 2>/dev/null || true
-            sudo ip link del br-ci 2>/dev/null || true
-            sudo ip link del vrf-ci 2>/dev/null || true
-          }
-          cleanup_preflight
-          trap cleanup_preflight EXIT
-          sudo ip link add vrf-ci type vrf table 424242
-          sudo ip link add br-ci type bridge
-          sudo ip link add vx-ci type vxlan id 4242 local 127.0.0.1 dstport 4789 nolearning
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build rustbgpd:dev
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: rustbgpd:dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
   m36:
     name: M36 — EVPN VTEP receive FDB programming (FRR 10.3.1)
-    runs-on: [self-hosted, linux, kernel-dataplane]
-    needs: build-image
-    environment:
-      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
-    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-
+      - uses: ./.github/actions/setup-dataplane-host
       - name: Run M36 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
         with:
@@ -123,15 +55,11 @@ jobs:
 
   m37:
     name: M37 — EVPN local MAC origination (FRR 10.3.1)
-    runs-on: [self-hosted, linux, kernel-dataplane]
-    needs: [build-image, m36]
-    if: ${{ !cancelled() && needs.build-image.result == 'success' }}
-    environment:
-      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
-    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-
+      - uses: ./.github/actions/setup-dataplane-host
       - name: Run M37 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
         with:
@@ -141,15 +69,11 @@ jobs:
 
   m37-ip:
     name: M37+IP — EVPN local MAC/IP origination (FRR 10.3.1)
-    runs-on: [self-hosted, linux, kernel-dataplane]
-    needs: [build-image, m37]
-    if: ${{ !cancelled() && needs.build-image.result == 'success' }}
-    environment:
-      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
-    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-
+      - uses: ./.github/actions/setup-dataplane-host
       - name: Run M37+IP (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
         with:
@@ -159,15 +83,11 @@ jobs:
 
   m38:
     name: M38 — EVPN DF election + Type 1/4 origination
-    runs-on: [self-hosted, linux, kernel-dataplane]
-    needs: [build-image, m37-ip]
-    if: ${{ !cancelled() && needs.build-image.result == 'success' }}
-    environment:
-      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
-    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-
+      - uses: ./.github/actions/setup-dataplane-host
       - name: Run M38 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
         with:
@@ -177,14 +97,11 @@ jobs:
 
   m39:
     name: M39 — EVPN Type 5 symmetric Interface-less IRB (FRR 10.3.1)
-    runs-on: [self-hosted, linux, kernel-dataplane]
-    needs: build-image
-    environment:
-      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
-    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-
+      - uses: ./.github/actions/setup-dataplane-host
       - name: Run M39 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
         with:
@@ -194,14 +111,11 @@ jobs:
 
   m39b:
     name: M39b — EVPN auto-derived Route Targets cross-vendor (FRR 10.3.1)
-    runs-on: [self-hosted, linux, kernel-dataplane]
-    needs: build-image
-    environment:
-      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
-    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-
+      - uses: ./.github/actions/setup-dataplane-host
       - name: Run M39b (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
         with:
@@ -211,14 +125,11 @@ jobs:
 
   m48:
     name: M48 — EVPN runtime tenant teardown over kernel L3 datapath (FRR 10.3.1)
-    runs-on: [self-hosted, linux, kernel-dataplane]
-    needs: build-image
-    environment:
-      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
-    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-
+      - uses: ./.github/actions/setup-dataplane-host
       - name: Run M48 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
         with:
@@ -228,14 +139,11 @@ jobs:
 
   m40:
     name: M40 — ADR-0059 aliasing dataplane ECMP (FRR EVPN-MH 10.3.1)
-    runs-on: [self-hosted, linux, kernel-dataplane]
-    needs: build-image
-    environment:
-      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
-    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-
+      - uses: ./.github/actions/setup-dataplane-host
       - name: Run M40 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
         with:
@@ -245,14 +153,11 @@ jobs:
 
   m42:
     name: M42 — ADR-0061 configured-table unicast FIB runtime (FRR 10.3.1)
-    runs-on: [self-hosted, linux, kernel-dataplane]
-    needs: build-image
-    environment:
-      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
-    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-
+      - uses: ./.github/actions/setup-dataplane-host
       - name: Run M42 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
         with:
@@ -262,14 +167,11 @@ jobs:
 
   m50:
     name: M50 — ADR-0066 unicast multipath/ECMP FIB install (FRR 10.3.1)
-    runs-on: [self-hosted, linux, kernel-dataplane]
-    needs: build-image
-    environment:
-      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
-    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-
+      - uses: ./.github/actions/setup-dataplane-host
       - name: Run M50 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
         with:
@@ -279,14 +181,11 @@ jobs:
 
   m52:
     name: M52 — ADR-0066 multipath-relax (FRR 10.3.1, mixed ASes)
-    runs-on: [self-hosted, linux, kernel-dataplane]
-    needs: build-image
-    environment:
-      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
-    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-
+      - uses: ./.github/actions/setup-dataplane-host
       - name: Run M52 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
         with:
@@ -296,14 +195,11 @@ jobs:
 
   m51:
     name: M51 — ADR-0067 single-hop BFD + RFC 5882 coupling (FRR 10.3.1)
-    runs-on: [self-hosted, linux, kernel-dataplane]
-    needs: build-image
-    environment:
-      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
-    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-
+      - uses: ./.github/actions/setup-dataplane-host
       - name: Run M51 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
         with:
@@ -313,13 +209,11 @@ jobs:
 
   m43:
     name: M43 — ADR-0062 TCP-AO protected session (BIRD 3.2.1)
-    runs-on: [self-hosted, linux, kernel-dataplane]
-    needs: build-image
-    environment:
-      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
-    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-dataplane-host
 
       - name: Detect TCP-AO kernel support
         id: tcp_ao
@@ -362,21 +256,15 @@ jobs:
 
   netns:
     name: Privileged netns selectors (fdb_nhg + fib_runtime + bfd_runtime)
-    runs-on: [self-hosted, linux, kernel-dataplane]
-    environment:
-      name: ${{ github.event_name == 'pull_request' && (github.actor != 'lance0' || github.event.pull_request.head.repo.full_name != github.repository) && 'kernel-dataplane' || 'kernel-dataplane-auto' }}
-    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
-      - name: Verify host tooling
-        run: |
-          command -v docker >/dev/null \
-            || { echo "::error::docker not found on the kernel-dataplane runner — see docs/kernel-dataplane-runner.md"; exit 1; }
-
-      # The Docker netns harness builds its own image and runs the
-      # privileged tests inside `docker run --cap-add=NET_ADMIN`, so
-      # netns never leaks to the host namespace.
+      # The Docker netns harness builds its own image and runs the privileged
+      # tests inside `docker run --cap-add=NET_ADMIN --cap-add=SYS_ADMIN`, so the
+      # netns never leaks to the host namespace. These selectors do not use the
+      # vrf module, so no extra host setup beyond Docker (preinstalled) is needed.
       - name: ADR-0059 FDB nexthop group netns tests
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg
 

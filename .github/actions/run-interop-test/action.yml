@@ -88,6 +88,22 @@ runs:
         # not accumulate stale clab containers across jobs.
         sudo containerlab destroy -t "$topology" --cleanup 2>/dev/null || true
 
+        # Issue #187: durable per-job retry telemetry. Records topology label,
+        # attempts used, final result, and whether a retry absorbed a transient
+        # failure — so reviewers can tell real stability from flake masking in
+        # the Actions UI. Does not change pass/fail semantics.
+        if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+          if [ "$rc" -eq 0 ]; then result="pass"; else result="FAIL"; fi
+          if [ "$rc" -eq 0 ] && [ "$attempt" -gt 1 ]; then absorbed="yes"; else absorbed="no"; fi
+          {
+            echo "### Interop retry telemetry — ${label}"
+            echo ""
+            echo "| topology | attempts | result | retry absorbed transient failure |"
+            echo "|---|---|---|---|"
+            echo "| ${label} | ${attempt}/${max_attempts} | ${result} | ${absorbed} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
         if [ "$rc" -eq 0 ]; then
           if [ "$attempt" -gt 1 ]; then
             echo "::warning::${label} passed after ${attempt} attempts (retry absorbed transient failure)"
