@@ -495,11 +495,20 @@ fn write_sockaddr(storage: &mut libc::sockaddr_storage, peer: IpAddr, scope_id: 
 
 /// Enable GTSM (Generalized TTL Security Mechanism, RFC 5082) on a socket.
 ///
-/// Sets `IP_MINTTL` to 254 (accept only TTL >= 254, i.e., directly connected)
-/// and sets outgoing TTL to 255.
+/// Sets GTSM for the remote address family: accept only directly connected
+/// packets and send with TTL/Hop-Limit 255.
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code, clippy::cast_possible_truncation)]
-pub fn set_gtsm(socket: &Socket) -> io::Result<()> {
+pub fn set_gtsm(socket: &Socket, remote: SocketAddr) -> io::Result<()> {
+    if remote.is_ipv6() {
+        return set_gtsm_v6(socket);
+    }
+    set_gtsm_v4(socket)
+}
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code, clippy::cast_possible_truncation)]
+fn set_gtsm_v4(socket: &Socket) -> io::Result<()> {
     const IP_MINTTL: libc::c_int = 21;
     let min_ttl: libc::c_int = 254;
 
@@ -531,9 +540,31 @@ pub fn set_gtsm(socket: &Socket) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code, clippy::cast_possible_truncation)]
+fn set_gtsm_v6(socket: &Socket) -> io::Result<()> {
+    let min_hops: libc::c_int = 254;
+    let fd = socket.as_raw_fd();
+
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IPV6,
+            libc::IPV6_MINHOPCOUNT,
+            (&raw const min_hops).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    socket.set_unicast_hops_v6(255)?;
+    Ok(())
+}
+
 /// Stub for non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
-pub fn set_gtsm(_socket: &Socket) -> io::Result<()> {
+pub fn set_gtsm(_socket: &Socket, _remote: SocketAddr) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "GTSM / TTL security is only supported on Linux",

@@ -65,6 +65,16 @@ pub struct PeerRates {
     pub updates_per_sec_tx: f64,
 }
 
+fn neighbor_key(neighbor: &NeighborState) -> Option<String> {
+    neighbor.config.as_ref().map(|config| {
+        if config.interface.is_empty() {
+            config.address.clone()
+        } else {
+            format!("{}%{}", config.address, config.interface)
+        }
+    })
+}
+
 pub struct App {
     pub global: Option<GlobalState>,
     pub health: Option<HealthResponse>,
@@ -141,11 +151,7 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.select_prev(),
             KeyCode::Enter => {
                 if let Some(i) = self.peer_table_state.selected()
-                    && let Some(address) = self
-                        .neighbors
-                        .get(i)
-                        .and_then(|neighbor| neighbor.config.as_ref())
-                        .map(|config| config.address.clone())
+                    && let Some(address) = self.neighbors.get(i).and_then(neighbor_key)
                 {
                     self.view = View::PeerDetail(address);
                 }
@@ -189,8 +195,7 @@ impl App {
             .peer_table_state
             .selected()
             .and_then(|i| self.neighbors.get(i))
-            .and_then(|neighbor| neighbor.config.as_ref())
-            .map(|config| config.address.clone());
+            .and_then(neighbor_key);
 
         if let Some(g) = snapshot.global {
             self.global = Some(g);
@@ -206,11 +211,7 @@ impl App {
         let elapsed = now.duration_since(self.last_rate_calc).as_secs_f64();
         if elapsed > 0.5 {
             for n in &snapshot.neighbors {
-                let addr = n
-                    .config
-                    .as_ref()
-                    .map(|c| c.address.clone())
-                    .unwrap_or_default();
+                let addr = neighbor_key(n).unwrap_or_default();
                 if let Some(prev) = self.prev_counters.get(&addr) {
                     let rx_delta = n.updates_received.saturating_sub(prev.updates_received);
                     let tx_delta = n.updates_sent.saturating_sub(prev.updates_sent);
@@ -247,13 +248,9 @@ impl App {
         let selected_idx = selected_addr
             .as_deref()
             .and_then(|address| {
-                self.neighbors.iter().position(|neighbor| {
-                    neighbor
-                        .config
-                        .as_ref()
-                        .map(|config| config.address.as_str())
-                        == Some(address)
-                })
+                self.neighbors
+                    .iter()
+                    .position(|neighbor| neighbor_key(neighbor).as_deref() == Some(address))
             })
             .or_else(|| {
                 self.peer_table_state
@@ -347,6 +344,7 @@ mod tests {
         NeighborState {
             config: Some(NeighborConfig {
                 address: address.to_string(),
+                interface: String::new(),
                 remote_asn: 64512,
                 description: String::new(),
                 hold_time: 90,
@@ -369,6 +367,12 @@ mod tests {
             is_dynamic: false,
             stale: false,
         }
+    }
+
+    fn scoped_neighbor(address: &str, interface: &str, uptime_seconds: u64) -> NeighborState {
+        let mut neighbor = neighbor(address, uptime_seconds);
+        neighbor.config.as_mut().unwrap().interface = interface.to_string();
+        neighbor
     }
 
     fn snapshot(neighbors: Vec<NeighborState>) -> DataSnapshot {
@@ -430,5 +434,31 @@ mod tests {
             .and_then(|neighbor| neighbor.config.as_ref())
             .map(|config| config.address.as_str());
         assert_eq!(selected, Some("198.51.100.1"));
+    }
+
+    #[test]
+    fn selection_tracks_scoped_peer_after_resort() {
+        let mut app = App::new();
+        app.sort_column = SortColumn::Uptime;
+        app.sort_ascending = false;
+
+        app.on_data(snapshot(vec![
+            scoped_neighbor("fe80::1", "eth0", 100),
+            scoped_neighbor("fe80::1", "eth1", 50),
+        ]));
+        app.peer_table_state.select(Some(0));
+
+        app.on_data(snapshot(vec![
+            scoped_neighbor("fe80::1", "eth0", 10),
+            scoped_neighbor("fe80::1", "eth1", 200),
+        ]));
+
+        let selected = app
+            .peer_table_state
+            .selected()
+            .and_then(|i| app.neighbors.get(i))
+            .and_then(|neighbor| neighbor.config.as_ref())
+            .map(|config| config.interface.as_str());
+        assert_eq!(selected, Some("eth0"));
     }
 }

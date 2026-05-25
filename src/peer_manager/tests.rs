@@ -1,6 +1,6 @@
 use super::*;
 use bytes::BytesMut;
-use rustbgpd_api::peer_types::SessionLifecycleEventType;
+use rustbgpd_api::peer_types::{PeerKey, SessionLifecycleEventType};
 use rustbgpd_fsm::SessionState;
 use rustbgpd_transport::PeerSessionState;
 use rustbgpd_wire::{
@@ -17,9 +17,23 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+fn key(addr: IpAddr) -> PeerKey {
+    PeerKey::new(addr, None)
+}
+
+fn scoped_key(addr: IpAddr, interface: &str) -> PeerKey {
+    PeerKey::new(addr, Some(interface.to_string()))
+}
+
+fn sock(addr: IpAddr) -> SocketAddr {
+    SocketAddr::new(addr, 179)
+}
+
 fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
     PeerManagerNeighborConfig {
         address: addr,
+        interface: None,
+        scope_id: None,
         remote_asn: asn,
         description: format!("test-peer-{addr}"),
         peer_group: None,
@@ -321,7 +335,7 @@ fn insert_test_managed_peer_with_asn(
     let transport = mgr.build_transport_config(&peer_config);
     let hold = transport.peer.hold_time;
     mgr.peers.insert(
-        addr,
+        key(addr),
         ManagedPeer {
             handle,
             session_id: 1,
@@ -337,6 +351,42 @@ fn insert_test_managed_peer_with_asn(
             pending_inbound: None,
             is_dynamic: false,
             pending_refresh,
+            pending_export_apply: false,
+            advertise_graceful_shutdown: false,
+        },
+    );
+}
+
+fn insert_test_scoped_managed_peer(
+    mgr: &mut PeerManager,
+    addr: IpAddr,
+    interface: &str,
+    scope_id: u32,
+    session_id: u64,
+    handle: PeerHandle,
+) {
+    let mut peer_config = make_config(addr, 65002);
+    peer_config.interface = Some(interface.to_string());
+    peer_config.scope_id = Some(scope_id);
+    let transport = mgr.build_transport_config(&peer_config);
+    let hold = transport.peer.hold_time;
+    mgr.peers.insert(
+        scoped_key(addr, interface),
+        ManagedPeer {
+            handle,
+            session_id,
+            remote_asn: 65002,
+            description: interface.to_string(),
+            peer_group: None,
+            enabled: true,
+            hold_time: Some(hold),
+            max_prefixes: None,
+            transport_config: transport,
+            import_policy: None,
+            export_policy: None,
+            pending_inbound: None,
+            is_dynamic: false,
+            pending_refresh: false,
             pending_export_apply: false,
             advertise_graceful_shutdown: false,
         },
@@ -406,7 +456,7 @@ fn attach_test_pending_inbound(
     session_id: u64,
 ) {
     mgr.peers
-        .get_mut(&peer_addr)
+        .get_mut(&key(peer_addr))
         .expect("managed peer")
         .pending_inbound = Some(PendingInbound { handle, session_id });
 }
@@ -424,6 +474,7 @@ async fn wait_counter(counter: &AtomicU32, expected: u32) {
 fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
     crate::config::Neighbor {
         address: addr.to_string(),
+        interface: None,
         remote_asn,
         description: None,
         peer_group: None,
@@ -560,7 +611,7 @@ async fn collision_notifications_flush_ready_lifecycle_events_first() {
         PeerHandle::from_parts(session_tx, task),
         false,
     );
-    mgr.peers.get_mut(&addr).unwrap().is_dynamic = true;
+    mgr.peers.get_mut(&key(addr)).unwrap().is_dynamic = true;
 
     let lifecycle_tx = mgr.session_lifecycle_tx.clone();
     let notify_tx = mgr.session_notify_tx.clone();
@@ -595,6 +646,70 @@ async fn collision_notifications_flush_ready_lifecycle_events_first() {
 }
 
 #[tokio::test]
+async fn lifecycle_notification_matches_scoped_static_peer_by_session_id() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+
+    let peer = IpAddr::V6("fe80::2".parse().unwrap());
+    insert_test_scoped_managed_peer(
+        &mut mgr,
+        peer,
+        "eth0",
+        10,
+        1,
+        fake_peer_handle(
+            peer,
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    insert_test_scoped_managed_peer(
+        &mut mgr,
+        peer,
+        "eth1",
+        11,
+        2,
+        fake_peer_handle(
+            peer,
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+
+    let mut events = mgr.session_events_tx.subscribe();
+    mgr.handle_session_lifecycle_notification(&SessionLifecycleNotification::StateChanged {
+        session_id: 2,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr: peer,
+        old: SessionState::OpenConfirm,
+        new: SessionState::Established,
+    });
+
+    let event = tokio::time::timeout(Duration::from_millis(250), events.recv())
+        .await
+        .expect("session event timeout")
+        .expect("session event channel closed");
+    let SessionEvent::Lifecycle(event) = event else {
+        panic!("expected lifecycle event");
+    };
+    assert_eq!(event.peer, peer);
+    assert_eq!(event.session_role.as_deref(), Some("primary"));
+}
+
+#[tokio::test]
 async fn session_events_publish_peer_enable_disable() {
     let (tx, rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
@@ -625,7 +740,7 @@ async fn session_events_publish_peer_enable_disable() {
     let mut events = subscribe_session_events(&tx).await;
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(PeerManagerCommand::DisablePeer {
-        address: addr,
+        peer: key(addr),
         reason: None,
         reply: reply_tx,
     })
@@ -637,7 +752,7 @@ async fn session_events_publish_peer_enable_disable() {
 
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(PeerManagerCommand::EnablePeer {
-        address: addr,
+        peer: key(addr),
         reply: reply_tx,
     })
     .await
@@ -856,7 +971,7 @@ async fn delete_peer_removes() {
 
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(PeerManagerCommand::DeletePeer {
-        address: addr,
+        peer: key(addr),
         sync_config_snapshot: false,
         reply: reply_tx,
     })
@@ -915,7 +1030,7 @@ async fn delete_tcp_ao_peer_is_restart_required() {
 
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(PeerManagerCommand::DeletePeer {
-        address: addr,
+        peer: key(addr),
         sync_config_snapshot: true,
         reply: reply_tx,
     })
@@ -1026,7 +1141,7 @@ async fn delete_nonexistent_returns_error() {
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99));
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(PeerManagerCommand::DeletePeer {
-        address: addr,
+        peer: key(addr),
         sync_config_snapshot: false,
         reply: reply_tx,
     })
@@ -1069,7 +1184,7 @@ async fn get_peer_state_existing() {
 
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(PeerManagerCommand::GetPeerState {
-        address: addr,
+        peer: key(addr),
         reply: reply_tx,
     })
     .await
@@ -1101,7 +1216,7 @@ async fn get_peer_state_nonexistent_returns_none() {
 
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(PeerManagerCommand::GetPeerState {
-        address: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)),
+        peer: key(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99))),
         reply: reply_tx,
     })
     .await
@@ -1394,7 +1509,7 @@ async fn pending_refresh_re_arms_when_peer_still_not_established() {
     );
     let hold = transport.peer.hold_time;
     mgr.peers.insert(
-        addr,
+        key(addr),
         ManagedPeer {
             handle,
             session_id: 1,
@@ -1427,7 +1542,7 @@ async fn pending_refresh_re_arms_when_peer_still_not_established() {
          is not an error condition. Got: {result:?}"
     );
 
-    let pending = mgr.peers.get(&addr).unwrap().pending_refresh;
+    let pending = mgr.peers.get(&key(addr)).unwrap().pending_refresh;
     assert!(
         pending,
         "pending_refresh must be re-armed after an update where the peer is still \
@@ -1488,7 +1603,7 @@ async fn channel_full_policy_update_bails_and_preserves_pending_refresh() {
         err.contains("timed out") && err.contains("import:"),
         "error should preserve the channel-full timeout detail: {err}"
     );
-    let managed = mgr.peers.get(&addr).expect("peer remains managed");
+    let managed = mgr.peers.get(&key(addr)).expect("peer remains managed");
     assert!(
         managed.pending_refresh,
         "pending_refresh must be set so a later policy update retries after the \
@@ -1584,7 +1699,7 @@ async fn back_to_back_updates_do_not_lose_pending_refresh() {
         "first update should re-arm the pending refresh while the peer is idle: {first:?}"
     );
     assert!(
-        mgr.peers.get(&addr).unwrap().pending_refresh,
+        mgr.peers.get(&key(addr)).unwrap().pending_refresh,
         "pending_refresh must survive the first back-to-back update while the peer is idle"
     );
     assert_eq!(
@@ -1600,7 +1715,7 @@ async fn back_to_back_updates_do_not_lose_pending_refresh() {
         "second update should consume the carried refresh once the peer is Established: {second:?}"
     );
     assert!(
-        !mgr.peers.get(&addr).unwrap().pending_refresh,
+        !mgr.peers.get(&key(addr)).unwrap().pending_refresh,
         "pending_refresh must clear after the retry successfully sends Route Refresh"
     );
     assert_eq!(
@@ -1609,7 +1724,7 @@ async fn back_to_back_updates_do_not_lose_pending_refresh() {
         "second update must fire the previously carried Route Refresh exactly once"
     );
 
-    mgr.delete_peer(addr, false).await.unwrap();
+    mgr.delete_peer(key(addr), false).await.unwrap();
     drop(mgr);
     let _ = rib_drainer.await;
 }
@@ -1676,11 +1791,11 @@ async fn peer_deletion_after_failed_update_drops_pending_retry_cleanly() {
         "first update should fail and leave pending retry intent: {failed:?}"
     );
     assert!(
-        mgr.peers.get(&addr).unwrap().pending_refresh,
+        mgr.peers.get(&key(addr)).unwrap().pending_refresh,
         "failed update must set pending_refresh before deletion"
     );
 
-    mgr.delete_peer(addr, false)
+    mgr.delete_peer(key(addr), false)
         .await
         .expect("peer deletion after failed update must complete");
     assert!(
@@ -1826,8 +1941,8 @@ async fn honor_graceful_shutdown_hot_apply_targets_ebgp_only() {
         "iBGP exemption also means no route refresh"
     );
 
-    mgr.delete_peer(ebgp, false).await.unwrap();
-    mgr.delete_peer(ibgp, false).await.unwrap();
+    mgr.delete_peer(key(ebgp), false).await.unwrap();
+    mgr.delete_peer(key(ibgp), false).await.unwrap();
     drop(mgr);
     let _ = rib_drainer.await;
 }
@@ -1936,7 +2051,7 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
     let transport = mgr.build_transport_config(&peer_config);
     let hold = transport.peer.hold_time;
     mgr.peers.insert(
-        task_addr,
+        key(task_addr),
         ManagedPeer {
             handle,
             session_id: 1,
@@ -1982,7 +2097,7 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
         "error message must explain the failure mode for the operator: {err_msg}"
     );
 
-    let managed = mgr.peers.get(&task_addr).expect("peer present");
+    let managed = mgr.peers.get(&key(task_addr)).expect("peer present");
     assert!(
         managed.pending_refresh,
         "pending_refresh must be set so the next update_runtime_policies call \
@@ -2094,7 +2209,7 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
     let transport = mgr.build_transport_config(&peer_config);
     let hold = transport.peer.hold_time;
     mgr.peers.insert(
-        task_addr,
+        key(task_addr),
         ManagedPeer {
             handle,
             session_id: 1,
@@ -2138,7 +2253,7 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
         "error message must call out the import side specifically: {err_msg}"
     );
 
-    let managed = mgr.peers.get(&task_addr).expect("peer present");
+    let managed = mgr.peers.get(&key(task_addr)).expect("peer present");
     assert!(
         managed.pending_refresh,
         "pending_refresh must be set so the next update_runtime_policies call \
@@ -2262,7 +2377,7 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
     let transport = mgr.build_transport_config(&peer_config);
     let hold = transport.peer.hold_time;
     mgr.peers.insert(
-        task_addr,
+        key(task_addr),
         ManagedPeer {
             handle,
             session_id: 1,
@@ -2310,7 +2425,7 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
          can diagnose: {err_msg}"
     );
 
-    let managed = mgr.peers.get(&task_addr).expect("peer present");
+    let managed = mgr.peers.get(&key(task_addr)).expect("peer present");
     assert!(
         managed.pending_export_apply,
         "pending_export_apply must be set so the next update_runtime_policies call \
@@ -2449,7 +2564,7 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
     let transport = mgr.build_transport_config(&peer_config);
     let hold = transport.peer.hold_time;
     mgr.peers.insert(
-        task_addr,
+        key(task_addr),
         ManagedPeer {
             handle,
             session_id: 1,
@@ -2493,7 +2608,7 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
         "First call must fail: export apply dropped reply. Got: {result_1:?}"
     );
 
-    let managed = mgr.peers.get(&task_addr).expect("peer present");
+    let managed = mgr.peers.get(&key(task_addr)).expect("peer present");
     assert!(
         managed.import_policy.is_some(),
         "managed.import_policy must have advanced — import apply succeeded. Got: {:?}",
@@ -2536,7 +2651,7 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
         "Second call (export now succeeds) must return Ok. Got: {result_2:?}"
     );
 
-    let managed = mgr.peers.get(&task_addr).expect("peer present");
+    let managed = mgr.peers.get(&key(task_addr)).expect("peer present");
     assert!(
         managed.export_policy.is_some(),
         "managed.export_policy must now be advanced after the successful retry."
@@ -2661,7 +2776,7 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
     let transport = mgr.build_transport_config(&peer_config);
     let hold = transport.peer.hold_time;
     mgr.peers.insert(
-        task_addr,
+        key(task_addr),
         ManagedPeer {
             handle,
             session_id: 1,
@@ -2706,7 +2821,7 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
         "error message must surface the RIB failure for the operator: {err_msg}"
     );
 
-    let managed = mgr.peers.get(&task_addr).expect("peer present");
+    let managed = mgr.peers.get(&key(task_addr)).expect("peer present");
     assert!(
         managed.pending_refresh,
         "pending_refresh MUST be set: bookkeeping already advanced (session-side \
@@ -2816,7 +2931,7 @@ async fn stale_query_state_re_arms_pending_refresh() {
     let transport = mgr.build_transport_config(&peer_config);
     let hold = transport.peer.hold_time;
     mgr.peers.insert(
-        task_addr,
+        key(task_addr),
         ManagedPeer {
             handle,
             session_id: 1,
@@ -2856,7 +2971,7 @@ async fn stale_query_state_re_arms_pending_refresh() {
          Got: {result:?}"
     );
 
-    let managed = mgr.peers.get(&task_addr).expect("peer present");
+    let managed = mgr.peers.get(&key(task_addr)).expect("peer present");
     assert!(
         managed.pending_refresh,
         "pending_refresh MUST be re-armed when query_state_timeout returned None \
@@ -2965,10 +3080,10 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
     let (server_stream, remote_addr) = listener.accept().await.unwrap();
     let mut client_stream = client.await.unwrap();
 
-    mgr.handle_inbound(server_stream, remote_addr.ip()).await;
+    mgr.handle_inbound(server_stream, remote_addr).await;
     assert!(
         mgr.peers
-            .get(&peer_addr)
+            .get(&key(peer_addr))
             .is_some_and(|m| m.pending_inbound.is_some()),
         "inbound socket should become a live collision candidate"
     );
@@ -3029,7 +3144,7 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
     );
     assert!(
         mgr.peers
-            .get(&peer_addr)
+            .get(&key(peer_addr))
             .is_some_and(|m| m.pending_inbound.is_none()),
         "candidate should be promoted, not left pending"
     );
@@ -3043,7 +3158,7 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
     assert!(matches!(msg, Message::Keepalive));
     send_bgp_message(&mut client_stream, &Message::Keepalive).await;
 
-    let managed = mgr.peers.get(&peer_addr).expect("promoted peer");
+    let managed = mgr.peers.get(&key(peer_addr)).expect("promoted peer");
     for _ in 0..20 {
         let state = managed.handle.query_state().await.expect("query state");
         if state.fsm_state == SessionState::Established {
@@ -3109,7 +3224,7 @@ async fn collision_local_wins_drops_inbound_candidate() {
     assert_eq!(pending.collision_dump.load(Ordering::SeqCst), 1);
     assert!(
         mgr.peers
-            .get(&peer_addr)
+            .get(&key(peer_addr))
             .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 1),
         "local-wins collision must keep the primary session"
     );
@@ -3170,7 +3285,7 @@ async fn collision_equal_router_ids_drops_inbound_candidate() {
     assert_eq!(pending.collision_dump.load(Ordering::SeqCst), 1);
     assert!(
         mgr.peers
-            .get(&peer_addr)
+            .get(&key(peer_addr))
             .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 1),
         "equal router-id collision must keep the primary session"
     );
@@ -3224,7 +3339,7 @@ async fn primary_back_to_idle_promotes_pending_inbound_candidate() {
     assert_eq!(pending.shutdown.load(Ordering::SeqCst), 0);
     assert!(
         mgr.peers
-            .get(&peer_addr)
+            .get(&key(peer_addr))
             .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 2),
         "pending inbound candidate should be promoted when the primary idles"
     );
@@ -3290,7 +3405,7 @@ async fn stale_collision_notifications_do_not_mutate_current_peer() {
     assert_eq!(pending.collision_dump.load(Ordering::SeqCst), 0);
     assert!(
         mgr.peers
-            .get(&peer_addr)
+            .get(&key(peer_addr))
             .is_some_and(|m| m.pending_inbound.is_some() && m.session_id == 1),
         "stale notifications must not drop or promote live sessions"
     );
@@ -3338,14 +3453,14 @@ async fn disable_peer_drains_pending_inbound_candidate() {
         2,
     );
 
-    mgr.disable_peer(peer_addr, None).await.unwrap();
+    mgr.disable_peer(key(peer_addr), None).await.unwrap();
 
     wait_counter(&primary.stop, 1).await;
     assert_eq!(pending.shutdown.load(Ordering::SeqCst), 1);
     assert_eq!(primary.stop.load(Ordering::SeqCst), 1);
     assert!(
         mgr.peers
-            .get(&peer_addr)
+            .get(&key(peer_addr))
             .is_some_and(|m| m.pending_inbound.is_none() && !m.enabled),
         "disable must clear the pending candidate"
     );
@@ -3386,7 +3501,7 @@ async fn collision_existing_goes_idle_accepts_pending() {
     // Verify the peer exists
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(PeerManagerCommand::GetPeerState {
-        address: addr,
+        peer: key(addr),
         reply: reply_tx,
     })
     .await
@@ -3433,7 +3548,7 @@ async fn disable_peer_stays_disabled() {
     // Disable peer
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(PeerManagerCommand::DisablePeer {
-        address: addr,
+        peer: key(addr),
         reason: None,
         reply: reply_tx,
     })
@@ -3447,7 +3562,7 @@ async fn disable_peer_stays_disabled() {
     // Verify the peer is still disabled
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(PeerManagerCommand::GetPeerState {
-        address: addr,
+        peer: key(addr),
         reply: reply_tx,
     })
     .await
@@ -3520,13 +3635,13 @@ async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
     let client_stream = client.await.unwrap();
     let peer_addr = remote_addr.ip();
 
-    mgr.handle_inbound(server_stream, peer_addr).await;
+    mgr.handle_inbound(server_stream, sock(peer_addr)).await;
 
     assert_eq!(
         mgr.dynamic_peer_count, 1,
         "dynamic peer count should increment"
     );
-    let info = mgr.get_peer_info(peer_addr).await.unwrap();
+    let info = mgr.get_peer_info(&key(peer_addr)).await.unwrap();
     assert!(info.is_dynamic, "peer should be marked dynamic");
     assert_eq!(info.peer_group.as_deref(), Some("ix-members"));
     assert_eq!(info.description, "ix-auto");
@@ -3535,7 +3650,7 @@ async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
     assert_eq!(peers.len(), 1);
     assert!(peers[0].is_dynamic);
 
-    let session_id = mgr.peers.get(&peer_addr).unwrap().session_id;
+    let session_id = mgr.peers.get(&key(peer_addr)).unwrap().session_id;
     mgr.handle_session_notification(SessionNotification::BackToIdle {
         session_id,
         role: rustbgpd_transport::SessionRole::Primary,
@@ -3548,7 +3663,7 @@ async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
         "dynamic peer count should decrement"
     );
     assert!(
-        mgr.get_peer_info(peer_addr).await.is_none(),
+        mgr.get_peer_info(&key(peer_addr)).await.is_none(),
         "dynamic peer should be removed when it goes idle"
     );
     assert!(mgr.peers.is_empty(), "dynamic peer table should be empty");
@@ -3588,16 +3703,16 @@ async fn dead_lettered_pending_survives_dynamic_peer_auto_removal_and_re_establi
     let client_stream = client.await.unwrap();
     let peer_addr = remote_addr.ip();
 
-    mgr.handle_inbound(server_stream, peer_addr).await;
+    mgr.handle_inbound(server_stream, sock(peer_addr)).await;
     assert_eq!(mgr.dynamic_peer_count, 1);
 
-    let managed = mgr.peers.get_mut(&peer_addr).unwrap();
+    let managed = mgr.peers.get_mut(&key(peer_addr)).unwrap();
     managed.pending_refresh = true;
     managed.pending_export_apply = true;
 
     // Tear down — peer auto-removes, flags should land in the
     // dead-letter side table rather than evaporating.
-    let session_id = mgr.peers.get(&peer_addr).unwrap().session_id;
+    let session_id = mgr.peers.get(&key(peer_addr)).unwrap().session_id;
     mgr.handle_session_notification(SessionNotification::BackToIdle {
         session_id,
         role: rustbgpd_transport::SessionRole::Primary,
@@ -3634,9 +3749,9 @@ async fn dead_lettered_pending_survives_dynamic_peer_auto_removal_and_re_establi
         "test relies on both incarnations sharing an IpAddr key"
     );
 
-    mgr.handle_inbound(server2, peer_addr2).await;
+    mgr.handle_inbound(server2, sock(peer_addr2)).await;
 
-    let managed2 = mgr.peers.get(&peer_addr2).expect("re-established");
+    let managed2 = mgr.peers.get(&key(peer_addr2)).expect("re-established");
     assert!(
         managed2.pending_refresh,
         "new ManagedPeer must inherit pending_refresh from dead-letter table"
@@ -3678,14 +3793,14 @@ async fn dead_lettered_gshut_survives_dynamic_peer_auto_removal_and_re_establish
     let client_stream = client.await.unwrap();
     let peer_addr = remote_addr.ip();
 
-    mgr.handle_inbound(server_stream, peer_addr).await;
+    mgr.handle_inbound(server_stream, sock(peer_addr)).await;
     assert_eq!(mgr.dynamic_peer_count, 1);
     mgr.peers
-        .get_mut(&peer_addr)
+        .get_mut(&key(peer_addr))
         .expect("dynamic peer present")
         .advertise_graceful_shutdown = true;
 
-    let session_id = mgr.peers.get(&peer_addr).unwrap().session_id;
+    let session_id = mgr.peers.get(&key(peer_addr)).unwrap().session_id;
     mgr.handle_session_notification(SessionNotification::BackToIdle {
         session_id,
         role: rustbgpd_transport::SessionRole::Primary,
@@ -3718,9 +3833,9 @@ async fn dead_lettered_gshut_survives_dynamic_peer_auto_removal_and_re_establish
         "test relies on both incarnations sharing an IpAddr key"
     );
 
-    mgr.handle_inbound(server2, peer_addr2).await;
+    mgr.handle_inbound(server2, sock(peer_addr2)).await;
 
-    let managed2 = mgr.peers.get(&peer_addr2).expect("re-established");
+    let managed2 = mgr.peers.get(&key(peer_addr2)).expect("re-established");
     assert!(
         managed2.advertise_graceful_shutdown,
         "new dynamic ManagedPeer must inherit advertise_graceful_shutdown"
@@ -3977,7 +4092,7 @@ async fn bfd_down_ignored_for_disabled_peer() {
     let (mut mgr, _rx) = coupled_mgr(peer, false, fake_bfd_peer_handle(counters.clone()));
     // Operator disabled the peer; the actor's resulting AdminDown/Down must not
     // be treated as a failure.
-    mgr.peers.get_mut(&peer).unwrap().enabled = false;
+    mgr.peers.get_mut(&key(peer)).unwrap().enabled = false;
 
     mgr.handle_bfd_state_change(down(peer)).await;
     assert_eq!(
@@ -3993,7 +4108,7 @@ async fn bfd_change_ignored_for_absent_peer() {
     let counters = Arc::new(BfdCouplingCounters::default());
     let (mut mgr, _rx) = coupled_mgr(peer, false, fake_bfd_peer_handle(counters.clone()));
     // Peer deleted; a stale state change from the draining session is ignored.
-    mgr.peers.remove(&peer);
+    mgr.peers.remove(&key(peer));
 
     mgr.handle_bfd_state_change(down(peer)).await;
     assert_eq!(counters.stop.load(Ordering::SeqCst), 0);
@@ -4062,19 +4177,19 @@ async fn strict_disable_drain_reenable_does_not_leak_bgp_before_fresh_up() {
     wait_counter(&counters.start, 1).await;
 
     // Operator disables; the actor drains the session to a local AdminDown.
-    mgr.peers.get_mut(&peer).unwrap().enabled = false;
+    mgr.peers.get_mut(&key(peer)).unwrap().enabled = false;
     mgr.set_bfd_peer_disabled(peer, true);
     mgr.handle_bfd_state_change(local_admin_down(peer)).await; // drained, ignored
 
     // Re-enable: BFD has not come Up again, so strict must withhold — the local
     // drain's AdminDown must not be read as "permits BGP".
-    mgr.peers.get_mut(&peer).unwrap().enabled = true;
+    mgr.peers.get_mut(&key(peer)).unwrap().enabled = true;
     mgr.set_bfd_peer_disabled(peer, false);
     assert!(
         mgr.bfd_should_withhold(&peer),
         "strict re-enable after a local drain must withhold until fresh BFD Up"
     );
-    mgr.enable_peer(peer).await.unwrap();
+    mgr.enable_peer(key(peer)).await.unwrap();
     assert_eq!(
         counters.start.load(Ordering::SeqCst),
         1,
@@ -4174,7 +4289,7 @@ async fn strict_enable_withholds_then_ack_or_edge_releases() {
     let (mut mgr, _rx) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
 
     // enable_peer always withholds a strict peer; a fresh Up (edge) releases it.
-    mgr.enable_peer(peer).await.unwrap();
+    mgr.enable_peer(key(peer)).await.unwrap();
     assert_eq!(
         counters.start.load(Ordering::SeqCst),
         0,
@@ -4186,7 +4301,7 @@ async fn strict_enable_withholds_then_ack_or_edge_releases() {
 
     // Re-enabling after release withholds again — never trusting a stale state —
     // and the reconcile ack (BFD still Up) releases it.
-    mgr.enable_peer(peer).await.unwrap();
+    mgr.enable_peer(key(peer)).await.unwrap();
     assert!(
         mgr.bfd_withholding(&peer),
         "re-enable re-withholds (no stale trust)"
@@ -4237,11 +4352,11 @@ async fn strict_reenable_withholds_until_ack_no_leak_no_deadlock() {
 
     // Disable then re-enable, coalesced: the actor never drained, the session
     // stays Up, and no fresh edge will arrive.
-    mgr.peers.get_mut(&peer).unwrap().enabled = false;
+    mgr.peers.get_mut(&key(peer)).unwrap().enabled = false;
     mgr.set_bfd_peer_disabled(peer, true);
-    mgr.peers.get_mut(&peer).unwrap().enabled = true;
+    mgr.peers.get_mut(&key(peer)).unwrap().enabled = true;
     mgr.set_bfd_peer_disabled(peer, false);
-    mgr.enable_peer(peer).await.unwrap();
+    mgr.enable_peer(key(peer)).await.unwrap();
     assert!(
         mgr.bfd_withholding(&peer),
         "re-enable withholds — no premature start"
@@ -4272,7 +4387,7 @@ async fn strict_bfd_drops_inbound_until_up() {
         "strict + BFD down → withhold"
     );
 
-    let session_id_before = mgr.peers.get(&peer).unwrap().session_id;
+    let session_id_before = mgr.peers.get(&key(peer)).unwrap().session_id;
 
     // A real inbound socket; the address we drive `handle_inbound` with is the
     // configured strict peer's, not the loopback the socket actually came from.
@@ -4282,11 +4397,11 @@ async fn strict_bfd_drops_inbound_until_up() {
     let (server_stream, _real_addr) = listener.accept().await.unwrap();
     let _client_stream = client.await.unwrap();
 
-    mgr.handle_inbound(server_stream, peer).await;
+    mgr.handle_inbound(server_stream, sock(peer)).await;
 
     // The inbound was dropped: the managed session was neither replaced nor
     // given a pending collision candidate, so no BGP session started.
-    let managed = mgr.peers.get(&peer).unwrap();
+    let managed = mgr.peers.get(&key(peer)).unwrap();
     assert_eq!(
         managed.session_id, session_id_before,
         "strict peer's session must not be replaced by an inbound while BFD is down"
@@ -4315,16 +4430,16 @@ async fn nonstrict_bfd_down_drops_inbound_while_held() {
         "non-strict peer is held while BFD is down"
     );
 
-    let session_id_before = mgr.peers.get(&peer).unwrap().session_id;
+    let session_id_before = mgr.peers.get(&key(peer)).unwrap().session_id;
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let listener_addr = listener.local_addr().unwrap();
     let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
     let (server_stream, _real_addr) = listener.accept().await.unwrap();
     let _client_stream = client.await.unwrap();
 
-    mgr.handle_inbound(server_stream, peer).await;
+    mgr.handle_inbound(server_stream, sock(peer)).await;
 
-    let managed = mgr.peers.get(&peer).unwrap();
+    let managed = mgr.peers.get(&key(peer)).unwrap();
     assert_eq!(
         managed.session_id, session_id_before,
         "inbound must be dropped while a non-strict peer is BFD-held"

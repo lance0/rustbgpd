@@ -199,7 +199,11 @@ impl PeerManager {
         // disabled/deleted peer's session is being drained on purpose (a local
         // operator action; the disable/delete lifecycle path stops BGP), so
         // ignore its changes and clear any stale hold.
-        let active = self.peers.get(&peer).is_some_and(|p| p.enabled);
+        let peer_key = self.unique_peer_key_for_address(peer);
+        let active = peer_key
+            .as_ref()
+            .and_then(|key| self.peers.get(key))
+            .is_some_and(|p| p.enabled);
         if !active {
             if let Some(c) = self.bfd_coupling.as_mut() {
                 c.held_down.remove(&peer);
@@ -221,7 +225,7 @@ impl PeerManager {
             if let Some(c) = self.bfd_coupling.as_mut() {
                 c.held_down.remove(&peer);
             }
-            if let Some(managed) = self.peers.get(&peer) {
+            if let Some(managed) = peer_key.as_ref().and_then(|key| self.peers.get(key)) {
                 if let Err(e) = managed.handle.start().await {
                     warn!(%peer, error = %e, "BFD permits BGP: failed to (re)start session");
                 } else if change.remote_admin_down {
@@ -246,7 +250,7 @@ impl PeerManager {
                 if already_held {
                     return;
                 }
-                if let Some(managed) = self.peers.get(&peer) {
+                if let Some(managed) = peer_key.as_ref().and_then(|key| self.peers.get(key)) {
                     let reason = bytes::Bytes::from_static(b"BFD session down");
                     if let Err(e) = managed.handle.stop(Some(reason)).await {
                         warn!(%peer, error = %e, "BFD down: failed to stop BGP session");

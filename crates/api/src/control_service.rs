@@ -309,6 +309,7 @@ mod tests {
                 let peers = vec![
                     PeerInfo {
                         address: "10.0.0.1".parse().unwrap(),
+                        interface: None,
                         remote_asn: 65001,
                         description: String::new(),
                         peer_group: None,
@@ -335,6 +336,7 @@ mod tests {
                     },
                     PeerInfo {
                         address: "10.0.0.2".parse().unwrap(),
+                        interface: None,
                         remote_asn: 65002,
                         description: String::new(),
                         peer_group: None,

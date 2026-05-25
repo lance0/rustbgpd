@@ -8,12 +8,21 @@ use rustbgpd_wire::{Afi, Safi};
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
-use crate::peer_types::{ConfigEvent, PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig};
+use crate::peer_types::{
+    ConfigEvent, PeerInfo, PeerKey, PeerManagerCommand, PeerManagerNeighborConfig,
+};
 use crate::proto;
 use crate::server::{AccessMode, read_only_rejection};
 use rustbgpd_rib::RibUpdate;
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn is_ipv6_link_local(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V6(v6) => v6.segments()[0] & 0xffc0 == 0xfe80,
+        IpAddr::V4(_) => false,
+    }
+}
 
 /// Parse a list of family strings from the gRPC proto into `(Afi, Safi)` pairs.
 #[allow(clippy::result_large_err)] // tonic::Status is the standard gRPC error type
@@ -142,6 +151,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
 
     let config = proto::NeighborConfig {
         address: info.address.to_string(),
+        interface: info.interface.clone().unwrap_or_default(),
         remote_asn: info.remote_asn,
         description: info.description.clone(),
         hold_time: info.hold_time.map_or(0, u32::from),
@@ -181,8 +191,22 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
     }
 }
 
+fn peer_key(address: &str, interface: &str) -> Result<PeerKey, Status> {
+    let address: IpAddr = address
+        .parse()
+        .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+    Ok(PeerKey::new(
+        address,
+        (!interface.trim().is_empty()).then(|| interface.to_string()),
+    ))
+}
+
 #[tonic::async_trait]
 impl proto::neighbor_service_server::NeighborService for NeighborService {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "gRPC add maps the public proto surface into the peer-manager command"
+    )]
     async fn add_neighbor(
         &self,
         request: Request<proto::AddNeighborRequest>,
@@ -207,6 +231,20 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         if config.hold_time > 0 && config.hold_time < 3 {
             return Err(Status::invalid_argument("hold_time must be 0 or >= 3"));
         }
+        let interface = (!config.interface.trim().is_empty()).then(|| config.interface.clone());
+        match (is_ipv6_link_local(address), interface.as_ref()) {
+            (true, None) => {
+                return Err(Status::invalid_argument(
+                    "interface is required for IPv6 link-local neighbors",
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(Status::invalid_argument(
+                    "interface is only valid for IPv6 link-local neighbors",
+                ));
+            }
+            _ => {}
+        }
 
         let families = parse_families_proto(&config.families)?;
         let remove_private_as = parse_remove_private_as_proto(&config.remove_private_as)?;
@@ -225,6 +263,8 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
 
         let peer_config = PeerManagerNeighborConfig {
             address,
+            interface,
+            scope_id: None,
             remote_asn: config.remote_asn,
             description: config.description,
             peer_group: if config.peer_group.trim().is_empty() {
@@ -301,10 +341,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let address: IpAddr = req
-            .address
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+        let peer = peer_key(&req.address, &req.interface)?;
 
         // Reserve config persistence capacity before mutating runtime state.
         // This makes DeleteNeighbor fail-fast when persistence is unavailable.
@@ -313,7 +350,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
             .send(PeerManagerCommand::DeletePeer {
-                address,
+                peer: peer.clone(),
                 sync_config_snapshot: true,
                 reply: reply_tx,
             })
@@ -326,7 +363,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .map_err(Status::not_found)?;
 
         if let Some(permit) = persist_permit {
-            permit.send(ConfigEvent::NeighborDeleted(address));
+            permit.send(ConfigEvent::NeighborDeleted(peer));
         }
 
         Ok(Response::new(proto::DeleteNeighborResponse {}))
@@ -361,15 +398,12 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         request: Request<proto::GetNeighborStateRequest>,
     ) -> Result<Response<proto::NeighborState>, Status> {
         let req = request.into_inner();
-        let address: IpAddr = req
-            .address
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+        let peer = peer_key(&req.address, &req.interface)?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
             .send(PeerManagerCommand::GetPeerState {
-                address,
+                peer: peer.clone(),
                 reply: reply_tx,
             })
             .await
@@ -378,7 +412,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let info = reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .ok_or_else(|| Status::not_found(format!("peer {address} not found")))?;
+            .ok_or_else(|| Status::not_found(format!("peer {peer} not found")))?;
 
         let mut state = peer_info_to_proto(&info);
         state.prefixes_sent = query_advertised_count(&self.rib_tx, info.address).await?;
@@ -393,15 +427,12 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let address: IpAddr = req
-            .address
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+        let peer = peer_key(&req.address, &req.interface)?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
             .send(PeerManagerCommand::EnablePeer {
-                address,
+                peer,
                 reply: reply_tx,
             })
             .await
@@ -423,10 +454,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let address: IpAddr = req
-            .address
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+        let peer = peer_key(&req.address, &req.interface)?;
 
         // Empty means "all configured families" — pass empty vec through.
         // Transport filters to negotiated families before sending.
@@ -439,7 +467,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
             .send(PeerManagerCommand::SoftResetIn {
-                address,
+                peer,
                 families,
                 reply: reply_tx,
             })
@@ -468,10 +496,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let address: IpAddr = req
-            .address
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+        let peer = peer_key(&req.address, &req.interface)?;
 
         let reason = if req.reason.is_empty() {
             None
@@ -484,7 +509,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
             .send(PeerManagerCommand::DisablePeer {
-                address,
+                peer,
                 reason,
                 reply: reply_tx,
             })
@@ -564,20 +589,16 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let req = request.into_inner();
         // Empty address means broadcast to every currently-managed peer
         // (operator running planned maintenance on the whole router).
-        let address = if req.address.is_empty() {
+        let peer = if req.address.is_empty() {
             None
         } else {
-            Some(
-                req.address
-                    .parse::<IpAddr>()
-                    .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?,
-            )
+            Some(peer_key(&req.address, &req.interface)?)
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
             .send(PeerManagerCommand::SetGracefulShutdown {
-                address,
+                peer,
                 enabled: req.enabled,
                 reply: reply_tx,
             })
@@ -619,6 +640,7 @@ mod tests {
         let req = Request::new(proto::AddNeighborRequest {
             config: Some(proto::NeighborConfig {
                 address: "10.0.0.2".into(),
+                interface: String::new(),
                 remote_asn: 0,
                 description: String::new(),
                 hold_time: 90,
@@ -640,6 +662,7 @@ mod tests {
         let req = Request::new(proto::AddNeighborRequest {
             config: Some(proto::NeighborConfig {
                 address: "10.0.0.2".into(),
+                interface: String::new(),
                 remote_asn: 65002,
                 description: String::new(),
                 hold_time: 2,
@@ -656,6 +679,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_neighbor_rejects_link_local_without_interface() {
+        let svc = make_service();
+        let req = Request::new(proto::AddNeighborRequest {
+            config: Some(proto::NeighborConfig {
+                address: "fe80::1".into(),
+                interface: String::new(),
+                remote_asn: 65002,
+                description: String::new(),
+                hold_time: 90,
+                max_prefixes: 0,
+                families: Vec::new(),
+                peer_group: String::new(),
+                remove_private_as: String::new(),
+                ..Default::default()
+            }),
+        });
+        let err = svc.add_neighbor(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("interface"));
+    }
+
+    #[tokio::test]
+    async fn add_neighbor_rejects_numbered_peer_with_interface() {
+        let svc = make_service();
+        let req = Request::new(proto::AddNeighborRequest {
+            config: Some(proto::NeighborConfig {
+                address: "2001:db8::1".into(),
+                interface: "eth0".into(),
+                remote_asn: 65002,
+                description: String::new(),
+                hold_time: 90,
+                max_prefixes: 0,
+                families: Vec::new(),
+                peer_group: String::new(),
+                remove_private_as: String::new(),
+                ..Default::default()
+            }),
+        });
+        let err = svc.add_neighbor(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("link-local"));
+    }
+
+    #[tokio::test]
     async fn add_neighbor_rejected_on_read_only_listener() {
         let (tx, mut rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
@@ -663,6 +730,7 @@ mod tests {
         let req = Request::new(proto::AddNeighborRequest {
             config: Some(proto::NeighborConfig {
                 address: "10.0.0.2".into(),
+                interface: String::new(),
                 remote_asn: 65002,
                 description: String::new(),
                 hold_time: 90,
@@ -711,6 +779,7 @@ mod tests {
         let err = svc
             .delete_neighbor(Request::new(proto::DeleteNeighborRequest {
                 address: "10.0.0.2".into(),
+                interface: String::new(),
             }))
             .await
             .unwrap_err();
@@ -719,6 +788,7 @@ mod tests {
         let err = svc
             .enable_neighbor(Request::new(proto::EnableNeighborRequest {
                 address: "10.0.0.2".into(),
+                interface: String::new(),
             }))
             .await
             .unwrap_err();
@@ -727,6 +797,7 @@ mod tests {
         let err = svc
             .disable_neighbor(Request::new(proto::DisableNeighborRequest {
                 address: "10.0.0.2".into(),
+                interface: String::new(),
                 reason: "maintenance".into(),
             }))
             .await
@@ -736,6 +807,7 @@ mod tests {
         let err = svc
             .soft_reset_in(Request::new(proto::SoftResetInRequest {
                 address: "10.0.0.2".into(),
+                interface: String::new(),
                 families: Vec::new(),
             }))
             .await
@@ -745,6 +817,7 @@ mod tests {
         let err = svc
             .set_graceful_shutdown(Request::new(proto::SetGracefulShutdownRequest {
                 address: "10.0.0.2".into(),
+                interface: String::new(),
                 enabled: true,
             }))
             .await
@@ -790,6 +863,7 @@ mod tests {
 
         let req = Request::new(proto::SoftResetInRequest {
             address: "10.0.0.2".into(),
+            interface: String::new(),
             families: vec![
                 "ipv4_unicast".into(),
                 "ipv4_unicast".into(),
@@ -816,6 +890,7 @@ mod tests {
             if let Some(PeerManagerCommand::GetPeerState { reply, .. }) = peer_rx.recv().await {
                 let _ = reply.send(Some(PeerInfo {
                     address: addr,
+                    interface: None,
                     remote_asn: 65001,
                     description: String::new(),
                     peer_group: None,
@@ -852,6 +927,7 @@ mod tests {
         let resp = svc
             .get_neighbor_state(Request::new(proto::GetNeighborStateRequest {
                 address: "10.0.0.1".into(),
+                interface: String::new(),
             }))
             .await
             .unwrap()
@@ -864,6 +940,7 @@ mod tests {
     fn peer_info_to_proto_includes_families() {
         let info = PeerInfo {
             address: "10.0.0.1".parse().unwrap(),
+            interface: None,
             remote_asn: 65001,
             description: String::new(),
             peer_group: None,
@@ -911,6 +988,7 @@ mod tests {
         let req = Request::new(proto::AddNeighborRequest {
             config: Some(proto::NeighborConfig {
                 address: "10.0.0.2".into(),
+                interface: String::new(),
                 remote_asn: 65002,
                 description: String::new(),
                 hold_time: 90,
@@ -942,6 +1020,7 @@ mod tests {
 
         let req = Request::new(proto::DeleteNeighborRequest {
             address: "10.0.0.2".into(),
+            interface: String::new(),
         });
         let err = svc.delete_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::Internal);
@@ -954,6 +1033,7 @@ mod tests {
         let req = Request::new(proto::AddNeighborRequest {
             config: Some(proto::NeighborConfig {
                 address: "10.0.0.2".into(),
+                interface: String::new(),
                 remote_asn: 65002,
                 description: String::new(),
                 hold_time: 90,
@@ -975,6 +1055,7 @@ mod tests {
         let req = Request::new(proto::AddNeighborRequest {
             config: Some(proto::NeighborConfig {
                 address: "10.0.0.2".into(),
+                interface: String::new(),
                 remote_asn: 65001,
                 description: String::new(),
                 hold_time: 90,
@@ -996,6 +1077,7 @@ mod tests {
         let req = Request::new(proto::AddNeighborRequest {
             config: Some(proto::NeighborConfig {
                 address: "10.0.0.2".into(),
+                interface: String::new(),
                 remote_asn: 65001,
                 description: String::new(),
                 hold_time: 90,

@@ -390,6 +390,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | Field                  | Type     | Required | Default | Description                                      |
 |------------------------|----------|----------|---------|--------------------------------------------------|
 | `address`              | string   | yes      | --      | Peer IP address (IPv4 or IPv6)                   |
+| `interface`            | string   | IPv6 link-local only | -- | Interface name for `fe80::/10` / unnumbered peers |
 | `remote_asn`           | u32      | yes      | --      | Peer's autonomous system number                  |
 | `description`          | string   | no       | --      | Human-readable label (used in logs; defaults to address if absent) |
 | `peer_group`           | string   | no       | --      | Named peer-group to inherit transport and policy defaults from      |
@@ -412,6 +413,20 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `llgr_stale_time`      | u32      | no       | 0       | LLGR stale time in seconds (0 = disabled, max 16777215; RFC 9494)    |
 | `add_path`             | table    | no       | --      | Add-Path (RFC 7911) config table (see below)                         |
 | `log_level`            | string   | no       | --      | Override log level for this peer: `"error"`, `"warn"`, `"info"`, `"debug"`, or `"trace"` |
+
+IPv6 link-local neighbors (`fe80::/10`) must set `interface`, because the same
+address is valid on multiple links. Numbered IPv4 / IPv6 neighbors must not set
+`interface`. Duplicate numbered peers are rejected by address; duplicate
+link-local peers are allowed only when the `(address, interface)` pair is
+unique.
+
+```toml
+[[neighbors]]
+address = "fe80::5054:ff:fe00:1"
+interface = "eth1"
+remote_asn = 65101
+families = ["ipv4_unicast"]
+```
 
 TCP-AO (RFC 5925) `tcp_ao` is accepted for static `[[neighbors]]` only. On
 Linux, rustbgpd installs the configured key on outbound active-open sockets
@@ -525,7 +540,8 @@ not this path.
 
 BFD is **static-neighbors only** in v1 — a `[[dynamic_neighbors]]` range whose
 peer group enables BFD is rejected at config time. v1 covers IPv4 + IPv6
-**global** addresses (IPv6 link-local / unnumbered is deferred to v1.1). Like
+**global** addresses. BFD on IPv6 link-local / unnumbered peers is still
+deferred even though the BGP neighbor itself can be interface scoped. Like
 TCP-AO, BFD edits are **restart-required**: on SIGHUP rustbgpd pins
 `[[bfd_profiles]]` and neighbor / peer-group `bfd` back to the live snapshot and
 reports them as restart-required in `--diff`. Inspect sessions with
@@ -2014,6 +2030,8 @@ starting:
 |------|-------|
 | `router_id` must be a valid IPv4 address | `invalid router_id` |
 | Each `address` in `[[neighbors]]` must be a valid IP address (IPv4 or IPv6) | `invalid neighbor address` |
+| IPv6 link-local `[[neighbors]]` must set `interface`; numbered neighbors must not | `invalid neighbor config` |
+| `[[neighbors]]` identity must be unique by address for numbered peers and by `(address, interface)` for IPv6 link-local peers | `duplicate neighbor address/interface` |
 | `prometheus_addr` must be a valid `ip:port` | `invalid prometheus_addr` |
 | `grpc_tcp.address` must be a valid `ip:port` when `grpc_tcp` is enabled | `invalid gRPC config` |
 | `grpc_uds.path` must be absolute when configured | `invalid gRPC config` |

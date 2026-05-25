@@ -189,6 +189,8 @@ pub struct JsonGlobal {
 #[derive(Serialize)]
 pub struct JsonNeighbor {
     pub address: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub interface: String,
     pub remote_asn: u32,
     pub state: String,
     /// True when the daemon couldn't read fresh state from the peer
@@ -206,6 +208,8 @@ pub struct JsonNeighbor {
 #[derive(Serialize)]
 pub struct JsonNeighborDetail {
     pub address: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub interface: String,
     pub remote_asn: u32,
     pub state: String,
     /// See [`JsonNeighbor::stale`].
@@ -358,7 +362,15 @@ pub fn print_neighbor_table(neighbors: &[proto::NeighborState]) {
         .map(|n| {
             let cfg = n.config.as_ref();
             Row {
-                addr: cfg.map(|c| c.address.clone()).unwrap_or_default(),
+                addr: cfg
+                    .map(|c| {
+                        if c.interface.is_empty() {
+                            c.address.clone()
+                        } else {
+                            format!("{}%{}", c.address, c.interface)
+                        }
+                    })
+                    .unwrap_or_default(),
                 asn: cfg.map(|c| c.remote_asn.to_string()).unwrap_or_default(),
                 state_plain: format_state_with_stale(n.state, n.stale).to_string(),
                 state_colored: colored_state_with_stale(n.state, n.stale),
@@ -669,6 +681,7 @@ mod tests {
     fn test_json_neighbor_detail_serializes_dynamic_peer_fields() {
         let detail = JsonNeighborDetail {
             address: "10.0.0.2".to_string(),
+            interface: String::new(),
             remote_asn: 65002,
             state: "Established".to_string(),
             stale: false,

@@ -17,8 +17,8 @@ const DEFAULT_LISTEN_BACKLOG: i32 = 1024;
 pub struct AcceptedConnection {
     /// The raw TCP stream for the accepted connection.
     pub stream: TcpStream,
-    /// IP address of the remote peer.
-    pub peer_addr: IpAddr,
+    /// Socket address of the remote peer, including IPv6 scope when available.
+    pub peer_addr: SocketAddr,
     /// Runtime TCP-AO socket information when the peer matched a configured
     /// listener MKT and Linux inspection succeeded.
     pub tcp_ao_info: Option<TcpAoInfoSnapshot>,
@@ -112,7 +112,7 @@ impl BgpListener {
                     let tcp_ao_info = self.inspect_tcp_ao_accept(&stream, peer_ip);
                     let conn = AcceptedConnection {
                         stream,
-                        peer_addr: peer_ip,
+                        peer_addr,
                         tcp_ao_info,
                     };
                     if self.accept_tx.send(conn).await.is_err() {

@@ -480,7 +480,7 @@ async fn create_and_connect(
     }
 
     if config.ttl_security {
-        crate::socket_opts::set_gtsm(&socket)?;
+        crate::socket_opts::set_gtsm(&socket, config.remote_addr)?;
         debug!(peer = %peer_label, "GTSM / TTL security configured");
     }
 

@@ -1,8 +1,7 @@
 use std::collections::HashMap;
-use std::net::IpAddr;
 
 use rustbgpd_api::peer_types::{
-    PeerManagerNeighborConfig, ReconcileFailure, ReconcileFailureKind, ReconcileResult,
+    PeerKey, PeerManagerNeighborConfig, ReconcileFailure, ReconcileFailureKind, ReconcileResult,
     RuntimeConfigDiff,
 };
 use tracing::{info, warn};
@@ -15,7 +14,7 @@ impl PeerManager {
     pub(super) async fn reconcile_peers(
         &mut self,
         added: Vec<PeerManagerNeighborConfig>,
-        removed: Vec<IpAddr>,
+        removed: Vec<PeerKey>,
         changed: Vec<PeerManagerNeighborConfig>,
     ) -> ReconcileResult {
         let mut result = ReconcileResult::default();
@@ -31,47 +30,48 @@ impl PeerManager {
         // ManagedPeer would come up with `advertise_graceful_shutdown
         // = false`, silently dropping the toggle mid-maintenance and
         // re-emitting untagged routes on the next outbound tick.
-        let preserved_gshut: HashMap<IpAddr, bool> = changed
+        let preserved_gshut: HashMap<PeerKey, bool> = changed
             .iter()
             .filter_map(|cfg| {
+                let peer = PeerKey::new(cfg.address, cfg.interface.clone());
                 self.peers
-                    .get(&cfg.address)
+                    .get(&peer)
                     .filter(|m| m.advertise_graceful_shutdown)
-                    .map(|_| (cfg.address, true))
+                    .map(|_| (peer, true))
             })
             .collect();
 
         // Remove peers
         for addr in &removed {
-            if let Err(e) = self.delete_peer(*addr, false).await {
-                warn!(%addr, error = %e, "reconcile: failed to remove peer");
+            if let Err(e) = self.delete_peer(addr.clone(), false).await {
+                warn!(peer = %addr, error = %e, "reconcile: failed to remove peer");
                 result.failures.push(ReconcileFailure {
                     kind: ReconcileFailureKind::Remove,
-                    address: *addr,
+                    peer: addr.clone(),
                     error: e,
                 });
             }
         }
         // Changed peers: delete then re-add
         for cfg in &changed {
-            let addr = cfg.address;
+            let addr = PeerKey::new(cfg.address, cfg.interface.clone());
             if let Err(e) = self
-                .delete_peer_for_reconfigure(addr, cfg.tcp_ao.as_ref())
+                .delete_peer_for_reconfigure(addr.clone(), cfg.tcp_ao.as_ref())
                 .await
             {
-                warn!(%addr, error = %e, "reconcile: failed to remove changed peer");
+                warn!(peer = %addr, error = %e, "reconcile: failed to remove changed peer");
                 result.failures.push(ReconcileFailure {
                     kind: ReconcileFailureKind::ChangeRemove,
-                    address: addr,
+                    peer: addr,
                     error: e,
                 });
                 continue;
             }
             if let Err(e) = self.add_peer(cfg.clone(), false).await {
-                warn!(%addr, error = %e, "reconcile: failed to re-add changed peer");
+                warn!(peer = %addr, error = %e, "reconcile: failed to re-add changed peer");
                 result.failures.push(ReconcileFailure {
                     kind: ReconcileFailureKind::ChangeAdd,
-                    address: addr,
+                    peer: addr,
                     error: e,
                 });
             }
@@ -84,9 +84,10 @@ impl PeerManager {
         // state is in place and the bool will be applied to the
         // session's first emission once it reaches Established.
         for (addr, enabled) in preserved_gshut {
+            let label = addr.to_string();
             if let Err(e) = self.set_graceful_shutdown(Some(addr), enabled).await {
                 warn!(
-                    %addr,
+                    peer = %label,
                     error = %e,
                     "reconcile: failed to replay graceful-shutdown toggle on changed peer"
                 );
@@ -94,12 +95,12 @@ impl PeerManager {
         }
         // Add new peers
         for cfg in added {
-            let addr = cfg.address;
+            let addr = PeerKey::new(cfg.address, cfg.interface.clone());
             if let Err(e) = self.add_peer(cfg, false).await {
-                warn!(%addr, error = %e, "reconcile: failed to add new peer");
+                warn!(peer = %addr, error = %e, "reconcile: failed to add new peer");
                 result.failures.push(ReconcileFailure {
                     kind: ReconcileFailureKind::Add,
-                    address: addr,
+                    peer: addr,
                     error: e,
                 });
             }

@@ -353,13 +353,12 @@ pub fn peer_group_references(config: &Config, name: &str) -> Vec<String> {
 pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<(), ConfigError> {
     match event {
         ConfigEvent::NeighborAdded(cfg) => {
-            if !config
-                .neighbors
-                .iter()
-                .any(|neighbor| neighbor.address == cfg.address.to_string())
-            {
+            if !config.neighbors.iter().any(|neighbor| {
+                neighbor.address == cfg.address.to_string() && neighbor.interface == cfg.interface
+            }) {
                 config.neighbors.push(Neighbor {
                     address: cfg.address.to_string(),
+                    interface: cfg.interface.clone(),
                     remote_asn: cfg.remote_asn,
                     description: Some(cfg.description.clone()),
                     peer_group: cfg.peer_group.clone(),
@@ -426,9 +425,11 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                 });
             }
         }
-        ConfigEvent::NeighborDeleted(address) => {
-            let addr = address.to_string();
-            config.neighbors.retain(|neighbor| neighbor.address != addr);
+        ConfigEvent::NeighborDeleted(peer) => {
+            let addr = peer.address.to_string();
+            config.neighbors.retain(|neighbor| {
+                !(neighbor.address == addr && neighbor.interface == peer.interface)
+            });
         }
         ConfigEvent::SetPolicy { name, definition } => {
             config
@@ -696,6 +697,8 @@ remote_asn = 65002
             &mut config,
             &ConfigEvent::NeighborAdded(rustbgpd_api::peer_types::PeerManagerNeighborConfig {
                 address: "10.0.0.3".parse().unwrap(),
+                interface: None,
+                scope_id: None,
                 remote_asn: 65003,
                 description: "protected".to_string(),
                 peer_group: None,

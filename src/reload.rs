@@ -26,6 +26,8 @@ fn build_peer_mgr_config(
 ) -> PeerManagerNeighborConfig {
     PeerManagerNeighborConfig {
         address: tc.remote_addr.ip(),
+        interface: tc.peer_interface.clone(),
+        scope_id: tc.peer_scope_id,
         remote_asn: tc.peer.remote_asn,
         description: label.to_string(),
         peer_group,
@@ -841,11 +843,14 @@ pub(crate) async fn reload_config(
                 );
             }
         };
-        let peer_map: std::collections::HashMap<String, _> = peer_configs
+        let peer_map: std::collections::HashMap<(String, Option<String>), _> = peer_configs
             .into_iter()
             .map(|neighbor| {
                 (
-                    neighbor.transport_config.remote_addr.ip().to_string(),
+                    (
+                        neighbor.transport_config.remote_addr.ip().to_string(),
+                        neighbor.transport_config.peer_interface.clone(),
+                    ),
                     neighbor,
                 )
             })
@@ -854,15 +859,17 @@ pub(crate) async fn reload_config(
             neighbors
                 .iter()
                 .filter_map(|n| {
-                    peer_map.get(&n.address).map(|neighbor| {
-                        build_peer_mgr_config(
-                            &neighbor.transport_config,
-                            &neighbor.label,
-                            neighbor.import_policy.as_ref(),
-                            neighbor.export_policy.as_ref(),
-                            neighbor.peer_group.clone(),
-                        )
-                    })
+                    peer_map
+                        .get(&(n.address.clone(), n.interface.clone()))
+                        .map(|neighbor| {
+                            build_peer_mgr_config(
+                                &neighbor.transport_config,
+                                &neighbor.label,
+                                neighbor.import_policy.as_ref(),
+                                neighbor.export_policy.as_ref(),
+                                neighbor.peer_group.clone(),
+                            )
+                        })
                 })
                 .collect()
         };
@@ -918,7 +925,7 @@ pub(crate) async fn reload_config(
                 for failure in &reconcile.failures {
                     warn!(
                         bucket = "neighbors.reconcile",
-                        target = %failure.address,
+                        target = %failure.peer,
                         kind = ?failure.kind,
                         error = %failure.error,
                         "config reload step failed"
@@ -1988,8 +1995,8 @@ hold_time = 90
                     changed.len(),
                 )
             }
-            PeerManagerCommand::SoftResetIn { address, .. } => {
-                format!("SoftResetIn({address})")
+            PeerManagerCommand::SoftResetIn { peer, .. } => {
+                format!("SoftResetIn({peer})")
             }
             _ => "Other".to_string(),
         }
@@ -2402,7 +2409,10 @@ peer_group = "secure"
                         let result = ReconcileResult {
                             failures: vec![ReconcileFailure {
                                 kind: ReconcileFailureKind::Add,
-                                address: "10.0.0.99".parse().unwrap(),
+                                peer: rustbgpd_api::peer_types::PeerKey::new(
+                                    "10.0.0.99".parse().unwrap(),
+                                    None,
+                                ),
                                 error: "simulated reconcile failure".to_string(),
                             }],
                         };

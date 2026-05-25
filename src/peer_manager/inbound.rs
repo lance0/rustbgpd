@@ -1,5 +1,6 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{Ipv4Addr, SocketAddr};
 
+use rustbgpd_api::peer_types::PeerKey;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_transport::{PeerHandle, SessionIdentity};
 use tokio::net::TcpStream;
@@ -10,19 +11,20 @@ use super::{ManagedPeer, PEER_QUERY_TIMEOUT, PeerManager, PendingInbound};
 impl PeerManager {
     pub(super) async fn spawn_pending_inbound(
         &mut self,
-        peer_addr: IpAddr,
+        peer_key: PeerKey,
         stream: TcpStream,
     ) -> bool {
+        let peer_addr = peer_key.address;
         if self
             .peers
-            .get(&peer_addr)
+            .get(&peer_key)
             .is_some_and(|m| m.pending_inbound.is_some())
         {
             info!(%peer_addr, "dropping extra inbound connection while collision candidate is pending");
             return false;
         }
 
-        let Some(managed) = self.peers.get(&peer_addr) else {
+        let Some(managed) = self.peers.get(&peer_key) else {
             return false;
         };
         let transport_config = managed.transport_config.clone();
@@ -52,7 +54,7 @@ impl PeerManager {
             return false;
         }
 
-        let Some(managed) = self.peers.get_mut(&peer_addr) else {
+        let Some(managed) = self.peers.get_mut(&peer_key) else {
             let _ = handle.shutdown().await;
             return false;
         };
@@ -69,15 +71,39 @@ impl PeerManager {
         true
     }
 
+    fn inbound_peer_key(&self, peer_addr: SocketAddr) -> Option<PeerKey> {
+        let ip = peer_addr.ip();
+        if let SocketAddr::V6(v6) = peer_addr
+            && v6.ip().segments()[0] & 0xffc0 == 0xfe80
+        {
+            return self
+                .peers
+                .keys()
+                .find(|key| {
+                    key.address == ip
+                        && self
+                            .peers
+                            .get(*key)
+                            .and_then(|managed| managed.transport_config.peer_scope_id)
+                            == Some(v6.scope_id())
+                })
+                .cloned();
+        }
+        let key = PeerKey::new(ip, None);
+        self.peers.contains_key(&key).then_some(key)
+    }
+
     #[expect(clippy::too_many_lines)]
-    pub(super) async fn handle_inbound(&mut self, stream: TcpStream, peer_addr: IpAddr) {
+    pub(super) async fn handle_inbound(&mut self, stream: TcpStream, peer_addr: SocketAddr) {
+        let peer_ip = peer_addr.ip();
+        let peer_key = self.inbound_peer_key(peer_addr);
         // If peer is not statically configured, try dynamic range matching.
-        if !self.peers.contains_key(&peer_addr) {
-            if let Some(range) = self.match_dynamic_range(peer_addr) {
+        if peer_key.is_none() {
+            if let Some(range) = self.match_dynamic_range(peer_ip) {
                 // Check dynamic peer limit
                 if self.dynamic_peer_count >= self.dynamic_neighbor_limit as usize {
                     warn!(
-                        %peer_addr,
+                        %peer_ip,
                         limit = self.dynamic_neighbor_limit,
                         "dynamic neighbor limit reached, dropping inbound connection"
                     );
@@ -87,7 +113,7 @@ impl PeerManager {
                 // Look up the peer group to build the config
                 let Some(group) = self.current_config.peer_groups.get(&range.peer_group) else {
                     warn!(
-                        %peer_addr,
+                        %peer_ip,
                         peer_group = %range.peer_group,
                         "dynamic neighbor peer_group not found, dropping"
                     );
@@ -103,7 +129,7 @@ impl PeerManager {
 
                 // Resolve the dynamic neighbor config from the peer group
                 let resolved = match self.current_config.resolve_dynamic_neighbor(
-                    peer_addr,
+                    peer_ip,
                     remote_asn,
                     &description,
                     group,
@@ -112,7 +138,7 @@ impl PeerManager {
                     Ok(r) => r,
                     Err(e) => {
                         warn!(
-                            %peer_addr,
+                            %peer_ip,
                             error = %e,
                             "failed to resolve dynamic neighbor config, dropping"
                         );
@@ -126,7 +152,7 @@ impl PeerManager {
                 let export_policy = cfg.export_policy.clone();
                 let advertise_graceful_shutdown = self
                     .dead_lettered_pending
-                    .get(&peer_addr)
+                    .get(&peer_ip)
                     .is_some_and(|pending| pending.graceful_shutdown);
 
                 let session_id = self.allocate_session_id();
@@ -169,7 +195,7 @@ impl PeerManager {
                     pending_export_apply: false,
                     advertise_graceful_shutdown,
                 };
-                self.peers.insert(peer_addr, managed);
+                self.peers.insert(PeerKey::new(peer_ip, None), managed);
                 self.dynamic_peer_count += 1;
 
                 // Restore any dead-lettered hot-apply / Route Refresh
@@ -177,10 +203,10 @@ impl PeerManager {
                 // removal at this address. Carries the retry across
                 // the brief drop-and-recreate window so a transient
                 // TCP flap doesn't silently lose a SetPolicy edit.
-                self.restore_dead_lettered_pending(peer_addr);
+                self.restore_dead_lettered_pending(peer_ip);
 
                 info!(
-                    %peer_addr,
+                    %peer_ip,
                     "accepted dynamic neighbor from configured range"
                 );
                 return;
@@ -188,9 +214,9 @@ impl PeerManager {
 
             // No dynamic range match either — drop with hint
             warn!(
-                %peer_addr,
+                %peer_ip,
                 hint = %format_args!(
-                    "to accept: rustbgpctl neighbor {peer_addr} add --asn <REMOTE_ASN>"
+                    "to accept: rustbgpctl neighbor {peer_ip} add --asn <REMOTE_ASN>"
                 ),
                 "inbound connection from unknown peer, dropping"
             );
@@ -210,12 +236,14 @@ impl PeerManager {
         // add-time decision) so an established, BFD-up peer still accepts inbound
         // normally; the hold's eventual release starts the session via the
         // normal up→start path.
+        let peer_key = peer_key.expect("checked above");
+        let peer_addr = peer_key.address;
         if self.bfd_withholding(&peer_addr) {
             info!(%peer_addr, "BFD — dropping inbound connection while BGP is held");
             return;
         }
 
-        let Some(managed) = self.peers.get_mut(&peer_addr) else {
+        let Some(managed) = self.peers.get_mut(&peer_key) else {
             return;
         };
 
@@ -238,7 +266,7 @@ impl PeerManager {
         match fsm_state {
             SessionState::Idle => {
                 // Accept immediately — no collision possible
-                self.replace_with_inbound(peer_addr, stream).await;
+                self.replace_with_inbound(peer_key.clone(), stream).await;
             }
             SessionState::Established => {
                 // Already established — drop inbound (no collision)
@@ -249,16 +277,16 @@ impl PeerManager {
                 // deadlocks simultaneous active-open: both outbound sessions
                 // wait for OPEN while both accepted inbound sockets sit inert.
                 info!(%peer_addr, state = fsm_state.as_str(), "starting inbound collision candidate");
-                self.spawn_pending_inbound(peer_addr, stream).await;
+                self.spawn_pending_inbound(peer_key.clone(), stream).await;
             }
             SessionState::OpenConfirm => {
                 // We already have router-id from negotiation; start a live
                 // inbound candidate and resolve immediately.
                 let remote_router_id = current_state.and_then(|s| s.remote_router_id);
-                let started = self.spawn_pending_inbound(peer_addr, stream).await;
+                let started = self.spawn_pending_inbound(peer_key.clone(), stream).await;
                 if let Some(rid) = remote_router_id {
                     if started {
-                        self.resolve_collision(peer_addr, rid).await;
+                        self.resolve_collision(peer_key, rid).await;
                     }
                 } else {
                     // Shouldn't happen; the live candidate can still notify
@@ -271,9 +299,10 @@ impl PeerManager {
 
     pub(super) async fn resolve_collision(
         &mut self,
-        peer_addr: IpAddr,
+        peer_key: PeerKey,
         remote_router_id: Ipv4Addr,
     ) {
+        let peer_addr = peer_key.address;
         let local_id = u32::from(self.router_id);
         let remote_id = u32::from(remote_router_id);
 
@@ -288,7 +317,7 @@ impl PeerManager {
                 );
                 if let Some(pending) = self
                     .peers
-                    .get_mut(&peer_addr)
+                    .get_mut(&peer_key)
                     .and_then(|m| m.pending_inbound.take())
                 {
                     let _ = pending.handle.collision_dump().await;
@@ -302,7 +331,7 @@ impl PeerManager {
                     remote_id = %remote_router_id,
                     "collision: remote wins, replacing with inbound"
                 );
-                if let Some(old_handle) = self.promote_pending_inbound_handle(peer_addr) {
+                if let Some(old_handle) = self.promote_pending_inbound_handle(&peer_key) {
                     let _ = old_handle.collision_dump().await;
                 }
             }
@@ -315,7 +344,7 @@ impl PeerManager {
                 );
                 if let Some(pending) = self
                     .peers
-                    .get_mut(&peer_addr)
+                    .get_mut(&peer_key)
                     .and_then(|m| m.pending_inbound.take())
                 {
                     let _ = pending.handle.collision_dump().await;
@@ -326,26 +355,27 @@ impl PeerManager {
 
     pub(super) fn promote_pending_inbound_handle(
         &mut self,
-        peer_addr: IpAddr,
+        peer_key: &PeerKey,
     ) -> Option<PeerHandle> {
-        let managed = self.peers.get_mut(&peer_addr)?;
+        let managed = self.peers.get_mut(peer_key)?;
         let pending = managed.pending_inbound.take()?;
         let old_handle = std::mem::replace(&mut managed.handle, pending.handle);
         managed.session_id = pending.session_id;
         Some(old_handle)
     }
 
-    pub(super) async fn promote_pending_inbound(&mut self, peer_addr: IpAddr) -> bool {
-        let Some(old_handle) = self.promote_pending_inbound_handle(peer_addr) else {
+    pub(super) async fn promote_pending_inbound(&mut self, peer_key: &PeerKey) -> bool {
+        let Some(old_handle) = self.promote_pending_inbound_handle(peer_key) else {
             return false;
         };
         let _ = old_handle.shutdown().await;
         true
     }
 
-    pub(super) async fn replace_with_inbound(&mut self, peer_addr: IpAddr, stream: TcpStream) {
+    pub(super) async fn replace_with_inbound(&mut self, peer_key: PeerKey, stream: TcpStream) {
+        let peer_addr = peer_key.address;
         let session_id = self.allocate_session_id();
-        let Some(managed) = self.peers.get_mut(&peer_addr) else {
+        let Some(managed) = self.peers.get_mut(&peer_key) else {
             return;
         };
 
