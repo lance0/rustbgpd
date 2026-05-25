@@ -135,8 +135,8 @@ single-path routes still use `RTA_GATEWAY`, and multipath routes still use
 `RTA_MULTIPATH` with weights. Scoped cross-family link-local routes use
 `RTA_VIA` plus `RTA_OIF` for single-path, or per-next-hop `rtnh_ifindex` inside
 `RTA_MULTIPATH`. Kernel dumps reconstruct the same scoped target, and owned-state
-v4 persists positional link-local ifindexes so crash restart does not forget
-which `dev` belongs to a daemon-owned row.
+v5 persists scalar and positional link-local ifindexes so crash restart does not
+forget which `dev` belongs to a daemon-owned row.
 
 If a link-local next-hop lacks scope, the FIB layer rejects the row with an
 explicit `link_local_next_hop_scope_missing` reason. IPv4 routes via

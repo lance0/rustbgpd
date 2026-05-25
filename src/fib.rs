@@ -110,19 +110,19 @@ pub(crate) struct FibRoute {
 /// single-next-hop behavior (emitted as `RTA_GATEWAY`); length >1 is ECMP
 /// (emitted as `RTA_MULTIPATH`). Never empty by construction.
 ///
-/// `best` records the selected best route's next-hop (always a member of the
-/// set). It is the scalar representative for status / events / owned-state
-/// back-compat, so the surfaced `(next_hop, peer, path_id)` stays a consistent
-/// tuple even though ECMP siblings can come from different peers. It is
-/// **deliberately excluded from equality**: two targets with the same next-hop
-/// *set* are the same kernel route regardless of which member was best, so the
-/// reconcile diff must not flap when only best-path provenance moves.
+/// `best` records the selected best route's scoped next-hop (always a member of
+/// the set). Its address is the scalar representative for status / events /
+/// owned-state back-compat, so the surfaced `(next_hop, peer, path_id)` stays a
+/// consistent tuple even though ECMP siblings can come from different peers. It
+/// is **deliberately excluded from equality**: two targets with the same
+/// next-hop *set* are the same kernel route regardless of which member was best,
+/// so the reconcile diff must not flap when only best-path provenance moves.
 #[derive(Debug, Clone)]
 pub(crate) struct FibRouteTarget {
     /// Gateway / next-hop entries, sorted ascending by address and deduplicated.
     pub next_hops: Vec<FibNextHop>,
-    /// The selected best route's next-hop; the scalar surface representative.
-    best: IpAddr,
+    /// The selected best route's scoped next-hop.
+    best: FibNextHop,
 }
 
 /// Linux output-interface scope for a link-local next-hop.
@@ -211,9 +211,10 @@ impl FibRouteTarget {
     /// Single-next-hop target — today's default forwarding shape (weight 1, no
     /// multipath, so the weight is never emitted to the kernel).
     pub(crate) fn single(next_hop: IpAddr) -> Self {
+        let best = FibNextHop::equal(next_hop);
         Self {
-            next_hops: vec![FibNextHop::equal(next_hop)],
-            best: next_hop,
+            next_hops: vec![best],
+            best,
         }
     }
 
@@ -225,11 +226,29 @@ impl FibRouteTarget {
         best: IpAddr,
         next_hops: impl IntoIterator<Item = FibNextHop>,
     ) -> Self {
+        Self::from_set_with_best_hop(FibNextHop::equal(best), next_hops)
+    }
+
+    /// Build from a known scoped best plus an arbitrary weighted set. Use this
+    /// when the selected best route is an IPv6 link-local next-hop, since
+    /// address alone is not enough to identify the egress interface.
+    pub(crate) fn from_set_with_best_hop(
+        best: FibNextHop,
+        next_hops: impl IntoIterator<Item = FibNextHop>,
+    ) -> Self {
         let mut next_hops: Vec<FibNextHop> = next_hops.into_iter().collect();
-        if !next_hops.iter().any(|nh| nh.addr == best) {
-            next_hops.push(FibNextHop::equal(best));
+        if !next_hops
+            .iter()
+            .any(|nh| nh.addr == best.addr && nh.scope == best.scope)
+        {
+            next_hops.push(best);
         }
         canonicalize_next_hops(&mut next_hops);
+        let best = next_hops
+            .iter()
+            .copied()
+            .find(|nh| nh.addr == best.addr && nh.scope == best.scope)
+            .expect("best next-hop is inserted before canonicalization");
         Self { next_hops, best }
     }
 
@@ -240,7 +259,7 @@ impl FibRouteTarget {
     pub(crate) fn from_next_hops(next_hops: impl IntoIterator<Item = FibNextHop>) -> Self {
         let mut next_hops: Vec<FibNextHop> = next_hops.into_iter().collect();
         canonicalize_next_hops(&mut next_hops);
-        let best = next_hops[0].addr;
+        let best = next_hops[0];
         Self { next_hops, best }
     }
 
@@ -248,6 +267,11 @@ impl FibRouteTarget {
     /// events, owned-state scalar back-compat) — the selected best route's
     /// next-hop, consistent with the row's `peer` / `path_id` / `origin_type`.
     pub(crate) fn primary(&self) -> IpAddr {
+        self.best.addr
+    }
+
+    /// The selected best route's scoped next-hop.
+    pub(crate) fn primary_next_hop(&self) -> FibNextHop {
         self.best
     }
 }
@@ -611,7 +635,7 @@ pub(crate) fn project_fib_intent_with_peer_groups(
                 // Pin `best` to the selected best route's next-hop (guaranteed
                 // present by the check above) so the scalar surface stays
                 // consistent with the row's best-route metadata.
-                target: FibRouteTarget::from_set_with_best(route.next_hop, eligible),
+                target: FibRouteTarget::from_set_with_best_hop(best_next_hop, eligible),
                 peer: route.peer,
                 origin_type: route.origin_type,
                 path_id: route.path_id,
@@ -1904,6 +1928,24 @@ mod tests {
             addr_scopes(&target),
             vec![(ip("fe80::1"), Some(7)), (ip("fe80::1"), Some(9))]
         );
+    }
+
+    #[test]
+    fn target_best_keeps_scope_when_link_local_address_is_duplicated() {
+        let target = FibRouteTarget::from_set_with_best_hop(
+            FibNextHop::scoped(ip("fe80::1"), 9),
+            [
+                FibNextHop::scoped(ip("fe80::1"), 7),
+                FibNextHop::scoped(ip("fe80::1"), 9),
+            ],
+        );
+
+        assert_eq!(target.primary(), ip("fe80::1"));
+        assert_eq!(
+            target.primary_next_hop().scope.map(|scope| scope.ifindex),
+            Some(9)
+        );
+        assert_eq!(target.primary_next_hop().weight, 1);
     }
 
     #[test]

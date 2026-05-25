@@ -778,12 +778,13 @@ fn emit_fib_event(
     });
 }
 
-/// Current owned-state envelope version. v4 persists per-next-hop link-local
-/// output ifindexes (ADR-0069); v3 persisted per-next-hop multipath `weights`
+/// Current owned-state envelope version. v5 persists the selected best
+/// next-hop's link-local ifindex; v4 persisted per-next-hop link-local output
+/// ifindexes (ADR-0069); v3 persisted per-next-hop multipath `weights`
 /// (ADR-0068); v2 persisted the equal-cost `next_hops` set; v1 persisted a
 /// single `next_hop` scalar. Older files load with no scoped ifindex and all
 /// missing weights defaulting to 1.
-const OWNED_STATE_VERSION: u32 = 4;
+const OWNED_STATE_VERSION: u32 = 5;
 /// Oldest owned-state version this build can still load (and upgrade).
 const OWNED_STATE_MIN_VERSION: u32 = 1;
 
@@ -831,6 +832,11 @@ struct PersistedFibRoute {
     /// equal-cost set rides in `next_hops`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     next_hop: Option<IpAddr>,
+    /// v5 output ifindex for the scalar best next-hop when it is IPv6
+    /// link-local. This disambiguates duplicate link-local addresses on
+    /// different interfaces across crash-restart owned-state reloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    next_hop_ifindex: Option<u32>,
     /// v2 equal-cost next-hop set (canonical). Empty on a v1 file, where
     /// `into_route` upgrades the scalar `next_hop` into a one-element set.
     #[serde(default)]
@@ -889,6 +895,12 @@ impl From<&FibRoute> for PersistedFibRoute {
             // v1 reader) recovers a representative consistent with the row's
             // peer / path_id; `next_hops` carries the full canonical set.
             next_hop: Some(route.target.primary()),
+            next_hop_ifindex: route
+                .target
+                .primary_next_hop()
+                .scope
+                .filter(|_| is_ipv6_link_local(route.target.primary()))
+                .map(|scope| scope.ifindex),
             next_hops: route.target.next_hops.iter().map(|nh| nh.addr).collect(),
             // ADR-0068: persist weights positionally aligned with `next_hops`.
             weights: route.target.next_hops.iter().map(|nh| nh.weight).collect(),
@@ -974,12 +986,22 @@ impl PersistedFibRoute {
         if next_hops.is_empty() {
             return None;
         }
-        // The persisted scalar is the best; fall back to the lowest surviving
-        // member if it is absent or was filtered out by the family check.
+        // The persisted scalar is the best; v5 also carries the ifindex when
+        // the scalar is link-local. Fall back to the lowest surviving member if
+        // the scalar is absent or was filtered out by the family/scope check.
+        let best_scope = self
+            .next_hop_ifindex
+            .filter(|_| self.next_hop.is_some_and(is_ipv6_link_local))
+            .filter(|ifindex| *ifindex != 0)
+            .map(|ifindex| FibNextHopScope { ifindex });
         let best = self
             .next_hop
-            .filter(|next_hop| next_hops.iter().any(|nh| nh.addr == *next_hop))
-            .unwrap_or(next_hops[0].addr);
+            .and_then(|addr| {
+                next_hops.iter().copied().find(|nh| {
+                    nh.addr == addr && best_scope.is_none_or(|scope| nh.scope == Some(scope))
+                })
+            })
+            .unwrap_or(next_hops[0]);
         let key = FibRouteKey {
             table_id: self.table_id,
             metric: self.metric,
@@ -988,7 +1010,7 @@ impl PersistedFibRoute {
         Some(FibRoute {
             table_name: self.table_name,
             key,
-            target: FibRouteTarget::from_set_with_best(best, next_hops),
+            target: FibRouteTarget::from_set_with_best_hop(best, next_hops),
             peer: self.peer,
             origin_type: self.origin_type.into(),
             path_id: self.path_id,
@@ -2690,7 +2712,36 @@ mod tests {
         write_owned_state(&path, &config.tables, &owned).unwrap();
 
         let loaded = load_owned_state(&config);
-        assert_eq!(loaded, owned, "v4 persists link-local output ifindex");
+        assert_eq!(loaded, owned, "v5 persists link-local output ifindex");
+    }
+
+    #[test]
+    fn owned_state_round_trips_scoped_link_local_best_ifindex() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let mut config = config();
+        config.owned_state_path = Some(path.clone());
+        let mut route = fib_route(v4(24), ip("fe80::2"));
+        route.target = FibRouteTarget::from_set_with_best_hop(
+            FibNextHop::scoped(ip("fe80::2"), 9),
+            [
+                FibNextHop::scoped(ip("fe80::2"), 7),
+                FibNextHop::scoped(ip("fe80::2"), 9),
+            ],
+        );
+        let mut owned = FibOwnedState::default();
+        owned.routes.insert(route.key, route);
+
+        write_owned_state(&path, &config.tables, &owned).unwrap();
+
+        let loaded = load_owned_state(&config);
+        let target = &loaded.routes.values().next().unwrap().target;
+        assert_eq!(target.primary(), ip("fe80::2"));
+        assert_eq!(
+            target.primary_next_hop().scope.map(|scope| scope.ifindex),
+            Some(9)
+        );
+        assert_eq!(loaded, owned, "v5 persists the best link-local ifindex");
     }
 
     #[test]
@@ -2713,6 +2764,7 @@ mod tests {
                 prefix_addr: ip("203.0.113.0"),
                 prefix_len: 24,
                 next_hop: Some(ip("192.0.2.1")),
+                next_hop_ifindex: None,
                 next_hops: vec![ip("192.0.2.1")],
                 weights: vec![1],
                 next_hop_ifindexes: vec![7],

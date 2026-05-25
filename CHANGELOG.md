@@ -75,7 +75,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   RIB install candidate carries a non-zero egress ifindex. Linux netlink emits
   scoped link-local routes as `RTA_VIA` plus `RTA_OIF` for single-path routes, or
   per-hop `rtnh_ifindex` inside `RTA_MULTIPATH` for ECMP / weighted multipath.
-  Kernel dumps and owned-state v4 preserve the ifindex, so scoped rows remain
+  Kernel dumps and owned-state v5 preserve the ifindex, so scoped rows remain
   diff-stable across reconciles and crash restart; missing link-local scope is
   rejected explicitly as `link_local_next_hop_scope_missing`.
 
