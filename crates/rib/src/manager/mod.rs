@@ -509,9 +509,10 @@ impl RibManager {
             RibUpdate::QueryFibInstallCandidates {
                 max_paths,
                 relax,
+                weighted,
                 reply,
             } => {
-                self.handle_query_fib_install_candidates(max_paths, relax, reply);
+                self.handle_query_fib_install_candidates(max_paths, relax, weighted, reply);
             }
             RibUpdate::QueryPeerGroups { reply } => self.handle_query_peer_groups(reply),
             RibUpdate::QueryAdvertisedRoutes { peer, reply } => {
@@ -665,9 +666,10 @@ impl RibManager {
         &mut self,
         max_paths: u32,
         relax: bool,
+        weighted: bool,
         reply: tokio::sync::oneshot::Sender<Vec<crate::route::FibInstallCandidate>>,
     ) {
-        use crate::best_path::multipath_equal;
+        use crate::best_path::{link_bandwidth_weights, multipath_equal};
         use crate::route::{FibInstallCandidate, FibInstallNextHop};
 
         let cap = max_paths.max(1) as usize;
@@ -684,6 +686,7 @@ impl RibManager {
                     link_local_next_hop: best.link_local_next_hop,
                     peer: best.peer,
                     path_id: best.path_id,
+                    weight: 1,
                 });
             } else {
                 let mut siblings: Vec<&crate::route::Route> = self
@@ -701,7 +704,10 @@ impl RibManager {
 
                 let mut seen: std::collections::BTreeSet<IpAddr> =
                     std::collections::BTreeSet::new();
-                // best next-hop is always index 0
+                // Gather (next-hop, link-bandwidth) best-first, deduped by
+                // next-hop, capped. Bandwidth is held alongside so weights can be
+                // normalized over exactly the installed set below.
+                let mut bandwidths: Vec<Option<f32>> = Vec::new();
                 for r in std::iter::once(best).chain(siblings.iter().copied()) {
                     if next_hops.len() >= cap {
                         break;
@@ -712,8 +718,16 @@ impl RibManager {
                             link_local_next_hop: r.link_local_next_hop,
                             peer: r.peer,
                             path_id: r.path_id,
+                            weight: 1,
                         });
+                        bandwidths.push(r.link_bandwidth());
                     }
+                }
+                for (next_hop, weight) in next_hops
+                    .iter_mut()
+                    .zip(link_bandwidth_weights(weighted, &bandwidths))
+                {
+                    next_hop.weight = weight;
                 }
             }
             out.push(FibInstallCandidate {

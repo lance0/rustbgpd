@@ -267,6 +267,14 @@ pub struct Global {
     /// `[[fib_tables]]`; it is inert unless a table sets `maximum_paths > 1`.
     #[serde(default)]
     pub multipath_relax: bool,
+    /// ADR-0068 weighted multipath (FRR's `bgp bestpath bandwidth`). When `true`,
+    /// unicast ECMP next-hops are weighted by their Link Bandwidth Extended
+    /// Community (draft-ietf-idr-link-bandwidth) when the whole equal-cost group
+    /// carries one; otherwise they stay equal-cost. Off by default. Like
+    /// `multipath_relax` it is a best-path-wide knob and is inert unless a table
+    /// sets `maximum_paths > 1`.
+    #[serde(default)]
+    pub link_bandwidth_weighted: bool,
     /// Install local kernel blackhole routes for accepted EBGP best
     /// routes carrying RFC 7999 `BLACKHOLE`. Off by default and only
     /// effective when `honor_blackhole = true`. The first FIB slice is

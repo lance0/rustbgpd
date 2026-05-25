@@ -119,10 +119,56 @@ pub(crate) struct FibRoute {
 /// reconcile diff must not flap when only best-path provenance moves.
 #[derive(Debug, Clone)]
 pub(crate) struct FibRouteTarget {
-    /// Gateway / next-hop addresses, sorted ascending and deduplicated.
-    pub next_hops: Vec<IpAddr>,
+    /// Gateway / next-hop entries, sorted ascending by address and deduplicated.
+    pub next_hops: Vec<FibNextHop>,
     /// The selected best route's next-hop; the scalar surface representative.
     best: IpAddr,
+}
+
+/// One forwarding next-hop in a [`FibRouteTarget`]: the gateway address plus its
+/// ADR-0068 multipath weight. The weight is the Linux kernel weight (`1..=256`,
+/// encoded as `rtnh_hops = weight - 1`); `1` everywhere means equal cost. Weight
+/// is part of equality/ordering so a bandwidth change reprograms the kernel, and
+/// it round-trips through `rtnh_hops` so a dumped route diffs stably.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct FibNextHop {
+    /// Gateway / next-hop address (sort key — ordered before `weight`).
+    pub addr: IpAddr,
+    /// Kernel multipath weight, `1..=256` (`1` = equal cost).
+    pub weight: u16,
+}
+
+impl FibNextHop {
+    /// An equal-cost (weight-1) next-hop — the ADR-0066 default shape.
+    pub(crate) fn equal(addr: IpAddr) -> Self {
+        Self { addr, weight: 1 }
+    }
+}
+
+/// Canonicalize a `FibRouteTarget`'s next-hops (ADR-0068) so equality is
+/// order-independent and a target can never *desire* something the kernel cannot
+/// store — which would diff forever against the dumped route:
+///
+/// 1. Sort by address. On a duplicate address (only possible from corrupt
+///    persisted state or a malformed kernel dump — the RIB never emits one) keep
+///    the **larger** weight, so a recovered target never silently under-weights
+///    a path. One entry per address, addr-ascending, is the canonical order.
+/// 2. Clamp every weight to the kernel-representable `1..=256` (`rtnh_hops` is a
+///    `u8`, so the kernel holds `weight - 1` in `0..=255`). Guards corrupt state
+///    and any future writer; RIB-computed weights are already in range.
+/// 3. Force a lone next-hop to weight 1: it carries all traffic regardless, and
+///    the kernel emits it as a weightless `RTA_GATEWAY`, so a dumped single route
+///    always reads back weight 1. Keeps the diff stable when a per-table cap (or
+///    a lone best) reduces a weighted group to one next-hop.
+fn canonicalize_next_hops(next_hops: &mut Vec<FibNextHop>) {
+    next_hops.sort_unstable_by(|a, b| a.addr.cmp(&b.addr).then(b.weight.cmp(&a.weight)));
+    next_hops.dedup_by_key(|nh| nh.addr);
+    for nh in next_hops.iter_mut() {
+        nh.weight = nh.weight.clamp(1, 256);
+    }
+    if let [only] = next_hops.as_mut_slice() {
+        only.weight = 1;
+    }
 }
 
 impl PartialEq for FibRouteTarget {
@@ -134,27 +180,28 @@ impl PartialEq for FibRouteTarget {
 impl Eq for FibRouteTarget {}
 
 impl FibRouteTarget {
-    /// Single-next-hop target — today's default forwarding shape.
+    /// Single-next-hop target — today's default forwarding shape (weight 1, no
+    /// multipath, so the weight is never emitted to the kernel).
     pub(crate) fn single(next_hop: IpAddr) -> Self {
         Self {
-            next_hops: vec![next_hop],
+            next_hops: vec![FibNextHop::equal(next_hop)],
             best: next_hop,
         }
     }
 
-    /// Build from a known best plus an arbitrary set (e.g. projection or
-    /// persisted owned-state). `best` is forced into the set if missing, then
-    /// the set is canonicalized.
+    /// Build from a known best plus an arbitrary weighted set (e.g. projection or
+    /// persisted owned-state). `best` is forced into the set (weight 1) if no
+    /// entry carries its address, then the set is canonicalized (sorted by
+    /// address, deduped by address keeping the first weight).
     pub(crate) fn from_set_with_best(
         best: IpAddr,
-        next_hops: impl IntoIterator<Item = IpAddr>,
+        next_hops: impl IntoIterator<Item = FibNextHop>,
     ) -> Self {
-        let mut next_hops: Vec<IpAddr> = next_hops.into_iter().collect();
-        if !next_hops.contains(&best) {
-            next_hops.push(best);
+        let mut next_hops: Vec<FibNextHop> = next_hops.into_iter().collect();
+        if !next_hops.iter().any(|nh| nh.addr == best) {
+            next_hops.push(FibNextHop::equal(best));
         }
-        next_hops.sort_unstable();
-        next_hops.dedup();
+        canonicalize_next_hops(&mut next_hops);
         Self { next_hops, best }
     }
 
@@ -162,11 +209,10 @@ impl FibRouteTarget {
     /// so the lowest-sorted member stands in as the representative. Equality
     /// ignores `best`, so this never affects diffing against owned state.
     /// Callers must ensure the input is non-empty.
-    pub(crate) fn from_next_hops(next_hops: impl IntoIterator<Item = IpAddr>) -> Self {
-        let mut next_hops: Vec<IpAddr> = next_hops.into_iter().collect();
-        next_hops.sort_unstable();
-        next_hops.dedup();
-        let best = next_hops[0];
+    pub(crate) fn from_next_hops(next_hops: impl IntoIterator<Item = FibNextHop>) -> Self {
+        let mut next_hops: Vec<FibNextHop> = next_hops.into_iter().collect();
+        canonicalize_next_hops(&mut next_hops);
+        let best = next_hops[0].addr;
         Self { next_hops, best }
     }
 
@@ -312,13 +358,16 @@ fn eligible_next_hops(
     prefix: Prefix,
     max_paths: usize,
     peer_allowed: impl Fn(IpAddr) -> bool,
-) -> Vec<IpAddr> {
+) -> Vec<FibNextHop> {
     candidate
         .next_hops
         .iter()
         .filter(|next_hop| peer_allowed(next_hop.peer))
         .filter(|next_hop| prefix_and_nexthop_same_family(prefix, next_hop.next_hop))
-        .map(|next_hop| next_hop.next_hop)
+        .map(|next_hop| FibNextHop {
+            addr: next_hop.next_hop,
+            weight: next_hop.weight,
+        })
         .take(max_paths)
         .collect()
 }
@@ -397,7 +446,7 @@ pub(crate) fn project_fib_intent_with_peer_groups(
             // (all best-route metadata) describing a path we never programmed —
             // and matches today's single-path behavior, which drops a
             // wrong-family best outright.
-            if !eligible.contains(&route.next_hop) {
+            if !eligible.iter().any(|nh| nh.addr == route.next_hop) {
                 intent.drops.push(FibDrop::NextHopFamilyUnsupported {
                     table_name: table.name.clone(),
                     prefix: route.prefix,
@@ -724,6 +773,7 @@ mod tests {
                 link_local_next_hop: route.link_local_next_hop,
                 peer: route.peer,
                 path_id: route.path_id,
+                weight: 1,
             }],
             best: route,
         }
@@ -743,6 +793,7 @@ mod tests {
             link_local_next_hop: best.link_local_next_hop,
             peer: best.peer,
             path_id: best.path_id,
+            weight: 1,
         }];
         for (idx, nh) in extra.iter().enumerate() {
             next_hops.push(FibInstallNextHop {
@@ -750,6 +801,34 @@ mod tests {
                 link_local_next_hop: None,
                 peer: ip("198.51.100.2"),
                 path_id: u32::try_from(idx).unwrap() + 1,
+                weight: 1,
+            });
+        }
+        FibInstallCandidate { next_hops, best }
+    }
+
+    /// Like [`multipath_candidate`] but with explicit per-next-hop weights:
+    /// `best_weight` for the best route and `(addr, weight)` for each sibling
+    /// (mirrors what the RIB produces under `link_bandwidth_weighted`).
+    fn weighted_multipath_candidate(
+        best: Route,
+        best_weight: u16,
+        extra: &[(&str, u16)],
+    ) -> FibInstallCandidate {
+        let mut next_hops = vec![FibInstallNextHop {
+            next_hop: best.next_hop,
+            link_local_next_hop: best.link_local_next_hop,
+            peer: best.peer,
+            path_id: best.path_id,
+            weight: best_weight,
+        }];
+        for (idx, (nh, weight)) in extra.iter().enumerate() {
+            next_hops.push(FibInstallNextHop {
+                next_hop: ip(nh),
+                link_local_next_hop: None,
+                peer: ip("198.51.100.2"),
+                path_id: u32::try_from(idx).unwrap() + 1,
+                weight: *weight,
             });
         }
         FibInstallCandidate { next_hops, best }
@@ -786,6 +865,30 @@ mod tests {
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    /// Equal-cost (weight-1) next-hop from a string address — the common test shape.
+    fn eq(s: &str) -> FibNextHop {
+        FibNextHop::equal(ip(s))
+    }
+
+    /// Build a canonical target from equal-cost string addresses (test convenience).
+    fn target_from_addrs<const N: usize>(addrs: [&str; N]) -> FibRouteTarget {
+        FibRouteTarget::from_next_hops(addrs.into_iter().map(eq))
+    }
+
+    /// The next-hop addresses of a target, in canonical order (drops weights).
+    fn addrs(target: &FibRouteTarget) -> Vec<IpAddr> {
+        target.next_hops.iter().map(|nh| nh.addr).collect()
+    }
+
+    /// The (address, weight) pairs of a target, in canonical order.
+    fn addr_weights(target: &FibRouteTarget) -> Vec<(IpAddr, u16)> {
+        target
+            .next_hops
+            .iter()
+            .map(|nh| (nh.addr, nh.weight))
+            .collect()
     }
 
     fn route(prefix: Prefix, next_hop: IpAddr, origin_type: RouteOrigin, path_id: u32) -> Route {
@@ -1576,22 +1679,14 @@ mod tests {
 
     #[test]
     fn target_from_next_hops_is_sorted_deduped_and_order_independent() {
-        let target = FibRouteTarget::from_next_hops([
-            ip("203.0.113.3"),
-            ip("203.0.113.1"),
-            ip("203.0.113.3"),
-            ip("203.0.113.2"),
-        ]);
+        let target =
+            target_from_addrs(["203.0.113.3", "203.0.113.1", "203.0.113.3", "203.0.113.2"]);
         assert_eq!(
-            target.next_hops,
+            addrs(&target),
             vec![ip("203.0.113.1"), ip("203.0.113.2"), ip("203.0.113.3")]
         );
         // Canonical form is independent of input order.
-        let reordered = FibRouteTarget::from_next_hops([
-            ip("203.0.113.2"),
-            ip("203.0.113.3"),
-            ip("203.0.113.1"),
-        ]);
+        let reordered = target_from_addrs(["203.0.113.2", "203.0.113.3", "203.0.113.1"]);
         assert_eq!(target, reordered);
         assert_eq!(target.primary(), ip("203.0.113.1"));
     }
@@ -1610,8 +1705,137 @@ mod tests {
         assert_eq!(intent.routes.len(), 1);
         let projected = intent.routes.values().next().unwrap();
         assert_eq!(
-            projected.target.next_hops,
+            addrs(&projected.target),
             vec![ip("203.0.113.1"), ip("203.0.113.2")]
+        );
+    }
+
+    #[test]
+    fn weighted_multipath_projects_per_next_hop_weights() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.maximum_paths = Some(2);
+        // Best .1 weight 256, sibling .2 weight 64 (a 4:1 bandwidth ratio).
+        let candidate = weighted_multipath_candidate(
+            route(v4_prefix(2, 24), ip("203.0.113.1"), RouteOrigin::Ebgp, 0),
+            256,
+            &[("203.0.113.2", 64)],
+        );
+
+        let intent = project_fib_intent(&[table], &[candidate]);
+
+        let projected = intent.routes.values().next().unwrap();
+        // Canonical order is by address; weights ride along.
+        assert_eq!(
+            addr_weights(&projected.target),
+            vec![(ip("203.0.113.1"), 256), (ip("203.0.113.2"), 64)]
+        );
+    }
+
+    #[test]
+    fn weighted_group_capped_to_one_normalizes_weight() {
+        // A weighted two-path group, but the table only allows one path. The lone
+        // survivor's weight must collapse to 1 — a single next-hop carries all
+        // traffic and the kernel emits it weightless, so any other value would
+        // diff forever against the dumped route.
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.maximum_paths = Some(1);
+        let candidate = weighted_multipath_candidate(
+            route(v4_prefix(2, 24), ip("203.0.113.1"), RouteOrigin::Ebgp, 0),
+            256,
+            &[("203.0.113.2", 64)],
+        );
+
+        let intent = project_fib_intent(&[table], &[candidate]);
+
+        let projected = intent.routes.values().next().unwrap();
+        assert_eq!(
+            addr_weights(&projected.target),
+            vec![(ip("203.0.113.1"), 1)]
+        );
+    }
+
+    #[test]
+    fn weight_change_breaks_target_equality_so_reconcile_reprograms() {
+        // Same next-hop set, different weights ⇒ not equal, so the reconcile diff
+        // emits a Replace and the kernel picks up the new distribution.
+        let a = FibRouteTarget::from_next_hops([
+            FibNextHop {
+                addr: ip("203.0.113.1"),
+                weight: 256,
+            },
+            FibNextHop {
+                addr: ip("203.0.113.2"),
+                weight: 64,
+            },
+        ]);
+        let b = FibRouteTarget::from_next_hops([
+            FibNextHop {
+                addr: ip("203.0.113.1"),
+                weight: 128,
+            },
+            FibNextHop {
+                addr: ip("203.0.113.2"),
+                weight: 128,
+            },
+        ]);
+        assert_ne!(a, b);
+        // Identical weights ⇒ equal, no spurious reprogram.
+        let c = FibRouteTarget::from_next_hops([
+            FibNextHop {
+                addr: ip("203.0.113.2"),
+                weight: 64,
+            },
+            FibNextHop {
+                addr: ip("203.0.113.1"),
+                weight: 256,
+            },
+        ]);
+        assert_eq!(a, c);
+    }
+
+    #[test]
+    fn target_clamps_weights_to_kernel_range() {
+        // A corrupt/out-of-range weight (e.g. a hand-edited owned-state file) is
+        // clamped into 1..=256 so the target never desires a weight the kernel's
+        // u8 rtnh_hops cannot store — which would otherwise diff forever.
+        let t = FibRouteTarget::from_next_hops([
+            FibNextHop {
+                addr: ip("203.0.113.1"),
+                weight: 5000,
+            },
+            FibNextHop {
+                addr: ip("203.0.113.2"),
+                weight: 0,
+            },
+        ]);
+        assert_eq!(
+            addr_weights(&t),
+            vec![(ip("203.0.113.1"), 256), (ip("203.0.113.2"), 1)]
+        );
+    }
+
+    #[test]
+    fn target_dedup_keeps_larger_weight_on_duplicate_address() {
+        // Duplicate addresses only arise from corrupt persisted state or a
+        // malformed kernel dump; canonicalization keeps the larger weight per
+        // address (deterministic, never silently under-weights a path).
+        let t = FibRouteTarget::from_next_hops([
+            FibNextHop {
+                addr: ip("203.0.113.1"),
+                weight: 64,
+            },
+            FibNextHop {
+                addr: ip("203.0.113.1"),
+                weight: 200,
+            },
+            FibNextHop {
+                addr: ip("203.0.113.2"),
+                weight: 100,
+            },
+        ]);
+        assert_eq!(
+            addr_weights(&t),
+            vec![(ip("203.0.113.1"), 200), (ip("203.0.113.2"), 100)]
         );
     }
 
@@ -1632,7 +1856,7 @@ mod tests {
 
         let projected = intent.routes.values().next().unwrap();
         assert_eq!(
-            projected.target.next_hops,
+            addrs(&projected.target),
             vec![ip("203.0.113.1"), ip("203.0.113.5")]
         );
         assert_eq!(projected.target.primary(), ip("203.0.113.5"));
@@ -1653,7 +1877,7 @@ mod tests {
 
         let projected = intent.routes.values().next().unwrap();
         assert_eq!(
-            projected.target.next_hops,
+            addrs(&projected.target),
             vec![ip("203.0.113.1"), ip("203.0.113.5")]
         );
     }
@@ -1671,7 +1895,7 @@ mod tests {
         let intent = project_fib_intent(&[table], &[candidate]);
 
         let projected = intent.routes.values().next().unwrap();
-        assert_eq!(projected.target.next_hops, vec![ip("203.0.113.1")]);
+        assert_eq!(addrs(&projected.target), vec![ip("203.0.113.1")]);
     }
 
     #[test]
@@ -1756,7 +1980,7 @@ mod tests {
 
         assert_eq!(intent.routes.len(), 1);
         let projected = intent.routes.values().next().unwrap();
-        assert_eq!(projected.target.next_hops, vec![ip("203.0.113.1")]);
+        assert_eq!(addrs(&projected.target), vec![ip("203.0.113.1")]);
         assert!(intent.drops.is_empty());
     }
 
@@ -1795,7 +2019,7 @@ mod tests {
 
         assert_eq!(intent.routes.len(), 1);
         let projected = intent.routes.values().next().unwrap();
-        assert_eq!(projected.target.next_hops, vec![ip("203.0.113.1")]);
+        assert_eq!(addrs(&projected.target), vec![ip("203.0.113.1")]);
         assert!(intent.drops.is_empty());
     }
 
@@ -1831,13 +2055,13 @@ mod tests {
         let owned_route = FibRoute {
             table_name: "edge".to_string(),
             key,
-            target: FibRouteTarget::from_next_hops([ip("203.0.113.1"), ip("203.0.113.2")]),
+            target: target_from_addrs(["203.0.113.1", "203.0.113.2"]),
             peer: ip("198.51.100.1"),
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
         let mut desired = owned_route.clone();
-        desired.target = FibRouteTarget::from_next_hops([ip("203.0.113.2"), ip("203.0.113.1")]);
+        desired.target = target_from_addrs(["203.0.113.2", "203.0.113.1"]);
         let owned = FibOwnedState {
             routes: BTreeMap::from([(key, owned_route)]),
         };
@@ -1845,7 +2069,7 @@ mod tests {
             routes: BTreeMap::from([(
                 key,
                 FibKernelRoute {
-                    target: FibRouteTarget::from_next_hops([ip("203.0.113.2"), ip("203.0.113.1")]),
+                    target: target_from_addrs(["203.0.113.2", "203.0.113.1"]),
                     protocol: FibKernelProtocol::Bgp,
                 },
             )]),
@@ -1871,7 +2095,7 @@ mod tests {
         let key = key(v4_prefix(2, 24));
         let previous = one_route(key, "203.0.113.1");
         let mut desired = previous.clone();
-        desired.target = FibRouteTarget::from_next_hops([ip("203.0.113.1"), ip("203.0.113.2")]);
+        desired.target = target_from_addrs(["203.0.113.1", "203.0.113.2"]);
         let owned = FibOwnedState {
             routes: BTreeMap::from([(key, previous.clone())]),
         };

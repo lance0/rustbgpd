@@ -279,6 +279,40 @@ pub fn multipath_equal(best: &Route, other: &Route, relax: bool) -> bool {
         && same_multipath_class(best, other)
 }
 
+/// ADR-0068 weighted multipath: normalize a multipath group's next-hop weights
+/// from their Link Bandwidth Extended Communities.
+///
+/// Returns one kernel weight (`1..=256`) per input, in order. Weighting applies
+/// only when `weighted` is on **and** every next-hop carries a finite, positive
+/// bandwidth; otherwise every next-hop gets weight `1` (equal cost — the
+/// ADR-0066 default, byte-for-byte). The largest bandwidth maps to 256 and the
+/// rest scale in proportion, so the kernel distributes traffic by the bandwidth
+/// ratio. The all-or-nothing rule avoids inventing a bandwidth for a path that
+/// never advertised one.
+#[must_use]
+pub(crate) fn link_bandwidth_weights(weighted: bool, bandwidths: &[Option<f32>]) -> Vec<u16> {
+    let all_present = !bandwidths.is_empty()
+        && bandwidths
+            .iter()
+            .all(|b| b.is_some_and(|v| v.is_finite() && v > 0.0));
+    if !weighted || !all_present {
+        return vec![1; bandwidths.len()];
+    }
+    let max = bandwidths
+        .iter()
+        .map(|b| b.unwrap_or(0.0))
+        .fold(0.0_f32, f32::max);
+    bandwidths
+        .iter()
+        .map(|b| {
+            // Clamped to [1, 256]: the cast is exact and non-negative.
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let weight = (b.unwrap_or(0.0) / max * 256.0).round().clamp(1.0, 256.0) as u16;
+            weight
+        })
+        .collect()
+}
+
 /// eBGP groups only with eBGP and iBGP only with iBGP. `RouteOrigin::Local`
 /// (controller-injected) routes are *not* part of maximum-paths, so any Local on
 /// either side returns `false` — `best.is_ebgp() == other.is_ebgp()` would wrongly
@@ -688,6 +722,71 @@ mod tests {
         b.is_stale = false;
         // b is non-stale → b wins despite Invalid RPKI
         assert_eq!(best_path_cmp(&a, &b), Ordering::Greater);
+    }
+
+    // --- ADR-0068 link_bandwidth_weights ---
+
+    #[test]
+    fn link_bw_weights_disabled_is_all_equal() {
+        let bws = [Some(40e9), Some(10e9)];
+        assert_eq!(link_bandwidth_weights(false, &bws), vec![1, 1]);
+    }
+
+    #[test]
+    fn link_bw_weights_proportional_when_all_present() {
+        // 40G / 20G / 10G → max 40G maps to 256, the rest scale by ratio.
+        let bws = [Some(40e9), Some(20e9), Some(10e9)];
+        assert_eq!(link_bandwidth_weights(true, &bws), vec![256, 128, 64]);
+    }
+
+    #[test]
+    fn link_bw_weights_all_or_nothing_on_missing() {
+        // One path without a Link Bandwidth community ⇒ whole group equal-cost.
+        let bws = [Some(40e9), None, Some(10e9)];
+        assert_eq!(link_bandwidth_weights(true, &bws), vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn link_bw_weights_reject_non_finite_and_non_positive() {
+        assert_eq!(
+            link_bandwidth_weights(true, &[Some(10e9), Some(f32::NAN)]),
+            vec![1, 1]
+        );
+        assert_eq!(
+            link_bandwidth_weights(true, &[Some(10e9), Some(f32::INFINITY)]),
+            vec![1, 1]
+        );
+        assert_eq!(
+            link_bandwidth_weights(true, &[Some(10e9), Some(0.0)]),
+            vec![1, 1]
+        );
+        assert_eq!(
+            link_bandwidth_weights(true, &[Some(10e9), Some(-5.0)]),
+            vec![1, 1]
+        );
+    }
+
+    #[test]
+    fn link_bw_weights_equal_bandwidth_is_uniform() {
+        // Equal bandwidth ⇒ equal (max) weight; ratio 1:1 distributes evenly.
+        assert_eq!(
+            link_bandwidth_weights(true, &[Some(10e9), Some(10e9)]),
+            vec![256, 256]
+        );
+    }
+
+    #[test]
+    fn link_bw_weights_clamps_extreme_ratio_to_one() {
+        // A bandwidth ratio beyond 256:1 saturates the low end at weight 1.
+        assert_eq!(
+            link_bandwidth_weights(true, &[Some(1e12), Some(1.0)]),
+            vec![256, 1]
+        );
+    }
+
+    #[test]
+    fn link_bw_weights_empty_input() {
+        assert_eq!(link_bandwidth_weights(true, &[]), Vec::<u16>::new());
     }
 }
 

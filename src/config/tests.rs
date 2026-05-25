@@ -5797,6 +5797,28 @@ log_format = "json"
 }
 
 #[test]
+fn link_bandwidth_weighted_parses_and_defaults_false() {
+    // ADR-0068 weighted multipath is a global best-path knob, default off.
+    let base = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+"#;
+    assert!(
+        !parse(base).unwrap().global.link_bandwidth_weighted,
+        "link_bandwidth_weighted defaults to false"
+    );
+    let on = base.replace(
+        "listen_port = 179",
+        "listen_port = 179\nlink_bandwidth_weighted = true",
+    );
+    assert!(parse(&on).unwrap().global.link_bandwidth_weighted);
+}
+
+#[test]
 fn fib_tables_reject_invalid_guardrails() {
     let cases = [
         (

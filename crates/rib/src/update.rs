@@ -211,6 +211,10 @@ pub enum RibUpdate {
         /// ADR-0066 multipath-relax: group equal-cost candidates by `AS_PATH`
         /// *length* rather than an exact `AS_PATH` match (global best-path knob).
         relax: bool,
+        /// ADR-0068 weighted multipath: when the whole equal-cost group carries a
+        /// Link Bandwidth Extended Community, weight next-hops in proportion to
+        /// it; otherwise every next-hop stays weight 1 (equal cost).
+        weighted: bool,
         /// Response channel.
         reply: oneshot::Sender<Vec<FibInstallCandidate>>,
     },

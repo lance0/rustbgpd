@@ -72,6 +72,12 @@ pub struct FibInstallNextHop {
     pub peer: IpAddr,
     /// Add-Path path id of the source path (0 = no Add-Path).
     pub path_id: u32,
+    /// ADR-0068 multipath weight, `1..=256` (the Linux kernel weight, encoded as
+    /// `rtnh_hops = weight - 1`). `1` for every next-hop means equal-cost — the
+    /// ADR-0066 default. When `link_bandwidth_weighted` is on and the whole
+    /// equal-cost group carries a Link Bandwidth Extended Community, weights are
+    /// normalized over the group in proportion to bandwidth.
+    pub weight: u16,
 }
 
 /// A prefix's FIB install candidate: the chosen best route plus the
