@@ -1254,7 +1254,19 @@ async fn process_update_rejects_ipv4_mp_link_local_without_extended_nexthop() {
 
     session.process_update(update).await;
 
-    assert!(rib_rx.try_recv().is_err());
+    // Fail closed on the route, gracefully: a scoped link-local peer that did
+    // not negotiate Extended Next Hop must not import an IPv4-over-IPv6
+    // link-local MP_REACH (no route reaches the RIB), but the route is dropped
+    // per-route (ignore + WARN at the ENH gate), not by tearing the session
+    // down with a NOTIFICATION. Pinning both ends guards against a regression in
+    // either direction — silently accepting the route, or escalating to a
+    // session reset. The positive case is covered by
+    // `process_update_accepts_ipv4_mp_link_local_for_scoped_unnumbered_peer`.
+    assert!(rib_rx.try_recv().is_err(), "no route may reach the RIB");
+    assert_eq!(
+        session.notifications_sent, 0,
+        "the route is dropped at the Extended-Next-Hop gate, not via NOTIFICATION"
+    );
 }
 
 #[tokio::test]

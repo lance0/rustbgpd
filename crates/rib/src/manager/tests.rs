@@ -10111,6 +10111,72 @@ async fn fib_install_candidates_preserve_link_local_next_hop_scope() {
 }
 
 #[tokio::test]
+async fn fib_install_candidates_keep_same_link_local_on_distinct_ifindexes() {
+    // ADR-0069: two equal-cost routes whose next-hop is the same fe80::/10
+    // address but reached over different interfaces are distinct forwarding
+    // next-hops. The ECMP dedup keys on (next-hop, ifindex), so both must
+    // install as ECMP rather than collapsing to one path on the bare address.
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+    let shared_nh = IpAddr::V6("fe80::1".parse().unwrap());
+    let make_scoped = |ifname: &'static str, ifindex: u32, peer: &str| Route {
+        prefix: Prefix::V4(prefix),
+        next_hop: shared_nh,
+        link_local_next_hop: Some("fe80::1".parse().unwrap()),
+        next_hop_scope: Some(NextHopScope {
+            interface: Arc::from(ifname),
+            ifindex,
+        }),
+        peer: IpAddr::V6(peer.parse().unwrap()),
+        attributes: Arc::new(vec![]),
+        received_at: Instant::now(),
+        origin_type: crate::route::RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+    };
+    for route in [
+        make_scoped("eth1", 7, "fe80::2"),
+        make_scoped("eth2", 9, "fe80::3"),
+    ] {
+        tx.send(RibUpdate::RoutesReceived {
+            peer: route.peer,
+            announced: vec![route],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    let cands = query_fib_install_candidates(&tx, 2).await;
+    assert_eq!(cands.len(), 1, "one prefix");
+    let mut ifindexes: Vec<u32> = cands[0]
+        .next_hops
+        .iter()
+        .filter_map(|nh| nh.next_hop_scope.as_ref().map(|scope| scope.ifindex))
+        .collect();
+    ifindexes.sort_unstable();
+    assert_eq!(
+        ifindexes,
+        vec![7, 9],
+        "same fe80:: next-hop on two ifindexes must install as two ECMP paths"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn fib_install_candidates_multipath_relax_groups_different_as_paths() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());

@@ -703,17 +703,23 @@ impl RibManager {
                         .then(a.path_id.cmp(&b.path_id))
                 });
 
-                let mut seen: std::collections::BTreeSet<IpAddr> =
+                let mut seen: std::collections::BTreeSet<(IpAddr, Option<u32>)> =
                     std::collections::BTreeSet::new();
                 // Gather (next-hop, link-bandwidth) best-first, deduped by
-                // next-hop, capped. Bandwidth is held alongside so weights can be
-                // normalized over exactly the installed set below.
+                // (next-hop, egress ifindex), capped. The ifindex is part of the
+                // key so two equal `fe80::/10` gateways reached over different
+                // interfaces stay distinct and both install as ECMP (ADR-0069);
+                // a same-family next-hop carries no scope, so this collapses to
+                // plain next-hop dedup for the common case. Bandwidth is held
+                // alongside so weights can be normalized over exactly the
+                // installed set below.
                 let mut bandwidths: Vec<Option<f32>> = Vec::new();
                 for r in std::iter::once(best).chain(siblings.iter().copied()) {
                     if next_hops.len() >= cap {
                         break;
                     }
-                    if seen.insert(r.next_hop) {
+                    let scope_ifindex = r.next_hop_scope.as_ref().map(|scope| scope.ifindex);
+                    if seen.insert((r.next_hop, scope_ifindex)) {
                         next_hops.push(FibInstallNextHop {
                             next_hop: r.next_hop,
                             link_local_next_hop: r.link_local_next_hop,
