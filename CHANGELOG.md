@@ -26,6 +26,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   widest `maximum_paths`), threaded into `multipath_equal`; eBGP/iBGP class
   homogeneity and all other best-path tie conditions are unchanged. Inert unless
   a `[[fib_tables]]` sets `maximum_paths > 1`.
+- **Link Bandwidth Extended Community parsing** (`rustbgpd-wire`,
+  draft-ietf-idr-link-bandwidth). `ExtendedCommunity::as_link_bandwidth()` /
+  `link_bandwidth()` decode and construct the non-transitive
+  two-octet-AS-specific community (type 0x40 subtype 0x04) carrying the
+  advertising AS and an IEEE-754 bytes/second bandwidth, and
+  `Route::link_bandwidth()` surfaces it from a route's extended communities.
+  Parse-only for now; consumed by weighted unequal-cost multipath in a follow-up.
 
 ## [0.28.0] — 2026-05-24
 

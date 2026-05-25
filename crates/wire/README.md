@@ -51,6 +51,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 9136 | EVPN Type 5: IP Prefix advertisement |
 | 9494 | Long-lived graceful restart capability |
 | 9785 §3 | DF Election preference algorithms + Don't-Preempt bit, extending the RFC 8584 DF Election Extended Community |
+| draft-ietf-idr-link-bandwidth | Link Bandwidth Extended Community (non-transitive two-octet-AS-specific, type 0x40 subtype 0x04): decode + construct of the advertising AS and the IEEE-754 bytes/second bandwidth used to weight unequal-cost multipath |
 
 ## Usage
 
@@ -118,6 +119,7 @@ let bytes = encode_message(&Message::Open(open));
 - **`PmsiTunnel`** / **`PmsiTunnelType`** / **`PmsiTunnelIdentifier`** — PMSI Tunnel attribute (RFC 6514 §5) carried on EVPN Type 3 IMET routes for ingress-replication BUM. Constructor `PmsiTunnel::for_evpn_ingress_replication(vni, ip)` emits the RFC 8365 §5.1.3 wire shape (raw 24-bit VNI in the label field, originator IP as the tunnel identifier).
 - **`RouteDistinguisher`** — RFC 4364 §4.2 8-byte RD, used by EVPN and VPNv4/v6. Implements `Display` + `FromStr` for the standard `asn:val` / `ipv4:val` textual encodings
 - **`DfElectionExtendedCommunity`** (`attribute`) — RFC 8584 §2.2 / RFC 9785 §3 DF Election Extended Community: `ExtendedCommunity::as_df_election()` decodes one, `ExtendedCommunity::df_election(algorithm, capabilities, preference)` constructs it (EVPN DF election algorithm, capabilities, and the RFC 9785 preference / Don't-Preempt fields)
+- **Link Bandwidth** (draft-ietf-idr-link-bandwidth) — `ExtendedCommunity::as_link_bandwidth()` decodes the advertising AS and the IEEE-754 bytes/second bandwidth from a non-transitive two-octet-AS-specific community (type 0x40 subtype 0x04); `ExtendedCommunity::link_bandwidth(asn, bytes_per_sec)` constructs one, for weighting unequal-cost multipath next hops
 - **`DecodeError`** / **`EncodeError`** — structured error types via `thiserror`
 - **Well-known community constants** — `u32` values for matching and setting
   standard communities: `COMMUNITY_NO_EXPORT` / `COMMUNITY_NO_ADVERTISE` /

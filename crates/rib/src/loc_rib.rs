@@ -412,8 +412,8 @@ mod tests {
     use std::time::Instant;
 
     use rustbgpd_wire::{
-        Afi, AsPath, AsPathSegment, FlowSpecComponent, FlowSpecRule, Ipv4Prefix, NumericMatch,
-        Origin, PathAttribute,
+        Afi, AsPath, AsPathSegment, ExtendedCommunity, FlowSpecComponent, FlowSpecRule, Ipv4Prefix,
+        NumericMatch, Origin, PathAttribute,
     };
 
     use super::*;
@@ -442,6 +442,25 @@ mod tests {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         }
+    }
+
+    #[test]
+    fn route_link_bandwidth_accessor() {
+        let v4 = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+        let mut route = make_route(1, v4, 100);
+
+        // No extended communities → no link bandwidth.
+        assert!(route.link_bandwidth().is_none());
+
+        // A Link Bandwidth community surfaces its bandwidth (bytes/second);
+        // an unrelated Route Target sitting alongside it is ignored.
+        let rt = ExtendedCommunity::new(u64::from_be_bytes([0x00, 0x02, 0xFD, 0xE9, 0, 0, 0, 100]));
+        let lb = ExtendedCommunity::link_bandwidth(65001, 1.25e9_f32);
+        Arc::make_mut(&mut route.attributes).push(PathAttribute::ExtendedCommunities(vec![rt, lb]));
+
+        let bw = route.link_bandwidth().expect("link bandwidth present");
+        // Exact round-trip through IEEE-754 bytes — assert bitwise equality.
+        assert_eq!(bw.to_bits(), 1.25e9_f32.to_bits());
     }
 
     #[test]

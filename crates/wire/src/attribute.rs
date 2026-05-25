@@ -453,6 +453,34 @@ impl ExtendedCommunity {
         Self(raw)
     }
 
+    /// Decode as Link Bandwidth Extended Community
+    /// (draft-ietf-idr-link-bandwidth): non-transitive two-octet-AS-specific,
+    /// type `0x40`, subtype `0x04`. The value carries the 2-octet AS plus the
+    /// bandwidth as an IEEE-754 single-precision float in **bytes per second**.
+    /// Returns `(asn, bytes_per_sec)`.
+    #[must_use]
+    pub fn as_link_bandwidth(self) -> Option<(u16, f32)> {
+        if self.type_byte() != 0x40 || self.subtype() != 0x04 {
+            return None;
+        }
+        let v = self.value_bytes();
+        let asn = u16::from_be_bytes([v[0], v[1]]);
+        let bytes_per_sec = f32::from_be_bytes([v[2], v[3], v[4], v[5]]);
+        Some((asn, bytes_per_sec))
+    }
+
+    /// Construct a Link Bandwidth Extended Community
+    /// (draft-ietf-idr-link-bandwidth): non-transitive two-octet-AS-specific,
+    /// type `0x40`, subtype `0x04`. `bytes_per_sec` is encoded as an IEEE-754
+    /// single-precision float.
+    #[must_use]
+    pub fn link_bandwidth(asn: u16, bytes_per_sec: f32) -> Self {
+        let a = asn.to_be_bytes();
+        let bw = bytes_per_sec.to_be_bytes();
+        let raw = u64::from_be_bytes([0x40, 0x04, a[0], a[1], bw[0], bw[1], bw[2], bw[3]]);
+        Self(raw)
+    }
+
     /// Decode as Router MAC Extended Community (RFC 9135 §4.1).
     /// Type 0x06, subtype 0x03.
     ///
@@ -1887,6 +1915,40 @@ mod tests {
     }
 
     #[test]
+    fn ext_comm_link_bandwidth_roundtrips() {
+        let bw = 1.25e9_f32; // 10 Gbps expressed in bytes/second
+        let e = ExtendedCommunity::link_bandwidth(65001, bw);
+        assert_eq!(e.type_byte(), 0x40, "non-transitive two-octet-AS-specific");
+        assert_eq!(e.subtype(), 0x04, "Link Bandwidth subtype");
+        let (asn, decoded) = e.as_link_bandwidth().expect("decodes as link bandwidth");
+        assert_eq!(asn, 65001);
+        // Exact round-trip through IEEE-754 bytes — assert bitwise equality.
+        assert_eq!(decoded.to_bits(), bw.to_bits());
+    }
+
+    #[test]
+    fn ext_comm_link_bandwidth_decodes_known_wire_bytes() {
+        // type=0x40 subtype=0x04 AS=0xFDE9(65001) bw=IEEE-754(1.0)
+        let one = 1.0_f32.to_be_bytes();
+        let raw = u64::from_be_bytes([0x40, 0x04, 0xFD, 0xE9, one[0], one[1], one[2], one[3]]);
+        let (asn, bw) = ExtendedCommunity::new(raw)
+            .as_link_bandwidth()
+            .expect("decodes as link bandwidth");
+        assert_eq!(asn, 65001);
+        assert_eq!(bw.to_bits(), 1.0_f32.to_bits());
+    }
+
+    #[test]
+    fn ext_comm_link_bandwidth_rejects_wrong_type_or_subtype() {
+        // Right subtype (0x04) but transitive type (0x00) — not Link Bandwidth.
+        let transitive = ExtendedCommunity::new(u64::from_be_bytes([0x00, 0x04, 0, 0, 0, 0, 0, 0]));
+        assert!(transitive.as_link_bandwidth().is_none());
+        // Right type (0x40) but a different subtype.
+        let wrong_sub = ExtendedCommunity::new(u64::from_be_bytes([0x40, 0x02, 0, 0, 0, 0, 0, 0]));
+        assert!(wrong_sub.as_link_bandwidth().is_none());
+    }
+
+    #[test]
     fn ext_comm_default_gateway_flag_only() {
         let d = ExtendedCommunity::default_gateway();
         assert!(d.as_default_gateway());
@@ -1918,6 +1980,7 @@ mod tests {
         assert_eq!(rt.as_esi_label(), None);
         assert_eq!(rt.as_es_import_rt(), None);
         assert_eq!(rt.as_router_mac(), None);
+        assert!(rt.as_link_bandwidth().is_none());
         assert!(!rt.as_default_gateway());
     }
 
