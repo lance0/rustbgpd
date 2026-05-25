@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use rustbgpd_api::peer_types::{ConfigEvent, PeerManagerNeighborConfig};
+use rustbgpd_api::peer_types::{ConfigEvent, PeerKey, PeerManagerNeighborConfig};
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::RibUpdate;
@@ -15,15 +15,30 @@ use crate::policy_admin::{
 use super::{ManagedPeer, PEER_POLICY_UPDATE_TIMEOUT, PEER_QUERY_TIMEOUT, PeerManager};
 
 impl PeerManager {
-    #[allow(clippy::too_many_lines)]
+    #[cfg(test)]
     pub(super) async fn update_runtime_policies(
         &mut self,
         address: IpAddr,
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
     ) -> Result<(), String> {
+        let Some(peer_key) = self.unique_peer_key_for_address(address) else {
+            return Ok(());
+        };
+        self.update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy)
+            .await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn update_runtime_policies_for_peer_key(
+        &mut self,
+        peer_key: PeerKey,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
+    ) -> Result<(), String> {
         use std::fmt::Write as _;
-        let Some(managed) = self.peers.get_mut(&address) else {
+        let address = peer_key.address;
+        let Some(managed) = self.peers.get_mut(&peer_key) else {
             return Ok(());
         };
 
@@ -144,7 +159,7 @@ impl PeerManager {
         let import_bail = import_apply_failed && needs_refresh;
         let export_bail = export_apply_failed && needs_export_apply;
         if import_bail || export_bail {
-            if let Some(managed) = self.peers.get_mut(&address) {
+            if let Some(managed) = self.peers.get_mut(&peer_key) {
                 // Carry forward *all* unfired apply / refresh intent
                 // across the bail, not just the side that triggered
                 // the bail. Critical cross-side case: import-apply
@@ -214,7 +229,7 @@ impl PeerManager {
                 },
             };
             if let Err(error) = rib_outcome {
-                if needs_refresh && let Some(managed) = self.peers.get_mut(&address) {
+                if needs_refresh && let Some(managed) = self.peers.get_mut(&peer_key) {
                     managed.pending_refresh = true;
                 }
                 return Err(error);
@@ -252,8 +267,8 @@ impl PeerManager {
         // routes already in AdjRibIn keep flowing under the prior
         // policy until the operator reissues a SetPolicy.
         if needs_refresh && is_established {
-            if let Err(error) = self.soft_reset_in(address, Vec::new()).await {
-                if let Some(managed) = self.peers.get_mut(&address) {
+            if let Err(error) = self.soft_reset_in(peer_key.clone(), Vec::new()).await {
+                if let Some(managed) = self.peers.get_mut(&peer_key) {
                     managed.pending_refresh = true;
                 }
                 return Err(error);
@@ -277,7 +292,7 @@ impl PeerManager {
             // sends Route Refresh against an empty / freshly-populated
             // AdjRibIn) is small and acceptable next to silent
             // staleness.
-            if let Some(managed) = self.peers.get_mut(&address) {
+            if let Some(managed) = self.peers.get_mut(&peer_key) {
                 managed.pending_refresh = true;
             }
         }
@@ -312,25 +327,31 @@ impl PeerManager {
         let mut next_config = self.current_config.clone();
         apply_config_event(&mut next_config, &event).map_err(|e| e.to_string())?;
 
-        let peers: Vec<IpAddr> =
-            affected_peers.unwrap_or_else(|| self.peers.keys().copied().collect());
+        let peers: Vec<PeerKey> = affected_peers.map_or_else(
+            || self.peers.keys().cloned().collect(),
+            |peers| {
+                peers
+                    .into_iter()
+                    .flat_map(|address| self.peer_keys_for_address(address))
+                    .collect()
+            },
+        );
         let mut affected_peer_count = 0usize;
-        for address in peers {
-            if !self.peers.contains_key(&address) {
+        for peer_key in peers {
+            if !self.peers.contains_key(&peer_key) {
                 continue;
             }
-            let Some(neighbor) = next_config
-                .neighbors
-                .iter()
-                .find(|neighbor| neighbor.address == address.to_string())
-            else {
+            let address = peer_key.address;
+            let Some(neighbor) = next_config.neighbors.iter().find(|neighbor| {
+                neighbor.address == address.to_string() && neighbor.interface == peer_key.interface
+            }) else {
                 continue;
             };
             affected_peer_count += 1;
             let (import_policy, export_policy) = next_config
                 .effective_policy_chains_for_neighbor(neighbor)
                 .map_err(|e| e.to_string())?;
-            self.update_runtime_policies(address, import_policy, export_policy)
+            self.update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy)
                 .await?;
         }
 
@@ -347,10 +368,14 @@ impl PeerManager {
         config
             .neighbors
             .iter()
-            .find(|neighbor| neighbor.address == address.to_string())
+            .find(|neighbor| {
+                neighbor.address == address.to_string()
+                    && neighbor.interface == managed.transport_config.peer_interface
+            })
             .cloned()
             .unwrap_or_else(|| crate::config::Neighbor {
                 address: address.to_string(),
+                interface: managed.transport_config.peer_interface.clone(),
                 remote_asn: managed.remote_asn,
                 description: None,
                 peer_group: managed.peer_group.clone(),
@@ -404,17 +429,18 @@ impl PeerManager {
         let mut next_config = self.current_config.clone();
         next_config.global.honor_graceful_shutdown = enabled;
 
-        let targets: Vec<IpAddr> = self
+        let targets: Vec<PeerKey> = self
             .peers
             .iter()
-            .filter_map(|(&address, managed)| {
-                (managed.remote_asn != self.local_asn).then_some(address)
+            .filter_map(|(peer, managed)| {
+                (managed.remote_asn != self.local_asn).then_some(peer.clone())
             })
             .collect();
 
         let mut failures: Vec<String> = Vec::new();
-        for address in targets {
-            let Some(managed) = self.peers.get(&address) else {
+        for peer_key in targets {
+            let address = peer_key.address;
+            let Some(managed) = self.peers.get(&peer_key) else {
                 continue;
             };
             let neighbor = Self::policy_resolution_neighbor(&next_config, address, managed);
@@ -432,7 +458,7 @@ impl PeerManager {
                 }
             };
             if let Err(e) = self
-                .update_runtime_policies(address, import_policy, export_policy)
+                .update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy)
                 .await
             {
                 warn!(
@@ -480,17 +506,18 @@ impl PeerManager {
         let mut next_config = self.current_config.clone();
         next_config.global.honor_blackhole = enabled;
 
-        let targets: Vec<IpAddr> = self
+        let targets: Vec<PeerKey> = self
             .peers
             .iter()
-            .filter_map(|(&address, managed)| {
-                (managed.remote_asn != self.local_asn).then_some(address)
+            .filter_map(|(peer, managed)| {
+                (managed.remote_asn != self.local_asn).then_some(peer.clone())
             })
             .collect();
 
         let mut failures: Vec<String> = Vec::new();
-        for address in targets {
-            let Some(managed) = self.peers.get(&address) else {
+        for peer_key in targets {
+            let address = peer_key.address;
+            let Some(managed) = self.peers.get(&peer_key) else {
                 continue;
             };
             let neighbor = Self::policy_resolution_neighbor(&next_config, address, managed);
@@ -508,7 +535,7 @@ impl PeerManager {
                 }
             };
             if let Err(e) = self
-                .update_runtime_policies(address, import_policy, export_policy)
+                .update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy)
                 .await
             {
                 warn!(
@@ -550,6 +577,8 @@ impl PeerManager {
         let tc = resolved.transport_config;
         PeerManagerNeighborConfig {
             address: tc.remote_addr.ip(),
+            interface: tc.peer_interface.clone(),
+            scope_id: tc.peer_scope_id,
             remote_asn: tc.peer.remote_asn,
             description: resolved.label,
             peer_group: resolved.peer_group,
@@ -594,17 +623,22 @@ impl PeerManager {
         let mut next_config = self.current_config.clone();
         apply_config_event(&mut next_config, &event).map_err(|e| e.to_string())?;
 
+        let targets: Vec<PeerKey> = affected_peers
+            .into_iter()
+            .flat_map(|address| self.peer_keys_for_address(address))
+            .collect();
         let mut affected_peer_count = 0usize;
-        for address in affected_peers {
+        for peer_key in targets {
+            let address = peer_key.address;
             let was_enabled = self
                 .peers
-                .get(&address)
+                .get(&peer_key)
                 .is_none_or(|managed| managed.enabled);
-            let next_peer_config = if let Some(neighbor) = next_config
-                .neighbors
-                .iter()
-                .find(|neighbor| neighbor.address == address.to_string())
-            {
+            let next_peer_config = if let Some(neighbor) =
+                next_config.neighbors.iter().find(|neighbor| {
+                    neighbor.address == address.to_string()
+                        && neighbor.interface == peer_key.interface
+                }) {
                 let resolved = next_config
                     .resolve_neighbor(neighbor)
                     .map_err(|e| e.to_string())?;
@@ -612,20 +646,20 @@ impl PeerManager {
             } else {
                 None
             };
-            if self.peers.contains_key(&address) {
-                if let Some(cfg) = next_peer_config.as_ref() {
-                    self.delete_peer_for_reconfigure(address, cfg.tcp_ao.as_ref())
-                        .await?;
-                } else {
-                    self.delete_peer(address, false).await?;
-                }
+
+            if let Some(cfg) = next_peer_config.as_ref() {
+                self.delete_peer_for_reconfigure(peer_key, cfg.tcp_ao.as_ref())
+                    .await?;
+            } else {
+                self.delete_peer(peer_key, false).await?;
             }
 
             if let Some(cfg) = next_peer_config {
+                let added_key = PeerKey::new(cfg.address, cfg.interface.clone());
                 self.add_peer(cfg, false).await?;
                 affected_peer_count += 1;
                 if !was_enabled {
-                    self.disable_peer(address, None).await?;
+                    self.disable_peer(added_key, None).await?;
                 }
             }
         }

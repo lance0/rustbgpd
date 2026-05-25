@@ -245,6 +245,16 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.NeighborService/AddNeighbor
 ```
 
+For an IPv6 link-local / unnumbered peer, include `interface` in
+`NeighborConfig`. Follow-up operations that address a scoped peer use the same
+`address` + `interface` pair.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"config": {"address": "fe80::5054:ff:fe00:1", "interface": "eth1", "remote_asn": 65101}}' \
+  localhost:50051 rustbgpd.v1.NeighborService/AddNeighbor
+```
+
 ### List all neighbors
 
 ```bash

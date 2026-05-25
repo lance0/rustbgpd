@@ -1855,6 +1855,8 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             .send(PeerManagerCommand::AddPeer {
                 config: PeerManagerNeighborConfig {
                     address: transport_config.remote_addr.ip(),
+                    interface: transport_config.peer_interface.clone(),
+                    scope_id: transport_config.peer_scope_id,
                     remote_asn: transport_config.peer.remote_asn,
                     description: label.clone(),
                     peer_group,
@@ -2282,6 +2284,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
             neighbors: vec![
                 crate::config::Neighbor {
                     address: "10.0.0.2".to_string(),
+                    interface: None,
                     remote_asn: 65002,
                     description: None,
                     peer_group: None,
@@ -2309,6 +2312,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
                 },
                 crate::config::Neighbor {
                     address: "10.0.0.3".to_string(),
+                    interface: None,
                     remote_asn: 65003,
                     description: None,
                     peer_group: None,
@@ -2336,6 +2340,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
                 },
                 crate::config::Neighbor {
                     address: "10.0.0.4".to_string(),
+                    interface: None,
                     remote_asn: 65004,
                     description: None,
                     peer_group: None,

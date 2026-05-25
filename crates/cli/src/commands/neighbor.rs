@@ -8,6 +8,13 @@ use crate::proto::{
     SoftResetInRequest,
 };
 
+fn split_scoped_address(address: &str) -> (String, String) {
+    address.rsplit_once('%').map_or_else(
+        || (address.to_string(), String::new()),
+        |(addr, iface)| (addr.to_string(), iface.to_string()),
+    )
+}
+
 pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -24,6 +31,7 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
                 let cfg = n.config.as_ref();
                 JsonNeighbor {
                     address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
+                    interface: cfg.map(|c| c.interface.clone()).unwrap_or_default(),
                     remote_asn: cfg.map(|c| c.remote_asn).unwrap_or(0),
                     state: output::format_state_with_stale(n.state, n.stale).to_string(),
                     stale: n.stale,
@@ -49,9 +57,11 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
 pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let (address_only, interface) = split_scoped_address(address);
     let n = client
         .get_neighbor_state(GetNeighborStateRequest {
-            address: address.to_string(),
+            address: address_only,
+            interface,
         })
         .await?
         .into_inner();
@@ -60,6 +70,7 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
     if json {
         let out = JsonNeighborDetail {
             address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
+            interface: cfg.map(|c| c.interface.clone()).unwrap_or_default(),
             remote_asn: cfg.map(|c| c.remote_asn).unwrap_or(0),
             state: output::format_state_with_stale(n.state, n.stale).to_string(),
             stale: n.stale,
@@ -91,6 +102,10 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             "Neighbor:              {}",
             cfg.map(|c| c.address.as_str()).unwrap_or("")
         );
+        let interface = cfg.map(|c| c.interface.as_str()).unwrap_or("");
+        if !interface.is_empty() {
+            println!("Interface:             {interface}");
+        }
         println!(
             "Remote ASN:            {}",
             cfg.map(|c| c.remote_asn).unwrap_or(0)
@@ -169,10 +184,12 @@ pub async fn add(
 ) -> Result<(), CliError> {
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let (address_only, interface) = split_scoped_address(address);
     client
         .add_neighbor(AddNeighborRequest {
             config: Some(NeighborConfig {
-                address: address.to_string(),
+                address: address_only,
+                interface,
                 remote_asn: opts.asn,
                 description: opts.description.unwrap_or_default(),
                 hold_time: opts.hold_time.unwrap_or(0),
@@ -199,9 +216,11 @@ pub async fn add(
 pub async fn delete(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let (address_only, interface) = split_scoped_address(address);
     client
         .delete_neighbor(DeleteNeighborRequest {
-            address: address.to_string(),
+            address: address_only,
+            interface,
         })
         .await?;
     output::print_result(
@@ -216,9 +235,11 @@ pub async fn delete(connection: Connection, address: &str, json: bool) -> Result
 pub async fn enable(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let (address_only, interface) = split_scoped_address(address);
     client
         .enable_neighbor(EnableNeighborRequest {
-            address: address.to_string(),
+            address: address_only,
+            interface,
         })
         .await?;
     output::print_result(
@@ -238,10 +259,12 @@ pub async fn disable(
 ) -> Result<(), CliError> {
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let (address_only, interface) = split_scoped_address(address);
     client
         .disable_neighbor(DisableNeighborRequest {
-            address: address.to_string(),
+            address: address_only,
             reason: reason.unwrap_or_default(),
+            interface,
         })
         .await?;
     output::print_result(
@@ -261,10 +284,12 @@ pub async fn softreset(
 ) -> Result<(), CliError> {
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let (address_only, interface) = split_scoped_address(address);
     client
         .soft_reset_in(SoftResetInRequest {
-            address: address.to_string(),
+            address: address_only,
             families: family.into_iter().collect(),
+            interface,
         })
         .await?;
     output::print_result(
@@ -288,10 +313,12 @@ pub async fn set_graceful_shutdown(
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let address = peer.clone().unwrap_or_default();
+    let (address_only, interface) = split_scoped_address(&address);
     client
         .set_graceful_shutdown(SetGracefulShutdownRequest {
-            address: address.clone(),
+            address: address_only,
             enabled,
+            interface,
         })
         .await?;
     let scope = peer.as_deref().unwrap_or("all peers");

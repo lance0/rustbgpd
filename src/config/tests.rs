@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use rustbgpd_api::peer_types::PeerKey;
 use rustbgpd_policy::RouteType;
 use rustbgpd_wire::{Afi, Safi};
 use tempfile::NamedTempFile;
@@ -188,6 +189,92 @@ remote_asn = 65099
             assert!(reason.contains("duplicate"));
         }
         other => panic!("expected InvalidNeighborAddress, got {other}"),
+    }
+}
+
+#[test]
+fn link_local_neighbor_requires_interface() {
+    let toml_str = valid_toml().replace("10.0.0.2", "fe80::1");
+    let err = parse(&toml_str).unwrap_err();
+    match err {
+        ConfigError::InvalidNeighborConfig { field, reason, .. } => {
+            assert_eq!(field, "interface");
+            assert!(reason.contains("link-local"));
+        }
+        other => panic!("expected InvalidNeighborConfig, got {other}"),
+    }
+}
+
+#[test]
+fn link_local_neighbor_rejects_same_address_on_different_interfaces() {
+    // v1 limitation (ADR-0069 Deferred): the RIB keys peers by bare address, so
+    // the same link-local address on two interfaces would alias in the RIB.
+    // Validation rejects it until the RIB carries scoped peer identity.
+    let base = valid_toml().replace(
+        r#"address = "10.0.0.2""#,
+        r#"address = "fe80::1"
+interface = "lo""#,
+    );
+    let toml_str = format!(
+        r#"
+{base}
+
+[[neighbors]]
+address = "fe80::1"
+interface = "eth0"
+remote_asn = 65099
+"#
+    );
+    let err = parse(&toml_str).unwrap_err();
+    match err {
+        ConfigError::InvalidNeighborConfig { field, reason, .. } => {
+            assert_eq!(field, "interface");
+            assert!(reason.contains("multiple"), "unexpected reason: {reason}");
+        }
+        other => panic!("expected InvalidNeighborConfig, got {other}"),
+    }
+}
+
+#[test]
+fn link_local_neighbor_rejects_duplicate_address_interface() {
+    let base = valid_toml().replace(
+        r#"address = "10.0.0.2""#,
+        r#"address = "fe80::1"
+interface = "lo""#,
+    );
+    let toml_str = format!(
+        r#"
+{base}
+
+[[neighbors]]
+address = "fe80::1"
+interface = "lo"
+remote_asn = 65099
+"#
+    );
+    let err = parse(&toml_str).unwrap_err();
+    match err {
+        ConfigError::InvalidNeighborAddress { reason, .. } => {
+            assert!(reason.contains("duplicate"));
+        }
+        other => panic!("expected InvalidNeighborAddress, got {other}"),
+    }
+}
+
+#[test]
+fn non_link_local_neighbor_rejects_interface() {
+    let toml_str = valid_toml().replace(
+        r#"address = "10.0.0.2""#,
+        r#"address = "2001:db8::1"
+interface = "lo""#,
+    );
+    let err = parse(&toml_str).unwrap_err();
+    match err {
+        ConfigError::InvalidNeighborConfig { field, reason, .. } => {
+            assert_eq!(field, "interface");
+            assert!(reason.contains("only valid"));
+        }
+        other => panic!("expected InvalidNeighborConfig, got {other}"),
     }
 }
 
@@ -3066,6 +3153,7 @@ peer_group = "missing"
 fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
     Neighbor {
         address: addr.to_string(),
+        interface: None,
         remote_asn: asn,
         description: None,
         peer_group: None,
@@ -3118,7 +3206,10 @@ fn diff_neighbors_detects_removed() {
     assert!(diff.added.is_empty());
     assert!(diff.changed.is_empty());
     assert_eq!(diff.removed.len(), 1);
-    assert_eq!(diff.removed[0], "10.0.0.2".parse::<IpAddr>().unwrap());
+    assert_eq!(
+        diff.removed[0],
+        PeerKey::new("10.0.0.2".parse::<IpAddr>().unwrap(), None)
+    );
 }
 
 #[test]
@@ -3557,6 +3648,10 @@ remote_asn = 65002
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "fixture-heavy TCP-AO pinning regression"
+)]
 fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
     let old = parse(valid_toml()).unwrap();
     let mut new = old.clone();
@@ -3587,6 +3682,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
     );
     new.neighbors.push(Neighbor {
         address: "10.0.0.3".into(),
+        interface: None,
         remote_asn: 65003,
         description: None,
         peer_group: Some("new-group".into()),
@@ -3621,6 +3717,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
     });
     new.neighbors.push(Neighbor {
         address: "10.0.0.4".into(),
+        interface: None,
         remote_asn: 65004,
         description: None,
         peer_group: Some("new-group".into()),
@@ -3667,6 +3764,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
     let mut new = old.clone();
     new.neighbors.push(Neighbor {
         address: "10.0.0.3".into(),
+        interface: None,
         remote_asn: 65003,
         description: None,
         peer_group: None,
@@ -6046,7 +6144,7 @@ metric = 200
 #[test]
 fn bfd_rejects_ipv6_link_local_neighbor() {
     // v1 ships IPv4 + IPv6 global only; link-local BFD is deferred to v1.1
-    // (needs a neighbor interface/scope the daemon can't express yet).
+    // even though BGP link-local peers now carry interface scope.
     let toml = format!(
         r#"
 {}
@@ -6056,6 +6154,7 @@ name = "fast"
 
 [[neighbors]]
 address = "fe80::1"
+interface = "eth0"
 remote_asn = 65003
 bfd = {{ profile = "fast" }}
 "#,
@@ -6084,6 +6183,7 @@ bfd = {{ profile = "fast" }}
 
 [[neighbors]]
 address = "fe80::2"
+interface = "eth0"
 remote_asn = 65003
 peer_group = "rrc"
 "#,

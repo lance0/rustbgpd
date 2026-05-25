@@ -4,7 +4,7 @@ mod schema;
 mod validation;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::path::PathBuf;
 
 use rustbgpd_evpn::{
@@ -33,6 +33,11 @@ use self::schema::{BGP_PORT, DEFAULT_CONNECT_RETRY_SECS, DEFAULT_HOLD_TIME};
 use self::parse::parse_named_policy;
 
 impl Config {
+    fn interface_index(interface: &str) -> Result<u32, String> {
+        nix::net::if_::if_nametoindex(interface)
+            .map_err(|err| format!("interface {interface:?} does not exist or is invalid: {err}"))
+    }
+
     fn load_from_toml_source(content: &str, source_name: &str) -> Result<Self, String> {
         let config: Config = match toml::from_str(content) {
             Ok(c) => c,
@@ -542,6 +547,10 @@ impl Config {
             .or_else(|| group.and_then(|g| g.add_path.clone()))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "neighbor resolution centralizes inheritance, validation, and transport projection"
+    )]
     pub(crate) fn resolve_neighbor(
         &self,
         neighbor: &Neighbor,
@@ -583,8 +592,26 @@ impl Config {
             add_path_send_max: add_path.as_ref().and_then(|c| c.send_max).unwrap_or(0),
         };
 
-        let remote_addr = SocketAddr::new(peer_addr, BGP_PORT);
+        let (remote_addr, peer_interface, peer_scope_id) =
+            if let (IpAddr::V6(v6), Some(interface)) = (peer_addr, neighbor.interface.as_ref()) {
+                let scope_id = Self::interface_index(interface).map_err(|err| {
+                    ConfigError::InvalidNeighborConfig {
+                        address: neighbor.address.clone(),
+                        field: "interface".to_string(),
+                        reason: err,
+                    }
+                })?;
+                (
+                    SocketAddr::V6(SocketAddrV6::new(v6, BGP_PORT, 0, scope_id)),
+                    Some(interface.clone()),
+                    Some(scope_id),
+                )
+            } else {
+                (SocketAddr::new(peer_addr, BGP_PORT), None, None)
+            };
         let mut transport = TransportConfig::new(peer, remote_addr);
+        transport.peer_interface = peer_interface;
+        transport.peer_scope_id = peer_scope_id;
         transport.max_prefixes = neighbor
             .max_prefixes
             .or_else(|| group.and_then(|g| g.max_prefixes));
@@ -657,6 +684,7 @@ impl Config {
         // All fields come from the group via the normal resolution path.
         let neighbor = Neighbor {
             address: addr.to_string(),
+            interface: None,
             remote_asn,
             description: Some(description.to_string()),
             peer_group: Some(peer_group_name.to_string()),
@@ -1016,7 +1044,7 @@ fn effective_grpc_max_tier(
 /// Differences between two neighbor lists, keyed by address.
 pub struct NeighborDiff {
     pub added: Vec<Neighbor>,
-    pub removed: Vec<IpAddr>,
+    pub removed: Vec<rustbgpd_api::peer_types::PeerKey>,
     pub changed: Vec<Neighbor>,
 }
 
@@ -1099,10 +1127,11 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<String> 
 /// reports them through `neighbor_tcp_ao_changed`, and SIGHUP pins them until
 /// daemon restart rather than hot-reconciling a peer with stale listener MKTs.
 pub fn diff_neighbors(old: &[Neighbor], new: &[Neighbor]) -> NeighborDiff {
-    let old_map: std::collections::HashMap<&str, &Neighbor> =
-        old.iter().map(|n| (n.address.as_str(), n)).collect();
-    let new_map: std::collections::HashMap<&str, &Neighbor> =
-        new.iter().map(|n| (n.address.as_str(), n)).collect();
+    let key = |n: &Neighbor| (n.address.clone(), n.interface.clone());
+    let old_map: std::collections::HashMap<(String, Option<String>), &Neighbor> =
+        old.iter().map(|n| (key(n), n)).collect();
+    let new_map: std::collections::HashMap<(String, Option<String>), &Neighbor> =
+        new.iter().map(|n| (key(n), n)).collect();
 
     let mut added = Vec::new();
     let mut changed = Vec::new();
@@ -1117,10 +1146,14 @@ pub fn diff_neighbors(old: &[Neighbor], new: &[Neighbor]) -> NeighborDiff {
         }
     }
 
-    let removed: Vec<IpAddr> = old_map
-        .keys()
-        .filter(|addr| !new_map.contains_key(*addr))
-        .filter_map(|addr| addr.parse::<IpAddr>().ok())
+    let removed: Vec<rustbgpd_api::peer_types::PeerKey> = old_map
+        .iter()
+        .filter(|(key, _)| !new_map.contains_key(key))
+        .filter_map(|((_addr, _interface), neighbor)| {
+            neighbor.address.parse::<IpAddr>().ok().map(|address| {
+                rustbgpd_api::peer_types::PeerKey::new(address, neighbor.interface.clone())
+            })
+        })
         .collect();
 
     NeighborDiff {
@@ -1132,6 +1165,7 @@ pub fn diff_neighbors(old: &[Neighbor], new: &[Neighbor]) -> NeighborDiff {
 
 fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
     old.address == new.address
+        && old.interface == new.interface
         && old.remote_asn == new.remote_asn
         && old.description == new.description
         && old.peer_group == new.peer_group
@@ -1690,7 +1724,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         removed: neighbor_diff
             .removed
             .iter()
-            .map(IpAddr::to_string)
+            .map(ToString::to_string)
             .collect(),
         changed: neighbor_diff
             .changed

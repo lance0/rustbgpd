@@ -180,6 +180,8 @@ message NeighborConfig {
   bool add_path_send = 11;
   // Maximum paths to advertise per prefix (Add-Path send).
   uint32 add_path_send_max = 12;
+  // Optional interface name for IPv6 link-local / unnumbered neighbors.
+  string interface = 13;
 }
 
 message NeighborState {
@@ -241,6 +243,7 @@ message AddNeighborResponse {}
 
 message DeleteNeighborRequest {
   string address = 1;
+  string interface = 2;
 }
 
 message DeleteNeighborResponse {}
@@ -253,10 +256,12 @@ message ListNeighborsResponse {
 
 message GetNeighborStateRequest {
   string address = 1;
+  string interface = 2;
 }
 
 message EnableNeighborRequest {
   string address = 1;
+  string interface = 2;
 }
 
 message EnableNeighborResponse {}
@@ -264,6 +269,7 @@ message EnableNeighborResponse {}
 message DisableNeighborRequest {
   string address = 1;
   string reason = 2;
+  string interface = 3;
 }
 
 message DisableNeighborResponse {}
@@ -273,6 +279,7 @@ message SoftResetInRequest {
   // Address families to refresh (e.g., "ipv4_unicast", "ipv6_unicast").
   // If empty, refreshes all configured families for the peer.
   repeated string families = 2;
+  string interface = 3;
 }
 
 message SoftResetInResponse {}
@@ -281,6 +288,7 @@ message SetGracefulShutdownRequest {
   // Per-peer toggle. Empty string means apply to every currently-managed peer.
   string address = 1;
   bool enabled = 2;
+  string interface = 3;
 }
 
 message SetGracefulShutdownResponse {}

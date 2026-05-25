@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 
-use rustbgpd_api::peer_types::PeerInfo;
+use rustbgpd_api::peer_types::{PeerInfo, PeerKey};
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::SessionState;
 use rustbgpd_transport::{PeerHandle, PeerSessionState};
@@ -15,13 +15,14 @@ use super::{ManagedPeer, PEER_QUERY_TIMEOUT, PeerManager};
 /// has already exited; in both cases we surface `state = Idle, stale =
 /// true` so consumers know the field isn't authoritative.
 fn build_peer_info(
-    address: IpAddr,
+    peer: &PeerKey,
     managed: &ManagedPeer,
     session_state: Option<&PeerSessionState>,
 ) -> PeerInfo {
     let stale = session_state.is_none();
     PeerInfo {
-        address,
+        address: peer.address,
+        interface: peer.interface.clone(),
         remote_asn: managed.remote_asn,
         description: managed.description.clone(),
         peer_group: managed.peer_group.clone(),
@@ -56,15 +57,16 @@ fn build_peer_info(
 /// failed entirely is absent from the map. Both cases are treated as
 /// `stale = true` by [`build_peer_info`].
 async fn collect_session_states(
-    peers: &HashMap<IpAddr, ManagedPeer>,
-) -> HashMap<IpAddr, Option<PeerSessionState>> {
-    let mut tasks: Vec<tokio::task::JoinHandle<(IpAddr, Option<PeerSessionState>)>> =
+    peers: &HashMap<PeerKey, ManagedPeer>,
+) -> HashMap<PeerKey, Option<PeerSessionState>> {
+    let mut tasks: Vec<tokio::task::JoinHandle<(PeerKey, Option<PeerSessionState>)>> =
         Vec::with_capacity(peers.len());
-    for (&addr, managed) in peers {
+    for (peer, managed) in peers {
+        let peer = peer.clone();
         let commands = managed.handle.commands_sender();
         tasks.push(tokio::spawn(async move {
             let state = PeerHandle::query_state_with(commands, PEER_QUERY_TIMEOUT).await;
-            (addr, state)
+            (peer, state)
         }));
     }
 
@@ -83,10 +85,10 @@ async fn collect_session_states(
 }
 
 impl PeerManager {
-    pub(super) async fn get_peer_info(&self, address: IpAddr) -> Option<PeerInfo> {
-        let managed = self.peers.get(&address)?;
+    pub(super) async fn get_peer_info(&self, peer: &PeerKey) -> Option<PeerInfo> {
+        let managed = self.peers.get(peer)?;
         let session_state = managed.handle.query_state_timeout(PEER_QUERY_TIMEOUT).await;
-        Some(build_peer_info(address, managed, session_state.as_ref()))
+        Some(build_peer_info(peer, managed, session_state.as_ref()))
     }
 
     pub(super) async fn list_peers(&self) -> Vec<PeerInfo> {
@@ -100,9 +102,9 @@ impl PeerManager {
         let states = collect_session_states(&self.peers).await;
 
         let mut infos = Vec::with_capacity(self.peers.len());
-        for (&addr, managed) in &self.peers {
-            let session_state = states.get(&addr).and_then(Option::as_ref);
-            infos.push(build_peer_info(addr, managed, session_state));
+        for (peer, managed) in &self.peers {
+            let session_state = states.get(peer).and_then(Option::as_ref);
+            infos.push(build_peer_info(peer, managed, session_state));
         }
         infos
     }
@@ -134,8 +136,9 @@ impl PeerManager {
         // any one TCP-back-pressured peer block the per-minute BMP tick and,
         // through it, every other admin command queued behind the BMP arm.
         let states = collect_session_states(&self.peers).await;
-        for (&peer_addr, managed) in &self.peers {
-            let Some(Some(state)) = states.get(&peer_addr) else {
+        for (peer, managed) in &self.peers {
+            let peer_addr = peer.address;
+            let Some(Some(state)) = states.get(peer) else {
                 continue;
             };
             if state.fsm_state != SessionState::Established {

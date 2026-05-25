@@ -458,6 +458,8 @@ fn default_grpc_uds_mode() -> u32 {
 #[serde(deny_unknown_fields)]
 pub struct Neighbor {
     pub address: String,
+    /// Interface name required for IPv6 link-local / BGP unnumbered peers.
+    pub interface: Option<String>,
     pub remote_asn: u32,
     pub description: Option<String>,
     /// Optional peer-group reference for inherited transport/policy defaults.

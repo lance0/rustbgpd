@@ -88,6 +88,8 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
     TransportConfig {
         peer: test_peer_config(),
         remote_addr: addr,
+        peer_interface: None,
+        peer_scope_id: None,
         connect_timeout: Duration::from_secs(5),
         max_prefixes: None,
         md5_password: None,

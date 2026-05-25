@@ -55,6 +55,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   routes with visible `fe80::/10` next-hops, captures 32-byte MP_REACH next-hop
   encoding, reports Extended Next Hop, and does not expose Link-Local Next Hop
   capability 77.
+- **ADR-0069 scoped static neighbor identity.** Static IPv6 link-local
+  neighbors now require `[[neighbors]].interface`, are keyed by
+  `(address, interface)`, and can be addressed through gRPC / `rustbgpctl` as
+  `fe80::...%ifname`. Active opens use scoped `SocketAddrV6`; passive accepts
+  match the accepted scope id back to the configured interface; IPv6 GTSM uses
+  Hop-Limit / Min-Hop. RFC 8950 route exchange and FIB `dev` propagation remain
+  the next ADR-0069 slices.
 
 ## [0.28.0] — 2026-05-24
 

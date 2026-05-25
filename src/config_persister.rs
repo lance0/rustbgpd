@@ -134,6 +134,7 @@ log_format = "json"
     fn test_neighbor(address: &str, asn: u32) -> Neighbor {
         Neighbor {
             address: address.to_string(),
+            interface: None,
             remote_asn: asn,
             description: None,
             peer_group: None,

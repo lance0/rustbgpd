@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, DynamicNeighborInfo, POLICY_EVENT_HISTORY_CAPACITY, PeerManagerCommand,
+    ConfigEvent, DynamicNeighborInfo, POLICY_EVENT_HISTORY_CAPACITY, PeerKey, PeerManagerCommand,
     PeerManagerNeighborConfig, PolicyEvent, SESSION_EVENT_HISTORY_CAPACITY, SessionEvent,
     SessionLifecycleEvent,
 };
@@ -139,7 +139,11 @@ struct PendingInbound {
 /// Runs as a single tokio task, receiving commands via an mpsc channel.
 /// Same single-task ownership pattern as `RibManager`.
 pub struct PeerManager {
-    peers: HashMap<IpAddr, ManagedPeer>,
+    peers: HashMap<PeerKey, ManagedPeer>,
+    /// Reverse lookup from transport session id to configured peer identity.
+    /// Session lifecycle notifications are keyed by session id, and scoped
+    /// link-local peers can share the same address on different interfaces.
+    session_index: HashMap<u64, PeerKey>,
     rx: mpsc::Receiver<PeerManagerCommand>,
     internal_rx: mpsc::UnboundedReceiver<InternalCommand>,
     local_asn: u32,
@@ -287,6 +291,7 @@ impl PeerManager {
         let (policy_events_tx, _) = broadcast::channel(4096);
         Self {
             peers: HashMap::new(),
+            session_index: HashMap::new(),
             rx,
             internal_rx,
             local_asn,
@@ -327,6 +332,14 @@ impl PeerManager {
         id
     }
 
+    pub(super) fn register_session(&mut self, session_id: u64, peer: &PeerKey) {
+        self.session_index.insert(session_id, peer.clone());
+    }
+
+    pub(super) fn unregister_session(&mut self, session_id: u64) {
+        self.session_index.remove(&session_id);
+    }
+
     fn build_transport_config(&self, config: &PeerManagerNeighborConfig) -> TransportConfig {
         let families = if config.families.is_empty() {
             vec![(Afi::Ipv4, Safi::Unicast)]
@@ -347,8 +360,21 @@ impl PeerManager {
             add_path_send: config.add_path_send,
             add_path_send_max: config.add_path_send_max,
         };
-        let remote_addr = SocketAddr::new(config.address, BGP_PORT);
+        let scope_id = config.scope_id.or_else(|| {
+            config
+                .interface
+                .as_ref()
+                .and_then(|interface| nix::net::if_::if_nametoindex(interface.as_str()).ok())
+        });
+        let remote_addr = match (config.address, scope_id) {
+            (IpAddr::V6(v6), Some(scope_id)) => {
+                SocketAddr::V6(std::net::SocketAddrV6::new(v6, BGP_PORT, 0, scope_id))
+            }
+            _ => SocketAddr::new(config.address, BGP_PORT),
+        };
         let mut transport = TransportConfig::new(peer, remote_addr);
+        transport.peer_interface.clone_from(&config.interface);
+        transport.peer_scope_id = scope_id;
         transport.max_prefixes = config.max_prefixes;
         transport.peer_group.clone_from(&config.peer_group);
         transport.md5_password.clone_from(&config.md5_password);
@@ -368,6 +394,24 @@ impl PeerManager {
         transport.remove_private_as = config.remove_private_as;
         transport.cluster_id = self.cluster_id;
         transport
+    }
+
+    pub(super) fn unique_peer_key_for_address(&self, address: IpAddr) -> Option<PeerKey> {
+        let mut matches = self.peers.keys().filter(|key| key.address == address);
+        let first = matches.next()?.clone();
+        matches.next().is_none().then_some(first)
+    }
+
+    pub(super) fn peer_keys_for_address(&self, address: IpAddr) -> Vec<PeerKey> {
+        self.peers
+            .keys()
+            .filter(|key| key.address == address)
+            .cloned()
+            .collect()
+    }
+
+    pub(super) fn peer_key_for_session(&self, session_id: u64) -> Option<PeerKey> {
+        self.session_index.get(&session_id).cloned()
     }
 
     /// Run the `PeerManager` event loop until shutdown or channel close.
@@ -409,8 +453,8 @@ impl PeerManager {
                             let result = self.add_peer(config, sync_config_snapshot).await;
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::DeletePeer { address, sync_config_snapshot, reply } => {
-                            let result = self.delete_peer(address, sync_config_snapshot).await;
+                        PeerManagerCommand::DeletePeer { peer, sync_config_snapshot, reply } => {
+                            let result = self.delete_peer(peer, sync_config_snapshot).await;
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::ListPeers { reply } => {
@@ -443,24 +487,24 @@ impl PeerManager {
                             let result = self.diff_runtime_config(&candidate_toml);
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::GetPeerState { address, reply } => {
-                            let info = self.get_peer_info(address).await;
+                        PeerManagerCommand::GetPeerState { peer, reply } => {
+                            let info = self.get_peer_info(&peer).await;
                             let _ = reply.send(info);
                         }
-                        PeerManagerCommand::EnablePeer { address, reply } => {
-                            let result = self.enable_peer(address).await;
+                        PeerManagerCommand::EnablePeer { peer, reply } => {
+                            let result = self.enable_peer(peer).await;
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::DisablePeer { address, reason, reply } => {
-                            let result = self.disable_peer(address, reason).await;
+                        PeerManagerCommand::DisablePeer { peer, reason, reply } => {
+                            let result = self.disable_peer(peer, reason).await;
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::SoftResetIn { address, families, reply } => {
-                            let result = self.soft_reset_in(address, families).await;
+                        PeerManagerCommand::SoftResetIn { peer, families, reply } => {
+                            let result = self.soft_reset_in(peer, families).await;
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::SetGracefulShutdown { address, enabled, reply } => {
-                            let result = self.set_graceful_shutdown(address, enabled).await;
+                        PeerManagerCommand::SetGracefulShutdown { peer, enabled, reply } => {
+                            let result = self.set_graceful_shutdown(peer, enabled).await;
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::AcceptInbound { stream, peer_addr } => {

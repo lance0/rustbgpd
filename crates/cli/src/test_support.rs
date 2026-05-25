@@ -404,6 +404,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
         Ok(Response::new(server_proto::NeighborState {
             config: Some(server_proto::NeighborConfig {
                 address: "10.0.0.2".to_string(),
+                interface: String::new(),
                 remote_asn: 65002,
                 description: "peer-2".to_string(),
                 hold_time: 90,

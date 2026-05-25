@@ -17,6 +17,44 @@ pub const SESSION_EVENT_HISTORY_CAPACITY: usize = 4096;
 /// Maximum number of recent policy mutation events retained in memory.
 pub const POLICY_EVENT_HISTORY_CAPACITY: usize = 4096;
 
+/// Stable identity for a configured BGP peer.
+///
+/// Numbered peers use only `address`. IPv6 link-local peers must also carry
+/// the configured interface name because `fe80::/10` addresses are scoped and
+/// not globally unique.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PeerKey {
+    pub address: IpAddr,
+    pub interface: Option<String>,
+}
+
+impl PeerKey {
+    #[must_use]
+    pub fn new(address: IpAddr, interface: Option<String>) -> Self {
+        Self {
+            address,
+            interface: interface.and_then(|s| {
+                let trimmed = s.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn label(&self) -> String {
+        match &self.interface {
+            Some(interface) => format!("{}%{}", self.address, interface),
+            None => self.address.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for PeerKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label())
+    }
+}
+
 /// Kind of reconciliation failure returned to config reload callers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconcileFailureKind {
@@ -35,8 +73,8 @@ pub enum ReconcileFailureKind {
 pub struct ReconcileFailure {
     /// Which reconciliation step failed.
     pub kind: ReconcileFailureKind,
-    /// Peer address that failed.
-    pub address: IpAddr,
+    /// Peer identity that failed.
+    pub peer: PeerKey,
     /// Human-readable error description.
     pub error: String,
 }
@@ -79,6 +117,9 @@ pub struct SessionLifecycleEvent {
     pub event_type: SessionLifecycleEventType,
     /// Peer address associated with the event.
     pub peer: IpAddr,
+    /// Operator-facing peer label. Scoped IPv6 link-local peers render as
+    /// `address%interface`; numbered peers may leave this absent.
+    pub peer_label: Option<String>,
     /// Unix epoch seconds, string-shaped to match `RouteEvent`.
     pub timestamp: String,
     /// Previous BGP FSM state, when this is a session transition.
@@ -161,7 +202,7 @@ pub enum SessionEvent {
 pub enum SetGshutError {
     /// Operator addressed a specific peer that isn't currently managed.
     /// Maps to gRPC `NOT_FOUND`.
-    PeerNotFound(IpAddr),
+    PeerNotFound(PeerKey),
     /// Live-session command, RIB refresh, or aggregated per-peer
     /// failure during a broadcast. Maps to gRPC `INTERNAL`.
     /// Authoritative state on `ManagedPeer` has been updated regardless
@@ -173,7 +214,7 @@ pub enum SetGshutError {
 impl std::fmt::Display for SetGshutError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::PeerNotFound(addr) => write!(f, "peer {addr} not found"),
+            Self::PeerNotFound(peer) => write!(f, "peer {peer} not found"),
             Self::Internal(msg) => f.write_str(msg),
         }
     }
@@ -208,8 +249,8 @@ pub enum PeerManagerCommand {
     },
     /// Remove an existing peer by address.
     DeletePeer {
-        /// Peer IP address to remove.
-        address: IpAddr,
+        /// Peer identity to remove.
+        peer: PeerKey,
         /// Whether to update the live config snapshot.
         sync_config_snapshot: bool,
         /// Reply channel for success/failure.
@@ -259,22 +300,22 @@ pub enum PeerManagerCommand {
     },
     /// Query a single peer's state by address.
     GetPeerState {
-        /// Peer IP address to query.
-        address: IpAddr,
+        /// Peer identity to query.
+        peer: PeerKey,
         /// Reply channel returning the peer snapshot (None if not found).
         reply: oneshot::Sender<Option<PeerInfo>>,
     },
     /// Start (enable) a previously disabled peer.
     EnablePeer {
-        /// Peer IP address to enable.
-        address: IpAddr,
+        /// Peer identity to enable.
+        peer: PeerKey,
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Disable (stop) a peer, optionally with a shutdown reason.
     DisablePeer {
-        /// Peer IP address to disable.
-        address: IpAddr,
+        /// Peer identity to disable.
+        peer: PeerKey,
         /// RFC 8203 shutdown communication reason (pre-encoded).
         reason: Option<Bytes>,
         /// Reply channel for success/failure.
@@ -282,8 +323,8 @@ pub enum PeerManagerCommand {
     },
     /// Trigger a soft inbound reset (route refresh) for the given families.
     SoftResetIn {
-        /// Peer IP address.
-        address: IpAddr,
+        /// Peer identity.
+        peer: PeerKey,
         /// Families to refresh (empty = all configured).
         families: Vec<(Afi, Safi)>,
         /// Reply channel for success/failure.
@@ -293,8 +334,8 @@ pub enum PeerManagerCommand {
     /// `GRACEFUL_SHUTDOWN` community on outbound updates for one peer
     /// (`Some(addr)`) or every currently-managed peer (`None`).
     SetGracefulShutdown {
-        /// Peer IP address; `None` applies to all peers.
-        address: Option<IpAddr>,
+        /// Peer identity; `None` applies to all peers.
+        peer: Option<PeerKey>,
         /// `true` attaches the community; `false` clears it.
         enabled: bool,
         /// Reply channel; the error type distinguishes
@@ -307,15 +348,15 @@ pub enum PeerManagerCommand {
     AcceptInbound {
         /// Already-accepted TCP stream.
         stream: TcpStream,
-        /// Remote peer IP address.
-        peer_addr: IpAddr,
+        /// Remote peer socket address, including IPv6 scope for link-local.
+        peer_addr: std::net::SocketAddr,
     },
     /// Reconcile peers after config reload (add/remove/change).
     ReconcilePeers {
         /// Neighbors to add.
         added: Vec<PeerManagerNeighborConfig>,
         /// Neighbor addresses to remove.
-        removed: Vec<IpAddr>,
+        removed: Vec<PeerKey>,
         /// Neighbors whose config changed (remove + re-add).
         changed: Vec<PeerManagerNeighborConfig>,
         /// Reply channel with reconciliation results.
@@ -709,6 +750,10 @@ pub struct PolicyChainAssignment {
 pub struct PeerManagerNeighborConfig {
     /// Remote peer IP address (used as peer identifier).
     pub address: IpAddr,
+    /// Configured interface for IPv6 link-local peers.
+    pub interface: Option<String>,
+    /// Resolved interface index for scoped IPv6 link-local peers.
+    pub scope_id: Option<u32>,
     /// Remote autonomous system number.
     pub remote_asn: u32,
     /// Human-readable peer description.
@@ -766,7 +811,7 @@ pub enum ConfigEvent {
     /// A neighbor was successfully added at runtime.
     NeighborAdded(PeerManagerNeighborConfig),
     /// A neighbor was successfully deleted at runtime.
-    NeighborDeleted(IpAddr),
+    NeighborDeleted(PeerKey),
     /// Create or replace a named policy definition.
     SetPolicy {
         /// Policy definition name.
@@ -861,6 +906,8 @@ pub enum ConfigEvent {
 pub struct PeerInfo {
     /// Remote peer IP address.
     pub address: IpAddr,
+    /// Configured interface for IPv6 link-local peers.
+    pub interface: Option<String>,
     /// Remote autonomous system number.
     pub remote_asn: u32,
     /// Human-readable peer description.

@@ -2,9 +2,9 @@ use std::collections::BTreeSet;
 use std::net::IpAddr;
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, POLICY_EVENT_HISTORY_CAPACITY, PolicyEvent, SESSION_EVENT_HISTORY_CAPACITY,
-    SessionEvent, SessionLifecycleEvent, SessionLifecycleEventType, SessionNotificationEvent,
-    SessionNotificationEventType,
+    ConfigEvent, POLICY_EVENT_HISTORY_CAPACITY, PeerKey, PolicyEvent,
+    SESSION_EVENT_HISTORY_CAPACITY, SessionEvent, SessionLifecycleEvent, SessionLifecycleEventType,
+    SessionNotificationEvent, SessionNotificationEventType,
 };
 use rustbgpd_fsm::SessionState;
 use rustbgpd_rib::event::unix_timestamp_now;
@@ -152,13 +152,14 @@ impl PeerManager {
 
     pub(super) fn publish_peer_lifecycle_event(
         &mut self,
-        address: IpAddr,
+        peer: &PeerKey,
         event_type: SessionLifecycleEventType,
         reason: String,
     ) {
         self.publish_lifecycle_event(SessionLifecycleEvent {
             event_type,
-            peer: address,
+            peer: peer.address,
+            peer_label: Some(peer.label()),
             timestamp: Self::session_event_timestamp(),
             old_state: None,
             new_state: None,
@@ -169,26 +170,27 @@ impl PeerManager {
 
     pub(super) fn publish_state_lifecycle_event(
         &mut self,
-        peer_addr: IpAddr,
+        peer: &PeerKey,
         role: rustbgpd_transport::SessionRole,
         old: SessionState,
         new: SessionState,
     ) {
         let event_type = Self::classify_state_event(old, new);
+        let peer_label = peer.label();
         let reason = match event_type {
             SessionLifecycleEventType::Established => {
-                format!("session established for peer {peer_addr}")
+                format!("session established for peer {peer_label}")
             }
             SessionLifecycleEventType::Lost => {
                 format!(
-                    "session lost for peer {peer_addr}: {} -> {}",
+                    "session lost for peer {peer_label}: {} -> {}",
                     old.as_str(),
                     new.as_str()
                 )
             }
             SessionLifecycleEventType::StateChanged => {
                 format!(
-                    "session state changed for peer {peer_addr}: {} -> {}",
+                    "session state changed for peer {peer_label}: {} -> {}",
                     old.as_str(),
                     new.as_str()
                 )
@@ -199,7 +201,8 @@ impl PeerManager {
         };
         self.publish_lifecycle_event(SessionLifecycleEvent {
             event_type,
-            peer: peer_addr,
+            peer: peer.address,
+            peer_label: Some(peer_label),
             timestamp: Self::session_event_timestamp(),
             old_state: Some(old),
             new_state: Some(new),

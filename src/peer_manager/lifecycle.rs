@@ -1,7 +1,5 @@
-use std::net::IpAddr;
-
 use rustbgpd_api::peer_types::{
-    ConfigEvent, PeerManagerNeighborConfig, SessionLifecycleEventType, SetGshutError,
+    ConfigEvent, PeerKey, PeerManagerNeighborConfig, SessionLifecycleEventType, SetGshutError,
 };
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_transport::{PeerHandle, SessionIdentity, TcpAoConfig};
@@ -14,13 +12,40 @@ use crate::policy_admin::apply_config_event;
 use super::{ManagedPeer, PEER_POLICY_UPDATE_TIMEOUT, PeerManager};
 
 impl PeerManager {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "peer add wires transport, policy, BFD desired state, persistence, and events"
+    )]
     pub(super) async fn add_peer(
         &mut self,
         config: PeerManagerNeighborConfig,
         sync_config_snapshot: bool,
     ) -> Result<(), String> {
-        if self.peers.contains_key(&config.address) {
-            return Err(format!("peer {} already exists", config.address));
+        let peer_key = PeerKey::new(config.address, config.interface.clone());
+        let is_link_local = matches!(config.address, std::net::IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80);
+        match (is_link_local, config.interface.as_ref()) {
+            (true, None) => {
+                return Err(format!(
+                    "peer {peer_key} is IPv6 link-local and requires an interface"
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(format!(
+                    "peer {peer_key} has an interface but is not IPv6 link-local"
+                ));
+            }
+            _ => {}
+        }
+        if self.peers.contains_key(&peer_key) {
+            return Err(format!("peer {peer_key} already exists"));
+        }
+        if let Some(interface) = &config.interface
+            && config.scope_id.is_none()
+            && let Err(error) = nix::net::if_::if_nametoindex(interface.as_str())
+        {
+            return Err(format!(
+                "peer {peer_key} interface {interface:?} cannot be resolved: {error}"
+            ));
         }
 
         let (transport, label, peer_group, import_policy, export_policy, next_config) =
@@ -34,12 +59,12 @@ impl PeerManager {
                 let neighbor = next_config
                     .neighbors
                     .iter()
-                    .find(|neighbor| neighbor.address == config.address.to_string())
+                    .find(|neighbor| {
+                        neighbor.address == config.address.to_string()
+                            && neighbor.interface == config.interface
+                    })
                     .ok_or_else(|| {
-                        format!(
-                            "neighbor {} missing after config snapshot update",
-                            config.address
-                        )
+                        format!("neighbor {peer_key} missing after config snapshot update")
                     })?;
                 let resolved = next_config
                     .resolve_neighbor(neighbor)
@@ -100,7 +125,7 @@ impl PeerManager {
 
         info!(%address, %remote_asn, "peer added dynamically");
         self.peers.insert(
-            address,
+            peer_key.clone(),
             ManagedPeer {
                 handle,
                 session_id,
@@ -120,6 +145,7 @@ impl PeerManager {
                 advertise_graceful_shutdown: false,
             },
         );
+        self.register_session(session_id, &peer_key);
 
         if let Some(next_config) = next_config {
             self.current_config = next_config;
@@ -141,30 +167,31 @@ impl PeerManager {
 
     pub(super) async fn delete_peer(
         &mut self,
-        address: IpAddr,
+        peer: PeerKey,
         sync_config_snapshot: bool,
     ) -> Result<(), String> {
-        self.delete_peer_checked(address, sync_config_snapshot, None)
+        self.delete_peer_checked(peer, sync_config_snapshot, None)
             .await
     }
 
     pub(super) async fn delete_peer_for_reconfigure(
         &mut self,
-        address: IpAddr,
+        peer: PeerKey,
         next_tcp_ao: Option<&TcpAoConfig>,
     ) -> Result<(), String> {
-        self.delete_peer_checked(address, false, next_tcp_ao).await
+        self.delete_peer_checked(peer, false, next_tcp_ao).await
     }
 
     pub(super) async fn delete_peer_checked(
         &mut self,
-        address: IpAddr,
+        peer: PeerKey,
         sync_config_snapshot: bool,
         next_tcp_ao: Option<&TcpAoConfig>,
     ) -> Result<(), String> {
+        let address = peer.address;
         let current_tcp_ao = self
             .peers
-            .get(&address)
+            .get(&peer)
             .and_then(|managed| managed.transport_config.tcp_ao.as_ref())
             .cloned();
         if current_tcp_ao
@@ -176,10 +203,15 @@ impl PeerManager {
             ));
         }
 
-        let managed = self
+        let mut managed = self
             .peers
-            .remove(&address)
-            .ok_or_else(|| format!("peer {address} not found"))?;
+            .remove(&peer)
+            .ok_or_else(|| format!("peer {peer} not found"))?;
+        self.unregister_session(managed.session_id);
+        if let Some(pending) = managed.pending_inbound.take() {
+            self.unregister_session(pending.session_id);
+            let _ = pending.handle.shutdown().await;
+        }
 
         match managed.handle.shutdown().await {
             Ok(Ok(())) => info!(%address, "peer deleted"),
@@ -190,7 +222,7 @@ impl PeerManager {
         if sync_config_snapshot {
             apply_config_event(
                 &mut self.current_config,
-                &ConfigEvent::NeighborDeleted(address),
+                &ConfigEvent::NeighborDeleted(peer),
             )
             .map_err(|e| e.to_string())?;
         }
@@ -200,11 +232,12 @@ impl PeerManager {
         Ok(())
     }
 
-    pub(super) async fn enable_peer(&mut self, address: IpAddr) -> Result<(), String> {
-        if !self.peers.contains_key(&address) {
-            return Err(format!("peer {address} not found"));
+    pub(super) async fn enable_peer(&mut self, peer: PeerKey) -> Result<(), String> {
+        let address = peer.address;
+        if !self.peers.contains_key(&peer) {
+            return Err(format!("peer {peer} not found"));
         }
-        self.peers.get_mut(&address).expect("peer present").enabled = true;
+        self.peers.get_mut(&peer).expect("peer present").enabled = true;
         // ADR-0067 step 4b: re-enabling a strict peer must re-apply the withhold
         // — start BGP only if BFD is already Up, else withhold until it is.
         // (A freshly-restarted BFD session begins Down with no transition, so an
@@ -212,7 +245,7 @@ impl PeerManager {
         let withhold = self.bfd_should_withhold(&address);
         if !withhold {
             self.peers
-                .get(&address)
+                .get(&peer)
                 .expect("peer present")
                 .handle
                 .start()
@@ -220,7 +253,7 @@ impl PeerManager {
                 .map_err(|e| format!("failed to start peer: {e}"))?;
         }
         self.publish_peer_lifecycle_event(
-            address,
+            &peer,
             SessionLifecycleEventType::PeerEnabled,
             format!("peer {address} enabled"),
         );
@@ -236,31 +269,33 @@ impl PeerManager {
 
     pub(super) async fn disable_peer(
         &mut self,
-        address: IpAddr,
+        peer: PeerKey,
         reason: Option<bytes::Bytes>,
     ) -> Result<(), String> {
+        let address = peer.address;
         let pending = {
             let managed = self
                 .peers
-                .get_mut(&address)
-                .ok_or_else(|| format!("peer {address} not found"))?;
+                .get_mut(&peer)
+                .ok_or_else(|| format!("peer {peer} not found"))?;
             managed.enabled = false;
             managed.pending_inbound.take()
         };
         if let Some(pending) = pending {
+            self.unregister_session(pending.session_id);
             let _ = pending.handle.shutdown().await;
         }
         let managed = self
             .peers
-            .get_mut(&address)
-            .ok_or_else(|| format!("peer {address} not found"))?;
+            .get_mut(&peer)
+            .ok_or_else(|| format!("peer {peer} not found"))?;
         managed
             .handle
             .stop(reason)
             .await
             .map_err(|e| format!("failed to stop peer: {e}"))?;
         self.publish_peer_lifecycle_event(
-            address,
+            &peer,
             SessionLifecycleEventType::PeerDisabled,
             format!("peer {address} disabled"),
         );
@@ -290,7 +325,7 @@ impl PeerManager {
     ///    routes would see no change until something else triggered a
     ///    re-advertise.
     ///
-    /// `Some(addr)` for a missing peer surfaces as `SetGshutError::PeerNotFound`
+    /// `Some(peer)` for a missing peer surfaces as `SetGshutError::PeerNotFound`
     /// so callers can distinguish that from a session/RIB failure.
     /// Per-peer dispatch failures aggregate into `Internal`. The
     /// authoritative state is updated even when the live-session
@@ -298,24 +333,25 @@ impl PeerManager {
     /// session spawn regardless.
     pub(super) async fn set_graceful_shutdown(
         &mut self,
-        address: Option<IpAddr>,
+        peer: Option<PeerKey>,
         enabled: bool,
     ) -> Result<(), SetGshutError> {
-        let targets: Vec<IpAddr> = match address {
-            Some(addr) => {
-                if !self.peers.contains_key(&addr) {
-                    return Err(SetGshutError::PeerNotFound(addr));
+        let targets: Vec<PeerKey> = match peer {
+            Some(peer) => {
+                if !self.peers.contains_key(&peer) {
+                    return Err(SetGshutError::PeerNotFound(peer));
                 }
-                vec![addr]
+                vec![peer]
             }
-            None => self.peers.keys().copied().collect(),
+            None => self.peers.keys().cloned().collect(),
         };
 
         let mut failures: Vec<String> = Vec::new();
-        for addr in &targets {
+        for peer in &targets {
+            let addr = peer.address;
             // (1) Update authoritative state on ManagedPeer so it
             // survives session restart.
-            if let Some(managed) = self.peers.get_mut(addr) {
+            if let Some(managed) = self.peers.get_mut(peer) {
                 managed.advertise_graceful_shutdown = enabled;
             } else {
                 // Peer disappeared between snapshot and dispatch; rare
@@ -327,7 +363,7 @@ impl PeerManager {
             // (2) Tell the live session — best-effort. If the session
             // task is wedged or already restarting, the new session
             // will pick up the toggle from ManagedPeer at spawn time.
-            if let Some(managed) = self.peers.get(addr)
+            if let Some(managed) = self.peers.get(peer)
                 && let Err(e) = managed
                     .handle
                     .update_graceful_shutdown_timeout(enabled, PEER_POLICY_UPDATE_TIMEOUT)
@@ -353,7 +389,7 @@ impl PeerManager {
             if let Err(e) = self
                 .rib_tx
                 .send(RibUpdate::RefreshPeerOutbound {
-                    peer: *addr,
+                    peer: addr,
                     reply: reply_tx,
                 })
                 .await
@@ -400,13 +436,14 @@ impl PeerManager {
 
     pub(super) async fn soft_reset_in(
         &self,
-        address: IpAddr,
+        peer: PeerKey,
         families: Vec<(Afi, Safi)>,
     ) -> Result<(), String> {
+        let address = peer.address;
         let managed = self
             .peers
-            .get(&address)
-            .ok_or_else(|| format!("not found: peer {address}"))?;
+            .get(&peer)
+            .ok_or_else(|| format!("not found: peer {peer}"))?;
 
         // Determine which families to request refresh for
         let target_families = if families.is_empty() {

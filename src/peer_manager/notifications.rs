@@ -7,6 +7,10 @@ use tracing::{debug, info};
 use super::PeerManager;
 
 impl PeerManager {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "notification handling keeps collision, dynamic-peer removal, and lifecycle ordering together"
+    )]
     pub(super) async fn handle_session_notification(&mut self, notification: SessionNotification) {
         match notification {
             SessionNotification::StateChanged {
@@ -24,7 +28,11 @@ impl PeerManager {
                 peer_addr,
                 remote_router_id,
             } => {
-                let matches_current = self.peers.get(&peer_addr).is_some_and(|m| {
+                let Some(peer_key) = self.peer_key_for_session(session_id) else {
+                    debug!(%peer_addr, session_id, ?role, "ignoring notification for unknown peer session");
+                    return;
+                };
+                let matches_current = self.peers.get(&peer_key).is_some_and(|m| {
                     m.session_id == session_id
                         || m.pending_inbound
                             .as_ref()
@@ -36,10 +44,10 @@ impl PeerManager {
                 }
                 if self
                     .peers
-                    .get(&peer_addr)
+                    .get(&peer_key)
                     .is_some_and(|m| m.pending_inbound.is_some())
                 {
-                    self.resolve_collision(peer_addr, remote_router_id).await;
+                    self.resolve_collision(peer_key, remote_router_id).await;
                 }
             }
             SessionNotification::BackToIdle {
@@ -47,7 +55,11 @@ impl PeerManager {
                 role,
                 peer_addr,
             } => {
-                let pending = self.peers.get_mut(&peer_addr).and_then(|m| {
+                let Some(peer_key) = self.peer_key_for_session(session_id) else {
+                    debug!(%peer_addr, session_id, ?role, "ignoring BackToIdle for unknown peer session");
+                    return;
+                };
+                let pending = self.peers.get_mut(&peer_key).and_then(|m| {
                     if m.pending_inbound
                         .as_ref()
                         .is_some_and(|p| p.session_id == session_id)
@@ -59,13 +71,14 @@ impl PeerManager {
                 });
                 if let Some(pending) = pending {
                     debug!(%peer_addr, session_id, ?role, "inbound collision candidate went idle, dropping");
+                    self.unregister_session(pending.session_id);
                     let _ = pending.handle.shutdown().await;
                     return;
                 }
 
                 let current_primary = self
                     .peers
-                    .get(&peer_addr)
+                    .get(&peer_key)
                     .is_some_and(|m| m.session_id == session_id);
                 if !current_primary {
                     debug!(%peer_addr, session_id, ?role, "ignoring stale BackToIdle notification");
@@ -74,11 +87,11 @@ impl PeerManager {
                 // Auto-remove dynamic peers when they go idle (no reconnect).
                 if self
                     .peers
-                    .get(&peer_addr)
+                    .get(&peer_key)
                     .is_some_and(|m| m.is_dynamic && !m.enabled)
                 {
                     // Operator explicitly disabled — don't remove, just let it stay idle.
-                } else if self.peers.get(&peer_addr).is_some_and(|m| m.is_dynamic) {
+                } else if self.peers.get(&peer_key).is_some_and(|m| m.is_dynamic) {
                     // Snapshot any unfired hot-apply / Route Refresh
                     // intent before we drop the ManagedPeer. A
                     // re-establishing dynamic peer at the same address
@@ -87,22 +100,29 @@ impl PeerManager {
                     // when handle_inbound recreates the ManagedPeer.
                     self.dead_letter_pending_for(peer_addr);
                     info!(%peer_addr, "dynamic peer session went idle, removing");
-                    self.peers.remove(&peer_addr);
+                    if let Some(mut managed) = self.peers.remove(&peer_key) {
+                        self.unregister_session(managed.session_id);
+                        if let Some(pending) = managed.pending_inbound.take() {
+                            self.unregister_session(pending.session_id);
+                            let _ = pending.handle.shutdown().await;
+                        }
+                    }
                     self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
                     // Skip pending inbound logic for removed dynamic peers
                 } else {
-                    let enabled = self.peers.get(&peer_addr).is_some_and(|m| m.enabled);
+                    let enabled = self.peers.get(&peer_key).is_some_and(|m| m.enabled);
                     if enabled {
                         // Existing primary failed — promote the already-running
                         // inbound candidate if one exists.
-                        if self.promote_pending_inbound(peer_addr).await {
+                        if self.promote_pending_inbound(&peer_key).await {
                             info!(%peer_addr, "existing session went idle, promoting inbound collision candidate");
                         }
                     } else if let Some(pending) = self
                         .peers
-                        .get_mut(&peer_addr)
+                        .get_mut(&peer_key)
                         .and_then(|m| m.pending_inbound.take())
                     {
+                        self.unregister_session(pending.session_id);
                         let _ = pending.handle.shutdown().await;
                     }
                 }
@@ -139,7 +159,11 @@ impl PeerManager {
         old: SessionState,
         new: SessionState,
     ) {
-        let matches_current = self.peers.get(&peer_addr).is_some_and(|m| {
+        let Some(peer_key) = self.peer_key_for_session(session_id) else {
+            debug!(%peer_addr, session_id, ?role, "ignoring lifecycle notification for unknown peer session");
+            return;
+        };
+        let matches_current = self.peers.get(&peer_key).is_some_and(|m| {
             m.session_id == session_id
                 || m.pending_inbound
                     .as_ref()
@@ -149,6 +173,6 @@ impl PeerManager {
             debug!(%peer_addr, session_id, ?role, "ignoring stale StateChanged lifecycle notification");
             return;
         }
-        self.publish_state_lifecycle_event(peer_addr, role, old, new);
+        self.publish_state_lifecycle_event(&peer_key, role, old, new);
     }
 }

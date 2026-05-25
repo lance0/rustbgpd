@@ -167,6 +167,7 @@ In production with the systemd unit, the default UDS path
 ```bash
 # Add a peer at runtime (persisted to config file automatically)
 rustbgpctl neighbor 10.0.0.5 add --asn 65005
+rustbgpctl neighbor fe80::5054:ff:fe00:1%eth1 add --asn 65101
 
 # Explain why a route was selected as best
 rustbgpctl rib --prefix 10.0.0.0/24 --explain
@@ -330,6 +331,10 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
   FRR-`bfdd`-interop-tested (M51). IPv4 + IPv6 global, static neighbors only;
   multihop (RFC 5883), echo / demand, authentication, dynamic-neighbor BFD, and
   IPv6 link-local (v1.1) remain follow-up work.
+- BGP unnumbered production work is in progress: static IPv6 link-local
+  neighbors are scoped by interface in config, gRPC, and `rustbgpctl` using
+  `fe80::...%ifname` addressing. RFC 8950 route exchange and FIB installation
+  are separate ADR-0069 follow-up slices.
 - Published benchmarks: bgperf2 covers IPv4 unicast at 10 peers × 1k, 2 peers × 10k, and 2 peers × 100k prefixes; the in-tree `bench/evpn-load` M33 scale gate covers 50,000 reflected Type 2 routes with 60 s of 1,000-rps churn (5.1 s initial convergence, post-churn distinct-key count exact). Gate-specific 24h soak harnesses now ship in-tree under `tests/soak/`: a Gate 8b BUM-state harness and a Gate 9 slice 6 24h Type 5 churn harness, both with post-mortems under `docs/soak-*.md`. Continuous / multi-day soak automation outside those gates remains future work (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
 
 ## Project status

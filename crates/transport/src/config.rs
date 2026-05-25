@@ -88,6 +88,10 @@ pub struct TransportConfig {
     pub peer: PeerConfig,
     /// TCP address of the remote peer (typically port 179).
     pub remote_addr: SocketAddr,
+    /// Configured interface for IPv6 link-local / unnumbered peers.
+    pub peer_interface: Option<String>,
+    /// Resolved interface index for scoped IPv6 link-local peers.
+    pub peer_scope_id: Option<u32>,
     /// Timeout for outbound TCP connect attempts.
     pub connect_timeout: Duration,
     /// Maximum number of prefixes accepted from this peer before Cease/1.
@@ -133,6 +137,8 @@ impl TransportConfig {
         Self {
             peer,
             remote_addr,
+            peer_interface: None,
+            peer_scope_id: None,
             connect_timeout: Self::DEFAULT_CONNECT_TIMEOUT,
             max_prefixes: None,
             peer_group: None,

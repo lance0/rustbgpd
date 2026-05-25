@@ -89,7 +89,10 @@ impl PeerManager {
     /// Bounded at `dynamic_neighbor_limit` — over-cap evicts an
     /// arbitrary entry with `warn!` to surface pathological churn.
     pub(super) fn dead_letter_pending_for(&mut self, peer_addr: IpAddr) {
-        let Some(managed) = self.peers.get(&peer_addr) else {
+        let Some(peer_key) = self.unique_peer_key_for_address(peer_addr) else {
+            return;
+        };
+        let Some(managed) = self.peers.get(&peer_key) else {
             return;
         };
         if !managed.pending_refresh
@@ -128,7 +131,10 @@ impl PeerManager {
         let Some(prev) = self.dead_lettered_pending.remove(&peer_addr) else {
             return;
         };
-        let Some(managed) = self.peers.get_mut(&peer_addr) else {
+        let Some(managed) = self
+            .unique_peer_key_for_address(peer_addr)
+            .and_then(|key| self.peers.get_mut(&key))
+        else {
             return;
         };
         managed.pending_refresh = prev.refresh;

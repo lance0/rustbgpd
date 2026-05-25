@@ -200,9 +200,11 @@ impl Config {
             &self.peer_groups,
         )?;
 
-        // Validate neighbor address uniqueness
+        // Validate neighbor address/interface identity. Numbered peers remain
+        // keyed by bare address; link-local peers are scoped by interface.
         {
             let mut seen = std::collections::HashSet::new();
+            let mut seen_link_local_addrs = std::collections::HashSet::new();
             for neighbor in &self.neighbors {
                 let addr = neighbor.address.parse::<IpAddr>().map_err(|e| {
                     ConfigError::InvalidNeighborAddress {
@@ -210,10 +212,60 @@ impl Config {
                         reason: e.to_string(),
                     }
                 })?;
-                if !seen.insert(addr) {
+                let is_link_local = matches!(addr, IpAddr::V6(v6) if is_ipv6_link_local_addr(&v6));
+                match (&neighbor.interface, is_link_local) {
+                    (Some(interface), true) if interface.trim().is_empty() => {
+                        return Err(ConfigError::InvalidNeighborConfig {
+                            address: neighbor.address.clone(),
+                            field: "interface".to_string(),
+                            reason: "interface must not be empty".to_string(),
+                        });
+                    }
+                    (Some(_), false) => {
+                        return Err(ConfigError::InvalidNeighborConfig {
+                            address: neighbor.address.clone(),
+                            field: "interface".to_string(),
+                            reason: "interface is only valid for IPv6 link-local neighbors"
+                                .to_string(),
+                        });
+                    }
+                    (None, true) => {
+                        return Err(ConfigError::InvalidNeighborConfig {
+                            address: neighbor.address.clone(),
+                            field: "interface".to_string(),
+                            reason: "IPv6 link-local neighbors require an interface".to_string(),
+                        });
+                    }
+                    _ => {}
+                }
+                let key = (
+                    addr,
+                    if is_link_local {
+                        neighbor.interface.as_deref()
+                    } else {
+                        None
+                    },
+                );
+                if !seen.insert(key) {
                     return Err(ConfigError::InvalidNeighborAddress {
                         value: neighbor.address.clone(),
-                        reason: "duplicate neighbor address".to_string(),
+                        reason: "duplicate neighbor address/interface".to_string(),
+                    });
+                }
+                // v1 limitation: the RIB still keys peers by bare address, so the
+                // same link-local address bound to two interfaces would alias into
+                // one Adj-RIB-In/Out entry (a PeerDown on one would wipe the
+                // other's routes). Require each link-local address to be unique
+                // across neighbors until the RIB carries scoped peer identity.
+                // See ADR-0069 "Deferred".
+                if is_link_local && !seen_link_local_addrs.insert(addr) {
+                    return Err(ConfigError::InvalidNeighborConfig {
+                        address: neighbor.address.clone(),
+                        field: "interface".to_string(),
+                        reason: "the same IPv6 link-local address on multiple \
+                                 interfaces is not supported in this release; use a \
+                                 distinct link-local address per interface"
+                            .to_string(),
                     });
                 }
             }
@@ -1276,12 +1328,10 @@ fn validate_bfd(config: &Config) -> Result<(), ConfigError> {
         }
     }
 
-    // v1 ships IPv4 + IPv6 global only. Link-local BFD needs a neighbor
-    // interface/scope the daemon cannot express today (the address parses as a
-    // bare `IpAddr` and `resolve_neighbor` builds an unscoped `SocketAddr`), so
-    // the actor would send to an unscoped fe80:: peer and the session would
-    // never come Up. Reject it up front with an actionable error rather than
-    // silently failing to converge (ADR-0067 defers link-local to v1.1).
+    // v1 ships IPv4 + IPv6 global only. BGP link-local peers carry interface
+    // scope, but the BFD actor still keys and sends sessions by bare address.
+    // Reject it up front with an actionable error rather than silently failing
+    // to converge (ADR-0067 defers link-local BFD to v1.1).
     for neighbor in &config.neighbors {
         // Effective BFD = own block, else inherited from the peer group; a
         // disabled (`enabled = false`) block runs no session, so it does not
@@ -1300,7 +1350,7 @@ fn validate_bfd(config: &Config) -> Result<(), ConfigError> {
             return Err(ConfigError::InvalidBfd {
                 reason: format!(
                     "neighbor {:?}: BFD on IPv6 link-local addresses is not supported in v1 \
-                     (link-local BFD requires a neighbor interface; deferred to v1.1)",
+                     (BFD link-local session scoping is deferred to v1.1)",
                     neighbor.address
                 ),
             });
@@ -1311,8 +1361,11 @@ fn validate_bfd(config: &Config) -> Result<(), ConfigError> {
 
 /// Whether `addr` parses to an IPv6 link-local address (`fe80::/10`).
 fn is_ipv6_link_local(addr: &str) -> bool {
-    addr.parse::<std::net::Ipv6Addr>().is_ok_and(|a| {
-        let octets = a.octets();
-        octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80
-    })
+    addr.parse::<std::net::Ipv6Addr>()
+        .is_ok_and(|a| is_ipv6_link_local_addr(&a))
+}
+
+fn is_ipv6_link_local_addr(addr: &std::net::Ipv6Addr) -> bool {
+    let octets = addr.octets();
+    octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80
 }
