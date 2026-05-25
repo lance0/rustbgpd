@@ -44,7 +44,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 8538 | Notification GR (N-bit) |
 | 8584 §2.2 | DF Election Extended Community (type 0x06, subtype 0x06): decode + construct of the algorithm / capabilities / DF-preference fields |
 | 8654 | Extended messages (up to 65535 bytes) |
-| 8950 | Extended next hop (IPv4 NLRI over IPv6 NH) |
+| 8950 | Extended next hop (IPv4 NLRI over IPv6 NH); optional acceptance of a link-local-primary `MP_REACH_NLRI` next-hop for unnumbered peers via `UpdateValidationOptions` |
 | 8955/8956 | FlowSpec: 13 component types, numeric/bitmask operators; §6.1-compliant `NEXT_HOP` validation (the irrelevant-next-hop case is accepted, not rejected); `FlowSpecRule::validate_encoded_len` rejects rules above the 12-bit `MAX_FLOWSPEC_NLRI_RULE_LEN` (4095 bytes) before they reach the wire |
 | 9012 | BGP Encapsulation extended community (§4.1) — VXLAN sub-type used by EVPN encap |
 | 9135 | EVPN integrated routing for IRB |
@@ -120,6 +120,9 @@ let bytes = encode_message(&Message::Open(open));
 - **`RouteDistinguisher`** — RFC 4364 §4.2 8-byte RD, used by EVPN and VPNv4/v6. Implements `Display` + `FromStr` for the standard `asn:val` / `ipv4:val` textual encodings
 - **`DfElectionExtendedCommunity`** (`attribute`) — RFC 8584 §2.2 / RFC 9785 §3 DF Election Extended Community: `ExtendedCommunity::as_df_election()` decodes one, `ExtendedCommunity::df_election(algorithm, capabilities, preference)` constructs it (EVPN DF election algorithm, capabilities, and the RFC 9785 preference / Don't-Preempt fields)
 - **Link Bandwidth** (draft-ietf-idr-link-bandwidth) — `ExtendedCommunity::as_link_bandwidth()` decodes the advertising AS and the IEEE-754 bytes/second bandwidth from a non-transitive two-octet-AS-specific community (type 0x40 subtype 0x04); `ExtendedCommunity::link_bandwidth(asn, bytes_per_sec)` constructs one, for weighting unequal-cost multipath next hops
+- **`UpdateValidationOptions`** — opt-in relaxations for
+  `validate_update_attributes_with_options`, e.g. accepting a link-local-primary
+  IPv4 `MP_REACH_NLRI` next-hop on a scoped unnumbered session (RFC 8950)
 - **`DecodeError`** / **`EncodeError`** — structured error types via `thiserror`
 - **Well-known community constants** — `u32` values for matching and setting
   standard communities: `COMMUNITY_NO_EXPORT` / `COMMUNITY_NO_ADVERTISE` /

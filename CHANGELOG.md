@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.29.0] — 2026-05-25
+
 ### Added
 
 - **ADR-0066 per-class ECMP caps.** New per-table `[[fib_tables]].maximum_paths_ebgp`
@@ -87,6 +89,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   two different interfaces, withdraw/re-advertise collapses and restores the
   scoped forwarding set, and injected rustbgpd IPv4 routes reach FRR with a
   link-local next-hop.
+
+### Changed
+
+- **`rustbgpd-wire` 0.9.3 → 0.9.4** (additive, non-breaking). Adds Link Bandwidth
+  Extended Community decode/construct (`ExtendedCommunity::as_link_bandwidth` /
+  `link_bandwidth`, draft-ietf-idr-link-bandwidth) and optional link-local-primary
+  IPv4 `MP_REACH_NLRI` next-hop acceptance for unnumbered peers via the new
+  `UpdateValidationOptions` + `validate_update_attributes_with_options`. No
+  breaking API changes — existing items are unchanged.
 
 ## [0.28.0] — 2026-05-24
 
