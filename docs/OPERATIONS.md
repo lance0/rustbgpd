@@ -998,7 +998,7 @@ session machinery:
 > FIB programming through a transactional `L3OwnedState` model,
 > `RTNLGRP_IPV4/IPV6_ROUTE` multicast for sub-second withdraw,
 > `ListIpVrfs`/`GetIpVrf` gRPC + `rustbgpctl evpn vrfs` CLI,
-> M39 protected self-hosted kernel-dataplane CI. **ADR-0059** (v0.19.0)
+> M39 hosted kernel-dataplane CI. **ADR-0059** (v0.19.0)
 > adds receive-path aliasing-ECMP via FDB nexthop groups
 > (slices 1-4, M40 FRR-validated); **slice 3.5 hardening**
 > (PRs #91 / #92 / #93) added the `apply_aliasing_ecmp`

@@ -183,7 +183,7 @@ MKTs are installed on the startup listener socket and are not deleted yet.
 Static-neighbor protected interop is validated by M43 against BIRD 3.2.1:
 matching keys establish and import a route, while a mismatched key withdraws
 the route and does not re-establish within the fail-closed window. The
-protected `kernel-dataplane` workflow includes M43, and the current protected
+hosted `kernel-dataplane` workflow includes M43, and the current hosted
 runner advertises `CONFIG_TCP_AO=y` and runs the topology. The workflow keeps a
 warning-only skip guard for future runner kernels without TCP-AO support.
 Dynamic-neighbor TCP-AO, runtime key rotation, multi-key rollover, and richer

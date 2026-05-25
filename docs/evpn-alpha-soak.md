@@ -16,8 +16,8 @@ none of them block the current release on their own.
 
 ## CI / observability
 
-- [x] **M36 / M37 / M37+IP / M38 on protected privileged CI.**
-  The earlier VTEP and DF-election smokes now run in the protected
+- [x] **M36 / M37 / M37+IP / M38 on hosted privileged CI.**
+  The earlier VTEP and DF-election smokes now run in the
   `.github/workflows/kernel-dataplane.yml` workflow (GitHub-hosted)
   alongside M39 / M40 / M42 and the Docker netns selectors. This
   closes the reviewer-run coverage gap tracked in
@@ -217,7 +217,7 @@ landing, tracked here for visibility)
   both Type 2 and EAD-per-EVI through from the RIB.
   [ADR-0059](adr/0059-evpn-aliasing-fdb-nexthop-groups.md) is
   fully shipped in v0.19.0 across four implementation slices
-  (PRs #84 / #86 / #87 / #88) plus the M40 protected self-hosted
+  (PRs #84 / #86 / #87 / #88) plus the M40 hosted
   smoke (PR #89): slice 1 added `RemoteMacEntry::alias_group_key`
   + same-AF projection invariant; slice 2 added the
   `nexthop_raw` raw-netlink primitive (rtnetlink 0.21 has no

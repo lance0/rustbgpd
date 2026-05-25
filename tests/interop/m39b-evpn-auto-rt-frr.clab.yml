@@ -16,7 +16,7 @@
 #
 # Reuses the M39 kernel topology (VRF + L3VXLAN + tenant dummy) and
 # start scripts unchanged; only the RT configuration differs. Like
-# M39 this is a manual / protected-runner smoke — it needs the kernel
+# M39 this is a manual / hosted-runner smoke — it needs the kernel
 # `vrf` module and CAP_NET_ADMIN, so it does NOT run on the hosted CI
 # runner.
 #

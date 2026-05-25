@@ -20,7 +20,7 @@ after-warmup RSS slope of **0.184 MB/h** trending asymptotic.
 | Field | Value |
 |-------|-------|
 | Duration | 24 h 1 m 53 s (target 86 400 s, actual 86 458 s, +58 s drain tail) |
-| Topology | `tests/interop/m37-soak.clab.yml` (name `m37-soak` to isolate from the protected M37 CI smoke) |
+| Topology | `tests/interop/m37-soak.clab.yml` (name `m37-soak` to isolate from the hosted M37 CI smoke) |
 | Harness | `tests/soak/run-m37-local-origination-churn-soak.sh` |
 | MAC pool | 4 096 |
 | Live target | 1 024 |

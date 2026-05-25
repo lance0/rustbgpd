@@ -247,7 +247,7 @@ aliasing in `crates/evpn/src/aliasing.rs`, mass-withdraw in
 to validate DF election + Type 1/4 origination against a peer running
 the same code. If the release touches **Gate 9 / ADR-0059** (IP-VRF,
 Type 5, L3 FIB programming, aliasing ECMP, or FDB nexthop groups), run
-the protected `Kernel Dataplane` workflow for M39 and/or M40 as
+the hosted `Kernel Dataplane` workflow for M39 and/or M40 as
 appropriate. They can still be reproduced manually with:
 
 ```bash
@@ -275,7 +275,7 @@ containerlab destroy -t tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml
 If the release touches **ADR-0061 / ADR-0066 / ADR-0068 general unicast FIB**
 (`src/fib.rs`, `src/fib_runtime.rs`, `[[fib_tables]]`, `ListFibRoutes`,
 `rustbgpctl rib fib`, ECMP caps, `multipath_relax`, or weighted multipath), run
-the protected `Kernel Dataplane` workflow for the relevant FIB suites: M42 for
+the hosted `Kernel Dataplane` workflow for the relevant FIB suites: M42 for
 base configured-table install, M50 for ECMP, and M52 for multipath-relax. Manual
 reproduction:
 
@@ -299,7 +299,7 @@ containerlab destroy -t tests/interop/m52-fib-ecmp-relax-frr.clab.yml
 
 If the release touches **ADR-0067 BFD** (`crates/bfd`, `src/bfd_runtime.rs`,
 `[[bfd_profiles]]`, `[neighbors.bfd]`, `BfdService`, `rustbgpctl bfd`, or BFD
-events / coupling), run the protected `Kernel Dataplane` workflow for M51.
+events / coupling), run the hosted `Kernel Dataplane` workflow for M51.
 Manual reproduction:
 
 ```bash

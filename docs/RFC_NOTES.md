@@ -242,8 +242,11 @@ AFI (2 bytes) | SAFI (1) | NH-Len (1) | Next Hop (variable) | Reserved (1) | NLR
 - AFI 2 (IPv6), SAFI 1 (Unicast) is the only supported combination beyond
   IPv4 unicast.
 - Next-hop length: 16 bytes (global IPv6 address) or 32 bytes (global +
-  link-local). When 32 bytes, rustbgpd takes the first 16 (global address)
-  and discards the link-local.
+  link-local). When 32 bytes, rustbgpd takes the first 16 as the primary
+  next-hop and preserves the trailing 16 in `link_local_next_hop`
+  (round-tripped through wire / RIB / MRT since v0.11.0); ADR-0069 resolves a
+  link-local next-hop as a scoped next-hop for unnumbered IPv4-over-IPv6 and
+  Linux FIB `dev`.
 - NLRI: same prefix-length encoding as IPv4, but up to 128 bits (16 bytes
   of address data).
 - When `MP_REACH_NLRI` is present in an UPDATE, the body NEXT_HOP attribute
@@ -818,12 +821,12 @@ implemented per ADR-0040.
   verdict to subscribers; `rustbgpctl evpn vrfs [NAME]` +
   `EvpnService.ListIpVrfs` / `EvpnService.GetIpVrf` gRPC
   surfaces let operators read it without scraping logs.
-  **M39 protected self-hosted kernel-dataplane CI** validates the
+  **M39 hosted kernel-dataplane CI** validates the
   bidirectional Type 5 path against FRR 10.3.1.
 - **Shipped since Gate 9:** auto-derived Route Targets (RFC 8365
   §5.1.2.1 for L2VNI / AS:VNI for L3VNI, v0.25.0, M39b cross-vendor
-  smoke) and Type 5 gRPC injection (v0.25.0, M45). Protected
-  self-hosted kernel-dataplane CI gates M36–M43 incl. M39b.
+  smoke) and Type 5 gRPC injection (v0.25.0, M45). Hosted
+  kernel-dataplane CI gates M36–M43 incl. M39b.
 - **Still ahead after Gate 9:** full RFC 9135 overlay-index IRB
   recursive resolution (Gate 9 ships the Interface-less variant only;
   non-zero gateways are detected and fail-closed).
@@ -874,7 +877,7 @@ implemented per ADR-0040.
   ordering, Router MAC conflict detection, sub-second withdraw
   via `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` multicast,
   `rustbgpctl evpn vrfs` CLI + `ListIpVrfs`/`GetIpVrf` gRPC,
-  M39 protected self-hosted smoke against FRR 10.3.1.
+  M39 hosted smoke against FRR 10.3.1.
 - **Still ahead:** full RFC 9135 overlay-index IRB recursive
   resolution. (Auto-derived Route Targets per RFC 8365 §5.1.2.1
   shipped in v0.25.0.)

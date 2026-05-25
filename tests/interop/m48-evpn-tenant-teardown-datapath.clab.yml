@@ -16,7 +16,7 @@
 # tenant and asserts every tenant route + kernel L3 row drains.
 #
 # Requires CAP_NET_ADMIN + the kernel `vrf`/`vxlan` modules, same as M39
-# — runs on the self-hosted kernel-dataplane runner, not hosted CI.
+# — runs on the hosted kernel-dataplane runner (GitHub Actions).
 #
 # Topology:
 #   PE1 (rustbgpd)              PE2 (FRR 10.3.1)

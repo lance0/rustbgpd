@@ -750,7 +750,7 @@ Still ahead:
   restart-required by design and non-teardown mixed edits (an add combined with a
   delete/redefine) fail closed with a "split the request" error.
 
-(The protected self-hosted `kernel-dataplane` workflow now covers M36 /
+(The hosted `kernel-dataplane` workflow now covers M36 /
 M37 / M37+IP / M38 / M39 / M39b / M40 / M42 / M43 — #130 closed.)
 
 Further out on this track:

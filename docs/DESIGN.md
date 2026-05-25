@@ -469,8 +469,7 @@ controller-driven injection for Type 2 / Type 3. What remains:
   Non-DF BUM suppression, ESI-aware Type 2 origination, aliasing
   projection, and receive-side EAD-per-ES mass-withdraw filtering.
   ADR-0059 closes the aliasing-ECMP receive-path data path via
-  FDB nexthop groups (slices 1-4 shipped on `main`, M40 protected
-  self-hosted smoke validated against FRR EVPN-MH 10.3.1); slice 3.5
+  FDB nexthop groups (slices 1-4 shipped on `main`, M40 hosted smoke validated against FRR EVPN-MH 10.3.1); slice 3.5
   hardening (PRs #91 / #92 / #93) followed up with the
   `apply_aliasing_ecmp` per-instance off-switch, periodic
   `RTM_GETNEXTHOP` drift recovery, and homogeneous IPv6 alias
@@ -486,7 +485,7 @@ controller-driven injection for Type 2 / Type 3. What remains:
   origination via `RibUpdate::InjectEvpn`, remote Type 5 import
   through the transactional `L3OwnedState` model with four-phase
   apply ordering, Router MAC conflict detection, and the M39
-  protected self-hosted smoke are all on `main`. Auto-derived RTs
+  hosted smoke are all on `main`. Auto-derived RTs
   (RFC 8365 §5.1.2.1) shipped in v0.25.0. Receive-side RFC 9135
   overlay-index Type 5 recursion now resolves non-zero Gateway Address
   routes through unambiguous linked Type 2 MAC/IP state while leaving

@@ -213,13 +213,15 @@ reconfiguration is a later enhancement.
 - Timer precision: a 300 ms interval under CPU load held **max jitter 0.61 ms,
   avg 0.21 ms** over 20 samples — ample margin for a 300 ms × 3 detection
   window. No timer concern.
-- **IPv6 link-local / unnumbered → deferred to v1.1.** The BGP side cannot peer
-  over link-local today: `Neighbor` has no interface field, the address parses
-  as a bare `IpAddr` (no `%scope`), and `resolve_neighbor` builds an unscoped
-  `SocketAddr`. Link-local BFD first needs link-local **BGP** peering (a shared
-  neighbor interface field + scoped connect) — a separate feature. The BFD-side
-  mechanics (scope_id TX, `PKTINFO` ifindex RX) are already proven, so it is a
-  small add once link-local BGP lands. **v1 ships IPv4 + IPv6 global.**
+- **IPv6 link-local / unnumbered → deferred to v1.1.** At the time of this spike
+  the BGP side could not peer over link-local: `Neighbor` had no interface field,
+  the address parsed as a bare `IpAddr` (no `%scope`), and `resolve_neighbor`
+  built an unscoped `SocketAddr`. Link-local BFD first needs link-local **BGP**
+  peering (a neighbor interface field + scoped connect). The BFD-side mechanics
+  (scope_id TX, `PKTINFO` ifindex RX) are already proven. **Update:** scoped
+  link-local BGP peering has since shipped (ADR-0069 / M53), so the prerequisite
+  now exists; link-local BFD becomes a small add keyed by the same scoped peer
+  identity but remains deferred to v1.1. **BFD v1 ships IPv4 + IPv6 global.**
 
 ## Deferred (explicit non-scope)
 

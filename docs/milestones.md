@@ -718,7 +718,7 @@ for the architectural record.
 - **Symmetric Interface-less IRB** (RFC 9136 §4.4.2) — shipped
   end-to-end in v0.18.0 (Gate 9 slice 6 PR A #77 origination +
   PR B #78 import/install + PR #79 sub-second route-event
-  refresh + M39 protected self-hosted smoke). `label2` and Router MAC are now
+  refresh + M39 hosted smoke). `label2` and Router MAC are now
   interpreted: Router MAC is operator-supplied via
   `[[evpn_ip_vrfs]].router_mac`, `label2` carries the L3VNI on
   origination, and remote Type 5 import maps `(L3VXLAN ifindex,
@@ -726,8 +726,7 @@ for the architectural record.
   with conflict detection. Full RFC 9135 overlay-index IRB
   remains deferred.
 - **ADR-0059 EVPN aliasing dataplane via FDB nexthop groups** —
-  shipped on `main` v0.19.0 across slices 1-4 + M40 protected
-  self-hosted smoke (PRs #84/#86/#87/#88/#89). Multi-homed Type 2 routes
+  shipped on `main` v0.19.0 across slices 1-4 + M40 hosted smoke (PRs #84/#86/#87/#88/#89). Multi-homed Type 2 routes
   program FDB nexthop groups via `NDA_NH_ID` / `NHA_FDB` on the
   receive path; FRR-validated against EVPN-MH 10.3.1.
   Slice 3.5 hardening follow-ups shipped in v0.20.0 — PRs

@@ -620,7 +620,7 @@ thousands of VTEPs, and gives you structured observability.
   L3 FIB programming through the transactional `L3OwnedState` model
   with four-phase apply ordering, sub-second
   `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rustbgpctl evpn vrfs` CLI +
-  `ListIpVrfs`/`GetIpVrf` gRPC, M39 protected self-hosted smoke against FRR 10.3.1.
+  `ListIpVrfs`/`GetIpVrf` gRPC, M39 hosted smoke against FRR 10.3.1.
   ADR-0059 (v0.19.0) adds receive-path aliasing-ECMP via FDB
   nexthop groups (slices 1-4 + M40 FRR-validated). Still ahead:
   RFC 9135 overlay-index IRB.
@@ -685,7 +685,7 @@ measurement path.
   schema, IP-VRF readiness probe, Type 5 origination + remote
   import + L3 FIB programming through the transactional
   `L3OwnedState` model, `RTNLGRP_IPV4/IPV6_ROUTE` multicast,
-  `rustbgpctl evpn vrfs` CLI, M39 protected self-hosted smoke. **ADR-0059**
+  `rustbgpctl evpn vrfs` CLI, M39 hosted smoke. **ADR-0059**
   (v0.19.0) adds receive-path aliasing-ECMP via FDB nexthop
   groups (slices 1-4 + M40 FRR-validated). Still ahead: full
   RFC 9135 overlay-index IRB. See
@@ -793,7 +793,7 @@ Be honest about where rustbgpd isn't the right tool:
   readiness probe, Type 5 origination + remote import + L3 FIB
   programming through the transactional `L3OwnedState` model,
   sub-second `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rustbgpctl evpn
-  vrfs` CLI, M39 protected self-hosted smoke. **ADR-0059** (v0.19.0) adds
+  vrfs` CLI, M39 hosted smoke. **ADR-0059** (v0.19.0) adds
   receive-path aliasing-ECMP via FDB nexthop groups (slices 1-4 +
   M40 FRR-validated). **Still missing for full VTEP parity:**
   RFC 9135 overlay-index IRB; MAC-churn variant of the Gate 8b

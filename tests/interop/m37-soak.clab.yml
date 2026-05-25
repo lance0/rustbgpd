@@ -2,7 +2,7 @@
 #
 # Identical wiring to m37-evpn-local-origination.clab.yml; only the
 # topology `name:` differs. The distinct name produces container names
-# (`clab-m37-soak-rustbgpd`, `clab-m37-soak-consumer`) that the protected
+# (`clab-m37-soak-rustbgpd`, `clab-m37-soak-consumer`) that the hosted
 # `kernel-dataplane` CI workflow's M37 smoke cannot match when it runs
 # `containerlab destroy` against the interop topology, so a push to main
 # during an active soak no longer kills the soak's containers.

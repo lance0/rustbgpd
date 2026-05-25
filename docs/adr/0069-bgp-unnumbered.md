@@ -239,11 +239,11 @@ rustbgpd ↔ FRR gate for the v1 scope:
 - FRR-style `neighbor swp1 interface remote-as external` autodiscovery via
   interface/ND lifecycle.
 - The same IPv6 link-local address bound to more than one interface. v1 keys the
-  RIB peer (and ECMP next-hop dedup) by bare address, so this is rejected at
-  config validation; supporting it requires threading the scoped
-  `(address, interface)` key through the Adj-RIB-In/Out and `RibUpdate` paths.
-  The FIB next-hop layer already keys link-local gateways by
-  `(address, ifindex)`, so it is ready for the scoped RIB key once it lands.
+  RIB **peer** by bare address, so this is rejected at config validation;
+  supporting it requires threading the scoped `(address, interface)` key through
+  the Adj-RIB-In/Out and `RibUpdate` paths. The RIB's ECMP next-hop dedup and the
+  Linux FIB next-hop layer already key link-local gateways by `(address,
+  ifindex)` — only the RIB peer key remains.
 - IPv6 link-local BFD for unnumbered peers. This follows naturally once scoped
   BGP peer identity exists.
 - Link-Local Next Hop Capability (code 77) for the 16-byte link-local-only
