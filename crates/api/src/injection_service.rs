@@ -267,6 +267,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             prefix,
             next_hop: next_hop_ip,
             link_local_next_hop: None,
+            next_hop_scope: None,
             peer: LOCAL_PEER,
             attributes: std::sync::Arc::new(attributes),
             received_at: std::time::Instant::now(),

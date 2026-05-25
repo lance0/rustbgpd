@@ -959,6 +959,7 @@ mod tests {
             prefix,
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             link_local_next_hop: None,
+            next_hop_scope: None,
             peer: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
             attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),

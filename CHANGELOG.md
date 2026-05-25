@@ -62,6 +62,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   match the accepted scope id back to the configured interface; IPv6 GTSM uses
   Hop-Limit / Min-Hop. RFC 8950 route exchange and FIB `dev` propagation remain
   the next ADR-0069 slices.
+- **ADR-0069 RFC 8950 unnumbered route exchange core.** Scoped IPv6 link-local
+  peers now fail closed for `ipv4_unicast` unless RFC 8950 Extended Next Hop is
+  negotiated: rustbgpd no longer falls back to IPv4 body NLRI on unnumbered
+  links, ignores inbound IPv4 body NLRI from scoped link-local peers, accepts
+  link-local primary IPv4 `MP_REACH_NLRI` only for scoped
+  ENHE-negotiated sessions, emits the FRR-proven 32-byte link-local/link-local
+  next-hop form, and carries next-hop scope metadata through RIB install
+  candidates for the later Linux FIB `dev`/OIF slice.
 
 ## [0.28.0] — 2026-05-24
 

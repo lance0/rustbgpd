@@ -44,6 +44,7 @@ fn make_route(prefix: Prefix, peer_idx: u32) -> Route {
         prefix,
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, peer_idx as u8, 1)),
         link_local_next_hop: None,
+        next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, peer_idx as u8, 1)),
         attributes: Arc::new(typical_attributes(peer_idx)),
         received_at: Instant::now(),

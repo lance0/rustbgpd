@@ -216,7 +216,12 @@ impl PeerSession {
                     // then for eBGP remove IPv6 unicast if no valid
                     // IPv6 next-hop is available.
                     let is_ebgp = neg.peer_asn != self.config.peer.local_asn;
-                    let sendable_families = if is_ebgp {
+                    let unnumbered_ipv4_without_enhe = self.is_scoped_link_local_peer()
+                        && !neg
+                            .extended_nexthop_families
+                            .get(&(Afi::Ipv4, Safi::Unicast))
+                            .is_some_and(|afi| *afi == Afi::Ipv6);
+                    let mut sendable_families = if is_ebgp {
                         let local_ipv6 = self
                             .read_half
                             .as_ref()
@@ -225,10 +230,8 @@ impl PeerSession {
                                 IpAddr::V6(v6) => Some(v6),
                                 IpAddr::V4(_) => None,
                             });
-                        let has_v6_nh = self
-                            .config
-                            .local_ipv6_nexthop
-                            .or(local_ipv6)
+                        let local_or_configured_v6 = self.config.local_ipv6_nexthop.or(local_ipv6);
+                        let has_v6_nh = local_or_configured_v6
                             .as_ref()
                             .is_some_and(rustbgpd_wire::is_valid_ipv6_nexthop);
                         neg.negotiated_families
@@ -243,6 +246,9 @@ impl PeerSession {
                     } else {
                         neg.negotiated_families.clone()
                     };
+                    if unnumbered_ipv4_without_enhe {
+                        sendable_families.retain(|family| *family != (Afi::Ipv4, Safi::Unicast));
+                    }
 
                     // If Extended Messages was negotiated, increase the
                     // framing buffer limit from 4096 to 65535 (RFC 8654).

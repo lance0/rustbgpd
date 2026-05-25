@@ -7,6 +7,16 @@ use rustbgpd_wire::{
     LargeCommunity, Origin, PathAttribute, Prefix, RpkiValidation,
 };
 
+/// Interface scope required to resolve an IPv6 link-local next-hop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NextHopScope {
+    /// Configured interface name, kept for operator-facing status and later FIB
+    /// projection.
+    pub interface: Arc<str>,
+    /// Linux interface index for the scope.
+    pub ifindex: u32,
+}
+
 /// How a route was learned, used for best-path selection and iBGP split-horizon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteOrigin {
@@ -30,6 +40,8 @@ pub struct Route {
     /// `MP_REACH_NLRI` had a 32-byte next-hop. Re-encoded by the MRT
     /// exporter and the BGP UPDATE encoder when present.
     pub link_local_next_hop: Option<Ipv6Addr>,
+    /// Interface scope for an IPv6 link-local primary next-hop.
+    pub next_hop_scope: Option<NextHopScope>,
     /// The peer that advertised this route.
     pub peer: IpAddr,
     /// BGP path attributes (ORIGIN, `AS_PATH`, communities, etc.).
@@ -68,6 +80,8 @@ pub struct FibInstallNextHop {
     pub next_hop: IpAddr,
     /// IPv6 link-local next-hop carried alongside the global one, if any.
     pub link_local_next_hop: Option<Ipv6Addr>,
+    /// Interface scope for an IPv6 link-local primary next-hop, if any.
+    pub next_hop_scope: Option<NextHopScope>,
     /// The peer that advertised the path this next-hop came from.
     pub peer: IpAddr,
     /// Add-Path path id of the source path (0 = no Add-Path).

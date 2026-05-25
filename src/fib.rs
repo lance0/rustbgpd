@@ -771,6 +771,7 @@ mod tests {
             next_hops: vec![FibInstallNextHop {
                 next_hop: route.next_hop,
                 link_local_next_hop: route.link_local_next_hop,
+                next_hop_scope: None,
                 peer: route.peer,
                 path_id: route.path_id,
                 weight: 1,
@@ -791,6 +792,7 @@ mod tests {
         let mut next_hops = vec![FibInstallNextHop {
             next_hop: best.next_hop,
             link_local_next_hop: best.link_local_next_hop,
+            next_hop_scope: None,
             peer: best.peer,
             path_id: best.path_id,
             weight: 1,
@@ -799,6 +801,7 @@ mod tests {
             next_hops.push(FibInstallNextHop {
                 next_hop: ip(nh),
                 link_local_next_hop: None,
+                next_hop_scope: None,
                 peer: ip("198.51.100.2"),
                 path_id: u32::try_from(idx).unwrap() + 1,
                 weight: 1,
@@ -818,6 +821,7 @@ mod tests {
         let mut next_hops = vec![FibInstallNextHop {
             next_hop: best.next_hop,
             link_local_next_hop: best.link_local_next_hop,
+            next_hop_scope: None,
             peer: best.peer,
             path_id: best.path_id,
             weight: best_weight,
@@ -826,6 +830,7 @@ mod tests {
             next_hops.push(FibInstallNextHop {
                 next_hop: ip(nh),
                 link_local_next_hop: None,
+                next_hop_scope: None,
                 peer: ip("198.51.100.2"),
                 path_id: u32::try_from(idx).unwrap() + 1,
                 weight: *weight,
@@ -906,6 +911,7 @@ mod tests {
             prefix,
             next_hop,
             link_local_next_hop: None,
+            next_hop_scope: None,
             peer,
             attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),

@@ -17,6 +17,16 @@ pub struct UpdateError {
     pub data: Vec<u8>,
 }
 
+/// Context-dependent UPDATE validation knobs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UpdateValidationOptions {
+    /// Permit an IPv6 link-local primary next-hop only for IPv4 unicast
+    /// `MP_REACH_NLRI`. This is intentionally opt-in: ordinary IPv6 next-hop
+    /// validation remains strict, and callers must have already established the
+    /// session scope/interface needed to resolve the link-local address.
+    pub allow_ipv4_link_local_mp_reach_next_hop: bool,
+}
+
 /// Well-known attribute type codes that MUST be present when NLRI is advertised.
 const MANDATORY_ATTRS: &[u8] = &[attr_type::ORIGIN, attr_type::AS_PATH];
 
@@ -37,6 +47,30 @@ pub fn validate_update_attributes(
     has_nlri: bool,
     has_body_nlri: bool,
     is_ebgp: bool,
+) -> Result<(), UpdateError> {
+    validate_update_attributes_with_options(
+        attrs,
+        has_nlri,
+        has_body_nlri,
+        is_ebgp,
+        UpdateValidationOptions::default(),
+    )
+}
+
+/// Validate UPDATE attributes with context-dependent validation options.
+///
+/// Use [`validate_update_attributes`] unless the caller has session context
+/// that legitimately relaxes one of the default checks.
+///
+/// # Errors
+///
+/// Returns an `UpdateError` with the appropriate subcode and data.
+pub fn validate_update_attributes_with_options(
+    attrs: &[PathAttribute],
+    has_nlri: bool,
+    has_body_nlri: bool,
+    is_ebgp: bool,
+    options: UpdateValidationOptions,
 ) -> Result<(), UpdateError> {
     check_duplicate_types(attrs)?;
     check_unrecognized_wellknown(attrs)?;
@@ -60,7 +94,14 @@ pub fn validate_update_attributes(
             // FlowSpec; the rule contents travel in
             // `flowspec_announced`, not next_hop.
             PathAttribute::MpReachNlri(mp) if mp.safi != Safi::FlowSpec => {
-                check_mp_reach_next_hop(mp.next_hop, mp.link_local_next_hop)?;
+                let allow_link_local_primary = options.allow_ipv4_link_local_mp_reach_next_hop
+                    && mp.afi == crate::capability::Afi::Ipv4
+                    && mp.safi == Safi::Unicast;
+                check_mp_reach_next_hop(
+                    mp.next_hop,
+                    mp.link_local_next_hop,
+                    allow_link_local_primary,
+                )?;
             }
             _ => {}
         }
@@ -187,11 +228,17 @@ fn check_next_hop(addr: std::net::Ipv4Addr) -> Result<(), UpdateError> {
 fn check_mp_reach_next_hop(
     addr: IpAddr,
     link_local: Option<std::net::Ipv6Addr>,
+    allow_link_local_primary: bool,
 ) -> Result<(), UpdateError> {
     match addr {
         IpAddr::V4(v4) => check_next_hop(v4)?,
         IpAddr::V6(v6) => {
-            if !is_valid_ipv6_nexthop(&v6) {
+            let valid = if allow_link_local_primary && is_ipv6_link_local(&v6) {
+                link_local.is_some_and(|ll| ll == v6)
+            } else {
+                is_valid_ipv6_nexthop(&v6)
+            };
+            if !valid {
                 return Err(UpdateError {
                     subcode: update_subcode::INVALID_NEXT_HOP,
                     data: v6.octets().to_vec(),
@@ -502,6 +549,59 @@ mod tests {
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
+    }
+
+    #[test]
+    fn mp_reach_nlri_allows_link_local_primary_only_for_opted_in_ipv4() {
+        use crate::attribute::MpReachNlri;
+        use crate::capability::{Afi, Safi};
+
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65001])],
+            }),
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                next_hop: std::net::IpAddr::V6("fe80::1".parse().unwrap()),
+                link_local_next_hop: Some("fe80::1".parse().unwrap()),
+                announced: vec![],
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+            }),
+        ];
+
+        assert!(validate_update_attributes(&attrs, true, false, true).is_err());
+        assert!(
+            validate_update_attributes_with_options(
+                &attrs,
+                true,
+                false,
+                true,
+                UpdateValidationOptions {
+                    allow_ipv4_link_local_mp_reach_next_hop: true,
+                },
+            )
+            .is_ok()
+        );
+
+        let mut attrs_without_companion = attrs.clone();
+        if let PathAttribute::MpReachNlri(mp) = &mut attrs_without_companion[2] {
+            mp.link_local_next_hop = None;
+        }
+        assert!(
+            validate_update_attributes_with_options(
+                &attrs_without_companion,
+                true,
+                false,
+                true,
+                UpdateValidationOptions {
+                    allow_ipv4_link_local_mp_reach_next_hop: true,
+                },
+            )
+            .is_err()
+        );
     }
 
     #[test]

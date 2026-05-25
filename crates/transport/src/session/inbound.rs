@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use super::{
     Afi, AsPath, Event, EvpnRibRoute, EvpnRoute, EvpnRouteKey, FlowSpecRoute, FlowSpecRule,
-    Instant, IpAddr, Ipv4Addr, NotificationCode, NotificationMessage, PathAttribute, PeerSession,
-    Prefix, RibUpdate, Route, Safi, cease_subcode, debug, info, resolve_import_nexthop, warn,
+    Instant, IpAddr, Ipv4Addr, NextHopScope, NotificationCode, NotificationMessage, PathAttribute,
+    PeerSession, Prefix, RibUpdate, Route, Safi, cease_subcode, debug, info, is_ipv6_link_local,
+    resolve_import_nexthop, warn,
 };
 use rustbgpd_policy::{RouteContext, RouteType};
 
@@ -51,6 +52,19 @@ impl PeerSession {
                 .get(&(Afi::Ipv4, Safi::Unicast))
                 .is_some_and(|afi| *afi == Afi::Ipv6)
         })
+    }
+
+    pub(super) fn is_scoped_link_local_peer(&self) -> bool {
+        matches!(self.peer_ip, IpAddr::V6(v6) if is_ipv6_link_local(&v6))
+            && self.config.peer_interface.is_some()
+            && self.config.peer_scope_id.is_some()
+    }
+
+    fn link_local_next_hop_scope(&self, next_hop: IpAddr) -> Option<NextHopScope> {
+        match next_hop {
+            IpAddr::V6(v6) if is_ipv6_link_local(&v6) => self.link_local_next_hop_scope.clone(),
+            _ => None,
+        }
     }
 
     /// Parse an UPDATE message, validate attributes, apply import policy,
@@ -103,11 +117,16 @@ impl PeerSession {
             .as_ref()
             .is_some_and(|n| n.peer_asn != self.config.peer.local_asn);
 
-        if let Err(update_err) = rustbgpd_wire::validate::validate_update_attributes(
+        let validation_options = rustbgpd_wire::UpdateValidationOptions {
+            allow_ipv4_link_local_mp_reach_next_hop: self.is_scoped_link_local_peer()
+                && self.use_extended_nexthop_ipv4(),
+        };
+        if let Err(update_err) = rustbgpd_wire::validate::validate_update_attributes_with_options(
             &parsed.attributes,
             has_nlri,
             has_body_nlri,
             is_ebgp,
+            validation_options,
         ) {
             warn!(
                 peer = %self.peer_label,
@@ -423,75 +442,94 @@ impl PeerSession {
                 v.validate_aspa(parsed_as_path)
             });
 
+        let unnumbered_ipv4_body_forbidden = self.is_scoped_link_local_peer();
+        if unnumbered_ipv4_body_forbidden
+            && (!parsed.announced.is_empty() || !parsed.withdrawn.is_empty())
+        {
+            warn!(
+                peer = %self.peer_label,
+                "Ignoring IPv4 body NLRI from scoped link-local peer; RFC 8950 requires MP_REACH_NLRI"
+            );
+        }
+
         // Body NLRI routes (IPv4)
-        let mut announced: Vec<Route> = parsed
-            .announced
-            .iter()
-            .filter_map(|entry| {
-                let prefix = Prefix::V4(entry.prefix);
-                let rpki_state = validation
-                    .as_ref()
-                    .map_or(rustbgpd_wire::RpkiValidation::NotFound, |v| {
-                        v.validate_rpki(&prefix, origin_asn)
-                    });
-                let ctx = RouteContext {
-                    prefix,
-                    next_hop: Some(body_next_hop),
-                    extended_communities: update_ecs,
-                    communities: update_communities,
-                    large_communities: update_large_communities,
-                    as_path_str: &aspath_str,
-                    as_path_len: aspath_len,
-                    validation_state: rpki_state,
-                    aspa_state,
-                    peer_address: Some(self.peer_ip),
-                    peer_asn: policy_peer_asn,
-                    peer_group: self.config.peer_group.as_deref(),
-                    route_type: policy_route_type,
-                    evpn_route_type: None,
-                    local_pref: policy_local_pref,
-                    med: policy_med,
-                };
-                let result = rustbgpd_policy::evaluate_chain(self.import_policy.as_ref(), &ctx);
-                if result.action != rustbgpd_policy::PolicyAction::Permit {
-                    return None;
-                }
-                let mut attrs = route_attrs.clone();
-                let nh_action =
-                    rustbgpd_policy::apply_modifications(&mut attrs, &result.modifications);
-                let next_hop = resolve_import_nexthop(
-                    nh_action.as_ref(),
-                    body_next_hop,
-                    self.read_half.as_ref(),
-                    &self.config,
-                );
-                Some(Route {
-                    prefix,
-                    next_hop,
-                    link_local_next_hop: None,
-                    peer: self.peer_ip,
-                    attributes: Arc::new(attrs),
-                    received_at: now,
-                    origin_type: route_origin,
-                    peer_router_id: self
-                        .negotiated
+        let mut announced: Vec<Route> = if unnumbered_ipv4_body_forbidden {
+            Vec::new()
+        } else {
+            parsed
+                .announced
+                .iter()
+                .filter_map(|entry| {
+                    let prefix = Prefix::V4(entry.prefix);
+                    let rpki_state = validation
                         .as_ref()
-                        .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
-                    is_stale: false,
-                    is_llgr_stale: false,
-                    path_id: entry.path_id,
-                    validation_state: rpki_state,
-                    aspa_state,
+                        .map_or(rustbgpd_wire::RpkiValidation::NotFound, |v| {
+                            v.validate_rpki(&prefix, origin_asn)
+                        });
+                    let ctx = RouteContext {
+                        prefix,
+                        next_hop: Some(body_next_hop),
+                        extended_communities: update_ecs,
+                        communities: update_communities,
+                        large_communities: update_large_communities,
+                        as_path_str: &aspath_str,
+                        as_path_len: aspath_len,
+                        validation_state: rpki_state,
+                        aspa_state,
+                        peer_address: Some(self.peer_ip),
+                        peer_asn: policy_peer_asn,
+                        peer_group: self.config.peer_group.as_deref(),
+                        route_type: policy_route_type,
+                        evpn_route_type: None,
+                        local_pref: policy_local_pref,
+                        med: policy_med,
+                    };
+                    let result = rustbgpd_policy::evaluate_chain(self.import_policy.as_ref(), &ctx);
+                    if result.action != rustbgpd_policy::PolicyAction::Permit {
+                        return None;
+                    }
+                    let mut attrs = route_attrs.clone();
+                    let nh_action =
+                        rustbgpd_policy::apply_modifications(&mut attrs, &result.modifications);
+                    let next_hop = resolve_import_nexthop(
+                        nh_action.as_ref(),
+                        body_next_hop,
+                        self.read_half.as_ref(),
+                        &self.config,
+                    );
+                    Some(Route {
+                        prefix,
+                        next_hop,
+                        link_local_next_hop: None,
+                        next_hop_scope: self.link_local_next_hop_scope(next_hop),
+                        peer: self.peer_ip,
+                        attributes: Arc::new(attrs),
+                        received_at: now,
+                        origin_type: route_origin,
+                        peer_router_id: self
+                            .negotiated
+                            .as_ref()
+                            .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
+                        is_stale: false,
+                        is_llgr_stale: false,
+                        path_id: entry.path_id,
+                        validation_state: rpki_state,
+                        aspa_state,
+                    })
                 })
-            })
-            .collect();
+                .collect()
+        };
 
         // Body withdrawn routes (IPv4) — carry path_id for Add-Path peers
-        let mut withdrawn: Vec<(Prefix, u32)> = parsed
-            .withdrawn
-            .iter()
-            .map(|e| (Prefix::V4(e.prefix), e.path_id))
-            .collect();
+        let mut withdrawn: Vec<(Prefix, u32)> = if unnumbered_ipv4_body_forbidden {
+            Vec::new()
+        } else {
+            parsed
+                .withdrawn
+                .iter()
+                .map(|e| (Prefix::V4(e.prefix), e.path_id))
+                .collect()
+        };
 
         // MP-BGP NLRI from attributes
         // For IPv6 routes, also strip body NEXT_HOP — it's IPv4-specific and
@@ -682,10 +720,16 @@ impl PeerSession {
                                 self.read_half.as_ref(),
                                 &self.config,
                             );
+                            let link_local_next_hop = if next_hop == mp.next_hop {
+                                mp.link_local_next_hop
+                            } else {
+                                None
+                            };
                             announced.push(Route {
                                 prefix: entry.prefix,
                                 next_hop,
-                                link_local_next_hop: mp.link_local_next_hop,
+                                link_local_next_hop,
+                                next_hop_scope: self.link_local_next_hop_scope(next_hop),
                                 peer: self.peer_ip,
                                 attributes: Arc::new(attrs),
                                 received_at: now,

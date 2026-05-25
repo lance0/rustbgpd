@@ -146,11 +146,20 @@ fn negotiated_session(remote_asn: u32, extended_nexthop: bool) -> NegotiatedSess
     }
 }
 
+fn configure_scoped_link_local_peer(session: &mut PeerSession) {
+    session.peer_ip = IpAddr::V6("fe80::2".parse().unwrap());
+    session.config.peer_interface = Some("eth1".to_string());
+    session.config.peer_scope_id = Some(7);
+    session.link_local_next_hop_scope =
+        PeerSession::link_local_next_hop_scope_from_config(&session.config);
+}
+
 fn make_route(local_pref: u32) -> Route {
     Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         link_local_next_hop: None,
+        next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -176,6 +185,7 @@ fn make_v6_unicast_route(next_hop: Ipv6Addr) -> Route {
         prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64)),
         next_hop: IpAddr::V6(next_hop),
         link_local_next_hop: None,
+        next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -466,6 +476,7 @@ fn route_server_client_ebgp_does_not_synthesize_as_path() {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         link_local_next_hop: None,
+        next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -650,6 +661,7 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         link_local_next_hop: None,
+        next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::clone(&attrs),
         received_at: Instant::now(),
@@ -709,6 +721,7 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
         prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64)),
         next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
         link_local_next_hop: None,
+        next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::clone(&attrs),
         received_at: Instant::now(),
@@ -893,6 +906,7 @@ fn ibgp_default_local_pref_when_missing() {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         link_local_next_hop: None,
+        next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -929,6 +943,7 @@ fn rr_does_not_add_originator_or_cluster_for_local_route() {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         link_local_next_hop: None,
+        next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
@@ -976,6 +991,7 @@ fn rr_adds_originator_and_cluster_for_ibgp_route() {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         link_local_next_hop: None,
+        next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -1086,6 +1102,211 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop() {
 }
 
 #[tokio::test]
+async fn process_update_accepts_ipv4_mp_link_local_for_scoped_unnumbered_peer() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    configure_scoped_link_local_peer(&mut session);
+    let negotiated = negotiated_session(65002, true);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let next_hop: Ipv6Addr = "fe80::1".parse().unwrap();
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            next_hop: IpAddr::V6(next_hop),
+            link_local_next_hop: Some(next_hop),
+            announced: vec![NlriEntry {
+                path_id: 0,
+                prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            }],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+        }),
+    ];
+    let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
+
+    session.process_update(update).await;
+
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].next_hop, IpAddr::V6(next_hop));
+    assert_eq!(announced[0].link_local_next_hop, Some(next_hop));
+    let scope = announced[0]
+        .next_hop_scope
+        .as_ref()
+        .expect("link-local next-hop must carry scope toward FIB");
+    assert_eq!(scope.interface.as_ref(), "eth1");
+    assert_eq!(scope.ifindex, 7);
+}
+
+#[tokio::test]
+async fn import_policy_next_hop_rewrite_clears_ipv4_mp_link_local_companion() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    configure_scoped_link_local_peer(&mut session);
+    let negotiated = negotiated_session(65002, true);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let replacement_next_hop: IpAddr = "2001:db8::99".parse().unwrap();
+    session.import_policy = Some(PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: PolicyAction::Permit,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: RouteModifications {
+                set_next_hop: Some(rustbgpd_policy::NextHopAction::Specific(
+                    replacement_next_hop,
+                )),
+                ..Default::default()
+            },
+        }],
+        default_action: PolicyAction::Deny,
+    }]));
+
+    let received_next_hop: Ipv6Addr = "fe80::1".parse().unwrap();
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            next_hop: IpAddr::V6(received_next_hop),
+            link_local_next_hop: Some(received_next_hop),
+            announced: vec![NlriEntry {
+                path_id: 0,
+                prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            }],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+        }),
+    ];
+    let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
+
+    session.process_update(update).await;
+
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].next_hop, replacement_next_hop);
+    assert_eq!(announced[0].link_local_next_hop, None);
+    assert_eq!(announced[0].next_hop_scope, None);
+}
+
+#[tokio::test]
+async fn process_update_rejects_ipv4_mp_link_local_without_extended_nexthop() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    configure_scoped_link_local_peer(&mut session);
+    let negotiated = negotiated_session(65002, false);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let next_hop: Ipv6Addr = "fe80::1".parse().unwrap();
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            next_hop: IpAddr::V6(next_hop),
+            link_local_next_hop: Some(next_hop),
+            announced: vec![NlriEntry {
+                path_id: 0,
+                prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            }],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+        }),
+    ];
+    let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
+
+    session.process_update(update).await;
+
+    // Fail closed on the route, gracefully: a scoped link-local peer that did
+    // not negotiate Extended Next Hop must not import an IPv4-over-IPv6
+    // link-local MP_REACH (no route reaches the RIB), but the route is dropped
+    // per-route (ignore + WARN at the ENH gate), not by tearing the session
+    // down with a NOTIFICATION. Pinning both ends guards against a regression in
+    // either direction — silently accepting the route, or escalating to a
+    // session reset. The positive case is covered by
+    // `process_update_accepts_ipv4_mp_link_local_for_scoped_unnumbered_peer`.
+    assert!(rib_rx.try_recv().is_err(), "no route may reach the RIB");
+    assert_eq!(
+        session.notifications_sent, 0,
+        "the route is dropped at the Extended-Next-Hop gate, not via NOTIFICATION"
+    );
+}
+
+#[tokio::test]
+async fn process_update_ignores_ipv4_body_nlri_for_scoped_unnumbered_peer() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    configure_scoped_link_local_peer(&mut session);
+    let negotiated = negotiated_session(65002, true);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 1)),
+    ];
+    let update = UpdateMessage::build(
+        &[],
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
+        }],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+
+    session.process_update(update).await;
+
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "scoped link-local peers must not import IPv4 body NLRI"
+    );
+}
+
+#[tokio::test]
 async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, mut server) = connected_stream_pair().await;
@@ -1104,6 +1325,7 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
             next_hop: IpAddr::V6(v6_nh),
             link_local_next_hop: None,
+            next_hop_scope: None,
             peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -1151,6 +1373,196 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
 }
 
 #[tokio::test]
+async fn unnumbered_ipv4_extended_nexthop_sends_link_local_mp_reach() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    configure_scoped_link_local_peer(&mut session);
+    session.config.local_ipv6_nexthop = Some("fe80::1".parse().unwrap());
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+
+    let negotiated = negotiated_session(65002, true);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let update = OutboundRouteUpdate {
+        announce: vec![make_route(100)],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![None],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+    };
+
+    session.send_route_update(update);
+
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected UPDATE");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("IPv4 unnumbered must use MP_REACH");
+
+    let link_local: Ipv6Addr = "fe80::1".parse().unwrap();
+    assert_eq!(mp.afi, Afi::Ipv4);
+    assert_eq!(mp.safi, Safi::Unicast);
+    assert_eq!(mp.next_hop, IpAddr::V6(link_local));
+    assert_eq!(mp.link_local_next_hop, Some(link_local));
+}
+
+#[tokio::test]
+async fn unnumbered_ipv4_recomputes_link_local_companion_after_next_hop_self() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    configure_scoped_link_local_peer(&mut session);
+    session.config.local_ipv6_nexthop = Some("fe80::1".parse().unwrap());
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+
+    let negotiated = negotiated_session(65002, true);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let remote_ll: Ipv6Addr = "fe80::2".parse().unwrap();
+    let mut route = make_route(100);
+    route.next_hop = IpAddr::V6(remote_ll);
+    route.link_local_next_hop = Some(remote_ll);
+
+    let update = OutboundRouteUpdate {
+        announce: vec![route],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![None],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+    };
+
+    session.send_route_update(update);
+
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected UPDATE");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("IPv4 unnumbered must use MP_REACH");
+
+    let local_ll: Ipv6Addr = "fe80::1".parse().unwrap();
+    assert_eq!(mp.next_hop, IpAddr::V6(local_ll));
+    assert_eq!(
+        mp.link_local_next_hop,
+        Some(local_ll),
+        "next-hop-self must not preserve the original remote link-local companion"
+    );
+}
+
+#[tokio::test]
+async fn extended_nexthop_clears_companion_when_primary_next_hop_is_rewritten() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+
+    let negotiated = negotiated_session(65002, true);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let mut route = make_route(100);
+    route.next_hop = IpAddr::V6("2001:db8::2".parse().unwrap());
+    route.link_local_next_hop = Some("fe80::2".parse().unwrap());
+
+    let update = OutboundRouteUpdate {
+        announce: vec![route],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![None],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+    };
+
+    session.send_route_update(update);
+
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected UPDATE");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("IPv4 extended next-hop must use MP_REACH");
+
+    assert_eq!(mp.next_hop, IpAddr::V6("2001:db8::1".parse().unwrap()));
+    assert_eq!(
+        mp.link_local_next_hop, None,
+        "stale link-local companion must be cleared when the primary next-hop changes"
+    );
+}
+
+#[tokio::test]
+async fn unnumbered_ipv4_without_extended_nexthop_does_not_fallback_to_body_nlri() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    configure_scoped_link_local_peer(&mut session);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+
+    let negotiated = negotiated_session(65002, false);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let update = OutboundRouteUpdate {
+        announce: vec![make_route(100)],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![None],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+    };
+
+    session.send_route_update(update);
+
+    let mut header = [0_u8; 19];
+    let result =
+        tokio::time::timeout(Duration::from_millis(100), server.read_exact(&mut header)).await;
+    assert!(
+        result.is_err(),
+        "scoped link-local peer must fail closed instead of sending IPv4 body NLRI"
+    );
+}
+
+#[tokio::test]
 async fn route_server_client_ipv6_preserves_next_hop() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, mut server) = connected_stream_pair().await;
@@ -1170,6 +1582,7 @@ async fn route_server_client_ipv6_preserves_next_hop() {
             prefix: Prefix::V6(Ipv6Prefix::new(v6_nh, 64)),
             next_hop: IpAddr::V6(v6_nh),
             link_local_next_hop: None,
+            next_hop_scope: None,
             peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -1214,6 +1627,111 @@ async fn route_server_client_ipv6_preserves_next_hop() {
     assert_eq!(mp.afi, Afi::Ipv6);
     assert_eq!(mp.safi, Safi::Unicast);
     assert_eq!(mp.next_hop, IpAddr::V6(v6_nh));
+    assert_eq!(mp.link_local_next_hop, None);
+}
+
+#[tokio::test]
+async fn ipv6_next_hop_self_clears_stale_link_local_companion() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.config.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
+
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let remote_global: Ipv6Addr = "2001:db8::2".parse().unwrap();
+    let mut route = make_v6_unicast_route(remote_global);
+    route.link_local_next_hop = Some("fe80::2".parse().unwrap());
+
+    let update = OutboundRouteUpdate {
+        announce: vec![route],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![None],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+    };
+
+    session.send_route_update(update);
+
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected UPDATE");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(mp.afi, Afi::Ipv6);
+    assert_eq!(mp.safi, Safi::Unicast);
+    assert_eq!(mp.next_hop, IpAddr::V6("2001:db8::1".parse().unwrap()));
+    assert_eq!(
+        mp.link_local_next_hop, None,
+        "IPv6 next-hop-self must not preserve an upstream link-local companion"
+    );
+}
+
+#[tokio::test]
+async fn scoped_peer_does_not_send_ipv6_unicast_with_link_local_primary_next_hop() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
+    configure_scoped_link_local_peer(&mut session);
+    session.config.local_ipv6_nexthop = Some("fe80::1".parse().unwrap());
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+
+    let mut negotiated = negotiated_session(65001, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let route_next_hop = "2001:db8::2".parse().unwrap();
+    let update = OutboundRouteUpdate {
+        announce: vec![make_v6_unicast_route(route_next_hop)],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![Some(rustbgpd_policy::NextHopAction::Self_)],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+    };
+
+    session.send_route_update(update);
+
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected UPDATE");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(mp.next_hop, IpAddr::V6(route_next_hop));
+    assert_eq!(
+        mp.link_local_next_hop, None,
+        "IPv6 unicast must not reuse the IPv4 ENHE scoped link-local relaxation"
+    );
 }
 
 /// Import policy is applied before `RoutesReceived` reaches the RIB.
@@ -1599,6 +2117,7 @@ async fn err_denied_replacement_is_swept_at_eorr() {
                 prefix: Prefix::V4(denied_prefix),
                 next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
                 link_local_next_hop: None,
+                next_hop_scope: None,
                 peer,
                 attributes: Arc::new(vec![
                     PathAttribute::Origin(Origin::Igp),

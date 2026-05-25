@@ -613,6 +613,7 @@ mod tests {
             prefix,
             next_hop,
             link_local_next_hop: None,
+            next_hop_scope: None,
             peer,
             attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),
