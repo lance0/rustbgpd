@@ -459,7 +459,8 @@ mod tests {
         Arc::make_mut(&mut route.attributes).push(PathAttribute::ExtendedCommunities(vec![rt, lb]));
 
         let bw = route.link_bandwidth().expect("link bandwidth present");
-        assert!((bw - 1.25e9_f32).abs() < f32::EPSILON);
+        // Exact round-trip through IEEE-754 bytes — assert bitwise equality.
+        assert_eq!(bw.to_bits(), 1.25e9_f32.to_bits());
     }
 
     #[test]

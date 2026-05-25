@@ -1922,7 +1922,8 @@ mod tests {
         assert_eq!(e.subtype(), 0x04, "Link Bandwidth subtype");
         let (asn, decoded) = e.as_link_bandwidth().expect("decodes as link bandwidth");
         assert_eq!(asn, 65001);
-        assert!((decoded - bw).abs() < f32::EPSILON);
+        // Exact round-trip through IEEE-754 bytes — assert bitwise equality.
+        assert_eq!(decoded.to_bits(), bw.to_bits());
     }
 
     #[test]
@@ -1934,7 +1935,7 @@ mod tests {
             .as_link_bandwidth()
             .expect("decodes as link bandwidth");
         assert_eq!(asn, 65001);
-        assert!((bw - 1.0).abs() < f32::EPSILON);
+        assert_eq!(bw.to_bits(), 1.0_f32.to_bits());
     }
 
     #[test]
