@@ -65,6 +65,9 @@ struct MpGroup {
 
 impl PeerSession {
     fn usable_ipv4_extended_nexthop_ipv6(&self, candidate: Option<Ipv6Addr>) -> Option<Ipv6Addr> {
+        // The link-local relaxation is only valid for IPv4-over-IPv6 ENHE on a
+        // configured scoped peer. IPv6 unicast keeps using
+        // `usable_ipv6_unicast_next_hop`, which rejects link-local primaries.
         candidate.filter(|addr| {
             rustbgpd_wire::is_valid_ipv6_nexthop(addr)
                 || (self.is_scoped_link_local_peer() && is_ipv6_link_local(addr))
@@ -78,14 +81,26 @@ impl PeerSession {
     fn ipv4_mp_reach_link_local_next_hop(
         &self,
         next_hop: IpAddr,
-        existing: Option<Ipv6Addr>,
+        route: &Route,
     ) -> Option<Ipv6Addr> {
-        existing.or(match next_hop {
+        match next_hop {
             IpAddr::V6(v6) if self.is_scoped_link_local_peer() && is_ipv6_link_local(&v6) => {
                 Some(v6)
             }
+            _ if next_hop == route.next_hop => route.link_local_next_hop,
             _ => None,
-        })
+        }
+    }
+
+    fn route_link_local_next_hop_for_selected_primary(
+        next_hop: IpAddr,
+        route: &Route,
+    ) -> Option<Ipv6Addr> {
+        if next_hop == route.next_hop {
+            route.link_local_next_hop
+        } else {
+            None
+        }
     }
 
     fn peer_accepts_llgr_stale(&self, family: (Afi, Safi)) -> bool {
@@ -422,8 +437,7 @@ impl PeerSession {
                     path_id: route.path_id,
                     prefix: route.prefix,
                 };
-                let link_local_next_hop =
-                    self.ipv4_mp_reach_link_local_next_hop(next_hop, route.link_local_next_hop);
+                let link_local_next_hop = self.ipv4_mp_reach_link_local_next_hop(next_hop, route);
                 let key = AttrGroupKey {
                     attrs_ptr: Arc::as_ptr(&attrs) as usize,
                     next_hop: Some(next_hop),
@@ -596,7 +610,9 @@ impl PeerSession {
             let key = AttrGroupKey {
                 attrs_ptr: Arc::as_ptr(&attrs) as usize,
                 next_hop: Some(nh),
-                link_local_next_hop: route.link_local_next_hop,
+                link_local_next_hop: Self::route_link_local_next_hop_for_selected_primary(
+                    nh, route,
+                ),
             };
             if let Some(&idx) = v6_group_index.get(&key) {
                 v6_groups[idx].prefixes.push(nlri_entry);
@@ -605,7 +621,9 @@ impl PeerSession {
                 v6_groups.push(MpGroup {
                     attrs,
                     next_hop: nh,
-                    link_local_next_hop: route.link_local_next_hop,
+                    link_local_next_hop: Self::route_link_local_next_hop_for_selected_primary(
+                        nh, route,
+                    ),
                     prefixes: vec![nlri_entry],
                 });
             }
