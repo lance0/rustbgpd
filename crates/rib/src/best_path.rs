@@ -247,8 +247,8 @@ pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
 ///
 /// `AS_PATH` is compared for **full equality** (not just length) — the
 /// conservative `maximum-paths` default (matches FRR without
-/// `as-path multipath-relax`). Loosening to length-only is a deliberate future
-/// knob, not the v1 behavior.
+/// `as-path multipath-relax`). Loosening to length-only is an explicit opt-in
+/// knob, not the default behavior.
 ///
 /// iBGP grouping is well-defined here despite the lack of an IGP: `best_path_cmp`
 /// has no IGP-metric step (the daemon carries a directly-usable next-hop and does

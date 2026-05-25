@@ -617,6 +617,7 @@ rustbgpctl events watch --category dataplane --type dataplane_status_changed
 rustbgpctl events watch --category dataplane --type dataplane_route_failed --prefix 203.0.113.0/24
 rustbgpctl events watch --prefix 203.0.113.0/24 --type policy_filtered
 rustbgpctl events watch --category evpn --type evpn_added,evpn_withdrawn,evpn_best_changed
+rustbgpctl events watch --category bfd --type bfd_up,bfd_down,bfd_state_changed
 rustbgpctl events sessions --address 10.0.0.2 --type established,lost --limit 20
 rustbgpctl events policy --address 10.0.0.2 --type policy_changed --limit 20
 rustbgpctl events evpn --route-type 2 --rd 65000:100 --limit 20
@@ -633,14 +634,16 @@ policy mutation summaries (`policy_changed`), EVPN route best-path events
 summary changes for the FIB / BLACKHOLE discard reconcilers
 (`dataplane_status_changed`) plus live per-route ADR-0061 FIB outcomes
 (`dataplane_route_installed`, `dataplane_route_withdrawn`,
-`dataplane_route_failed`). Prefix and family filters match route events and
+`dataplane_route_failed`), and BFD session events (`bfd_up`, `bfd_down`,
+`bfd_state_changed`). Prefix and family filters match route events and
 per-route FIB dataplane events; use `--category session` with peer and type
 filters when watching session events, `--category policy` to watch policy /
 neighbor-set / peer-group / chain mutations accepted by the runtime, or
-`--category evpn` when watching EVPN route changes. Dataplane summary events are
-peerless and do not match `--address`, `--family`, or `--prefix`. FIB rejected
-counts reflect surfaced status rows; sampled `route_limit_exceeded` rows are not
-a global suppressed-route total. Policy-filtered route events are target-peer
+`--category evpn` when watching EVPN route changes. Use `--category bfd` for
+BFD up/down/state-change events. Dataplane summary events are peerless and do
+not match `--address`, `--family`, or `--prefix`. FIB rejected counts reflect
+surfaced status rows; sampled `route_limit_exceeded` rows are not a global
+suppressed-route total. Policy-filtered route events are target-peer
 scoped: `peer_address` remains the source route peer, `target_peer_address` is
 the outbound peer whose export policy denied the route, and `--address` matches
 either side for route history and live route filtering. Policy events describe
@@ -649,10 +652,11 @@ config-file persistence is separate. Session state-change events use a bounded
 observability channel separate from the lossless TCP collision-coordination
 path, so a saturated watch stream can miss lifecycle events without blocking
 BGP collision handling. If the client falls behind a bounded route, session,
-EVPN, or dataplane source stream, `events watch` prints a `stream_lagged` warning with the missed
-count; treat subsequent output as a live tail after a gap. Use `--backfill N`
+policy, EVPN, dataplane, or BFD source stream, `events watch` prints a
+`stream_lagged` warning with the missed count; treat subsequent output as a
+live tail after a gap. Use `--backfill N`
 to print recent matching route history before the live tail starts. Backfill
-is route-history only; session, policy, EVPN, and dataplane events are not
+is route-history only; session, policy, EVPN, dataplane, and BFD events are not
 backfilled through the live stream command. Per-route FIB dataplane events are
 live-only; use `rustbgpctl rib fib` for the current route ownership snapshot
 after a reconnect.
@@ -684,12 +688,14 @@ Use the narrowest surface for the question you are asking:
 
 | Question | Command / RPC | Notes |
 |----------|---------------|-------|
-| "What is changing right now?" | `rustbgpctl events watch` / `EventService.WatchEvents` | Live route, session, policy, EVPN route, dataplane-summary, and per-route FIB dataplane stream. No replay after reconnect. |
+| "What is changing right now?" | `rustbgpctl events watch` / `EventService.WatchEvents` | Default live route + session stream. Policy, EVPN, dataplane, and BFD streams are opt-in with `--category` or matching `--type`. No replay after reconnect. |
 | "What just changed for this prefix?" | `rustbgpctl events --prefix 203.0.113.0/24` / `ListRouteEvents` | Exact-prefix route history from the bounded in-memory RIB ring. |
 | "Why did this prefix not reach a peer?" | `rustbgpctl events watch --address 10.0.0.2 --type policy_filtered --prefix 203.0.113.0/24` / `ListRouteEvents` | Export-policy denials where the peer is the denied outbound target. |
 | "Did FIB apply fail for this prefix?" | `rustbgpctl events watch --category dataplane --type dataplane_route_failed --prefix 203.0.113.0/24` / `EventService.WatchEvents` | Live ADR-0061 route apply outcome; no history API. |
 | "What policy changed recently?" | `rustbgpctl events policy` / `ListPolicyEvents` | Recent policy / neighbor-set / peer-group / chain mutation summaries from the bounded peer-manager ring. |
 | "What EVPN route changed recently?" | `rustbgpctl events evpn --route-type 2 --rd 65000:100` / `ListEvpnEvents` | Recent EVPN route add / withdraw / best-change history from the bounded RIB ring. |
+| "Are BFD sessions up?" | `rustbgpctl bfd`, `rustbgpctl bfd show 10.0.0.2` / `BfdService.GetBfdSessions` | Snapshot of configured single-hop BFD sessions, strict flag, state, and diagnostic. |
+| "Did BFD flap right now?" | `rustbgpctl events watch --category bfd --type bfd_up,bfd_down,bfd_state_changed` / `EventService.WatchEvents` | Live BFD session events. No bounded BFD history API. |
 | "What routes does the general FIB runtime own or reject?" | `rustbgpctl rib fib` / `ListFibRoutes` | Snapshot of ADR-0061 configured-table route ownership. |
 | "What BLACKHOLE discards are installed or rejected?" | `rustbgpctl rib blackholes` / `ListBlackholeDiscards` | Snapshot of RFC 7999 discard programming. |
 | "Are EVPN L2/L3 dataplane pieces ready?" | `rustbgpctl evpn runtime`, `rustbgpctl evpn instances`, `rustbgpctl evpn nexthops`, `rustbgpctl evpn vrfs` | Snapshot of the committed EVPN runtime generation, resolved EVPN config, and latest dataplane reports. |

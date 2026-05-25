@@ -807,6 +807,13 @@ struct PersistedFibTableSignature {
     /// `maximum_paths` changes this signature and forces a clean re-projection.
     #[serde(default)]
     maximum_paths: Option<u32>,
+    /// v3 per-class ECMP caps. These are part of the daemon-owned route-shape
+    /// contract for the table, so changing either cap invalidates prior owned
+    /// rows the same way changing `maximum_paths` does.
+    #[serde(default)]
+    maximum_paths_ebgp: Option<u32>,
+    #[serde(default)]
+    maximum_paths_ibgp: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -897,6 +904,8 @@ impl From<&FibTableConfig> for PersistedFibTableSignature {
             allowed_neighbors: table.allowed_neighbors.clone(),
             max_routes: table.max_routes,
             maximum_paths: table.maximum_paths,
+            maximum_paths_ebgp: table.maximum_paths_ebgp,
+            maximum_paths_ibgp: table.maximum_paths_ibgp,
         }
     }
 }
@@ -2497,6 +2506,34 @@ mod tests {
         let mut changed = config.clone();
         changed.tables[0].maximum_paths = Some(2);
         assert!(load_owned_state(&changed).routes.is_empty());
+    }
+
+    #[test]
+    fn changing_per_class_maximum_paths_invalidates_owned_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let mut config = config();
+        config.owned_state_path = Some(path.clone());
+        let route = fib_route(v4(24), ip("192.0.2.1"));
+        let mut owned = FibOwnedState::default();
+        owned.routes.insert(route.key, route);
+        write_owned_state(&path, &config.tables, &owned).unwrap();
+        assert_eq!(load_owned_state(&config), owned);
+
+        let mut ebgp_changed = config.clone();
+        ebgp_changed.tables[0].maximum_paths_ebgp = Some(2);
+        assert!(
+            load_owned_state(&ebgp_changed).routes.is_empty(),
+            "changing maximum_paths_ebgp must invalidate owned-state"
+        );
+
+        write_owned_state(&path, &config.tables, &owned).unwrap();
+        let mut ibgp_changed = config.clone();
+        ibgp_changed.tables[0].maximum_paths_ibgp = Some(2);
+        assert!(
+            load_owned_state(&ibgp_changed).routes.is_empty(),
+            "changing maximum_paths_ibgp must invalidate owned-state"
+        );
     }
 
     #[test]

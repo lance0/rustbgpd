@@ -25,14 +25,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a best-path-wide knob (the FIB install-candidate query groups once at the
   widest `maximum_paths`), threaded into `multipath_equal`; eBGP/iBGP class
   homogeneity and all other best-path tie conditions are unchanged. Inert unless
-  a `[[fib_tables]]` sets `maximum_paths > 1`.
+  a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or
+  `maximum_paths_ibgp` above `1`.
 - **Link Bandwidth Extended Community parsing** (`rustbgpd-wire`,
   draft-ietf-idr-link-bandwidth). `ExtendedCommunity::as_link_bandwidth()` /
   `link_bandwidth()` decode and construct the non-transitive
   two-octet-AS-specific community (type 0x40 subtype 0x04) carrying the
   advertising AS and an IEEE-754 bytes/second bandwidth, and
-  `Route::link_bandwidth()` surfaces it from a route's extended communities.
-  Parse-only for now; consumed by weighted unequal-cost multipath in a follow-up.
+  `Route::link_bandwidth()` surfaces it from a route's extended communities for
+  weighted unequal-cost multipath.
 - **ADR-0068 weighted (unequal-cost) multipath.** New global
   `[global].link_bandwidth_weighted` (default `false`) weights unicast ECMP
   next-hops by their Link Bandwidth Extended Community
@@ -44,7 +45,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   weight 1 (it carries all traffic and the kernel emits it weightless). Weights
   round-trip through the kernel and the v3 owned-state envelope, so a bandwidth
   change reprograms and an unchanged set never flaps. Inert unless a
-  `[[fib_tables]]` sets `maximum_paths > 1`.
+  `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or
+  `maximum_paths_ibgp` above `1`.
 
 ## [0.28.0] — 2026-05-24
 

@@ -198,9 +198,10 @@ OpenBGPd was not tested in this benchmark.
 
 ## Positioning
 
-**rustbgpd** is an API-first BGP daemon targeting IX route server and SDN controller
-use cases. It trades address family breadth for modern operational tooling (gRPC,
-Prometheus, structured logging, TUI, config diagnostics) and memory safety guarantees.
+**rustbgpd** is an API-first BGP daemon targeting data-center fabric, IX
+route-server, and automation-controller use cases. It trades full routing-suite
+breadth for modern operational tooling (gRPC, Prometheus, structured logging,
+TUI, config diagnostics) and memory safety guarantees.
 
 **FRR** is the most feature-complete open-source routing suite, covering BGP plus
 OSPF, IS-IS, PIM, and more. Best choice when you need a mature full routing stack

@@ -264,7 +264,8 @@ pub struct Global {
     /// *length* instead of an exact `AS_PATH` match, so equal-length paths through
     /// different ASes co-install as multipath. Off by default (exact match). It
     /// is a best-path-wide knob, so it lives here rather than per
-    /// `[[fib_tables]]`; it is inert unless a table sets `maximum_paths > 1`.
+    /// `[[fib_tables]]`; it is inert unless a table sets `maximum_paths`,
+    /// `maximum_paths_ebgp`, or `maximum_paths_ibgp` above 1.
     #[serde(default)]
     pub multipath_relax: bool,
     /// ADR-0068 weighted multipath (FRR's `bgp bestpath bandwidth`). When `true`,
@@ -272,7 +273,8 @@ pub struct Global {
     /// Community (draft-ietf-idr-link-bandwidth) when the whole equal-cost group
     /// carries one; otherwise they stay equal-cost. Off by default. Like
     /// `multipath_relax` it is a best-path-wide knob and is inert unless a table
-    /// sets `maximum_paths > 1`.
+    /// sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above
+    /// 1.
     #[serde(default)]
     pub link_bandwidth_weighted: bool,
     /// Install local kernel blackhole routes for accepted EBGP best

@@ -1,6 +1,7 @@
 # ADR-0066: Unicast multipath / ECMP FIB install
 
-**Status:** Accepted — supersedes ADR-0061's ECMP deferral.
+**Status:** Accepted — implemented; supersedes ADR-0061's ECMP deferral and
+is extended by ADR-0068 for weighted multipath.
 **Date:** 2026-05-24
 
 ## Context
@@ -52,9 +53,10 @@ peer address) are intentionally *not* compared — those are exactly what
 distinguishes the co-equal paths we want to bundle. Locally-originated routes
 (`RouteOrigin::Local`) never group.
 
-**Exact `AS_PATH` for v1** — the conservative choice, matching FRR's default. A
-future `multipath-relax` knob that loosens to `AS_PATH`-length-only equality is
-an explicit follow-up, not implied here.
+**Exact `AS_PATH` by default** — the conservative choice, matching FRR's
+default. The follow-up `[global].multipath_relax` knob is now implemented: when
+enabled, grouping loosens to `AS_PATH`-length-only equality while all other
+equal-cost predicates and eBGP/iBGP class homogeneity remain unchanged.
 
 ### iBGP multipath semantics
 
@@ -80,21 +82,22 @@ The crash-restart owned-state envelope moves v1 → v2: it persists the `next_ho
 set, and on load it accepts both v2 and the v1 scalar `next_hop` (upgraded to a
 one-element set). A version newer than this build still quarantines; v1 is never
 hard-rejected, because rejecting it would orphan crash-restart state into a
-foreign-route storm. `maximum_paths` joins the persisted table signature, so
-changing it forces a clean re-projection.
+foreign-route storm. `maximum_paths` and the per-class caps join the persisted
+table signature, so changing the installed width contract forces a clean
+re-projection.
 
 ### Config
 
 `[[fib_tables]].maximum_paths: Option<u32>` (validated `>= 1`, capped at 256).
 It is orthogonal to `max_routes` — `max_routes` caps the number of prefixes
-(rows); `maximum_paths` caps the next-hops per row. The single knob applies to
-both homogeneous eBGP and iBGP groups; per-class `maximum_paths_ebgp` /
-`maximum_paths_ibgp` (FRR parity) can be added later without a breaking change.
-The reconciler queries the RIB at the widest configured `maximum_paths` and
-re-caps per table, so a default config never pays for sibling gathering: when
-that width is `1` (no table opts into ECMP), the install-candidate handler
-short-circuits — it returns each Loc-RIB best directly, with no Adj-RIB-In
-sibling scan or sort.
+(rows); `maximum_paths` caps the next-hops per row. Per-class
+`maximum_paths_ebgp` / `maximum_paths_ibgp` (FRR parity) override the shared
+cap for homogeneous eBGP and iBGP groups respectively, falling back to
+`maximum_paths` and then `1` when unset. The reconciler queries the RIB at the
+widest configured cap across all tables and classes, then re-caps per table, so
+a default config never pays for sibling gathering: when that width is `1` (no
+table opts into ECMP), the install-candidate handler short-circuits — it returns
+each Loc-RIB best directly, with no Adj-RIB-In sibling scan or sort.
 
 ## Consequences
 
@@ -102,19 +105,21 @@ sibling scan or sort.
 - M42's behavior is unchanged: a single best path still emits `RTA_GATEWAY`,
   never `MultiPath`. Tests assert the **semantic shape** (single gateway, no
   multipath) rather than byte-identical netlink internals.
-- **Cost of the install-candidate query.** When ECMP is off (`maximum_paths`
-  unset / 1 — the default) the handler short-circuits: it returns each Loc-RIB
-  best directly, with no sibling work. When a table sets `maximum_paths > 1`
-  the query re-scans the per-peer Adj-RIB-In and sorts equal-cost siblings for
-  **every** Loc-RIB best on **every** reconcile pass — roughly
+- **Cost of the install-candidate query.** When ECMP is off (`maximum_paths`,
+  `maximum_paths_ebgp`, and `maximum_paths_ibgp` all unset / 1 — the default)
+  the handler short-circuits: it returns each Loc-RIB best directly, with no
+  sibling work. When a table sets any ECMP cap above 1, the query re-scans the
+  per-peer Adj-RIB-In and sorts equal-cost siblings for **every** Loc-RIB best
+  on **every** reconcile pass — roughly
   `O(best_routes × peers)` lookups plus a sort per prefix, with no incremental
   or cached sibling index. That is acceptable for the moderate-table deployments
   this alpha targets, but a full-table multipath deployment with many peers
   would want an incremental equal-cost index (rescan only changed prefixes) — a
   named future optimization, not shipped here.
-- **Equal-weight only.** ECMP next-hops are emitted with `hops = 0` (equal
-  weight). Unequal-cost / weighted multipath (FRR's `bgp bestpath ... weight`)
-  is not supported; it is future work.
+- **Base encoding is equal-weight.** Without ADR-0068 weighting, ECMP next-hops
+  are emitted with `hops = 0` (equal weight). Weighted / unequal-cost multipath
+  is implemented by ADR-0068 using the Link Bandwidth Extended Community and
+  Linux `rtnh_hops = weight - 1`.
 - Validation: projection / canonicalization / owned-state unit tests; kernel
   encode→parse round-trip tests; a privileged netns test (install, failover to a
   single survivor, widen back, withdraw); and **M50** containerlab interop —
@@ -123,9 +128,9 @@ sibling scan or sort.
 
 ## Alternatives considered
 
-- **`AS_PATH`-length-only equality (multipath-relax) in v1** — rejected as the
-  default; it silently bundles paths through different transit ASes. Deferred to
-  an explicit opt-in knob.
+- **`AS_PATH`-length-only equality (multipath-relax) as the default** —
+  rejected; it silently bundles paths through different transit ASes. Implemented
+  only as an explicit opt-in knob.
 - **Mixed eBGP/iBGP groups** — rejected; the classes have different
   forwarding/trust semantics and FRR keeps them separate too.
 - **Hand-rolled `RTA_MULTIPATH`** — unnecessary; the pinned netlink crate
