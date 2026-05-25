@@ -1,0 +1,40 @@
+[global]
+asn = 65001
+router_id = "10.53.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# ADR-0069 BGP unnumbered: two equal-cost IPv4 paths arrive over IPv6
+# link-local-only BGP sessions and install into Linux with per-next-hop dev
+# scope.
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+families = ["ipv4_unicast", "ipv6_unicast"]
+maximum_paths = 2
+
+[[neighbors]]
+address = "fe80::2"
+interface = "eth1"
+remote_asn = 65002
+description = "frr1-m53-unnumbered"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+
+[[neighbors]]
+address = "fe80::3"
+interface = "eth2"
+remote_asn = 65002
+description = "frr2-m53-unnumbered"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+
+[security.grpc]
+enforcement = "legacy"

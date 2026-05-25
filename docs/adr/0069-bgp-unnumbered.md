@@ -201,7 +201,8 @@ target behavior:
 
 ### Interop gate
 
-Add an M-series FRR interop smoke after the production slices:
+M53 (`tests/interop/m53-bgp-unnumbered-frr.clab.yml`) is the production
+rustbgpd ↔ FRR gate for the v1 scope:
 
 - rustbgpd peers with FRR over IPv6 link-local only;
 - no IPv4 addresses exist on the fabric links;
@@ -209,8 +210,10 @@ Add an M-series FRR interop smoke after the production slices:
 - rustbgpd status shows address plus interface identity;
 - Linux FIB installs the IPv4 route via IPv6 link-local next-hop with the
   correct output interface;
-- withdraw/failure collapses forwarding to the surviving path, and recovery
-  restores it.
+- two FRR peers advertise the same IPv4 prefix over separate link-local
+  sessions, so the kernel route installs as ECMP via both scoped devices;
+- withdraw collapses forwarding to the surviving scoped path, and recovery
+  restores two-way ECMP.
 
 ## Consequences
 
