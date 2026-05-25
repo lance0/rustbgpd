@@ -984,12 +984,25 @@ pub struct FibTableConfig {
     /// Optional maximum number of equal-cost next-hops to install per prefix
     /// (unicast multipath / ECMP, ADR-0066). Unset or `1` programs a single
     /// next-hop — exactly today's behavior. Higher values install up to this
-    /// many equal-cost paths as a kernel `RTA_MULTIPATH` route. Applies
-    /// uniformly to homogeneous eBGP and iBGP equal-cost groups. Distinct from
-    /// `max_routes`, which caps the number of prefixes (rows), not the
-    /// next-hops per row. Validated `>= 1`, capped at 256.
+    /// many equal-cost paths as a kernel `RTA_MULTIPATH` route. Applies to any
+    /// homogeneous eBGP or iBGP equal-cost group that does not have a per-class
+    /// override below. Distinct from `max_routes`, which caps the number of
+    /// prefixes (rows), not the next-hops per row. Validated `>= 1`, capped at
+    /// 256.
     #[serde(default)]
     pub maximum_paths: Option<u32>,
+    /// Per-class ECMP cap for **eBGP** equal-cost groups (FRR's
+    /// `maximum-paths`). Overrides `maximum_paths` for eBGP best routes; when
+    /// unset, eBGP groups fall back to `maximum_paths` (then `1`). Validated
+    /// `>= 1`, capped at 256.
+    #[serde(default)]
+    pub maximum_paths_ebgp: Option<u32>,
+    /// Per-class ECMP cap for **iBGP** equal-cost groups (FRR's
+    /// `maximum-paths ibgp`). Overrides `maximum_paths` for iBGP best routes;
+    /// when unset, iBGP groups fall back to `maximum_paths` (then `1`).
+    /// Validated `>= 1`, capped at 256.
+    #[serde(default)]
+    pub maximum_paths_ibgp: Option<u32>,
 }
 
 fn default_fib_families() -> Vec<String> {

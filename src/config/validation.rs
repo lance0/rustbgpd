@@ -717,24 +717,27 @@ fn validate_fib_table_guardrails(
             ),
         });
     }
-    if let Some(maximum_paths) = table.maximum_paths {
-        if maximum_paths == 0 {
+    // Same `>= 1` / `<= cap` guardrail for the overall and per-class ECMP caps.
+    let check_max_paths = |field: &str, value: Option<u32>| -> Result<(), ConfigError> {
+        let Some(v) = value else { return Ok(()) };
+        if v == 0 {
+            return Err(ConfigError::InvalidFibTable {
+                reason: format!("name {:?}: {field} must be greater than zero", table.name),
+            });
+        }
+        if v > FIB_MAX_MAXIMUM_PATHS {
             return Err(ConfigError::InvalidFibTable {
                 reason: format!(
-                    "name {:?}: maximum_paths must be greater than zero",
+                    "name {:?}: {field} {v} exceeds the supported cap of {FIB_MAX_MAXIMUM_PATHS}",
                     table.name
                 ),
             });
         }
-        if maximum_paths > FIB_MAX_MAXIMUM_PATHS {
-            return Err(ConfigError::InvalidFibTable {
-                reason: format!(
-                    "name {:?}: maximum_paths {maximum_paths} exceeds the supported cap of {FIB_MAX_MAXIMUM_PATHS}",
-                    table.name
-                ),
-            });
-        }
-    }
+        Ok(())
+    };
+    check_max_paths("maximum_paths", table.maximum_paths)?;
+    check_max_paths("maximum_paths_ebgp", table.maximum_paths_ebgp)?;
+    check_max_paths("maximum_paths_ibgp", table.maximum_paths_ibgp)?;
     let mut seen_groups = std::collections::HashSet::new();
     for group in &table.allowed_peer_groups {
         if !config.peer_groups.contains_key(group) {

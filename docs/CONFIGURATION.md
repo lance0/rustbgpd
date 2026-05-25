@@ -1606,6 +1606,9 @@ kernel row.
 | `allowed_peer_groups` | string[] | no | `[]` | Optional source peer-group allow-list. Entries must reference existing `[peer_groups.NAME]` blocks |
 | `allowed_neighbors` | string[] | no | `[]` | Optional source neighbor-address allow-list. Entries must parse as IPv4 or IPv6 addresses |
 | `max_routes` | u32 | no | unset | Optional hard cap. `0` is rejected; exceeding the cap freezes existing owned rows and suppresses growth for that table |
+| `maximum_paths` | u32 | no | `1` | Unicast multipath/ECMP: install up to N equal-cost next-hops per prefix as a kernel `RTA_MULTIPATH` route (ADR-0066). `1` (or unset) = single next-hop, today's behavior. Validated `>= 1`, capped at 256 |
+| `maximum_paths_ebgp` | u32 | no | unset | Per-class ECMP cap for **eBGP** groups (FRR's `maximum-paths`). Overrides `maximum_paths` for eBGP best routes; falls back to `maximum_paths` then `1`. Validated `>= 1`, capped at 256 |
+| `maximum_paths_ibgp` | u32 | no | unset | Per-class ECMP cap for **iBGP** groups (FRR's `maximum-paths ibgp`). Overrides `maximum_paths` for iBGP best routes; falls back to `maximum_paths` then `1`. Validated `>= 1`, capped at 256 |
 
 **Restart required**: `[[fib_tables]]` is resolved at startup and the
 runtime actor is spawned once. SIGHUP edits are surfaced by
