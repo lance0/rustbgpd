@@ -1,40 +1,31 @@
-name: Privileged Interop
+name: Privileged Interop (netns)
 
-# Manual-only harness for a trusted self-hosted Linux runner with the
-# `evpn-privileged` label. Do not enable this on untrusted pull-request
-# code: the jobs intentionally exercise NET_ADMIN / containerlab paths.
+# Manual, on-demand harness for the direct-`cargo test` privileged netns suites
+# on GitHub-hosted ubuntu-latest. The containerlab EVPN smokes (M36–M49) now run
+# automatically in the kernel-dataplane workflow, so this keeps only the
+# non-docker netns binaries (`netns_dataplane` / `netns_fdb_nhg` /
+# `netns_l3_install` / `netns_nexthop_raw`) available on demand. The
+# kernel-dataplane workflow exercises the docker-harness netns selectors
+# (`fdb_nhg` / `fib_runtime` / `bfd_runtime`) on every PR.
 on:
   workflow_dispatch:
-    inputs:
-      suite:
-        description: "Privileged suite to run"
-        required: true
-        default: "netns"
-        type: choice
-        options:
-          - netns
-          - m36
-          - m37
-          - m37-ip
-          - m38
-          - m39
-          - m39b
-          - m40
-          - m46
-          - m47
-          - m49
-          - all
 
 permissions:
   contents: read
 
 jobs:
-  privileged:
-    name: ${{ inputs.suite }} on evpn-privileged runner
-    runs-on: [self-hosted, linux, x64, evpn-privileged]
-    timeout-minutes: 90
+  netns:
+    name: Direct-cargo privileged netns tests on ubuntu-latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install protoc + jq
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq protobuf-compiler
 
       - name: Preflight privileged networking support
         run: |
@@ -43,23 +34,18 @@ jobs:
           ip -V
           cargo --version
           protoc --version
-          jq --version
-          docker version
-          containerlab version
-          sudo modprobe vrf vxlan bridge bonding || true
+          # vrf is absent from the hosted Azure kernel; pull it from
+          # linux-modules-extra for the running kernel before the probe.
+          if ! sudo modprobe vrf 2>/dev/null; then
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)" || \
+              echo "::warning::linux-modules-extra-$(uname -r) unavailable; vrf-dependent tests may fail"
+            sudo modprobe vrf || echo "::warning::vrf module still not loadable"
+          fi
+          sudo modprobe vxlan bridge bonding || true
           sudo ip link add vrf-ci-preflight type vrf table 424242
           sudo ip link del vrf-ci-preflight
-          sudo ip link add br-ci-preflight type bridge
-          sudo ip link add vxlan-ci-preflight type vxlan id 4242 local 127.0.0.1 dstport 4789 nolearning
-          sudo ip link del vxlan-ci-preflight
-          sudo ip link del br-ci-preflight
-
-      - name: Build rustbgpd image
-        if: inputs.suite != 'netns'
-        run: docker build -t rustbgpd:dev .
 
       - name: Run privileged netns tests
-        if: inputs.suite == 'netns' || inputs.suite == 'all'
         run: |
           set -euo pipefail
           run_privileged_cargo_test() {
@@ -75,92 +61,3 @@ jobs:
           run_privileged_cargo_test netns_fdb_nhg
           run_privileged_cargo_test netns_l3_install
           run_privileged_cargo_test netns_nexthop_raw
-
-      - name: Run M36 VTEP smoke
-        if: inputs.suite == 'm36' || inputs.suite == 'all'
-        run: |
-          set -euo pipefail
-          sudo containerlab deploy -t tests/interop/m36-evpn-vtep-smoke.clab.yml
-          CLEANUP=1 bash tests/interop/scripts/test-m36-evpn-vtep-smoke.sh
-
-      - name: Run M37 local MAC origination smoke
-        if: inputs.suite == 'm37' || inputs.suite == 'all'
-        run: |
-          set -euo pipefail
-          sudo containerlab deploy -t tests/interop/m37-evpn-local-origination.clab.yml
-          CLEANUP=1 bash tests/interop/scripts/test-m37-evpn-local-origination.sh
-
-      - name: Run M37+IP MAC/IP origination smoke
-        if: inputs.suite == 'm37-ip' || inputs.suite == 'all'
-        run: |
-          set -euo pipefail
-          sudo containerlab deploy -t tests/interop/m37-evpn-mac-ip-origination.clab.yml
-          CLEANUP=1 bash tests/interop/scripts/test-m37-evpn-mac-ip-origination.sh
-
-      - name: Run M38 DF election smoke
-        if: inputs.suite == 'm38' || inputs.suite == 'all'
-        run: |
-          set -euo pipefail
-          sudo containerlab deploy -t tests/interop/m38-evpn-df-election.clab.yml
-          CLEANUP=1 bash tests/interop/scripts/test-m38-evpn-df-election.sh
-
-      - name: Run M39 Type 5 symmetric IRB smoke
-        if: inputs.suite == 'm39' || inputs.suite == 'all'
-        run: |
-          set -euo pipefail
-          sudo containerlab deploy -t tests/interop/m39-evpn-type5-symmetric-irb.clab.yml
-          CLEANUP=1 bash tests/interop/scripts/test-m39-evpn-type5-symmetric-irb.sh
-
-      - name: Run M39b auto-derived Route Target smoke
-        if: inputs.suite == 'm39b' || inputs.suite == 'all'
-        run: |
-          set -euo pipefail
-          sudo containerlab deploy -t tests/interop/m39b-evpn-auto-rt-frr.clab.yml
-          CLEANUP=1 bash tests/interop/scripts/test-m39b-evpn-auto-rt-frr.sh
-
-      - name: Run M40 aliasing ECMP smoke
-        if: inputs.suite == 'm40' || inputs.suite == 'all'
-        run: |
-          set -euo pipefail
-          sudo containerlab deploy -t tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml
-          CLEANUP=1 bash tests/interop/scripts/test-m40-evpn-aliasing-ecmp-frr.sh
-
-      - name: Run M46 HRW DF election smoke
-        if: inputs.suite == 'm46' || inputs.suite == 'all'
-        run: |
-          set -euo pipefail
-          sudo containerlab deploy -t tests/interop/m46-evpn-df-hrw.clab.yml
-          CLEANUP=1 bash tests/interop/scripts/test-m46-evpn-df-hrw.sh
-
-      - name: Run M47 tenant teardown smoke
-        if: inputs.suite == 'm47' || inputs.suite == 'all'
-        run: |
-          set -euo pipefail
-          sudo containerlab deploy -t tests/interop/m47-evpn-tenant-teardown.clab.yml
-          CLEANUP=1 bash tests/interop/scripts/test-m47-evpn-tenant-teardown.sh
-
-      - name: Run M49 preference-DF election smoke
-        if: inputs.suite == 'm49' || inputs.suite == 'all'
-        run: |
-          set -euo pipefail
-          sudo containerlab deploy -t tests/interop/m49-evpn-preference-df.clab.yml
-          CLEANUP=1 bash tests/interop/scripts/test-m49-evpn-preference-df.sh
-
-      - name: Best-effort containerlab cleanup
-        if: always()
-        run: |
-          set +e
-          for topo in \
-            tests/interop/m36-evpn-vtep-smoke.clab.yml \
-            tests/interop/m37-evpn-local-origination.clab.yml \
-            tests/interop/m37-evpn-mac-ip-origination.clab.yml \
-            tests/interop/m38-evpn-df-election.clab.yml \
-            tests/interop/m39-evpn-type5-symmetric-irb.clab.yml \
-            tests/interop/m39b-evpn-auto-rt-frr.clab.yml \
-            tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml \
-            tests/interop/m46-evpn-df-hrw.clab.yml \
-            tests/interop/m47-evpn-tenant-teardown.clab.yml \
-            tests/interop/m49-evpn-preference-df.clab.yml
-          do
-            sudo containerlab destroy -t "$topo" --cleanup >/dev/null 2>&1
-          done

@@ -54,7 +54,10 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 - M38: EVPN DF election + Type 1/4 origination (rustbgpd ×2).
 - M39: EVPN Type 5 symmetric Interface-less IRB against FRR (uses `vrf`).
 - M39b: EVPN auto-derived Route Targets, cross-vendor against FRR (uses `vrf`).
+- M46: EVPN HRW DF election against FRR.
+- M47: EVPN runtime tenant teardown against FRR.
 - M48: EVPN runtime tenant teardown over the kernel L3 datapath (uses `vrf`).
+- M49: EVPN preference-DF election (rustbgpd ×2).
 - M40: EVPN aliasing dataplane ECMP via FDB nexthop groups against FRR EVPN-MH.
 - M42: ADR-0061 configured-table unicast FIB runtime against FRR.
 - M50: ADR-0066 unicast multipath/ECMP FIB install against two FRR peers.
@@ -63,6 +66,12 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 - M43: ADR-0062 static-neighbor TCP-AO protected session against BIRD 3.2.1
   (conditional on the runner advertising `CONFIG_TCP_AO=y`).
 - Docker netns selectors: `fdb_nhg`, `fib_runtime`, `bfd_runtime`.
+
+The `Privileged Interop (netns)` workflow (`privileged-interop.yml`) is a
+manual (`workflow_dispatch`) on-demand harness for the non-docker direct-`cargo
+test` netns binaries (`netns_dataplane` / `netns_fdb_nhg` / `netns_l3_install` /
+`netns_nexthop_raw`); its former containerlab EVPN smokes (M36–M49) now run
+automatically here.
 
 ## Security model
 
