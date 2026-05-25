@@ -78,6 +78,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Kernel dumps and owned-state v5 preserve the ifindex, so scoped rows remain
   diff-stable across reconciles and crash restart; missing link-local scope is
   rejected explicitly as `link_local_next_hop_scope_missing`.
+- **M53 BGP unnumbered FRR interop.** Added the production ADR-0069
+  rustbgpd↔FRR smoke: two IPv6 link-local-only FRR interface peers advertise the
+  same IPv4 prefix, rustbgpd installs kernel ECMP through link-local gateways on
+  two different interfaces, withdraw/re-advertise collapses and restores the
+  scoped forwarding set, and injected rustbgpd IPv4 routes reach FRR with a
+  link-local next-hop.
 
 ## [0.28.0] — 2026-05-24
 

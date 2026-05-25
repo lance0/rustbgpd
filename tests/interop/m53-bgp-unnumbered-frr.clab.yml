@@ -1,0 +1,68 @@
+# Containerlab topology: rustbgpd ↔ 2× FRR (M53 — ADR-0069 BGP unnumbered)
+#
+# Validates static IPv6 link-local / BGP unnumbered interop against FRR:
+#
+#   * no IPv4 addresses on the fabric links;
+#   * rustbgpd peers with two FRR interface neighbors over fe80::/10 only;
+#   * IPv4 routes are exchanged using RFC 8950 Extended Next Hop;
+#   * link-local next-hops carry their output interface scope into the FIB;
+#   * Linux installs two-way ECMP via `fe80::2 dev eth1` + `fe80::3 dev eth2`;
+#   * withdrawing one FRR path collapses forwarding to the surviving dev and
+#     re-advertising restores two-way ECMP.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m53-bgp-unnumbered-frr.clab.yml
+#   bash tests/interop/scripts/test-m53-bgp-unnumbered-frr.sh
+#   containerlab destroy -t tests/interop/m53-bgp-unnumbered-frr.clab.yml --cleanup
+
+name: m53-bgp-unnumbered-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m53-bgp-unnumbered.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip -4 addr flush dev eth1
+        - ip -4 addr flush dev eth2
+        - ip -6 addr flush dev eth1 scope link
+        - ip -6 addr flush dev eth2 scope link
+        - ip -6 addr replace fe80::1/64 dev eth1 nodad
+        - ip -6 addr replace fe80::1/64 dev eth2 nodad
+        - ip link set eth1 up
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    frr1:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m53-rustbgpd-1.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip -4 addr flush dev eth1
+        - ip -6 addr flush dev eth1 scope link
+        - ip -6 addr replace fe80::2/64 dev eth1 nodad
+        - ip link set eth1 up
+
+    frr2:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m53-rustbgpd-2.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip -4 addr flush dev eth1
+        - ip -6 addr flush dev eth1 scope link
+        - ip -6 addr replace fe80::3/64 dev eth1 nodad
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr1:eth1"]
+    - endpoints: ["rustbgpd:eth2", "frr2:eth1"]
