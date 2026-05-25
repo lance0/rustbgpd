@@ -335,9 +335,6 @@ pub(crate) fn project_fib_intent(
     project_fib_intent_with_peer_groups(tables, candidates, &BTreeMap::new())
 }
 
-/// Project configured FIB tables and Loc-RIB install candidates using the
-/// current RIB peer-group map for table allow-list checks.
-#[must_use]
 /// Per-class ECMP width: the eBGP/iBGP override if set, else the table's overall
 /// `maximum_paths`, else 1 (today's single-next-hop behavior). The equal-cost
 /// group is homogeneous, so the best route's class selects the cap.
@@ -351,6 +348,9 @@ fn per_class_max_paths(table: &FibTableConfig, is_ebgp: bool) -> usize {
     .max(1) as usize
 }
 
+/// Project configured FIB tables and Loc-RIB install candidates using the
+/// current RIB peer-group map for table allow-list checks.
+#[must_use]
 pub(crate) fn project_fib_intent_with_peer_groups(
     tables: &[FibTableConfig],
     candidates: &[FibInstallCandidate],
