@@ -1535,6 +1535,9 @@ fn build_route_message(
                     .iter()
                     .map(|next_hop| {
                         let mut hop = RouteNextHop::default();
+                        // `FibRouteTarget` guarantees weight ∈ 1..=256, so
+                        // `weight - 1` always fits a u8; the saturating fallback
+                        // is unreachable defense.
                         hop.hops =
                             u8::try_from(next_hop.weight.saturating_sub(1)).unwrap_or(u8::MAX);
                         hop.attributes

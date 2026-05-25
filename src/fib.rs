@@ -145,12 +145,22 @@ impl FibNextHop {
     }
 }
 
-/// Normalize a lone next-hop's weight to 1 (ADR-0068). A single next-hop carries
-/// all traffic regardless of weight, and the kernel emits it as a weightless
-/// `RTA_GATEWAY`, so a dumped single route always reads back weight 1. Forcing
-/// the canonical singleton to weight 1 keeps the reconcile diff stable when a
-/// per-table cap (or a lone best) reduces a weighted group to one next-hop.
-fn normalize_singleton_weight(next_hops: &mut [FibNextHop]) {
+/// Enforce the canonical weight invariants on a `FibRouteTarget`'s next-hops
+/// (ADR-0068), at every constructor, so a target can never *desire* a weight the
+/// kernel cannot store — which would diff forever against the dumped route:
+///
+/// 1. Every weight is clamped to the kernel-representable `1..=256` (`rtnh_hops`
+///    is a `u8`, so the kernel holds `weight - 1` in `0..=255`). This guards
+///    corrupt/hand-edited persisted state and any future writer; RIB-computed
+///    weights are already in range.
+/// 2. A lone next-hop is forced to weight 1: it carries all traffic regardless,
+///    and the kernel emits it as a weightless `RTA_GATEWAY`, so a dumped single
+///    route always reads back weight 1. This keeps the diff stable when a
+///    per-table cap (or a lone best) reduces a weighted group to one next-hop.
+fn canonicalize_next_hop_weights(next_hops: &mut [FibNextHop]) {
+    for nh in next_hops.iter_mut() {
+        nh.weight = nh.weight.clamp(1, 256);
+    }
     if let [only] = next_hops {
         only.weight = 1;
     }
@@ -188,7 +198,7 @@ impl FibRouteTarget {
         }
         next_hops.sort_unstable();
         next_hops.dedup_by_key(|nh| nh.addr);
-        normalize_singleton_weight(&mut next_hops);
+        canonicalize_next_hop_weights(&mut next_hops);
         Self { next_hops, best }
     }
 
@@ -200,7 +210,7 @@ impl FibRouteTarget {
         let mut next_hops: Vec<FibNextHop> = next_hops.into_iter().collect();
         next_hops.sort_unstable();
         next_hops.dedup_by_key(|nh| nh.addr);
-        normalize_singleton_weight(&mut next_hops);
+        canonicalize_next_hop_weights(&mut next_hops);
         let best = next_hops[0].addr;
         Self { next_hops, best }
     }
@@ -1780,6 +1790,27 @@ mod tests {
             },
         ]);
         assert_eq!(a, c);
+    }
+
+    #[test]
+    fn target_clamps_weights_to_kernel_range() {
+        // A corrupt/out-of-range weight (e.g. a hand-edited owned-state file) is
+        // clamped into 1..=256 so the target never desires a weight the kernel's
+        // u8 rtnh_hops cannot store — which would otherwise diff forever.
+        let t = FibRouteTarget::from_next_hops([
+            FibNextHop {
+                addr: ip("203.0.113.1"),
+                weight: 5000,
+            },
+            FibNextHop {
+                addr: ip("203.0.113.2"),
+                weight: 0,
+            },
+        ]);
+        assert_eq!(
+            addr_weights(&t),
+            vec![(ip("203.0.113.1"), 256), (ip("203.0.113.2"), 1)]
+        );
     }
 
     #[test]
