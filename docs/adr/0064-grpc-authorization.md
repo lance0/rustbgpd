@@ -13,10 +13,10 @@ clients must satisfy the listener's transport/authentication boundary
 accepted client, and `read_only` does not distinguish liveness from
 RIB/policy/topology reads.
 
-The inventory in `docs/grpc-method-inventory.md` classifies the 66
-RPCs across 10 services into four tiers by worst-case effect on a
-compromised credential: `read` (0), `sensitive_read` (33),
-`mutating` (15), `operator_only` (18). That distribution makes
+The inventory in `docs/grpc-method-inventory.md` classifies the current 72
+RPCs across 11 services into four tiers by worst-case effect on a
+compromised credential: `read` (0), `sensitive_read` (37),
+`mutating` (17), `operator_only` (18). That distribution makes
 unscoped `read_write` access too broad for v1.0 — a leaked automation
 credential grants the holder `Shutdown`, network-wide
 `SetGracefulShutdown`, route injection, FlowSpec filter installation,

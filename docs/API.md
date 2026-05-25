@@ -1,8 +1,9 @@
 # gRPC API Reference
 
-rustbgpd exposes ten gRPC services (Global, Config, Neighbor, Policy,
-PeerGroup, Rib, Event, Injection, Control, Evpn) over one or more configured listeners. The
-default listener is a local Unix domain socket at `/var/lib/rustbgpd/grpc.sock`.
+rustbgpd exposes eleven gRPC services (Global, Config, Neighbor, Policy,
+PeerGroup, Rib, BFD, Event, Injection, Control, Evpn) over one or more configured
+listeners. The default listener is a local Unix domain socket at
+`/var/lib/rustbgpd/grpc.sock`.
 
 For same-host administration, prefer UDS:
 
@@ -231,8 +232,8 @@ added at runtime.
 | `EnableNeighbor` | Re-enable a previously disabled peer |
 | `DisableNeighbor` | Administratively disable a peer (sends NOTIFICATION) |
 | `SoftResetIn` | Request inbound route refresh (RFC 2918/7313) for one or more families |
-| `AddDynamicNeighbor` | Add a `[[dynamic_neighbors]]` range — auto-accept peers from a CIDR with a configured AS / peer-group |
-| `DeleteDynamicNeighbor` | Remove a dynamic-neighbor range; in-flight sessions stay until they go Idle |
+| `AddDynamicNeighbor` | Reserved runtime add for a `[[dynamic_neighbors]]` range; currently returns `UNIMPLEMENTED` |
+| `DeleteDynamicNeighbor` | Reserved runtime delete for a dynamic-neighbor range; currently returns `UNIMPLEMENTED` |
 | `ListDynamicNeighbors` | List configured dynamic-neighbor ranges with active peer counts |
 | `SetGracefulShutdown` | RFC 8326 initiator toggle — attach the `GRACEFUL_SHUTDOWN` community to outbound updates for one peer (or all peers when `address` is empty) and clear with `clear = true` |
 
@@ -738,11 +739,13 @@ CLI JSON output remains a route array unless `--page-size` is greater than
 `0`, in which case it emits an object with `routes`,
 `next_page_token`, `total_count`, and optional `sampling` metadata.
 
-`table_id`, `metric`, `prefix`, `prefix_length`, and `next_hop` describe
-the route identity and forwarding value. The CLI human table renders
-`Table`, `Metric`, `Prefix`, `Next hop`, `State`, and `Reason`; JSON output
-uses `table_name`, `table_id`, `metric`, `prefix`, `next_hop`,
-`peer_address`, `state`, `reason`, and optional `sampling`. Sampling is present
+`table_id`, `metric`, `prefix`, `prefix_length`, `next_hop`, and `next_hops`
+describe the route identity and forwarding value. `next_hop` is the selected
+best route's representative gateway; `next_hops` is the canonical installed
+set for ECMP / multipath rows. The CLI human table renders `Table`, `Metric`,
+`Prefix`, `Next hop`, `State`, and `Reason`; JSON output uses `table_name`,
+`table_id`, `metric`, `prefix`, `next_hop`, `next_hops`, `peer_address`,
+`state`, `reason`, and optional `sampling`. Sampling is present
 on high-cardinality rows such as `route_limit_exceeded`; it reports the number
 of surfaced sample rows, suppressed rows, total rows in that table/metric/reason
 set, the configured `max_routes`, the status sample cap, and whether the sample
@@ -761,8 +764,8 @@ does not delete that replacement on a later withdraw.
 Unified typed live event stream. Current categories are route events, session
 events (peer lifecycle plus BGP NOTIFICATION sent/received metadata), policy
 mutation summary events, EVPN route best-path events, dataplane status-row
-summary changes for the daemon-owned FIB / BLACKHOLE discard reconcilers, and
-live ADR-0061 per-route FIB apply outcomes.
+summary changes for the daemon-owned FIB / BLACKHOLE discard reconcilers, live
+ADR-0061 per-route FIB apply outcomes, and BFD session state changes.
 
 | RPC | Description |
 |-----|-------------|
@@ -774,7 +777,7 @@ live ADR-0061 per-route FIB apply outcomes.
 ### Watch unified events
 
 ```bash
-# Watch all live route + session + dataplane-summary events
+# Watch the default live route + session events
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.EventService/WatchEvents
 
@@ -860,23 +863,24 @@ suppressed-row totals, so the event count itself is not a global
 suppressed-route total. Empty category and type filters subscribe to
 the default route + session live stream. A non-empty type filter narrows the
 stream; `BGP_EVENT_TYPE_POLICY_CHANGED`,
-`BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED`, or an EVPN route event type with
-empty categories selects the corresponding opt-in stream, and
-`EVENT_CATEGORY_POLICY`, `EVENT_CATEGORY_DATAPLANE`, or `EVENT_CATEGORY_EVPN`
-selects those streams explicitly. Transport sessions send ordinary
+`BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED`, an ADR-0061 per-route dataplane
+event type, an EVPN route event type, or a `BGP_EVENT_TYPE_BFD_SESSION_*` type
+with empty categories selects the corresponding opt-in stream, and
+`EVENT_CATEGORY_POLICY`, `EVENT_CATEGORY_DATAPLANE`, `EVENT_CATEGORY_EVPN`, or
+`EVENT_CATEGORY_BFD` selects those streams explicitly. Transport sessions send ordinary
 state-change lifecycle events over
 a bounded channel that is separate from the lossless TCP collision-coordination
 path, so high churn can drop observability events without risking collision
-handling. If a subscriber falls behind either bounded broadcast, the stream
+handling. If a subscriber falls behind any subscribed bounded source, the stream
 emits a `stream_lagged` warning event with the source category and missed
 count; lag warnings are delivered for subscribed source categories even when
 the request's event-type filter is otherwise restrictive. Prefix and family
 filters match unicast route events and per-route FIB dataplane events; session,
-policy, EVPN, and peerless dataplane summary events do not match requests that
-set `prefix` or `afi_safi`. Peer filters match route, session, EVPN, and
-per-route FIB dataplane events; route events also match `target_peer_address`
-for `route_policy_filtered`. Peer filters do not match peerless dataplane
-summary events. `BgpEvent` repeats common fields such as peer, target peer,
+policy, EVPN, BFD, and peerless dataplane summary events do not match requests
+that set `prefix` or `afi_safi`. Peer filters match route, session, EVPN, BFD,
+and per-route FIB dataplane events; route events also match
+`target_peer_address` for `route_policy_filtered`. Peer filters do not match
+peerless dataplane summary events. `BgpEvent` repeats common fields such as peer, target peer,
 prefix, type, and severity at the top level even when the payload also carries
 them so category-agnostic clients can render or filter events without unpacking
 the `oneof`.
@@ -946,6 +950,9 @@ Unified event types:
 | `BGP_EVENT_TYPE_PEER_DISABLED` | Operator disabled a configured peer |
 | `BGP_EVENT_TYPE_NOTIFICATION_SENT` | rustbgpd sent a BGP NOTIFICATION; payload carries direction, code, subcode, description, session role, and optional RFC 8203 shutdown reason |
 | `BGP_EVENT_TYPE_NOTIFICATION_RECEIVED` | rustbgpd received a BGP NOTIFICATION from the peer; payload carries the same metadata |
+| `BGP_EVENT_TYPE_BFD_SESSION_UP` | BFD session transitioned to Up |
+| `BGP_EVENT_TYPE_BFD_SESSION_DOWN` | BFD session transitioned to Down |
+| `BGP_EVENT_TYPE_BFD_SESSION_STATE_CHANGED` | BFD session changed state; payload carries peer, state, diagnostic, and strict flag |
 
 NOTIFICATION events are metadata-only. Raw NOTIFICATION packet data remains
 limited to BMP peer-down handling; `WatchEvents` does not retain or replay it.

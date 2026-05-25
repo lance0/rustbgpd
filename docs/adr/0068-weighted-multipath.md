@@ -26,10 +26,11 @@ parse landed already (`ExtendedCommunity::as_link_bandwidth` /
 Weight the next-hops of an equal-cost multipath group in proportion to each
 path's advertised Link Bandwidth, **opt-in globally** via
 `[global].link_bandwidth_weighted` (default `false`), parallel to
-`multipath_relax`. It is inert unless a `[[fib_tables]]` sets
-`maximum_paths > 1` *and* the grouped paths carry the community — when off, or
-when bandwidth is absent, every next-hop keeps weight 1 and the kernel route is
-**byte-for-byte ADR-0066's equal-weight shape**.
+`multipath_relax`. It is inert unless a `[[fib_tables]]` sets `maximum_paths`,
+`maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` *and* the grouped paths
+carry the community — when off, or when bandwidth is absent, every next-hop
+keeps weight 1 and the kernel route is **byte-for-byte ADR-0066's equal-weight
+shape**.
 
 ### Weight is an integer, computed in the RIB
 

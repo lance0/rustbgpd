@@ -4,24 +4,25 @@
 [![Rust](https://img.shields.io/badge/rust-1.92+-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
 
-An API-first BGP daemon in Rust, built for programmable route-server and
-control-plane use cases. gRPC is the primary interface for all peer lifecycle,
-routing, and policy operations. The config file bootstraps initial state; after
-startup, gRPC owns the truth. No restarts to add peers, change policy, or
-inject routes.
+An API-first BGP daemon in Rust, built for programmable data-center fabric,
+route-server, and automation-heavy control-plane use cases. gRPC is the primary
+interface for all peer lifecycle, routing, and policy operations. The config
+file bootstraps initial state; after startup, gRPC owns the truth. No restarts
+to add peers, change policy, or inject routes.
 
-**Status: public alpha.** Feature-complete for the initial route-server and
-control-plane target. Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR,
-ASPA path verification, FlowSpec, BMP, MRT, and full gRPC/CLI management
-are implemented. Default-off Linux FIB integration exists for RFC 7999
-discard routes and configured unicast FIB tables; broader router features
-remain future work. Validated with a workspace test suite, fuzz targets,
-and an automated interop suite — primarily against FRR 10.3.1, plus
-GoBGP 4.3.0 and StayRTR-backed RTR coverage; BIRD 2.0.12 has documented
-M0 containerlab validation. A foundation tier runs on every PR; the
-remaining scripts and privileged kernel dataplane smokes are local /
-manual gates for runtime or kernel reasons. See `docs/INTEROP.md` for
-the full matrix.
+**Status: public alpha.** Feature-complete for the initial programmable
+control-plane target and expanding toward cloud / AI-scale data-center fabric
+use. Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR, ASPA path
+verification, FlowSpec, BMP, MRT, BFD, EVPN/VXLAN alpha, and full gRPC/CLI
+management are implemented. Default-off Linux FIB integration exists for RFC
+7999 discard routes and configured unicast FIB tables, including ECMP and
+weighted multipath; broader routing-suite features remain future work.
+Validated with a workspace test suite, fuzz targets, and an automated interop
+suite — primarily against FRR 10.3.1, plus GoBGP 4.3.0 and StayRTR-backed RTR
+coverage; BIRD 2.0.12 has documented M0 containerlab validation. A foundation
+tier runs on every PR; the remaining scripts and privileged kernel dataplane
+smokes are local / manual gates for runtime or kernel reasons. See
+`docs/INTEROP.md` for the full matrix.
 
 > **Alpha expectations:** The config format and gRPC API are not yet frozen.
 > Breaking changes are possible between minor versions. The daemon runs on
@@ -30,7 +31,7 @@ the full matrix.
 
 ## Why rustbgpd
 
-- **API-first control plane** -- full gRPC control surface across 10 services plus a thin CLI (`rustbgpctl`) with colored tables, dynamic column alignment, and human-readable uptimes. Dynamic peer management, route injection, policy CRUD, peer groups, EVPN instance queries, streaming events, and daemon control without restarts.
+- **API-first control plane** -- full gRPC control surface across 11 services plus a thin CLI (`rustbgpctl`) with colored tables, dynamic column alignment, and human-readable uptimes. Dynamic peer management, route injection, policy CRUD, peer groups, BFD inspection, EVPN instance queries, streaming events, and daemon control without restarts.
 - **Explicit architecture** -- pure FSM with no I/O, single-owner RIB with no locks, bounded channels between tasks. No `Arc<RwLock>` on routing state. See [ARCHITECTURE.md](ARCHITECTURE.md).
 - **Dual-stack and modern protocol support** -- MP-BGP, Add-Path, Extended Next Hop, Extended Messages, GR/LLGR/Notification GR, Route Refresh/Enhanced Route Refresh, FlowSpec, Route Reflector, large and extended communities.
 - **Operational visibility** -- Prometheus metrics, BMP export to collectors, MRT TABLE_DUMP_V2 snapshots, birdwatcher-compatible looking glass REST API, structured JSON logging, per-peer counters, best-path explain.
@@ -40,6 +41,8 @@ the full matrix.
 ## Good fit
 
 - **DDoS mitigation platforms** — FlowSpec + RTBH route injection from automation
+- **Cloud / AI-scale data-center fabrics** — API-first BGP control, BFD, ECMP,
+  EVPN/VXLAN alpha, and whitebox-friendly interop surfaces
 - **Hosting provider prefix management** — API-driven customer prefix announcements
 - **Internet exchange route servers** — transparent mode, Add-Path, RPKI, per-member policy
 - **SDN / network automation controllers** — programmable BGP control plane
@@ -152,6 +155,7 @@ export RUSTBGPD_ADDR=unix:///tmp/rustbgpd/grpc.sock
 rustbgpctl health
 rustbgpctl neighbor
 rustbgpctl rib
+rustbgpctl bfd       # BFD sessions, if configured
 rustbgpctl top       # live TUI dashboard
 ```
 
@@ -200,17 +204,18 @@ Or use systemd with [`examples/systemd/rustbgpd.service`](examples/systemd/rustb
 
 ## gRPC API
 
-Ten services cover the full operational surface:
+Eleven services cover the full operational surface:
 
 | Service | RPCs | Purpose |
 |---------|------|---------|
 | `GlobalService` | `GetGlobal`, `SetGlobal` | Daemon identity and configuration |
 | `ConfigService` | `DiffRuntimeConfig` | Compare a candidate TOML against live runtime config |
-| `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, RFC 8326 graceful-shutdown toggle, and dynamic-range admin |
+| `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor visibility. Runtime dynamic-range add/delete RPCs are reserved and currently return `UNIMPLEMENTED` |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `List/Get/Set/DeleteNeighborSet`, `Get*Chain`, `Set*Chain`, `Clear*Chain` | Named policy CRUD, neighbor sets, and global/per-neighbor chain attachment |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
 | `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListRouteEvents`, `WatchRoutes`, `WatchRouteEvents` | RIB queries (incl. EVPN), BLACKHOLE discard status, paginated FIB status, explain, recent route-event history with per-prefix drilldown, and streaming |
-| `EventService` | `WatchEvents`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
+| `BfdService` | `GetBfdSessions` | Single-hop BFD session inspection for configured static neighbors |
+| `EventService` | `WatchEvents`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
 | `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection |
 | `ControlService` | `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`, `GetIpVrf`, `ClearDuplicateMacQuarantine`, `ApplyEvpnRuntime` | Local EVPN VTEP instance state, ADR-0059 FDB-nexthop ownership, Gate 9 IP-VRF readiness / route counters, duplicate-MAC quarantine clear, and ADR-0063 runtime model status / apply |
@@ -267,7 +272,7 @@ and more explicit internal architecture.
 | Workspace tests | Unit, integration, and property tests (`cargo test --workspace`) |
 | Wire fuzzing | libFuzzer harnesses on message and attribute decoders, CI smoke + nightly extended |
 | Interop suites | Automated interop suite (see `docs/INTEROP.md` for the full matrix), primarily against FRR 10.3.1 plus GoBGP 4.3.0 and StayRTR-backed RTR coverage; BIRD 2.0.12 has documented M0 containerlab validation. A foundation tier is gated on every PR; privileged / longer kernel smokes run locally. |
-| Protocol coverage | RFC 4271 FSM + UPDATE validation, MP-BGP, GR/LLGR, Add-Path, FlowSpec, RPKI, ASPA, Extended Messages, Extended Next Hop, Route Refresh/ERR, RFC 7999 BLACKHOLE receiver scoping + opt-in FIB discard, ADR-0061 configured-table unicast Linux FIB programming, RFC 8326 Graceful Shutdown |
+| Protocol coverage | RFC 4271 FSM + UPDATE validation, MP-BGP, GR/LLGR, Add-Path, FlowSpec, RPKI, ASPA, Extended Messages, Extended Next Hop, Route Refresh/ERR, RFC 7999 BLACKHOLE receiver scoping + opt-in FIB discard, ADR-0061/0066/0068 configured-table unicast Linux FIB programming with ECMP / weighted multipath, RFC 5880/5881/5882 BFD, RFC 8326 Graceful Shutdown |
 | Architecture decisions | ADRs documenting every protocol and design choice ([docs/adr/](docs/adr/)) |
 
 ```bash
@@ -283,11 +288,13 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
 - Linux FIB integration is opt-in and scoped: RFC 7999 BLACKHOLE
   discard routes and configured `[[fib_tables]]` unicast route
   installation are available, with per-peer / peer-group allow-lists
-  and per-table route-count caps for the general FIB path. The general
-  FIB actor persists exact owned-state receipts for crash-restart
-  recovery without adopting `RTPROT_BGP` by protocol alone. Full router
-  parity still needs broader redistribution policy and non-BGP
-  route-manager scope
+  and per-table route-count caps for the general FIB path. ADR-0066/0068
+  add opt-in unicast ECMP via `maximum_paths`, per-class
+  `maximum_paths_ebgp` / `maximum_paths_ibgp`, `multipath_relax`, and Link
+  Bandwidth weighted multipath. The general FIB actor persists exact owned-state
+  receipts for crash-restart recovery without adopting `RTPROT_BGP` by protocol
+  alone. Full router parity still needs broader redistribution policy and
+  non-BGP route-manager scope
 - EVPN (RFC 7432 / RFC 9136) is **alpha** and Linux / VXLAN-only.
   Shipped and FRR-interop-tested: the Route Reflector role (all five
   route types reflected end-to-end), a bidirectional single-homed L2VNI
@@ -327,12 +334,13 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
 
 ## Project status
 
-**Alpha — suitable for lab, IX route-server pilots, and programmable
-control-plane deployments where you are comfortable with an evolving API.**
+**Alpha — suitable for lab, data-center fabric pilots, IX route-server pilots,
+and programmable control-plane deployments where you are comfortable with an
+evolving API.**
 
 | Dimension | Current state |
 |-----------|---------------|
-| **Target use case** | IXP route servers, programmable BGP control planes, lab/test environments |
+| **Target use case** | Data-center fabric pilots, IXP route servers, programmable BGP control planes, lab/test environments |
 | **Maturity** | Public alpha (v0.28.0) |
 | **Supported OS** | Linux (primary target). Requires `CAP_NET_BIND_SERVICE` for port 179. |
 | **Runtime** | Rust 1.92+ (workspace MSRV — Tokio rolling-6-month policy), single binary, no external dependencies except optional RPKI/BMP/MRT backends |

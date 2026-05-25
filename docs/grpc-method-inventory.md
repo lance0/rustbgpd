@@ -133,6 +133,12 @@ shape itself does not raise the tier.
 | `ListFlowSpecRoutes` | `sensitive_read` | RFC 5575 flow-spec routes — discloses traffic filter installations. |
 | `ListEvpnRoutes` | `sensitive_read` | EVPN Type 1/2/3/4/5 routes — MAC/IP topology, multi-homing ES layout. |
 
+### BfdService (1 RPC)
+
+| RPC | Tier | Notes |
+|-----|------|-------|
+| `GetBfdSessions` | `sensitive_read` | ADR-0067 BFD session snapshot — peer addresses, state, diagnostics, and strict flag. |
+
 ### EventService (4 RPCs)
 
 | RPC | Tier | Notes |
@@ -179,10 +185,10 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 36 | 50.7% |
-| `mutating` | 17 | 23.9% |
-| `operator_only` | 18 | 25.4% |
-| **Total** | **71** | **100%** |
+| `sensitive_read` | 37 | 51.4% |
+| `mutating` | 17 | 23.6% |
+| `operator_only` | 18 | 25.0% |
+| **Total** | **72** | **100%** |
 
 (Counts treat `SetGracefulShutdown` as one RPC even though it appears once in `NeighborService`.)
 
@@ -260,7 +266,7 @@ specific method if the model warrants it.
 
 ## Code matrix
 
-`crates/api/src/authz.rs` contains the same 71-method classification
+`crates/api/src/authz.rs` contains the same 72-method classification
 as a static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added

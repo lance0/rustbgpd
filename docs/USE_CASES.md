@@ -632,7 +632,7 @@ thousands of VTEPs, and gives you structured observability.
 - Pipe EVPN route events into your SDN controller or fabric-observability
   tool via `WatchRoutes`. (BMP and MRT export carry unicast / FlowSpec
   today; typed EVPN extraction in those channels is on the roadmap.)
-- Validate policy changes with `rustbgpctl rib explain-best-path` before
+- Validate policy changes with `rustbgpctl rib --prefix <PREFIX> --explain` before
   pushing — routable-surface diffs, not CLI scraping.
 
 **Example config:** `examples/rr-evpn-fabric/config.toml` — three VTEP

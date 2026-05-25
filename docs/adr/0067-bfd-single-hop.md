@@ -6,8 +6,9 @@ operator surface → BGP coupling → interop); all slices landed.
 
 ## Context
 
-`COMPARISON.md` marks **BFD integration** `No` for rustbgpd (`Yes` for FRR and
-BIRD; **`No` for GoBGP and OpenBGPd**). BFD (RFC 5880 / RFC 5881) provides
+Before this ADR shipped, `COMPARISON.md` marked **BFD integration** `No` for
+rustbgpd (`Yes` for FRR and BIRD; **`No` for GoBGP and OpenBGPd**). BFD (RFC
+5880 / RFC 5881) provides
 sub-second peer-failure detection; RFC 5882 wires that detection to BGP so a
 BFD-down event tears the neighbor down immediately instead of waiting out the
 hold timer (typically 90 s / 180 s).

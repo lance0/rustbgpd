@@ -272,10 +272,12 @@ bash tests/interop/scripts/test-m40-evpn-aliasing-ecmp-frr.sh
 containerlab destroy -t tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml
 ```
 
-If the release touches **ADR-0061 general unicast FIB** (`src/fib.rs`,
-`src/fib_runtime.rs`, `[[fib_tables]]`, `ListFibRoutes`, or
-`rustbgpctl rib fib`), run the protected `Kernel Dataplane` workflow for
-M42. Manual reproduction:
+If the release touches **ADR-0061 / ADR-0066 / ADR-0068 general unicast FIB**
+(`src/fib.rs`, `src/fib_runtime.rs`, `[[fib_tables]]`, `ListFibRoutes`,
+`rustbgpctl rib fib`, ECMP caps, `multipath_relax`, or weighted multipath), run
+the protected `Kernel Dataplane` workflow for the relevant FIB suites: M42 for
+base configured-table install, M50 for ECMP, and M52 for multipath-relax. Manual
+reproduction:
 
 ```bash
 # M42 — ADR-0061 configured-table unicast Linux FIB runtime
@@ -283,6 +285,29 @@ docker build -t rustbgpd:dev .
 containerlab deploy -t tests/interop/m42-fib-runtime-frr.clab.yml
 bash tests/interop/scripts/test-m42-fib-runtime-frr.sh
 containerlab destroy -t tests/interop/m42-fib-runtime-frr.clab.yml
+
+# M50 — ADR-0066 ECMP FIB install
+containerlab deploy -t tests/interop/m50-fib-ecmp-frr.clab.yml
+bash tests/interop/scripts/test-m50-fib-ecmp-frr.sh
+containerlab destroy -t tests/interop/m50-fib-ecmp-frr.clab.yml
+
+# M52 — ADR-0066 multipath-relax
+containerlab deploy -t tests/interop/m52-fib-ecmp-relax-frr.clab.yml
+bash tests/interop/scripts/test-m52-fib-ecmp-relax-frr.sh
+containerlab destroy -t tests/interop/m52-fib-ecmp-relax-frr.clab.yml
+```
+
+If the release touches **ADR-0067 BFD** (`crates/bfd`, `src/bfd_runtime.rs`,
+`[[bfd_profiles]]`, `[neighbors.bfd]`, `BfdService`, `rustbgpctl bfd`, or BFD
+events / coupling), run the protected `Kernel Dataplane` workflow for M51.
+Manual reproduction:
+
+```bash
+# M51 — single-hop BFD + RFC 5882 coupling against FRR bfdd
+docker build -t rustbgpd:dev .
+containerlab deploy -t tests/interop/m51-bfd-frr.clab.yml
+bash tests/interop/scripts/test-m51-bfd-frr.sh
+containerlab destroy -t tests/interop/m51-bfd-frr.clab.yml
 ```
 
 Also smoke the controller-injection path against a live RR (M30
