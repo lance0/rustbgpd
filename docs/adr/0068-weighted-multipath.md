@@ -10,8 +10,8 @@ route, every next-hop emitted with `hops = 0` (equal weight). It named the gap
 bluntly:
 
 > **Equal-weight only.** ECMP next-hops are emitted with `hops = 0` (equal
-> weight). Unequal-cost / weighted multipath (FRR's `bgp bestpath ... weight`)
-> is not supported; it is future work.
+> weight). Unequal-cost / weighted multipath … is not supported; it is future
+> work.
 
 draft-ietf-idr-link-bandwidth defines a **Link Bandwidth Extended Community**
 (non-transitive two-octet-AS-specific, type `0x40` subtype `0x04`) carrying a
