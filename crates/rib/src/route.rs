@@ -98,6 +98,17 @@ impl Route {
         self.origin_type == RouteOrigin::Ebgp
     }
 
+    /// Link Bandwidth in **bytes per second** (draft-ietf-idr-link-bandwidth),
+    /// if the route carries a Link Bandwidth Extended Community. Used to weight
+    /// next hops for unequal-cost multipath. Returns the first match's bandwidth;
+    /// the advertising AS is discarded since weighting only needs the magnitude.
+    #[must_use]
+    pub fn link_bandwidth(&self) -> Option<f32> {
+        self.extended_communities()
+            .iter()
+            .find_map(|c| c.as_link_bandwidth().map(|(_asn, bw)| bw))
+    }
+
     /// Extract the ORIGIN attribute value, defaulting to Incomplete.
     #[must_use]
     pub fn origin(&self) -> Origin {
