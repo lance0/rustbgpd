@@ -5817,6 +5817,14 @@ fn fib_tables_reject_invalid_guardrails() {
             "maximum_paths must be greater than zero",
         ),
         (r"maximum_paths = 9999", "exceeds the supported cap"),
+        (
+            r"maximum_paths_ebgp = 0",
+            "maximum_paths_ebgp must be greater than zero",
+        ),
+        (
+            r"maximum_paths_ibgp = 9999",
+            "maximum_paths_ibgp 9999 exceeds the supported cap",
+        ),
     ];
 
     for (line, expected) in cases {
@@ -5841,6 +5849,28 @@ metric = 200
             "expected {expected:?} in error, got {reason:?}"
         );
     }
+}
+
+#[test]
+fn fib_tables_per_class_maximum_paths_round_trip() {
+    let toml = format!(
+        r#"
+{}
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+maximum_paths = 2
+maximum_paths_ebgp = 4
+maximum_paths_ibgp = 8
+"#,
+        valid_toml()
+    );
+    let t = &parse(&toml).unwrap().fib_tables[0];
+    assert_eq!(t.maximum_paths, Some(2));
+    assert_eq!(t.maximum_paths_ebgp, Some(4));
+    assert_eq!(t.maximum_paths_ibgp, Some(8));
 }
 
 #[test]

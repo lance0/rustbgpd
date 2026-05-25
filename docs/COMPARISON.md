@@ -177,10 +177,11 @@ for the EVPN gate ladder.
     route — opt-in per table, default `1` (single next-hop). The global
     `[global].multipath_relax` knob relaxes the default exact-`AS_PATH` grouping
     to `AS_PATH`-length-only (FRR's `bgp bestpath as-path multipath-relax`).
-    Add-Path multi-path *send* (RFC 7911, route-server mode) and EVPN aliasing
-    ECMP (ADR-0059 FDB nexthop groups, default-on) also ship. Per-class
-    `maximum_paths_ebgp`/`ibgp` and weighted/unequal-cost multipath are the
-    remaining follow-ups.
+    Per-class caps (`maximum_paths_ebgp` / `maximum_paths_ibgp`, FRR parity) let
+    eBGP and iBGP groups carry different widths. Add-Path multi-path *send*
+    (RFC 7911, route-server mode) and EVPN aliasing ECMP (ADR-0059 FDB nexthop
+    groups, default-on) also ship. Weighted/unequal-cost multipath is the
+    remaining follow-up.
 
 ## Memory (200k prefixes, bgperf2)
 

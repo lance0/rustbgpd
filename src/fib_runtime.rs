@@ -392,7 +392,19 @@ fn max_install_paths(config: &FibRuntimeConfig) -> u32 {
     config
         .tables
         .iter()
-        .map(|table| table.maximum_paths.unwrap_or(1).max(1))
+        .map(|table| {
+            // Widest across the overall and per-class caps, so the RIB gathers
+            // enough siblings for projection's per-class re-cap to reach any of
+            // them.
+            table
+                .maximum_paths
+                .into_iter()
+                .chain(table.maximum_paths_ebgp)
+                .chain(table.maximum_paths_ibgp)
+                .max()
+                .unwrap_or(1)
+                .max(1)
+        })
         .max()
         .unwrap_or(1)
 }
@@ -1783,6 +1795,8 @@ mod tests {
             allowed_neighbors: Vec::new(),
             max_routes: None,
             maximum_paths: None,
+            maximum_paths_ebgp: None,
+            maximum_paths_ibgp: None,
         }
     }
 

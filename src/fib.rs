@@ -335,6 +335,19 @@ pub(crate) fn project_fib_intent(
     project_fib_intent_with_peer_groups(tables, candidates, &BTreeMap::new())
 }
 
+/// Per-class ECMP width: the eBGP/iBGP override if set, else the table's overall
+/// `maximum_paths`, else 1 (today's single-next-hop behavior). The equal-cost
+/// group is homogeneous, so the best route's class selects the cap.
+fn per_class_max_paths(table: &FibTableConfig, is_ebgp: bool) -> usize {
+    if is_ebgp {
+        table.maximum_paths_ebgp.or(table.maximum_paths)
+    } else {
+        table.maximum_paths_ibgp.or(table.maximum_paths)
+    }
+    .unwrap_or(1)
+    .max(1) as usize
+}
+
 /// Project configured FIB tables and Loc-RIB install candidates using the
 /// current RIB peer-group map for table allow-list checks.
 #[must_use]
@@ -350,10 +363,6 @@ pub(crate) fn project_fib_intent_with_peer_groups(
         let mut table_frozen = false;
         let mut route_limit_drops = RouteLimitDropCounters::default();
         let route_limit_drop_start = intent.drops.len();
-        // Per-table ECMP width. Unset / 1 == single-next-hop (today). The RIB
-        // already capped each candidate at the widest table's `maximum_paths`,
-        // so this re-caps to *this* table's value over the best-first set.
-        let max_paths = table.maximum_paths.unwrap_or(1).max(1) as usize;
         let allowed_neighbors = table
             .allowed_neighbors
             .iter()
@@ -372,9 +381,12 @@ pub(crate) fn project_fib_intent_with_peer_groups(
                 });
                 continue;
             }
+            // Per-class ECMP width for this candidate (homogeneous group ⇒ the
+            // best route's class picks the cap). The RIB already gathered
+            // siblings at the widest of these, so this re-caps the best-first set.
+            let max_paths = per_class_max_paths(table, route.is_ebgp());
             // Keep only equal-cost next-hops from allowed peers whose family
-            // matches the prefix, best-first, capped at this table's
-            // `maximum_paths`.
+            // matches the prefix, best-first, capped at the per-class width.
             let eligible = eligible_next_hops(candidate, route.prefix, max_paths, |peer| {
                 table_allows_peer(table, &allowed_neighbors, peer, peer_groups)
             });
@@ -756,6 +768,8 @@ mod tests {
             allowed_neighbors: Vec::new(),
             max_routes: None,
             maximum_paths: None,
+            maximum_paths_ebgp: None,
+            maximum_paths_ibgp: None,
         }
     }
 
@@ -1658,6 +1672,73 @@ mod tests {
 
         let projected = intent.routes.values().next().unwrap();
         assert_eq!(projected.target.next_hops, vec![ip("203.0.113.1")]);
+    }
+
+    #[test]
+    fn maximum_paths_ebgp_caps_ebgp_group() {
+        // Per-class eBGP cap applies even with no overall `maximum_paths`.
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.maximum_paths_ebgp = Some(2);
+        let candidate = multipath_candidate(
+            route(v4_prefix(2, 24), ip("203.0.113.1"), RouteOrigin::Ebgp, 0),
+            &["203.0.113.2", "203.0.113.3"],
+        );
+
+        let intent = project_fib_intent(&[table], &[candidate]);
+
+        let projected = intent.routes.values().next().unwrap();
+        assert_eq!(
+            projected.target.next_hops.len(),
+            2,
+            "eBGP group capped at maximum_paths_ebgp"
+        );
+    }
+
+    #[test]
+    fn maximum_paths_ibgp_caps_ibgp_group() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.maximum_paths_ibgp = Some(3);
+        let candidate = multipath_candidate(
+            route(v4_prefix(2, 24), ip("203.0.113.1"), RouteOrigin::Ibgp, 0),
+            &["203.0.113.2", "203.0.113.3", "203.0.113.4"],
+        );
+
+        let intent = project_fib_intent(&[table], &[candidate]);
+
+        let projected = intent.routes.values().next().unwrap();
+        assert_eq!(
+            projected.target.next_hops.len(),
+            3,
+            "iBGP group capped at maximum_paths_ibgp"
+        );
+    }
+
+    #[test]
+    fn per_class_overrides_with_maximum_paths_fallback() {
+        // `maximum_paths` is the shared fallback; the eBGP override wins for the
+        // eBGP group, while the iBGP group (no override) falls back to it.
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.maximum_paths = Some(3);
+        table.maximum_paths_ebgp = Some(2);
+        let ebgp = multipath_candidate(
+            route(v4_prefix(2, 24), ip("203.0.113.1"), RouteOrigin::Ebgp, 0),
+            &["203.0.113.2", "203.0.113.3"],
+        );
+        let ibgp = multipath_candidate(
+            route(v4_prefix(3, 24), ip("203.0.114.1"), RouteOrigin::Ibgp, 0),
+            &["203.0.114.2", "203.0.114.3", "203.0.114.4"],
+        );
+
+        let intent = project_fib_intent(&[table], &[ebgp, ibgp]);
+
+        let mut lens: Vec<usize> = intent
+            .routes
+            .values()
+            .map(|r| r.target.next_hops.len())
+            .collect();
+        lens.sort_unstable();
+        // eBGP capped at 2 (override), iBGP at 3 (fallback to maximum_paths).
+        assert_eq!(lens, vec![2, 3]);
     }
 
     #[test]

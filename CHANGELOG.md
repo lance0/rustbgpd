@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0066 per-class ECMP caps.** New per-table `[[fib_tables]].maximum_paths_ebgp`
+  and `maximum_paths_ibgp` (FRR's `maximum-paths` / `maximum-paths ibgp`) cap eBGP
+  and iBGP equal-cost groups independently. They override the table's overall
+  `maximum_paths` for their class and fall back to it (then `1`) when unset, so
+  existing configs are unchanged. The equal-cost group is homogeneous, so the
+  best route's class selects the cap at projection; the RIB gathers siblings at
+  the widest of the three caps. Validated `>= 1`, capped at 256.
 - **ADR-0066 multipath-relax.** New global `[global].multipath_relax` (default
   `false`) relaxes unicast ECMP grouping from an exact `AS_PATH` match to
   `AS_PATH`-*length* equality, so equal-length paths through different ASes
