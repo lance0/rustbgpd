@@ -65,6 +65,7 @@ for the EVPN gate ladder.
 | Add-Path (RFC 7911) | Yes | Yes | Yes | Yes | Yes |
 | Extended Messages (RFC 8654) | Yes | Yes | Yes | No | Yes |
 | Extended Nexthop (RFC 8950) | Yes | Yes | Yes | Yes | Yes |
+| BGP unnumbered (interface IPv6 link-local)[^unnum] | Yes | Yes | Yes | Yes | No |
 | Route Reflector (RFC 4456) | Yes | Yes | Yes | Yes | Yes |
 | Confederation (RFC 5065) | No | Yes | Yes | Yes | No |
 | Admin Shutdown (RFC 8203) | Yes | Yes | Yes | Yes | Yes |
@@ -155,6 +156,17 @@ for the EVPN gate ladder.
     BFD tracking, dynamic-neighbor BFD, hardware / offload, and BFD over
     IPv6 link-local / unnumbered peers → v1.1 (BGP unnumbered itself shipped —
     ADR-0069 / M53).
+
+[^unnum]: Interface-scoped BGP over IPv6 link-local carrying IPv4 unicast via
+    RFC 8950. rustbgpd ships static interface-bound neighbors (operator supplies
+    `address` + `interface`) with scoped Linux FIB install (egress `dev`),
+    validated against FRR by M53 (ADR-0069); FRR-style pure-interface
+    autodiscovery and the same link-local address on multiple interfaces are
+    deferred. FRR (`neighbor IFACE interface`), GoBGP (`neighbor-interface`),
+    and BIRD (`fe80::x%iface`, plus RAdv-based AutoBGP added in 3.3.0 / 2.19.0
+    on 2026-05-25) support interface autodiscovery. OpenBGPd has no interface /
+    unnumbered neighbor model (numeric-IP neighbors only), although it does
+    support the RFC 8950 next-hop encoding itself.
 
 ## Best-Path Selection
 
