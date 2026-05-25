@@ -437,6 +437,7 @@ fn fib_next_hop_from_install(
     let scope = next_hop
         .next_hop_scope
         .as_ref()
+        .filter(|_| is_ipv6_link_local(next_hop.next_hop))
         .filter(|scope| scope.ifindex != 0)
         .map(|scope| FibNextHopScope {
             ifindex: scope.ifindex,
@@ -1232,6 +1233,22 @@ mod tests {
         assert_eq!(
             addr_scopes(&projected.target),
             vec![(ip("fe80::1"), Some(7))]
+        );
+        assert!(intent.drops.is_empty());
+    }
+
+    #[test]
+    fn non_link_local_next_hop_scope_is_ignored() {
+        let tables = vec![table("edge", 1000, 200, &["ipv4_unicast"])];
+        let route = scoped_route(v4_prefix(2, 24), ip("192.0.2.1"), 7);
+
+        let intent = project_fib_intent(&tables, &candidates(vec![route]));
+
+        assert_eq!(intent.routes.len(), 1);
+        let projected = intent.routes.values().next().unwrap();
+        assert_eq!(
+            addr_scopes(&projected.target),
+            vec![(ip("192.0.2.1"), None)]
         );
         assert!(intent.drops.is_empty());
     }

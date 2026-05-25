@@ -139,8 +139,8 @@ v4 persists positional link-local ifindexes so crash restart does not forget
 which `dev` belongs to a daemon-owned row.
 
 If a link-local next-hop lacks scope, the FIB layer rejects the row with an
-explicit `link_local_next_hop_scope_missing` reason. IPv4 routes via non
-link-local IPv6 gateways remain rejected as unsupported.
+explicit `link_local_next_hop_scope_missing` reason. IPv4 routes via
+non-link-local IPv6 gateways remain rejected as unsupported.
 
 ### FIB install is part of the feature
 

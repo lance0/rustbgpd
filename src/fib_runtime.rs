@@ -897,7 +897,11 @@ impl From<&FibRoute> for PersistedFibRoute {
                 .target
                 .next_hops
                 .iter()
-                .map(|nh| nh.scope.map_or(0, |scope| scope.ifindex))
+                .map(|nh| {
+                    nh.scope
+                        .filter(|_| is_ipv6_link_local(nh.addr))
+                        .map_or(0, |scope| scope.ifindex)
+                })
                 .collect(),
             peer: route.peer,
             origin_type: route.origin_type.into(),
@@ -947,6 +951,7 @@ impl PersistedFibRoute {
                         .next_hop_ifindexes
                         .get(i)
                         .copied()
+                        .filter(|_| is_ipv6_link_local(addr))
                         .filter(|ifindex| *ifindex != 0)
                         .map(|ifindex| FibNextHopScope { ifindex });
                     (
@@ -1601,7 +1606,7 @@ fn build_route_message(
             [next_hop] => {
                 msg.attributes
                     .push(route_next_hop_attribute(route.key.prefix, next_hop));
-                if let Some(scope) = next_hop.scope {
+                if let Some(scope) = next_hop.scope.filter(|_| is_ipv6_link_local(next_hop.addr)) {
                     msg.attributes.push(RouteAttribute::Oif(scope.ifindex));
                 }
             }
@@ -1619,7 +1624,10 @@ fn build_route_message(
                         // is unreachable defense.
                         hop.hops =
                             u8::try_from(next_hop.weight.saturating_sub(1)).unwrap_or(u8::MAX);
-                        hop.interface_index = next_hop.scope.map_or(0, |scope| scope.ifindex);
+                        hop.interface_index = next_hop
+                            .scope
+                            .filter(|_| is_ipv6_link_local(next_hop.addr))
+                            .map_or(0, |scope| scope.ifindex);
                         hop.attributes
                             .push(route_next_hop_attribute(route.key.prefix, next_hop));
                         hop
@@ -2686,6 +2694,45 @@ mod tests {
     }
 
     #[test]
+    fn owned_state_load_ignores_non_link_local_ifindex() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let mut config = config();
+        config.owned_state_path = Some(path.clone());
+        let persisted = PersistedFibOwnedState {
+            version: OWNED_STATE_VERSION,
+            tables: config
+                .tables
+                .iter()
+                .map(PersistedFibTableSignature::from)
+                .collect(),
+            routes: vec![PersistedFibRoute {
+                table_name: "edge".to_string(),
+                table_id: 1000,
+                metric: 200,
+                prefix_addr: ip("203.0.113.0"),
+                prefix_len: 24,
+                next_hop: Some(ip("192.0.2.1")),
+                next_hops: vec![ip("192.0.2.1")],
+                weights: vec![1],
+                next_hop_ifindexes: vec![7],
+                peer: ip("198.51.100.1"),
+                origin_type: PersistedRouteOrigin::Ebgp,
+                path_id: 0,
+            }],
+        };
+        std::fs::write(&path, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
+
+        let loaded = load_owned_state(&config);
+
+        let route = loaded.routes.values().next().unwrap();
+        assert_eq!(
+            route.target.next_hops[0].scope, None,
+            "corrupt v4 owned-state must not pin a non-link-local gateway to an interface"
+        );
+    }
+
+    #[test]
     fn changing_maximum_paths_invalidates_owned_state() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fib-owned.json");
@@ -3548,6 +3595,33 @@ mod tests {
                 .iter()
                 .any(|attr| matches!(attr, RouteAttribute::Gateway(_))),
             "cross-family link-local route must use RTA_VIA, not RTA_GATEWAY"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn build_route_message_ignores_non_link_local_scope() {
+        use netlink_packet_route::route::RouteAttribute;
+        let route = FibRoute {
+            table_name: "edge".to_string(),
+            key: key(v4(24)),
+            target: FibRouteTarget::from_next_hops([FibNextHop {
+                addr: ip("192.0.2.1"),
+                scope: Some(FibNextHopScope { ifindex: 7 }),
+                weight: 1,
+            }]),
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        };
+
+        let msg = build_route_message(&route, RouteMessageGateway::Include).unwrap();
+
+        assert!(
+            !msg.attributes
+                .iter()
+                .any(|attr| matches!(attr, RouteAttribute::Oif(_))),
+            "non-link-local scope metadata must not emit RTA_OIF"
         );
     }
 
