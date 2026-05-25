@@ -195,10 +195,13 @@ fn peer_key(address: &str, interface: &str) -> Result<PeerKey, Status> {
     let address: IpAddr = address
         .parse()
         .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
-    Ok(PeerKey::new(
-        address,
-        (!interface.trim().is_empty()).then(|| interface.to_string()),
-    ))
+    let interface = (!interface.trim().is_empty()).then(|| interface.to_string());
+    if is_ipv6_link_local(address) && interface.is_none() {
+        return Err(Status::invalid_argument(
+            "interface is required for IPv6 link-local neighbors",
+        ));
+    }
+    Ok(PeerKey::new(address, interface))
 }
 
 #[tonic::async_trait]
@@ -632,6 +635,20 @@ mod tests {
         let (tx, _rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         NeighborService::new(65001, AccessMode::ReadWrite, tx, rib_tx, None)
+    }
+
+    #[test]
+    fn peer_key_rejects_link_local_without_interface() {
+        let err = peer_key("fe80::1", "").unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("interface"));
+    }
+
+    #[test]
+    fn peer_key_accepts_scoped_link_local() {
+        let key = peer_key("fe80::1", "eth0").unwrap();
+        assert_eq!(key.address, "fe80::1".parse::<IpAddr>().unwrap());
+        assert_eq!(key.interface.as_deref(), Some("eth0"));
     }
 
     #[tokio::test]

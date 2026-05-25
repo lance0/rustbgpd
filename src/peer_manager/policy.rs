@@ -15,17 +15,29 @@ use crate::policy_admin::{
 use super::{ManagedPeer, PEER_POLICY_UPDATE_TIMEOUT, PEER_QUERY_TIMEOUT, PeerManager};
 
 impl PeerManager {
-    #[allow(clippy::too_many_lines)]
+    #[cfg(test)]
     pub(super) async fn update_runtime_policies(
         &mut self,
         address: IpAddr,
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
     ) -> Result<(), String> {
-        use std::fmt::Write as _;
         let Some(peer_key) = self.unique_peer_key_for_address(address) else {
             return Ok(());
         };
+        self.update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy)
+            .await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn update_runtime_policies_for_peer_key(
+        &mut self,
+        peer_key: PeerKey,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
+    ) -> Result<(), String> {
+        use std::fmt::Write as _;
+        let address = peer_key.address;
         let Some(managed) = self.peers.get_mut(&peer_key) else {
             return Ok(());
         };
@@ -339,7 +351,7 @@ impl PeerManager {
             let (import_policy, export_policy) = next_config
                 .effective_policy_chains_for_neighbor(neighbor)
                 .map_err(|e| e.to_string())?;
-            self.update_runtime_policies(address, import_policy, export_policy)
+            self.update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy)
                 .await?;
         }
 
@@ -446,7 +458,7 @@ impl PeerManager {
                 }
             };
             if let Err(e) = self
-                .update_runtime_policies(address, import_policy, export_policy)
+                .update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy)
                 .await
             {
                 warn!(
@@ -523,7 +535,7 @@ impl PeerManager {
                 }
             };
             if let Err(e) = self
-                .update_runtime_policies(address, import_policy, export_policy)
+                .update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy)
                 .await
             {
                 warn!(

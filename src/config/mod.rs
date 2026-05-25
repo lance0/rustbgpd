@@ -33,12 +33,9 @@ use self::schema::{BGP_PORT, DEFAULT_CONNECT_RETRY_SECS, DEFAULT_HOLD_TIME};
 use self::parse::parse_named_policy;
 
 impl Config {
-    fn interface_index(interface: &str) -> Result<u32, ConfigError> {
-        nix::net::if_::if_nametoindex(interface).map_err(|err| ConfigError::InvalidNeighborConfig {
-            address: String::new(),
-            field: "interface".to_string(),
-            reason: format!("interface {interface:?} does not exist or is invalid: {err}"),
-        })
+    fn interface_index(interface: &str) -> Result<u32, String> {
+        nix::net::if_::if_nametoindex(interface)
+            .map_err(|err| format!("interface {interface:?} does not exist or is invalid: {err}"))
     }
 
     fn load_from_toml_source(content: &str, source_name: &str) -> Result<Self, String> {
@@ -601,7 +598,7 @@ impl Config {
                     ConfigError::InvalidNeighborConfig {
                         address: neighbor.address.clone(),
                         field: "interface".to_string(),
-                        reason: err.to_string(),
+                        reason: err,
                     }
                 })?;
                 (

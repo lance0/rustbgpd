@@ -396,6 +396,7 @@ fn insert_test_scoped_managed_peer(
 #[derive(Default)]
 struct FakePeerCounters {
     collision_dump: AtomicU32,
+    query_state: AtomicU32,
     shutdown: AtomicU32,
     stop: AtomicU32,
 }
@@ -413,6 +414,7 @@ fn fake_peer_handle(
         while let Some(cmd) = session_rx.recv().await {
             match cmd {
                 PeerCommand::QueryState { reply } => {
+                    counters.query_state.fetch_add(1, Ordering::SeqCst);
                     let _ = reply.send(PeerSessionState {
                         fsm_state: state,
                         peer_ip: peer_addr,
@@ -1354,6 +1356,76 @@ async fn policy_events_publish_successful_policy_mutations() {
 
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn apply_policy_change_fans_out_to_scoped_peers_with_same_address() {
+    use rustbgpd_api::peer_types::NeighborSetDefinition;
+
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let rib_drainer = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer = IpAddr::V6("fe80::2".parse().unwrap());
+    let eth0 = Arc::new(FakePeerCounters::default());
+    let eth1 = Arc::new(FakePeerCounters::default());
+
+    insert_test_scoped_managed_peer(
+        &mut mgr,
+        peer,
+        "eth0",
+        10,
+        1,
+        fake_peer_handle(peer, SessionState::Established, None, eth0.clone()),
+    );
+    insert_test_scoped_managed_peer(
+        &mut mgr,
+        peer,
+        "eth1",
+        11,
+        2,
+        fake_peer_handle(peer, SessionState::Established, None, eth1.clone()),
+    );
+
+    let mut n0 = config_neighbor(peer, 65002);
+    n0.interface = Some("eth0".to_string());
+    let mut n1 = config_neighbor(peer, 65002);
+    n1.interface = Some("eth1".to_string());
+    mgr.current_config.neighbors = vec![n0, n1];
+
+    mgr.apply_policy_change(
+        ConfigEvent::SetNeighborSet {
+            name: "unused".to_string(),
+            definition: NeighborSetDefinition {
+                addresses: vec!["192.0.2.1".to_string()],
+                remote_asns: vec![],
+                peer_groups: vec![],
+            },
+        },
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(eth0.query_state.load(Ordering::SeqCst), 1);
+    assert_eq!(eth1.query_state.load(Ordering::SeqCst), 1);
+    drop(mgr);
+    rib_drainer.await.unwrap();
 }
 
 /// Regression: when a policy mutation actually changes the
