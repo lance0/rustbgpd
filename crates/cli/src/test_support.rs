@@ -435,6 +435,10 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             remote_role: "rs-client".to_string(),
             role_negotiated: true,
             otc_routes_blocked: 0,
+            import_policy_routes_permitted: 0,
+            import_policy_routes_denied: 0,
+            export_policy_routes_permitted: 0,
+            export_policy_routes_denied: 0,
         }))
     }
 

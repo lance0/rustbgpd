@@ -958,6 +958,14 @@ pub struct PeerInfo {
     pub notifications_sent: u64,
     /// Number of unicast route announcements blocked by RFC 9234 OTC rules.
     pub otc_routes_blocked: u64,
+    /// Import policy evaluations that permitted a route.
+    pub import_policy_routes_permitted: u64,
+    /// Import policy evaluations that denied a route.
+    pub import_policy_routes_denied: u64,
+    /// Export policy evaluations that permitted a route.
+    pub export_policy_routes_permitted: u64,
+    /// Export policy evaluations that denied a route.
+    pub export_policy_routes_denied: u64,
     /// Number of Established→non-Established transitions.
     pub flap_count: u64,
     /// Seconds since last Established transition (0 if never).

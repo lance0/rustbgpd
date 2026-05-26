@@ -16,11 +16,19 @@ fn record_import_policy_eval(
     metrics: &rustbgpd_telemetry::BgpMetrics,
     peer_label: &str,
     evaluation: &PolicyEvaluation,
+    permitted: &mut u64,
+    denied: &mut u64,
 ) {
     let policy = evaluation.matched_policy.as_deref().unwrap_or("inline");
     let action = match evaluation.action {
-        PolicyAction::Permit => "permit",
-        PolicyAction::Deny => "deny",
+        PolicyAction::Permit => {
+            *permitted = permitted.saturating_add(1);
+            "permit"
+        }
+        PolicyAction::Deny => {
+            *denied = denied.saturating_add(1);
+            "deny"
+        }
     };
     metrics.record_policy_routes(peer_label, policy, "import", action);
 }
@@ -158,6 +166,8 @@ impl PeerSession {
     #[expect(clippy::too_many_lines)]
     pub(super) async fn process_update(&mut self, update: rustbgpd_wire::UpdateMessage) {
         let four_octet_as = self.negotiated.as_ref().is_some_and(|n| n.four_octet_as);
+        let mut import_policy_routes_permitted = 0_u64;
+        let mut import_policy_routes_denied = 0_u64;
 
         // Build Add-Path receive families for MP attribute decode context.
         let add_path_recv_families: Vec<(Afi, Safi)> = self
@@ -608,7 +618,13 @@ impl PeerSession {
                             self.import_policy.as_ref(),
                             &ctx,
                         );
-                        record_import_policy_eval(&self.metrics, &self.peer_label, &evaluation);
+                        record_import_policy_eval(
+                            &self.metrics,
+                            &self.peer_label,
+                            &evaluation,
+                            &mut import_policy_routes_permitted,
+                            &mut import_policy_routes_denied,
+                        );
                         if result.action != rustbgpd_policy::PolicyAction::Permit {
                             return None;
                         }
@@ -732,7 +748,13 @@ impl PeerSession {
                                     self.import_policy.as_ref(),
                                     &ctx,
                                 );
-                            record_import_policy_eval(&self.metrics, &self.peer_label, &evaluation);
+                            record_import_policy_eval(
+                                &self.metrics,
+                                &self.peer_label,
+                                &evaluation,
+                                &mut import_policy_routes_permitted,
+                                &mut import_policy_routes_denied,
+                            );
                             if result.action == rustbgpd_policy::PolicyAction::Permit {
                                 let mut attrs = mp_route_attrs.clone();
                                 let _nh_action = rustbgpd_policy::apply_modifications(
@@ -791,7 +813,13 @@ impl PeerSession {
                                     self.import_policy.as_ref(),
                                     &ctx,
                                 );
-                            record_import_policy_eval(&self.metrics, &self.peer_label, &evaluation);
+                            record_import_policy_eval(
+                                &self.metrics,
+                                &self.peer_label,
+                                &evaluation,
+                                &mut import_policy_routes_permitted,
+                                &mut import_policy_routes_denied,
+                            );
                             if result.action == rustbgpd_policy::PolicyAction::Permit {
                                 let mut attrs = mp_route_attrs.clone();
                                 let _nh_action = rustbgpd_policy::apply_modifications(
@@ -851,7 +879,13 @@ impl PeerSession {
                             self.import_policy.as_ref(),
                             &ctx,
                         );
-                        record_import_policy_eval(&self.metrics, &self.peer_label, &evaluation);
+                        record_import_policy_eval(
+                            &self.metrics,
+                            &self.peer_label,
+                            &evaluation,
+                            &mut import_policy_routes_permitted,
+                            &mut import_policy_routes_denied,
+                        );
                         if result.action == rustbgpd_policy::PolicyAction::Permit {
                             let mut attrs = mp_unicast_route_attrs.clone();
                             let nh_action = rustbgpd_policy::apply_modifications(
@@ -933,6 +967,12 @@ impl PeerSession {
         for route in &evpn_announced {
             self.known_evpn.insert(route.key());
         }
+        self.import_policy_routes_permitted = self
+            .import_policy_routes_permitted
+            .saturating_add(import_policy_routes_permitted);
+        self.import_policy_routes_denied = self
+            .import_policy_routes_denied
+            .saturating_add(import_policy_routes_denied);
 
         let prefix_count = self.known_prefix_count();
         if let Some(max) = self.config.max_prefixes

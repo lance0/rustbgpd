@@ -96,6 +96,10 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             remote_role: n.remote_role.clone(),
             role_negotiated: n.role_negotiated,
             otc_routes_blocked: n.otc_routes_blocked,
+            import_policy_routes_permitted: n.import_policy_routes_permitted,
+            import_policy_routes_denied: n.import_policy_routes_denied,
+            export_policy_routes_permitted: n.export_policy_routes_permitted,
+            export_policy_routes_denied: n.export_policy_routes_denied,
         };
         println!(
             "{}",
@@ -180,6 +184,15 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
         println!("Notifications Received:{}", n.notifications_received);
         println!("Notifications Sent:    {}", n.notifications_sent);
         println!("OTC Routes Blocked:    {}", n.otc_routes_blocked);
+        println!("Policy Stats:");
+        println!(
+            "  Import — permitted: {} denied: {}",
+            n.import_policy_routes_permitted, n.import_policy_routes_denied
+        );
+        println!(
+            "  Export — permitted: {} denied: {}",
+            n.export_policy_routes_permitted, n.export_policy_routes_denied
+        );
         println!("Flap Count:            {}", n.flap_count);
         if !n.last_error.is_empty() {
             println!("Last Error:            {}", n.last_error);

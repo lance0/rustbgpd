@@ -344,17 +344,48 @@ counters operators watch:
 - **GR / FIB** — `bgp_gr_active_peers`, `bgp_gr_stale_routes`,
   `bgp_fib_routes_installed_total`, `bgp_fib_kernel_failures_total`.
 
-**Policy filtering visibility** — `bgp_policy_routes_total{peer,
-policy, direction, action}` lands with the Operator Confidence
-Sprint's PR2 (when enabled in the build). It attributes each evaluated
-route to the terminal-decision policy in the chain with `policy="…"`
-(the configured name) or `policy="inline"` for inline statements. Use
-it to confirm policy chains are firing as expected:
+**Policy filtering visibility — Prometheus.** `bgp_policy_routes_total
+{peer, policy, direction, action}` attributes each import and export
+policy evaluation to the terminal-decision policy in the chain with
+`policy="…"` (the configured name) or `policy="inline"` for inline
+statements and permit-all peers without an explicit chain. Initial
+table dumps, route refreshes, dirty resyncs, and forced outbound
+refreshes can increment export counters because they re-evaluate export
+policy. The Prometheus counter is **monotonic for the lifetime of the
+daemon process** — use Prometheus `rate()` / `increase()` to read it.
 
 ```promql
 # Routes denied by a named filter on each peer's import side:
 rate(bgp_policy_routes_total{direction="import", action="deny"}[5m])
 ```
+
+**Policy filtering visibility — gRPC scalar aggregates.** `NeighborState`
+carries four per-peer running totals to give operators a cheap
+sanity-check on the labelled Prometheus counter:
+
+| Field | Direction | Scope |
+|---|---|---|
+| `import_policy_routes_permitted` | import | Per session — resets on session-down (lives on `PeerSessionState`). |
+| `import_policy_routes_denied` | import | Per session — same. |
+| `export_policy_routes_permitted` | export | Per RIB peer-attach — resets on `handle_peer_down`, i.e. session-down. |
+| `export_policy_routes_denied` | export | Per RIB peer-attach — same. |
+
+Both directions reset together on the next session establishment, so
+"how many routes did this session permit / deny in total" is straight
+subtraction; "how many across reconnects" requires Prometheus history.
+The CLI surfaces these in `rustbgpctl neighbor show` as a Policy Stats
+block:
+
+```
+Policy Stats:
+  Import — permitted: 1,247  denied: 31
+  Export — permitted: 892    denied: 0
+```
+
+JSON output (`rustbgpctl neighbor show --format json`) carries the same
+fields under `import_policy_routes_permitted` / `import_policy_routes_denied`
+/ `export_policy_routes_permitted` / `export_policy_routes_denied`,
+elided when zero.
 
 ### BMP
 

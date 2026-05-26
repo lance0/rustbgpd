@@ -203,6 +203,47 @@ async fn query_explain_best_path_for_peer(
     reply_rx.await.unwrap()
 }
 
+async fn query_neighbor_policy_stats(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+) -> crate::update::NeighborPolicyStats {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryNeighborPolicyStats {
+        peer,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx.await.unwrap()
+}
+
+fn policy_metric_value(
+    metrics: &BgpMetrics,
+    peer: &str,
+    policy: &str,
+    direction: &str,
+    action: &str,
+) -> f64 {
+    metrics
+        .registry()
+        .gather()
+        .iter()
+        .find(|family| family.name() == "bgp_policy_routes_total")
+        .and_then(|family| {
+            family.metric.iter().find(|metric| {
+                let mut labels = std::collections::HashMap::new();
+                for label in metric.get_label() {
+                    labels.insert(label.name(), label.value());
+                }
+                labels.get("peer") == Some(&peer)
+                    && labels.get("policy") == Some(&policy)
+                    && labels.get("direction") == Some(&direction)
+                    && labels.get("action") == Some(&action)
+            })
+        })
+        .map_or(0.0, |metric| metric.get_counter().value())
+}
+
 fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
     Route {
         prefix: Prefix::V4(prefix),
@@ -1597,6 +1638,122 @@ async fn withdraw_injected_removes_and_distributes() {
 }
 
 #[tokio::test]
+async fn export_policy_counter_records_single_best_permit() {
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    let update = out_rx.recv().await.unwrap();
+    assert_eq!(update.announce.len(), 1);
+
+    assert!(
+        (policy_metric_value(&metrics, "10.0.0.2", "inline", "export", "permit") - 1.0).abs()
+            < f64::EPSILON
+    );
+    let stats = query_neighbor_policy_stats(&tx, target).await;
+    assert_eq!(stats.export_policy_routes_permitted, 1);
+    assert_eq!(stats.export_policy_routes_denied, 0);
+
+    // Peer-down clears per-peer state including the export policy
+    // counters. Without this cleanup the HashMap grows unbounded across
+    // peer add/delete churn — see handle_peer_down in peer_lifecycle.rs.
+    // The counter resets here matches the import-side per-session
+    // contract: both directions zero on the next session.
+    tx.send(RibUpdate::PeerDown { peer: target }).await.unwrap();
+    let stats_after = query_neighbor_policy_stats(&tx, target).await;
+    assert_eq!(
+        stats_after.export_policy_routes_permitted, 0,
+        "PeerDown must clear export_policy_stats; saw {stats_after:?}"
+    );
+    assert_eq!(stats_after.export_policy_routes_denied, 0);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn explain_advertised_route_does_not_increment_export_policy_counter() {
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    let _ = out_rx.recv().await.unwrap();
+
+    let before = policy_metric_value(&metrics, "10.0.0.2", "inline", "export", "permit");
+    let explain = query_explain_advertised_route(&tx, target, Prefix::V4(prefix)).await;
+    assert_eq!(explain.decision, crate::update::ExplainDecision::Advertise);
+    let after = policy_metric_value(&metrics, "10.0.0.2", "inline", "export", "permit");
+    assert!((after - before).abs() < f64::EPSILON);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn export_policy_blocks_denied() {
     use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 
@@ -1626,13 +1783,14 @@ async fn export_policy_blocks_denied() {
         default_action: PolicyAction::Permit,
     }]);
 
+    let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(
         rx,
         dummy_query_rx(),
         Some(export_policy),
         None,
-        BgpMetrics::new(),
+        metrics.clone(),
     );
     let handle = tokio::spawn(manager.run());
 
@@ -1677,6 +1835,13 @@ async fn export_policy_blocks_denied() {
 
     // Should NOT have received the denied route
     assert!(out_rx.try_recv().is_err());
+    assert!(
+        (policy_metric_value(&metrics, "10.0.0.2", "inline", "export", "deny") - 1.0).abs()
+            < f64::EPSILON
+    );
+    let stats = query_neighbor_policy_stats(&tx, target).await;
+    assert_eq!(stats.export_policy_routes_permitted, 0);
+    assert_eq!(stats.export_policy_routes_denied, 1);
 
     drop(tx);
     handle.await.unwrap();
@@ -7769,13 +7934,14 @@ async fn multipath_policy_filtered_events_for_denied_candidates() {
         default_action: PolicyAction::Permit,
     }]);
 
+    let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(
         rx,
         dummy_query_rx(),
         Some(export_policy),
         None,
-        BgpMetrics::new(),
+        metrics.clone(),
     );
     let handle = tokio::spawn(manager.run());
 
@@ -7859,6 +8025,13 @@ async fn multipath_policy_filtered_events_for_denied_candidates() {
             && event.prefix == Prefix::V4(prefix)
             && event.reason == "policy_denied"
     }));
+    assert!(
+        (policy_metric_value(&metrics, "10.0.0.3", "inline", "export", "deny") - 3.0).abs()
+            < f64::EPSILON
+    );
+    let stats = query_neighbor_policy_stats(&tx, target).await;
+    assert_eq!(stats.export_policy_routes_permitted, 0);
+    assert_eq!(stats.export_policy_routes_denied, 3);
 
     drop(tx);
     handle.await.unwrap();

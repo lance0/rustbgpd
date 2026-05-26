@@ -25,7 +25,7 @@ use crate::event::{RouteEvent, RouteEventType};
 use crate::loc_rib::LocRib;
 use crate::update::{
     BestPathCandidate, ExplainAdvertisedRoute, ExplainBestPath, MrtPeerEntry, MrtSnapshotData,
-    OutboundRouteUpdate, RibUpdate,
+    NeighborPolicyStats, OutboundRouteUpdate, RibUpdate,
 };
 
 use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, prefix_family};
@@ -115,6 +115,8 @@ pub struct RibManager {
     /// route-level policy-filtered events transition-based instead of
     /// re-emitting on every dirty or forced outbound resync.
     policy_filtered_routes: HashMap<IpAddr, HashSet<PolicyFilteredRouteKey>>,
+    /// Aggregate export-policy evaluation counters keyed by target peer.
+    export_policy_stats: HashMap<IpAddr, NeighborPolicyStats>,
     /// Bounded recent route-event history for after-the-fact operator
     /// timeline queries. Live streaming still uses `route_events_tx`.
     route_event_history: VecDeque<RouteEvent>,
@@ -369,6 +371,7 @@ impl RibManager {
             aspa_table: None,
             route_events_tx,
             policy_filtered_routes: HashMap::new(),
+            export_policy_stats: HashMap::new(),
             route_event_history: VecDeque::with_capacity(ROUTE_EVENT_HISTORY_CAPACITY),
             next_route_event_id: 1,
             evpn_events_tx,
@@ -565,6 +568,9 @@ impl RibManager {
             RibUpdate::QueryLocRibCount { reply } => self.handle_query_loc_rib_count(reply),
             RibUpdate::QueryAdvertisedCount { peer, reply } => {
                 self.handle_query_advertised_count(peer, reply);
+            }
+            RibUpdate::QueryNeighborPolicyStats { peer, reply } => {
+                self.handle_query_neighbor_policy_stats(peer, reply);
             }
             RibUpdate::ReplacePeerExportPolicy {
                 peer,
@@ -1194,6 +1200,19 @@ impl RibManager {
     ) {
         let count = self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len);
         let _ = reply.send(count);
+    }
+
+    fn handle_query_neighbor_policy_stats(
+        &mut self,
+        peer: IpAddr,
+        reply: tokio::sync::oneshot::Sender<NeighborPolicyStats>,
+    ) {
+        let stats = self
+            .export_policy_stats
+            .get(&peer)
+            .copied()
+            .unwrap_or_default();
+        let _ = reply.send(stats);
     }
 
     fn handle_query_flowspec_routes(

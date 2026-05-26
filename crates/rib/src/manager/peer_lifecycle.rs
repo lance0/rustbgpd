@@ -74,6 +74,17 @@ impl RibManager {
         self.pending_eor.remove(&peer);
         self.pending_route_batches.retain(|prb| prb.peer() != peer);
         self.clear_peer_refresh_state(peer);
+        // Drop per-peer export-policy counters alongside the rest of the
+        // per-peer state. Without this the HashMap grows unbounded as
+        // peers come and go (especially under dynamic neighbors), and
+        // stale aggregates leak across peer-identity reuse. The reset
+        // also gives operators consistent semantics: the import-side
+        // counters reset on session-down (they live on PeerSessionState),
+        // and now the export-side aggregates do too — same per-session
+        // contract in both directions. Operators that need
+        // across-flap totals can subtract Prometheus snapshots
+        // (`bgp_policy_routes_total` is monotonic per process).
+        self.export_policy_stats.remove(&peer);
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -171,6 +182,9 @@ impl RibManager {
             .cloned()
             .unwrap_or_default();
         let loc_rib = &self.loc_rib;
+        let target_peer_label = peer.to_string();
+        let metrics = self.metrics.clone();
+        let policy_stats = self.export_policy_stats.entry(peer).or_default();
 
         let mut all_prefixes: HashSet<Prefix> = self.loc_rib.iter().map(|r| r.prefix).collect();
         for rib in self.ribs.values() {
@@ -205,6 +219,9 @@ impl RibManager {
                     cluster_id,
                     sendable.as_ref(),
                     export_pol.as_ref(),
+                    &metrics,
+                    policy_stats,
+                    &target_peer_label,
                     &mut announce,
                     &mut withdraw,
                     &mut nh_override_flags,
@@ -227,6 +244,9 @@ impl RibManager {
                     cluster_id,
                     sendable.as_ref(),
                     export_pol.as_ref(),
+                    &metrics,
+                    policy_stats,
+                    &target_peer_label,
                     &mut announce,
                     &mut withdraw,
                     &mut nh_override_flags,
@@ -256,6 +276,9 @@ impl RibManager {
                 cluster_id,
                 sendable.as_ref(),
                 export_pol.as_ref(),
+                &metrics,
+                policy_stats,
+                &target_peer_label,
                 &mut fs_announce,
                 &mut fs_withdraw,
             );
@@ -284,6 +307,9 @@ impl RibManager {
                 cluster_id,
                 sendable.as_ref(),
                 export_pol.as_ref(),
+                &metrics,
+                policy_stats,
+                &target_peer_label,
                 &mut evpn_announce,
                 &mut evpn_withdraw,
                 false, // initial dump — equality check is correct
