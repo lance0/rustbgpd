@@ -742,6 +742,65 @@ pub fn evaluate_policy(policy: Option<&Policy>, ctx: &RouteContext<'_>) -> Polic
     }
 }
 
+/// A `Policy` carried alongside its optional configured name.
+///
+/// The name lives at the chain level — not on `Policy` itself — so the
+/// dozens of test-only constructors that build bare `Policy` values
+/// (most of `crates/policy/src/engine/tests/`) don't churn. The chain
+/// is the only place a policy gets a stable identity, which matches how
+/// names enter the system (via `resolve_chain` in `src/config/parse.rs`,
+/// which already has the name in hand at the moment it builds each
+/// `Policy`).
+#[derive(Debug, Clone)]
+pub struct NamedPolicy {
+    /// Configured policy name (`None` for inline / anonymous policies).
+    pub name: Option<String>,
+    /// The policy itself.
+    pub policy: Policy,
+}
+
+impl From<Policy> for NamedPolicy {
+    fn from(policy: Policy) -> Self {
+        Self { name: None, policy }
+    }
+}
+
+// Deref to Policy is a pragmatic shortcut: many existing tests read
+// `chain.policies[i].entries` / `.default_action` directly. Keeping
+// those working transparently is worth the Deref-on-not-a-smart-pointer
+// idiom — the alternative is a mechanical sweep across ~30 test sites
+// that adds no signal. The wrapper has exactly one field that matters
+// (`policy`), so the deref target is unambiguous.
+impl std::ops::Deref for NamedPolicy {
+    type Target = Policy;
+    fn deref(&self) -> &Self::Target {
+        &self.policy
+    }
+}
+
+/// Per-route policy evaluation outcome with attribution to the
+/// terminal-decision policy. Produced by
+/// [`PolicyChain::evaluate_with_attribution`] alongside the existing
+/// [`PolicyResult`] so the rich path doesn't churn the many sites that
+/// match on `PolicyResult` directly.
+///
+/// `matched_policy` is the name of the policy that **terminated** chain
+/// evaluation:
+/// - For a Deny: the policy that issued the Deny (chain stops there).
+/// - For a Permit (all policies permitted): the last policy in the
+///   chain, since chain evaluation completes only after every policy
+///   has permitted. With one named policy in the chain that's the named
+///   one; with an empty chain it's `None`.
+/// - For chains where the terminal policy is inline / anonymous, it's
+///   `None` — the operator can read `"inline"` as the metric label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyEvaluation {
+    /// The terminal action — `Permit` or `Deny`.
+    pub action: PolicyAction,
+    /// Configured name of the terminal-decision policy, if it has one.
+    pub matched_policy: Option<String>,
+}
+
 /// An ordered sequence of policies evaluated in chain.
 ///
 /// GoBGP-style semantics: each policy is evaluated in order. If a policy
@@ -752,31 +811,76 @@ pub fn evaluate_policy(policy: Option<&Policy>, ctx: &RouteContext<'_>) -> Polic
 #[derive(Debug, Clone, Default)]
 pub struct PolicyChain {
     /// Policies evaluated in order; modifications accumulate across permits.
-    pub policies: Vec<Policy>,
+    pub policies: Vec<NamedPolicy>,
 }
 
 impl PolicyChain {
-    /// Create a chain from an ordered list of policies.
+    /// Create a chain from an ordered list of (unnamed) policies. Each
+    /// becomes a `NamedPolicy` with `name = None`. Callers that have
+    /// names in hand (the config resolver) build `NamedPolicy` values
+    /// directly and assign to `policies`.
     #[must_use]
     pub fn new(policies: Vec<Policy>) -> Self {
+        Self {
+            policies: policies.into_iter().map(NamedPolicy::from).collect(),
+        }
+    }
+
+    /// Create a chain from a list of already-named policies.
+    #[must_use]
+    pub fn from_named(policies: Vec<NamedPolicy>) -> Self {
         Self { policies }
     }
 
     /// Evaluate a route against this chain of policies.
     #[must_use]
     pub fn evaluate(&self, ctx: &RouteContext<'_>) -> PolicyResult {
+        self.evaluate_with_attribution(ctx).0
+    }
+
+    /// Evaluate plus attribution — for telemetry / explain surfaces
+    /// that need to label "which policy made this decision."
+    ///
+    /// Returns the same `PolicyResult` as [`evaluate`](Self::evaluate)
+    /// plus a `PolicyEvaluation` carrying the terminal-decision
+    /// policy's name (`None` for inline / anonymous, or for an empty
+    /// chain). The action on the `PolicyEvaluation` matches the
+    /// `PolicyResult.action`.
+    #[must_use]
+    pub fn evaluate_with_attribution(
+        &self,
+        ctx: &RouteContext<'_>,
+    ) -> (PolicyResult, PolicyEvaluation) {
         let mut accumulated = RouteModifications::default();
-        for policy in &self.policies {
-            let result = policy.evaluate(ctx);
+        for named in &self.policies {
+            let result = named.policy.evaluate(ctx);
             match result.action {
-                PolicyAction::Deny => return PolicyResult::deny(),
+                PolicyAction::Deny => {
+                    return (
+                        PolicyResult::deny(),
+                        PolicyEvaluation {
+                            action: PolicyAction::Deny,
+                            matched_policy: named.name.clone(),
+                        },
+                    );
+                }
                 PolicyAction::Permit => accumulated.merge_from(result.modifications),
             }
         }
-        PolicyResult {
-            action: PolicyAction::Permit,
-            modifications: accumulated,
-        }
+        // All policies permitted (including an empty chain). Attribute
+        // to the last policy in the chain since chain evaluation
+        // completes only after every policy permits.
+        let matched_policy = self.policies.last().and_then(|n| n.name.clone());
+        (
+            PolicyResult {
+                action: PolicyAction::Permit,
+                modifications: accumulated,
+            },
+            PolicyEvaluation {
+                action: PolicyAction::Permit,
+                matched_policy,
+            },
+        )
     }
 }
 
@@ -786,6 +890,26 @@ pub fn evaluate_chain(chain: Option<&PolicyChain>, ctx: &RouteContext<'_>) -> Po
     match chain {
         Some(c) => c.evaluate(ctx),
         None => PolicyResult::permit(),
+    }
+}
+
+/// Convenience: evaluate an optional chain with attribution. Returns
+/// `(Permit, no-name)` if there's no chain — the operator-visible
+/// "no policy is configured on this peer" case.
+#[must_use]
+pub fn evaluate_chain_with_attribution(
+    chain: Option<&PolicyChain>,
+    ctx: &RouteContext<'_>,
+) -> (PolicyResult, PolicyEvaluation) {
+    match chain {
+        Some(c) => c.evaluate_with_attribution(ctx),
+        None => (
+            PolicyResult::permit(),
+            PolicyEvaluation {
+                action: PolicyAction::Permit,
+                matched_policy: None,
+            },
+        ),
     }
 }
 

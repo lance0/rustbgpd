@@ -6,7 +6,24 @@ use super::{
     PathAttribute, PeerSession, Prefix, RibUpdate, Route, Safi, cease_subcode, debug, info,
     is_ipv6_link_local, resolve_import_nexthop, warn,
 };
-use rustbgpd_policy::{RouteContext, RouteType};
+use rustbgpd_policy::{PolicyAction, PolicyEvaluation, RouteContext, RouteType};
+
+/// Increment `bgp_policy_routes_total{peer, policy, direction=import,
+/// action}` for one import-side chain evaluation. Policy falls back to
+/// `"inline"` for anonymous / inline policies; cardinality stays
+/// bounded by config.
+fn record_import_policy_eval(
+    metrics: &rustbgpd_telemetry::BgpMetrics,
+    peer_label: &str,
+    evaluation: &PolicyEvaluation,
+) {
+    let policy = evaluation.matched_policy.as_deref().unwrap_or("inline");
+    let action = match evaluation.action {
+        PolicyAction::Permit => "permit",
+        PolicyAction::Deny => "deny",
+    };
+    metrics.record_policy_routes(peer_label, policy, "import", action);
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OtcState {
@@ -555,74 +572,77 @@ impl PeerSession {
         }
 
         // Body NLRI routes (IPv4)
-        let mut announced: Vec<Route> = if unnumbered_ipv4_body_forbidden
-            || otc_drop_unicast_announcements
-        {
-            Vec::new()
-        } else {
-            parsed
-                .announced
-                .iter()
-                .filter_map(|entry| {
-                    let prefix = Prefix::V4(entry.prefix);
-                    let rpki_state = validation
-                        .as_ref()
-                        .map_or(rustbgpd_wire::RpkiValidation::NotFound, |v| {
-                            v.validate_rpki(&prefix, origin_asn)
-                        });
-                    let ctx = RouteContext {
-                        prefix,
-                        next_hop: Some(body_next_hop),
-                        extended_communities: update_ecs,
-                        communities: update_communities,
-                        large_communities: update_large_communities,
-                        as_path_str: &aspath_str,
-                        as_path_len: aspath_len,
-                        validation_state: rpki_state,
-                        aspa_state,
-                        peer_address: Some(self.peer_ip),
-                        peer_asn: policy_peer_asn,
-                        peer_group: self.config.peer_group.as_deref(),
-                        route_type: policy_route_type,
-                        evpn_route_type: None,
-                        local_pref: policy_local_pref,
-                        med: policy_med,
-                    };
-                    let result = rustbgpd_policy::evaluate_chain(self.import_policy.as_ref(), &ctx);
-                    if result.action != rustbgpd_policy::PolicyAction::Permit {
-                        return None;
-                    }
-                    let mut attrs = unicast_route_attrs.clone();
-                    let nh_action =
-                        rustbgpd_policy::apply_modifications(&mut attrs, &result.modifications);
-                    let next_hop = resolve_import_nexthop(
-                        nh_action.as_ref(),
-                        body_next_hop,
-                        self.read_half.as_ref(),
-                        &self.config,
-                    );
-                    Some(Route {
-                        prefix,
-                        next_hop,
-                        link_local_next_hop: None,
-                        next_hop_scope: self.link_local_next_hop_scope(next_hop),
-                        peer: self.peer_ip,
-                        attributes: Arc::new(attrs),
-                        received_at: now,
-                        origin_type: route_origin,
-                        peer_router_id: self
-                            .negotiated
+        let mut announced: Vec<Route> =
+            if unnumbered_ipv4_body_forbidden || otc_drop_unicast_announcements {
+                Vec::new()
+            } else {
+                parsed
+                    .announced
+                    .iter()
+                    .filter_map(|entry| {
+                        let prefix = Prefix::V4(entry.prefix);
+                        let rpki_state = validation
                             .as_ref()
-                            .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
-                        is_stale: false,
-                        is_llgr_stale: false,
-                        path_id: entry.path_id,
-                        validation_state: rpki_state,
-                        aspa_state,
+                            .map_or(rustbgpd_wire::RpkiValidation::NotFound, |v| {
+                                v.validate_rpki(&prefix, origin_asn)
+                            });
+                        let ctx = RouteContext {
+                            prefix,
+                            next_hop: Some(body_next_hop),
+                            extended_communities: update_ecs,
+                            communities: update_communities,
+                            large_communities: update_large_communities,
+                            as_path_str: &aspath_str,
+                            as_path_len: aspath_len,
+                            validation_state: rpki_state,
+                            aspa_state,
+                            peer_address: Some(self.peer_ip),
+                            peer_asn: policy_peer_asn,
+                            peer_group: self.config.peer_group.as_deref(),
+                            route_type: policy_route_type,
+                            evpn_route_type: None,
+                            local_pref: policy_local_pref,
+                            med: policy_med,
+                        };
+                        let (result, evaluation) = rustbgpd_policy::evaluate_chain_with_attribution(
+                            self.import_policy.as_ref(),
+                            &ctx,
+                        );
+                        record_import_policy_eval(&self.metrics, &self.peer_label, &evaluation);
+                        if result.action != rustbgpd_policy::PolicyAction::Permit {
+                            return None;
+                        }
+                        let mut attrs = unicast_route_attrs.clone();
+                        let nh_action =
+                            rustbgpd_policy::apply_modifications(&mut attrs, &result.modifications);
+                        let next_hop = resolve_import_nexthop(
+                            nh_action.as_ref(),
+                            body_next_hop,
+                            self.read_half.as_ref(),
+                            &self.config,
+                        );
+                        Some(Route {
+                            prefix,
+                            next_hop,
+                            link_local_next_hop: None,
+                            next_hop_scope: self.link_local_next_hop_scope(next_hop),
+                            peer: self.peer_ip,
+                            attributes: Arc::new(attrs),
+                            received_at: now,
+                            origin_type: route_origin,
+                            peer_router_id: self
+                                .negotiated
+                                .as_ref()
+                                .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
+                            is_stale: false,
+                            is_llgr_stale: false,
+                            path_id: entry.path_id,
+                            validation_state: rpki_state,
+                            aspa_state,
+                        })
                     })
-                })
-                .collect()
-        };
+                    .collect()
+            };
 
         // Body withdrawn routes (IPv4) — carry path_id for Add-Path peers
         let mut withdrawn: Vec<(Prefix, u32)> = if unnumbered_ipv4_body_forbidden {
@@ -707,8 +727,12 @@ impl PeerSession {
                                 local_pref: policy_local_pref,
                                 med: policy_med,
                             };
-                            let result =
-                                rustbgpd_policy::evaluate_chain(self.import_policy.as_ref(), &ctx);
+                            let (result, evaluation) =
+                                rustbgpd_policy::evaluate_chain_with_attribution(
+                                    self.import_policy.as_ref(),
+                                    &ctx,
+                                );
+                            record_import_policy_eval(&self.metrics, &self.peer_label, &evaluation);
                             if result.action == rustbgpd_policy::PolicyAction::Permit {
                                 let mut attrs = mp_route_attrs.clone();
                                 let _nh_action = rustbgpd_policy::apply_modifications(
@@ -762,8 +786,12 @@ impl PeerSession {
                                 local_pref: policy_local_pref,
                                 med: policy_med,
                             };
-                            let result =
-                                rustbgpd_policy::evaluate_chain(self.import_policy.as_ref(), &ctx);
+                            let (result, evaluation) =
+                                rustbgpd_policy::evaluate_chain_with_attribution(
+                                    self.import_policy.as_ref(),
+                                    &ctx,
+                                );
+                            record_import_policy_eval(&self.metrics, &self.peer_label, &evaluation);
                             if result.action == rustbgpd_policy::PolicyAction::Permit {
                                 let mut attrs = mp_route_attrs.clone();
                                 let _nh_action = rustbgpd_policy::apply_modifications(
@@ -819,8 +847,11 @@ impl PeerSession {
                             local_pref: policy_local_pref,
                             med: policy_med,
                         };
-                        let result =
-                            rustbgpd_policy::evaluate_chain(self.import_policy.as_ref(), &ctx);
+                        let (result, evaluation) = rustbgpd_policy::evaluate_chain_with_attribution(
+                            self.import_policy.as_ref(),
+                            &ctx,
+                        );
+                        record_import_policy_eval(&self.metrics, &self.peer_label, &evaluation);
                         if result.action == rustbgpd_policy::PolicyAction::Permit {
                             let mut attrs = mp_unicast_route_attrs.clone();
                             let nh_action = rustbgpd_policy::apply_modifications(
