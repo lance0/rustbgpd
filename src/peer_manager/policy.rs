@@ -393,6 +393,8 @@ impl PeerManager {
                 local_ipv6_nexthop: None,
                 route_reflector_client: None,
                 route_server_client: None,
+                role: None,
+                strict_role: None,
                 remove_private_as: None,
                 add_path: None,
                 log_level: None,
@@ -600,6 +602,8 @@ impl PeerManager {
             add_path_receive: tc.peer.add_path_receive,
             add_path_send: tc.peer.add_path_send,
             add_path_send_max: tc.peer.add_path_send_max,
+            local_role: tc.peer.local_role,
+            strict_role: tc.peer.strict_role,
             import_policy: resolved.import_policy,
             export_policy: resolved.export_policy,
         }

@@ -4,12 +4,16 @@ use std::net::Ipv4Addr;
 
 use rustbgpd_wire::constants::AS_TRANS;
 use rustbgpd_wire::{
-    AddPathFamily, AddPathMode, Afi, Capability, ExtendedNextHopFamily, GracefulRestartFamily,
-    LlgrFamily, Safi,
+    AddPathFamily, AddPathMode, Afi, BgpRole, Capability, ExtendedNextHopFamily,
+    GracefulRestartFamily, LlgrFamily, Safi,
 };
 
 /// Configuration for a single BGP peer session.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "PeerConfig mirrors independent negotiated BGP feature knobs"
+)]
 pub struct PeerConfig {
     /// Our ASN (4-byte).
     pub local_asn: u32,
@@ -35,6 +39,10 @@ pub struct PeerConfig {
     pub add_path_send: bool,
     /// Maximum paths per prefix to advertise (0 = unlimited).
     pub add_path_send_max: u32,
+    /// Local BGP Role advertised to this eBGP peer (RFC 9234).
+    pub local_role: Option<BgpRole>,
+    /// Require the peer to advertise a compatible BGP Role.
+    pub strict_role: bool,
 }
 
 impl PeerConfig {
@@ -85,6 +93,9 @@ impl PeerConfig {
         let extended_nexthop_caps = self.extended_nexthop_capabilities();
         if !extended_nexthop_caps.is_empty() {
             caps.push(Capability::ExtendedNextHop(extended_nexthop_caps));
+        }
+        if let Some(role) = self.local_role {
+            caps.push(Capability::Role { role });
         }
         caps.push(Capability::FourOctetAs {
             asn: self.local_asn,
@@ -175,6 +186,8 @@ mod tests {
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,
+            local_role: None,
+            strict_role: false,
         }
     }
 
@@ -194,6 +207,22 @@ mod tests {
         assert!(matches!(caps[2], Capability::EnhancedRouteRefresh));
         assert!(matches!(caps[3], Capability::ExtendedMessage));
         assert!(matches!(caps[4], Capability::FourOctetAs { asn: 65001 }));
+    }
+
+    #[test]
+    fn local_capabilities_includes_role_when_configured() {
+        let mut cfg = test_config();
+        cfg.local_role = Some(BgpRole::Provider);
+
+        let caps = cfg.local_capabilities();
+
+        assert!(matches!(
+            caps.iter()
+                .find(|cap| matches!(cap, Capability::Role { .. })),
+            Some(Capability::Role {
+                role: BgpRole::Provider
+            })
+        ));
     }
 
     #[test]

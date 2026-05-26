@@ -312,6 +312,8 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             add_path_receive: config.add_path_receive,
             add_path_send: config.add_path_send,
             add_path_send_max: config.add_path_send_max,
+            local_role: None,
+            strict_role: false,
             import_policy: None,
             export_policy: None,
         };

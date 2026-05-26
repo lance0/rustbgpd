@@ -2,12 +2,22 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::{
-    Afi, AsPath, AsPathSegment, EvpnRibRoute, EvpnRoute, EvpnRouteKey, FlowSpecRoute, FlowSpecRule,
-    IpAddr, Ipv4Addr, Ipv4NlriEntry, Ipv4UnicastMode, Ipv6Addr, Message, MpReachNlri,
+    Afi, AsPath, AsPathSegment, BgpRole, EvpnRibRoute, EvpnRoute, EvpnRouteKey, FlowSpecRoute,
+    FlowSpecRule, IpAddr, Ipv4Addr, Ipv4NlriEntry, Ipv4UnicastMode, Ipv6Addr, Message, MpReachNlri,
     MpUnreachNlri, NlriEntry, OutboundRouteUpdate, PathAttribute, PeerSession, Prefix,
-    RemovePrivateAs, Route, RouteRefreshMessage, RouteRefreshSubtype, Safi, UpdateMessage, info,
-    is_ipv6_link_local, is_private_asn, warn,
+    RemovePrivateAs, Route, RouteRefreshMessage, RouteRefreshSubtype, Safi, UpdateMessage, debug,
+    info, is_ipv6_link_local, is_private_asn, warn,
 };
+
+fn has_otc(attrs: &[PathAttribute]) -> bool {
+    attrs.iter().any(|attr| match attr {
+        PathAttribute::OnlyToCustomer(_) => true,
+        PathAttribute::Unknown(raw) => {
+            raw.type_code == rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER
+        }
+        _ => false,
+    })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum NextHopOverrideKey {
@@ -201,6 +211,14 @@ impl PeerSession {
         })
     }
 
+    pub(super) fn otc_egress_blocks_unicast(&self, route: &Route) -> bool {
+        has_otc(&route.attributes)
+            && matches!(
+                self.config.peer.local_role,
+                Some(BgpRole::Customer | BgpRole::Peer | BgpRole::RouteServerClient)
+            )
+    }
+
     /// Send an outbound route update as wire UPDATE messages.
     ///
     /// Encodes each piece (`BoRR` markers, withdrawals, announcements,
@@ -386,6 +404,19 @@ impl PeerSession {
         let mut v6_routes: Vec<(&Route, Option<&rustbgpd_policy::NextHopAction>)> = Vec::new();
         for (i, route) in update.announce.iter().enumerate() {
             if !self.is_family_negotiated(&route.prefix) {
+                continue;
+            }
+            if self.otc_egress_blocks_unicast(route) {
+                debug!(
+                    peer = %self.peer_label,
+                    prefix = %route.prefix,
+                    "not advertising unicast route with OTC to Provider/Peer/RouteServer"
+                );
+                self.metrics.record_otc_routes_blocked(
+                    &self.peer_label,
+                    "egress_to_upstream_via_otc",
+                    1,
+                );
                 continue;
             }
             let nh_override = update.next_hop_override.get(i).and_then(|o| o.as_ref());
@@ -1082,6 +1113,16 @@ impl PeerSession {
                 .any(|a| matches!(a, PathAttribute::LocalPref(_)))
         {
             attrs.push(PathAttribute::LocalPref(100));
+        }
+
+        if is_ebgp
+            && matches!(
+                self.config.peer.local_role,
+                Some(BgpRole::Provider | BgpRole::Peer | BgpRole::RouteServer)
+            )
+            && !has_otc(&attrs)
+        {
+            attrs.push(PathAttribute::OnlyToCustomer(self.config.peer.local_asn));
         }
 
         // Ensure classic IPv4 body-NLRI exports carry a NEXT_HOP. This also

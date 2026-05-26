@@ -38,6 +38,8 @@ fn test_peer_config() -> PeerConfig {
         add_path_receive: false,
         add_path_send: false,
         add_path_send_max: 0,
+        local_role: None,
+        strict_role: false,
     }
 }
 

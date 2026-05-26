@@ -1,18 +1,86 @@
 use std::sync::Arc;
 
 use super::{
-    Afi, AsPath, Event, EvpnRibRoute, EvpnRoute, EvpnRouteKey, FlowSpecRoute, FlowSpecRule,
-    Instant, IpAddr, Ipv4Addr, NextHopScope, NotificationCode, NotificationMessage, PathAttribute,
-    PeerSession, Prefix, RibUpdate, Route, Safi, cease_subcode, debug, info, is_ipv6_link_local,
-    resolve_import_nexthop, warn,
+    Afi, AsPath, BgpRole, Event, EvpnRibRoute, EvpnRoute, EvpnRouteKey, FlowSpecRoute,
+    FlowSpecRule, Instant, IpAddr, Ipv4Addr, NextHopScope, NotificationCode, NotificationMessage,
+    PathAttribute, PeerSession, Prefix, RibUpdate, Route, Safi, cease_subcode, debug, info,
+    is_ipv6_link_local, resolve_import_nexthop, warn,
 };
 use rustbgpd_policy::{RouteContext, RouteType};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OtcState {
+    Absent,
+    Present(u32),
+    MalformedLength,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OtcIngressAction {
+    None,
+    Add(u32),
+    DropUnicastAnnouncements(&'static str),
+}
 
 fn explicit_local_pref(attrs: &[PathAttribute]) -> Option<u32> {
     attrs.iter().find_map(|attr| match attr {
         PathAttribute::LocalPref(value) => Some(*value),
         _ => None,
     })
+}
+
+fn otc_state(attrs: &[PathAttribute]) -> OtcState {
+    let mut found = OtcState::Absent;
+    for attr in attrs {
+        match attr {
+            PathAttribute::OnlyToCustomer(asn) => found = OtcState::Present(*asn),
+            PathAttribute::Unknown(raw)
+                if raw.type_code == rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER =>
+            {
+                if raw.data.len() != 4 {
+                    return OtcState::MalformedLength;
+                }
+                found = OtcState::Present(u32::from_be_bytes([
+                    raw.data[0],
+                    raw.data[1],
+                    raw.data[2],
+                    raw.data[3],
+                ]));
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+fn otc_ingress_action(
+    local_role: Option<BgpRole>,
+    remote_asn: Option<u32>,
+    attrs: &[PathAttribute],
+) -> OtcIngressAction {
+    let Some(local_role) = local_role else {
+        return OtcIngressAction::None;
+    };
+    match otc_state(attrs) {
+        OtcState::MalformedLength => OtcIngressAction::DropUnicastAnnouncements("malformed_length"),
+        OtcState::Present(_) if matches!(local_role, BgpRole::Provider | BgpRole::RouteServer) => {
+            OtcIngressAction::DropUnicastAnnouncements("ingress_from_customer_rsclient")
+        }
+        OtcState::Present(asn)
+            if local_role == BgpRole::Peer && remote_asn.is_some_and(|remote| asn != remote) =>
+        {
+            OtcIngressAction::DropUnicastAnnouncements("ingress_peer_mismatch")
+        }
+        OtcState::Absent
+            if matches!(
+                local_role,
+                BgpRole::Customer | BgpRole::Peer | BgpRole::RouteServerClient
+            ) =>
+        {
+            remote_asn.map_or(OtcIngressAction::None, OtcIngressAction::Add)
+        }
+        _ => OtcIngressAction::None,
+    }
 }
 
 fn explicit_med(attrs: &[PathAttribute]) -> Option<u32> {
@@ -212,6 +280,37 @@ impl PeerSession {
             rustbgpd_rib::RouteOrigin::Ebgp => RouteType::External,
         });
         let policy_peer_asn = self.negotiated.as_ref().map(|n| n.peer_asn);
+        let otc_action = otc_ingress_action(
+            self.config.peer.local_role,
+            policy_peer_asn,
+            &parsed.attributes,
+        );
+        let otc_drop_unicast_announcements =
+            matches!(otc_action, OtcIngressAction::DropUnicastAnnouncements(_));
+        if let OtcIngressAction::DropUnicastAnnouncements(reason) = otc_action {
+            let rejected = parsed.announced.len()
+                + parsed
+                    .attributes
+                    .iter()
+                    .filter_map(|attr| match attr {
+                        PathAttribute::MpReachNlri(mp)
+                            if (mp.afi, mp.safi) == (Afi::Ipv4, Safi::Unicast)
+                                || (mp.afi, mp.safi) == (Afi::Ipv6, Safi::Unicast) =>
+                        {
+                            Some(mp.announced.len())
+                        }
+                        _ => None,
+                    })
+                    .sum::<usize>();
+            warn!(
+                peer = %self.peer_label,
+                reason,
+                rejected,
+                "OTC route-leak rule rejected unicast announcements; withdrawals still processed"
+            );
+            self.metrics
+                .record_otc_routes_blocked(&self.peer_label, reason, rejected as u64);
+        }
 
         // AS_PATH loop detection (RFC 4271 §9.1.2): discard all
         // announcements if our local ASN appears in the AS_PATH.
@@ -381,6 +480,10 @@ impl PeerSession {
             })
             .cloned()
             .collect();
+        let mut unicast_route_attrs = route_attrs.clone();
+        if let OtcIngressAction::Add(asn) = otc_action {
+            unicast_route_attrs.push(PathAttribute::OnlyToCustomer(asn));
+        }
 
         // Extract communities for policy matching
         let update_ecs: &[rustbgpd_wire::ExtendedCommunity] = route_attrs
@@ -453,7 +556,9 @@ impl PeerSession {
         }
 
         // Body NLRI routes (IPv4)
-        let mut announced: Vec<Route> = if unnumbered_ipv4_body_forbidden {
+        let mut announced: Vec<Route> = if unnumbered_ipv4_body_forbidden
+            || otc_drop_unicast_announcements
+        {
             Vec::new()
         } else {
             parsed
@@ -488,7 +593,7 @@ impl PeerSession {
                     if result.action != rustbgpd_policy::PolicyAction::Permit {
                         return None;
                     }
-                    let mut attrs = route_attrs.clone();
+                    let mut attrs = unicast_route_attrs.clone();
                     let nh_action =
                         rustbgpd_policy::apply_modifications(&mut attrs, &result.modifications);
                     let next_hop = resolve_import_nexthop(
@@ -535,6 +640,11 @@ impl PeerSession {
         // For IPv6 routes, also strip body NEXT_HOP — it's IPv4-specific and
         // would contaminate IPv6 route attributes in mixed UPDATEs.
         let mp_route_attrs: Vec<PathAttribute> = route_attrs
+            .iter()
+            .filter(|a| !matches!(a, PathAttribute::NextHop(_)))
+            .cloned()
+            .collect();
+        let mp_unicast_route_attrs: Vec<PathAttribute> = unicast_route_attrs
             .iter()
             .filter(|a| !matches!(a, PathAttribute::NextHop(_)))
             .cloned()
@@ -681,6 +791,10 @@ impl PeerSession {
                         continue;
                     }
 
+                    if otc_drop_unicast_announcements {
+                        continue;
+                    }
+
                     // Unicast routes
                     for entry in &mp.announced {
                         let mp_rpki_state = validation
@@ -709,7 +823,7 @@ impl PeerSession {
                         let result =
                             rustbgpd_policy::evaluate_chain(self.import_policy.as_ref(), &ctx);
                         if result.action == rustbgpd_policy::PolicyAction::Permit {
-                            let mut attrs = mp_route_attrs.clone();
+                            let mut attrs = mp_unicast_route_attrs.clone();
                             let nh_action = rustbgpd_policy::apply_modifications(
                                 &mut attrs,
                                 &result.modifications,

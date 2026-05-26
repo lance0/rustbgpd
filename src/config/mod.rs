@@ -547,6 +547,16 @@ impl Config {
             .or_else(|| group.and_then(|g| g.add_path.clone()))
     }
 
+    fn resolved_role(
+        neighbor: &Neighbor,
+        group: Option<&PeerGroupConfig>,
+    ) -> Option<rustbgpd_wire::BgpRole> {
+        neighbor
+            .role
+            .or_else(|| group.and_then(|g| g.role))
+            .map(BgpRoleConfig::to_wire)
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "neighbor resolution centralizes inheritance, validation, and transport projection"
@@ -590,6 +600,11 @@ impl Config {
             add_path_receive: add_path.as_ref().is_some_and(|c| c.receive),
             add_path_send: add_path.as_ref().is_some_and(|c| c.send),
             add_path_send_max: add_path.as_ref().and_then(|c| c.send_max).unwrap_or(0),
+            local_role: Self::resolved_role(neighbor, group),
+            strict_role: neighbor
+                .strict_role
+                .or_else(|| group.and_then(|g| g.strict_role))
+                .unwrap_or(false),
         };
 
         let (remote_addr, peer_interface, peer_scope_id) =
@@ -702,6 +717,8 @@ impl Config {
             local_ipv6_nexthop: None,
             route_reflector_client: None,
             route_server_client: None,
+            role: None,
+            strict_role: None,
             remove_private_as: None,
             add_path: None,
             log_level: None,
@@ -1081,6 +1098,8 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<String> 
     cmp_field!(local_ipv6_nexthop);
     cmp_field!(route_reflector_client);
     cmp_field!(route_server_client);
+    cmp_field!(role);
+    cmp_field!(strict_role);
     cmp_field!(remove_private_as);
     cmp_field!(add_path);
     cmp_field!(log_level);
@@ -1181,6 +1200,8 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.local_ipv6_nexthop == new.local_ipv6_nexthop
         && old.route_reflector_client == new.route_reflector_client
         && old.route_server_client == new.route_server_client
+        && old.role == new.role
+        && old.strict_role == new.strict_role
         && old.remove_private_as == new.remove_private_as
         && old.add_path == new.add_path
         && old.log_level == new.log_level
@@ -2460,6 +2481,8 @@ pub fn describe_peer_group_changes(old: &PeerGroupConfig, new: &PeerGroupConfig)
     cmp_field!(local_ipv6_nexthop);
     cmp_field!(route_reflector_client);
     cmp_field!(route_server_client);
+    cmp_field!(role);
+    cmp_field!(strict_role);
     cmp_field!(remove_private_as);
     cmp_field!(add_path);
     cmp_field!(log_level);

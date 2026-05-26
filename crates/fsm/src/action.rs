@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use rustbgpd_wire::{
-    AddPathMode, Afi, Capability, GracefulRestartFamily, LlgrFamily, NotificationMessage,
+    AddPathMode, Afi, BgpRole, Capability, GracefulRestartFamily, LlgrFamily, NotificationMessage,
     OpenMessage, Safi,
 };
 
@@ -34,6 +34,12 @@ pub struct NegotiatedSession {
     pub keepalive_interval: u16,
     /// Capabilities the peer advertised.
     pub peer_capabilities: Vec<Capability>,
+    /// Locally configured BGP Role advertised for this eBGP session.
+    pub local_role: Option<BgpRole>,
+    /// Peer-advertised BGP Role, if present and valid.
+    pub remote_role: Option<BgpRole>,
+    /// True when both sides advertised compatible BGP Roles.
+    pub role_negotiated: bool,
     /// Whether both sides support 4-octet AS numbers.
     pub four_octet_as: bool,
     /// Address families negotiated between both sides.

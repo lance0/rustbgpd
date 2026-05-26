@@ -6,8 +6,8 @@ use bytes::Bytes;
 
 use rustbgpd_wire::notification::{NotificationCode, open_subcode};
 use rustbgpd_wire::{
-    AddPathFamily, AddPathMode, Afi, Capability, ExtendedNextHopFamily, NotificationMessage,
-    OpenMessage, Safi,
+    AddPathFamily, AddPathMode, Afi, BgpRole, Capability, ExtendedNextHopFamily,
+    NotificationMessage, OpenMessage, Safi,
 };
 
 use crate::action::NegotiatedSession;
@@ -73,6 +73,8 @@ pub fn validate_open(
             Bytes::new(),
         ));
     }
+
+    let remote_role = validate_role_capability(open, config)?;
 
     // Negotiate hold time
     let hold_time = negotiate_hold_time(config.hold_time, open.hold_time);
@@ -178,6 +180,9 @@ pub fn validate_open(
         hold_time,
         keepalive_interval,
         peer_capabilities: open.capabilities.clone(),
+        local_role: config.local_role,
+        remote_role,
+        role_negotiated: config.local_role.is_some() && remote_role.is_some(),
         four_octet_as,
         negotiated_families,
         peer_gr_capable,
@@ -193,6 +198,60 @@ pub fn validate_open(
         extended_nexthop_families,
         add_path_families,
     })
+}
+
+fn validate_role_capability(
+    open: &OpenMessage,
+    config: &PeerConfig,
+) -> Result<Option<BgpRole>, NotificationMessage> {
+    let mut remote_role: Option<BgpRole> = None;
+    for capability in &open.capabilities {
+        let Capability::Role { role } = capability else {
+            continue;
+        };
+        if let Some(existing) = remote_role
+            && existing != *role
+        {
+            return Err(role_mismatch_notification());
+        }
+        remote_role = Some(*role);
+    }
+
+    let Some(local_role) = config.local_role else {
+        return Ok(remote_role);
+    };
+
+    let Some(remote_role) = remote_role else {
+        if config.strict_role {
+            return Err(role_mismatch_notification());
+        }
+        return Ok(None);
+    };
+
+    if !roles_compatible(local_role, remote_role) {
+        return Err(role_mismatch_notification());
+    }
+
+    Ok(Some(remote_role))
+}
+
+const fn roles_compatible(local: BgpRole, remote: BgpRole) -> bool {
+    matches!(
+        (local, remote),
+        (BgpRole::Provider, BgpRole::Customer)
+            | (BgpRole::Customer, BgpRole::Provider)
+            | (BgpRole::RouteServer, BgpRole::RouteServerClient)
+            | (BgpRole::RouteServerClient, BgpRole::RouteServer)
+            | (BgpRole::Peer, BgpRole::Peer)
+    )
+}
+
+fn role_mismatch_notification() -> NotificationMessage {
+    NotificationMessage::new(
+        NotificationCode::OpenMessage,
+        open_subcode::ROLE_MISMATCH,
+        Bytes::new(),
+    )
 }
 
 /// RFC 4271 §4.2 — negotiated hold time is the minimum of the two
@@ -349,6 +408,8 @@ mod tests {
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,
+            local_role: None,
+            strict_role: false,
         }
     }
 
@@ -447,6 +508,98 @@ mod tests {
         open.capabilities = vec![Capability::FourOctetAs { asn: 65099 }];
         let neg = validate_open(&open, &cfg).unwrap();
         assert_eq!(neg.peer_asn, 65099);
+    }
+
+    #[test]
+    fn role_capability_negotiates_compatible_pair() {
+        let mut cfg = test_config();
+        cfg.local_role = Some(BgpRole::Provider);
+        let mut open = peer_open();
+        open.capabilities.push(Capability::Role {
+            role: BgpRole::Customer,
+        });
+
+        let neg = validate_open(&open, &cfg).unwrap();
+
+        assert_eq!(neg.local_role, Some(BgpRole::Provider));
+        assert_eq!(neg.remote_role, Some(BgpRole::Customer));
+        assert!(neg.role_negotiated);
+    }
+
+    #[test]
+    fn role_capability_missing_remote_is_allowed_when_not_strict() {
+        let mut cfg = test_config();
+        cfg.local_role = Some(BgpRole::Provider);
+        cfg.strict_role = false;
+
+        let neg = validate_open(&peer_open(), &cfg).unwrap();
+
+        assert_eq!(neg.local_role, Some(BgpRole::Provider));
+        assert_eq!(neg.remote_role, None);
+        assert!(!neg.role_negotiated);
+    }
+
+    #[test]
+    fn role_capability_missing_remote_rejected_when_strict() {
+        let mut cfg = test_config();
+        cfg.local_role = Some(BgpRole::Provider);
+        cfg.strict_role = true;
+
+        let err = validate_open(&peer_open(), &cfg).unwrap_err();
+
+        assert_eq!(err.code, NotificationCode::OpenMessage);
+        assert_eq!(err.subcode, open_subcode::ROLE_MISMATCH);
+    }
+
+    #[test]
+    fn role_capability_mismatch_rejected() {
+        let mut cfg = test_config();
+        cfg.local_role = Some(BgpRole::Provider);
+        let mut open = peer_open();
+        open.capabilities.push(Capability::Role {
+            role: BgpRole::Peer,
+        });
+
+        let err = validate_open(&open, &cfg).unwrap_err();
+
+        assert_eq!(err.code, NotificationCode::OpenMessage);
+        assert_eq!(err.subcode, open_subcode::ROLE_MISMATCH);
+    }
+
+    #[test]
+    fn role_capability_duplicate_identical_coalesces() {
+        let mut cfg = test_config();
+        cfg.local_role = Some(BgpRole::RouteServer);
+        let mut open = peer_open();
+        open.capabilities.push(Capability::Role {
+            role: BgpRole::RouteServerClient,
+        });
+        open.capabilities.push(Capability::Role {
+            role: BgpRole::RouteServerClient,
+        });
+
+        let neg = validate_open(&open, &cfg).unwrap();
+
+        assert_eq!(neg.remote_role, Some(BgpRole::RouteServerClient));
+        assert!(neg.role_negotiated);
+    }
+
+    #[test]
+    fn role_capability_duplicate_conflicting_rejected() {
+        let mut cfg = test_config();
+        cfg.local_role = Some(BgpRole::Provider);
+        let mut open = peer_open();
+        open.capabilities.push(Capability::Role {
+            role: BgpRole::Customer,
+        });
+        open.capabilities.push(Capability::Role {
+            role: BgpRole::Peer,
+        });
+
+        let err = validate_open(&open, &cfg).unwrap_err();
+
+        assert_eq!(err.code, NotificationCode::OpenMessage);
+        assert_eq!(err.subcode, open_subcode::ROLE_MISMATCH);
     }
 
     #[test]

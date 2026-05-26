@@ -55,6 +55,8 @@ fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
         add_path_receive: false,
         add_path_send: false,
         add_path_send_max: 0,
+        local_role: None,
+        strict_role: false,
         import_policy: None,
         export_policy: None,
     }
@@ -499,6 +501,8 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         local_ipv6_nexthop: None,
         route_reflector_client: None,
         route_server_client: None,
+        role: None,
+        strict_role: None,
         remove_private_as: None,
         add_path: None,
         log_level: None,

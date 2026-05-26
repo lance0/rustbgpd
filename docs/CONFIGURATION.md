@@ -412,6 +412,8 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `gr_restart_time`      | u16      | no       | 120     | Restart time advertised in GR capability (seconds, 1--4095) |
 | `gr_stale_routes_time` | u64      | no       | 360     | Time to retain stale routes after peer reconnects (seconds, 1--3600) |
 | `route_server_client`  | bool     | no       | false   | Transparent route-server mode for eBGP peers (see below) |
+| `role`                 | string   | no       | --      | Local BGP Role for RFC 9234 route-leak protection: `"provider"`, `"rs"`, `"rs-client"`, `"customer"`, or `"peer"` (eBGP only) |
+| `strict_role`          | bool     | no       | false   | Require the peer to advertise a compatible BGP Role capability; only valid when `role` is set |
 | `remove_private_as`   | string   | no       | --      | Remove private ASNs from AS_PATH: `"remove"`, `"all"`, or `"replace"` (eBGP only) |
 | `route_reflector_client` | bool   | no       | false   | Mark this iBGP peer as a route reflector client (RFC 4456) |
 | `local_ipv6_nexthop`   | string   | no       | --      | Override IPv6 next-hop for eBGP exports (must be valid non-link-local IPv6) |
@@ -618,9 +620,10 @@ hold_time = 45  # neighbor override beats peer-group default
 ```
 
 Peer-group fields mirror inheritable neighbor settings: timers, families,
-GR/LLGR, Add-Path, route-server / RR flags, private-AS handling, MD5/GTSM,
-`local_ipv6_nexthop`, `log_level`, and import/export inline policy or named
-chains. TCP-AO is intentionally not inherited through peer groups because
+GR/LLGR, Add-Path, route-server / RR flags, BGP Role / strict-role defaults,
+private-AS handling, MD5/GTSM, `local_ipv6_nexthop`, `log_level`, and
+import/export inline policy or named chains. TCP-AO is intentionally not
+inherited through peer groups because
 dynamic-neighbor TCP-AO needs a separate wildcard-MKT design.
 
 ```toml
@@ -847,6 +850,37 @@ This applies to:
 
 `route_server_client` is only valid for eBGP neighbors. Config validation
 rejects it on iBGP peers.
+
+### BGP Roles and Only-to-Customer (RFC 9234)
+
+Static eBGP neighbors can advertise a local BGP Role and apply the RFC 9234
+Only-to-Customer (OTC) route-leak procedures for IPv4/IPv6 unicast:
+
+```toml
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+role = "provider"
+strict_role = true
+```
+
+Valid role values are `"provider"`, `"rs"`, `"rs-client"`, `"customer"`, and
+`"peer"`. The longer aliases `"route_server"` and `"route_server_client"` are
+also accepted. When `role` is configured, rustbgpd advertises the BGP Role
+capability and applies OTC rules based on the local role even if the peer does
+not advertise a Role. `strict_role = true` changes that compatibility behavior:
+the peer must advertise a compatible Role or the OPEN is rejected with Role
+Mismatch (NOTIFICATION 2/11).
+
+OTC handling is scoped to unicast. FlowSpec and EVPN route attributes are not
+modified by the v1 implementation. Existing OTC attributes are preserved;
+rustbgpd only adds OTC when RFC 9234 requires it and the attribute is absent.
+Malformed OTC length is handled as treat-as-withdraw for unicast announcements:
+withdrawals in the same UPDATE still apply and the BGP session stays up.
+
+`role` is eBGP-only and `strict_role` requires `role`. Config reload applies a
+role change by reconfiguring the affected peer session; dynamic in-place role
+flips without a session restart are deferred in ADR-0071.
 
 ### Private AS Removal
 
@@ -2072,6 +2106,7 @@ starting:
 | Named policy referenced in chain must exist in `[policy.definitions]` | `undefined policy` |
 | Inline policy and policy chain cannot both be set for the same neighbor/direction | `mutually exclusive` |
 | `route_server_client` is only valid on eBGP neighbors | `invalid route_server_client` |
+| `role` is only valid on eBGP neighbors; `strict_role = true` requires `role` | `invalid neighbor config` |
 | `remove_private_as` must be `"remove"`, `"all"`, or `"replace"` (eBGP only) | `invalid remove_private_as` |
 | MRT `output_dir` must not be empty | `output_dir must not be empty` |
 | MRT `dump_interval` must be > 0 | `dump_interval must be > 0` |
@@ -2108,5 +2143,6 @@ starting:
 | `llgr_stale_time` | 0 (disabled) |
 | `description` | peer address used as label |
 | `route_server_client` | `false` |
+| `role` / `strict_role` | disabled / `false` |
 | `remove_private_as` | disabled (absent) |
 | Policy default action | permit (when no entry matches) |

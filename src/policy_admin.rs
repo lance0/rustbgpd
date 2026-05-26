@@ -9,9 +9,19 @@ use rustbgpd_api::peer_types::{
 };
 
 use crate::config::{
-    AddPathConfig, AsPathPrependConfig, Config, ConfigError, NamedPolicyConfig, Neighbor,
-    NeighborSetConfig, PeerGroupConfig, PolicyStatementConfig, TcpAoConfig,
+    AddPathConfig, AsPathPrependConfig, BgpRoleConfig, Config, ConfigError, NamedPolicyConfig,
+    Neighbor, NeighborSetConfig, PeerGroupConfig, PolicyStatementConfig, TcpAoConfig,
 };
+
+const fn wire_role_to_config(role: rustbgpd_wire::BgpRole) -> BgpRoleConfig {
+    match role {
+        rustbgpd_wire::BgpRole::Provider => BgpRoleConfig::Provider,
+        rustbgpd_wire::BgpRole::RouteServer => BgpRoleConfig::RouteServer,
+        rustbgpd_wire::BgpRole::RouteServerClient => BgpRoleConfig::RouteServerClient,
+        rustbgpd_wire::BgpRole::Customer => BgpRoleConfig::Customer,
+        rustbgpd_wire::BgpRole::Peer => BgpRoleConfig::Peer,
+    }
+}
 
 fn api_prepend_to_config(
     prepend: Option<PolicyAsPathPrependConfig>,
@@ -169,6 +179,8 @@ fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerGroupConfig 
         local_ipv6_nexthop: definition.local_ipv6_nexthop,
         route_reflector_client: definition.route_reflector_client,
         route_server_client: definition.route_server_client,
+        role: None,
+        strict_role: None,
         remove_private_as: definition.remove_private_as,
         add_path: api_add_path_to_config(definition.add_path),
         import_policy: definition
@@ -398,6 +410,8 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     local_ipv6_nexthop: cfg.local_ipv6_nexthop.map(|addr| addr.to_string()),
                     route_reflector_client: Some(cfg.route_reflector_client),
                     route_server_client: Some(cfg.route_server_client),
+                    role: cfg.local_role.map(wire_role_to_config),
+                    strict_role: Some(cfg.strict_role),
                     remove_private_as: match cfg.remove_private_as {
                         rustbgpd_transport::RemovePrivateAs::Disabled => None,
                         rustbgpd_transport::RemovePrivateAs::Remove => Some("remove".to_string()),
@@ -727,6 +741,8 @@ remote_asn = 65002
                 add_path_receive: false,
                 add_path_send: false,
                 add_path_send_max: 0,
+                local_role: None,
+                strict_role: false,
                 import_policy: None,
                 export_policy: None,
             }),

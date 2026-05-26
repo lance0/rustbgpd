@@ -6,7 +6,7 @@ use std::{
 
 use rustbgpd_api::peer_types::PeerKey;
 use rustbgpd_policy::RouteType;
-use rustbgpd_wire::{Afi, Safi};
+use rustbgpd_wire::{Afi, BgpRole, Safi};
 use tempfile::NamedTempFile;
 
 fn valid_toml() -> &'static str {
@@ -3019,6 +3019,8 @@ fn peer_group_inheritance_applies_to_resolved_neighbor() {
 hold_time = 30
 families = ["ipv4_unicast", "ipv6_unicast"]
 route_server_client = true
+role = "route_server"
+strict_role = true
 
 [[neighbors]]
 address = "10.0.0.3"
@@ -3035,6 +3037,11 @@ peer_group = "rs-clients"
         vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
     );
     assert!(resolved.transport_config.route_server_client);
+    assert_eq!(
+        resolved.transport_config.peer.local_role,
+        Some(BgpRole::RouteServer)
+    );
+    assert!(resolved.transport_config.peer.strict_role);
     assert_eq!(resolved.peer_group.as_deref(), Some("rs-clients"));
 }
 
@@ -3046,18 +3053,108 @@ fn neighbor_values_override_peer_group_defaults() {
 
 [peer_groups.transit]
 hold_time = 30
+role = "provider"
+strict_role = false
 
 [[neighbors]]
 address = "10.0.0.3"
 remote_asn = 65003
 peer_group = "transit"
 hold_time = 45
+role = "customer"
+strict_role = true
 "#,
         GLOBAL_HEADER = valid_toml()
     );
     let config = parse(&toml_str).unwrap();
     let resolved = config.resolve_neighbor(&config.neighbors[1]).unwrap();
     assert_eq!(resolved.transport_config.peer.hold_time, 45);
+    assert_eq!(
+        resolved.transport_config.peer.local_role,
+        Some(BgpRole::Customer)
+    );
+    assert!(resolved.transport_config.peer.strict_role);
+}
+
+#[test]
+fn bgp_role_on_ibgp_neighbor_is_rejected() {
+    let toml_str = format!(
+        r#"
+{GLOBAL_HEADER}
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65001
+role = "peer"
+"#,
+        GLOBAL_HEADER = valid_toml()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    match err {
+        ConfigError::InvalidNeighborConfig { field, reason, .. } => {
+            assert_eq!(field, "role");
+            assert!(reason.contains("eBGP"), "unexpected reason: {reason}");
+        }
+        other => panic!("expected InvalidNeighborConfig, got {other}"),
+    }
+}
+
+#[test]
+fn bgp_role_config_accepts_rfc_aliases() {
+    let toml_str = format!(
+        r#"
+{GLOBAL_HEADER}
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+role = "rs"
+
+[[neighbors]]
+address = "10.0.0.4"
+remote_asn = 65004
+role = "rs-client"
+"#,
+        GLOBAL_HEADER = valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+
+    let rs = config.resolve_neighbor(&config.neighbors[1]).unwrap();
+    let client = config.resolve_neighbor(&config.neighbors[2]).unwrap();
+    assert_eq!(
+        rs.transport_config.peer.local_role,
+        Some(BgpRole::RouteServer)
+    );
+    assert_eq!(
+        client.transport_config.peer.local_role,
+        Some(BgpRole::RouteServerClient)
+    );
+}
+
+#[test]
+fn strict_role_without_role_is_rejected() {
+    let toml_str = format!(
+        r#"
+{GLOBAL_HEADER}
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+strict_role = true
+"#,
+        GLOBAL_HEADER = valid_toml()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    match err {
+        ConfigError::InvalidNeighborConfig { field, reason, .. } => {
+            assert_eq!(field, "strict_role");
+            assert!(
+                reason.contains("requires role"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("expected InvalidNeighborConfig, got {other}"),
+    }
 }
 
 #[test]
@@ -3171,6 +3268,8 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         local_ipv6_nexthop: None,
         route_reflector_client: Some(false),
         route_server_client: Some(false),
+        role: None,
+        strict_role: None,
         remove_private_as: None,
         add_path: None,
         import_policy: Vec::new(),
@@ -3671,6 +3770,8 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             local_ipv6_nexthop: None,
             route_reflector_client: None,
             route_server_client: None,
+            role: None,
+            strict_role: None,
             remove_private_as: None,
             add_path: None,
             log_level: None,
@@ -3707,6 +3808,8 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         local_ipv6_nexthop: None,
         route_reflector_client: None,
         route_server_client: None,
+        role: None,
+        strict_role: None,
         remove_private_as: None,
         add_path: None,
         import_policy: Vec::new(),
@@ -3735,6 +3838,8 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         local_ipv6_nexthop: None,
         route_reflector_client: None,
         route_server_client: None,
+        role: None,
+        strict_role: None,
         remove_private_as: None,
         add_path: None,
         import_policy: Vec::new(),
@@ -3789,6 +3894,8 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         local_ipv6_nexthop: None,
         route_reflector_client: None,
         route_server_client: None,
+        role: None,
+        strict_role: None,
         remove_private_as: None,
         add_path: None,
         import_policy: Vec::new(),
@@ -4042,6 +4149,35 @@ fn diff_config_honor_blackhole_only_is_reload_applied_not_restart_required() {
     assert!(diff.honor_blackhole_changed);
     assert!(!diff.has_restart_required_changes());
     assert!(diff.has_reload_applied_changes());
+}
+
+#[test]
+fn diff_config_role_change_is_reload_applied() {
+    let old = parse(valid_toml()).unwrap();
+    let new_toml = valid_toml().replace(
+        "hold_time = 90\n",
+        "hold_time = 90\nrole = \"provider\"\nstrict_role = true\n",
+    );
+    let new = parse(&new_toml).unwrap();
+    let diff = super::diff_config(&old, &new);
+
+    assert!(
+        diff.has_reload_applied_changes(),
+        "PeerManager applies Role capability changes by reconfiguring the peer session"
+    );
+    assert!(
+        diff.neighbors
+            .changed
+            .iter()
+            .any(|summary| summary.address == "10.0.0.2"
+                && summary.changes.iter().any(|change| change.contains("role"))
+                && summary
+                    .changes
+                    .iter()
+                    .any(|change| change.contains("strict_role"))),
+        "neighbor details must explain role/strict_role drift: {:?}",
+        diff.neighbors.changed
+    );
 }
 
 #[test]

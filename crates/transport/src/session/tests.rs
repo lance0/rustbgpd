@@ -30,6 +30,8 @@ fn make_test_session(local_asn: u32, remote_asn: u32) -> PeerSession {
         add_path_receive: false,
         add_path_send: false,
         add_path_send_max: 0,
+        local_role: None,
+        strict_role: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -58,6 +60,8 @@ fn make_test_session_with_rib(
         add_path_receive: false,
         add_path_send: false,
         add_path_send_max: 0,
+        local_role: None,
+        strict_role: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -93,6 +97,8 @@ fn make_test_session_with_rib_and_bmp(
         add_path_receive: false,
         add_path_send: false,
         add_path_send_max: 0,
+        local_role: None,
+        strict_role: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -141,6 +147,9 @@ fn negotiated_session(remote_asn: u32, extended_nexthop: bool) -> NegotiatedSess
         peer_route_refresh: false,
         peer_enhanced_route_refresh: false,
         peer_extended_message: false,
+        local_role: None,
+        remote_role: None,
+        role_negotiated: false,
         extended_nexthop_families,
         add_path_families: HashMap::new(),
     }
@@ -177,6 +186,13 @@ fn make_route(local_pref: u32) -> Route {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+    }
+}
+
+fn replace_route_attrs(route: &Route, attrs: Vec<PathAttribute>) -> Route {
+    Route {
+        attributes: Arc::new(attrs),
+        ..route.clone()
     }
 }
 
@@ -498,6 +514,81 @@ fn route_server_client_ebgp_does_not_synthesize_as_path() {
         a,
         PathAttribute::NextHop(nh) if *nh == Ipv4Addr::new(10, 0, 0, 2)
     )));
+}
+
+#[test]
+fn otc_egress_adds_local_asn_for_provider_peer_and_route_server() {
+    for role in [BgpRole::Provider, BgpRole::Peer, BgpRole::RouteServer] {
+        let mut session = make_test_session(65001, 65002);
+        session.config.peer.local_role = Some(role);
+        let route = make_route(100);
+
+        let attrs =
+            session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
+
+        assert!(
+            attrs
+                .iter()
+                .any(|a| matches!(a, PathAttribute::OnlyToCustomer(65001))),
+            "role {role:?} must add OTC(local AS) on eBGP unicast egress"
+        );
+    }
+}
+
+#[test]
+fn otc_egress_preserves_existing_otc() {
+    let mut session = make_test_session(65001, 65002);
+    session.config.peer.local_role = Some(BgpRole::Provider);
+    let route = replace_route_attrs(
+        &make_route(100),
+        vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::OnlyToCustomer(64512),
+        ],
+    );
+
+    let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
+    let otcs: Vec<u32> = attrs
+        .iter()
+        .filter_map(|a| match a {
+            PathAttribute::OnlyToCustomer(asn) => Some(*asn),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        otcs,
+        vec![64512],
+        "E1 must not overwrite or duplicate an existing OTC attribute"
+    );
+}
+
+#[test]
+fn otc_egress_blocks_unicast_to_provider_peer_or_route_server_client() {
+    for role in [BgpRole::Customer, BgpRole::Peer, BgpRole::RouteServerClient] {
+        let mut session = make_test_session(65001, 65002);
+        session.config.peer.local_role = Some(role);
+        let route = replace_route_attrs(
+            &make_route(100),
+            vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                }),
+                PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+                PathAttribute::OnlyToCustomer(65002),
+            ],
+        );
+
+        assert!(
+            session.otc_egress_blocks_unicast(&route),
+            "role {role:?} must not propagate an OTC-tagged unicast route"
+        );
+    }
 }
 
 #[test]
@@ -1099,6 +1190,185 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop() {
         announced[0].next_hop,
         IpAddr::V6("2001:db8::1".parse().unwrap())
     );
+}
+
+#[tokio::test]
+async fn otc_ingress_adds_remote_asn_for_route_from_provider_unicast() {
+    for role in [BgpRole::Customer, BgpRole::Peer, BgpRole::RouteServerClient] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        session.config.peer.local_role = Some(role);
+        session.negotiated = Some(negotiated_session(65002, false));
+
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        ];
+        let update = UpdateMessage::build(
+            &[Ipv4NlriEntry { path_id: 0, prefix }],
+            &[],
+            &attrs,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        );
+
+        session.process_update(update).await;
+
+        let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+            panic!("expected RoutesReceived");
+        };
+        assert_eq!(announced.len(), 1);
+        assert!(
+            announced[0]
+                .attributes
+                .iter()
+                .any(|a| matches!(a, PathAttribute::OnlyToCustomer(65002))),
+            "I3 must add OTC(remote AS) for local role {role:?} receiving untagged unicast"
+        );
+    }
+}
+
+#[tokio::test]
+async fn otc_ingress_provider_drops_tagged_unicast_from_customer_but_keeps_withdrawals() {
+    for role in [BgpRole::Provider, BgpRole::RouteServer] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        session.config.peer.local_role = Some(role);
+        session.negotiated = Some(negotiated_session(65002, false));
+
+        let announced_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+        let withdrawn_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::OnlyToCustomer(65002),
+        ];
+        let update = UpdateMessage::build(
+            &[Ipv4NlriEntry {
+                path_id: 0,
+                prefix: announced_prefix,
+            }],
+            &[Ipv4NlriEntry {
+                path_id: 0,
+                prefix: withdrawn_prefix,
+            }],
+            &attrs,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        );
+
+        session.process_update(update).await;
+
+        let RibUpdate::RoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } = rib_rx.try_recv().unwrap()
+        else {
+            panic!("expected RoutesReceived");
+        };
+        assert!(
+            announced.is_empty(),
+            "I1 must drop tagged unicast announces for local role {role:?}"
+        );
+        assert_eq!(
+            withdrawn,
+            vec![(Prefix::V4(withdrawn_prefix), 0)],
+            "I1 must preserve withdrawals from the same UPDATE for local role {role:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn otc_ingress_peer_drops_tagged_unicast_from_wrong_as() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.peer.local_role = Some(BgpRole::Peer);
+    session.negotiated = Some(negotiated_session(65002, false));
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        PathAttribute::OnlyToCustomer(64512),
+    ];
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry { path_id: 0, prefix }],
+        &[],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+
+    session.process_update(update).await;
+
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "I2 must drop tagged unicast announces whose OTC ASN is not the peer AS"
+    );
+}
+
+#[tokio::test]
+async fn otc_ingress_malformed_length_drops_unicast_announces_but_keeps_withdrawals() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.peer.local_role = Some(BgpRole::Provider);
+    session.negotiated = Some(negotiated_session(65002, false));
+
+    let announced_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let withdrawn_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
+            flags: rustbgpd_wire::constants::attr_flags::OPTIONAL
+                | rustbgpd_wire::constants::attr_flags::TRANSITIVE,
+            type_code: rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER,
+            data: Bytes::from_static(&[0, 0, 0]),
+        }),
+    ];
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: announced_prefix,
+        }],
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: withdrawn_prefix,
+        }],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+
+    session.process_update(update).await;
+
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx.try_recv().unwrap()
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert!(
+        announced.is_empty(),
+        "malformed OTC length must use treat-as-withdraw behavior for unicast"
+    );
+    assert_eq!(withdrawn, vec![(Prefix::V4(withdrawn_prefix), 0)]);
 }
 
 #[tokio::test]
@@ -1756,6 +2026,8 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
         add_path_receive: false,
         add_path_send: false,
         add_path_send_max: 0,
+        local_role: None,
+        strict_role: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -1875,6 +2147,8 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
         add_path_receive: false,
         add_path_send: false,
         add_path_send_max: 0,
+        local_role: None,
+        strict_role: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -2020,6 +2294,8 @@ async fn update_import_policy_applies_to_future_updates() {
         add_path_receive: false,
         add_path_send: false,
         add_path_send_max: 0,
+        local_role: None,
+        strict_role: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -2168,6 +2444,8 @@ async fn err_denied_replacement_is_swept_at_eorr() {
         add_path_receive: false,
         add_path_send: false,
         add_path_send_max: 0,
+        local_role: None,
+        strict_role: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -2289,6 +2567,8 @@ async fn import_policy_match_next_hop_filters_route() {
         add_path_receive: false,
         add_path_send: false,
         add_path_send_max: 0,
+        local_role: None,
+        strict_role: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -2745,6 +3025,8 @@ async fn import_policy_filters_rpki_invalid_with_snapshot() {
         add_path_receive: false,
         add_path_send: false,
         add_path_send_max: 0,
+        local_role: None,
+        strict_role: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -2885,6 +3167,8 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
         add_path_receive: false,
         add_path_send: false,
         add_path_send_max: 0,
+        local_role: None,
+        strict_role: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -3069,6 +3353,9 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
         peer_route_refresh: false,
         peer_enhanced_route_refresh: false,
         peer_extended_message: false,
+        local_role: None,
+        remote_role: None,
+        role_negotiated: false,
         extended_nexthop_families: HashMap::new(),
         add_path_families: HashMap::new(),
     };
@@ -3175,6 +3462,9 @@ async fn evpn_routes_counted_toward_max_prefix() {
         peer_route_refresh: false,
         peer_enhanced_route_refresh: false,
         peer_extended_message: false,
+        local_role: None,
+        remote_role: None,
+        role_negotiated: false,
         extended_nexthop_families: HashMap::new(),
         add_path_families: HashMap::new(),
     };
@@ -3267,6 +3557,9 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
         peer_route_refresh: false,
         peer_enhanced_route_refresh: false,
         peer_extended_message: false,
+        local_role: None,
+        remote_role: None,
+        role_negotiated: false,
         extended_nexthop_families: HashMap::new(),
         add_path_families: HashMap::new(),
     };
