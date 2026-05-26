@@ -34,6 +34,7 @@ x509-parser.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true
+protoc-bin-vendored = "3"
 
 [dev-dependencies]
 rcgen.workspace = true
