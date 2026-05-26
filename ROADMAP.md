@@ -155,20 +155,60 @@ priority table above because it has the biggest blast radius.
   in one PR. A single `rustbgpd-test-support` crate (or a `pub mod
   test_support` per existing crate, re-exported under `#[cfg(test)]`)
   would centralize the fixtures and stop the per-PR churn.
-- [ ] **`unwrap()` audit on daemon-runtime paths.** The workspace has
-  ~2.7k `.unwrap()` calls in non-test source; the hotspots that can
-  actually panic the daemon at runtime are `src/peer_manager.rs` (~136
-  calls), `src/main.rs` (~92), `crates/api/src/event_service.rs` (~64),
-  and `crates/transport/src/session/tests.rs` (~72; test-only, lower
-  priority). Most are proven-unreachable in practice but warrant a
-  before-1.0 sweep to either replace with `expect("...")` carrying the
-  proof or convert to typed errors. Pair with the mega-module splits
-  so the audit can land in narrow PRs per file.
-- [ ] **`#[expect(clippy::too_many_lines)]` reduction.** ~94
-  `clippy::too_many_lines` suppressions workspace-wide and growing. Some are honest (sectioned renderers,
-  match-heavy dispatch) and should stay; the rest indicate functions
-  ready for extraction. Track absolute count downward release over
-  release rather than gating individual PRs on it.
+- [ ] **`unwrap()` audit on daemon-runtime paths.** Raw count is ~2k
+  in non-test source; **actual production-code unwraps (outside
+  `#[cfg(test)] mod tests` blocks) measure at ~5** sites after the
+  v0.30 quality scan (2026-05-26) — TLS-cert reads downstream of
+  validated `is_some()` (`src/config/validation.rs:93-95`), one
+  `u32::try_from(MAX_ROUTE_LIMIT_EXCEEDED_DROPS_PER_TABLE).unwrap()`
+  const cast in `src/fib.rs:726`, and a few defensive parses of
+  already-validated strings. The bulk of the raw count is fixtures /
+  asserts inside inline test modules. Item kept open as a forcing
+  function for the audit when these few stragglers come up for
+  refactor; not blocking v1.0.
+- [ ] **`panic!` → typed-error sweep on the one production site.**
+  `crates/bfd/src/discriminator.rs:39` panics with
+  `"BFD discriminator space exhausted"`. 2^32 discriminator space
+  makes the case theoretically unreachable, but defensive returns
+  are free and remove the only `panic!()` outside tests in the
+  workspace. Replace with `Result<Discriminator, AllocError>`;
+  caller logs and refuses to install the new session.
+- [ ] **`#[expect(clippy::too_many_lines)]` reduction.** ~30
+  suppressions workspace-wide (down from 94 — credit the FSM /
+  policy refactors). Concentrated in long dispatchers (FSM action
+  loop, EVPN reconcilers, encode/decode match arms). Some are
+  honest match-heavy dispatch and should stay; the rest indicate
+  functions ready for extraction. Track absolute count downward
+  release over release rather than gating individual PRs on it.
+- [ ] **`#[allow(clippy::too_many_arguments)]` cluster tidy-up.**
+  ~25 sites — distribution functions in `crates/rib/src/manager/`,
+  EVPN originators in `src/evpn_originator/`, BFD socket setup. The
+  Operator Confidence Polish Sprint's PR2b had to thread three new
+  parameters (`&BgpMetrics + &mut policy_stats + &str peer_label`)
+  through `distribute_multipath_prefix` /
+  `distribute_single_best_prefix` / `stage_flowspec_rules` /
+  `stage_evpn_routes` because those four were already past the
+  threshold. A `DistributionContext` parameter struct would absorb
+  them; same trick fits the EVPN originators. Cosmetic, but it
+  buys headroom for the next slice of metric / policy threading.
+- [ ] **`#[allow(clippy::result_large_err)]` in
+  `crates/api/src/rib_service.rs`.** 6 suppressions for a large
+  `Result<_, RibServiceError>` enum. Box the error variant if it
+  ever shows up in any benchmark or RIB query hot-path; until then
+  the cost is purely cosmetic.
+- [ ] **CI gate: `#[allow(clippy::*)]` requires `reason = "..."`.**
+  171 clippy escape-hatches workspace-wide; ~40 are
+  `cast_possible_truncation` in the wire codec (intentional after a
+  length check), the rest split across `too_many_lines`,
+  `too_many_arguments`, and `result_large_err`. Mechanical
+  forcing function: a CI lint that rejects new `#[allow(clippy::*)]`
+  without an explicit `reason = "..."` arg. ~171 sites to backfill,
+  best done as a polish-sprint side quest one crate at a time.
+- [ ] **`cargo deny` for license / dependency / advisory audit.**
+  `chore/dependabot-and-cargo-audit` is a stale branch on origin.
+  Resurrect, modernize to `cargo deny check advisories bans
+  licenses sources`, and wire into the CI workflow. Pairs naturally
+  with the next dependency audit before v1.0.
 - [ ] **Workspace `cargo doc` warning posture.** CI already runs
   `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`. Make
   that the standing local pre-flight expectation too — surfacing
