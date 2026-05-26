@@ -49,6 +49,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 9012 | BGP Encapsulation extended community (§4.1) — VXLAN sub-type used by EVPN encap |
 | 9135 | EVPN integrated routing for IRB |
 | 9136 | EVPN Type 5: IP Prefix advertisement |
+| 9234 | BGP Roles (OPEN capability code 9, `BgpRole`) + Only-to-Customer path attribute (type 35, `PathAttribute::OnlyToCustomer`). Codec only; malformed-length OTC is preserved as `Unknown` (not a fatal decode) so transport can apply RFC 7606 treat-as-withdraw. Negotiation + ingress/egress rules live in the daemon (ADR-0071) |
 | 9494 | Long-lived graceful restart capability |
 | 9785 §3 | DF Election preference algorithms + Don't-Preempt bit, extending the RFC 8584 DF Election Extended Community |
 | draft-ietf-idr-link-bandwidth | Link Bandwidth Extended Community (non-transitive two-octet-AS-specific, type 0x40 subtype 0x04): decode + construct of the advertising AS and the IEEE-754 bytes/second bandwidth used to weight unequal-cost multipath |

@@ -77,6 +77,8 @@ pub mod capability_code {
     pub const LONG_LIVED_GRACEFUL_RESTART: u8 = 71;
     /// RFC 6793: 4-Byte AS Number.
     pub const FOUR_OCTET_AS: u8 = 65;
+    /// RFC 9234: BGP Role.
+    pub const BGP_ROLE: u8 = 9;
 }
 
 /// Path attribute type codes (RFC 4271 §5).
@@ -112,6 +114,8 @@ pub mod attr_type {
     /// RFC 6514 §5: PMSI Tunnel attribute (used by EVPN Type 3 IMET
     /// for ingress-replication BUM).
     pub const PMSI_TUNNEL: u8 = 22;
+    /// RFC 9234 §5: Only-to-Customer (OTC).
+    pub const ONLY_TO_CUSTOMER: u8 = 35;
 }
 
 /// Path attribute flag bits (RFC 4271 §4.3).

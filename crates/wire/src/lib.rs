@@ -65,8 +65,8 @@ pub mod validate;
 
 // Re-export primary public API
 pub use capability::{
-    AddPathFamily, AddPathMode, Afi, Capability, ExtendedNextHopFamily, GracefulRestartFamily,
-    LlgrFamily, Safi,
+    AddPathFamily, AddPathMode, Afi, BgpRole, Capability, ExtendedNextHopFamily,
+    GracefulRestartFamily, LlgrFamily, Safi,
 };
 pub use constants::{EXTENDED_MAX_MESSAGE_LEN, MAX_MESSAGE_LEN};
 pub use error::{DecodeError, EncodeError};

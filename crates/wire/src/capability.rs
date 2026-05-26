@@ -130,6 +130,49 @@ pub struct LlgrFamily {
     pub stale_time: u32,
 }
 
+/// BGP Role (RFC 9234 §4) — the speaker's role on this eBGP session.
+///
+/// The numeric encoding is the 1-byte capability value carried in the
+/// Role capability (code 9). The compatibility matrix
+/// (Provider↔Customer, RS↔RS-Client, Peer↔Peer) is enforced by the FSM
+/// negotiator, not by this codec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum BgpRole {
+    /// Speaker is a transit Provider for the peer.
+    Provider = 0,
+    /// Speaker is a Route Server (RFC 7947).
+    RouteServer = 1,
+    /// Speaker is a client of a Route Server.
+    RouteServerClient = 2,
+    /// Speaker is a Customer of the peer.
+    Customer = 3,
+    /// Speaker is a lateral Peer of the peer.
+    Peer = 4,
+}
+
+impl BgpRole {
+    /// Create from a raw 8-bit role value. Unknown values yield `None` so
+    /// the caller can preserve them via [`Capability::Unknown`].
+    #[must_use]
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Provider),
+            1 => Some(Self::RouteServer),
+            2 => Some(Self::RouteServerClient),
+            3 => Some(Self::Customer),
+            4 => Some(Self::Peer),
+            _ => None,
+        }
+    }
+
+    /// Raw 8-bit encoding for the Role capability value field.
+    #[must_use]
+    pub fn to_u8(self) -> u8 {
+        self as u8
+    }
+}
+
 /// BGP capability as negotiated in OPEN optional parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Capability {
@@ -169,6 +212,11 @@ pub enum Capability {
     FourOctetAs {
         /// The 4-byte autonomous system number.
         asn: u32,
+    },
+    /// RFC 9234 §4: BGP Role. The speaker's role on this eBGP session.
+    Role {
+        /// The role advertised by this speaker.
+        role: BgpRole,
     },
     /// Unknown or unrecognized capability, preserved for re-emission.
     Unknown {
@@ -420,6 +468,22 @@ impl Capability {
                 let asn = buf.get_u32();
                 Ok(Capability::FourOctetAs { asn })
             }
+            capability_code::BGP_ROLE => {
+                // RFC 9234 §4.1: Length = 1, value ∈ {0..=4}. Anything else
+                // is preserved as Unknown so the peer's bytes round-trip and
+                // FSM negotiation can decide whether to reject the session.
+                if length != 1 {
+                    let data = buf.copy_to_bytes(usize::from(length));
+                    return Ok(Capability::Unknown { code, data });
+                }
+                let role_byte = buf.get_u8();
+                if let Some(role) = BgpRole::from_u8(role_byte) {
+                    Ok(Capability::Role { role })
+                } else {
+                    let data = Bytes::copy_from_slice(&[role_byte]);
+                    Ok(Capability::Unknown { code, data })
+                }
+            }
             _ => {
                 let data = buf.copy_to_bytes(usize::from(length));
                 Ok(Capability::Unknown { code, data })
@@ -554,6 +618,11 @@ impl Capability {
                 buf.put_u8(4); // length
                 buf.put_u32(*asn);
             }
+            Capability::Role { role } => {
+                buf.put_u8(capability_code::BGP_ROLE);
+                buf.put_u8(1); // length
+                buf.put_u8(role.to_u8());
+            }
             Capability::Unknown { code, data } => {
                 if data.len() > 255 {
                     return Err(EncodeError::ValueOutOfRange {
@@ -583,6 +652,7 @@ impl Capability {
             Self::AddPath(_) => capability_code::ADD_PATH,
             Self::GracefulRestart { .. } => capability_code::GRACEFUL_RESTART,
             Self::FourOctetAs { .. } => capability_code::FOUR_OCTET_AS,
+            Self::Role { .. } => capability_code::BGP_ROLE,
             Self::Unknown { code, .. } => *code,
         }
     }
@@ -593,6 +663,7 @@ impl Capability {
         2 + match self {
             Self::MultiProtocol { .. } | Self::FourOctetAs { .. } => 4,
             Self::RouteRefresh | Self::EnhancedRouteRefresh | Self::ExtendedMessage => 0,
+            Self::Role { .. } => 1,
             Self::ExtendedNextHop(families) => families.len() * 6,
             Self::LongLivedGracefulRestart(families) => families.len() * 7,
             Self::AddPath(families) => families.len() * 4,
@@ -1404,5 +1475,104 @@ mod tests {
             decoded,
             Capability::LongLivedGracefulRestart(fams) if fams.is_empty()
         ));
+    }
+
+    // --- BGP Role capability (RFC 9234 §4) tests ---
+
+    #[test]
+    fn bgp_role_capability_encode_decode_roundtrip() {
+        for role in [
+            BgpRole::Provider,
+            BgpRole::RouteServer,
+            BgpRole::RouteServerClient,
+            BgpRole::Customer,
+            BgpRole::Peer,
+        ] {
+            let original = Capability::Role { role };
+            let mut buf = bytes::BytesMut::new();
+            original.encode(&mut buf).unwrap();
+            // Wire form: code=9, len=1, value=role
+            assert_eq!(buf.as_ref(), &[9, 1, role.to_u8()][..]);
+            let mut frozen = buf.freeze();
+            let decoded = Capability::decode(&mut frozen).unwrap();
+            assert_eq!(decoded, original);
+        }
+    }
+
+    #[test]
+    fn bgp_role_capability_code_returns_nine() {
+        assert_eq!(
+            Capability::Role {
+                role: BgpRole::Provider
+            }
+            .code(),
+            9
+        );
+    }
+
+    #[test]
+    fn bgp_role_capability_encoded_len_is_three() {
+        // 1 (code) + 1 (length) + 1 (value) = 3
+        assert_eq!(
+            Capability::Role {
+                role: BgpRole::Customer
+            }
+            .encoded_len(),
+            3
+        );
+    }
+
+    #[test]
+    fn bgp_role_capability_bad_length_stored_as_unknown() {
+        // RFC 9234 §4.1: Role length MUST be 1. Anything else round-trips as
+        // Unknown so the negotiator can decide (the codec stays non-fatal).
+        for (len, payload) in [
+            (0u8, &[][..]),
+            (2u8, &[0x00, 0x00][..]),
+            (3u8, &[0x00, 0x00, 0x03][..]),
+        ] {
+            let mut wire = vec![9, len];
+            wire.extend_from_slice(payload);
+            let mut buf = Bytes::copy_from_slice(&wire);
+            let cap = Capability::decode(&mut buf).unwrap();
+            assert!(
+                matches!(cap, Capability::Unknown { code: 9, .. }),
+                "len {len}: expected Unknown, got {cap:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bgp_role_capability_invalid_role_byte_stored_as_unknown() {
+        // Role bytes 5..=255 are not defined; preserve the offending byte as
+        // Unknown so the negotiator can NOTIFICATION 2/11 with the raw value.
+        for invalid in [5u8, 99u8, 200u8, 255u8] {
+            let wire = [9u8, 1, invalid];
+            let mut buf = Bytes::copy_from_slice(&wire);
+            let cap = Capability::decode(&mut buf).unwrap();
+            match cap {
+                Capability::Unknown { code, data } => {
+                    assert_eq!(code, 9);
+                    assert_eq!(data.as_ref(), &[invalid][..]);
+                }
+                other => panic!("invalid role byte {invalid}: expected Unknown, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn bgp_role_from_u8_roundtrip() {
+        for role in [
+            BgpRole::Provider,
+            BgpRole::RouteServer,
+            BgpRole::RouteServerClient,
+            BgpRole::Customer,
+            BgpRole::Peer,
+        ] {
+            assert_eq!(BgpRole::from_u8(role.to_u8()), Some(role));
+        }
+        for invalid in [5u8, 9, 99, 255] {
+            assert_eq!(BgpRole::from_u8(invalid), None);
+        }
     }
 }
