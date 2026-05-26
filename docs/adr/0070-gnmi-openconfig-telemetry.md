@@ -244,8 +244,10 @@ Grounded against the current checkout:
 
 - **gNMI `Set` / config datastore** — needs the ADR-0064-gated config
   transaction model (roadmap P2). v1 `Set` returns `Unimplemented`.
-- **`Subscribe ON_CHANGE`** — needs loss-free, path-diffed leaf events
-  (roadmap P1 durable event history).
+- **`Subscribe ON_CHANGE`** — needs loss-free, path-diffed leaf events.
+  **Unblocked by [ADR-0072](0072-durable-event-history.md);** ships
+  once the durable outbox lands and provides restart-survivable change
+  cursors.
 - **Per-AFI-SAFI prefix counters** (`received` / `sent` / `installed`) — no
   trustworthy per-family source today.
 - **Per-neighbor `installed` / `accepted` prefix split** — only a global Loc-RIB
