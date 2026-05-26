@@ -2,7 +2,7 @@
 
 A feature comparison of open-source BGP daemon implementations.
 
-Last updated: 2026-05-24. See [CHANGELOG.md](../CHANGELOG.md) for
+Last updated: 2026-05-26. See [CHANGELOG.md](../CHANGELOG.md) for
 per-release feature deltas and [evpn-enablement.md](evpn-enablement.md)
 for the EVPN gate ladder.
 
@@ -113,12 +113,14 @@ for the EVPN gate ladder.
 | BMP (RFC 7854) | Yes | Yes | Yes | Yes | No |
 | MRT dump (RFC 6396) | Yes | Yes | Yes | Yes | Yes |
 | Streaming route events | Yes | No | No | Yes | No |
+| OpenConfig/gNMI telemetry | Subset[^gnmi] | Partial | No | No | No |
 
 ## API & Programmability
 
 | Feature | rustbgpd | FRR | BIRD | GoBGP | OpenBGPd |
 |---|:---:|:---:|:---:|:---:|:---:|
 | gRPC API | Yes | Partial | No | Yes | No |
+| OpenConfig/gNMI API | Subset[^gnmi] | Partial | No | No | No |
 | REST API | Partial | Partial | No | No | No |
 | YANG model | No | Partial | No | No | No |
 | CLI tool | Yes | Yes | Yes | Yes | Yes |
@@ -167,6 +169,13 @@ for the EVPN gate ladder.
     on 2026-05-25) support interface autodiscovery. OpenBGPd has no interface /
     unnumbered neighbor model (numeric-IP neighbors only), although it does
     support the RFC 8950 next-hop encoding itself.
+
+[^gnmi]: rustbgpd ships a native read-only `gnmi.gNMI` target for a strict
+    OpenConfig BGP operational-state subset: `Capabilities`, `Get`, and
+    `Subscribe` (ONCE / POLL / STREAM SAMPLE) over UDS or mTLS TCP; `Set`
+    returns `Unimplemented`. M54 verifies the path with `gnmic`. FRR's
+    OpenConfig story is through broader management frameworks such as `mgmtd` /
+    SONiC-style northbound layers rather than a clean per-`bgpd` gNMI service.
 
 ## Best-Path Selection
 

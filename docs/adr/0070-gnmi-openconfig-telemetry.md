@@ -7,11 +7,11 @@
 
 Cloud and whitebox operators already aggregate device state through
 gNMI / OpenConfig tooling (`gnmic`, `gnmi-gateway`, OpenConfig collectors).
-rustbgpd exposes rich typed gRPC snapshots and event streams, but only through
-its own `rustbgpd.v1` proto — there is no OpenConfig-modelled, gNMI-spoken
-surface, so it cannot drop into an existing OpenConfig telemetry pipeline. This
-is the highest-leverage remaining adoption gap and the one open **P0** item on
-the roadmap now that BGP unnumbered, BFD, and ECMP have shipped.
+Before ADR-0070 landed, rustbgpd exposed rich typed gRPC snapshots and event
+streams, but only through its own `rustbgpd.v1` proto — there was no
+OpenConfig-modelled, gNMI-spoken surface, so it could not drop into an existing
+OpenConfig telemetry pipeline. Closing that gap was the highest-leverage
+remaining adoption item once BGP unnumbered, BFD, and ECMP had shipped.
 
 It is also a clean differentiator. **GoBGP** has a rich native gRPC API and
 Prometheus metrics but does **not** speak OpenConfig/gNMI. **FRR** can carry
@@ -187,6 +187,9 @@ listener model rather than adding a new one:
 
 ## Implementation status
 
+User-facing setup, supported-path, `gnmic`, and troubleshooting guidance lives in
+[docs/GNMI.md](../GNMI.md). This ADR records the design boundary and rationale.
+
 | Slice | Status |
 |-------|--------|
 | PR1 — proto + codegen + `Capabilities` + `Set`-closed | Landed (PR #275) |
@@ -199,13 +202,13 @@ listener model rather than adding a new one:
 
 Grounded against the current checkout:
 
-- **Codegen:** `crates/api/build.rs` (single-proto `tonic_prost_build::compile_protos`),
-  `crates/api/src/lib.rs` (`pub mod proto`). gNMI is a second proto package, so it
-  needs a second `compile_protos` / `include_proto!("gnmi")` and a vendored
-  `gnmi.proto` (+ `gnmi_ext.proto`).
-- **Service registration:** `crates/api/src/server.rs` — add the service to
-  **both** `run_tcp_listener` and `run_uds_listener` (the `.add_service(...)`
-  chains are duplicated), behind the existing `GrpcAuthzLayer`.
+- **Codegen:** `crates/api/build.rs` compiles both the native `rustbgpd.v1`
+  proto and the vendored OpenConfig gNMI protos
+  (`proto/github.com/openconfig/gnmi/proto/gnmi/{gnmi,gnmi_ext}.proto`);
+  `crates/api/src/lib.rs` exposes `pub mod gnmi` and `pub mod gnmi_ext`.
+- **Service registration:** `crates/api/src/server.rs` registers `gnmi.gNMI` on
+  the UDS listener and on TCP listeners only when mTLS is configured, behind the
+  existing `GrpcAuthzLayer`.
 - **Authorization:** `crates/api/src/authz.rs` (the `METHODS` matrix + tier enum),
   `crates/api/src/authz_runtime/layer.rs` (runtime enforcement, fail-closed),
   `docs/grpc-method-inventory.json`. See ADR-0064.

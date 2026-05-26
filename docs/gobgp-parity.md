@@ -1,6 +1,6 @@
 # rustbgpd vs GoBGP Feature Parity
 
-Last updated: 2026-05-25 (post-v0.28.0 main, including ADR-0067 BFD, ADR-0066/0068 unicast multipath / ECMP FIB, and the latest EVPN runtime-mutation slices)
+Last updated: 2026-05-26 (post-v0.29.0 main, including ADR-0067 BFD, ADR-0066/0068 unicast multipath / ECMP FIB, ADR-0069 BGP unnumbered, and ADR-0070 read-only gNMI / OpenConfig telemetry)
 
 ## Address Families
 
@@ -88,7 +88,7 @@ Last updated: 2026-05-25 (post-v0.28.0 main, including ADR-0067 BFD, ADR-0066/00
 
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
-| Total RPCs | ~55 | 72 | |
+| Total RPCs | ~55 | 76 | 72 `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs |
 | Peer CRUD | Yes | Yes | Add/Delete/List/Enable/Disable |
 | Peer groups | Yes | Yes | `PeerGroupService` + neighbor membership RPCs |
 | Dynamic neighbors (prefix-based) | Yes | Yes | `[[dynamic_neighbors]]` config + `ListDynamicNeighbors` (M28); runtime Add/Delete RPCs defined but stubbed |
@@ -96,6 +96,7 @@ Last updated: 2026-05-25 (post-v0.28.0 main, including ADR-0067 BFD, ADR-0066/00
 | Streaming path injection | Yes | No | AddPathStream |
 | List paths (Adj-In/Loc/Adj-Out) | Yes | Yes | |
 | Watch events (streaming) | Yes | Yes | WatchRoutes |
+| gNMI / OpenConfig telemetry | No | Partial | Read-only `Capabilities` / `Get` / `Subscribe` for a strict OpenConfig BGP state subset; `Set` returns `Unimplemented`; ADR-0070 / M54 |
 | Table statistics | Yes | Partial | Health endpoint |
 | VRF management | Yes | No | |
 | Policy CRUD via API | Yes | Yes | Named policy definition CRUD plus global/per-neighbor chain assignment |
@@ -117,6 +118,7 @@ Last updated: 2026-05-25 (post-v0.28.0 main, including ADR-0067 BFD, ADR-0066/00
 | BMP exporter (RFC 7854) | Yes | Yes | Per-collector TCP client, Initiation/PeerUp/PeerDown/RouteMonitoring/StatsReport/Termination |
 | MRT dump (RFC 6396) | Yes | Yes | `TABLE_DUMP_V2` periodic + on-demand; gzip optional (ADR-0044) |
 | WatchEvent streaming | Yes | Yes | WatchRoutes |
+| gNMI / OpenConfig telemetry | No | Yes | Read-only `gnmi.gNMI` target for a strict OpenConfig BGP state subset (`Capabilities`, `Get`, `Subscribe` ONCE/POLL/STREAM SAMPLE; `Set` returns `Unimplemented`). Served on mTLS TCP or local UDS; M54 validates with `gnmic` |
 | Sentry integration | Yes | No | |
 
 ## Security
@@ -173,8 +175,8 @@ Last updated: 2026-05-25 (post-v0.28.0 main, including ADR-0067 BFD, ADR-0066/00
 | Core protocol | 14 | 14 | 100% |
 | Path attributes | 13 | 9 | ~69% |
 | Policy engine | 18 | 18 | 100% |
-| gRPC RPCs | ~55 | 72 | 100%+ (broader surface) |
-| Monitoring | 5 | 5 | 100% |
+| gRPC RPCs | ~55 | 76 | 100%+ (broader surface, including read-only gNMI) |
+| Monitoring | 5 | 6 | 100%+ |
 | Security | 4 | 5 | 100%+ |
 | Best-path steps | 11 | 11 | 100% except AIGP |
 
@@ -198,14 +200,14 @@ A first-class target deployment. Weighted toward what matters:
 
 **Remaining gaps for IX RS parity:** no material control-plane gaps remain for the target deployment. Remaining work is operator polish: CLI integration tests and other non-protocol hardening.
 
-### General-Purpose BGP Speaker (~80% parity)
+### General-Purpose BGP Speaker (~87% parity)
 
 Competing head-to-head with GoBGP for all use cases:
 
 - EVPN RR + bidirectional VTEP shipped (Phase 1 ADR-0050; Phase 2 ADR-0052/0054/0055/0056 — MAC-only Type 2 + Type 3 IMET in v0.15.0, MAC+IP Type 2 via ARP/ND suppression in v0.16.0 under the FRR replace model). Gate 8/8b (v0.17.0+) adds alpha multi-homing execution: DF election, Type 1/4 origination, production-default kernel BUM-port enforcement with opt-out config (RFC 7432 §8.5), ESI-aware Type 2 origination, RFC 7432 §14 aliasing receive-side projection, and RFC 7432 §8.4 mass-withdraw filtering. Gate 9 symmetric Interface-less IRB shipped end-to-end in v0.18.0 (IP-VRF schema, Type 5 origination + remote import + L3 FIB programming with four-phase apply ordering, sub-second `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rustbgpctl evpn vrfs` CLI + `ListIpVrfs`/`GetIpVrf` gRPC, M39 smoke). ADR-0059 aliasing dataplane ECMP shipped via FDB nexthop groups across slices 1-4 + M40 FRR smoke. Auto-derived RTs, Type 5 gRPC injection including non-zero Gateway Address, receive-side RFC 9135 overlay-index recursion, duplicate-MAC remote suppression + manual clear, and production-default DF/non-DF BUM suppression + aliasing ECMP all shipped. Still missing: VXLAN local-bias split-horizon (ASIC/offload-dependent on the Linux softswitch — ADR-0065, the remaining all-active correctness gate), native overlay-index local origination / recursion-path interop, the two remaining ADR-0063 runtime shapes (L3VNI/device/table IP-VRF identity redefine — restart-required by design; non-teardown mixed edits — fail closed; relink + teardown + single shapes all commit live), single-active backup-path pre-install, EVPN over MPLS/PBB, and EVPN route types 6-11
 - VPNv4/v6 and labeled unicast missing
 - No confederation support limits SP deployments
-- gRPC API exposes 72 RPCs across 11 services — broader than GoBGP's ~55 in raw count, though shaped differently (BFD inspection via `GetBfdSessions`; EVPN IP-VRF visibility via `ListIpVrfs` / `GetIpVrf`; dynamic-neighbor query via `ListDynamicNeighbors`, with runtime Add/Delete RPCs defined but stubbed)
+- gRPC API exposes a broader operator surface than GoBGP's raw API count, shaped differently: BFD inspection via `GetBfdSessions`, EVPN IP-VRF visibility via `ListIpVrfs` / `GetIpVrf`, dynamic-neighbor query via `ListDynamicNeighbors`, and a read-only OpenConfig/gNMI target for existing telemetry collectors
 - Linux FIB integration is scoped and opt-in: RFC 7999 discard routes and ADR-0061 configured-table unicast installs exist, and ADR-0066/0068 now cover unicast multipath / ECMP FIB including per-class caps, `multipath_relax`, and Link Bandwidth weighted multipath. It is still not a Zebra-compatible full routing-suite backend or redistribution manager
 
 ## Advantages Over GoBGP
@@ -219,46 +221,55 @@ Competing head-to-head with GoBGP for all use cases:
 - **ASPA upstream path verification** — RTR v2, best-path step 0.7, export policy matching; GoBGP has no ASPA support
 - **BFD integration (RFC 5880/5881/5882)** — rustbgpd has in-process single-hop async BFD with strict and non-strict RFC 5882 BGP coupling; GoBGP has no BFD integration
 - **Unicast FIB ECMP beyond Add-Path** — rustbgpd installs kernel `RTA_MULTIPATH` routes with `maximum_paths`, per-class eBGP/iBGP caps, `multipath_relax`, and Link Bandwidth weighted multipath
+- **Read-only gNMI / OpenConfig telemetry** — rustbgpd exposes a native `gnmi.gNMI` service for OpenConfig BGP operational state (`Capabilities`, `Get`, `Subscribe` SAMPLE/POLL/ONCE), verified with `gnmic`; GoBGP exposes its own gRPC API but not an OpenConfig/gNMI target
 - **Config persistence** — gRPC mutations atomically persisted to TOML; GoBGP doesn't persist runtime changes
 - **Operator packaging** — systemd unit, example configs, operations guide, release checklist, container image CI out of the box
 - **Secure-by-default gRPC** — UDS default listener, optional token auth per listener, read-only/read-write split; GoBGP defaults to open TCP
 - **Rustc-style config diagnostics** — validation errors show TOML source lines with column markers; GoBGP prints plain-text errors
 - **Live TUI dashboard** — `rustbgpctl top` with session table, prefix counts, message rates, and route events; GoBGP has no built-in TUI
-- **EVPN RR + bidirectional VTEP via API-first + kernel-integrated model** — Phase 1 RR (ADR-0050) covers RFC 7432 Types 1-5 with MAC Mobility best-path, VXLAN encap community, gRPC `ListEvpnRoutes`, and controller-driven `AddEvpnRoute` / `DeleteEvpnRoute` injection (Type 2/3); validated end-to-end against FRR 10.3.1 and at 50k-route scale with churn (M30-M33). Phase 2 (Gates 7a/7b/7b+1/7b+2/7c, ADR-0052/0054/0055/0056) adds the **bidirectional VTEP loop**: kernel FDB programming from received Type 2 routes (M36), local MAC/MAC+IP origination via `RTNLGRP_NEIGH` with RFC 7432 §15.1 mobility sequencing, Type 3 IMET per L2VNI (M37), SVI MAC origination, sticky MAC config, and sub-second mobility wakeups. Gate 8/8b (v0.17.0+) adds alpha multi-homing execution: DF election (M38), Type 1/4 origination, opt-in kernel BUM-port enforcement (RFC 7432 §8.5), ESI-aware Type 2 origination, RFC 7432 §14 aliasing receive-side projection, and RFC 7432 §8.4 mass-withdraw filtering. Gate 9 symmetric Interface-less IRB shipped end-to-end in v0.18.0 (`[[evpn_ip_vrfs]]`, Type 5 origination + remote import + L3 FIB programming, `Dataplane::probe_ip_vrfs`, sub-second route-event subscription, `rustbgpctl evpn vrfs`, M39 hosted smoke against FRR 10.3.1). ADR-0059 aliasing dataplane ECMP shipped in v0.19.0 (slices 1-4 + M40 FRR smoke). On the VTEP-mode dimension this is functional parity-plus over GoBGP — GoBGP exposes the EVPN wire codec but does not own kernel-side FDB integration. GoBGP retains the edge on full RFC 9135 overlay-index IRB and mature production multi-homing soak time-in-deployment. rustbgpd's operational model stays API-first throughout
+- **EVPN RR + bidirectional VTEP via API-first + kernel-integrated model** — Phase 1 RR (ADR-0050) covers RFC 7432 Types 1-5 with MAC Mobility best-path, VXLAN encap community, gRPC `ListEvpnRoutes`, and controller-driven `AddEvpnRoute` / `DeleteEvpnRoute` injection (Type 2/3); validated end-to-end against FRR 10.3.1 and at 50k-route scale with churn (M30-M33). Phase 2 (Gates 7a/7b/7b+1/7b+2/7c, ADR-0052/0054/0055/0056) adds the **bidirectional VTEP loop**: kernel FDB programming from received Type 2 routes (M36), local MAC/MAC+IP origination via `RTNLGRP_NEIGH` with RFC 7432 §15.1 mobility sequencing, Type 3 IMET per L2VNI (M37), SVI MAC origination, sticky MAC config, and sub-second mobility wakeups. Gate 8/8b (v0.17.0+) adds alpha multi-homing execution: DF election (M38), Type 1/4 origination, opt-in kernel BUM-port enforcement (RFC 7432 §8.5), ESI-aware Type 2 origination, RFC 7432 §14 aliasing receive-side projection, and RFC 7432 §8.4 mass-withdraw filtering. Gate 9 symmetric Interface-less IRB shipped end-to-end in v0.18.0 (`[[evpn_ip_vrfs]]`, Type 5 origination + remote import + L3 FIB programming, `Dataplane::probe_ip_vrfs`, sub-second route-event subscription, `rustbgpctl evpn vrfs`, M39 hosted smoke against FRR 10.3.1). ADR-0059 aliasing dataplane ECMP shipped in v0.19.0 (slices 1-4 + M40 FRR smoke). On the VTEP-mode dimension this is functional parity-plus over GoBGP — GoBGP exposes the EVPN wire codec but does not own kernel-side FDB integration. GoBGP retains an edge on remaining overlay-index local origination / recursion-path interop and mature production multi-homing soak time-in-deployment. rustbgpd's operational model stays API-first throughout
 
 ## Top Gaps by Use Case
 
 ### IX Route Server (~100% parity)
 
-### VXLAN-EVPN DC Fabric RR (~100% parity, updated 2026-04-24)
+No material control-plane gaps remain for the target route-server deployment.
+Remaining work is operator polish: CLI integration tests, bulk policy-edit
+ergonomics, and production packaging hardening rather than missing protocol
+capability.
 
-Minimum viable for a SONiC/FRR fabric where VTEPs handle local state:
+### DC Fabric / Whitebox BGP Speaker (~95% parity)
 
-1. ~~**EVPN GR/LLGR stale handling**~~ — shipped (Gate 2, 2026-04-23). EVPN participates in the stale-route pipeline alongside unicast and FlowSpec; LLGR promotion injects `LLGR_STALE`, `NO_LLGR` is honored, EoR and ERR clear stale state.
-2. ~~**Real Type 2 MAC-exchange interop**~~ — shipped (Gate 1, M30, 2026-04-24). 3-node containerlab topology with kernel VXLAN + bridge per VTEP validates Type 2 reflection against FRR 10.3.1 end-to-end.
-3. ~~**MAC mobility / sticky preservation interop**~~ — shipped (Gate 3, M31, 2026-04-24). 4-node topology validates the RFC 7432 §15.1 sequence increment on move and §7.7 sticky semantics against real FRR.
-4. ~~**Multi-homing Type 1 EAD + Type 4 ES reflection**~~ — shipped (Gate 4, M32, 2026-04-24). 4-node topology with two FRR VTEPs sharing an Ethernet Segment on a bond ES interface validates Type 4 ES + Type 1 EAD-per-EVI reflection (with correct ORIGINATOR_ID + CLUSTER_LIST) through the rustbgpd RR.
-5. ~~**Scale validation**~~ — shipped (Gate 5, M33, 2026-04-24). In-tree `bench/evpn-load` generator drives 50k Type 2 routes + 60 s of 1000/sec churn through the RR to a third observer; initial convergence 5.1 s, post-churn count within ±tester batch (40) of 50,000 with ≥30k withdrawal events observed (proves churn propagated), zero session flaps, peak RR memory ~80 MB.
-6. ~~**Controller-driven EVPN injection**~~ — shipped (Gate 6, 2026-04-24). `AddEvpnRoute` / `DeleteEvpnRoute` gRPC RPCs (Type 2 MAC/IP and Type 3 IMET) plus `rustbgpctl evpn add-mac-ip / add-imet / delete-*` CLI; reflects on the same path as FlowSpec injection.
-7. **Hierarchical RR (cluster-of-clusters)** — nested reflection untested
+BGP unnumbered, scoped link-local FIB installs, ECMP / weighted multipath, BFD,
+read-only gNMI, and EVPN RR / VTEP work make this a first-class deployment
+target. Remaining gaps are narrower:
 
-No material protocol gaps remain. Remaining work is operator polish:
+1. **BGP unnumbered autodiscovery** — rustbgpd v1 requires static
+   `address` + `interface`; FRR-style `neighbor IFACE interface remote-as
+   external` remains deferred.
+2. **IPv6 link-local BFD for unnumbered peers** — follows naturally from the
+   scoped peer identity in ADR-0069, but ADR-0067 intentionally shipped global
+   IPv4 / IPv6 single-hop first.
+3. **Config transaction / diff UX** — required before any serious gNMI `Set`
+   or broader remote-mutation story.
+4. **Durable event replay** — prerequisite for honest gNMI `ON_CHANGE` and
+   post-incident fabric debugging.
 
-1. **CLI integration tests** — operator-quality hardening, not protocol parity.
-2. **Policy UX polish** — bulk editing / richer ergonomics rather than missing
-   route-server capability.
-3. ~~**Built-in looking glass**~~ — shipped as birdwatcher-compatible REST API.
+### General-Purpose BGP Speaker (~87% parity)
 
-### General-Purpose BGP Speaker (~76% parity)
+The remaining broad-market gaps are mostly service-provider or full-router
+scope:
 
-These close the biggest gaps for broader adoption but are out of scope for
-the current alpha:
-
-1. **Confederation (RFC 5065)** — required for service provider deployments
-2. ~~**EVPN RR + bidirectional VTEP (RFC 7432)**~~ — Phase 1 RR role shipped; **Phase 2 bidirectional VTEP shipped across Gates 7a/7b/7b+1/7b+2/7c, ADR-0052/0054/0055/0056** with kernel FDB program/learn loops, MAC-only + MAC+IP local origination under the FRR-style replace model, sticky-MAC config, and sub-second mobility convergence. **Gate 8/8b (v0.17.0)** adds alpha multi-homing execution: DF election (M38), Type 1/4 origination, RFC 7432 §14 aliasing receive-side projection, RFC 7432 §8.4 mass-withdraw filtering, and opt-in kernel BUM-port enforcement (RFC 7432 §8.5). **Gate 9 symmetric Interface-less IRB shipped end-to-end in v0.18.0** (`[[evpn_ip_vrfs]]`, Type 5 origination + remote import + L3 FIB programming, M39 hosted smoke). **ADR-0059 aliasing dataplane ECMP** shipped on `main` (slices 1-4 + M40 FRR-validated smoke). Still later: RFC 9135 overlay-index IRB, production-default multi-homing enforcement after the MAC-churn variant of the Gate 8b soak, and duplicate-MAC remote-route processing / dataplane loop-protection (local-origin suppression shipped in ADR-0055 §9)
-3. **VPNv4/v6 (RFC 4364)** — enterprise/SP VPN deployments
-4. ~~**Dynamic neighbors (prefix-based)**~~ — shipped: `[[dynamic_neighbors]]` with peer group inheritance, `remote_asn=0`, auto-accept/remove
-5. **Full Zebra/FIB integration** — ADR-0061/0066/0068 add configured-table kernel route installation with peer / peer-group allow-lists, per-table route caps, persisted crash-restart ownership, unicast ECMP, per-class caps, `multipath_relax`, and Link Bandwidth weighted multipath, but production router parity still needs broader redistribution policy and non-BGP route-manager scope
+1. **VPNv4/v6 and labeled unicast** — enterprise/SP VPN deployments.
+2. **Confederation (RFC 5065)** — service-provider deployments.
+3. **Full Zebra/FIB integration and redistribution** — ADR-0061/0066/0068/0069
+   add configured-table kernel route installation with scoped next-hop identity,
+   per-table caps, ECMP, per-class caps, `multipath_relax`, Link Bandwidth
+   weighted multipath, and link-local gateway support, but rustbgpd is still not
+   a full routing-suite backend or redistribution manager.
+4. **EVPN standards tail** — native overlay-index local origination,
+   recursion-path interop, single-active backup-path pre-install, EVPN over
+   MPLS/PBB, and route types 6-11.
 
 ## Pre-1.0 Tech Debt
 

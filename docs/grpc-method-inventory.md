@@ -2,7 +2,8 @@
 
 **Status:** Accepted. Input artifact for ADR-0064 (gRPC authorization)
 and mirrored in `crates/api/src/authz.rs`.
-**Source:** `proto/rustbgpd.proto`.
+**Source:** `crates/api/src/authz.rs`, covering `proto/rustbgpd.proto`
+plus vendored OpenConfig gNMI service definitions.
 **Machine-readable export:** `docs/grpc-method-inventory.json`.
 **Maintenance:** Re-derive whenever an RPC is added, renamed, or
 removed; the ADR's enforcement model assumes every method has a tier
@@ -180,17 +181,26 @@ shape itself does not raise the tier.
 | `ClearDuplicateMacQuarantine` | `mutating` | Clears one local duplicate-MAC suppression key and may replay still-live local MAC state. Reversible, per-`(VNI, MAC)` scope; not a route-injection primitive and not a clear-all. |
 | `ApplyEvpnRuntime` | `mutating` | ADR-0063 full-candidate EVPN runtime validation/apply entry point. `validate_only` and no-op applies are bounded; the supported shapes converge live and commit a new generation (single L2VNI add/delete/redefine, single IP-VRF add/standalone-delete/redefine with unchanged L3VNI/device/table identity, single Ethernet Segment add/delete/redefine, atomic tenant teardown of an ES-member L2VNI + Ethernet Segment and/or linked IP-VRF in one pass, and `ip_vrf` relink), while L3VNI/device/table IP-VRF identity redefine (restart-required by design) and non-teardown mixed edits fail closed (issue #210). Request TOML can contain credentials and must be audit-redacted. |
 
+### gnmi.gNMI (4 RPCs)
+
+| RPC | Tier | Notes |
+|-----|------|-------|
+| `Capabilities` | `sensitive_read` | OpenConfig/gNMI model inventory and supported encodings. Discloses management-plane capabilities and telemetry shape. |
+| `Get` | `sensitive_read` | Read-only OpenConfig BGP telemetry subset. Exposes AS/router-id, neighbor identity/state, counters, and other operational topology. |
+| `Set` | `operator_only` | Always returns `UNIMPLEMENTED`; classify defensively because any future implementation would mutate configuration or operational state. |
+| `Subscribe` (stream) | `sensitive_read` | Read-only OpenConfig BGP telemetry stream. Streaming shape; same disclosure class as `Get`. |
+
 ## Totals
 
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 37 | 51.4% |
-| `mutating` | 17 | 23.6% |
-| `operator_only` | 18 | 25.0% |
-| **Total** | **72** | **100%** |
+| `sensitive_read` | 40 | 52.6% |
+| `mutating` | 17 | 22.4% |
+| `operator_only` | 19 | 25.0% |
+| **Total** | **76** | **100%** |
 
-(Counts treat `SetGracefulShutdown` as one RPC even though it appears once in `NeighborService`.)
+(Counts treat `SetGracefulShutdown` as one RPC even though it appears once in `NeighborService`; the 76 total is 72 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 
@@ -209,12 +219,12 @@ specific method if the model warrants it.
    mutating listener for everything else. The 4-tier scheme allows
    richer enforcement (e.g., per-method capability tokens) but the
    per-service split is the cheapest first step.
-2. **`operator_only` is small enough to gate by principal role.** 18
+2. **`operator_only` is small enough to gate by principal role.** 19
    methods total; carving these out into a separate listener or
    requiring a distinct principal role (`operator` vs. `automation`) has
    low operational cost and high blast-radius reduction.
 3. **InjectionService is uniformly `operator_only`.** Six of the
-   eighteen `operator_only` methods live here. The simplest model is
+   nineteen `operator_only` methods live here. The simplest model is
    to make the whole service gated behind an `inject` capability or a
    dedicated listener — operators rarely use it for automation, and
    when they do it should be a deliberate channel.
@@ -266,7 +276,7 @@ specific method if the model warrants it.
 
 ## Code matrix
 
-`crates/api/src/authz.rs` contains the same 72-method classification
+`crates/api/src/authz.rs` contains the same 76-method classification
 as a static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added

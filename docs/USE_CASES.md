@@ -767,7 +767,7 @@ Be honest about where rustbgpd isn't the right tool:
   not a full FRR/BIRD replacement. Use a full routing suite when you need
   default-on main-table ownership, IGPs, broad policy-driven redistribution,
   crash-restart FIB adoption, or mature multi-protocol forwarding features.
-- **EVPN VTEP role — partial (v0.17.0).** rustbgpd-as-RR has been
+- **EVPN VTEP role — partial (v0.29.0).** rustbgpd-as-RR has been
   the supported deployment since Phase 1 (ADR-0050). Phase 2
   (Gates 7a / 7b / 7b+1 / 7b+2 / 7c, ADR-0052 / 0054 / 0055 /
   0056) added the **bidirectional VTEP loop**: kernel FDB
@@ -794,15 +794,17 @@ Be honest about where rustbgpd isn't the right tool:
   programming through the transactional `L3OwnedState` model,
   sub-second `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rustbgpctl evpn
   vrfs` CLI, M39 hosted smoke. **ADR-0059** (v0.19.0) adds
-  receive-path aliasing-ECMP via FDB nexthop groups (slices 1-4 +
-  M40 FRR-validated). **Still missing for full VTEP parity:**
-  RFC 9135 overlay-index IRB; MAC-churn variant of the Gate 8b
-  24h soak before enabling BUM enforcement by default; optional
-  import-side ES-Import RT filtering; auto-derived RTs (RFC 8365
-  §5.1.2.1); duplicate-MAC remote-route processing / dataplane loop-protection (local-origin suppression shipped in ADR-0055 §9). For a
-  single-homed L2VNI fabric without overlay-index IRB
-  requirements, rustbgpd is a fit today; full FRR-equivalent VTEP
-  coverage closes when RFC 9135 overlay-index IRB ships.
+	  receive-path aliasing-ECMP via FDB nexthop groups (slices 1-4 +
+	  M40 FRR-validated). Auto-derived RTs, Type 5 gRPC injection
+	  including non-zero Gateway Address, receive-side RFC 9135
+	  overlay-index recursion, duplicate-MAC remote suppression +
+	  manual clear, and production-default DF/non-DF BUM suppression
+	  have also shipped. **Still missing for full VTEP parity:**
+	  native overlay-index local origination / recursion-path interop,
+	  optional import-side ES-Import RT filtering, single-active
+	  backup-path pre-install, EVPN over MPLS/PBB, and EVPN route
+	  types 6-11. For a single-homed L2VNI fabric without native
+	  overlay-index origination requirements, rustbgpd is a fit today.
 - **VPLS fabrics** — No RFC 4761 VPLS address family support.
 - **Service provider core** — No Confederation (RFC 5065), no labeled unicast,
   no VPNv4/v6. Use FRR or commercial NOS.

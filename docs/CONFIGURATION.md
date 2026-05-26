@@ -244,6 +244,13 @@ config (including any TLS field) is **restart-required** — SIGHUP reload
 pins the runtime listener back to the live values and surfaces the drift
 in `rustbgpd --diff` until the daemon is restarted.
 
+Native gNMI / OpenConfig telemetry (`gnmi.gNMI`) is registered on TCP only when
+this native mTLS config is present. Plaintext or bearer-token-only TCP listeners
+serve the native `rustbgpd.v1` API but intentionally do not expose network gNMI;
+the UDS listener may serve gNMI as a local-only extension. See
+[GNMI.md](GNMI.md) for the supported OpenConfig path subset and `gnmic`
+examples.
+
 If either listener subtable is present, at least one gRPC listener must remain
 enabled after applying `enabled = false`.
 

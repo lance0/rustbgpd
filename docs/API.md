@@ -1,7 +1,8 @@
 # gRPC API Reference
 
-rustbgpd exposes eleven gRPC services (Global, Config, Neighbor, Policy,
-PeerGroup, Rib, BFD, Event, Injection, Control, Evpn) over one or more configured
+rustbgpd exposes eleven native `rustbgpd.v1` gRPC services (Global, Config,
+Neighbor, Policy, PeerGroup, Rib, BFD, Event, Injection, Control, Evpn) plus the
+read-only `gnmi.gNMI` OpenConfig telemetry service over one or more configured
 listeners. The default listener is a local Unix domain socket at
 `/var/lib/rustbgpd/grpc.sock`.
 
@@ -49,6 +50,12 @@ at startup. Adding, removing, or rotating the TLS files is
 config back to the live values and surfaces the drift in
 `rustbgpd --diff` until the daemon is restarted.
 
+Native gNMI is available on the local UDS listener and on TCP listeners only
+when mTLS is configured. Plaintext or bearer-token-only TCP listeners serve the
+native `rustbgpd.v1` API but do not register `gnmi.gNMI`. See
+[GNMI.md](GNMI.md) for the operator-facing OpenConfig path list and `gnmic`
+examples.
+
 ```bash
 # mTLS client example with grpcurl
 grpcurl \
@@ -57,6 +64,17 @@ grpcurl \
   -import-path . -proto proto/rustbgpd.proto \
   rustbgpd.example.net:50051 \
   rustbgpd.v1.GlobalService/GetGlobal
+```
+
+```bash
+# mTLS gNMI client example with gnmic
+gnmic \
+  --address rustbgpd.example.net:50051 \
+  --tls-ca /etc/rustbgpd/server-ca.pem \
+  --tls-cert /etc/operator/client.pem \
+  --tls-key /etc/operator/client.key \
+  --tls-server-name rustbgpd.example.net \
+  capabilities
 ```
 
 Per-listener `access_mode = "read_only"` rejects mutating RPCs
@@ -136,6 +154,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `EventService` | All RPCs | None |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`, `GetIpVrf` | `ClearDuplicateMacQuarantine`, `ApplyEvpnRuntime` |
 | `BfdService` | `GetBfdSessions` | None |
+| `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (always returns `UNIMPLEMENTED`) |
 | `InjectionService` | None | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` |
 | `ControlService` | `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
 
@@ -153,6 +172,35 @@ The API uses gRPC status codes consistently across services:
 | `FAILED_PRECONDITION` | The request is valid but the daemon is not in a state where it can complete it, such as MRT export being disabled or a policy object still being referenced |
 | `UNIMPLEMENTED` | The RPC is reserved in the protobuf but runtime support has not shipped yet |
 | `INTERNAL` | An internal daemon actor, persistence queue, metrics encoder, or RIB boundary failed unexpectedly |
+
+---
+
+## gnmi.gNMI
+
+Read-only OpenConfig BGP telemetry surface (ADR-0070). The supported subset is
+deliberately narrow: `Capabilities`, `Get`, and `Subscribe` (`ONCE`, `POLL`, and
+`STREAM SAMPLE`) for global and neighbor `state` under the default network
+instance; `Set` is present because gNMI requires it, but always returns
+`UNIMPLEMENTED`.
+
+Network gNMI is served only on mTLS TCP listeners. The UDS listener also exposes
+the service as a local-only extension.
+
+For the full supported path list, setup guidance, troubleshooting table, and
+tested `gnmic` commands, see [GNMI.md](GNMI.md).
+
+```bash
+gnmic \
+  --address rustbgpd.example.net:50051 \
+  --tls-ca /etc/rustbgpd/server-ca.pem \
+  --tls-cert /etc/operator/client.pem \
+  --tls-key /etc/operator/client.key \
+  --tls-server-name rustbgpd.example.net \
+  get \
+  --encoding json_ietf \
+  --type STATE \
+  --path '/network-instances/network-instance[name=DEFAULT]/protocols/protocol[identifier=BGP][name=BGP]/bgp/global/state'
+```
 
 ---
 

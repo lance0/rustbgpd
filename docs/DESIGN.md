@@ -462,8 +462,10 @@ controller-driven injection for Type 2 / Type 3. What remains:
   origination via ARP/ND suppression under the FRR replace model
   (requires `bridge neigh_suppress on`), and Gate 7c switches the
   originator from a 5 s poll to a push-notified RIB broadcast for
-  sub-second mobility convergence. **Still ahead in Phase 2:**
-  duplicate-MAC remote-route processing and dataplane loop-protection.
+  sub-second mobility convergence. Later EVPN slices added remote
+  duplicate-MAC suppression + manual clear, so the remaining VTEP tail is
+  native overlay-index local origination / recursion-path interop and
+  standards features outside the Linux/VXLAN alpha boundary.
 - **Multi-homing execution:** Gate 8/8b covers rustbgpd-as-VTEP
   DF election (RFC 7432 §8 + RFC 8584), Type 1/4 origination, opt-in
   Non-DF BUM suppression, ESI-aware Type 2 origination, aliasing
