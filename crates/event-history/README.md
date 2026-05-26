@@ -12,39 +12,59 @@ crate is the daemon-local persistence layer, not an event bus.
 Single-writer model. The `EventHistoryManager` actor owns the
 broadcast channels currently scattered across producers, batches
 inserts into one SQLite transaction, and serves cursor-based replay
-through the `SubscribeFromEvent` gRPC RPC.
+through the `SubscribeFromEvent` gRPC RPC (wired in PR3).
 
 ## Module layout
 
-- `lib.rs` — `EventHistoryManager`, `EventEnvelope`, `OutboxConfig`,
-  public actor handle. Async wiring only.
+- `lib.rs` — public API. `EventHistoryManager`, `EventHistoryConfig`,
+  `EventEnvelope`, `CommittedEvent`, `EventHistorySender`,
+  `Category`, `Severity`, `PayloadCodec`, `EnvelopePeers`, plus the
+  shared `EhmState` and the async actor loop (`run_actor`). PR3 also
+  re-exports `SubscribeFilter` / `SubscribeRequest` / `SubscribeStats`
+  from `cursor.rs`.
 - `storage.rs` — the `spawn_blocking` boundary. Owns the rusqlite
   `Connection` on a dedicated thread; processes batches via an
   internal channel. Only place in the crate that touches
-  `rusqlite::Connection`.
+  `rusqlite::Connection`. Contains the batching + retention SQL paths
+  (no separate `batch.rs` / `retention.rs` modules; both are method
+  groups on the storage thread for atomic coupling with the
+  connection).
 - `sequence.rs` — explicit `metadata.last_event_id` allocator and the
-  3-step recovery ladder (primary → quarantine → sidecar).
-- `migrations.rs` — schema bootstrap + version-fence downgrade refusal
-  (mirrors the `GR_RESTART_MARKER_VERSION` pattern in `src/main.rs`).
-- `batch.rs` — async-side batching state machine (size + time
-  thresholds).
-- `retention.rs` — periodic count-cap + byte-cap eviction with
-  explicit `ORDER BY event_id ASC` (SQLite `DELETE … LIMIT` is
-  otherwise implementation-defined).
-- `quarantine.rs` — corrupted-DB detection + `.stale` rename, matching
-  the `fib-owned.json` pattern in `src/fib_runtime.rs`.
+  txn-scoped `Allocator::load → next → finalize` lifecycle.
+- `migrations.rs` — schema bootstrap + version-fence downgrade
+  refusal (mirrors the `GR_RESTART_MARKER_VERSION` pattern in
+  `src/main.rs`).
+- `quarantine.rs` — corrupted-DB detection + `.stale` rename +
+  sidecar (`events.last_id`) atomic write, matching the
+  `fib-owned.json` pattern in `src/fib_runtime.rs`.
+- `error.rs` — `EventHistoryError`. Single type covering SQL,
+  schema, allocator, I/O, and `PassThrough`.
 
 ## Invariants
 
 - **`event_id` is allocated by EHM, never auto-assigned by SQLite.**
-  Disk uses `INTEGER PRIMARY KEY` (ROWID-aliased); the semantic
-  contract is "EHM picks the value, then INSERTs it explicitly."
-- **Encoding order is strict:** assign `event_id` → mutate envelope →
-  encode once → insert exact bytes → commit → broadcast same bytes.
-  Pinned by the `payload_bytes_identical_persisted_and_broadcast`
-  test.
-- **No live event without durability**, when enabled and healthy. Pass-
-  through degrades visibly via `bgp_event_outbox_degraded`.
-- **Allocator recovery ladder**: primary DB → quarantine fallback →
-  sidecar. If all three fail and a prior `events.db.stale` exists,
-  EHM goes pass-through, never restarts the allocator at 1 silently.
+  The disk uses `INTEGER PRIMARY KEY` (ROWID-aliased) for storage
+  efficiency, but the SEMANTIC contract is that EHM picks the value
+  via the explicit `metadata.last_event_id` allocator and then
+  INSERTs it. ROWID auto-assignment is never used.
+- **Producer-encoded opaque payload.** EHM treats
+  `EventEnvelope.payload` as opaque bytes. The producer is
+  responsible for whatever encoding it wants (eventually the
+  prost-encoded `BgpEvent`; PR2 accepts any `Vec<u8>`). The assigned
+  `event_id` is delivered to subscribers via the `CommittedEvent`
+  wrapper — never by mutating the payload bytes.
+- **Byte-equality across persist + broadcast.** The bytes the
+  producer hands EHM equal the SQLite `payload` BLOB AND the
+  `CommittedEvent.envelope.payload` field on the broadcast.
+  Pinned by `payload_bytes_identical_persisted_and_broadcast` in
+  `tests/byte_equality.rs`.
+- **No live event without durability (when enabled and healthy).**
+  EHM commits a batch BEFORE broadcasting; live subscribers and
+  cursor-replay subscribers observing the same `event_id` see the
+  same envelope.
+- **Allocator recovery ladder.** Primary DB → quarantine fallback →
+  sidecar. If all three fail AND a prior `events.db.stale` exists,
+  EHM refuses to issue new IDs (PassThrough), never restarts the
+  allocator at 1 silently. The stale-only-state check happens
+  BEFORE any create-capable `Connection::open` to prevent a fresh
+  empty DB from masking a quarantined state.

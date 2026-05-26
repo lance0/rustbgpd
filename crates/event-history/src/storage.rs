@@ -14,6 +14,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+// Re-export for cursor.rs / lib.rs — they hand Arc<EventEnvelope> to
+// append so payload bytes aren't cloned a second time on the
+// broadcast side.
+
 use rusqlite::{Connection, params};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -31,13 +35,20 @@ use crate::{Category, EventEnvelope, Severity};
 pub(crate) enum StoreOp {
     /// Persist a batch of envelopes inside one SQLite transaction.
     ///
+    /// Envelopes are passed as `Arc`s so the actor can hand the SAME
+    /// underlying payload bytes to both the storage path (here) and
+    /// the broadcast path (after commit) without cloning the payload
+    /// vec a second time. Per Copilot review on PR2: the original
+    /// design cloned the full `Vec<EventEnvelope>` (including payload
+    /// bytes) twice, doubling allocation per batch.
+    ///
     /// Reply carries:
     /// - the assigned `(event_id, ...)` tuples in order (same order as
     ///   the input `envelopes`)
     /// - the new high-water mark (`metadata.last_event_id` post-commit)
     /// - the daemon boot ID stamped on each row
     Append {
-        envelopes: Vec<EventEnvelope>,
+        envelopes: Vec<Arc<EventEnvelope>>,
         reply: oneshot::Sender<Result<AppendOutcome, EventHistoryError>>,
     },
 
@@ -103,7 +114,10 @@ pub struct QueryFilter {
 
 /// One row read back from `events`. Mirrors `EventEnvelope` shape plus
 /// the assigned `event_id`. The payload is byte-identical to what the
-/// producer originally provided (byte-equality invariant).
+/// producer originally provided (byte-equality invariant). The
+/// `payload_codec` round-trips the producer's encoding declaration so
+/// replay consumers know how to interpret `payload` (e.g., `"opaque"`
+/// vs `"proto"` for prost-encoded `BgpEvent` envelopes).
 #[derive(Debug, Clone)]
 pub struct PersistedEvent {
     pub event_id: u64,
@@ -119,6 +133,9 @@ pub struct PersistedEvent {
     pub evpn_route_type: Option<i32>,
     pub severity: Severity,
     pub daemon_boot_id: String,
+    /// String form of `PayloadCodec` as stored in SQLite — `"opaque"`
+    /// or `"proto"`. Use [`crate::PayloadCodec::parse`] to map back.
+    pub payload_codec: String,
     pub payload: Vec<u8>,
 }
 
@@ -134,7 +151,7 @@ pub(crate) struct StoreHandle {
 impl StoreHandle {
     pub(crate) async fn append(
         &self,
-        envelopes: Vec<EventEnvelope>,
+        envelopes: Vec<Arc<EventEnvelope>>,
     ) -> Result<AppendOutcome, EventHistoryError> {
         let (reply, rx) = oneshot::channel();
         self.tx
@@ -263,6 +280,26 @@ fn open_with_recovery(path: &Path) -> Result<StorageInit, EventHistoryError> {
     let sidecar = sidecar_path(path);
     let stale = stale_path(path);
 
+    // STALE-ONLY GUARD (Codex review finding): when a previous start
+    // quarantined `events.db` and the daemon exited before producing a
+    // replacement, the next start would see no primary file. The plain
+    // `Connection::open(path)` below WOULD CREATE a fresh empty DB and
+    // `bootstrap` would seed `last_event_id = 0` — silently violating
+    // the never-reused contract because prior IDs were already issued
+    // (proven by the stale file's existence).
+    //
+    // Detect this state up front and run the recovery ladder BEFORE
+    // any create-capable open. If the ladder can't recover an anchor,
+    // surface `PassThrough` instead of restarting at 1.
+    if !path.exists() && stale.exists() {
+        warn!(
+            events_db = %path.display(),
+            stale = %stale.display(),
+            "primary DB missing but stale quarantine exists; entering recovery ladder before create"
+        );
+        return recover_after_quarantine(path, &stale, &sidecar);
+    }
+
     // Try the primary path.
     match probe_open(path) {
         Ok(allocator) => Ok(StorageInit {
@@ -276,47 +313,72 @@ fn open_with_recovery(path: &Path) -> Result<StorageInit, EventHistoryError> {
                 error = %primary_err,
                 "primary DB open failed; entering recovery ladder"
             );
-            // Quarantine the broken file, then look up the recovery
-            // ladder for an allocator anchor.
+            // Quarantine the broken file, then enter the recovery
+            // ladder. `quarantine_db` no-ops if path doesn't exist
+            // (covers the case where probe_open failed without
+            // creating a file).
             quarantine_db(path)?;
-
-            let fallback = read_quarantine_allocator(&stale).or_else(|| read_sidecar(&sidecar));
-
-            let fresh_anchor = match fallback {
-                Some(v) => v,
-                None => {
-                    // No anchor recoverable. If a stale file exists,
-                    // we KNOW prior IDs were issued — refusing here
-                    // protects the never-reused promise. The actor
-                    // surfaces this via PassThrough mode.
-                    if stale.exists() {
-                        return Err(EventHistoryError::PassThrough);
-                    }
-                    // Truly fresh install — allocator starts at 0.
-                    0
-                }
-            };
-
-            // Open (or create) the now-fresh primary DB and seed its
-            // allocator to the recovered anchor.
-            let mut conn = Connection::open(path).map_err(EventHistoryError::Sqlite)?;
-            bootstrap(&mut conn)?;
-            conn.execute(
-                "UPDATE metadata SET value = ?1 WHERE key = ?2",
-                params![fresh_anchor.to_string(), META_LAST_EVENT_ID],
-            )?;
-
-            Ok(StorageInit {
-                had_quarantine: true,
-                initial_allocator: fresh_anchor,
-                recovered_via_fallback: fallback.is_some(),
-            })
+            recover_after_quarantine(path, &stale, &sidecar)
         }
     }
 }
 
+/// Allocator-recovery ladder, applied AFTER a quarantine (whether the
+/// quarantine just happened or was left over from a prior process).
+/// Reads from the quarantine first, then the sidecar; if both fail
+/// AND a stale file exists, returns [`EventHistoryError::PassThrough`]
+/// rather than seeding a fresh DB with `last_event_id = 0`.
+///
+/// Only creates the new primary DB when there IS a recoverable anchor
+/// (or when no stale file is present, i.e. truly fresh install).
+fn recover_after_quarantine(
+    path: &Path,
+    stale: &Path,
+    sidecar: &Path,
+) -> Result<StorageInit, EventHistoryError> {
+    let fallback = read_quarantine_allocator(stale).or_else(|| read_sidecar(sidecar));
+
+    let fresh_anchor = match fallback {
+        Some(v) => v,
+        None => {
+            // No anchor recoverable. If a stale file exists, we KNOW
+            // prior IDs were issued — refusing here protects the
+            // never-reused promise. Caller decides what to do
+            // (required=true ⇒ fail-start, required=false ⇒ pass-
+            // through with degraded flag — see EventHistoryManager).
+            if stale.exists() {
+                return Err(EventHistoryError::PassThrough);
+            }
+            // Truly fresh install — no stale, no sidecar, no DB.
+            // Allocator starts at 0.
+            0
+        }
+    };
+
+    // Open (or create) the primary DB and seed its allocator to the
+    // recovered anchor.
+    let mut conn = Connection::open(path).map_err(EventHistoryError::Sqlite)?;
+    bootstrap(&mut conn)?;
+    conn.execute(
+        "UPDATE metadata SET value = ?1 WHERE key = ?2",
+        params![fresh_anchor.to_string(), META_LAST_EVENT_ID],
+    )?;
+
+    Ok(StorageInit {
+        had_quarantine: true,
+        initial_allocator: fresh_anchor,
+        recovered_via_fallback: fallback.is_some(),
+    })
+}
+
 /// Open + bootstrap + read allocator. Used by [`open_with_recovery`] to
 /// probe whether the DB is usable.
+///
+/// **Note**: this WILL create the file if it doesn't exist (SQLite
+/// default `Connection::open`). [`open_with_recovery`] is responsible
+/// for the stale-only-state guard that prevents an unexpected create
+/// from masking a quarantined state. Callers outside `open_with_recovery`
+/// must enforce that guard themselves.
 fn probe_open(path: &Path) -> Result<u64, EventHistoryError> {
     let mut conn = Connection::open(path).map_err(EventHistoryError::Sqlite)?;
     bootstrap(&mut conn)?;
@@ -410,7 +472,7 @@ fn run_storage_thread(
 
 fn append_batch_blocking(
     conn: &mut Connection,
-    envelopes: Vec<EventEnvelope>,
+    envelopes: Vec<Arc<EventEnvelope>>,
     daemon_boot_id: &Arc<str>,
 ) -> Result<AppendOutcome, EventHistoryError> {
     if envelopes.is_empty() {
@@ -516,7 +578,7 @@ fn query_by_peer(
         "SELECT e.event_id, e.timestamp_ns, e.category, e.event_type,
                 e.peer, e.previous_peer, e.target_peer,
                 e.afi_safi, e.prefix, e.rd, e.evpn_route_type,
-                e.severity, e.daemon_boot_id, e.payload
+                e.severity, e.daemon_boot_id, e.payload_codec, e.payload
          FROM events e
          JOIN event_peers ep ON ep.event_id = e.event_id
          WHERE ep.peer = ?1
@@ -576,7 +638,7 @@ fn query_no_peer(
         "SELECT event_id, timestamp_ns, category, event_type,
                 peer, previous_peer, target_peer,
                 afi_safi, prefix, rd, evpn_route_type,
-                severity, daemon_boot_id, payload
+                severity, daemon_boot_id, payload_codec, payload
          FROM events
          WHERE event_id > ?1 AND event_id <= ?2",
     );
@@ -647,7 +709,8 @@ fn persisted_row_mapper(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedEv
         evpn_route_type: row.get(10)?,
         severity: Severity::parse(&severity_raw).unwrap_or(Severity::Info),
         daemon_boot_id: row.get(12)?,
-        payload: row.get(13)?,
+        payload_codec: row.get(13)?,
+        payload: row.get(14)?,
     })
 }
 
@@ -722,12 +785,18 @@ fn evict_oldest(conn: &mut Connection, limit: usize) -> Result<usize, EventHisto
     Ok(deleted)
 }
 
+/// SQLite WAL filenames are formed by appending `"-wal"` to the
+/// **full** DB filename, NOT by replacing the extension. So
+/// `events.db` → `events.db-wal` (not `events.db.db-wal` or
+/// `events.db-wal-wal`) and `events` (no extension) → `events-wal`.
+/// `path.with_extension(...)` REPLACES the extension, which gets it
+/// wrong in the no-extension case. Concatenate to the OsString
+/// directly instead.
 fn file_size(path: &Path) -> u64 {
     let main = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    let wal = path.with_extension(format!(
-        "{}-wal",
-        path.extension().and_then(|e| e.to_str()).unwrap_or("db")
-    ));
+    let mut wal_os = path.as_os_str().to_os_string();
+    wal_os.push("-wal");
+    let wal = std::path::PathBuf::from(wal_os);
     let wal_size = std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
     main + wal_size
 }

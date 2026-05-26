@@ -43,6 +43,40 @@ async fn drain_and_count(manager: &EventHistoryManager) -> Vec<u64> {
 }
 
 #[tokio::test]
+async fn shutdown_completes_even_with_live_sender_clones() {
+    // Codex review regression test: shutdown must NOT depend on all
+    // EventHistorySender clones being dropped. Producers commonly
+    // hold a sender across the lifetime of the daemon; if shutdown
+    // waited for the producer channel to close, the actor would
+    // deadlock on rx.recv().
+    //
+    // Earlier PR2 implementation used `drop(self.sender)` + waited
+    // for the channel-closed signal. Tests held sender clones in
+    // their local scope, so shutdown hung. Fixed by switching to a
+    // `watch::channel`-driven shutdown signal that lets the actor
+    // exit while clones remain alive.
+    let dir = TempDir::new().unwrap();
+    let cfg = EventHistoryConfig {
+        path: dir.path().join("events.db"),
+        batch_interval: Duration::from_millis(5),
+        ..EventHistoryConfig::default()
+    };
+    let manager = EventHistoryManager::start(cfg).await.unwrap();
+
+    // Hold MULTIPLE clones across the shutdown call.
+    let _live_clone_1 = manager.sender();
+    let _live_clone_2 = manager.sender();
+    let _live_clone_3 = manager.sender();
+
+    // shutdown() must return within a reasonable time even with
+    // sender clones still alive. Bound at 5 s — way above the
+    // expected ms-scale teardown.
+    tokio::time::timeout(Duration::from_secs(5), manager.shutdown())
+        .await
+        .expect("shutdown must not deadlock on live sender clones");
+}
+
+#[tokio::test]
 async fn event_ids_monotonic_across_restart() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("events.db");
@@ -119,6 +153,77 @@ async fn corrupted_db_with_unrecoverable_anchor_and_required_true_refuses_start(
     assert!(matches!(err, EventHistoryError::PassThrough));
     // Quarantine should have been created.
     assert!(dir.path().join("events.db.stale").exists());
+}
+
+#[tokio::test]
+async fn stale_only_with_no_sidecar_refuses_to_restart_allocator_at_one() {
+    // Codex review regression test for the critical bug pre-merge of PR2:
+    //
+    // Scenario: corrupt-DB + missing-sidecar on the first start
+    // quarantines events.db → events.db.stale and returns PassThrough
+    // (correct). The daemon exits. On the NEXT start, events.db
+    // doesn't exist (it was renamed). The old open_with_recovery
+    // would call Connection::open(path) which CREATES a fresh empty
+    // DB, bootstrap seeds last_event_id=0, and the next event gets
+    // event_id=1 — silently colliding with the prior process's IDs.
+    //
+    // Pinned behavior: when events.db is missing AND events.db.stale
+    // exists AND no sidecar / quarantine-metadata anchor is
+    // recoverable, refuse to start (required=true) or return
+    // PassThrough (required=false). Never restart the allocator
+    // silently.
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("events.db");
+
+    // First lifetime: leave a stale file with unrecoverable metadata
+    // and NO sidecar. We do this by writing garbage to the events.db
+    // path, then starting EHM, which quarantines it and returns
+    // PassThrough.
+    fs::write(&db_path, b"not a valid sqlite database").unwrap();
+    let _ = fs::remove_file(dir.path().join("events.last_id"));
+    let first_cfg = EventHistoryConfig {
+        path: db_path.clone(),
+        required: false,
+        ..EventHistoryConfig::default()
+    };
+    let first_err = EventHistoryManager::start(first_cfg).await.unwrap_err();
+    assert!(matches!(first_err, EventHistoryError::PassThrough));
+    assert!(
+        dir.path().join("events.db.stale").exists(),
+        "stale quarantine produced"
+    );
+    assert!(!db_path.exists(), "primary DB renamed away by quarantine");
+    assert!(
+        !dir.path().join("events.last_id").exists(),
+        "no sidecar to recover from"
+    );
+
+    // Second lifetime: primary DB missing, stale present, no sidecar.
+    // Old code: probe_open would CREATE events.db, succeed, allocator
+    // resets to 0 → first event gets event_id=1. New code: detect
+    // stale-only state pre-create and return PassThrough.
+    let second_cfg = EventHistoryConfig {
+        path: db_path.clone(),
+        required: false,
+        ..EventHistoryConfig::default()
+    };
+    let second_err = EventHistoryManager::start(second_cfg).await.unwrap_err();
+    assert!(
+        matches!(second_err, EventHistoryError::PassThrough),
+        "stale-only cold start must return PassThrough, got {second_err:?}"
+    );
+
+    // Same scenario with required=true must also refuse.
+    let third_cfg = EventHistoryConfig {
+        path: db_path.clone(),
+        required: true,
+        ..EventHistoryConfig::default()
+    };
+    let third_err = EventHistoryManager::start(third_cfg).await.unwrap_err();
+    assert!(matches!(third_err, EventHistoryError::PassThrough));
+
+    // No fresh DB created behind our back.
+    assert!(!db_path.exists());
 }
 
 #[tokio::test]

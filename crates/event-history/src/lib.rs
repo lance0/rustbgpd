@@ -5,9 +5,11 @@
 //! This crate is the persistence + cursor surface only. Producers
 //! convert their existing event types to [`EventEnvelope`] and send
 //! via the [`EventHistorySender`] mpsc handle. EHM batches inserts
-//! into one SQLite transaction, stamps a durable `event_id`,
-//! broadcasts the now-stamped envelope, and serves cursor-based
-//! replay via the storage layer (PR3 wires the gRPC surface).
+//! into one SQLite transaction, assigns a durable `event_id`, and
+//! broadcasts a [`CommittedEvent`] carrying that `event_id` alongside
+//! the **unchanged** producer payload bytes (the byte-equality
+//! invariant — see `tests/byte_equality.rs`). The cursor-based replay
+//! gRPC surface lands in PR3.
 //!
 //! ## Quick-start (for tests)
 //!
@@ -56,7 +58,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use tokio::sync::{Notify, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
@@ -224,6 +226,20 @@ impl PayloadCodec {
             Self::Proto => "proto",
         }
     }
+
+    /// Parse the string form stored in
+    /// [`crate::PersistedEvent::payload_codec`]. Returns `None` on
+    /// unknown values (forward-compat: a future writer might use a
+    /// codec name a reader from an older version doesn't recognize;
+    /// the reader treats it as opaque rather than panicking).
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "opaque" => Some(Self::Opaque),
+            "proto" => Some(Self::Proto),
+            _ => None,
+        }
+    }
 }
 
 /// The peers carried on an event, in their three possible roles.
@@ -341,12 +357,14 @@ pub struct EventHistoryManager {
     storage_join: Option<JoinHandle<()>>,
     daemon_boot_id: Arc<str>,
     state: Arc<EhmState>,
-    /// Shared shutdown signal — `shutdown()` notifies it; the actor
-    /// loop checks it on every iteration. Using `Notify` (instead of
-    /// dropping the sender) lets producers keep `EventHistorySender`
-    /// clones alive across shutdown without deadlocking the actor on
-    /// `rx.recv()`.
-    shutdown_notify: Arc<Notify>,
+    /// Shared shutdown signal. `shutdown()` flips the watch value to
+    /// `true`; every storage await + producer-receive in the actor
+    /// loop is wrapped in a `tokio::select!` that races
+    /// `shutdown_rx.changed()`, so a wedged storage op can NOT hold
+    /// the actor past shutdown. Producers can keep
+    /// [`EventHistorySender`] clones alive across shutdown without
+    /// deadlocking the actor on `rx.recv()`.
+    shutdown_tx: watch::Sender<bool>,
 }
 
 impl std::fmt::Debug for EventHistoryManager {
@@ -452,14 +470,13 @@ impl EventHistoryManager {
 
         let (producer_tx, producer_rx) = mpsc::channel(config.queue_capacity);
         let (broadcast_tx, _) = broadcast::channel(config.broadcast_capacity);
-        let shutdown_notify = Arc::new(Notify::new());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let actor_state = state.clone();
         let actor_store = store_handle.clone();
         let actor_broadcast = broadcast_tx.clone();
         let actor_boot_id = daemon_boot_id.clone();
         let actor_config = config.clone();
-        let actor_shutdown = shutdown_notify.clone();
 
         let actor = tokio::spawn(async move {
             run_actor(
@@ -469,7 +486,7 @@ impl EventHistoryManager {
                 actor_broadcast,
                 actor_boot_id,
                 producer_rx,
-                actor_shutdown,
+                shutdown_rx,
             )
             .await;
         });
@@ -489,7 +506,7 @@ impl EventHistoryManager {
             storage_join: Some(storage_join),
             daemon_boot_id,
             state,
-            shutdown_notify,
+            shutdown_tx,
         })
     }
 
@@ -539,19 +556,35 @@ impl EventHistoryManager {
     /// and exits.
     ///
     /// Safe to call while producer-held [`EventHistorySender`] clones
-    /// are still alive — the shutdown is `Notify`-driven, not channel-
-    /// drop-driven. Producers calling `try_send` after shutdown will
-    /// see `TrySendError::Closed` once the storage thread exits.
+    /// are still alive — shutdown is `watch::channel`-driven, not
+    /// channel-drop-driven. Producers calling `try_send` after
+    /// shutdown will see `TrySendError::Closed` once the storage
+    /// thread exits.
+    ///
+    /// **Bounded by `shutdown_timeout`**: the actor wraps its storage
+    /// awaits in a `tokio::select!` with `shutdown_rx.changed()`, so
+    /// a wedged SQLite/disk operation can NOT hold us past the
+    /// shutdown signal. After the actor exits, we send
+    /// `StoreOp::Shutdown` to the storage thread and await its join
+    /// handle with a hard timeout so a wedged blocking thread can't
+    /// stall the daemon binary exit (we log and abandon the blocking
+    /// thread if it doesn't return — the OS reclaims it on process
+    /// exit).
     pub async fn shutdown(mut self) {
-        // Signal the actor; it will run one final commit if there are
-        // pending events, flush the sidecar, and return.
-        self.shutdown_notify.notify_one();
+        // Signal the actor first. `watch::Sender::send` ignores the
+        // closed-receiver error because the actor may already have
+        // exited (e.g., DB-open failure during start).
+        let _ = self.shutdown_tx.send(true);
         if let Some(actor) = self.actor.take() {
             let _ = actor.await;
         }
-        self.storage.shutdown().await;
+        // Now drain the storage thread. Best-effort with a bounded
+        // timeout so a wedged spawn_blocking task doesn't hold the
+        // caller forever.
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(5), self.storage.shutdown()).await;
         if let Some(j) = self.storage_join.take() {
-            let _ = j.await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), j).await;
         }
     }
 }
@@ -563,7 +596,7 @@ async fn run_actor(
     broadcast_tx: broadcast::Sender<CommittedEvent>,
     daemon_boot_id: Arc<str>,
     mut rx: mpsc::Receiver<EventEnvelope>,
-    shutdown_notify: Arc<Notify>,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let mut buffer: Vec<EventEnvelope> = Vec::with_capacity(config.batch_size);
     let mut batches_since_sidecar_flush: u64 = 0;
@@ -571,6 +604,11 @@ async fn run_actor(
     retention_interval.tick().await; // skip the immediate tick
 
     loop {
+        // Fast-path bail: shutdown_rx already saw the flip.
+        if *shutdown_rx.borrow() {
+            break;
+        }
+
         let deadline = tokio::time::sleep(config.batch_interval);
         tokio::pin!(deadline);
 
@@ -587,22 +625,25 @@ async fn run_actor(
                             }
                         }
                         // All senders dropped — also a valid shutdown
-                        // signal, but the primary signal is the
-                        // explicit Notify (which works while clones
-                        // remain).
+                        // signal, distinct from the explicit watch
+                        // (which works while clones remain alive).
                         None => { shutdown_requested = true; break; }
                     }
                 }
                 () = &mut deadline => {
                     break;
                 }
-                () = shutdown_notify.notified() => {
-                    shutdown_requested = true;
-                    break;
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        shutdown_requested = true;
+                        break;
+                    }
                 }
                 _ = retention_interval.tick() => {
                     // Retention is async — kick it off but don't
-                    // block the batch loop.
+                    // block the batch loop. Drop the JoinHandle; the
+                    // task is best-effort and bounded by the
+                    // retention queries' inherent cost.
                     let store = store.clone();
                     let max_events = config.max_events;
                     let max_bytes = config.max_bytes;
@@ -630,23 +671,65 @@ async fn run_actor(
         }
 
         // Phase 2: commit, broadcast, update state.
+        //
+        // Codex review finding [HIGH]: `store.append()` is a
+        // spawn_blocking-backed operation that can wedge behind a
+        // slow/locked SQLite or a stalled disk. We race it against
+        // `shutdown_rx.changed()` so a stalled append can't hold the
+        // actor past shutdown. The committed-side guarantee still
+        // holds — if shutdown cancels the await before append
+        // returns, the events are NEITHER persisted NOR broadcast,
+        // matching the "no live event without durability" contract.
         if !buffer.is_empty() {
-            let envelopes = std::mem::take(&mut buffer);
-            let envelopes_for_broadcast = envelopes.clone();
-            match store.append(envelopes).await {
+            // Project the gathered envelopes into Arcs ONCE. The same
+            // Arcs are handed to the storage thread (for the INSERT
+            // bind) and re-used to build CommittedEvent wrappers on
+            // the broadcast side — no payload-bytes clone on the
+            // broadcast path.
+            let shared: Vec<Arc<EventEnvelope>> = std::mem::take(&mut buffer)
+                .into_iter()
+                .map(Arc::new)
+                .collect();
+            let len = shared.len();
+            let append_input = shared.clone(); // Vec<Arc<...>> clone: pointer-bump only
+
+            let append_result = tokio::select! {
+                res = store.append(append_input) => res,
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        warn!(
+                            pending = len,
+                            "shutdown requested mid-batch; pending events lost (not persisted, not broadcast)"
+                        );
+                        state.flip_degraded();
+                        break;
+                    } else {
+                        // Spurious wake (shouldn't happen for a
+                        // boolean watch we never write again).
+                        // Re-stash the envelopes back into buffer
+                        // and continue around the outer loop.
+                        buffer = shared
+                            .iter()
+                            .map(|e| (**e).clone())
+                            .collect();
+                        continue;
+                    }
+                }
+            };
+
+            match append_result {
                 Ok(outcome) => {
                     state
                         .latest_event_id
                         .store(outcome.new_high_water, Ordering::Release);
                     // Broadcast every committed envelope with its assigned ID.
-                    for (env, id) in envelopes_for_broadcast
-                        .into_iter()
-                        .zip(outcome.assigned_ids)
-                    {
+                    // The Arc means the broadcast clone is a pointer
+                    // bump, not a payload-bytes copy.
+                    for (env_arc, id) in shared.into_iter().zip(outcome.assigned_ids) {
                         let committed = CommittedEvent {
                             event_id: id,
                             daemon_boot_id: outcome.daemon_boot_id.clone(),
-                            envelope: env,
+                            envelope: (*env_arc).clone(),
                         };
                         // broadcast::Sender::send returns Err only if
                         // there are no subscribers; that's fine.
@@ -655,7 +738,11 @@ async fn run_actor(
                     batches_since_sidecar_flush += 1;
                     if batches_since_sidecar_flush >= config.sidecar_flush_interval_batches {
                         batches_since_sidecar_flush = 0;
-                        if let Err(e) = store.flush_sidecar().await {
+                        let flush_result = tokio::select! {
+                            res = store.flush_sidecar() => res,
+                            _ = shutdown_rx.changed() => Ok(0),  // shutdown will flush again below
+                        };
+                        if let Err(e) = flush_result {
                             warn!(error = %e, "sidecar flush failed; will retry next batch");
                         }
                     }
@@ -667,12 +754,18 @@ async fn run_actor(
             }
         }
 
-        if shutdown_requested {
+        if shutdown_requested || *shutdown_rx.borrow() {
             // Final sidecar flush so the recovery ladder has the most
             // up-to-date anchor in case the next start opens against a
-            // corrupted DB.
-            if let Err(e) = store.flush_sidecar().await {
-                warn!(error = %e, "final sidecar flush failed");
+            // corrupted DB. Bounded by a short timeout so a wedged
+            // sidecar write can't hold the actor here.
+            let flush_result =
+                tokio::time::timeout(std::time::Duration::from_secs(2), store.flush_sidecar())
+                    .await;
+            match flush_result {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => warn!(error = %e, "final sidecar flush failed"),
+                Err(_) => warn!("final sidecar flush timed out"),
             }
             info!(
                 daemon_boot_id = %daemon_boot_id.as_ref(),
