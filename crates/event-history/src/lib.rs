@@ -46,11 +46,14 @@
 #![warn(clippy::all)]
 #![allow(clippy::module_name_repetitions)]
 
+mod cursor;
 mod error;
 mod migrations;
 mod quarantine;
 mod sequence;
 mod storage;
+
+pub use cursor::{SubscribeFilter, SubscribeRequest, SubscribeStats};
 
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -576,6 +579,22 @@ impl EventHistoryManager {
         self.storage
             .query(from_event_id, to_event_id, limit, filter)
             .await
+    }
+
+    /// Crate-internal: hand a live broadcast receiver to the cursor
+    /// drain task. Mirrors [`Self::subscribe`] but kept on a separate
+    /// method so the cursor module's reach into private state is
+    /// explicit (and easier to audit).
+    pub(crate) fn broadcast_tx_for_cursor(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<CommittedEvent> {
+        self.broadcast_tx.subscribe()
+    }
+
+    /// Crate-internal: clone of the storage handle, for the cursor
+    /// drain task's replay-phase queries.
+    pub(crate) fn storage_handle_for_cursor(&self) -> storage::StoreHandle {
+        self.storage.clone()
     }
 
     /// Graceful shutdown: signals the actor, drains pending events
