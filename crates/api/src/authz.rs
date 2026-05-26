@@ -115,8 +115,27 @@ const fn method(
     }
 }
 
-/// Complete gRPC method inventory for `proto/rustbgpd.proto`.
+/// Complete gRPC method inventory for the daemon's generated gRPC protos.
 pub const METHODS: &[GrpcMethodAuthz] = &[
+    method(
+        "gnmi.gNMI",
+        "Capabilities",
+        "/gnmi.gNMI/Capabilities",
+        AuthTier::SensitiveRead,
+    ),
+    method(
+        "gnmi.gNMI",
+        "Get",
+        "/gnmi.gNMI/Get",
+        AuthTier::SensitiveRead,
+    ),
+    method("gnmi.gNMI", "Set", "/gnmi.gNMI/Set", AuthTier::OperatorOnly),
+    method(
+        "gnmi.gNMI",
+        "Subscribe",
+        "/gnmi.gNMI/Subscribe",
+        AuthTier::SensitiveRead,
+    ),
     method(
         "rustbgpd.v1.GlobalService",
         "GetGlobal",
@@ -570,10 +589,14 @@ mod tests {
     use super::{AuthTier, METHODS, method_authz, method_count_by_tier};
     use serde_json::json;
 
-    const PROTO: &str = include_str!("../../../proto/rustbgpd.proto");
+    const RUSTBGPD_PROTO: &str = include_str!("../../../proto/rustbgpd.proto");
+    const GNMI_PROTO: &str =
+        include_str!("../../../proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto");
     const INVENTORY_JSON: &str = include_str!("../../../docs/grpc-method-inventory.json");
     const AUTHZ_SOURCE_PATH: &str = "crates/api/src/authz.rs";
-    const PROTO_PATH: &str = "proto/rustbgpd.proto";
+    const PRIMARY_PROTO_PATH: &str = "proto/rustbgpd.proto";
+    const ADDITIONAL_PROTO_PATHS: &[&str] =
+        &["proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto"];
 
     fn proto_package_from(proto: &str) -> String {
         proto
@@ -620,7 +643,9 @@ mod tests {
     }
 
     fn proto_methods() -> BTreeSet<String> {
-        proto_methods_from(PROTO)
+        let mut methods = proto_methods_from(RUSTBGPD_PROTO);
+        methods.extend(proto_methods_from(GNMI_PROTO));
+        methods
     }
 
     fn expected_inventory_json() -> serde_json::Value {
@@ -638,9 +663,10 @@ mod tests {
 
         json!({
             "schema_version": 1,
-            "package": proto_package_from(PROTO),
+            "package": proto_package_from(RUSTBGPD_PROTO),
             "source": AUTHZ_SOURCE_PATH,
-            "proto": PROTO_PATH,
+            "proto": PRIMARY_PROTO_PATH,
+            "additional_protos": ADDITIONAL_PROTO_PATHS,
             "method_count": METHODS.len(),
             "tier_counts": {
                 "read": method_count_by_tier(AuthTier::Read),
@@ -669,7 +695,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 72);
+        assert_eq!(METHODS.len(), 76);
     }
 
     #[test]
@@ -710,9 +736,9 @@ mod tests {
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 0);
-        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 37);
+        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 40);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 17);
-        assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 18);
+        assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 19);
     }
 
     #[test]
@@ -750,6 +776,22 @@ mod tests {
         );
         assert_eq!(
             method_authz("/rustbgpd.v1.ControlService/Shutdown").map(|m| m.tier),
+            Some(AuthTier::OperatorOnly)
+        );
+        assert_eq!(
+            method_authz("/gnmi.gNMI/Capabilities").map(|m| m.tier),
+            Some(AuthTier::SensitiveRead)
+        );
+        assert_eq!(
+            method_authz("/gnmi.gNMI/Get").map(|m| m.tier),
+            Some(AuthTier::SensitiveRead)
+        );
+        assert_eq!(
+            method_authz("/gnmi.gNMI/Subscribe").map(|m| m.tier),
+            Some(AuthTier::SensitiveRead)
+        );
+        assert_eq!(
+            method_authz("/gnmi.gNMI/Set").map(|m| m.tier),
             Some(AuthTier::OperatorOnly)
         );
         assert!(method_authz("/rustbgpd.v1.Nope/Missing").is_none());
