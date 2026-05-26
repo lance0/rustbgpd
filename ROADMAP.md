@@ -642,6 +642,50 @@ Items identified during review that improve strictness, correctness, or long-run
 - [x] **Validation snapshot delivery to transport sessions** — `match_rpki_validation` and `match_aspa_validation` now work in import policy. `ValidationSnapshot` (VRP + ASPA tables) delivered to transport sessions via `tokio::sync::watch` channel. Each session borrows the latest immutable snapshot and evaluates import policy against it. RIB-side revalidation remains the correctness backstop. Config rejection for import validation matches removed.
 - [ ] **Convergent import validation on cache update** — import `match_rpki_validation` / `match_aspa_validation` is currently best-effort at ingress time; later VRP/ASPA cache updates do not re-run import policy or trigger route refresh for affected peers. Fix: on cache update, trigger `SoftResetIn` for peers whose resolved import policy uses validation-state matches. Infrastructure exists (route refresh, per-peer policy tracking). Not urgent — current semantics match FRR/BIRD behavior and are documented in KNOWN_ISSUES.
 
+#### RFC 9234 (BGP Roles + OTC) follow-ups
+
+Tracked here in the Deferred Hardening table so the ADR-0071 "Deferred"
+section has an operator-visible roadmap counterpart. None are blocking
+— v1 ships static eBGP Role configuration + IPv4/IPv6 unicast OTC
+procedures, and the M55 interop proves it.
+
+- [ ] **iBGP Roles** — RFC 9234 §4 scopes Roles to eBGP today. iBGP Roles would extend the leak-detection surface inside a confederation / cluster; needs the working-group discussion to settle on semantics first.
+- [ ] **AS Confederation sub-AS Roles** — RFC marks NOT RECOMMENDED; if confederation support later exports OTC across the confederation boundary, the OTC ASN MUST be the **Confederation Identifier**, not a member AS (RFC 9234 §5). Captured here so the future confed implementer doesn't recreate the same trap.
+- [ ] **Complex peering on a single eBGP session** — RFC: MUST NOT configure Roles on a session that is Peer for some prefixes and Customer for others. Operators with mixed relationships split into multiple sessions today. A per-prefix role surface would need a separate ADR + working-group precedent.
+- [ ] **Dynamic role change without session restart** — `role` / `strict_role` reload class is **live (effective next session)** in `docs/reload-matrix.md`. Lifting that to in-place re-evaluation needs a Route-Refresh + revalidation pass plus a careful look at the compatibility-matrix replay against an already-Established session. Future ADR if demand appears.
+- [ ] **Operator override of OTC behaviour** — e.g. forced strip on egress for asymmetric leak protection, or per-neighbor opt-out of the I1/I2 drop. Deliberately not exposed in v1; would be config sugar over the existing policy engine.
+- [ ] **OTC scope beyond IPv4 / IPv6 unicast** — RFC 9234 §5 explicitly scopes the procedures to AFI 1/2 SAFI 1, and v1 honors that. If a future RFC extends OTC to FlowSpec / EVPN / VPN-IPv4, the egress hook would land in `prepare_outbound_attributes_flowspec` / `_evpn`; the v1 code path leaves them untouched.
+- [ ] **`OtcRouteBlocked` structured event payload** — ADR-0071 deferred the rich route-leak event payload to the durable event-history work (P0 below). Operators see the counter (`bgp_otc_routes_blocked_total{peer, reason}`) + per-peer scalar (`otc_routes_blocked` on `NeighborState`) today; the cursor-bearing event arrives with P0.
+
+#### gNMI / OpenConfig telemetry follow-ups (ADR-0070)
+
+Tracked here so the ADR-0070 "Deferred" section has a roadmap counterpart. v1 ships read-only `Capabilities` / `Get` / `Subscribe` (`ONCE` / `POLL` / `STREAM SAMPLE`) over the strict OpenConfig BGP state subset; the gNMI interop suite (M54) covers the surface end-to-end.
+
+- [ ] **gNMI `Set` + config datastore** — needs the ADR-0064-gated config transaction model (separately tracked as P2). v1 `Set` returns a stable `Unimplemented`.
+- [ ] **`Subscribe ON_CHANGE`** — needs loss-free, path-diffed leaf events from the new durable event history (P0 below); pair the two.
+- [ ] **Per-AFI-SAFI prefix counters** (`received` / `sent` / `installed`) — no trustworthy per-family source today; lands when the RIB exposes per-family install counts.
+- [ ] **Per-neighbor `installed` / `accepted` prefix split** — only a global Loc-RIB best-path count exists today.
+- [ ] **`supported-capabilities` + negotiated AFI-SAFI state** — needs a peer snapshot extension that surfaces the negotiated capability set (the data exists internally but isn't on the snapshot today).
+- [ ] **`global/state/total-prefixes` and `total-paths`** — `total-prefixes` means prefixes *received* in OpenConfig context, which the Loc-RIB best-path count doesn't represent; `total-paths` has no pre-best-path aggregate.
+- [ ] **`neighbors/neighbor[...]/state/last-established`** — absolute last-transition timestamp on the peer snapshot. Only elapsed-since-Established is tracked today; lift to a wall-clock instant.
+- [ ] **gNMI `PROTO` / `ASCII` encodings, multicast / VPN AFIs, full OpenConfig BGP coverage** — v1 ships JSON / JSON_IETF over the BGP subset; widen on demand.
+- [ ] **BFD / FIB / EVPN OpenConfig(-adjacent) telemetry surfaces** — after the BGP subset proves the path-parser + renderer pattern.
+- [ ] **YANG / NETCONF / RESTCONF** — deprioritized; gNMI is the telemetry-first surface.
+
+#### Operator Confidence Polish Sprint 1 follow-ups
+
+Sprint 1 (PRs #282 / #283 / #284 / #285) shipped the reload matrix, the
+`bgp_policy_routes_total` counter across both directions, the four
+scalar `NeighborState` aggregates, the CLI Policy Stats block, and the
+deployment guide. These items were explicitly carved out at the time
+of merge.
+
+- [ ] **`reason` label on `bgp_policy_routes_total`** — per-clause attribution (which statement inside the named policy matched). Pushes cardinality from ~1k to ~8k labelsets; still bounded by config but not free. Pairs naturally with the best-path explain enrichment below.
+- [ ] **FlowSpec / EVPN policy-counter explicit unit tests** — the counter wiring in `stage_flowspec_rules` / `stage_evpn_routes` is exercised via `distribute_*` but lacks dedicated unit cases asserting `direction="export", action ∈ {permit, deny}` with the right policy label. Sprint 1 PR2b review noted this as a NIT.
+- [ ] **Best-path explain enrichment** — RIB-side sibling to PR2a's policy-explain enrichment. The `ExplainBestPath` deny / no-best path currently reports the structural reason (no candidate, RR split-horizon, etc.) but not the policy-clause attribution that PR2a added on the export side. Lifting that the same way — without metric double-count — gives operators "why is THIS the best route" with structured reasons.
+- [ ] **`rustbgpctl explain-import-route` CLI** — sibling to `explain-advertised-route`. Asks the daemon "what happened to this prefix on the import side from peer X" — would walk the import policy chain + RPKI/ASPA validation state + max-prefix gate and report the terminal decision with the same policy-name attribution. Touches `crates/cli` + a new `RibUpdate::ExplainImportedRoute` query.
+- [ ] **`rustbgpd --diff` output formatted by reload class** — `--diff` currently groups changes by section. Cross-reference each diff line against `docs/reload-matrix.md` so the operator sees "(live)" / "(restart-required)" inline. Polish.
+
 ### P1 — Core Protocol Gaps
 
 Features that close meaningful protocol gaps vs GoBGP.
