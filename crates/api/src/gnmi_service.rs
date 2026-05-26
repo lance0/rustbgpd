@@ -1,5 +1,4 @@
 //! Read-only `OpenConfig` gNMI surface.
-#![allow(deprecated)]
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -68,11 +67,33 @@ impl GnmiService {
 
     async fn render_get(&self, request: gnmi::GetRequest) -> Result<gnmi::GetResponse, Status> {
         validate_get_request(&request)?;
-        let mut notifications = Vec::with_capacity(request.path.len());
-        for path in request.path {
-            let full_path = combine_paths(request.prefix.as_ref(), &path)?;
-            let query = parse_supported_path(&full_path)?;
-            let updates = self.render_query(&query).await?;
+        let encoding = gnmi::Encoding::try_from(request.encoding).unwrap_or(gnmi::Encoding::Json);
+
+        // Parse every requested path before touching any snapshot so a malformed
+        // or unsupported path fails fast without a peer-manager round-trip.
+        let queries = request
+            .path
+            .iter()
+            .map(|path| {
+                let full_path = combine_paths(request.prefix.as_ref(), path)?;
+                parse_supported_path(&full_path)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Snapshot peers once per request (a multi-path Get otherwise fans out
+        // one peer-manager round-trip per neighbor path); sort once for stable
+        // ordering across the whole response.
+        let peers = if queries.iter().any(SupportedPath::needs_peers) {
+            let mut peers = (self.peer_snapshot)().await?;
+            peers.sort_by_key(|peer| peer.address);
+            Some(peers)
+        } else {
+            None
+        };
+
+        let mut notifications = Vec::with_capacity(queries.len());
+        for query in &queries {
+            let updates = self.render_query(query, peers.as_deref(), encoding)?;
             notifications.push(gnmi::Notification {
                 timestamp: now_nanos(),
                 prefix: None,
@@ -84,31 +105,37 @@ impl GnmiService {
 
         Ok(gnmi::GetResponse {
             notification: notifications,
+            // `error` is the deprecated top-level error field; per-RPC errors are
+            // returned as a gRPC `Status` instead.
+            #[allow(deprecated)]
             error: None,
             extension: Vec::new(),
         })
     }
 
-    async fn render_query(&self, query: &SupportedPath) -> Result<Vec<gnmi::Update>, Status> {
+    fn render_query(
+        &self,
+        query: &SupportedPath,
+        peers: Option<&[PeerInfo]>,
+        encoding: gnmi::Encoding,
+    ) -> Result<Vec<gnmi::Update>, Status> {
         match query {
             SupportedPath::Global { leaf } => Ok(render_global_updates(
                 self.asn,
                 &self.router_id,
                 leaf.as_ref().copied(),
+                encoding,
             )),
-            SupportedPath::Neighbor { address, leaf } => {
-                let peers = (self.peer_snapshot)().await?;
-                render_neighbor_updates(&peers, self.asn, *address, leaf.as_ref().copied())
+            SupportedPath::Neighbor { address, select } => {
+                let peers = peers.unwrap_or(&[]);
+                render_neighbor_updates(peers, self.asn, *address, *select, encoding)
             }
-            SupportedPath::AllNeighbors { leaf } => {
-                let mut peers = (self.peer_snapshot)().await?;
-                peers.sort_by_key(|peer| peer.address);
+            SupportedPath::AllNeighbors { select } => {
+                let peers = peers.unwrap_or(&[]);
                 let mut updates = Vec::new();
-                for peer in &peers {
+                for peer in peers {
                     updates.extend(render_one_neighbor_updates(
-                        peer,
-                        self.asn,
-                        leaf.as_ref().copied(),
+                        peer, self.asn, *select, encoding,
                     ));
                 }
                 Ok(updates)
@@ -161,6 +188,55 @@ enum NeighborLeaf {
     NotificationsReceived,
 }
 
+/// The set of neighbor leaves a path selects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NeighborSelect {
+    /// The full supported `state` leaf set (bare `.../neighbor[..]` or `.../state`).
+    AllState,
+    /// All `messages` counters (a bare `.../state/messages` container Get).
+    Messages,
+    /// Only the `messages/sent` counters (bare `.../messages/sent` container).
+    MessagesSent,
+    /// Only the `messages/received` counters (bare `.../messages/received`).
+    MessagesReceived,
+    /// A single specific leaf.
+    One(NeighborLeaf),
+}
+
+impl NeighborSelect {
+    /// Expand this selection into the concrete ordered list of leaves to render.
+    fn leaves(self) -> Vec<NeighborLeaf> {
+        match self {
+            NeighborSelect::AllState => vec![
+                NeighborLeaf::NeighborAddress,
+                NeighborLeaf::Enabled,
+                NeighborLeaf::PeerAs,
+                NeighborLeaf::LocalAs,
+                NeighborLeaf::SessionState,
+                NeighborLeaf::EstablishedTransitions,
+                NeighborLeaf::UpdatesSent,
+                NeighborLeaf::UpdatesReceived,
+                NeighborLeaf::NotificationsSent,
+                NeighborLeaf::NotificationsReceived,
+            ],
+            NeighborSelect::Messages => vec![
+                NeighborLeaf::UpdatesSent,
+                NeighborLeaf::UpdatesReceived,
+                NeighborLeaf::NotificationsSent,
+                NeighborLeaf::NotificationsReceived,
+            ],
+            NeighborSelect::MessagesSent => {
+                vec![NeighborLeaf::UpdatesSent, NeighborLeaf::NotificationsSent]
+            }
+            NeighborSelect::MessagesReceived => vec![
+                NeighborLeaf::UpdatesReceived,
+                NeighborLeaf::NotificationsReceived,
+            ],
+            NeighborSelect::One(leaf) => vec![leaf],
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SupportedPath {
     Global {
@@ -168,11 +244,22 @@ enum SupportedPath {
     },
     Neighbor {
         address: IpAddr,
-        leaf: Option<NeighborLeaf>,
+        select: NeighborSelect,
     },
     AllNeighbors {
-        leaf: Option<NeighborLeaf>,
+        select: NeighborSelect,
     },
+}
+
+impl SupportedPath {
+    /// Whether rendering this path requires the peer snapshot (global state is
+    /// served from static config and needs no peer-manager round-trip).
+    fn needs_peers(&self) -> bool {
+        matches!(
+            self,
+            SupportedPath::Neighbor { .. } | SupportedPath::AllNeighbors { .. }
+        )
+    }
 }
 
 fn validate_get_request(request: &gnmi::GetRequest) -> Result<(), Status> {
@@ -185,6 +272,11 @@ fn validate_get_request(request: &gnmi::GetRequest) -> Result<(), Status> {
         Status::invalid_argument(format!("unknown gNMI Get data type {}", request.r#type))
     })?;
     match data_type {
+        // gNMI `ALL` means config + state. rustbgpd has no config datastore (Set
+        // is closed; ADR-0070), so this is a state-only operational target: it
+        // serves the state subset for `ALL`/`STATE`/`OPERATIONAL`. `ALL` is the
+        // collector default, so it must not be rejected — there is simply no
+        // config half to add. `CONFIG` alone has nothing to return.
         gnmi::get_request::DataType::All
         | gnmi::get_request::DataType::State
         | gnmi::get_request::DataType::Operational => {}
@@ -208,6 +300,8 @@ fn validate_get_request(request: &gnmi::GetRequest) -> Result<(), Status> {
 }
 
 fn combine_paths(prefix: Option<&gnmi::Path>, path: &gnmi::Path) -> Result<gnmi::Path, Status> {
+    // `Path.element` is the deprecated legacy string form; we only support `PathElem`.
+    #[allow(deprecated)]
     if prefix.is_some_and(|prefix| !prefix.element.is_empty()) || !path.element.is_empty() {
         return Err(Status::invalid_argument(
             "legacy string path elements are not supported; use PathElem",
@@ -217,6 +311,7 @@ fn combine_paths(prefix: Option<&gnmi::Path>, path: &gnmi::Path) -> Result<gnmi:
     let mut elem = prefix.map_or_else(Vec::new, |prefix| prefix.elem.clone());
     elem.extend(path.elem.clone());
     Ok(gnmi::Path {
+        #[allow(deprecated)]
         element: Vec::new(),
         origin: path
             .origin
@@ -241,6 +336,8 @@ impl EmptyFallback for String {
 }
 
 fn parse_supported_path(path: &gnmi::Path) -> Result<SupportedPath, Status> {
+    // Reject the deprecated legacy string path form; structured `PathElem` only.
+    #[allow(deprecated)]
     if !path.element.is_empty() {
         return Err(Status::invalid_argument(
             "legacy string path elements are not supported; use PathElem",
@@ -254,7 +351,12 @@ fn parse_supported_path(path: &gnmi::Path) -> Result<SupportedPath, Status> {
     }
 
     let elem = &path.elem;
-    if elem.len() < 7 {
+    // The shortest supported path reaches the `bgp` container element at index 5
+    // (`network-instances/network-instance/protocols/protocol/bgp/{global,neighbors}`);
+    // a subtree Get above `/state` (e.g. `.../bgp/global`) is valid and renders
+    // the whole supported subtree, so bound-check per level rather than demanding
+    // a full leaf path.
+    if elem.len() < 6 {
         return Err(Status::unimplemented("unsupported OpenConfig path"));
     }
     expect_no_keys(&elem[0], "network-instances")?;
@@ -276,10 +378,9 @@ fn parse_supported_path(path: &gnmi::Path) -> Result<SupportedPath, Status> {
 }
 
 fn parse_global_path(tail: &[gnmi::PathElem]) -> Result<SupportedPath, Status> {
+    // A bare `.../bgp/global` subtree Get renders both supported global leaves.
     if tail.is_empty() {
-        return Err(Status::unimplemented(
-            "unsupported OpenConfig BGP global path",
-        ));
+        return Ok(SupportedPath::Global { leaf: None });
     }
     expect_no_keys(&tail[0], "state")?;
     let leaf = match tail.get(1).map(|elem| elem.name.as_str()) {
@@ -299,10 +400,12 @@ fn parse_global_path(tail: &[gnmi::PathElem]) -> Result<SupportedPath, Status> {
 }
 
 fn parse_neighbors_path(tail: &[gnmi::PathElem]) -> Result<SupportedPath, Status> {
+    // A bare `.../bgp/neighbors` subtree Get renders every neighbor's full
+    // supported leaf set.
     if tail.is_empty() {
-        return Err(Status::unimplemented(
-            "unsupported OpenConfig BGP neighbors path",
-        ));
+        return Ok(SupportedPath::AllNeighbors {
+            select: NeighborSelect::AllState,
+        });
     }
     let neighbor = &tail[0];
     if neighbor.name != "neighbor" {
@@ -328,51 +431,56 @@ fn parse_neighbors_path(tail: &[gnmi::PathElem]) -> Result<SupportedPath, Status
     }
 
     if tail.len() == 1 {
+        // A bare `.../neighbor[addr]` (or `.../neighbors/neighbor`) renders the
+        // full supported state leaf set.
         return Ok(match address {
             Some(address) => SupportedPath::Neighbor {
                 address,
-                leaf: None,
+                select: NeighborSelect::AllState,
             },
-            None => SupportedPath::AllNeighbors { leaf: None },
+            None => SupportedPath::AllNeighbors {
+                select: NeighborSelect::AllState,
+            },
         });
     }
     expect_no_keys(&tail[1], "state")?;
-    let leaf = parse_neighbor_state_leaf(&tail[2..])?;
+    let select = parse_neighbor_state_leaf(&tail[2..])?;
     Ok(match address {
-        Some(address) => SupportedPath::Neighbor { address, leaf },
-        None => SupportedPath::AllNeighbors { leaf },
+        Some(address) => SupportedPath::Neighbor { address, select },
+        None => SupportedPath::AllNeighbors { select },
     })
 }
 
-fn parse_neighbor_state_leaf(tail: &[gnmi::PathElem]) -> Result<Option<NeighborLeaf>, Status> {
+fn parse_neighbor_state_leaf(tail: &[gnmi::PathElem]) -> Result<NeighborSelect, Status> {
+    // A bare `.../state` container Get renders the full supported state leaf set.
     if tail.is_empty() {
-        return Ok(None);
+        return Ok(NeighborSelect::AllState);
     }
     let first = &tail[0];
     match first.name.as_str() {
         "neighbor-address" if tail.len() == 1 => {
             ensure_no_extra_leaf_keys(first)?;
-            Ok(Some(NeighborLeaf::NeighborAddress))
+            Ok(NeighborSelect::One(NeighborLeaf::NeighborAddress))
         }
         "enabled" if tail.len() == 1 => {
             ensure_no_extra_leaf_keys(first)?;
-            Ok(Some(NeighborLeaf::Enabled))
+            Ok(NeighborSelect::One(NeighborLeaf::Enabled))
         }
         "peer-as" if tail.len() == 1 => {
             ensure_no_extra_leaf_keys(first)?;
-            Ok(Some(NeighborLeaf::PeerAs))
+            Ok(NeighborSelect::One(NeighborLeaf::PeerAs))
         }
         "local-as" if tail.len() == 1 => {
             ensure_no_extra_leaf_keys(first)?;
-            Ok(Some(NeighborLeaf::LocalAs))
+            Ok(NeighborSelect::One(NeighborLeaf::LocalAs))
         }
         "session-state" if tail.len() == 1 => {
             ensure_no_extra_leaf_keys(first)?;
-            Ok(Some(NeighborLeaf::SessionState))
+            Ok(NeighborSelect::One(NeighborLeaf::SessionState))
         }
         "established-transitions" if tail.len() == 1 => {
             ensure_no_extra_leaf_keys(first)?;
-            Ok(Some(NeighborLeaf::EstablishedTransitions))
+            Ok(NeighborSelect::One(NeighborLeaf::EstablishedTransitions))
         }
         "messages" => parse_neighbor_messages_leaf(&tail[1..]),
         _ => Err(Status::unimplemented(
@@ -381,31 +489,36 @@ fn parse_neighbor_state_leaf(tail: &[gnmi::PathElem]) -> Result<Option<NeighborL
     }
 }
 
-fn parse_neighbor_messages_leaf(tail: &[gnmi::PathElem]) -> Result<Option<NeighborLeaf>, Status> {
+fn parse_neighbor_messages_leaf(tail: &[gnmi::PathElem]) -> Result<NeighborSelect, Status> {
+    // A bare `.../state/messages` container renders only the message counters,
+    // not the whole state subtree.
     if tail.is_empty() {
-        return Ok(None);
+        return Ok(NeighborSelect::Messages);
     }
     expect_name_no_keys(&tail[0], &["sent", "received"])?;
     match (
         tail[0].name.as_str(),
         tail.get(1).map(|elem| elem.name.as_str()),
     ) {
-        ("sent" | "received", None) => Ok(None),
+        // A bare `.../messages/sent` or `.../messages/received` container renders
+        // only that direction's counters.
+        ("sent", None) => Ok(NeighborSelect::MessagesSent),
+        ("received", None) => Ok(NeighborSelect::MessagesReceived),
         ("sent", Some("UPDATE")) if tail.len() == 2 => {
             ensure_no_extra_leaf_keys(&tail[1])?;
-            Ok(Some(NeighborLeaf::UpdatesSent))
+            Ok(NeighborSelect::One(NeighborLeaf::UpdatesSent))
         }
         ("received", Some("UPDATE")) if tail.len() == 2 => {
             ensure_no_extra_leaf_keys(&tail[1])?;
-            Ok(Some(NeighborLeaf::UpdatesReceived))
+            Ok(NeighborSelect::One(NeighborLeaf::UpdatesReceived))
         }
         ("sent", Some("NOTIFICATION")) if tail.len() == 2 => {
             ensure_no_extra_leaf_keys(&tail[1])?;
-            Ok(Some(NeighborLeaf::NotificationsSent))
+            Ok(NeighborSelect::One(NeighborLeaf::NotificationsSent))
         }
         ("received", Some("NOTIFICATION")) if tail.len() == 2 => {
             ensure_no_extra_leaf_keys(&tail[1])?;
-            Ok(Some(NeighborLeaf::NotificationsReceived))
+            Ok(NeighborSelect::One(NeighborLeaf::NotificationsReceived))
         }
         _ => Err(Status::unimplemented(
             "unsupported OpenConfig BGP neighbor message counter path",
@@ -490,14 +603,24 @@ fn ensure_no_extra_leaf_keys(elem: &gnmi::PathElem) -> Result<(), Status> {
     }
 }
 
-fn render_global_updates(asn: u32, router_id: &str, leaf: Option<GlobalLeaf>) -> Vec<gnmi::Update> {
+fn render_global_updates(
+    asn: u32,
+    router_id: &str,
+    leaf: Option<GlobalLeaf>,
+    encoding: gnmi::Encoding,
+) -> Vec<gnmi::Update> {
+    let as_update = || leaf_update(global_leaf_path("as"), &LeafValue::U32(asn), encoding);
+    let router_id_update = || {
+        leaf_update(
+            global_leaf_path("router-id"),
+            &LeafValue::Str(router_id.to_string()),
+            encoding,
+        )
+    };
     match leaf {
-        Some(GlobalLeaf::As) => vec![uint_update(global_leaf_path("as"), u64::from(asn))],
-        Some(GlobalLeaf::RouterId) => vec![string_update(global_leaf_path("router-id"), router_id)],
-        None => vec![
-            uint_update(global_leaf_path("as"), u64::from(asn)),
-            string_update(global_leaf_path("router-id"), router_id),
-        ],
+        Some(GlobalLeaf::As) => vec![as_update()],
+        Some(GlobalLeaf::RouterId) => vec![router_id_update()],
+        None => vec![as_update(), router_id_update()],
     }
 }
 
@@ -505,77 +628,52 @@ fn render_neighbor_updates(
     peers: &[PeerInfo],
     local_as: u32,
     address: IpAddr,
-    leaf: Option<NeighborLeaf>,
+    select: NeighborSelect,
+    encoding: gnmi::Encoding,
 ) -> Result<Vec<gnmi::Update>, Status> {
     let peer = peers
         .iter()
         .find(|peer| peer.address == address)
         .ok_or_else(|| Status::not_found(format!("neighbor {address} not found")))?;
-    Ok(render_one_neighbor_updates(peer, local_as, leaf))
+    Ok(render_one_neighbor_updates(
+        peer, local_as, select, encoding,
+    ))
 }
 
 fn render_one_neighbor_updates(
     peer: &PeerInfo,
     local_as: u32,
-    leaf: Option<NeighborLeaf>,
+    select: NeighborSelect,
+    encoding: gnmi::Encoding,
 ) -> Vec<gnmi::Update> {
-    let leaves = match leaf {
-        Some(leaf) => vec![leaf],
-        None => vec![
-            NeighborLeaf::NeighborAddress,
-            NeighborLeaf::Enabled,
-            NeighborLeaf::PeerAs,
-            NeighborLeaf::LocalAs,
-            NeighborLeaf::SessionState,
-            NeighborLeaf::EstablishedTransitions,
-            NeighborLeaf::UpdatesSent,
-            NeighborLeaf::UpdatesReceived,
-            NeighborLeaf::NotificationsSent,
-            NeighborLeaf::NotificationsReceived,
-        ],
-    };
-
-    leaves
+    select
+        .leaves()
         .into_iter()
-        .map(|leaf| match leaf {
-            NeighborLeaf::NeighborAddress => string_update(
-                neighbor_leaf_path(peer.address, leaf),
-                &peer.address.to_string(),
-            ),
-            NeighborLeaf::Enabled => {
-                bool_update(neighbor_leaf_path(peer.address, leaf), peer.enabled)
-            }
-            NeighborLeaf::PeerAs => uint_update(
-                neighbor_leaf_path(peer.address, leaf),
-                u64::from(peer.remote_asn),
-            ),
-            NeighborLeaf::LocalAs => {
-                uint_update(neighbor_leaf_path(peer.address, leaf), u64::from(local_as))
-            }
-            NeighborLeaf::SessionState => string_update(
-                neighbor_leaf_path(peer.address, leaf),
-                session_state_name(peer.state),
-            ),
-            NeighborLeaf::EstablishedTransitions => {
-                uint_update(neighbor_leaf_path(peer.address, leaf), peer.flap_count)
-            }
-            NeighborLeaf::UpdatesSent => {
-                uint_update(neighbor_leaf_path(peer.address, leaf), peer.updates_sent)
-            }
-            NeighborLeaf::UpdatesReceived => uint_update(
-                neighbor_leaf_path(peer.address, leaf),
-                peer.updates_received,
-            ),
-            NeighborLeaf::NotificationsSent => uint_update(
-                neighbor_leaf_path(peer.address, leaf),
-                peer.notifications_sent,
-            ),
-            NeighborLeaf::NotificationsReceived => uint_update(
-                neighbor_leaf_path(peer.address, leaf),
-                peer.notifications_received,
-            ),
+        .map(|leaf| {
+            let value = neighbor_leaf_value(peer, local_as, leaf);
+            leaf_update(neighbor_leaf_path(peer.address, leaf), &value, encoding)
         })
         .collect()
+}
+
+fn neighbor_leaf_value(peer: &PeerInfo, local_as: u32, leaf: NeighborLeaf) -> LeafValue {
+    match leaf {
+        NeighborLeaf::NeighborAddress => LeafValue::Str(peer.address.to_string()),
+        NeighborLeaf::Enabled => LeafValue::Bool(peer.enabled),
+        NeighborLeaf::PeerAs => LeafValue::U32(peer.remote_asn),
+        // `local-as` is derived from the global ASN: rustbgpd is single-AS and
+        // has no per-neighbor local-as override.
+        NeighborLeaf::LocalAs => LeafValue::U32(local_as),
+        NeighborLeaf::SessionState => LeafValue::Str(session_state_name(peer.state).to_string()),
+        // `established-transitions` is sourced from `flap_count`, which counts
+        // transitions *out of* Established — an off-by-one approximation of the
+        // OpenConfig definition (transitions *into* Established).
+        NeighborLeaf::EstablishedTransitions => LeafValue::U64(peer.flap_count),
+        NeighborLeaf::UpdatesSent => LeafValue::U64(peer.updates_sent),
+        NeighborLeaf::UpdatesReceived => LeafValue::U64(peer.updates_received),
+        NeighborLeaf::NotificationsSent => LeafValue::U64(peer.notifications_sent),
+        NeighborLeaf::NotificationsReceived => LeafValue::U64(peer.notifications_received),
+    }
 }
 
 fn session_state_name(state: SessionState) -> &'static str {
@@ -640,6 +738,7 @@ fn mounted_path(tail: &[gnmi::PathElem]) -> gnmi::Path {
     ];
     elem.extend_from_slice(tail);
     gnmi::Path {
+        #[allow(deprecated)]
         element: Vec::new(),
         origin: String::new(),
         elem,
@@ -662,6 +761,8 @@ fn keyed_pe(name: &str, key: &str, value: &str) -> gnmi::PathElem {
 }
 
 fn protocol_pe() -> gnmi::PathElem {
+    // `protocol[identifier=BGP][name=BGP]` is hardcoded: rustbgpd runs a single,
+    // conventionally-named BGP instance, so the protocol name is always `BGP`.
     gnmi::PathElem {
         name: "protocol".to_string(),
         key: HashMap::from([
@@ -671,23 +772,75 @@ fn protocol_pe() -> gnmi::PathElem {
     }
 }
 
-fn string_update(path: gnmi::Path, value: &str) -> gnmi::Update {
-    typed_update(path, gnmi::typed_value::Value::StringVal(value.to_string()))
+/// A typed `OpenConfig` leaf value, carried until it is JSON-encoded for the
+/// requested gNMI encoding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LeafValue {
+    /// A JSON-string leaf (`router-id`, `neighbor-address`, `session-state`).
+    Str(String),
+    /// A uint32 leaf rendered as a bare JSON number (`as`, `peer-as`, `local-as`).
+    U32(u32),
+    /// A uint64 leaf; RFC7951 requires uint64/int64 to be JSON *strings*
+    /// (`established-transitions`, the `messages` counters).
+    U64(u64),
+    /// A boolean leaf rendered as a JSON literal (`enabled`).
+    Bool(bool),
 }
 
-fn uint_update(path: gnmi::Path, value: u64) -> gnmi::Update {
-    typed_update(path, gnmi::typed_value::Value::UintVal(value))
+impl LeafValue {
+    /// Render this leaf as a single RFC7951 JSON value (the form used by both
+    /// `JSON_IETF` and, for this small scalar set, `JSON`).
+    fn to_json_bytes(&self) -> Vec<u8> {
+        match self {
+            LeafValue::Str(value) => json_quote(value).into_bytes(),
+            LeafValue::U32(value) => value.to_string().into_bytes(),
+            // RFC7951: 64-bit integers are encoded as JSON strings.
+            LeafValue::U64(value) => format!("\"{value}\"").into_bytes(),
+            LeafValue::Bool(value) => if *value { "true" } else { "false" }
+                .to_string()
+                .into_bytes(),
+        }
+    }
 }
 
-fn bool_update(path: gnmi::Path, value: bool) -> gnmi::Update {
-    typed_update(path, gnmi::typed_value::Value::BoolVal(value))
+/// Quote and escape a string as a JSON string literal.
+fn json_quote(value: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                // `write!` to a String is infallible.
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
-fn typed_update(path: gnmi::Path, value: gnmi::typed_value::Value) -> gnmi::Update {
+fn leaf_update(path: gnmi::Path, value: &LeafValue, encoding: gnmi::Encoding) -> gnmi::Update {
+    let json = value.to_json_bytes();
+    // The requested encoding selects which `TypedValue` oneof carries the leaf:
+    // a Get for JSON_IETF/JSON must return RFC7951/JSON bytes, not the scalar
+    // PROTO oneof variants (string_val/uint_val/bool_val).
+    let typed = match encoding {
+        gnmi::Encoding::JsonIetf => gnmi::typed_value::Value::JsonIetfVal(json),
+        _ => gnmi::typed_value::Value::JsonVal(json),
+    };
     gnmi::Update {
         path: Some(path),
+        // `value` is the deprecated pre-`TypedValue` field; we populate `val`.
+        #[allow(deprecated)]
         value: None,
-        val: Some(gnmi::TypedValue { value: Some(value) }),
+        val: Some(gnmi::TypedValue { value: Some(typed) }),
         duplicates: 0,
     }
 }
@@ -793,12 +946,21 @@ mod tests {
         })
     }
 
-    fn update_values(response: &gnmi::GetResponse) -> Vec<&gnmi::typed_value::Value> {
+    /// Decode each leaf's `JSON_IETF` value (the encoding used by `get_request`)
+    /// into its raw JSON text.
+    fn json_ietf_values(response: &gnmi::GetResponse) -> Vec<String> {
         response
             .notification
             .iter()
             .flat_map(|notification| &notification.update)
-            .map(|update| update.val.as_ref().unwrap().value.as_ref().unwrap())
+            .map(
+                |update| match update.val.as_ref().unwrap().value.as_ref().unwrap() {
+                    gnmi::typed_value::Value::JsonIetfVal(bytes) => {
+                        String::from_utf8(bytes.clone()).unwrap()
+                    }
+                    other => panic!("expected json_ietf_val, got {other:?}"),
+                },
+            )
             .collect()
     }
 
@@ -904,12 +1066,10 @@ mod tests {
             .unwrap()
             .into_inner();
 
+        // `as` is a uint32 (bare JSON number); `router-id` is a JSON string.
         assert_eq!(
-            update_values(&response),
-            vec![
-                &gnmi::typed_value::Value::UintVal(65001),
-                &gnmi::typed_value::Value::StringVal("192.0.2.1".to_string())
-            ]
+            json_ietf_values(&response),
+            vec!["65001".to_string(), "\"192.0.2.1\"".to_string()]
         );
     }
 
@@ -928,19 +1088,22 @@ mod tests {
             .into_inner();
 
         assert_eq!(response.notification[0].update.len(), 10);
+        // RFC7951: uint32 leaves (peer-as/local-as) are bare numbers; uint64
+        // counters (established-transitions, the messages counters) are quoted
+        // strings; enabled is a bool literal; address/session-state are strings.
         assert_eq!(
-            update_values(&response),
+            json_ietf_values(&response),
             vec![
-                &gnmi::typed_value::Value::StringVal("203.0.113.2".to_string()),
-                &gnmi::typed_value::Value::BoolVal(true),
-                &gnmi::typed_value::Value::UintVal(65002),
-                &gnmi::typed_value::Value::UintVal(65001),
-                &gnmi::typed_value::Value::StringVal("ESTABLISHED".to_string()),
-                &gnmi::typed_value::Value::UintVal(4),
-                &gnmi::typed_value::Value::UintVal(12),
-                &gnmi::typed_value::Value::UintVal(11),
-                &gnmi::typed_value::Value::UintVal(3),
-                &gnmi::typed_value::Value::UintVal(2)
+                "\"203.0.113.2\"".to_string(),
+                "true".to_string(),
+                "65002".to_string(),
+                "65001".to_string(),
+                "\"ESTABLISHED\"".to_string(),
+                "\"4\"".to_string(),
+                "\"12\"".to_string(),
+                "\"11\"".to_string(),
+                "\"3\"".to_string(),
+                "\"2\"".to_string(),
             ]
         );
     }
@@ -962,10 +1125,8 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        assert_eq!(
-            update_values(&response),
-            vec![&gnmi::typed_value::Value::UintVal(12)]
-        );
+        // A uint64 counter is a quoted JSON string under RFC7951.
+        assert_eq!(json_ietf_values(&response), vec!["\"12\"".to_string()]);
     }
 
     #[tokio::test]
@@ -980,12 +1141,10 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert_eq!(
-            update_values(&response),
-            vec![&gnmi::typed_value::Value::UintVal(65001)]
-        );
+        assert_eq!(json_ietf_values(&response), vec!["65001".to_string()]);
 
         let alias_path = gnmi::Path {
+            #[allow(deprecated)]
             element: Vec::new(),
             origin: String::new(),
             target: String::new(),
@@ -1015,10 +1174,8 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_eq!(
-            update_values(&response),
-            vec![&gnmi::typed_value::Value::StringVal(
-                "192.0.2.1".to_string()
-            )]
+            json_ietf_values(&response),
+            vec!["\"192.0.2.1\"".to_string()]
         );
     }
 
@@ -1056,5 +1213,185 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(malformed.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn leaf_values_render_rfc7951_json() {
+        let json = |value: LeafValue| String::from_utf8(value.to_json_bytes()).unwrap();
+        // String leaf → quoted JSON string.
+        assert_eq!(
+            json(LeafValue::Str("ESTABLISHED".to_string())),
+            "\"ESTABLISHED\""
+        );
+        // uint32 leaf → bare JSON number.
+        assert_eq!(json(LeafValue::U32(65001)), "65001");
+        // uint64 leaf → quoted JSON string (RFC7951).
+        assert_eq!(json(LeafValue::U64(42)), "\"42\"");
+        // bool leaf → JSON literal.
+        assert_eq!(json(LeafValue::Bool(true)), "true");
+        assert_eq!(json(LeafValue::Bool(false)), "false");
+        // Strings are escaped.
+        assert_eq!(json(LeafValue::Str("a\"b\\c".to_string())), r#""a\"b\\c""#);
+    }
+
+    #[tokio::test]
+    async fn get_uses_requested_encoding_oneof() {
+        // JSON_IETF → json_ietf_val.
+        let response = test_service(Vec::new())
+            .get(get_request(mounted_path(&[
+                pe("bgp"),
+                pe("global"),
+                pe("state"),
+                pe("as"),
+            ])))
+            .await
+            .unwrap()
+            .into_inner();
+        let value = response.notification[0].update[0]
+            .val
+            .as_ref()
+            .unwrap()
+            .value
+            .clone()
+            .unwrap();
+        assert_eq!(
+            value,
+            gnmi::typed_value::Value::JsonIetfVal(b"65001".to_vec())
+        );
+
+        // JSON → json_val.
+        let json_request = Request::new(gnmi::GetRequest {
+            prefix: None,
+            path: vec![mounted_path(&[
+                pe("bgp"),
+                pe("global"),
+                pe("state"),
+                pe("as"),
+            ])],
+            r#type: gnmi::get_request::DataType::State as i32,
+            encoding: gnmi::Encoding::Json as i32,
+            use_models: Vec::new(),
+            extension: Vec::new(),
+        });
+        let response = test_service(Vec::new())
+            .get(json_request)
+            .await
+            .unwrap()
+            .into_inner();
+        let value = response.notification[0].update[0]
+            .val
+            .as_ref()
+            .unwrap()
+            .value
+            .clone()
+            .unwrap();
+        assert_eq!(value, gnmi::typed_value::Value::JsonVal(b"65001".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn get_bgp_global_subtree_renders_both_leaves() {
+        let response = test_service(Vec::new())
+            .get(get_request(mounted_path(&[pe("bgp"), pe("global")])))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            json_ietf_values(&response),
+            vec!["65001".to_string(), "\"192.0.2.1\"".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn get_bgp_neighbors_subtree_renders_all_neighbors() {
+        let peers = vec![
+            test_peer("203.0.113.2".parse().unwrap()),
+            test_peer("203.0.113.3".parse().unwrap()),
+        ];
+        let response = test_service(peers)
+            .get(get_request(mounted_path(&[pe("bgp"), pe("neighbors")])))
+            .await
+            .unwrap()
+            .into_inner();
+        // Two neighbors, ten supported state leaves each.
+        assert_eq!(response.notification[0].update.len(), 20);
+        // First leaf of each neighbor is its (sorted) address.
+        let values = json_ietf_values(&response);
+        assert_eq!(values[0], "\"203.0.113.2\"".to_string());
+        assert_eq!(values[10], "\"203.0.113.3\"".to_string());
+    }
+
+    #[tokio::test]
+    async fn get_messages_container_renders_only_counters() {
+        let peer = test_peer("203.0.113.2".parse().unwrap());
+        let response = test_service(vec![peer])
+            .get(get_request(mounted_path(&[
+                pe("bgp"),
+                pe("neighbors"),
+                keyed_pe("neighbor", "neighbor-address", "203.0.113.2"),
+                pe("state"),
+                pe("messages"),
+            ])))
+            .await
+            .unwrap()
+            .into_inner();
+        // Only the four message counters (updates sent/received, notifications
+        // sent/received) — not the full state subtree.
+        assert_eq!(response.notification[0].update.len(), 4);
+        assert_eq!(
+            json_ietf_values(&response),
+            vec![
+                "\"12\"".to_string(),
+                "\"11\"".to_string(),
+                "\"3\"".to_string(),
+                "\"2\"".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_path_get_snapshots_peers_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = Arc::clone(&calls);
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            calls_clone.fetch_add(1, Ordering::SeqCst);
+            async move { Ok(vec![test_peer("203.0.113.2".parse().unwrap())]) }
+        });
+
+        let request = Request::new(gnmi::GetRequest {
+            prefix: None,
+            path: vec![
+                mounted_path(&[
+                    pe("bgp"),
+                    pe("neighbors"),
+                    keyed_pe("neighbor", "neighbor-address", "203.0.113.2"),
+                    pe("state"),
+                ]),
+                mounted_path(&[pe("bgp"), pe("neighbors")]),
+            ],
+            r#type: gnmi::get_request::DataType::All as i32,
+            encoding: gnmi::Encoding::JsonIetf as i32,
+            use_models: Vec::new(),
+            extension: Vec::new(),
+        });
+        service.get(request).await.unwrap();
+        // Two neighbor paths, but the peer snapshot is fetched exactly once.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn global_only_get_does_not_snapshot_peers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = Arc::clone(&calls);
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            calls_clone.fetch_add(1, Ordering::SeqCst);
+            async move { Ok(Vec::new()) }
+        });
+        service
+            .get(get_request(mounted_path(&[pe("bgp"), pe("global")])))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }
