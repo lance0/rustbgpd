@@ -552,9 +552,12 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 
 ```bash
 rustbgpctl neighbor 10.0.0.5 add --asn 65005 --description "new-peer"
+rustbgpctl neighbor 203.0.113.2 add --asn 65002 --role provider --strict-role
 ```
 
-The peer is persisted to the config file automatically.
+The peer is persisted to the config file automatically. `--role` enables RFC
+9234 BGP Roles / OTC route-leak protection for static eBGP peers; the optional
+`--strict-role` flag rejects peers that do not advertise a compatible Role.
 
 ### Remove a peer
 

@@ -167,6 +167,7 @@ In production with the systemd unit, the default UDS path
 ```bash
 # Add a peer at runtime (persisted to config file automatically)
 rustbgpctl neighbor 10.0.0.5 add --asn 65005
+rustbgpctl neighbor 203.0.113.2 add --asn 65002 --role provider --strict-role
 rustbgpctl neighbor fe80::5054:ff:fe00:1%eth1 add --asn 65101
 
 # Explain why a route was selected as best

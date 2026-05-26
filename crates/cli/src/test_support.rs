@@ -413,6 +413,8 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
                 remove_private_as: String::new(),
                 peer_group: String::new(),
                 route_server_client: true,
+                role: "rs".to_string(),
+                strict_role: true,
                 add_path_receive: true,
                 add_path_send: true,
                 add_path_send_max: 4,
@@ -429,6 +431,10 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             last_error: String::new(),
             is_dynamic: false,
             stale: false,
+            local_role: "rs".to_string(),
+            remote_role: "rs-client".to_string(),
+            role_negotiated: true,
+            otc_routes_blocked: 0,
         }))
     }
 

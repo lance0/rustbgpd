@@ -366,6 +366,7 @@ mod tests {
             last_error: String::new(),
             is_dynamic: false,
             stale: false,
+            ..Default::default()
         }
     }
 

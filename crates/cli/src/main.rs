@@ -385,6 +385,12 @@ enum NeighborAction {
         /// Enable transparent route-server client mode (eBGP only)
         #[arg(long)]
         route_server_client: bool,
+        /// Local BGP Role for RFC 9234 route-leak protection
+        #[arg(long, value_name = "ROLE")]
+        role: Option<String>,
+        /// Require the peer to advertise a compatible BGP Role capability
+        #[arg(long)]
+        strict_role: bool,
         /// Enable Add-Path receive
         #[arg(long)]
         add_path_receive: bool,
@@ -911,6 +917,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     max_prefixes,
                     families,
                     route_server_client,
+                    role,
+                    strict_role,
                     add_path_receive,
                     add_path_send,
                     add_path_send_max,
@@ -926,6 +934,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                         max_prefixes,
                         families,
                         route_server_client,
+                        role,
+                        strict_role,
                         add_path_receive,
                         add_path_send,
                         add_path_send_max,
@@ -1596,15 +1606,26 @@ mod tests {
             "add",
             "--asn",
             "65001",
+            "--role",
+            "provider",
+            "--strict-role",
         ])
         .unwrap();
         if let Command::Neighbor {
             address: Some(addr),
-            action: Some(NeighborAction::Add { asn, .. }),
+            action:
+                Some(NeighborAction::Add {
+                    asn,
+                    role,
+                    strict_role,
+                    ..
+                }),
         } = cli.command
         {
             assert_eq!(addr, "10.0.0.1");
             assert_eq!(asn, 65001);
+            assert_eq!(role.as_deref(), Some("provider"));
+            assert!(strict_role);
         } else {
             panic!("expected Neighbor Add command");
         }

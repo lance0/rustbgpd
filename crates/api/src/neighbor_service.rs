@@ -4,7 +4,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use rustbgpd_transport::RemovePrivateAs;
-use rustbgpd_wire::{Afi, Safi};
+use rustbgpd_wire::{Afi, BgpRole, Safi};
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
@@ -142,6 +142,34 @@ fn remove_private_as_to_string(mode: RemovePrivateAs) -> String {
     }
 }
 
+fn bgp_role_to_string(role: Option<BgpRole>) -> String {
+    match role {
+        Some(BgpRole::Provider) => "provider".to_string(),
+        Some(BgpRole::RouteServer) => "rs".to_string(),
+        Some(BgpRole::RouteServerClient) => "rs-client".to_string(),
+        Some(BgpRole::Customer) => "customer".to_string(),
+        Some(BgpRole::Peer) => "peer".to_string(),
+        None => String::new(),
+    }
+}
+
+fn parse_bgp_role_proto(role: &str) -> Result<Option<BgpRole>, Status> {
+    let role = role.trim();
+    if role.is_empty() {
+        return Ok(None);
+    }
+    match role {
+        "provider" => Ok(Some(BgpRole::Provider)),
+        "rs" | "route_server" => Ok(Some(BgpRole::RouteServer)),
+        "rs-client" | "route_server_client" => Ok(Some(BgpRole::RouteServerClient)),
+        "customer" => Ok(Some(BgpRole::Customer)),
+        "peer" => Ok(Some(BgpRole::Peer)),
+        other => Err(Status::invalid_argument(format!(
+            "unknown BGP role {other:?}, expected provider, rs, rs-client, customer, or peer"
+        ))),
+    }
+}
+
 fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
     let families = info
         .families
@@ -160,6 +188,8 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         remove_private_as: remove_private_as_to_string(info.remove_private_as),
         peer_group: info.peer_group.clone().unwrap_or_default(),
         route_server_client: info.route_server_client,
+        role: bgp_role_to_string(info.local_role),
+        strict_role: info.strict_role,
         add_path_receive: info.add_path_receive,
         add_path_send: info.add_path_send,
         add_path_send_max: info.add_path_send_max,
@@ -188,6 +218,10 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         last_error: info.last_error.clone(),
         is_dynamic: info.is_dynamic,
         stale: info.stale,
+        local_role: bgp_role_to_string(info.local_role),
+        remote_role: bgp_role_to_string(info.remote_role),
+        role_negotiated: info.role_negotiated,
+        otc_routes_blocked: info.otc_routes_blocked,
     }
 }
 
@@ -259,6 +293,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
 
         let families = parse_families_proto(&config.families)?;
         let remove_private_as = parse_remove_private_as_proto(&config.remove_private_as)?;
+        let local_role = parse_bgp_role_proto(&config.role)?;
         if remove_private_as != RemovePrivateAs::Disabled && config.remote_asn == self.local_asn {
             return Err(Status::invalid_argument(format!(
                 "remove_private_as requires eBGP (remote_asn {} == local asn {})",
@@ -270,6 +305,15 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
                 "route_server_client requires eBGP (remote_asn {} == local asn {})",
                 config.remote_asn, self.local_asn
             )));
+        }
+        if local_role.is_some() && config.remote_asn == self.local_asn {
+            return Err(Status::invalid_argument(format!(
+                "role requires eBGP (remote_asn {} == local asn {})",
+                config.remote_asn, self.local_asn
+            )));
+        }
+        if config.strict_role && local_role.is_none() {
+            return Err(Status::invalid_argument("strict_role requires role"));
         }
 
         let peer_config = PeerManagerNeighborConfig {
@@ -312,8 +356,8 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             add_path_receive: config.add_path_receive,
             add_path_send: config.add_path_send,
             add_path_send_max: config.add_path_send_max,
-            local_role: None,
-            strict_role: false,
+            local_role,
+            strict_role: config.strict_role,
             import_policy: None,
             export_policy: None,
         };
@@ -936,6 +980,10 @@ mod tests {
                     families: vec![(Afi::Ipv4, Safi::Unicast)],
                     remove_private_as: RemovePrivateAs::Disabled,
                     route_server_client: false,
+                    local_role: None,
+                    strict_role: false,
+                    remote_role: None,
+                    role_negotiated: false,
                     add_path_receive: false,
                     add_path_send: false,
                     add_path_send_max: 0,
@@ -943,6 +991,7 @@ mod tests {
                     updates_sent: 0,
                     notifications_received: 0,
                     notifications_sent: 0,
+                    otc_routes_blocked: 0,
                     flap_count: 0,
                     uptime_secs: 0,
                     last_error: String::new(),
@@ -986,6 +1035,10 @@ mod tests {
             families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
             remove_private_as: RemovePrivateAs::All,
             route_server_client: false,
+            local_role: Some(BgpRole::RouteServer),
+            strict_role: true,
+            remote_role: Some(BgpRole::RouteServerClient),
+            role_negotiated: true,
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,
@@ -993,6 +1046,7 @@ mod tests {
             updates_sent: 0,
             notifications_received: 0,
             notifications_sent: 0,
+            otc_routes_blocked: 3,
             flap_count: 0,
             uptime_secs: 0,
             last_error: String::new(),
@@ -1003,6 +1057,12 @@ mod tests {
         let config = state.config.unwrap();
         assert_eq!(config.families, vec!["ipv4_unicast", "ipv6_unicast"]);
         assert_eq!(config.remove_private_as, "all");
+        assert_eq!(config.role, "rs");
+        assert!(config.strict_role);
+        assert_eq!(state.local_role, "rs");
+        assert_eq!(state.remote_role, "rs-client");
+        assert!(state.role_negotiated);
+        assert_eq!(state.otc_routes_blocked, 3);
     }
 
     #[tokio::test]
@@ -1126,5 +1186,51 @@ mod tests {
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("route_server_client"));
+    }
+
+    #[tokio::test]
+    async fn add_neighbor_rejects_role_on_ibgp() {
+        let svc = make_service();
+        let req = Request::new(proto::AddNeighborRequest {
+            config: Some(proto::NeighborConfig {
+                address: "10.0.0.2".into(),
+                interface: String::new(),
+                remote_asn: 65001,
+                description: String::new(),
+                hold_time: 90,
+                max_prefixes: 0,
+                families: Vec::new(),
+                peer_group: String::new(),
+                remove_private_as: String::new(),
+                role: "peer".into(),
+                ..Default::default()
+            }),
+        });
+        let err = svc.add_neighbor(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("role"));
+    }
+
+    #[tokio::test]
+    async fn add_neighbor_rejects_strict_role_without_role() {
+        let svc = make_service();
+        let req = Request::new(proto::AddNeighborRequest {
+            config: Some(proto::NeighborConfig {
+                address: "10.0.0.2".into(),
+                interface: String::new(),
+                remote_asn: 65002,
+                description: String::new(),
+                hold_time: 90,
+                max_prefixes: 0,
+                families: Vec::new(),
+                peer_group: String::new(),
+                remove_private_as: String::new(),
+                strict_role: true,
+                ..Default::default()
+            }),
+        });
+        let err = svc.add_neighbor(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("strict_role"));
     }
 }

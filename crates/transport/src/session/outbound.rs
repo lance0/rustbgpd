@@ -412,11 +412,7 @@ impl PeerSession {
                     prefix = %route.prefix,
                     "not advertising unicast route with OTC to Provider/Peer/RouteServer"
                 );
-                self.metrics.record_otc_routes_blocked(
-                    &self.peer_label,
-                    "egress_to_upstream_via_otc",
-                    1,
-                );
+                self.record_otc_routes_blocked("egress_to_upstream_via_otc", 1);
                 continue;
             }
             let nh_override = update.next_hop_override.get(i).and_then(|o| o.as_ref());

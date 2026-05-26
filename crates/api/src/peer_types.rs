@@ -934,6 +934,14 @@ pub struct PeerInfo {
     pub remove_private_as: RemovePrivateAs,
     /// Whether this eBGP peer is a transparent route-server client.
     pub route_server_client: bool,
+    /// Locally configured BGP Role, if advertised.
+    pub local_role: Option<BgpRole>,
+    /// Require a compatible remote BGP Role.
+    pub strict_role: bool,
+    /// Remote BGP Role advertised in OPEN, if present in the current session.
+    pub remote_role: Option<BgpRole>,
+    /// True when both sides advertised compatible BGP Roles.
+    pub role_negotiated: bool,
     /// Add-Path receive enabled.
     pub add_path_receive: bool,
     /// Add-Path send enabled.
@@ -948,6 +956,8 @@ pub struct PeerInfo {
     pub notifications_received: u64,
     /// Total NOTIFICATION messages sent.
     pub notifications_sent: u64,
+    /// Number of unicast route announcements blocked by RFC 9234 OTC rules.
+    pub otc_routes_blocked: u64,
     /// Number of Established→non-Established transitions.
     pub flap_count: u64,
     /// Seconds since last Established transition (0 if never).

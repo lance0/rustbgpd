@@ -91,6 +91,11 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             add_path_receive: cfg.map(|c| c.add_path_receive).unwrap_or(false),
             add_path_send: cfg.map(|c| c.add_path_send).unwrap_or(false),
             add_path_send_max: cfg.map(|c| c.add_path_send_max).unwrap_or(0),
+            role: cfg.map(|c| c.role.clone()).unwrap_or_default(),
+            strict_role: cfg.map(|c| c.strict_role).unwrap_or(false),
+            remote_role: n.remote_role.clone(),
+            role_negotiated: n.role_negotiated,
+            otc_routes_blocked: n.otc_routes_blocked,
         };
         println!(
             "{}",
@@ -130,6 +135,24 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             "Route Server Client:   {}",
             cfg.map(|c| c.route_server_client).unwrap_or(false)
         );
+        let role = cfg.map(|c| c.role.as_str()).unwrap_or("");
+        if !role.is_empty() {
+            println!("BGP Role:              {role}");
+            println!(
+                "Strict Role:           {}",
+                cfg.map(|c| c.strict_role).unwrap_or(false)
+            );
+            let remote_role = n.remote_role.as_str();
+            println!(
+                "Remote Role:           {}",
+                if remote_role.is_empty() {
+                    "not advertised"
+                } else {
+                    remote_role
+                }
+            );
+            println!("Role Negotiated:       {}", n.role_negotiated);
+        }
         println!(
             "Add-Path Receive:      {}",
             cfg.map(|c| c.add_path_receive).unwrap_or(false)
@@ -156,6 +179,7 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
         println!("Updates Sent:          {}", n.updates_sent);
         println!("Notifications Received:{}", n.notifications_received);
         println!("Notifications Sent:    {}", n.notifications_sent);
+        println!("OTC Routes Blocked:    {}", n.otc_routes_blocked);
         println!("Flap Count:            {}", n.flap_count);
         if !n.last_error.is_empty() {
             println!("Last Error:            {}", n.last_error);
@@ -171,6 +195,8 @@ pub struct AddNeighborOpts {
     pub max_prefixes: Option<u32>,
     pub families: Vec<String>,
     pub route_server_client: bool,
+    pub role: Option<String>,
+    pub strict_role: bool,
     pub add_path_receive: bool,
     pub add_path_send: bool,
     pub add_path_send_max: u32,
@@ -198,6 +224,8 @@ pub async fn add(
                 peer_group: String::new(),
                 remove_private_as: String::new(),
                 route_server_client: opts.route_server_client,
+                role: opts.role.unwrap_or_default(),
+                strict_role: opts.strict_role,
                 add_path_receive: opts.add_path_receive,
                 add_path_send: opts.add_path_send,
                 add_path_send_max: opts.add_path_send_max,
@@ -353,6 +381,8 @@ mod tests {
                 max_prefixes: Some(1000),
                 families: vec!["ipv4_unicast".to_string(), "ipv6_unicast".to_string()],
                 route_server_client: true,
+                role: Some("rs".to_string()),
+                strict_role: true,
                 add_path_receive: true,
                 add_path_send: true,
                 add_path_send_max: 4,
@@ -364,6 +394,8 @@ mod tests {
 
         let request = server.state.last_add_neighbor.lock().await.clone().unwrap();
         assert!(request.route_server_client);
+        assert_eq!(request.role, "rs");
+        assert!(request.strict_role);
         assert!(request.add_path_receive);
         assert!(request.add_path_send);
         assert_eq!(request.add_path_send_max, 4);
