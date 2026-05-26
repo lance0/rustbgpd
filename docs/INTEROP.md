@@ -5,6 +5,10 @@ every milestone. "Tested" means validated by a documented containerlab
 or privileged-netns procedure, not "someone tried it once." CI-gated rows
 are called out explicitly.
 
+> For the end-to-end install + lifecycle walkthrough (containerlab
+> quick-start with `m0-frr.clab.yml` is in there), see
+> [`deployment.md`](deployment.md).
+
 ---
 
 ## Test Matrix

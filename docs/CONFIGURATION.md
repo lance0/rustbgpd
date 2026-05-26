@@ -17,6 +17,10 @@ all peers are managed via gRPC.
 > which are restart-required, and which are rejected at parse time, see
 > [`reload-matrix.md`](reload-matrix.md). This page documents *what* each
 > field means; the matrix documents *when* a change takes effect.
+>
+> **Deploying it.** For the end-to-end install + lifecycle walkthrough
+> (systemd setup, Docker, containerlab quick-start, upgrade, observability),
+> see [`deployment.md`](deployment.md).
 
 ---
 
