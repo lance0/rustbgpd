@@ -613,7 +613,7 @@ async fn run_tcp_listener(
         interceptor.clone(),
     ));
     routes.add_service(GlobalServiceServer::with_interceptor(
-        GlobalService::new(access_mode, asn, router_id, listen_port),
+        GlobalService::new(access_mode, asn, router_id.clone(), listen_port),
         interceptor.clone(),
     ));
     routes.add_service(ConfigServiceServer::with_interceptor(
@@ -640,7 +640,7 @@ async fn run_tcp_listener(
             access_mode,
             start_time,
             metrics.clone(),
-            peer_mgr_tx,
+            peer_mgr_tx.clone(),
             rib_query_tx,
             rpc_shutdown_tx,
             mrt_trigger_tx,
@@ -649,7 +649,7 @@ async fn run_tcp_listener(
     ));
     if tls_enabled {
         routes.add_service(GNmiServer::with_interceptor(
-            GnmiService,
+            GnmiService::new(asn, router_id.clone(), peer_mgr_tx.clone()),
             interceptor.clone(),
         ));
     }
@@ -769,7 +769,7 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(GlobalServiceServer::with_interceptor(
-        GlobalService::new(access_mode, asn, router_id, listen_port),
+        GlobalService::new(access_mode, asn, router_id.clone(), listen_port),
         interceptor.clone(),
     ));
     routes.add_service(ConfigServiceServer::with_interceptor(
@@ -796,14 +796,17 @@ async fn run_uds_listener(
             access_mode,
             start_time,
             metrics.clone(),
-            peer_mgr_tx,
+            peer_mgr_tx.clone(),
             rib_query_tx,
             rpc_shutdown_tx,
             mrt_trigger_tx,
         ),
         interceptor.clone(),
     ));
-    routes.add_service(GNmiServer::with_interceptor(GnmiService, interceptor));
+    routes.add_service(GNmiServer::with_interceptor(
+        GnmiService::new(asn, router_id, peer_mgr_tx.clone()),
+        interceptor,
+    ));
 
     let result = Server::builder()
         .layer(GrpcAuthzLayer::new(audit_context, metrics.clone()))
