@@ -208,6 +208,28 @@ scope for SIGHUP reload today.
 | `[security.grpc.mutating_authz]` | restart-required | |
 | `[security.grpc.operator_only_authz]` | restart-required | |
 
+## `[event_history]` (ADR-0072)
+
+The durable event-history outbox is configured once at startup and
+its lifecycle (open / quarantine / sidecar) is fixed for the
+process. Hot-reload of the outbox config is a P1 nice-to-have;
+v1 pins every field as restart-required and surfaces the change as
+an `ERROR`-level log line during reload so operators see exactly
+what's deferred.
+
+| Field | Class | Notes |
+|---|---|---|
+| `enabled` | restart-required | Toggles spawning the `EventHistoryManager` actor and opening `events.db`. Off ⇒ live broadcasts only, no persistence. |
+| `required` | restart-required | If `true`, the daemon fails to start when the events DB cannot be opened or recovered. Default `false`: degrade to pass-through with `bgp_event_outbox_degraded = 1`. |
+| `path` | restart-required | Relative to `runtime_state_dir`. Empty ⇒ `<runtime_state_dir>/events.db`. |
+| `max_events` | restart-required | Hard count cap; default 100,000. Retention sweeps every 60s evict oldest `event_id` first. |
+| `max_bytes` | restart-required | Hard byte cap on `events.db` + WAL combined; default 256 MB. |
+| `synchronous` | restart-required | SQLite `PRAGMA synchronous` mode. `full` (default) fsyncs per commit; `normal` checkpoints periodically and trades a small crash window for throughput. |
+| `overflow` | restart-required | v1 only supports `drop`; `block` is reserved for a future ADR. |
+| `queue_capacity` | restart-required | Per-producer mpsc capacity. |
+| `batch_size` | restart-required | Batch-commit size threshold. |
+| `batch_interval_ms` | restart-required | Batch-commit time threshold. |
+
 ## Rejected configurations (parse-time)
 
 These are the `ConfigError` variants in `src/config/validation.rs` that

@@ -195,6 +195,28 @@ impl Config {
         self.runtime_state_dir().join("grpc.sock")
     }
 
+    /// Resolved path for the durable event-history outbox (ADR-0072).
+    /// Honors `[event_history].path` when set; defaults to
+    /// `<runtime_state_dir>/events.db`. Consumed by PR3+ when the
+    /// daemon wires up the `EventHistoryManager` actor; PR2 ships
+    /// the accessor so the config / validation surface lands
+    /// together with the schema.
+    #[must_use]
+    #[allow(dead_code)] // wired in PR3+
+    pub fn event_history_db_path(&self) -> PathBuf {
+        let configured = &self.event_history.path;
+        if configured.is_empty() {
+            self.runtime_state_dir().join("events.db")
+        } else {
+            let p = PathBuf::from(configured);
+            if p.is_absolute() {
+                p
+            } else {
+                self.runtime_state_dir().join(p)
+            }
+        }
+    }
+
     /// Resolve the effective cluster ID.
     ///
     /// Returns `Some` if explicitly configured, or if any neighbor is an RR client

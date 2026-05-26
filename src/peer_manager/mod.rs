@@ -266,6 +266,7 @@ impl PeerManager {
                 fib_tables: Vec::new(),
                 bfd_profiles: Vec::new(),
                 apply_bum_enforcement: false,
+                event_history: crate::config::EventHistoryConfig::default(),
             },
         )
     }

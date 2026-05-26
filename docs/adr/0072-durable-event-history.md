@@ -273,23 +273,47 @@ columns are decoded scratch space. Foreign keys stay OFF for
 ingest throughput; retention `DELETE` against `events`
 explicitly deletes from `event_peers` in the same transaction.
 
-`payload` is the prost-encoded `BgpEvent` envelope — identical wire
-format to what `WatchEvents` already delivers over gRPC. No separate
-codec.
+`payload` is **producer-encoded opaque bytes** from EHM's
+perspective. The producer is responsible for encoding its own
+event shape (eventually the prost-encoded `BgpEvent` envelope;
+PR2 accepts any opaque `Vec<u8>` so test fixtures don't need the
+proto type). EHM does not decode the payload; it never has to.
 
-**Encoding-order invariant.** `BgpEvent.event_id` is part of the
-envelope, so the encoded payload bytes depend on the assigned ID.
-Inside the storage transaction the order is **strict**:
+**Architectural rationale for opaque payload (PR2 refinement).**
+The original draft of this ADR had EHM mutate the in-memory
+`BgpEvent`, stamp the `event_id`, and re-encode inside the
+storage transaction. That sequence forced a build-time dependency
+from `rustbgpd-event-history` onto `rustbgpd-api` (the proto-
+source crate), which would create a circular dep when producers
+in `rustbgpd-rib` and the PeerManager (in the top-level
+`rustbgpd` binary crate) eventually wire up — both already depend
+on `rustbgpd-api`. PR2 broke the cycle by making EHM payload-
+agnostic: the producer encodes its own event with whatever shape
+it wants, hands EHM opaque bytes plus the indexable scalar
+fields, and EHM persists + broadcasts those exact bytes. The
+`event_id` is delivered to subscribers via the `CommittedEvent`
+wrapper struct (which carries the durable id + the unchanged
+producer envelope), **not** by mutating the payload bytes. PR4
+and PR5 producers can still stamp `event_id` into a structured
+field of their own envelope post-commit if they want a self-
+describing payload — but that's an upstream-of-EHM concern that
+doesn't touch the storage contract.
 
-1. Receive in-memory `BgpEvent` from the producer with
-   `event_id == 0`.
-2. Allocate `event_id` (the read-increment-update against
-   `metadata.last_event_id`).
-3. Mutate the in-memory envelope to carry the assigned ID.
-4. Encode the mutated envelope to bytes **once**.
-5. INSERT those exact bytes as `payload`.
-6. After the transaction commits, broadcast those same bytes (or
-   a deserialized clone) on the EHM-owned broadcast sender.
+**Byte-equality invariant.** The bytes the producer hands EHM in
+`EventEnvelope.payload` are byte-identical to:
+
+- the `payload` BLOB in the SQLite `events` row, and
+- the `payload` field on the `CommittedEvent` delivered to live
+  broadcast subscribers.
+
+So a live subscriber and a `SubscribeFromEvent` replay subscriber
+observing the same `event_id` see byte-identical payloads. Pinned
+by `payload_bytes_identical_persisted_and_broadcast` in
+`crates/event-history/tests/byte_equality.rs`. PR3 (the cursor
+gRPC surface) and PR4/PR5 (producer wiring) build on this
+property — breaking it would silently re-introduce the "history
+says one thing, live stream said another" bug class the outbox
+exists to prevent.
 
 The bytes persisted to SQLite and the bytes (or struct) handed to
 broadcast subscribers are byte-identical, so a live subscriber and
