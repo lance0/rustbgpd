@@ -1,0 +1,114 @@
+# Containerlab topology: rustbgpd ↔ FRR + raw-BGP fixture (M55 — ADR-0071)
+#
+# Validates RFC 9234 BGP Roles + Only-to-Customer against FRR 10.3.1 and a
+# deliberately non-compliant raw speaker for leak/malformed OTC injection:
+#
+#   * compatible Role pairs establish: Provider↔Customer, RS↔RS-Client,
+#     Peer↔Peer;
+#   * incompatible Provider↔Provider and strict-without-remote-role fail closed;
+#   * rustbgpd Provider egress adds OTC for a route sent to an FRR Customer;
+#   * raw Customer ingress with OTC is rejected as a leak while the session stays
+#     up;
+#   * raw malformed OTC length is treated as withdraw for announcements while
+#     withdrawals in the same UPDATE still apply.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m55-bgp-roles-otc-frr.clab.yml
+#   bash tests/interop/scripts/test-m55-bgp-roles-otc-frr.sh
+#   containerlab destroy -t tests/interop/m55-bgp-roles-otc-frr.clab.yml --cleanup
+
+name: m55-bgp-roles-otc-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m55-bgp-roles-otc.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.55.1.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.55.2.1/24 dev eth2
+        - ip link set eth2 up
+        - ip addr add 10.55.3.1/24 dev eth3
+        - ip link set eth3 up
+        - ip addr add 10.55.4.1/24 dev eth4
+        - ip link set eth4 up
+        - ip addr add 10.55.5.1/24 dev eth5
+        - ip link set eth5 up
+        - ip addr add 10.55.6.1/24 dev eth6
+        - ip link set eth6 up
+      env:
+        RUST_LOG: info
+
+    frr-customer:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m55-customer.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.55.1.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-rsclient:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m55-rsclient.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.55.2.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-peer:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m55-peer.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.55.3.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-mismatch:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m55-mismatch.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.55.4.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-norole:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m55-norole.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.55.5.2/24 dev eth1
+        - ip link set eth1 up
+
+    raw-customer:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      cmd: sleep infinity
+      binds:
+        - ./scripts/m55_raw_bgp.py:/usr/local/bin/m55_raw_bgp.py:ro
+      exec:
+        - ip addr add 10.55.6.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr-customer:eth1"]
+    - endpoints: ["rustbgpd:eth2", "frr-rsclient:eth1"]
+    - endpoints: ["rustbgpd:eth3", "frr-peer:eth1"]
+    - endpoints: ["rustbgpd:eth4", "frr-mismatch:eth1"]
+    - endpoints: ["rustbgpd:eth5", "frr-norole:eth1"]
+    - endpoints: ["rustbgpd:eth6", "raw-customer:eth1"]
