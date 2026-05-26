@@ -5,10 +5,10 @@ use std::future::Future;
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustbgpd_fsm::SessionState;
-use tokio_stream::Stream;
+use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 
 use crate::gnmi;
@@ -17,6 +17,9 @@ use crate::peer_types::{PeerInfo, PeerManagerCommand};
 const GNMI_VERSION: &str = "0.10.0";
 const DEFAULT_NETWORK_INSTANCE: &str = "DEFAULT";
 const DEFAULT_PROTOCOL_NAME: &str = "BGP";
+const MAX_SUBSCRIPTIONS: usize = 16;
+const SUBSCRIBE_CHANNEL_DEPTH: usize = 16;
+const MIN_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
 type PeerSnapshotFuture = Pin<Box<dyn Future<Output = Result<Vec<PeerInfo>, Status>> + Send>>;
 type PeerSnapshotFn = Arc<dyn Fn() -> PeerSnapshotFuture + Send + Sync>;
@@ -142,6 +145,49 @@ impl GnmiService {
             }
         }
     }
+
+    async fn render_subscription_snapshot(
+        &self,
+        plan: &SubscriptionPlan,
+        include_sync: bool,
+    ) -> Result<Vec<gnmi::SubscribeResponse>, Status> {
+        let mut updates = Vec::new();
+        if !plan.updates_only {
+            // Snapshot peers once per snapshot/tick (the subscription may carry
+            // multiple neighbor paths; otherwise each path fans out its own
+            // peer-manager round-trip). Global-only plans skip the snapshot.
+            let peers = if plan.paths.iter().any(SupportedPath::needs_peers) {
+                let mut peers = (self.peer_snapshot)().await?;
+                peers.sort_by_key(|peer| peer.address);
+                Some(peers)
+            } else {
+                None
+            };
+            for query in &plan.paths {
+                updates.extend(self.render_query(query, peers.as_deref(), plan.encoding)?);
+            }
+        }
+
+        let mut responses = Vec::new();
+        if !updates.is_empty() {
+            responses.push(gnmi::SubscribeResponse {
+                response: Some(gnmi::subscribe_response::Response::Update(
+                    gnmi::Notification {
+                        timestamp: now_nanos(),
+                        prefix: None,
+                        update: updates,
+                        delete: Vec::new(),
+                        atomic: false,
+                    },
+                )),
+                extension: Vec::new(),
+            });
+        }
+        if include_sync {
+            responses.push(sync_response());
+        }
+        Ok(responses)
+    }
 }
 
 fn supported_models() -> Vec<gnmi::ModelData> {
@@ -262,6 +308,15 @@ impl SupportedPath {
     }
 }
 
+#[derive(Clone, Debug)]
+struct SubscriptionPlan {
+    mode: gnmi::subscription_list::Mode,
+    paths: Vec<SupportedPath>,
+    updates_only: bool,
+    sample_interval: Duration,
+    encoding: gnmi::Encoding,
+}
+
 fn validate_get_request(request: &gnmi::GetRequest) -> Result<(), Status> {
     if request.path.is_empty() {
         return Err(Status::invalid_argument(
@@ -287,15 +342,94 @@ fn validate_get_request(request: &gnmi::GetRequest) -> Result<(), Status> {
         }
     }
 
-    let encoding = gnmi::Encoding::try_from(request.encoding).map_err(|_| {
-        Status::invalid_argument(format!("unknown gNMI encoding {}", request.encoding))
-    })?;
+    validate_encoding(request.encoding)
+}
+
+fn validate_encoding(raw: i32) -> Result<(), Status> {
+    let encoding = gnmi::Encoding::try_from(raw)
+        .map_err(|_| Status::invalid_argument(format!("unknown gNMI encoding {raw}")))?;
     match encoding {
         gnmi::Encoding::Json | gnmi::Encoding::JsonIetf => Ok(()),
         _ => Err(Status::unimplemented(format!(
             "gNMI encoding {} is not supported",
             encoding.as_str_name()
         ))),
+    }
+}
+
+fn parse_subscription_list(list: &gnmi::SubscriptionList) -> Result<SubscriptionPlan, Status> {
+    validate_encoding(list.encoding)?;
+    let encoding = gnmi::Encoding::try_from(list.encoding)
+        .map_err(|_| Status::invalid_argument(format!("unknown gNMI encoding {}", list.encoding)))?;
+    let mode = gnmi::subscription_list::Mode::try_from(list.mode)
+        .map_err(|_| Status::invalid_argument(format!("unknown Subscribe mode {}", list.mode)))?;
+    if list.subscription.is_empty() {
+        return Err(Status::invalid_argument(
+            "gNMI Subscribe requires at least one subscription",
+        ));
+    }
+    if list.subscription.len() > MAX_SUBSCRIPTIONS {
+        return Err(Status::invalid_argument(format!(
+            "gNMI Subscribe supports at most {MAX_SUBSCRIPTIONS} paths",
+        )));
+    }
+
+    let mut paths = Vec::with_capacity(list.subscription.len());
+    let mut sample_interval = MIN_SAMPLE_INTERVAL;
+    for subscription in &list.subscription {
+        validate_subscription_mode(mode, subscription)?;
+        let path = subscription
+            .path
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("subscription path is required"))?;
+        let full_path = combine_paths(list.prefix.as_ref(), path)?;
+        paths.push(parse_supported_path(&full_path)?);
+
+        if mode == gnmi::subscription_list::Mode::Stream {
+            let requested = if subscription.sample_interval == 0 {
+                MIN_SAMPLE_INTERVAL
+            } else {
+                Duration::from_nanos(subscription.sample_interval)
+            };
+            sample_interval = sample_interval.min(requested.max(MIN_SAMPLE_INTERVAL));
+        }
+    }
+
+    Ok(SubscriptionPlan {
+        mode,
+        paths,
+        updates_only: list.updates_only,
+        sample_interval,
+        encoding,
+    })
+}
+
+fn validate_subscription_mode(
+    list_mode: gnmi::subscription_list::Mode,
+    subscription: &gnmi::Subscription,
+) -> Result<(), Status> {
+    let mode = gnmi::SubscriptionMode::try_from(subscription.mode).map_err(|_| {
+        Status::invalid_argument(format!("unknown subscription mode {}", subscription.mode))
+    })?;
+    match list_mode {
+        gnmi::subscription_list::Mode::Once | gnmi::subscription_list::Mode::Poll => {
+            if mode == gnmi::SubscriptionMode::OnChange {
+                Err(Status::unimplemented(
+                    "gNMI Subscribe ON_CHANGE is not supported",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        gnmi::subscription_list::Mode::Stream => match mode {
+            gnmi::SubscriptionMode::Sample => Ok(()),
+            gnmi::SubscriptionMode::OnChange => Err(Status::unimplemented(
+                "gNMI Subscribe ON_CHANGE is not supported",
+            )),
+            gnmi::SubscriptionMode::TargetDefined => Err(Status::unimplemented(
+                "gNMI Subscribe TARGET_DEFINED is not supported",
+            )),
+        },
     }
 }
 
@@ -845,6 +979,13 @@ fn leaf_update(path: gnmi::Path, value: &LeafValue, encoding: gnmi::Encoding) ->
     }
 }
 
+fn sync_response() -> gnmi::SubscribeResponse {
+    gnmi::SubscribeResponse {
+        response: Some(gnmi::subscribe_response::Response::SyncResponse(true)),
+        extension: Vec::new(),
+    }
+}
+
 fn now_nanos() -> i64 {
     let Ok(duration) = SystemTime::now().duration_since(UNIX_EPOCH) else {
         return 0;
@@ -884,11 +1025,103 @@ impl gnmi::g_nmi_server::GNmi for GnmiService {
 
     async fn subscribe(
         &self,
-        _request: Request<tonic::Streaming<gnmi::SubscribeRequest>>,
+        request: Request<tonic::Streaming<gnmi::SubscribeRequest>>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
-        Err(Status::unimplemented(
-            "gNMI Subscribe is not implemented in this slice",
-        ))
+        let mut inbound = request.into_inner();
+        let first = inbound
+            .message()
+            .await?
+            .ok_or_else(|| Status::invalid_argument("missing initial Subscribe request"))?;
+        let list = match first.request {
+            Some(gnmi::subscribe_request::Request::Subscribe(list)) => list,
+            Some(gnmi::subscribe_request::Request::Poll(_)) => {
+                return Err(Status::invalid_argument(
+                    "first Subscribe request must carry a subscription list",
+                ));
+            }
+            None => return Err(Status::invalid_argument("empty Subscribe request")),
+        };
+        let plan = parse_subscription_list(&list)?;
+
+        match plan.mode {
+            gnmi::subscription_list::Mode::Once => {
+                let responses = self.render_subscription_snapshot(&plan, true).await?;
+                Ok(Response::new(Box::pin(tokio_stream::iter(
+                    responses.into_iter().map(Ok),
+                ))))
+            }
+            gnmi::subscription_list::Mode::Poll => {
+                let service = self.clone();
+                let (tx, rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+                tokio::spawn(async move {
+                    if tx.send(Ok(sync_response())).await.is_err() {
+                        return;
+                    }
+                    loop {
+                        match inbound.message().await {
+                            Ok(Some(gnmi::SubscribeRequest {
+                                request: Some(gnmi::subscribe_request::Request::Poll(_)),
+                                ..
+                            })) => match service.render_subscription_snapshot(&plan, true).await {
+                                Ok(responses) => {
+                                    for response in responses {
+                                        if tx.send(Ok(response)).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    let _ = tx.send(Err(err)).await;
+                                    return;
+                                }
+                            },
+                            Ok(Some(_)) => {
+                                let _ = tx
+                                    .send(Err(Status::invalid_argument(
+                                        "POLL subscription accepts only Poll requests after setup",
+                                    )))
+                                    .await;
+                                return;
+                            }
+                            Ok(None) => return,
+                            Err(err) => {
+                                let _ = tx.send(Err(err)).await;
+                                return;
+                            }
+                        }
+                    }
+                });
+                Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+            }
+            gnmi::subscription_list::Mode::Stream => {
+                let service = self.clone();
+                let (tx, rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+                tokio::spawn(async move {
+                    let mut include_sync = true;
+                    loop {
+                        match service
+                            .render_subscription_snapshot(&plan, include_sync)
+                            .await
+                        {
+                            Ok(responses) => {
+                                for response in responses {
+                                    if tx.send(Ok(response)).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                let _ = tx.send(Err(err)).await;
+                                return;
+                            }
+                        }
+                        include_sync = false;
+                        tokio::time::sleep(plan.sample_interval).await;
+                    }
+                });
+                Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+            }
+        }
     }
 }
 
@@ -962,6 +1195,29 @@ mod tests {
                 },
             )
             .collect()
+    }
+
+    fn subscription_list(
+        mode: gnmi::subscription_list::Mode,
+        subscription_mode: gnmi::SubscriptionMode,
+        path: gnmi::Path,
+    ) -> gnmi::SubscriptionList {
+        gnmi::SubscriptionList {
+            prefix: None,
+            subscription: vec![gnmi::Subscription {
+                path: Some(path),
+                mode: subscription_mode as i32,
+                sample_interval: 0,
+                suppress_redundant: false,
+                heartbeat_interval: 0,
+            }],
+            qos: None,
+            mode: mode as i32,
+            allow_aggregation: false,
+            use_models: Vec::new(),
+            encoding: gnmi::Encoding::JsonIetf as i32,
+            updates_only: false,
+        }
     }
 
     #[tokio::test]
@@ -1393,5 +1649,97 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn subscribe_plan_accepts_once_poll_and_sample() {
+        let path = mounted_path(&[pe("bgp"), pe("global"), pe("state")]);
+
+        let once = parse_subscription_list(&subscription_list(
+            gnmi::subscription_list::Mode::Once,
+            gnmi::SubscriptionMode::TargetDefined,
+            path.clone(),
+        ))
+        .unwrap();
+        assert_eq!(once.mode, gnmi::subscription_list::Mode::Once);
+
+        let poll = parse_subscription_list(&subscription_list(
+            gnmi::subscription_list::Mode::Poll,
+            gnmi::SubscriptionMode::TargetDefined,
+            path.clone(),
+        ))
+        .unwrap();
+        assert_eq!(poll.mode, gnmi::subscription_list::Mode::Poll);
+
+        let stream = parse_subscription_list(&subscription_list(
+            gnmi::subscription_list::Mode::Stream,
+            gnmi::SubscriptionMode::Sample,
+            path,
+        ))
+        .unwrap();
+        assert_eq!(stream.mode, gnmi::subscription_list::Mode::Stream);
+        assert_eq!(stream.sample_interval, MIN_SAMPLE_INTERVAL);
+    }
+
+    #[test]
+    fn subscribe_plan_rejects_on_change_target_defined_and_too_many_paths() {
+        let path = mounted_path(&[pe("bgp"), pe("global"), pe("state")]);
+        let on_change = parse_subscription_list(&subscription_list(
+            gnmi::subscription_list::Mode::Stream,
+            gnmi::SubscriptionMode::OnChange,
+            path.clone(),
+        ))
+        .unwrap_err();
+        assert_eq!(on_change.code(), tonic::Code::Unimplemented);
+
+        let target_defined = parse_subscription_list(&subscription_list(
+            gnmi::subscription_list::Mode::Stream,
+            gnmi::SubscriptionMode::TargetDefined,
+            path.clone(),
+        ))
+        .unwrap_err();
+        assert_eq!(target_defined.code(), tonic::Code::Unimplemented);
+
+        let mut too_many = subscription_list(
+            gnmi::subscription_list::Mode::Once,
+            gnmi::SubscriptionMode::TargetDefined,
+            path.clone(),
+        );
+        too_many.subscription = (0..=MAX_SUBSCRIPTIONS)
+            .map(|_| gnmi::Subscription {
+                path: Some(path.clone()),
+                mode: gnmi::SubscriptionMode::TargetDefined as i32,
+                sample_interval: 0,
+                suppress_redundant: false,
+                heartbeat_interval: 0,
+            })
+            .collect();
+        let err = parse_subscription_list(&too_many).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn subscribe_snapshot_reuses_get_renderer_and_emits_sync() {
+        let service = test_service(Vec::new());
+        let plan = parse_subscription_list(&subscription_list(
+            gnmi::subscription_list::Mode::Once,
+            gnmi::SubscriptionMode::TargetDefined,
+            mounted_path(&[pe("bgp"), pe("global"), pe("state")]),
+        ))
+        .unwrap();
+
+        let responses = service
+            .render_subscription_snapshot(&plan, true)
+            .await
+            .unwrap();
+        assert_eq!(responses.len(), 2);
+        assert!(matches!(
+            responses[0].response,
+            Some(gnmi::subscribe_response::Response::Update(_))
+        ));
+        assert_eq!(
+            responses[1].response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
     }
 }
