@@ -2009,10 +2009,12 @@ Vector, journald, custom) over the existing gRPC event-stream
 RPCs; rustbgpd itself does not try to be an event bus.
 
 **Default-on.** Operators who want zero on-disk footprint can opt
-out via `enabled = false`. The outbox is bounded — `max_events`
-and `max_bytes` are hard caps, whichever fires first — so the
-default cannot grow more than ~256 MB under the
-`<runtime_state_dir>/events.db` (+ WAL) path.
+out via `enabled = false`. The outbox is bounded by a hard
+`max_events` count cap plus a `max_bytes` retention trigger. SQLite
+reuses freed pages after DELETE and does not guarantee that the main
+database file immediately shrinks without a future compaction pass, so
+`max_bytes` is an operational target rather than a strict filesystem
+ceiling in v1.
 
 All fields are restart-required; see
 [reload-matrix.md](reload-matrix.md#event_history-adr-0072) for
@@ -2024,7 +2026,7 @@ enabled = true                  # default; set false for minimal deployments
 required = false                # if true, daemon fails to start when DB unrecoverable
 path = ""                       # relative to runtime_state_dir; "" = events.db
 max_events = 100_000            # hard count cap
-max_bytes = 256_000_000         # hard byte cap (events.db + WAL)
+max_bytes = 256_000_000         # byte retention target (events.db + WAL)
 synchronous = "full"            # full = fsync per commit; normal trades crash window for throughput
 overflow = "drop"               # v1 only supports "drop"; "block" reserved for a future ADR
 queue_capacity = 4096           # per-producer mpsc capacity
@@ -2038,11 +2040,13 @@ When the events DB fails to open or is corrupted:
 
 - The bad file is renamed to `events.db.stale` (matches the
   `*.json.stale` convention from `fib-owned.json`).
-- The allocator anchor is recovered via a 3-step ladder: primary
-  DB metadata → quarantine fallback → `events.last_id` sidecar
-  (written atomically every batch).
-- If **all three** fail AND a prior `events.db.stale` exists, EHM
-  enters pass-through (`required = false`) or refuses to start
+- The allocator anchor is recovered via authoritative DB metadata:
+  primary DB metadata, then quarantine fallback. `events.last_id` is
+  written as a diagnostic hint, but it may lag committed events and is
+  not used to resume allocation in v1.
+- If both authoritative sources fail AND prior allocation evidence
+  exists (`events.db.stale` or `events.last_id`), EHM enters
+  pass-through (`required = false`) or refuses to start
   (`required = true`). The allocator never restarts at 1 silently.
 - `bgp_event_outbox_degraded` flips to `1` and does not auto-
   clear in v1; operator restarts to clear.

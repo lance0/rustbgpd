@@ -707,7 +707,7 @@ impl BgpMetrics {
 
         let event_outbox_db_size_bytes = IntGauge::new(
             "bgp_event_outbox_db_size_bytes",
-            "Combined size of events.db + WAL on disk. Capped by the [event_history].max_bytes retention bound.",
+            "Combined size of events.db + WAL on disk. The [event_history].max_bytes setting is a retention trigger/target, not a strict filesystem cap.",
         )
         .expect("valid metric definition");
 

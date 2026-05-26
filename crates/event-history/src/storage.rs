@@ -11,6 +11,7 @@
 //! [`crate::lib`] holds the only [`StoreHandle`]; broadcast subscribers
 //! never call into storage.
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -18,7 +19,7 @@ use std::sync::Arc;
 // append so payload bytes aren't cloned a second time on the
 // broadcast side.
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, params, types::Type};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -29,7 +30,7 @@ use crate::quarantine::{
     quarantine_db, read_quarantine_allocator, read_sidecar, sidecar_path, stale_path, write_sidecar,
 };
 use crate::sequence::Allocator;
-use crate::{Category, EventEnvelope, Severity};
+use crate::{Category, EventEnvelope, Severity, SynchronousMode};
 
 /// Operations the async side can send to the blocking storage thread.
 pub(crate) enum StoreOp {
@@ -101,9 +102,9 @@ pub(crate) struct RetentionOutcome {
     pub db_size_bytes: u64,
 }
 
-/// Filter for [`StoreOp::Query`]. Each field is optional; `None` means
-/// "any." Public so PR3's cursor API and PR2's tests can construct one;
-/// the storage-thread internals are still private.
+/// Filter for persisted-event queries. Each field is optional; `None`
+/// means "any." Public so PR3's cursor API and PR2's tests can
+/// construct one; the storage-thread internals are still private.
 #[derive(Debug, Default, Clone)]
 pub struct QueryFilter {
     pub category: Option<Category>,
@@ -227,15 +228,22 @@ impl StoreHandle {
 pub(crate) fn spawn_store(
     path: PathBuf,
     daemon_boot_id: Arc<str>,
+    synchronous: SynchronousMode,
     capacity: usize,
 ) -> Result<(StoreHandle, JoinHandle<()>, StorageInit), EventHistoryError> {
-    let init = open_with_recovery(&path)?;
+    let init = open_with_recovery(&path, synchronous)?;
     let (tx, rx) = mpsc::channel(capacity);
     let path_clone = path.clone();
     let boot_id_clone = daemon_boot_id.clone();
     let initial_allocator = init.initial_allocator;
     let join = tokio::task::spawn_blocking(move || {
-        run_storage_thread(path_clone, boot_id_clone, initial_allocator, rx);
+        run_storage_thread(
+            path_clone,
+            boot_id_clone,
+            initial_allocator,
+            synchronous,
+            rx,
+        );
     });
     Ok((StoreHandle { tx }, join, init))
 }
@@ -250,22 +258,26 @@ pub(crate) struct StorageInit {
     /// The allocator value loaded from the live DB (after any
     /// quarantine + recovery). For a brand-new DB this is 0.
     pub initial_allocator: u64,
-    /// True if the allocator was seeded from the quarantine or sidecar
-    /// fallback rather than the primary DB.
+    /// True if the allocator was seeded from the quarantine fallback
+    /// rather than the primary DB.
     pub recovered_via_fallback: bool,
 }
 
 /// Open the events DB at `path`, applying the recovery ladder (primary
-/// → quarantine → sidecar). On success, returns the in-memory snapshot
-/// of how recovery resolved. On failure, returns an error.
+/// → quarantine). On success, returns the in-memory snapshot of how
+/// recovery resolved. On failure, returns an error.
 ///
 /// Implementation notes:
 /// - We open the DB twice in the success path (first to probe, second
 ///   inside the blocking thread). The probe is cheap; doing it on the
 ///   async side keeps the error path off the blocking thread.
-/// - If the primary fails to open, we attempt the quarantine + sidecar
-///   reads before creating a fresh DB.
-fn open_with_recovery(path: &Path) -> Result<StorageInit, EventHistoryError> {
+/// - If the primary fails to open, we attempt quarantine metadata before
+///   creating a fresh DB. The sidecar is a diagnostic hint only because
+///   it can lag committed events.
+fn open_with_recovery(
+    path: &Path,
+    synchronous: SynchronousMode,
+) -> Result<StorageInit, EventHistoryError> {
     // Ensure parent dir exists. Matches the create_dir_all pattern in
     // src/fib_runtime.rs:1157.
     if let Some(parent) = path.parent()
@@ -280,28 +292,31 @@ fn open_with_recovery(path: &Path) -> Result<StorageInit, EventHistoryError> {
     let sidecar = sidecar_path(path);
     let stale = stale_path(path);
 
-    // STALE-ONLY GUARD (Codex review finding): when a previous start
+    // STALE/SIDECAR-ONLY GUARD (Codex review finding): when a previous start
     // quarantined `events.db` and the daemon exited before producing a
     // replacement, the next start would see no primary file. The plain
     // `Connection::open(path)` below WOULD CREATE a fresh empty DB and
     // `bootstrap` would seed `last_event_id = 0` — silently violating
     // the never-reused contract because prior IDs were already issued
-    // (proven by the stale file's existence).
+    // (proven by the stale file's existence). A sidecar without a DB is
+    // also evidence of prior allocation; because the sidecar is only a
+    // diagnostic hint, we refuse instead of using it as authority.
     //
     // Detect this state up front and run the recovery ladder BEFORE
     // any create-capable open. If the ladder can't recover an anchor,
     // surface `PassThrough` instead of restarting at 1.
-    if !path.exists() && stale.exists() {
+    if !path.exists() && (stale.exists() || sidecar.exists()) {
         warn!(
             events_db = %path.display(),
             stale = %stale.display(),
-            "primary DB missing but stale quarantine exists; entering recovery ladder before create"
+            sidecar = %sidecar.display(),
+            "primary DB missing but prior allocator evidence exists; entering recovery ladder before create"
         );
-        return recover_after_quarantine(path, &stale, &sidecar);
+        return recover_after_quarantine(path, &stale, &sidecar, synchronous);
     }
 
     // Try the primary path.
-    match probe_open(path) {
+    match probe_open(path, synchronous) {
         Ok(allocator) => Ok(StorageInit {
             had_quarantine: false,
             initial_allocator: allocator,
@@ -318,16 +333,17 @@ fn open_with_recovery(path: &Path) -> Result<StorageInit, EventHistoryError> {
             // (covers the case where probe_open failed without
             // creating a file).
             quarantine_db(path)?;
-            recover_after_quarantine(path, &stale, &sidecar)
+            recover_after_quarantine(path, &stale, &sidecar, synchronous)
         }
     }
 }
 
 /// Allocator-recovery ladder, applied AFTER a quarantine (whether the
 /// quarantine just happened or was left over from a prior process).
-/// Reads from the quarantine first, then the sidecar; if both fail
-/// AND a stale file exists, returns [`EventHistoryError::PassThrough`]
-/// rather than seeding a fresh DB with `last_event_id = 0`.
+/// Reads from the quarantine; if it fails AND a stale file or sidecar
+/// exists, returns [`EventHistoryError::PassThrough`] rather than
+/// seeding a fresh DB with `last_event_id = 0`. The sidecar is ignored
+/// for allocator authority because it can lag committed events.
 ///
 /// Only creates the new primary DB when there IS a recoverable anchor
 /// (or when no stale file is present, i.e. truly fresh install).
@@ -335,18 +351,27 @@ fn recover_after_quarantine(
     path: &Path,
     stale: &Path,
     sidecar: &Path,
+    synchronous: SynchronousMode,
 ) -> Result<StorageInit, EventHistoryError> {
-    let fallback = read_quarantine_allocator(stale).or_else(|| read_sidecar(sidecar));
+    let quarantine_anchor = read_quarantine_allocator(stale);
+    let sidecar_hint = read_sidecar(sidecar);
 
-    let fresh_anchor = match fallback {
+    let fresh_anchor = match quarantine_anchor {
         Some(v) => v,
         None => {
-            // No anchor recoverable. If a stale file exists, we KNOW
-            // prior IDs were issued — refusing here protects the
-            // never-reused promise. Caller decides what to do
-            // (required=true ⇒ fail-start, required=false ⇒ pass-
-            // through with degraded flag — see EventHistoryManager).
-            if stale.exists() {
+            // No authoritative anchor recoverable. If a stale file or
+            // sidecar exists, we KNOW prior IDs may have been issued —
+            // refusing here protects the never-reused promise. Caller
+            // decides what to do (required=true ⇒ fail-start,
+            // required=false ⇒ pass-through with degraded flag — see
+            // EventHistoryManager).
+            if stale.exists() || sidecar.exists() {
+                if let Some(sidecar_value) = sidecar_hint {
+                    warn!(
+                        sidecar_value,
+                        "ignoring sidecar allocator hint because it may lag committed events"
+                    );
+                }
                 return Err(EventHistoryError::PassThrough);
             }
             // Truly fresh install — no stale, no sidecar, no DB.
@@ -358,7 +383,7 @@ fn recover_after_quarantine(
     // Open (or create) the primary DB and seed its allocator to the
     // recovered anchor.
     let mut conn = Connection::open(path).map_err(EventHistoryError::Sqlite)?;
-    bootstrap(&mut conn)?;
+    bootstrap(&mut conn, synchronous)?;
     conn.execute(
         "UPDATE metadata SET value = ?1 WHERE key = ?2",
         params![fresh_anchor.to_string(), META_LAST_EVENT_ID],
@@ -367,7 +392,7 @@ fn recover_after_quarantine(
     Ok(StorageInit {
         had_quarantine: true,
         initial_allocator: fresh_anchor,
-        recovered_via_fallback: fallback.is_some(),
+        recovered_via_fallback: quarantine_anchor.is_some(),
     })
 }
 
@@ -379,9 +404,9 @@ fn recover_after_quarantine(
 /// for the stale-only-state guard that prevents an unexpected create
 /// from masking a quarantined state. Callers outside `open_with_recovery`
 /// must enforce that guard themselves.
-fn probe_open(path: &Path) -> Result<u64, EventHistoryError> {
+fn probe_open(path: &Path, synchronous: SynchronousMode) -> Result<u64, EventHistoryError> {
     let mut conn = Connection::open(path).map_err(EventHistoryError::Sqlite)?;
-    bootstrap(&mut conn)?;
+    bootstrap(&mut conn, synchronous)?;
     crate::sequence::read_allocator(&conn)?
         .ok_or_else(|| EventHistoryError::AllocatorCorrupt("missing post-bootstrap".to_string()))
 }
@@ -391,6 +416,7 @@ fn run_storage_thread(
     path: PathBuf,
     daemon_boot_id: Arc<str>,
     initial_allocator: u64,
+    synchronous: SynchronousMode,
     mut rx: mpsc::Receiver<StoreOp>,
 ) {
     let mut conn = match Connection::open(&path) {
@@ -400,7 +426,7 @@ fn run_storage_thread(
             return;
         }
     };
-    if let Err(e) = bootstrap(&mut conn) {
+    if let Err(e) = bootstrap(&mut conn, synchronous) {
         error!(error = %e, "storage thread bootstrap failed; exiting");
         return;
     }
@@ -580,8 +606,10 @@ fn query_by_peer(
                 e.afi_safi, e.prefix, e.rd, e.evpn_route_type,
                 e.severity, e.daemon_boot_id, e.payload_codec, e.payload
          FROM events e
-         JOIN event_peers ep ON ep.event_id = e.event_id
-         WHERE ep.peer = ?1
+         WHERE EXISTS (
+               SELECT 1 FROM event_peers ep
+               WHERE ep.event_id = e.event_id AND ep.peer = ?1
+         )
            AND e.event_id > ?2
            AND e.event_id <= ?3",
     );
@@ -695,10 +723,14 @@ fn clamp_event_id(value: u64) -> i64 {
 fn persisted_row_mapper(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedEvent> {
     let category_raw: String = row.get(2)?;
     let severity_raw: String = row.get(11)?;
+    let category = Category::parse(&category_raw)
+        .ok_or_else(|| invalid_enum_error(2, "category", &category_raw))?;
+    let severity = Severity::parse(&severity_raw)
+        .ok_or_else(|| invalid_enum_error(11, "severity", &severity_raw))?;
     Ok(PersistedEvent {
         event_id: row.get::<_, i64>(0)? as u64,
         timestamp_ns: row.get(1)?,
-        category: Category::parse(&category_raw).unwrap_or(Category::Route),
+        category,
         event_type: row.get(3)?,
         peer: row.get(4)?,
         previous_peer: row.get(5)?,
@@ -707,11 +739,22 @@ fn persisted_row_mapper(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedEv
         prefix: row.get(8)?,
         rd: row.get(9)?,
         evpn_route_type: row.get(10)?,
-        severity: Severity::parse(&severity_raw).unwrap_or(Severity::Info),
+        severity,
         daemon_boot_id: row.get(12)?,
         payload_codec: row.get(13)?,
         payload: row.get(14)?,
     })
+}
+
+fn invalid_enum_error(column: usize, name: &'static str, value: &str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        column,
+        Type::Text,
+        Box::new(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid event-history {name}: {value:?}"),
+        )),
+    )
 }
 
 fn retain_blocking(
@@ -733,9 +776,11 @@ fn retain_blocking(
         outcome.evicted_count_cap = evict_oldest(conn, to_evict as usize)?;
     }
 
-    // 2. Byte cap. Loop because one DELETE LIMIT pass may not get us
-    //    under the bound on a heavily-overweight DB; cap at 10
-    //    passes per retention call to bound worst-case work.
+    // 2. Byte retention target. DELETE frees pages for SQLite reuse but
+    //    does not guarantee the main DB file immediately shrinks. Loop
+    //    because one DELETE LIMIT pass may not reduce row pressure enough
+    //    on a heavily-overweight DB; cap at 10 passes per retention call
+    //    to bound worst-case work.
     for _ in 0..10 {
         let size = file_size(db_path);
         outcome.db_size_bytes = size;

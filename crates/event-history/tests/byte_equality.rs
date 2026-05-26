@@ -162,3 +162,86 @@ async fn payload_with_internal_zeros_and_high_bytes_survives_intact() {
 
     manager.shutdown().await;
 }
+
+#[tokio::test]
+async fn peer_filter_deduplicates_same_peer_in_multiple_roles() {
+    let dir = TempDir::new().unwrap();
+    let cfg = EventHistoryConfig {
+        path: dir.path().join("events.db"),
+        batch_interval: Duration::from_millis(5),
+        ..EventHistoryConfig::default()
+    };
+    let manager = EventHistoryManager::start(cfg).await.unwrap();
+    let peer = "192.0.2.10".parse().unwrap();
+
+    let env = EventEnvelope {
+        timestamp_ns: 0,
+        category: Category::Route,
+        event_type: "best-changed".to_string(),
+        peers: EnvelopePeers {
+            peer: Some(peer),
+            previous_peer: Some(peer),
+            target_peer: Some(peer),
+        },
+        afi_safi: Some("ipv4-unicast".to_string()),
+        prefix: Some("203.0.113.0/24".to_string()),
+        rd: None,
+        evpn_route_type: None,
+        severity: Severity::Info,
+        payload_codec: PayloadCodec::Opaque,
+        payload: vec![1, 2, 3],
+    };
+    manager.sender().try_send(env).unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let persisted = manager
+        .query_persisted(
+            0,
+            u64::MAX,
+            10,
+            QueryFilter {
+                peer: Some(peer.to_string()),
+                ..QueryFilter::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].event_id, 1);
+
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn byte_cap_retention_evicts_oldest_rows_but_is_soft_size_target() {
+    let dir = TempDir::new().unwrap();
+    let cfg = EventHistoryConfig {
+        path: dir.path().join("events.db"),
+        batch_interval: Duration::from_millis(5),
+        retention_interval: Duration::from_millis(10),
+        max_events: 10_000,
+        max_bytes: 1,
+        ..EventHistoryConfig::default()
+    };
+    let manager = EventHistoryManager::start(cfg).await.unwrap();
+
+    for i in 0..20_u8 {
+        let mut env = make_envelope(i);
+        env.payload = vec![i; 4096];
+        manager.sender().try_send(env).unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let persisted = manager
+        .query_persisted(0, u64::MAX, 100, QueryFilter::default())
+        .await
+        .unwrap();
+
+    assert!(
+        persisted.len() < 20,
+        "byte-cap retention should evict rows even though SQLite file size is only a soft target"
+    );
+
+    manager.shutdown().await;
+}

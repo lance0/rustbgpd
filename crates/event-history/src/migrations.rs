@@ -11,7 +11,7 @@
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::error::EventHistoryError;
+use crate::{SynchronousMode, error::EventHistoryError};
 
 /// Schema version this daemon understands. Bumped on every schema-shape
 /// change (new column, new index, new table). Downgrading the daemon
@@ -48,8 +48,11 @@ pub(crate) const META_CREATED_AT_UNIX: &str = "created_at_unix";
 ///
 /// Called by [`crate::storage`] inside `spawn_blocking`; this function
 /// is synchronous.
-pub(crate) fn bootstrap(conn: &mut Connection) -> Result<(), EventHistoryError> {
-    apply_pragmas(conn)?;
+pub(crate) fn bootstrap(
+    conn: &mut Connection,
+    synchronous: SynchronousMode,
+) -> Result<(), EventHistoryError> {
+    apply_pragmas(conn, synchronous)?;
 
     // The metadata table is the version anchor. If it doesn't exist,
     // this is a fresh DB and we bootstrap everything.
@@ -87,11 +90,11 @@ pub(crate) fn bootstrap(conn: &mut Connection) -> Result<(), EventHistoryError> 
 
 /// Apply the PRAGMAs the ADR-0072 storage section requires. Idempotent
 /// on every open.
-fn apply_pragmas(conn: &Connection) -> Result<(), EventHistoryError> {
+fn apply_pragmas(conn: &Connection, synchronous: SynchronousMode) -> Result<(), EventHistoryError> {
     // SQLite returns the resolved mode for journal_mode pragmas; we ignore the
     // value and only care that the call succeeds.
     conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "synchronous", "FULL")?;
+    conn.pragma_update(None, "synchronous", synchronous.as_pragma())?;
     conn.pragma_update(None, "busy_timeout", 5000_i32)?;
     conn.pragma_update(None, "foreign_keys", "OFF")?;
     conn.pragma_update(None, "wal_autocheckpoint", 1000_i32)?;
@@ -197,7 +200,7 @@ mod tests {
     #[test]
     fn first_init_creates_schema_at_current_version() {
         let mut conn = open_in_memory();
-        bootstrap(&mut conn).unwrap();
+        bootstrap(&mut conn, SynchronousMode::Full).unwrap();
         let version = read_schema_version(&conn).unwrap();
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
 
@@ -215,15 +218,15 @@ mod tests {
     #[test]
     fn reopening_existing_db_is_noop() {
         let mut conn = open_in_memory();
-        bootstrap(&mut conn).unwrap();
+        bootstrap(&mut conn, SynchronousMode::Full).unwrap();
         // Second bootstrap on the same connection must not error.
-        bootstrap(&mut conn).unwrap();
+        bootstrap(&mut conn, SynchronousMode::Full).unwrap();
     }
 
     #[test]
     fn higher_on_disk_version_refuses() {
         let mut conn = open_in_memory();
-        bootstrap(&mut conn).unwrap();
+        bootstrap(&mut conn, SynchronousMode::Full).unwrap();
         // Spoof a higher version directly into metadata.
         conn.execute(
             "UPDATE metadata SET value = ?1 WHERE key = ?2",
@@ -233,14 +236,14 @@ mod tests {
             ],
         )
         .unwrap();
-        let err = bootstrap(&mut conn).unwrap_err();
+        let err = bootstrap(&mut conn, SynchronousMode::Full).unwrap_err();
         assert!(matches!(err, EventHistoryError::SchemaDowngrade { .. }));
     }
 
     #[test]
     fn indexes_exist_after_first_init() {
         let mut conn = open_in_memory();
-        bootstrap(&mut conn).unwrap();
+        bootstrap(&mut conn, SynchronousMode::Full).unwrap();
         let mut stmt = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='index'")
             .unwrap();
@@ -261,5 +264,16 @@ mod tests {
                 "missing index {required}; have {names:?}"
             );
         }
+    }
+
+    #[test]
+    fn synchronous_mode_is_applied() {
+        let mut conn = open_in_memory();
+        bootstrap(&mut conn, SynchronousMode::Normal).unwrap();
+
+        let value: i64 = conn
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, 1, "NORMAL resolves to SQLite synchronous=1");
     }
 }

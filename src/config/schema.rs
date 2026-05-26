@@ -116,7 +116,8 @@ pub struct EventHistoryConfig {
     /// Hard count cap on retained events.
     #[serde(default = "default_event_history_max_events")]
     pub max_events: u64,
-    /// Hard byte cap on `events.db` + WAL combined.
+    /// Byte retention trigger on `events.db` + WAL combined. `SQLite`
+    /// may reuse freed pages rather than shrink the main DB immediately.
     #[serde(default = "default_event_history_max_bytes")]
     pub max_bytes: u64,
     /// `SQLite` `PRAGMA synchronous` mode. `full` (default) fsyncs

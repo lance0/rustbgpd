@@ -14,7 +14,7 @@
 //! "`MAX(event_id)` of an empty table is NULL" ambiguity that bites
 //! when retention has cleared everything.
 //!
-//! The sidecar fallback and the quarantine fallback live in
+//! The quarantine fallback and diagnostic sidecar helpers live in
 //! [`crate::quarantine`]; `read_allocator` here is the in-DB-metadata
 //! step only. The recovery-ladder orchestration is in [`crate::storage`].
 
@@ -151,12 +151,12 @@ impl Drop for Allocator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::migrations::bootstrap;
+    use crate::{SynchronousMode, migrations::bootstrap};
     use rusqlite::Connection;
 
     fn open_bootstrapped() -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();
-        bootstrap(&mut conn).unwrap();
+        bootstrap(&mut conn, SynchronousMode::Full).unwrap();
         conn
     }
 

@@ -3,10 +3,11 @@
 //! These pin the never-reused contract:
 //!
 //! - IDs continue monotonically after process restart against the same DB.
-//! - After quarantine + sidecar fallback, IDs continue from the sidecar's
-//!   high-water mark + 1 (no collision with the quarantined IDs).
-//! - When all recovery paths fail AND a prior `.stale` exists, EHM enters
-//!   pass-through (`required = false`) or refuses to start (`required = true`).
+//! - A lagging sidecar is never used as allocator authority after DB /
+//!   quarantine metadata loss; EHM enters pass-through instead.
+//! - When all authoritative recovery paths fail AND a prior `.stale`
+//!   exists, EHM enters pass-through (`required = false`) or refuses to
+//!   start (`required = true`).
 
 use std::fs;
 use std::time::Duration;
@@ -227,13 +228,33 @@ async fn stale_only_with_no_sidecar_refuses_to_restart_allocator_at_one() {
 }
 
 #[tokio::test]
-async fn corrupted_db_recovers_allocator_from_sidecar() {
+async fn sidecar_only_with_no_db_refuses_to_restart_allocator_at_one() {
+    // A sidecar without a primary DB is still evidence that IDs may have
+    // been issued previously. Since the sidecar can lag committed
+    // events, EHM must not use it to resume and must not create a fresh
+    // DB starting at 1.
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("events.db");
+    fs::write(dir.path().join("events.last_id"), b"42\n").unwrap();
+
+    let cfg = EventHistoryConfig {
+        path: db_path.clone(),
+        required: false,
+        ..EventHistoryConfig::default()
+    };
+    let err = EventHistoryManager::start(cfg).await.unwrap_err();
+    assert!(matches!(err, EventHistoryError::PassThrough));
+    assert!(!db_path.exists(), "fresh DB must not be created");
+}
+
+#[tokio::test]
+async fn corrupted_db_with_only_sidecar_refuses_to_resume_allocator() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("events.db");
 
-    // First lifetime: send enough events to flush the sidecar (default
-    // is every 100 batches — we override to 1 so it flushes on every
-    // commit). Then shutdown to ensure final sidecar flush.
+    // First lifetime: flush a sidecar value. The sidecar may lag in
+    // production, so even this exact-looking test sidecar is treated as
+    // non-authoritative after DB/quarantine loss.
     {
         let cfg = EventHistoryConfig {
             path: db_path.clone(),
@@ -261,28 +282,18 @@ async fn corrupted_db_recovers_allocator_from_sidecar() {
     // the quarantine read will fail to open the file.
     fs::write(&db_path, b"\x00\x00garbage that is not sqlite").unwrap();
 
-    // Required-false: continue. Allocator must start AFTER the sidecar
-    // value, so the next event_id is 8.
+    // Required-false: do NOT resume from the sidecar. It is only a
+    // diagnostic hint in v1; using it as allocator authority can reuse
+    // committed IDs when the sidecar lags behind the DB.
     let cfg = EventHistoryConfig {
         path: db_path.clone(),
         batch_interval: Duration::from_millis(5),
         required: false,
         ..EventHistoryConfig::default()
     };
-    let manager = EventHistoryManager::start(cfg).await.unwrap();
+    let err = EventHistoryManager::start(cfg).await.unwrap_err();
     assert!(
-        manager.state().degraded(),
-        "degraded flag set after quarantine"
+        matches!(err, EventHistoryError::PassThrough),
+        "sidecar alone must not authorize allocator restart, got {err:?}"
     );
-
-    manager.sender().try_send(make_envelope()).unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let ids = drain_and_count(&manager).await;
-    assert_eq!(
-        ids,
-        vec![8],
-        "first post-recovery event picks up after sidecar high-water + 1"
-    );
-
-    manager.shutdown().await;
 }

@@ -34,7 +34,8 @@ through the `SubscribeFromEvent` gRPC RPC (wired in PR3).
 - `migrations.rs` — schema bootstrap + version-fence downgrade
   refusal (mirrors the `GR_RESTART_MARKER_VERSION` pattern in
   `src/main.rs`).
-- `quarantine.rs` — corrupted-DB detection + `.stale` rename +
+- `quarantine.rs` — corrupted-DB detection + `.stale` rename for
+  `events.db`, `events.db-wal`, and `events.db-shm`, plus diagnostic
   sidecar (`events.last_id`) atomic write, matching the
   `fib-owned.json` pattern in `src/fib_runtime.rs`.
 - `error.rs` — `EventHistoryError`. Single type covering SQL,
@@ -62,9 +63,12 @@ through the `SubscribeFromEvent` gRPC RPC (wired in PR3).
   EHM commits a batch BEFORE broadcasting; live subscribers and
   cursor-replay subscribers observing the same `event_id` see the
   same envelope.
-- **Allocator recovery ladder.** Primary DB → quarantine fallback →
-  sidecar. If all three fail AND a prior `events.db.stale` exists,
-  EHM refuses to issue new IDs (PassThrough), never restarts the
-  allocator at 1 silently. The stale-only-state check happens
+- **Allocator recovery ladder.** Primary DB → quarantine fallback.
+  `events.last_id` is a diagnostic hint only in v1 because it can lag
+  committed events. If both authoritative sources fail AND prior
+  allocation evidence exists (`events.db.stale` or `events.last_id`),
+  EHM refuses to issue new IDs
+  (PassThrough), never restarts the allocator at 1 silently. The
+  stale-only-state check happens
   BEFORE any create-capable `Connection::open` to prevent a fresh
   empty DB from masking a quarantined state.

@@ -89,8 +89,28 @@ pub const DEFAULT_MAX_BYTES: u64 = 256_000_000;
 pub const DEFAULT_RETENTION_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Default sidecar flush cadence — write `events.last_id` every N
-/// completed batches.
+/// completed batches. The sidecar is diagnostic only in v1; it is not
+/// authoritative for allocator recovery because it may lag the committed DB.
 pub const DEFAULT_SIDECAR_FLUSH_INTERVAL_BATCHES: u64 = 100;
+
+/// SQLite `PRAGMA synchronous` mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SynchronousMode {
+    /// `FULL`: sync on every commit. Default durability posture.
+    Full,
+    /// `NORMAL`: lower sync frequency; higher crash-loss window.
+    Normal,
+}
+
+impl SynchronousMode {
+    #[must_use]
+    pub const fn as_pragma(self) -> &'static str {
+        match self {
+            Self::Full => "FULL",
+            Self::Normal => "NORMAL",
+        }
+    }
+}
 
 /// Configuration for the EHM actor.
 #[derive(Debug, Clone)]
@@ -113,7 +133,13 @@ pub struct EventHistoryConfig {
     /// Count-cap retention.
     pub max_events: u64,
     /// Byte-cap retention (combined events.db + WAL).
+    ///
+    /// This is a retention trigger/target, not a strict filesystem cap:
+    /// SQLite DELETE frees pages for reuse but does not guarantee the
+    /// main DB file shrinks without vacuum/compaction.
     pub max_bytes: u64,
+    /// SQLite synchronous mode.
+    pub synchronous: SynchronousMode,
     /// Retention pass cadence.
     pub retention_interval: Duration,
     /// Sidecar flush cadence (batches between writes).
@@ -131,6 +157,7 @@ impl Default for EventHistoryConfig {
             broadcast_capacity: DEFAULT_BROADCAST_CAPACITY,
             max_events: DEFAULT_MAX_EVENTS,
             max_bytes: DEFAULT_MAX_BYTES,
+            synchronous: SynchronousMode::Full,
             retention_interval: DEFAULT_RETENTION_INTERVAL,
             sidecar_flush_interval_batches: DEFAULT_SIDECAR_FLUSH_INTERVAL_BATCHES,
         }
@@ -296,7 +323,7 @@ pub struct EventEnvelope {
 pub struct CommittedEvent {
     pub event_id: u64,
     pub daemon_boot_id: Arc<str>,
-    pub envelope: EventEnvelope,
+    pub envelope: Arc<EventEnvelope>,
 }
 
 /// Reusable sender handle. Producers hold one of these and use
@@ -428,6 +455,7 @@ impl EventHistoryManager {
         let init_result = storage::spawn_store(
             config.path.clone(),
             daemon_boot_id.clone(),
+            config.synchronous,
             // Storage channel capacity: matches batch_size so the EHM
             // loop can submit one in-flight commit while building the
             // next batch.
@@ -446,10 +474,9 @@ impl EventHistoryManager {
                 );
                 state.pass_through.store(true, Ordering::Release);
                 state.flip_degraded();
-                // We still create a sender so producers can send (the
-                // events get dropped at the actor — and the dropped
-                // counter increments, surfacing the pass-through
-                // condition).
+                // The crate-level API returns PassThrough here; the daemon
+                // wiring decides whether to create a live-only manager for
+                // required=false.
                 return Err(EventHistoryError::PassThrough);
             }
             Err(e) => return Err(e),
@@ -601,6 +628,7 @@ async fn run_actor(
     let mut buffer: Vec<EventEnvelope> = Vec::with_capacity(config.batch_size);
     let mut batches_since_sidecar_flush: u64 = 0;
     let mut retention_interval = tokio::time::interval(config.retention_interval);
+    let mut retention_task: Option<JoinHandle<()>> = None;
     retention_interval.tick().await; // skip the immediate tick
 
     loop {
@@ -640,18 +668,22 @@ async fn run_actor(
                     }
                 }
                 _ = retention_interval.tick() => {
-                    // Retention is async — kick it off but don't
-                    // block the batch loop. Drop the JoinHandle; the
-                    // task is best-effort and bounded by the
-                    // retention queries' inherent cost.
+                    if retention_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                        continue;
+                    }
+                    if let Some(task) = retention_task.take()
+                        && let Err(e) = task.await
+                    {
+                        warn!(error = %e, "retention task join failed");
+                    }
                     let store = store.clone();
                     let max_events = config.max_events;
                     let max_bytes = config.max_bytes;
-                    tokio::spawn(async move {
+                    retention_task = Some(tokio::spawn(async move {
                         if let Err(e) = store.retain(max_events, max_bytes).await {
                             warn!(error = %e, "retention pass failed");
                         }
-                    });
+                    }));
                 }
             }
         }
@@ -723,13 +755,13 @@ async fn run_actor(
                         .latest_event_id
                         .store(outcome.new_high_water, Ordering::Release);
                     // Broadcast every committed envelope with its assigned ID.
-                    // The Arc means the broadcast clone is a pointer
-                    // bump, not a payload-bytes copy.
+                    // CommittedEvent carries the same Arc handed to storage, so
+                    // broadcast fanout clones a pointer, not payload bytes.
                     for (env_arc, id) in shared.into_iter().zip(outcome.assigned_ids) {
                         let committed = CommittedEvent {
                             event_id: id,
                             daemon_boot_id: outcome.daemon_boot_id.clone(),
-                            envelope: (*env_arc).clone(),
+                            envelope: env_arc,
                         };
                         // broadcast::Sender::send returns Err only if
                         // there are no subscribers; that's fine.

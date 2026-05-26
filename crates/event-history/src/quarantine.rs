@@ -3,22 +3,24 @@
 //! Two surfaces:
 //!
 //! 1. **Quarantine.** When `events.db` fails to open cleanly (corrupted
-//!    file, schema corruption, header garbage), rename it to
-//!    `events.db.stale` so a fresh DB can take its place. Matches the
-//!    `*.json.stale` convention in `src/fib_runtime.rs:1140-1142`
-//!    so operators inherit one quarantine idiom across the daemon.
-//!    No timestamp suffix — a second quarantine overwrites the first;
-//!    operators rename manually if they need forensic preservation.
+//!    file, schema corruption, header garbage), rename the SQLite file
+//!    set to `events.db.stale`, `events.db.stale-wal`, and
+//!    `events.db.stale-shm` so a fresh DB can take its place. The main
+//!    file naming matches the `*.json.stale` convention in
+//!    `src/fib_runtime.rs:1140-1142` so operators inherit one
+//!    quarantine idiom across the daemon. No timestamp suffix — a
+//!    second quarantine overwrites the first; operators rename manually
+//!    if they need forensic preservation.
 //!
 //! 2. **Sidecar.** A tiny file at `<runtime_state_dir>/events.last_id`
 //!    carrying just the allocator value as ASCII. Written via the
 //!    `tempfile + rename` atomic pattern at `src/fib_runtime.rs:1159-1161`.
-//!    Sidecar updates lag the DB by at most N commits
-//!    (`sidecar_flush_interval_batches`, default 100). On open, when
-//!    the primary DB and the quarantine both fail to yield an
-//!    allocator anchor, the sidecar is the third fallback. If all
-//!    three fail AND a prior `events.db.stale` exists, EHM enters
-//!    pass-through rather than restart the allocator at 1.
+//!    Sidecar updates may lag the DB by multiple commits. In v1, the
+//!    sidecar is a diagnostic hint only: because it can lag committed
+//!    events, it is not authoritative for allocator recovery. If the
+//!    primary DB and quarantine both fail to yield an allocator anchor
+//!    while a prior `events.db.stale` exists, EHM enters pass-through
+//!    rather than restart the allocator from a possibly stale sidecar.
 
 use std::fs;
 use std::io::Write;
@@ -52,6 +54,20 @@ pub(crate) fn stale_path(events_db: &Path) -> PathBuf {
     p
 }
 
+#[must_use]
+pub(crate) fn wal_path(db: &Path) -> PathBuf {
+    let mut p = db.as_os_str().to_os_string();
+    p.push("-wal");
+    PathBuf::from(p)
+}
+
+#[must_use]
+pub(crate) fn shm_path(db: &Path) -> PathBuf {
+    let mut p = db.as_os_str().to_os_string();
+    p.push("-shm");
+    PathBuf::from(p)
+}
+
 /// Sidecar path next to the events DB.
 #[must_use]
 pub(crate) fn sidecar_path(events_db: &Path) -> PathBuf {
@@ -61,18 +77,32 @@ pub(crate) fn sidecar_path(events_db: &Path) -> PathBuf {
     )
 }
 
-/// Move `events_db` → `events.db.stale`. Overwrites any existing stale
-/// file. Returns OK even if the events DB doesn't exist (idempotent on
-/// the "nothing to quarantine" case).
+/// Move the SQLite file set:
+///
+/// - `events.db` → `events.db.stale`
+/// - `events.db-wal` → `events.db.stale-wal`
+/// - `events.db-shm` → `events.db.stale-shm`
+///
+/// Overwrites any existing stale files. Returns OK even if the events DB
+/// doesn't exist (idempotent on the "nothing to quarantine" case).
 pub(crate) fn quarantine_db(events_db: &Path) -> Result<(), EventHistoryError> {
     if !events_db.exists() {
         return Ok(());
     }
     let target = stale_path(events_db);
-    fs::rename(events_db, &target).map_err(|source| EventHistoryError::Io {
-        path: target.clone(),
-        source,
-    })?;
+    rename_overwrite(events_db, &target)?;
+
+    // WAL mode side files are part of the database state. Rename them to
+    // the names SQLite expects when opening `events.db.stale` so metadata
+    // recovery sees committed-but-not-checkpointed allocator updates.
+    let wal = wal_path(events_db);
+    if wal.exists() {
+        rename_overwrite(&wal, &wal_path(&target))?;
+    }
+    let shm = shm_path(events_db);
+    if shm.exists() {
+        rename_overwrite(&shm, &shm_path(&target))?;
+    }
     warn!(
         events_db = %events_db.display(),
         quarantined_to = %target.display(),
@@ -81,10 +111,23 @@ pub(crate) fn quarantine_db(events_db: &Path) -> Result<(), EventHistoryError> {
     Ok(())
 }
 
+fn rename_overwrite(from: &Path, to: &Path) -> Result<(), EventHistoryError> {
+    if to.exists() {
+        fs::remove_file(to).map_err(|source| EventHistoryError::Io {
+            path: to.to_path_buf(),
+            source,
+        })?;
+    }
+    fs::rename(from, to).map_err(|source| EventHistoryError::Io {
+        path: to.to_path_buf(),
+        source,
+    })
+}
+
 /// Read the sidecar's allocator value, if the sidecar exists and
 /// parses cleanly. Returns `None` on missing file or unparseable
 /// contents (the latter logs a warning but does not propagate the
-/// error — the sidecar is a best-effort fallback).
+/// error). The value is diagnostic only in v1, not allocator authority.
 pub(crate) fn read_sidecar(sidecar: &Path) -> Option<u64> {
     let raw = match fs::read_to_string(sidecar) {
         Ok(s) => s,
@@ -204,6 +247,13 @@ mod tests {
     }
 
     #[test]
+    fn wal_and_shm_paths_append_suffix() {
+        let p = Path::new("/foo/bar/events.db");
+        assert_eq!(wal_path(p), PathBuf::from("/foo/bar/events.db-wal"));
+        assert_eq!(shm_path(p), PathBuf::from("/foo/bar/events.db-shm"));
+    }
+
+    #[test]
     fn quarantine_db_renames_existing_file() {
         let dir = TempDir::new().unwrap();
         let events = dir.path().join("events.db");
@@ -211,6 +261,30 @@ mod tests {
         quarantine_db(&events).unwrap();
         assert!(!events.exists());
         assert!(dir.path().join("events.db.stale").exists());
+    }
+
+    #[test]
+    fn quarantine_db_renames_wal_side_files_as_a_set() {
+        let dir = TempDir::new().unwrap();
+        let events = dir.path().join("events.db");
+        fs::write(&events, b"garbage").unwrap();
+        fs::write(dir.path().join("events.db-wal"), b"wal").unwrap();
+        fs::write(dir.path().join("events.db-shm"), b"shm").unwrap();
+
+        quarantine_db(&events).unwrap();
+
+        assert!(!events.exists());
+        assert!(!dir.path().join("events.db-wal").exists());
+        assert!(!dir.path().join("events.db-shm").exists());
+        assert!(dir.path().join("events.db.stale").exists());
+        assert_eq!(
+            fs::read(dir.path().join("events.db.stale-wal")).unwrap(),
+            b"wal"
+        );
+        assert_eq!(
+            fs::read(dir.path().join("events.db.stale-shm")).unwrap(),
+            b"shm"
+        );
     }
 
     #[test]

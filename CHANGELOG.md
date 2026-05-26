@@ -21,12 +21,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ON_CHANGE` deferral from ADR-0070.
 - **Event-history foundation crate (`rustbgpd-event-history`).** New
   `EventHistoryManager` actor + storage thread, explicit
-  `metadata.last_event_id` allocator with 3-step recovery ladder
-  (primary DB → `events.db.stale` quarantine → `events.last_id`
-  sidecar), `event_peers` join table for any-role peer queries,
+  `metadata.last_event_id` allocator with primary DB plus
+  `events.db.stale` quarantine recovery; `events.last_id` is
+  diagnostic-only in v1. Adds `event_peers` join table for any-role peer queries,
   count + byte retention with explicit `ORDER BY event_id ASC`
   eviction. Behind `[event_history]` config — default-on, ~256 MB
-  hard cap on disk. No producer wiring yet (PR4 + PR5); validated
+  soft retention target on disk. No producer wiring yet (PR4 + PR5); validated
   by direct test injection. Pinned by the byte-equality invariant
   test: producer bytes == persisted bytes == broadcast bytes.
 - **`[event_history]` config block** with `enabled` (default-on),

@@ -1025,6 +1025,10 @@ fn validate_peer_group(
 }
 
 fn validate_event_history(cfg: &EventHistoryConfig) -> Result<(), ConfigError> {
+    if !cfg.enabled {
+        return Ok(());
+    }
+
     if !matches!(cfg.synchronous.as_str(), "full" | "normal") {
         return Err(ConfigError::InvalidEventHistoryConfig {
             reason: format!(
@@ -1058,14 +1062,12 @@ fn validate_event_history(cfg: &EventHistoryConfig) -> Result<(), ConfigError> {
     }
     if cfg.max_events == 0 {
         return Err(ConfigError::InvalidEventHistoryConfig {
-            reason: "max_events must be > 0 (use enabled = false to disable the outbox entirely)"
-                .to_string(),
+            reason: "max_events must be > 0".to_string(),
         });
     }
     if cfg.max_bytes == 0 {
         return Err(ConfigError::InvalidEventHistoryConfig {
-            reason: "max_bytes must be > 0 (use enabled = false to disable the outbox entirely)"
-                .to_string(),
+            reason: "max_bytes must be > 0".to_string(),
         });
     }
     Ok(())
