@@ -20,6 +20,13 @@ const DEFAULT_PROTOCOL_NAME: &str = "BGP";
 const MAX_SUBSCRIPTIONS: usize = 16;
 const SUBSCRIBE_CHANNEL_DEPTH: usize = 16;
 const MIN_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+/// Upper bound on a client-requested `STREAM` `SAMPLE` interval. Clamps absurd
+/// values (a client could otherwise request an interval of centuries) so a
+/// subscription always resamples within a sane bound.
+// `from_secs(3600)` (1 hour) is kept over `from_hours` to stay within the
+// workspace MSRV.
+#[allow(clippy::duration_suboptimal_units)]
+const MAX_SAMPLE_INTERVAL: Duration = Duration::from_secs(3600);
 /// Application-level ceiling on concurrent `Subscribe` streams. `MAX_SUBSCRIPTIONS`
 /// bounds the paths within a single request; this bounds how many open streams the
 /// target will service at once so a flood of collectors cannot exhaust resources.
@@ -480,12 +487,14 @@ fn parse_subscription_list(list: &gnmi::SubscriptionList) -> Result<Subscription
         paths.push(parse_supported_path(&full_path)?);
 
         if mode == gnmi::subscription_list::Mode::Stream {
-            // Honor the client's requested interval, only raising it to the floor
-            // (a missing/zero interval defaults to the floor). The shared sample
-            // timer ticks at the *largest* floored interval across subscriptions
+            // Honor the client's requested interval, clamped to
+            // [MIN_SAMPLE_INTERVAL, MAX_SAMPLE_INTERVAL] (a missing/zero interval
+            // defaults to the floor; an absurd value is capped). The shared sample
+            // timer ticks at the *largest* clamped interval across subscriptions
             // so no subscription is sampled faster than it asked for.
-            let requested = Duration::from_nanos(subscription.sample_interval);
-            sample_interval = sample_interval.max(requested.max(MIN_SAMPLE_INTERVAL));
+            let requested = Duration::from_nanos(subscription.sample_interval)
+                .clamp(MIN_SAMPLE_INTERVAL, MAX_SAMPLE_INTERVAL);
+            sample_interval = sample_interval.max(requested);
         }
     }
 
@@ -579,8 +588,9 @@ fn parse_supported_path(path: &gnmi::Path) -> Result<SupportedPath, Status> {
     }
 
     let elem = &path.elem;
-    // The shortest supported path reaches the `bgp` container element at index 5
-    // (`network-instances/network-instance/protocols/protocol/bgp/{global,neighbors}`);
+    // The shortest supported path reaches the `{global,neighbors}` selector at
+    // element index 5 (the `bgp` container is element 4):
+    // `network-instances/network-instance/protocols/protocol/bgp/{global,neighbors}`.
     // a subtree Get above `/state` (e.g. `.../bgp/global`) is valid and renders
     // the whole supported subtree, so bound-check per level rather than demanding
     // a full leaf path.
@@ -1837,6 +1847,13 @@ mod tests {
         // A missing/zero interval defaults to the floor.
         let plan = parse_subscription_list(&stream_sample_list(0)).unwrap();
         assert_eq!(plan.sample_interval, MIN_SAMPLE_INTERVAL);
+    }
+
+    #[test]
+    fn stream_sample_interval_caps_absurd_request_to_ceiling() {
+        // An absurd interval (u64::MAX ns ≈ centuries) is capped to the ceiling.
+        let plan = parse_subscription_list(&stream_sample_list(u64::MAX)).unwrap();
+        assert_eq!(plan.sample_interval, MAX_SAMPLE_INTERVAL);
     }
 
     #[test]

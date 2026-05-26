@@ -189,9 +189,9 @@ listener model rather than adding a new one:
 
 | Slice | Status |
 |-------|--------|
-| PR1 — proto + codegen + `Capabilities` + `Set`-closed | Planned |
-| PR2 — `Get` OpenConfig BGP global + neighbors | Planned |
-| PR3 — `Subscribe` ONCE / POLL / SAMPLE | Planned |
+| PR1 — proto + codegen + `Capabilities` + `Set`-closed | Landed (PR #275) |
+| PR2 — `Get` OpenConfig BGP global + neighbors | Landed (PR #276) |
+| PR3 — `Subscribe` ONCE / POLL / SAMPLE | Landed (PR #277) |
 | PR4 — counters / capabilities / non-BGP telemetry | Deferred |
 
 ## Repo seams
