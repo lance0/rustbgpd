@@ -877,6 +877,9 @@ modified by the v1 implementation. Existing OTC attributes are preserved;
 rustbgpd only adds OTC when RFC 9234 requires it and the attribute is absent.
 Malformed OTC length is handled as treat-as-withdraw for unicast announcements:
 withdrawals in the same UPDATE still apply and the BGP session stays up.
+`rustbgpctl neighbor <addr>` and `NeighborService.GetNeighborState` report the
+configured local role, any remote role advertised in OPEN, whether the role was
+mutually negotiated, and the running `otc_routes_blocked` count.
 
 `role` is eBGP-only and `strict_role` requires `role`. Config reload applies a
 role change by reconfiguring the affected peer session; dynamic in-place role

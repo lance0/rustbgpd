@@ -230,6 +230,14 @@ pub struct JsonNeighborDetail {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub peer_group: String,
     pub route_server_client: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub role: String,
+    pub strict_role: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub remote_role: String,
+    pub role_negotiated: bool,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub otc_routes_blocked: u64,
     pub add_path_receive: bool,
     pub add_path_send: bool,
     #[serde(skip_serializing_if = "is_zero")]
@@ -699,6 +707,11 @@ mod tests {
             families: vec!["ipv4_unicast".to_string()],
             peer_group: "rs-clients".to_string(),
             route_server_client: true,
+            role: "rs".to_string(),
+            strict_role: true,
+            remote_role: "rs-client".to_string(),
+            role_negotiated: true,
+            otc_routes_blocked: 3,
             add_path_receive: true,
             add_path_send: true,
             add_path_send_max: 4,
@@ -710,6 +723,11 @@ mod tests {
 
         assert_eq!(value["peer_group"], "rs-clients");
         assert_eq!(value["route_server_client"], true);
+        assert_eq!(value["role"], "rs");
+        assert_eq!(value["strict_role"], true);
+        assert_eq!(value["remote_role"], "rs-client");
+        assert_eq!(value["role_negotiated"], true);
+        assert_eq!(value["otc_routes_blocked"], 3);
         assert_eq!(value["add_path_receive"], true);
         assert_eq!(value["add_path_send"], true);
         assert_eq!(value["add_path_send_max"], 4);

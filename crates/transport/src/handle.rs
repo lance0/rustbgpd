@@ -9,7 +9,7 @@ use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::{Afi, Safi};
+use rustbgpd_wire::{Afi, BgpRole, Safi};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -237,6 +237,12 @@ pub struct PeerSessionState {
     pub four_octet_as: Option<bool>,
     /// Remote BGP router ID, if session reached `OpenConfirm`.
     pub remote_router_id: Option<Ipv4Addr>,
+    /// Locally configured BGP Role, if advertised.
+    pub local_role: Option<BgpRole>,
+    /// Remote BGP Role advertised in OPEN, if present.
+    pub remote_role: Option<BgpRole>,
+    /// True when both sides advertised compatible BGP Roles.
+    pub role_negotiated: bool,
     /// Total UPDATE messages received.
     pub updates_received: u64,
     /// Total UPDATE messages sent.
@@ -251,6 +257,8 @@ pub struct PeerSessionState {
     pub uptime_secs: u64,
     /// Human-readable description of the last error (empty if none).
     pub last_error: String,
+    /// Number of unicast route announcements blocked by RFC 9234 OTC rules.
+    pub otc_routes_blocked: u64,
 }
 
 /// Handle for controlling a spawned peer session.

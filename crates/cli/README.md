@@ -12,7 +12,7 @@ rustbgpctl global                      # show ASN, router ID
 rustbgpctl config diff --from-file config.toml
 rustbgpctl neighbor                    # list all peers
 rustbgpctl neighbor <addr>             # peer detail
-rustbgpctl neighbor <addr> add --asn <asn>
+rustbgpctl neighbor <addr> add --asn <asn> [--role provider|rs|rs-client|customer|peer] [--strict-role]
 rustbgpctl neighbor <addr> delete      # remove peer
 rustbgpctl neighbor <addr> enable      # enable peer
 rustbgpctl neighbor <addr> disable     # disable peer with reason

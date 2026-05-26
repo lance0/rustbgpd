@@ -187,6 +187,7 @@ pub(crate) struct PeerSession {
     updates_sent: u64,
     notifications_received: u64,
     notifications_sent: u64,
+    otc_routes_blocked: u64,
     flap_count: u64,
     established_at: Option<Instant>,
     last_error: String,
@@ -358,6 +359,7 @@ impl PeerSession {
             updates_sent: 0,
             notifications_received: 0,
             notifications_sent: 0,
+            otc_routes_blocked: 0,
             flap_count: 0,
             established_at: None,
             last_error: String::new(),
@@ -436,6 +438,7 @@ impl PeerSession {
             updates_sent: 0,
             notifications_received: 0,
             notifications_sent: 0,
+            otc_routes_blocked: 0,
             flap_count: 0,
             established_at: None,
             last_error: String::new(),
@@ -513,6 +516,12 @@ impl PeerSession {
                 "session notification-event channel full or closed"
             );
         }
+    }
+
+    pub(super) fn record_otc_routes_blocked(&mut self, reason: &'static str, count: u64) {
+        self.otc_routes_blocked = self.otc_routes_blocked.saturating_add(count);
+        self.metrics
+            .record_otc_routes_blocked(&self.peer_label, reason, count);
     }
 
     /// Main event loop. Runs until Shutdown command or fatal error.

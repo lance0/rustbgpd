@@ -308,8 +308,7 @@ impl PeerSession {
                 rejected,
                 "OTC route-leak rule rejected unicast announcements; withdrawals still processed"
             );
-            self.metrics
-                .record_otc_routes_blocked(&self.peer_label, reason, rejected as u64);
+            self.record_otc_routes_blocked(reason, rejected as u64);
         }
 
         // AS_PATH loop detection (RFC 4271 §9.1.2): discard all
