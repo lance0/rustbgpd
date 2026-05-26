@@ -54,6 +54,16 @@ async fn drain_subscription(
             Err(_) => break,
         }
     }
+    if ids.len() >= expected_at_least {
+        let grace_deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+        while tokio::time::Instant::now() < grace_deadline {
+            let remaining = grace_deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Some(evt)) => ids.push(evt.event_id),
+                Ok(None) | Err(_) => break,
+            }
+        }
+    }
     ids
 }
 
@@ -74,7 +84,11 @@ async fn subscribe_from_zero_drains_all_history() {
         from_event_id: Some(0),
         ..SubscribeRequest::default()
     };
-    let rx = manager.subscribe_from_event(req).await.unwrap();
+    let rx = manager
+        .subscribe_from_event(req)
+        .await
+        .unwrap()
+        .into_receiver();
     let ids = drain_subscription(rx, Duration::from_secs(2), 5).await;
 
     assert_eq!(ids, vec![1, 2, 3, 4, 5]);
@@ -99,7 +113,11 @@ async fn subscribe_from_high_id_returns_only_new() {
         from_event_id: Some(7),
         ..SubscribeRequest::default()
     };
-    let rx = manager.subscribe_from_event(req).await.unwrap();
+    let rx = manager
+        .subscribe_from_event(req)
+        .await
+        .unwrap()
+        .into_receiver();
     let ids = drain_subscription(rx, Duration::from_secs(2), 3).await;
 
     assert_eq!(ids, vec![8, 9, 10]);
@@ -126,7 +144,11 @@ async fn live_only_when_cursor_absent() {
         from_event_id: None,
         ..SubscribeRequest::default()
     };
-    let rx = manager.subscribe_from_event(req).await.unwrap();
+    let rx = manager
+        .subscribe_from_event(req)
+        .await
+        .unwrap()
+        .into_receiver();
 
     // Fire a fourth event AFTER subscribing.
     sender.try_send(make_envelope(4)).unwrap();
@@ -175,12 +197,16 @@ async fn subscribe_during_active_commit_no_gap_no_dup() {
     // Cursor at 25 — we want events 26..=150 in order, no gaps, no
     // duplicates. The interesting region is around event 50: the
     // replay path covers [26, high_watermark] and the live path
-    // covers (high_watermark, 150], with the dedup boundary.
+    // covers (max(high_watermark, cursor), 150].
     let req = SubscribeRequest {
         from_event_id: Some(25),
         ..SubscribeRequest::default()
     };
-    let rx = manager.subscribe_from_event(req).await.unwrap();
+    let rx = manager
+        .subscribe_from_event(req)
+        .await
+        .unwrap()
+        .into_receiver();
 
     producer.await.unwrap();
     // Wait a bit more to ensure the actor commits the tail of the
@@ -252,7 +278,11 @@ async fn filter_by_category_applies_to_replay_and_live() {
         },
         ..SubscribeRequest::default()
     };
-    let rx = manager.subscribe_from_event(req).await.unwrap();
+    let rx = manager
+        .subscribe_from_event(req)
+        .await
+        .unwrap()
+        .into_receiver();
     let ids = drain_subscription(rx, Duration::from_secs(2), 5).await;
 
     assert_eq!(ids, vec![1, 3, 5, 7, 9]);
@@ -263,7 +293,7 @@ async fn filter_by_category_applies_to_replay_and_live() {
 #[tokio::test]
 async fn invalid_high_from_id_returns_only_future_events() {
     // from_event_id beyond the current latest. Replay query returns
-    // nothing; live-only path delivers post-subscribe events.
+    // nothing; live path must not leak older event IDs from a batch-tail.
     let dir = TempDir::new().unwrap();
     let manager = EventHistoryManager::start(fast_cfg(dir.path().join("events.db")))
         .await
@@ -275,16 +305,84 @@ async fn invalid_high_from_id_returns_only_future_events() {
     tokio::time::sleep(Duration::from_millis(80)).await;
 
     // Cursor at 9999. Replay finds nothing. Then we send #6 — live
-    // delivers it.
+    // must suppress it because it is still <= caller cursor.
     let req = SubscribeRequest {
         from_event_id: Some(9999),
         ..SubscribeRequest::default()
     };
-    let rx = manager.subscribe_from_event(req).await.unwrap();
+    let rx = manager
+        .subscribe_from_event(req)
+        .await
+        .unwrap()
+        .into_receiver();
     sender.try_send(make_envelope(6)).unwrap();
 
-    let ids = drain_subscription(rx, Duration::from_secs(2), 1).await;
-    assert_eq!(ids, vec![6]);
+    let ids = drain_subscription(rx, Duration::from_millis(200), 1).await;
+    assert!(
+        ids.is_empty(),
+        "events below from_event_id must not leak from live tail: {ids:?}"
+    );
+
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn replay_preserves_payload_codec() {
+    let dir = TempDir::new().unwrap();
+    let manager = EventHistoryManager::start(fast_cfg(dir.path().join("events.db")))
+        .await
+        .unwrap();
+
+    let mut env = make_envelope(1);
+    env.payload_codec = PayloadCodec::Proto;
+    manager.sender().try_send(env).unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let mut rx = manager
+        .subscribe_from_event(SubscribeRequest {
+            from_event_id: Some(0),
+            ..SubscribeRequest::default()
+        })
+        .await
+        .unwrap()
+        .into_receiver();
+
+    let evt = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(evt.envelope.payload_codec, PayloadCodec::Proto);
+
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn output_full_is_observable_in_subscription_stats() {
+    let dir = TempDir::new().unwrap();
+    let manager = EventHistoryManager::start(fast_cfg(dir.path().join("events.db")))
+        .await
+        .unwrap();
+
+    let subscription = manager
+        .subscribe_from_event(SubscribeRequest {
+            from_event_id: None,
+            output_capacity: 1,
+            ..SubscribeRequest::default()
+        })
+        .await
+        .unwrap();
+    let stats = subscription.stats();
+    let _rx = subscription.into_receiver();
+
+    for i in 1..=20_u64 {
+        manager.sender().try_send(make_envelope(i)).unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    assert!(
+        stats.snapshot().output_full > 0,
+        "slow consumers should have observable output_full stats"
+    );
 
     manager.shutdown().await;
 }

@@ -20,8 +20,8 @@ through the `SubscribeFromEvent` gRPC RPC (wired in PR3).
   `EventEnvelope`, `CommittedEvent`, `EventHistorySender`,
   `Category`, `Severity`, `PayloadCodec`, `EnvelopePeers`, plus the
   shared `EhmState` and the async actor loop (`run_actor`). PR3 also
-  re-exports `SubscribeFilter` / `SubscribeRequest` / `SubscribeStats`
-  from `cursor.rs`.
+  re-exports `EventSubscription` / `SubscribeFilter` /
+  `SubscribeRequest` / `SubscribeStats` from `cursor.rs`.
 - `storage.rs` — the `spawn_blocking` boundary. Owns the rusqlite
   `Connection` on a dedicated thread; processes batches via an
   internal channel. Only place in the crate that touches

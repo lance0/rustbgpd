@@ -53,7 +53,9 @@ mod quarantine;
 mod sequence;
 mod storage;
 
-pub use cursor::{SubscribeFilter, SubscribeRequest, SubscribeStats};
+pub use cursor::{
+    EventSubscription, SubscribeFilter, SubscribeRequest, SubscribeStats, SubscribeStatsSnapshot,
+};
 
 use std::net::IpAddr;
 use std::path::PathBuf;
