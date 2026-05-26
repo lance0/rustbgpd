@@ -962,15 +962,32 @@ fn decode_attribute_value(
         }
 
         attr_type::ONLY_TO_CUSTOMER => {
-            // RFC 9234 §5 / RFC 7606: malformed-length OTC is preserved as
-            // Unknown(RawAttribute) — NOT a fatal DecodeError. Transport
-            // (ADR-0071 PR2) inspects parsed attributes for Unknown with
-            // type_code == ONLY_TO_CUSTOMER and applies treat-as-withdraw,
-            // because UPDATE parse errors otherwise short-circuit into the
-            // FSM error path and tear the session down. Flag validation
-            // already ran above (subcode 4) so this arm only sees correct
-            // flags.
-            if value.len() != 4 {
+            // Preserve as Unknown(RawAttribute) in two cases — both keep
+            // PR2's transport-side OTC inspection working (it matches
+            // typed `OnlyToCustomer(_)` AND `Unknown(raw)` with
+            // raw.type_code == 35):
+            //
+            // (1) **Malformed length (≠ 4 octets).** RFC 9234 §5 / RFC
+            //     7606 — must be recoverable, NOT a fatal DecodeError,
+            //     because UPDATE parse errors otherwise short-circuit
+            //     into the FSM and tear the session down. PR2 detects
+            //     malformed type-35 attributes via the Unknown path and
+            //     applies treat-as-withdraw.
+            //
+            // (2) **Partial bit set.** RFC 4271 §5: a recognized
+            //     optional-transitive attribute received with Partial=1
+            //     MUST have Partial preserved on re-advertisement.
+            //     Decoding to canonical `OnlyToCustomer(u32)` would lose
+            //     the bit (encode emits 0xC0). Routing it through the
+            //     Unknown arm lets the existing Unknown-encode path
+            //     keep Partial faithfully (it OR's Partial into
+            //     optional-transitive flags on emit). Locally-added OTC
+            //     (PR2 E1/I3) constructs `OnlyToCustomer(u32)` directly
+            //     and emits canonical 0xC0.
+            //
+            // Flag-validity ran above (subcode 4), so this arm only
+            // sees flags whose (OPTIONAL | TRANSITIVE) bits are 0xC0.
+            if value.len() != 4 || (flags & attr_flags::PARTIAL) != 0 {
                 return Ok(PathAttribute::Unknown(RawAttribute {
                     flags,
                     type_code,
@@ -3523,12 +3540,16 @@ mod tests {
     }
 
     #[test]
-    fn only_to_customer_partial_bit_tolerated() {
-        // RFC 4271 §5: an optional+transitive attribute MAY arrive with the
-        // Partial bit set when an intermediate speaker propagated an
-        // unrecognized form. The flags_mask in decode_attribute_value (OPTIONAL
-        // | TRANSITIVE) masks out Partial, so 0xE0 decodes to the typed
-        // variant and we encode back as canonical 0xC0.
+    fn only_to_customer_partial_bit_preserved_via_unknown() {
+        // RFC 4271 §5: a recognized optional-transitive attribute received
+        // with Partial set MUST have Partial preserved on re-advertisement.
+        // We achieve this by routing Partial-bearing OTC through the
+        // `Unknown(RawAttribute)` arm — the typed `OnlyToCustomer(u32)`
+        // path emits canonical 0xC0 and is reserved for locally-added or
+        // received-with-canonical-flags OTC.
+        //
+        // Wire-shape sanity: flags = 0xE0 (Optional | Transitive | Partial),
+        // length 4, ASN = 65000.
         let buf = [
             attr_flags::OPTIONAL | attr_flags::TRANSITIVE | attr_flags::PARTIAL, // 0xE0
             attr_type::ONLY_TO_CUSTOMER,
@@ -3540,6 +3561,48 @@ mod tests {
         ];
         let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0], PathAttribute::OnlyToCustomer(65000));
+        match &decoded[0] {
+            PathAttribute::Unknown(raw) => {
+                assert_eq!(raw.type_code, attr_type::ONLY_TO_CUSTOMER);
+                assert_eq!(
+                    raw.flags,
+                    attr_flags::OPTIONAL | attr_flags::TRANSITIVE | attr_flags::PARTIAL,
+                    "Partial bit must survive decode for round-trip-faithful re-emission"
+                );
+                assert_eq!(raw.data.as_ref(), &[0x00, 0x00, 0xFD, 0xE8][..]);
+            }
+            other => panic!(
+                "Partial-bearing OTC must decode to Unknown (so encode preserves \
+                 Partial via the existing Unknown-encode path); got {other:?}"
+            ),
+        }
+
+        // Round-trip: encoding the decoded Unknown must emit flags with
+        // Partial set (the Unknown-encode arm OR's Partial into optional-
+        // transitive flags, so 0xE0 → 0xE0).
+        let mut reencoded = Vec::new();
+        encode_path_attributes(&decoded, &mut reencoded, true, false);
+        assert_eq!(
+            reencoded[0],
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE | attr_flags::PARTIAL,
+            "re-encode must preserve Partial; lost-Partial violates RFC 4271 §5"
+        );
+        assert_eq!(reencoded[1], attr_type::ONLY_TO_CUSTOMER);
+        assert_eq!(reencoded[2], 4);
+        assert_eq!(&reencoded[3..7], &[0x00, 0x00, 0xFD, 0xE8][..]);
+    }
+
+    #[test]
+    fn only_to_customer_locally_constructed_emits_canonical_flags() {
+        // Locally-added OTC (PR2 E1/I3 will use this path) is built as
+        // `OnlyToCustomer(u32)` and must emit canonical 0xC0 — no Partial.
+        let attrs = vec![PathAttribute::OnlyToCustomer(65000)];
+        let mut buf = Vec::new();
+        encode_path_attributes(&attrs, &mut buf, true, false);
+        assert_eq!(
+            buf[0],
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            "locally-constructed OTC must emit 0xC0, never 0xE0"
+        );
     }
 }
