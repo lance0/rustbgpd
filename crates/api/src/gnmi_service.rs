@@ -20,6 +20,10 @@ const DEFAULT_PROTOCOL_NAME: &str = "BGP";
 const MAX_SUBSCRIPTIONS: usize = 16;
 const SUBSCRIBE_CHANNEL_DEPTH: usize = 16;
 const MIN_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+/// Application-level ceiling on concurrent `Subscribe` streams. `MAX_SUBSCRIPTIONS`
+/// bounds the paths within a single request; this bounds how many open streams the
+/// target will service at once so a flood of collectors cannot exhaust resources.
+const MAX_CONCURRENT_SUBSCRIPTIONS: usize = 64;
 
 type PeerSnapshotFuture = Pin<Box<dyn Future<Output = Result<Vec<PeerInfo>, Status>> + Send>>;
 type PeerSnapshotFn = Arc<dyn Fn() -> PeerSnapshotFuture + Send + Sync>;
@@ -30,6 +34,9 @@ pub struct GnmiService {
     asn: u32,
     router_id: String,
     peer_snapshot: PeerSnapshotFn,
+    /// Bounds concurrent `Subscribe` streams; a permit is held for the lifetime
+    /// of each open stream.
+    subscribe_slots: Arc<tokio::sync::Semaphore>,
 }
 
 type SubscribeStream =
@@ -65,6 +72,7 @@ impl GnmiService {
             asn,
             router_id: router_id.into(),
             peer_snapshot: Arc::new(move || Box::pin(peer_snapshot())),
+            subscribe_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SUBSCRIPTIONS)),
         }
     }
 
@@ -187,6 +195,91 @@ impl GnmiService {
             responses.push(sync_response());
         }
         Ok(responses)
+    }
+
+    /// Render a snapshot and forward it (then any error) over `tx`. Returns
+    /// `false` when the task should stop (client gone or render error).
+    async fn forward_snapshot(
+        &self,
+        plan: &SubscriptionPlan,
+        include_sync: bool,
+        tx: &tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
+    ) -> bool {
+        match self.render_subscription_snapshot(plan, include_sync).await {
+            Ok(responses) => {
+                for response in responses {
+                    if tx.send(Ok(response)).await.is_err() {
+                        return false;
+                    }
+                }
+                true
+            }
+            Err(err) => {
+                let _ = tx.send(Err(err)).await;
+                false
+            }
+        }
+    }
+
+    /// POLL task: emit the initial data tree once, then a fresh snapshot per
+    /// Poll request, until the client disconnects.
+    async fn run_poll(
+        self,
+        plan: SubscriptionPlan,
+        mut inbound: tonic::Streaming<gnmi::SubscribeRequest>,
+        tx: tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
+    ) {
+        if !self.forward_snapshot(&plan, true, &tx).await {
+            return;
+        }
+        loop {
+            match inbound.message().await {
+                Ok(Some(gnmi::SubscribeRequest {
+                    request: Some(gnmi::subscribe_request::Request::Poll(_)),
+                    ..
+                })) => {
+                    if !self.forward_snapshot(&plan, true, &tx).await {
+                        return;
+                    }
+                }
+                Ok(Some(_)) => {
+                    let _ = tx
+                        .send(Err(Status::invalid_argument(
+                            "POLL subscription accepts only Poll requests after setup",
+                        )))
+                        .await;
+                    return;
+                }
+                Ok(None) => return,
+                Err(err) => {
+                    let _ = tx.send(Err(err)).await;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// STREAM/SAMPLE task: emit an initial snapshot + sync, then a fresh sample
+    /// every `sample_interval`, exiting promptly when the client disconnects.
+    async fn run_stream_sample(
+        self,
+        plan: SubscriptionPlan,
+        tx: tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
+    ) {
+        let mut include_sync = true;
+        loop {
+            if !self.forward_snapshot(&plan, include_sync, &tx).await {
+                return;
+            }
+            include_sync = false;
+            // Sleep until the next sample, but bail out promptly if the client
+            // disconnects (or the server drops the receiver) instead of waiting
+            // out a full interval first.
+            tokio::select! {
+                () = tokio::time::sleep(plan.sample_interval) => {}
+                () = tx.closed() => return,
+            }
+        }
     }
 }
 
@@ -359,8 +452,9 @@ fn validate_encoding(raw: i32) -> Result<(), Status> {
 
 fn parse_subscription_list(list: &gnmi::SubscriptionList) -> Result<SubscriptionPlan, Status> {
     validate_encoding(list.encoding)?;
-    let encoding = gnmi::Encoding::try_from(list.encoding)
-        .map_err(|_| Status::invalid_argument(format!("unknown gNMI encoding {}", list.encoding)))?;
+    let encoding = gnmi::Encoding::try_from(list.encoding).map_err(|_| {
+        Status::invalid_argument(format!("unknown gNMI encoding {}", list.encoding))
+    })?;
     let mode = gnmi::subscription_list::Mode::try_from(list.mode)
         .map_err(|_| Status::invalid_argument(format!("unknown Subscribe mode {}", list.mode)))?;
     if list.subscription.is_empty() {
@@ -386,12 +480,12 @@ fn parse_subscription_list(list: &gnmi::SubscriptionList) -> Result<Subscription
         paths.push(parse_supported_path(&full_path)?);
 
         if mode == gnmi::subscription_list::Mode::Stream {
-            let requested = if subscription.sample_interval == 0 {
-                MIN_SAMPLE_INTERVAL
-            } else {
-                Duration::from_nanos(subscription.sample_interval)
-            };
-            sample_interval = sample_interval.min(requested.max(MIN_SAMPLE_INTERVAL));
+            // Honor the client's requested interval, only raising it to the floor
+            // (a missing/zero interval defaults to the floor). The shared sample
+            // timer ticks at the *largest* floored interval across subscriptions
+            // so no subscription is sampled faster than it asked for.
+            let requested = Duration::from_nanos(subscription.sample_interval);
+            sample_interval = sample_interval.max(requested.max(MIN_SAMPLE_INTERVAL));
         }
     }
 
@@ -1043,9 +1137,20 @@ impl gnmi::g_nmi_server::GNmi for GnmiService {
         };
         let plan = parse_subscription_list(&list)?;
 
+        // Bound concurrent streams (independent of the per-request path cap). The
+        // owned permit is held for the lifetime of the stream — moved into the
+        // long-lived POLL/STREAM tasks, or kept on the stack across the ONCE
+        // render — and is released when the stream ends or the client drops.
+        let permit = Arc::clone(&self.subscribe_slots)
+            .try_acquire_owned()
+            .map_err(|_| {
+                Status::resource_exhausted("gNMI Subscribe stream limit reached; try again later")
+            })?;
+
         match plan.mode {
             gnmi::subscription_list::Mode::Once => {
                 let responses = self.render_subscription_snapshot(&plan, true).await?;
+                drop(permit);
                 Ok(Response::new(Box::pin(tokio_stream::iter(
                     responses.into_iter().map(Ok),
                 ))))
@@ -1054,42 +1159,9 @@ impl gnmi::g_nmi_server::GNmi for GnmiService {
                 let service = self.clone();
                 let (tx, rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
                 tokio::spawn(async move {
-                    if tx.send(Ok(sync_response())).await.is_err() {
-                        return;
-                    }
-                    loop {
-                        match inbound.message().await {
-                            Ok(Some(gnmi::SubscribeRequest {
-                                request: Some(gnmi::subscribe_request::Request::Poll(_)),
-                                ..
-                            })) => match service.render_subscription_snapshot(&plan, true).await {
-                                Ok(responses) => {
-                                    for response in responses {
-                                        if tx.send(Ok(response)).await.is_err() {
-                                            return;
-                                        }
-                                    }
-                                }
-                                Err(err) => {
-                                    let _ = tx.send(Err(err)).await;
-                                    return;
-                                }
-                            },
-                            Ok(Some(_)) => {
-                                let _ = tx
-                                    .send(Err(Status::invalid_argument(
-                                        "POLL subscription accepts only Poll requests after setup",
-                                    )))
-                                    .await;
-                                return;
-                            }
-                            Ok(None) => return,
-                            Err(err) => {
-                                let _ = tx.send(Err(err)).await;
-                                return;
-                            }
-                        }
-                    }
+                    // Hold the concurrency permit for the lifetime of the task.
+                    let _permit = permit;
+                    service.run_poll(plan, inbound, tx).await;
                 });
                 Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
             }
@@ -1097,27 +1169,9 @@ impl gnmi::g_nmi_server::GNmi for GnmiService {
                 let service = self.clone();
                 let (tx, rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
                 tokio::spawn(async move {
-                    let mut include_sync = true;
-                    loop {
-                        match service
-                            .render_subscription_snapshot(&plan, include_sync)
-                            .await
-                        {
-                            Ok(responses) => {
-                                for response in responses {
-                                    if tx.send(Ok(response)).await.is_err() {
-                                        return;
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                let _ = tx.send(Err(err)).await;
-                                return;
-                            }
-                        }
-                        include_sync = false;
-                        tokio::time::sleep(plan.sample_interval).await;
-                    }
+                    // Hold the concurrency permit for the lifetime of the task.
+                    let _permit = permit;
+                    service.run_stream_sample(plan, tx).await;
                 });
                 Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
             }
@@ -1741,5 +1795,284 @@ mod tests {
             responses[1].response,
             Some(gnmi::subscribe_response::Response::SyncResponse(true))
         );
+    }
+
+    /// Build a single-path STREAM/SAMPLE subscription list with an explicit
+    /// `sample_interval` (in nanoseconds) so the interval-floor logic is testable.
+    fn stream_sample_list(sample_interval_nanos: u64) -> gnmi::SubscriptionList {
+        gnmi::SubscriptionList {
+            prefix: None,
+            subscription: vec![gnmi::Subscription {
+                path: Some(mounted_path(&[pe("bgp"), pe("global"), pe("state")])),
+                mode: gnmi::SubscriptionMode::Sample as i32,
+                sample_interval: sample_interval_nanos,
+                suppress_redundant: false,
+                heartbeat_interval: 0,
+            }],
+            qos: None,
+            mode: gnmi::subscription_list::Mode::Stream as i32,
+            allow_aggregation: false,
+            use_models: Vec::new(),
+            encoding: gnmi::Encoding::JsonIetf as i32,
+            updates_only: false,
+        }
+    }
+
+    #[test]
+    fn stream_sample_interval_honors_request_above_floor() {
+        // A 5s request is kept as-is (it is already above the 1s floor).
+        let plan = parse_subscription_list(&stream_sample_list(5_000_000_000)).unwrap();
+        assert_eq!(plan.sample_interval, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn stream_sample_interval_raises_sub_floor_request_to_floor() {
+        // A 1ms request is raised up to the 1s floor.
+        let plan = parse_subscription_list(&stream_sample_list(1_000_000)).unwrap();
+        assert_eq!(plan.sample_interval, MIN_SAMPLE_INTERVAL);
+    }
+
+    #[test]
+    fn stream_sample_interval_defaults_zero_to_floor() {
+        // A missing/zero interval defaults to the floor.
+        let plan = parse_subscription_list(&stream_sample_list(0)).unwrap();
+        assert_eq!(plan.sample_interval, MIN_SAMPLE_INTERVAL);
+    }
+
+    #[test]
+    fn stream_sample_interval_takes_largest_floored_across_subscriptions() {
+        // The shared sample timer ticks at the largest floored interval so no
+        // subscription is sampled faster than it requested.
+        let path = mounted_path(&[pe("bgp"), pe("global"), pe("state")]);
+        let subscription = |nanos| gnmi::Subscription {
+            path: Some(path.clone()),
+            mode: gnmi::SubscriptionMode::Sample as i32,
+            sample_interval: nanos,
+            suppress_redundant: false,
+            heartbeat_interval: 0,
+        };
+        let list = gnmi::SubscriptionList {
+            prefix: None,
+            subscription: vec![
+                subscription(0),             // -> floor (1s)
+                subscription(2_000_000_000), // -> 2s
+                subscription(1_000_000),     // -> floor (1s)
+            ],
+            qos: None,
+            mode: gnmi::subscription_list::Mode::Stream as i32,
+            allow_aggregation: false,
+            use_models: Vec::new(),
+            encoding: gnmi::Encoding::JsonIetf as i32,
+            updates_only: false,
+        };
+        let plan = parse_subscription_list(&list).unwrap();
+        assert_eq!(plan.sample_interval, Duration::from_secs(2));
+    }
+
+    // --- Subscribe RPC-level harness ---------------------------------------
+    //
+    // Drives the real `subscribe` RPC over an in-process TCP server+client so the
+    // bidi stream (and interactive POLL) exercise the full codec path, matching
+    // the CLI crate's mock-server pattern.
+
+    use crate::gnmi::g_nmi_client::GNmiClient;
+    use crate::gnmi::g_nmi_server::GNmiServer;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::transport::{Channel, Server};
+
+    struct SubscribeHarness {
+        client: GNmiClient<Channel>,
+        shutdown: Option<oneshot::Sender<()>>,
+    }
+
+    impl Drop for SubscribeHarness {
+        fn drop(&mut self) {
+            if let Some(tx) = self.shutdown.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    async fn serve(service: GnmiService) -> SubscribeHarness {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(GNmiServer::new(service))
+                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let channel = Channel::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        SubscribeHarness {
+            client: GNmiClient::new(channel),
+            shutdown: Some(shutdown_tx),
+        }
+    }
+
+    fn subscribe_msg(list: gnmi::SubscriptionList) -> gnmi::SubscribeRequest {
+        gnmi::SubscribeRequest {
+            request: Some(gnmi::subscribe_request::Request::Subscribe(list)),
+            extension: Vec::new(),
+        }
+    }
+
+    fn poll_msg() -> gnmi::SubscribeRequest {
+        gnmi::SubscribeRequest {
+            request: Some(gnmi::subscribe_request::Request::Poll(gnmi::Poll {})),
+            extension: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn subscribe_once_streams_update_then_sync_then_ends() {
+        let mut harness = serve(test_service(Vec::new())).await;
+        let list = subscription_list(
+            gnmi::subscription_list::Mode::Once,
+            gnmi::SubscriptionMode::TargetDefined,
+            mounted_path(&[pe("bgp"), pe("global"), pe("state")]),
+        );
+        let mut stream = harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(list)]))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let first = stream.message().await.unwrap().unwrap();
+        assert!(matches!(
+            first.response,
+            Some(gnmi::subscribe_response::Response::Update(_))
+        ));
+        let second = stream.message().await.unwrap().unwrap();
+        assert_eq!(
+            second.response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+        // ONCE closes the stream after the sync.
+        assert!(stream.message().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn subscribe_poll_sends_initial_snapshot_then_per_poll() {
+        let mut harness = serve(test_service(Vec::new())).await;
+        let list = subscription_list(
+            gnmi::subscription_list::Mode::Poll,
+            gnmi::SubscriptionMode::TargetDefined,
+            mounted_path(&[pe("bgp"), pe("global"), pe("state")]),
+        );
+        // A channel-backed request stream so we can interleave Poll requests.
+        let (req_tx, req_rx) = tokio::sync::mpsc::channel(4);
+        req_tx.send(subscribe_msg(list)).await.unwrap();
+        let mut stream = harness
+            .client
+            .subscribe(ReceiverStream::new(req_rx))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // POLL emits the initial data tree once, then a sync.
+        let first = stream.message().await.unwrap().unwrap();
+        assert!(matches!(
+            first.response,
+            Some(gnmi::subscribe_response::Response::Update(_))
+        ));
+        assert_eq!(
+            stream.message().await.unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+
+        // A Poll triggers a fresh snapshot (update + sync).
+        req_tx.send(poll_msg()).await.unwrap();
+        assert!(matches!(
+            stream.message().await.unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::Update(_))
+        ));
+        assert_eq!(
+            stream.message().await.unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_stream_sample_emits_initial_sync_and_resamples() {
+        let mut harness = serve(test_service(Vec::new())).await;
+        // 1s floor; a couple of ticks is enough to confirm resampling.
+        let mut stream = harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(stream_sample_list(
+                0,
+            ))]))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // First sample: update then sync.
+        assert!(matches!(
+            stream.message().await.unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::Update(_))
+        ));
+        assert_eq!(
+            stream.message().await.unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+        // Second sample (after the floor): a fresh update, no repeated sync.
+        assert!(matches!(
+            stream.message().await.unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::Update(_))
+        ));
+        // Dropping the client end lets the sample task exit promptly via select!.
+        drop(stream);
+    }
+
+    #[tokio::test]
+    async fn subscribe_concurrency_cap_returns_resource_exhausted() {
+        // A service whose concurrency ceiling is exhausted by a single live
+        // stream rejects the next Subscribe with RESOURCE_EXHAUSTED.
+        let mut service = test_service(Vec::new());
+        service.subscribe_slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let mut harness = serve(service).await;
+
+        // Open a long-lived STREAM that holds the only permit. Keep the stream
+        // handle alive (it owns the permit) for the rest of the test.
+        let mut held = harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(stream_sample_list(
+                0,
+            ))]))
+            .await
+            .unwrap()
+            .into_inner();
+        // Drain the first sample so the server task is definitely running and
+        // holding its permit before the second subscribe races in.
+        let _ = held.message().await.unwrap();
+
+        // The handler rejects before opening the response stream, so the status
+        // surfaces either on the initial `subscribe` call or on the first
+        // `message()` of the returned (trailers-only) stream.
+        let err = match harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(stream_sample_list(
+                0,
+            ))]))
+            .await
+        {
+            Err(status) => status,
+            Ok(response) => response
+                .into_inner()
+                .message()
+                .await
+                .expect_err("expected a RESOURCE_EXHAUSTED status, got a message"),
+        };
+        assert_eq!(err.code(), tonic::Code::ResourceExhausted);
     }
 }
