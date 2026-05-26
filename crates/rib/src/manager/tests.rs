@@ -2084,12 +2084,10 @@ async fn explain_advertised_route_reports_no_best_route() {
 #[tokio::test]
 async fn explain_advertised_route_reports_policy_deny_without_mutation() {
     let (tx, rx) = mpsc::channel(64);
-    let deny_policy = rustbgpd_policy::PolicyChain {
-        policies: vec![rustbgpd_policy::Policy {
-            default_action: rustbgpd_policy::PolicyAction::Deny,
-            entries: vec![],
-        }],
-    };
+    let deny_policy = rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+        default_action: rustbgpd_policy::PolicyAction::Deny,
+        entries: vec![],
+    }]);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
@@ -2152,35 +2150,33 @@ async fn explain_advertised_route_reports_policy_deny_without_mutation() {
 #[tokio::test]
 async fn explain_advertised_route_reports_modifications() {
     let (tx, rx) = mpsc::channel(64);
-    let export_policy = rustbgpd_policy::PolicyChain {
-        policies: vec![rustbgpd_policy::Policy {
-            default_action: rustbgpd_policy::PolicyAction::Permit,
-            entries: vec![rustbgpd_policy::PolicyStatement {
-                prefix: None,
-                ge: None,
-                le: None,
-                match_community: vec![],
-                match_as_path: None,
-                match_neighbor_set: None,
-                match_route_type: None,
-                match_evpn_route_type: None,
-                match_as_path_length_ge: None,
-                match_as_path_length_le: None,
-                match_rpki_validation: None,
-                match_aspa_validation: None,
-                match_local_pref_ge: None,
-                match_local_pref_le: None,
-                match_med_ge: None,
-                match_med_le: None,
-                match_next_hop: None,
-                modifications: rustbgpd_policy::RouteModifications {
-                    set_local_pref: Some(200),
-                    ..rustbgpd_policy::RouteModifications::default()
-                },
-                action: rustbgpd_policy::PolicyAction::Permit,
-            }],
+    let export_policy = rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+        default_action: rustbgpd_policy::PolicyAction::Permit,
+        entries: vec![rustbgpd_policy::PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: rustbgpd_policy::RouteModifications {
+                set_local_pref: Some(200),
+                ..rustbgpd_policy::RouteModifications::default()
+            },
+            action: rustbgpd_policy::PolicyAction::Permit,
         }],
-    };
+    }]);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
@@ -2238,37 +2234,35 @@ async fn explain_advertised_route_reports_modifications() {
 #[tokio::test]
 async fn explain_advertised_route_reports_ipv6_next_hop_override() {
     let (tx, rx) = mpsc::channel(64);
-    let export_policy = rustbgpd_policy::PolicyChain {
-        policies: vec![rustbgpd_policy::Policy {
-            default_action: rustbgpd_policy::PolicyAction::Permit,
-            entries: vec![rustbgpd_policy::PolicyStatement {
-                prefix: None,
-                ge: None,
-                le: None,
-                match_community: vec![],
-                match_as_path: None,
-                match_neighbor_set: None,
-                match_route_type: None,
-                match_evpn_route_type: None,
-                match_as_path_length_ge: None,
-                match_as_path_length_le: None,
-                match_rpki_validation: None,
-                match_aspa_validation: None,
-                match_local_pref_ge: None,
-                match_local_pref_le: None,
-                match_med_ge: None,
-                match_med_le: None,
-                match_next_hop: None,
-                modifications: rustbgpd_policy::RouteModifications {
-                    set_next_hop: Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V6(
-                        "2001:db8::42".parse().unwrap(),
-                    ))),
-                    ..rustbgpd_policy::RouteModifications::default()
-                },
-                action: rustbgpd_policy::PolicyAction::Permit,
-            }],
+    let export_policy = rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+        default_action: rustbgpd_policy::PolicyAction::Permit,
+        entries: vec![rustbgpd_policy::PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: rustbgpd_policy::RouteModifications {
+                set_next_hop: Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V6(
+                    "2001:db8::42".parse().unwrap(),
+                ))),
+                ..rustbgpd_policy::RouteModifications::default()
+            },
+            action: rustbgpd_policy::PolicyAction::Permit,
         }],
-    };
+    }]);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 

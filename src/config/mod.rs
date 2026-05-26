@@ -470,10 +470,14 @@ impl Config {
             if (self.global.honor_graceful_shutdown || self.global.honor_blackhole) && is_ebgp {
                 let mut chain = import.unwrap_or_default();
                 if self.global.honor_graceful_shutdown {
-                    chain.policies.push(Self::build_implicit_gshut_policy());
+                    chain
+                        .policies
+                        .push(Self::build_implicit_gshut_policy().into());
                 }
                 if self.global.honor_blackhole {
-                    chain.policies.push(Self::build_implicit_blackhole_policy());
+                    chain
+                        .policies
+                        .push(Self::build_implicit_blackhole_policy().into());
                 }
                 Some(chain)
             } else {

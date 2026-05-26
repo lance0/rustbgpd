@@ -284,7 +284,10 @@ pub(super) fn parse_named_policy(
     })
 }
 
-/// Resolve a list of policy names to a `PolicyChain`.
+/// Resolve a list of policy names to a `PolicyChain`. Each entry is
+/// tagged with its configured name so the chain-eval attribution path
+/// (used by `bgp_policy_routes_total` and the explain surface) can
+/// report which named policy made the decision.
 pub(super) fn resolve_chain(
     names: &[String],
     definitions: &HashMap<String, NamedPolicyConfig>,
@@ -301,9 +304,13 @@ pub(super) fn resolve_chain(
                 .get(name.as_str())
                 .ok_or_else(|| ConfigError::UndefinedPolicy { name: name.clone() })
                 .and_then(|cfg| parse_named_policy(name, cfg, neighbor_sets, peer_groups))
+                .map(|policy| rustbgpd_policy::NamedPolicy {
+                    name: Some(name.clone()),
+                    policy,
+                })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Some(PolicyChain::new(policies)))
+    Ok(Some(PolicyChain::from_named(policies)))
 }
 
 fn resolve_neighbor_set(

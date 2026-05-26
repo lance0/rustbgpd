@@ -67,6 +67,9 @@ pub struct BgpMetrics {
     otc_routes_blocked: IntCounterVec,
     role_mismatch: IntCounterVec,
 
+    // ── Policy chain evaluation ────────────────────────────────
+    policy_routes: IntCounterVec,
+
     // ── Graceful Restart ──────────────────────────────────────
     gr_active_peers: IntGaugeVec,
     gr_stale_routes: IntGaugeVec,
@@ -392,6 +395,20 @@ impl BgpMetrics {
                  route_server_client, customer, peer, none}.",
             ),
             &["peer", "local_role", "remote_role"],
+        )
+        .expect("valid metric definition");
+
+        let policy_routes = IntCounterVec::new(
+            Opts::new(
+                "bgp_policy_routes_total",
+                "Routes evaluated through a policy chain, attributed to the \
+                 terminal-decision policy. Labels: peer (bounded by neighbor \
+                 count), policy (configured policy name; \"inline\" for \
+                 anonymous), direction ∈ {import, export}, action ∈ {permit, \
+                 deny}. Cardinality is bounded by config — no per-clause \
+                 reason label in v1.",
+            ),
+            &["peer", "policy", "direction", "action"],
         )
         .expect("valid metric definition");
 
@@ -747,6 +764,9 @@ impl BgpMetrics {
             .register(Box::new(role_mismatch.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(policy_routes.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(gr_active_peers.clone()))
             .expect("metric not already registered");
         registry
@@ -865,6 +885,7 @@ impl BgpMetrics {
             rr_loop_detected,
             otc_routes_blocked,
             role_mismatch,
+            policy_routes,
             gr_active_peers,
             gr_stale_routes,
             gr_timer_expired,
@@ -1152,6 +1173,22 @@ impl BgpMetrics {
     pub fn record_role_mismatch(&self, peer: &str, local_role: &str, remote_role: &str) {
         self.role_mismatch
             .with_label_values(&[peer, local_role, remote_role])
+            .inc();
+    }
+
+    /// Record a route evaluated through a policy chain, attributed to
+    /// the terminal-decision policy.
+    ///
+    /// - `peer`: bounded by neighbor count.
+    /// - `policy`: configured policy name; `"inline"` for anonymous /
+    ///   inline policies.
+    /// - `direction`: `"import"` or `"export"`.
+    /// - `action`: `"permit"` or `"deny"`.
+    ///
+    /// Cardinality stays bounded by config (no free-form labels).
+    pub fn record_policy_routes(&self, peer: &str, policy: &str, direction: &str, action: &str) {
+        self.policy_routes
+            .with_label_values(&[peer, policy, direction, action])
             .inc();
     }
 
@@ -1584,6 +1621,45 @@ mod tests {
                 .get(),
             5
         );
+    }
+
+    #[test]
+    fn policy_routes_counter_uses_bounded_labels() {
+        let m = BgpMetrics::new();
+        // Three permits + one deny against the same import policy.
+        m.record_policy_routes("10.0.0.2", "ingress-filter", "import", "permit");
+        m.record_policy_routes("10.0.0.2", "ingress-filter", "import", "permit");
+        m.record_policy_routes("10.0.0.2", "ingress-filter", "import", "permit");
+        m.record_policy_routes("10.0.0.2", "ingress-filter", "import", "deny");
+        // An export policy on the same peer.
+        m.record_policy_routes("10.0.0.2", "egress-clean", "export", "permit");
+        // An inline policy on a different peer.
+        m.record_policy_routes("10.0.0.3", "inline", "import", "deny");
+
+        assert_eq!(
+            m.policy_routes
+                .with_label_values(&["10.0.0.2", "ingress-filter", "import", "permit"])
+                .get(),
+            3
+        );
+        assert_eq!(
+            m.policy_routes
+                .with_label_values(&["10.0.0.2", "ingress-filter", "import", "deny"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.policy_routes
+                .with_label_values(&["10.0.0.3", "inline", "import", "deny"])
+                .get(),
+            1
+        );
+
+        let text = gather_text(&m);
+        assert!(text.contains("bgp_policy_routes_total"));
+        assert!(text.contains(r#"policy="ingress-filter""#));
+        assert!(text.contains(r#"direction="import""#));
+        assert!(text.contains(r#"action="deny""#));
     }
 
     #[test]

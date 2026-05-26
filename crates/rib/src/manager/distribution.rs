@@ -2,7 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
-use rustbgpd_policy::{PolicyAction, PolicyChain, RouteContext, RouteType, evaluate_chain};
+use rustbgpd_policy::{
+    PolicyAction, PolicyChain, RouteContext, RouteType, evaluate_chain,
+    evaluate_chain_with_attribution,
+};
 use rustbgpd_rpki::VrpTable;
 use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
 use tracing::{debug, info, warn};
@@ -162,12 +165,18 @@ impl RibManager {
             local_pref: best.local_pref_attr(),
             med: best.med_attr(),
         };
-        let result = evaluate_chain(export_pol, &ctx);
+        // Explain is a one-shot operator query path: enrich the deny /
+        // permit reason with the terminal-decision policy name but do
+        // NOT increment bgp_policy_routes_total here — the actual
+        // distribution path counts each route once, and double-counting
+        // explain calls would skew the metric.
+        let (result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
+        let policy_label = evaluation.matched_policy.as_deref().unwrap_or("inline");
         if result.action != PolicyAction::Permit {
             explain.decision = ExplainDecision::Deny;
             explain.reasons.push(ExplainReason {
                 code: "policy_denied",
-                message: "export policy denied this route".to_string(),
+                message: format!("export policy {policy_label:?} denied this route"),
             });
             return explain;
         }
@@ -183,7 +192,7 @@ impl RibManager {
         if export_pol.is_some() {
             explain.reasons.push(ExplainReason {
                 code: "policy_permitted",
-                message: "export policy permitted this route".to_string(),
+                message: format!("export policy {policy_label:?} permitted this route"),
             });
         }
 
