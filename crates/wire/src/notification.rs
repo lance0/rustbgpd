@@ -90,6 +90,8 @@ pub mod open_subcode {
     pub const UNACCEPTABLE_HOLD_TIME: u8 = 6;
     /// Subcode 7: Unsupported Capability (RFC 5492).
     pub const UNSUPPORTED_CAPABILITY: u8 = 7;
+    /// Subcode 11: Role Mismatch (RFC 9234 §4.2).
+    pub const ROLE_MISMATCH: u8 = 11;
 }
 
 /// UPDATE Message Error subcodes (code 3).
@@ -190,6 +192,7 @@ pub fn description(code: NotificationCode, subcode: u8) -> &'static str {
         (NotificationCode::OpenMessage, 4) => "Unsupported Optional Parameter",
         (NotificationCode::OpenMessage, 6) => "Unacceptable Hold Time",
         (NotificationCode::OpenMessage, 7) => "Unsupported Capability",
+        (NotificationCode::OpenMessage, 11) => "Role Mismatch",
         // UPDATE Message Error
         (NotificationCode::UpdateMessage, 1) => "Malformed Attribute List",
         (NotificationCode::UpdateMessage, 2) => "Unrecognized Well-known Attribute",
