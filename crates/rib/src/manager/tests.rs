@@ -1704,6 +1704,80 @@ async fn export_policy_counter_records_single_best_permit() {
 }
 
 #[tokio::test]
+async fn graceful_restart_clears_export_policy_stats() {
+    // Mirror of the PeerDown cleanup assertion. A GR-driven session
+    // teardown reuses the outbound peer state slot on reconnect, so the
+    // export policy aggregates must reset alongside the rest of the
+    // per-peer state cleared in handle_peer_graceful_restart. Without
+    // this, `rustbgpctl neighbor show` shows import counters at 0
+    // (reset on SessionDown in transport/session/fsm.rs) but export
+    // counters carrying forward — a directional asymmetry that
+    // confuses operators.
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    let _ = out_rx.recv().await.unwrap();
+
+    let stats = query_neighbor_policy_stats(&tx, target).await;
+    assert_eq!(stats.export_policy_routes_permitted, 1);
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer: target,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    let stats_after = query_neighbor_policy_stats(&tx, target).await;
+    assert_eq!(
+        stats_after.export_policy_routes_permitted, 0,
+        "PeerGracefulRestart must clear export_policy_stats; saw {stats_after:?}"
+    );
+    assert_eq!(stats_after.export_policy_routes_denied, 0);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn explain_advertised_route_does_not_increment_export_policy_counter() {
     let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(64);
