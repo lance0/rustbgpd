@@ -64,13 +64,15 @@ contract we promise consumers.
   ConfigPersister) is one tokio task driven by an mpsc receive loop
   (e.g. `src/main.rs:847-849`, `src/main.rs:1027-1066`). A new
   `EventHistoryManager` slots into the existing supervisor pattern.
-- **Atomic on-disk state pattern**: `gr-restart.toml` and
-  `fib-owned.json` use temp-write + rename
-  (`src/main.rs:316-334`, `src/fib_runtime.rs:1144-1163`), with
-  `.stale-<ts>` quarantine on corrupt-on-load
-  (`src/fib_runtime.rs:1140-1141`). The new SQLite store inherits the
-  quarantine convention; the WAL handles the atomic-write story
-  internally.
+- **Atomic on-disk state pattern**: `fib-owned.json` uses temp-write +
+  rename (`src/fib_runtime.rs:1144-1163`), with `.json.stale`
+  quarantine on corrupt-on-load
+  (`stale_owned_state_path` at `src/fib_runtime.rs:1140-1142`).
+  `gr-restart.toml` is a simpler case — small versioned marker written
+  in-place (`src/main.rs:316-334`) — and is the reference for the
+  versioned schema-marker pattern below, not the atomic-write one.
+  The new SQLite store inherits the `.stale` quarantine convention;
+  the WAL handles the atomic-write story internally.
 - **Versioned on-disk markers**: `GR_RESTART_MARKER_VERSION` at
   `src/main.rs:67-73` is the existing schema-downgrade-fence pattern;
   the SQLite `metadata.schema_version` row mirrors it.
@@ -373,11 +375,21 @@ corrupted file, schema downgrade fence) splits by `required`:
   escape hatch.
 
 **Corrupted DB on load**: same quarantine pattern as
-`fib-owned.json` (`src/fib_runtime.rs:1140-1141`). Rename to
-`events.db.stale-<unix-ts>`, attempt to read `last_event_id` from
-the quarantined file's `metadata` table (best-effort) to seed the
-fresh DB's allocator, and continue. Quarantine files are not
-auto-deleted; operator inspects and removes them.
+`fib-owned.json` (`stale_owned_state_path` at
+`src/fib_runtime.rs:1140-1142`). Rename to `events.db.stale` —
+no timestamp suffix, matching the existing convention so operators
+inherit one quarantine idiom across the daemon. Before quarantining,
+EHM best-effort reads `last_event_id` from the quarantined file's
+`metadata` table to seed the fresh DB's allocator (preserving
+cursor monotonicity across the recovery), then continues. The
+quarantine file is **not** auto-deleted, and a subsequent
+corruption would overwrite the prior quarantine — operators who
+need to preserve multiple bad files for forensics rename manually
+before the next start. The single-file convention beats a
+multi-file timestamped convention here because (a) it matches what
+operators already know from `fib-owned.json`, and (b) corruption
+during a quarantined-file-still-present state is a rare-enough
+event that the manual-rename cost is acceptable.
 
 **Schema downgrade fence**: a future daemon version bumps
 `schema_version`. Downgrading the daemon binary while pointing at
