@@ -2,7 +2,9 @@
 
 Practical reference for running rustbgpd in production. For config syntax,
 see [CONFIGURATION.md](CONFIGURATION.md). For security posture, see
-[SECURITY.md](SECURITY.md).
+[SECURITY.md](SECURITY.md). For the end-to-end install + lifecycle
+walkthrough (systemd setup, Docker, containerlab quick-start, sample
+profiles), see [deployment.md](deployment.md).
 
 ---
 

@@ -1,5 +1,8 @@
 # Security Posture
 
+> For the end-to-end install + lifecycle walkthrough (systemd setup,
+> Docker, containerlab quick-start), see [`deployment.md`](deployment.md).
+
 rustbgpd exposes a privileged gRPC management API for peer lifecycle, route
 injection, soft reset, MRT triggers, and daemon shutdown. Treat that surface as
 part of your management plane, not as a general-purpose service endpoint.
