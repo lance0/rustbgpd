@@ -23,7 +23,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   EVPN are intentionally untouched in v1. Prometheus exposes
   `bgp_otc_routes_blocked_total{peer,reason}` for blocked unicast routes, and
   `NeighborService` / `rustbgpctl neighbor` surface configured and negotiated
-  roles plus per-peer OTC block counts.
+  roles plus per-peer OTC block counts. M55 validates compatible Role pairs,
+  Role mismatch / strict-mode rejection, OTC egress set, deliberate ingress
+  leak rejection, and malformed-OTC treat-as-withdraw against FRR 10.3.1 plus a
+  raw-BGP fixture.
 - **ADR-0070 read-only gNMI / OpenConfig telemetry adapter.** A native gNMI
   target (`gnmi.gNMI`, gNMI v0.10.0) served over the mTLS TCP and UDS gRPC
   listeners, backed by the existing typed snapshots — not a config datastore.

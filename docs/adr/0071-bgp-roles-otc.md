@@ -69,7 +69,7 @@ ingress (the RFC numbers them under one heading; we list five for clarity):
   removal. OTC egress (E1/E2) belongs here.
 - **Inbound UPDATE processing** already supports import-policy filtering and
   per-attribute validation. OTC ingress leak rejection (I1/I2) follows the
-  same precedent: ineligible at import + structured event.
+  same precedent: ineligible at import + counter/status update.
 - **Per-neighbor config + peer-group inheritance** is established (ADR-0036); a
   new `role` + `strict_role` field follows the existing enum-field pattern
   (e.g. `redundancy_mode`, `df_algorithm`).
@@ -79,7 +79,9 @@ ingress (the RFC numbers them under one heading; we list five for clarity):
 Implement RFC 9234 in full for static eBGP neighbors. Per-neighbor `role` config
 drives both the OPEN Role capability and the egress/ingress OTC rules. Optional
 `strict_role` enforces "both sides MUST advertise" at OPEN time. Leak
-detections are structured events + Prometheus counters, never silent.
+detections are observable through bounded Prometheus counters plus per-peer
+status counters; a richer route-leak event payload is deferred to the durable
+event-history work so it can carry stable cursors/backfill semantics.
 
 ### Role capability (§4)
 
@@ -134,21 +136,20 @@ detections are structured events + Prometheus counters, never silent.
   - **E2:** If the route already carries OTC, suppress the route from
     outbound advertisements when the peer's implied role is Provider /
     Peer / RS (i.e. our local role is Customer / Peer / RS-Client). The
-    suppression is observable via the structured event + counter; it is
-    not a silent drop.
+    suppression is observable via the counter/status surface; it is not a
+    silent drop.
 - **Ingress — semantic leak detection** (in `process_update`). Driven by
   the **local** role. **This is RFC 9234 §5 semantic ineligibility, NOT
   RFC 7606 treat-as-withdraw** — the route is "ineligible for the Adj-
   RIB-In and Loc-RIB" per the RFC. We reuse the AS_PATH-loop / RR-loop
   transport-layer mechanics (drop announcements, process withdrawals,
-  structured event + counter, session stays Established) because that's
+  counter/status update, session stays Established) because that's
   the only "drop announces, keep withdrawals" primitive in the codebase
-  today — but the metric labels and events make the RFC justification
-  explicit:
+  today — but the metric labels make the RFC justification explicit:
   - **I1:** From a peer whose implied role is Customer or RS-Client, with
     OTC present ⇒ leak. UPDATE announcements dropped, withdrawals
     processed, `bgp_otc_routes_blocked_total{reason="ingress_from_customer_rsclient"}`
-    + structured event fire. Session NOT torn down.
+    increments. Session NOT torn down.
   - **I2:** From a peer whose implied role is Peer, with OTC present AND
     OTC value ≠ remote AS ⇒ leak. Same semantic ineligibility +
     `reason="ingress_peer_mismatch"`.
@@ -170,10 +171,9 @@ detections are structured events + Prometheus counters, never silent.
   applies the same transport-layer mechanics as I1/I2 (drop
   announcements, process withdrawals, session stays Established) but
   with a distinct counter label:
-  `bgp_otc_routes_blocked_total{reason="malformed_length"}`. Same event
-  type as I1/I2 (see below) with `reason="malformed_length"`. This is a
-  syntactic error, not a semantic leak; the reason label makes the
-  distinction observable.
+  `bgp_otc_routes_blocked_total{reason="malformed_length"}`. This is a
+  syntactic error, not a semantic leak; the reason label makes the distinction
+  observable.
 - Roles + OTC procedures fire whenever the **local** `[[neighbors]].role`
   is configured (eBGP only). They do NOT require the peer to advertise
   Role — the local role determines the peer's implied relationship per
@@ -238,12 +238,11 @@ Validation:
     malformed_length, egress_to_upstream_via_otc}`.
   - `bgp_role_mismatch_total{peer, local_role, remote_role}` incremented
     on OPEN-time rejection.
-- New `BgpEventType::OtcRouteBlocked` event carrying peer, prefix,
-  observed OTC value (or raw bytes for the malformed case), AS_PATH
-  context, and the `reason` (`I1` / `I2` / `E2` / `malformed_length`).
-  Named "blocked" rather than "leak" because malformed-length is not
-  semantically a leak — one event type with a discriminating reason is
-  simpler than splitting "leak" and "malformed" into two.
+- Deferred: a dedicated `OtcRouteBlocked` event carrying peer, prefix,
+  observed OTC value (or raw bytes for the malformed case), AS_PATH context,
+  and the `reason` (`I1` / `I2` / `E2` / `malformed_length`). This belongs with
+  the durable event-history / replay work so operators get a backfillable event,
+  not another lossy live-stream-only signal.
 
 ### Interop gate
 
@@ -272,7 +271,7 @@ on the `local-role` line. The FRR doc reference is pinned to
    peering through an intermediate that re-emits the route with OTC.
    Assertion: rustbgpd marks the route ineligible (not installed,
    `bgp_otc_routes_blocked_total{reason="ingress_from_customer_rsclient"}`
-   increments, structured event emitted, session stays Established).
+   increments, session stays Established).
 5. **Strict mode.** rustbgpd with `strict_role = true` peers against a
    FRR config without `local-role`: assert NOTIFICATION 2/11.
 6. **Malformed OTC length.** A raw-BGP fixture sends an UPDATE with an
@@ -286,18 +285,18 @@ on the `local-role` line. The FRR doc reference is pinned to
 | PR | Scope | Verification |
 |----|-------|--------------|
 | **PR1** | `crates/wire`: Role capability (code 9, 1-byte enum encode/decode) + OTC path attribute (type 35, 4-byte AS encode/decode) + their public re-exports. **Malformed OTC length (≠ 4) is preserved as `PathAttribute::Unknown(RawAttribute)` carrying the OTC type code — NOT a fatal `DecodeError`** so transport can apply RFC 7606 treat-as-withdraw without killing the session. Pure crate; unit tests + fuzz-target update if applicable. | `cargo test -p rustbgpd-wire`; new tests cover all five role values, the `0xC0` flag encoding, round-trips, **malformed-length stored as recoverable `Unknown` (verified non-fatal)**, and the `expected_flags()` rejection path for bad flags. |
-| **PR2** | `crates/fsm` role compatibility + NOTIFICATION 2/11 + strict-mode gating + duplicate-role-cap rejection, and recording the configured local role + advertised peer role on `NegotiatedSession`; `crates/transport` ingress (I1/I2 semantic leak + malformed-OTC-length treat-as-withdraw + I3 set) + egress (E1/E2 unicast only — FlowSpec/EVPN siblings NOT touched) wired through `prepare_outbound_attributes` and the inbound UPDATE path; `src/config` schema + validation for `role` / `strict_role` (mirroring the `remove_private_as` precedent); structured event + Prometheus counters with distinct `reason` labels for `ingress_from_customer_rsclient` / `ingress_peer_mismatch` / `malformed_length` / `egress_to_upstream_via_otc`. | `cargo test --workspace`; unit tests cover each ingress/egress rule, the duplicate-cap behaviour, the malformed-length treat-as-withdraw, the preserve-existing-OTC invariant, and the strict / non-strict paths; FSM table covers the compatibility matrix. |
+| **PR2** | `crates/fsm` role compatibility + NOTIFICATION 2/11 + strict-mode gating + duplicate-role-cap rejection, and recording the configured local role + advertised peer role on `NegotiatedSession`; `crates/transport` ingress (I1/I2 semantic leak + malformed-OTC-length treat-as-withdraw + I3 set) + egress (E1/E2 unicast only — FlowSpec/EVPN siblings NOT touched) wired through `prepare_outbound_attributes` and the inbound UPDATE path; `src/config` schema + validation for `role` / `strict_role` (mirroring the `remove_private_as` precedent); Prometheus counters with distinct `reason` labels for `ingress_from_customer_rsclient` / `ingress_peer_mismatch` / `malformed_length` / `egress_to_upstream_via_otc`. | `cargo test --workspace`; unit tests cover each ingress/egress rule, the duplicate-cap behaviour, the malformed-length treat-as-withdraw, the preserve-existing-OTC invariant, and the strict / non-strict paths; FSM table covers the compatibility matrix. |
 | **PR3** | `proto/rustbgpd.proto` + `crates/api/src/neighbor_service.rs`: surface `local_role` / `remote_role` / `role_negotiated` on `NeighborState`; `crates/cli` renders them in `rustbgpctl neighbor show`. Additive — no new authz-matrix entries. | `cargo test -p rustbgpd-api`; `rustbgpctl neighbor show` smoke. |
-| **PR4** | FRR interop topology + driver under `tests/interop/`, wired into `kernel-dataplane.yml`. Covers the six interop scenarios above (pair establishment, mismatch, OTC egress set, OTC ingress leak via deliberate injection, strict mode, malformed-length treat-as-withdraw). | M-series CI green against FRR 10.3.1. |
+| **PR4** | FRR interop topology + driver under `tests/interop/`, wired into `interop.yml`. Covers the six interop scenarios above (pair establishment, mismatch, OTC egress set, OTC ingress leak via deliberate injection, strict mode, malformed-length treat-as-withdraw). | M-series CI green against FRR 10.3.1. |
 
 ## Implementation status
 
 | Slice | Status |
 |-------|--------|
-| PR1 — wire codec (Role capability + OTC attribute) | Planned |
-| PR2 — FSM mismatch + transport ingress/egress + config | Planned |
-| PR3 — gRPC `NeighborState` + CLI | Planned |
-| PR4 — FRR interop | Planned |
+| PR1 — wire codec (Role capability + OTC attribute) | PR ready |
+| PR2 — FSM mismatch + transport ingress/egress + config | PR ready |
+| PR3 — gRPC `NeighborState` + CLI | PR ready |
+| PR4 — FRR interop | PR ready |
 
 ## Repo seams (grounded)
 
@@ -366,9 +365,9 @@ on the `local-role` line. The FRR doc reference is pinned to
   attr_type::ONLY_TO_CUSTOMER` (malformed length — the wire crate
   preserves it as Unknown rather than raising `DecodeError`, see PR1).
   All three cases drop announcements, process withdrawals, bump
-  `bgp_otc_routes_blocked_total{reason=…}` with the right label, and
-  emit `BgpEventType::OtcRouteBlocked`. No NOTIFICATION; session stays
-  Established. `process_update` entry is `inbound.rs:74`.
+  `bgp_otc_routes_blocked_total{reason=…}` with the right label, and update
+  per-peer OTC counters. No NOTIFICATION; session stays Established.
+  `process_update` entry is `inbound.rs:74`.
 - **Config schema:** `Neighbor` struct at `src/config/schema.rs:459` —
   add `role: Option<String>` + `strict_role: Option<bool>` following the
   `Option<T>`-with-string-enum pattern. Mirror fields on `PeerGroupConfig`
@@ -426,8 +425,8 @@ on the `local-role` line. The FRR doc reference is pinned to
   - **I1 / I2 — RFC 9234 §5 semantic ineligibility.** The route is
     "ineligible for the Adj-RIB-In and Loc-RIB." Not a malformed UPDATE.
     Distinct `reason` labels (`ingress_from_customer_rsclient`,
-    `ingress_peer_mismatch`) and distinct structured events keep the RFC
-    justification explicit even though the transport mechanism is shared.
+    `ingress_peer_mismatch`) keep the RFC justification explicit even though
+    the transport mechanism is shared.
   - **Malformed OTC length (≠ 4 octets) — RFC 7606 treat-as-withdraw.**
     Genuinely a syntactic error. Same transport mechanism, different
     `reason` label (`malformed_length`).

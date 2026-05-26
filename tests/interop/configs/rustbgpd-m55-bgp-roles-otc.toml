@@ -1,0 +1,60 @@
+[global]
+asn = 65001
+router_id = "10.55.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.55.1.2"
+remote_asn = 65002
+description = "m55-frr-customer"
+hold_time = 90
+role = "provider"
+
+[[neighbors]]
+address = "10.55.2.2"
+remote_asn = 65003
+description = "m55-frr-rsclient"
+hold_time = 90
+role = "rs"
+
+[[neighbors]]
+address = "10.55.3.2"
+remote_asn = 65004
+description = "m55-frr-peer"
+hold_time = 90
+role = "peer"
+
+# Provider↔Provider is incompatible and must fail with OPEN 2/11.
+[[neighbors]]
+address = "10.55.4.2"
+remote_asn = 65005
+description = "m55-frr-mismatch"
+hold_time = 90
+role = "provider"
+
+# Strict local Role rejects a peer that does not advertise Role.
+[[neighbors]]
+address = "10.55.5.2"
+remote_asn = 65006
+description = "m55-frr-norole-strict"
+hold_time = 90
+role = "provider"
+strict_role = true
+
+# Raw fixture advertises Customer role and sends deliberately invalid OTC cases.
+[[neighbors]]
+address = "10.55.6.2"
+remote_asn = 65007
+description = "m55-raw-customer"
+hold_time = 90
+role = "provider"
+
+[security.grpc]
+enforcement = "legacy"

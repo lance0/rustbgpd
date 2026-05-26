@@ -6874,6 +6874,65 @@ fn m52_interop_config_enables_multipath_relax_with_mixed_asns() {
 }
 
 #[test]
+fn m55_interop_config_pins_role_matrix_and_strict_neighbor() {
+    // Pin the M55 interop fixture: it needs three compatible role pairs, one
+    // incompatible Provider/Provider pair, one strict-role/no-remote-role peer,
+    // and one raw Customer fixture for deliberate OTC leak injection.
+    let config = parse(include_str!(
+        "../../tests/interop/configs/rustbgpd-m55-bgp-roles-otc.toml"
+    ))
+    .unwrap();
+    let roles: Vec<(String, u32, Option<BgpRole>, Option<bool>)> = config
+        .neighbors
+        .iter()
+        .map(|n| {
+            (
+                n.address.clone(),
+                n.remote_asn,
+                n.role.map(BgpRoleConfig::to_wire),
+                n.strict_role,
+            )
+        })
+        .collect();
+    assert_eq!(
+        roles,
+        vec![
+            (
+                "10.55.1.2".to_string(),
+                65002,
+                Some(BgpRole::Provider),
+                None,
+            ),
+            (
+                "10.55.2.2".to_string(),
+                65003,
+                Some(BgpRole::RouteServer),
+                None,
+            ),
+            ("10.55.3.2".to_string(), 65004, Some(BgpRole::Peer), None),
+            (
+                "10.55.4.2".to_string(),
+                65005,
+                Some(BgpRole::Provider),
+                None,
+            ),
+            (
+                "10.55.5.2".to_string(),
+                65006,
+                Some(BgpRole::Provider),
+                Some(true),
+            ),
+            (
+                "10.55.6.2".to_string(),
+                65007,
+                Some(BgpRole::Provider),
+                None,
+            ),
+        ]
+    );
+}
+
+#[test]
 fn ethernet_segment_rejects_ambiguous_preference_df_algorithm_alias() {
     let toml = evpn_toml_with(
         r#"
