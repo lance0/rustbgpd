@@ -242,7 +242,8 @@ Validation:
   observed OTC value (or raw bytes for the malformed case), AS_PATH context,
   and the `reason` (`I1` / `I2` / `E2` / `malformed_length`). This belongs with
   the durable event-history / replay work so operators get a backfillable event,
-  not another lossy live-stream-only signal.
+  not another lossy live-stream-only signal. **Unblocked by [ADR-0072](0072-durable-event-history.md);**
+  ships once the durable outbox lands.
 
 ### Interop gate
 
