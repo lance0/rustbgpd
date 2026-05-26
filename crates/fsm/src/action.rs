@@ -118,4 +118,19 @@ pub enum Action {
         /// Which timer the daemon delivered.
         timer: TimerType,
     },
+    /// RFC 9234 Role-Mismatch observed at OPEN time — emitted alongside
+    /// `SendNotification(OpenMessage / ROLE_MISMATCH)` so transport can
+    /// label `bgp_role_mismatch_total{peer, local_role, remote_role}`
+    /// with the configured local role and (where available) the peer's
+    /// advertised role. The notification + close + transition to Idle are
+    /// still driven by the surrounding `SendNotification`,
+    /// `CloseTcpConnection`, and `StateChanged` actions; this variant is
+    /// strictly observability.
+    RoleMismatchObserved {
+        /// Locally configured role (`None` if we didn't advertise Role).
+        local_role: Option<BgpRole>,
+        /// Peer's advertised role (`None` if absent; for duplicate-Role
+        /// OPENs the FIRST received Role value is reported).
+        remote_role: Option<BgpRole>,
+    },
 }

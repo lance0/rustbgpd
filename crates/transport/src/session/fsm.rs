@@ -354,6 +354,26 @@ impl PeerSession {
                         timer_label,
                     );
                 }
+                Action::RoleMismatchObserved {
+                    local_role,
+                    remote_role,
+                } => {
+                    // RFC 9234 OPEN-time Role-Mismatch (NOTIFICATION 2/11). The
+                    // surrounding `SendNotification` action drives the wire-
+                    // level rejection; here we only emit the bounded metric so
+                    // operators can see mismatch rates per (peer, local, remote).
+                    warn!(
+                        peer = %self.peer_label,
+                        local_role = ?local_role,
+                        remote_role = ?remote_role,
+                        "RFC 9234 role mismatch — rejecting OPEN with NOTIFICATION 2/11"
+                    );
+                    self.metrics.record_role_mismatch(
+                        &self.peer_label,
+                        role_metric_label(local_role),
+                        role_metric_label(remote_role),
+                    );
+                }
                 Action::SessionDown => {
                     info!(peer = %self.peer_label, "session down");
 
@@ -512,4 +532,21 @@ pub(super) fn hard_reset_notification_in_actions(actions: &[Action]) -> bool {
                     && notif.subcode == cease_subcode::HARD_RESET
         )
     })
+}
+
+/// Bounded label string for `bgp_role_mismatch_total{local_role, remote_role}`.
+///
+/// Returns a static `&'static str` so the metric cardinality stays bounded
+/// (six values: the five RFC 9234 roles plus `"none"`). An absent role
+/// (peer did not advertise the Role capability, or we didn't configure one)
+/// is reported as `"none"`.
+const fn role_metric_label(role: Option<rustbgpd_wire::BgpRole>) -> &'static str {
+    match role {
+        Some(rustbgpd_wire::BgpRole::Provider) => "provider",
+        Some(rustbgpd_wire::BgpRole::RouteServer) => "route_server",
+        Some(rustbgpd_wire::BgpRole::RouteServerClient) => "route_server_client",
+        Some(rustbgpd_wire::BgpRole::Customer) => "customer",
+        Some(rustbgpd_wire::BgpRole::Peer) => "peer",
+        None => "none",
+    }
 }

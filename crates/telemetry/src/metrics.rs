@@ -65,6 +65,7 @@ pub struct BgpMetrics {
     as_path_loop_detected: IntCounterVec,
     rr_loop_detected: IntCounterVec,
     otc_routes_blocked: IntCounterVec,
+    role_mismatch: IntCounterVec,
 
     // ── Graceful Restart ──────────────────────────────────────
     gr_active_peers: IntGaugeVec,
@@ -380,6 +381,17 @@ impl BgpMetrics {
                 "RFC 9234 Only-to-Customer unicast routes blocked by bounded peer and reason labels.",
             ),
             &["peer", "reason"],
+        )
+        .expect("valid metric definition");
+
+        let role_mismatch = IntCounterVec::new(
+            Opts::new(
+                "bgp_role_mismatch_total",
+                "RFC 9234 OPEN-time Role-Mismatch rejections (NOTIFICATION 2/11). \
+                 local_role + remote_role ∈ {provider, route_server, \
+                 route_server_client, customer, peer, none}.",
+            ),
+            &["peer", "local_role", "remote_role"],
         )
         .expect("valid metric definition");
 
@@ -732,6 +744,9 @@ impl BgpMetrics {
             .register(Box::new(otc_routes_blocked.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(role_mismatch.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(gr_active_peers.clone()))
             .expect("metric not already registered");
         registry
@@ -849,6 +864,7 @@ impl BgpMetrics {
             as_path_loop_detected,
             rr_loop_detected,
             otc_routes_blocked,
+            role_mismatch,
             gr_active_peers,
             gr_stale_routes,
             gr_timer_expired,
@@ -1125,6 +1141,18 @@ impl BgpMetrics {
         self.otc_routes_blocked
             .with_label_values(&[peer, reason])
             .inc_by(count);
+    }
+
+    /// Record RFC 9234 OPEN-time Role-Mismatch rejection.
+    ///
+    /// `local_role` and `remote_role` are bounded strings — one of
+    /// `{provider, route_server, route_server_client, customer, peer, none}`.
+    /// The label cardinality is fixed at 6×6 = 36 per peer; absent roles
+    /// (peer didn't advertise, or we didn't configure) become `"none"`.
+    pub fn record_role_mismatch(&self, peer: &str, local_role: &str, remote_role: &str) {
+        self.role_mismatch
+            .with_label_values(&[peer, local_role, remote_role])
+            .inc();
     }
 
     /// Set the GR active flag for a peer (1 = in GR, 0 = not).
@@ -1556,6 +1584,35 @@ mod tests {
                 .get(),
             5
         );
+    }
+
+    #[test]
+    fn role_mismatch_counter_uses_bounded_role_labels() {
+        let m = BgpMetrics::new();
+        // Both Provider — incompatible (RFC 9234 Table 2 forbids).
+        m.record_role_mismatch("10.0.0.7", "provider", "provider");
+        m.record_role_mismatch("10.0.0.7", "provider", "provider");
+        // Strict mode: we configured Customer but peer didn't advertise Role.
+        m.record_role_mismatch("10.0.0.8", "customer", "none");
+
+        assert_eq!(
+            m.role_mismatch
+                .with_label_values(&["10.0.0.7", "provider", "provider"])
+                .get(),
+            2
+        );
+        assert_eq!(
+            m.role_mismatch
+                .with_label_values(&["10.0.0.8", "customer", "none"])
+                .get(),
+            1
+        );
+
+        // The metric should render in the registry's text output.
+        let text = gather_text(&m);
+        assert!(text.contains("bgp_role_mismatch_total"));
+        assert!(text.contains(r#"local_role="provider""#));
+        assert!(text.contains(r#"remote_role="none""#));
     }
 
     #[test]
