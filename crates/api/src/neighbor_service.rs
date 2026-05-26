@@ -112,6 +112,23 @@ async fn query_advertised_count(
     Ok(u64::try_from(count).unwrap_or(u64::MAX))
 }
 
+async fn query_export_policy_stats(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    peer: std::net::IpAddr,
+) -> Result<rustbgpd_rib::NeighborPolicyStats, Status> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    rib_tx
+        .send(RibUpdate::QueryNeighborPolicyStats {
+            peer,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| Status::internal("RIB manager unavailable"))?;
+    reply_rx
+        .await
+        .map_err(|_| Status::internal("RIB manager dropped reply"))
+}
+
 pub(crate) fn family_to_string(afi: Afi, safi: Safi) -> String {
     match (afi, safi) {
         (Afi::Ipv4, Safi::Unicast) => "ipv4_unicast".to_string(),
@@ -222,6 +239,10 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         remote_role: bgp_role_to_string(info.remote_role),
         role_negotiated: info.role_negotiated,
         otc_routes_blocked: info.otc_routes_blocked,
+        import_policy_routes_permitted: info.import_policy_routes_permitted,
+        import_policy_routes_denied: info.import_policy_routes_denied,
+        export_policy_routes_permitted: info.export_policy_routes_permitted,
+        export_policy_routes_denied: info.export_policy_routes_denied,
     }
 }
 
@@ -444,6 +465,9 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         for info in &infos {
             let mut state = peer_info_to_proto(info);
             state.prefixes_sent = query_advertised_count(&self.rib_tx, info.address).await?;
+            let policy_stats = query_export_policy_stats(&self.rib_tx, info.address).await?;
+            state.export_policy_routes_permitted = policy_stats.export_policy_routes_permitted;
+            state.export_policy_routes_denied = policy_stats.export_policy_routes_denied;
             neighbors.push(state);
         }
 
@@ -473,6 +497,9 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
 
         let mut state = peer_info_to_proto(&info);
         state.prefixes_sent = query_advertised_count(&self.rib_tx, info.address).await?;
+        let policy_stats = query_export_policy_stats(&self.rib_tx, info.address).await?;
+        state.export_policy_routes_permitted = policy_stats.export_policy_routes_permitted;
+        state.export_policy_routes_denied = policy_stats.export_policy_routes_denied;
         Ok(Response::new(state))
     }
 
@@ -992,6 +1019,10 @@ mod tests {
                     notifications_received: 0,
                     notifications_sent: 0,
                     otc_routes_blocked: 0,
+                    import_policy_routes_permitted: 0,
+                    import_policy_routes_denied: 0,
+                    export_policy_routes_permitted: 0,
+                    export_policy_routes_denied: 0,
                     flap_count: 0,
                     uptime_secs: 0,
                     last_error: String::new(),
@@ -1002,8 +1033,20 @@ mod tests {
         });
 
         tokio::spawn(async move {
-            if let Some(RibUpdate::QueryAdvertisedCount { reply, .. }) = rib_rx.recv().await {
-                let _ = reply.send(7);
+            while let Some(cmd) = rib_rx.recv().await {
+                match cmd {
+                    RibUpdate::QueryAdvertisedCount { reply, .. } => {
+                        let _ = reply.send(7);
+                    }
+                    RibUpdate::QueryNeighborPolicyStats { reply, .. } => {
+                        let _ = reply.send(rustbgpd_rib::NeighborPolicyStats {
+                            export_policy_routes_permitted: 3,
+                            export_policy_routes_denied: 4,
+                            ..Default::default()
+                        });
+                    }
+                    _ => {}
+                }
             }
         });
 
@@ -1017,6 +1060,8 @@ mod tests {
             .into_inner();
 
         assert_eq!(resp.prefixes_sent, 7);
+        assert_eq!(resp.export_policy_routes_permitted, 3);
+        assert_eq!(resp.export_policy_routes_denied, 4);
     }
 
     #[test]
@@ -1047,6 +1092,10 @@ mod tests {
             notifications_received: 0,
             notifications_sent: 0,
             otc_routes_blocked: 3,
+            import_policy_routes_permitted: 11,
+            import_policy_routes_denied: 12,
+            export_policy_routes_permitted: 13,
+            export_policy_routes_denied: 14,
             flap_count: 0,
             uptime_secs: 0,
             last_error: String::new(),
@@ -1063,6 +1112,10 @@ mod tests {
         assert_eq!(state.remote_role, "rs-client");
         assert!(state.role_negotiated);
         assert_eq!(state.otc_routes_blocked, 3);
+        assert_eq!(state.import_policy_routes_permitted, 11);
+        assert_eq!(state.import_policy_routes_denied, 12);
+        assert_eq!(state.export_policy_routes_permitted, 13);
+        assert_eq!(state.export_policy_routes_denied, 14);
     }
 
     #[tokio::test]

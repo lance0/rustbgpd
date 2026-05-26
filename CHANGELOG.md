@@ -11,6 +11,51 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Operator Confidence Polish Sprint 1.**
+  - **Reload matrix** (`docs/reload-matrix.md`). Per-field classification —
+    `live` / `restart-required` / `rejected` / `unsupported` / `validation-only`
+    — for the full config surface, including `[[neighbors]]` (28 fields),
+    `[[peer_groups]]` (19 fields), `[global]` + telemetry / gRPC sub-sections,
+    `[policy]` (named definitions / chains hot-apply; inline `[policy.import]`
+    / `[policy.export]` are warn + no-op), and the pinned EVPN / FIB / BFD /
+    TCP-AO sections. Cross-linked from `CONFIGURATION.md`. Backed by two
+    structural tests in `src/config/tests.rs` that catch field-drift on
+    future PRs.
+  - **`bgp_policy_routes_total{peer, policy, direction, action}` Prometheus
+    counter** plus the four scalar per-peer aggregates on `NeighborState`:
+    `import_policy_routes_permitted` / `_denied` (per session — reset on
+    session-down) and `export_policy_routes_permitted` / `_denied` (per RIB
+    peer-attach — same reset semantics). Attribution is to the terminal-
+    decision policy in the chain — the policy that issued the Deny, or the
+    last policy when all permit. `policy="inline"` for anonymous statements
+    and permit-all peers without an explicit chain (no `inline-<n>` —
+    positions aren't stable across reloads). New `rustbgpd_policy::
+    NamedPolicy { name, policy }` and `PolicyChain::evaluate_with_attribution`
+    are the underlying seam; existing `PolicyResult` matchers don't churn.
+    `RibUpdate::QueryNeighborPolicyStats` exposes the export-side aggregates
+    via the same control channel as `QueryNeighbor`. Wired through every
+    `evaluate_chain` call site on both ingress (`crates/transport/src/session/
+    inbound.rs`) and egress (`crates/rib/src/manager/{distribution,
+    peer_lifecycle, route_refresh}.rs`) — initial peer sync, route refresh,
+    SIGHUP-driven outbound recompute, FlowSpec, and EVPN all increment.
+    `ExplainAdvertisedRoute` remains diagnostic-only and does not count.
+  - **`ExplainAdvertisedRoute` deny / permit reasons** now name the matched
+    policy in the `ExplainReason.message` string (`"export policy
+    \"filter-customers\" denied this route"` rather than the generic
+    `"policy_denied"`).
+  - **`rustbgpctl neighbor show` Policy Stats block** rendering the four
+    scalar aggregates, with JSON output (`--format json`) carrying the same
+    fields elided when zero.
+  - **`docs/deployment.md`** — end-to-end install + lifecycle runbook:
+    pre-built binary / source / container install, hardened systemd unit
+    install, Docker + Docker Compose with state volumes, containerlab
+    "hello world" (M0-frr), recommended first-production-ish topology that
+    walks the build → validate → reload → observe loop, `--check` / `--diff`
+    workflow, Observability (Prometheus / BMP / gNMI / CLI) including the new
+    policy counter + scalar aggregates, GR-aware upgrade story with state-
+    persistence inventory, sample-profile cross-reference table, and
+    troubleshooting pointers. Cross-linked from README + OPERATIONS /
+    CONFIGURATION / SECURITY / INTEROP.
 - **ADR-0071 BGP Roles + Only-to-Customer behavior.** Static eBGP neighbors can
   set `role = "provider" | "rs" | "rs-client" | "customer" | "peer"` plus
   optional `strict_role = true`. rustbgpd advertises the RFC 9234 Role

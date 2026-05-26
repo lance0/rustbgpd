@@ -434,6 +434,15 @@ impl PeerSession {
                     self.notification_teardown = false;
                     self.received_hard_reset = false;
                     self.sent_hard_reset = false;
+                    // Import-side policy aggregates are per-session — reset
+                    // alongside the other per-session state. A reconnecting
+                    // PeerSession isn't reconstructed, so without this the
+                    // counters would carry forward across flaps and lie about
+                    // "permits / denies on the current session." Matches the
+                    // export-side reset in RibManager::handle_peer_down /
+                    // ::handle_peer_graceful_restart.
+                    self.import_policy_routes_permitted = 0;
+                    self.import_policy_routes_denied = 0;
                     // Reset framing limit for the next session (RFC 8654 §2:
                     // extended messages are per-session, not persistent).
                     self.read_buf

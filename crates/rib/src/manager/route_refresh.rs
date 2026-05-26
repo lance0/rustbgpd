@@ -229,6 +229,9 @@ impl RibManager {
             .cloned()
             .unwrap_or_default();
         let loc_rib = &self.loc_rib;
+        let target_peer_label = peer.to_string();
+        let metrics = self.metrics.clone();
+        let policy_stats = self.export_policy_stats.entry(peer).or_default();
 
         let mut all_prefixes: HashSet<Prefix> = self
             .loc_rib
@@ -271,6 +274,9 @@ impl RibManager {
                     cluster_id,
                     sendable.as_ref(),
                     export_pol.as_ref(),
+                    &metrics,
+                    policy_stats,
+                    &target_peer_label,
                     &mut fs_announce,
                     &mut fs_withdraw,
                 );
@@ -295,6 +301,9 @@ impl RibManager {
                     cluster_id,
                     sendable.as_ref(),
                     export_pol.as_ref(),
+                    &metrics,
+                    policy_stats,
+                    &target_peer_label,
                     &mut evpn_announce,
                     &mut evpn_withdraw,
                     false, // route refresh re-emits via empty refresh_view
@@ -325,6 +334,9 @@ impl RibManager {
                         cluster_id,
                         sendable.as_ref(),
                         export_pol.as_ref(),
+                        &metrics,
+                        policy_stats,
+                        &target_peer_label,
                         &mut announce,
                         &mut withdraw,
                         &mut nh_override_flags,
@@ -347,6 +359,9 @@ impl RibManager {
                         cluster_id,
                         sendable.as_ref(),
                         export_pol.as_ref(),
+                        &metrics,
+                        policy_stats,
+                        &target_peer_label,
                         &mut announce,
                         &mut withdraw,
                         &mut nh_override_flags,

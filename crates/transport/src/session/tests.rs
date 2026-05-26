@@ -2111,6 +2111,8 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
         Ipv4UnicastMode::Body,
     );
     session.process_update(update).await;
+    assert_eq!(session.import_policy_routes_permitted, 1);
+    assert_eq!(session.import_policy_routes_denied, 1);
 
     // Drain any messages — there may be zero or one RoutesReceived
     let mut all_announced = vec![];

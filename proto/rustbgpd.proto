@@ -216,6 +216,14 @@ message NeighborState {
   bool role_negotiated = 16;
   // Unicast route announcements blocked by RFC 9234 OTC rules.
   uint64 otc_routes_blocked = 17;
+  // Import policy evaluations that permitted a route.
+  uint64 import_policy_routes_permitted = 18;
+  // Import policy evaluations that denied a route.
+  uint64 import_policy_routes_denied = 19;
+  // Export policy evaluations that permitted a route.
+  uint64 export_policy_routes_permitted = 20;
+  // Export policy evaluations that denied a route.
+  uint64 export_policy_routes_denied = 21;
 }
 
 message DynamicNeighborRange {

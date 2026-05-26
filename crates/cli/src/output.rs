@@ -238,6 +238,14 @@ pub struct JsonNeighborDetail {
     pub role_negotiated: bool,
     #[serde(skip_serializing_if = "is_zero_u64")]
     pub otc_routes_blocked: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub import_policy_routes_permitted: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub import_policy_routes_denied: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub export_policy_routes_permitted: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub export_policy_routes_denied: u64,
     pub add_path_receive: bool,
     pub add_path_send: bool,
     #[serde(skip_serializing_if = "is_zero")]
@@ -712,6 +720,10 @@ mod tests {
             remote_role: "rs-client".to_string(),
             role_negotiated: true,
             otc_routes_blocked: 3,
+            import_policy_routes_permitted: 8,
+            import_policy_routes_denied: 1,
+            export_policy_routes_permitted: 5,
+            export_policy_routes_denied: 2,
             add_path_receive: true,
             add_path_send: true,
             add_path_send_max: 4,
@@ -728,6 +740,10 @@ mod tests {
         assert_eq!(value["remote_role"], "rs-client");
         assert_eq!(value["role_negotiated"], true);
         assert_eq!(value["otc_routes_blocked"], 3);
+        assert_eq!(value["import_policy_routes_permitted"], 8);
+        assert_eq!(value["import_policy_routes_denied"], 1);
+        assert_eq!(value["export_policy_routes_permitted"], 5);
+        assert_eq!(value["export_policy_routes_denied"], 2);
         assert_eq!(value["add_path_receive"], true);
         assert_eq!(value["add_path_send"], true);
         assert_eq!(value["add_path_send_max"], 4);

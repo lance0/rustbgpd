@@ -58,6 +58,8 @@ impl PeerSession {
                     notifications_received: self.notifications_received,
                     notifications_sent: self.notifications_sent,
                     otc_routes_blocked: self.otc_routes_blocked,
+                    import_policy_routes_permitted: self.import_policy_routes_permitted,
+                    import_policy_routes_denied: self.import_policy_routes_denied,
                     flap_count: self.flap_count,
                     uptime_secs,
                     last_error: self.last_error.clone(),

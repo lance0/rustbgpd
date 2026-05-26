@@ -36,6 +36,19 @@ pub struct OutboundRouteUpdate {
     pub evpn_withdraw: Vec<EvpnRouteKey>,
 }
 
+/// Aggregate route-policy evaluation counters for one neighbor.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NeighborPolicyStats {
+    /// Import policy evaluations that permitted a route.
+    pub import_policy_routes_permitted: u64,
+    /// Import policy evaluations that denied a route.
+    pub import_policy_routes_denied: u64,
+    /// Export policy evaluations that permitted a route.
+    pub export_policy_routes_permitted: u64,
+    /// Export policy evaluations that denied a route.
+    pub export_policy_routes_denied: u64,
+}
+
 /// Structured explanation for whether a route would be advertised to a peer.
 #[derive(Debug, Clone)]
 pub struct ExplainAdvertisedRoute {
@@ -351,6 +364,13 @@ pub enum RibUpdate {
         peer: IpAddr,
         /// Response channel.
         reply: oneshot::Sender<usize>,
+    },
+    /// Query: return aggregate route-policy counters for a specific peer.
+    QueryNeighborPolicyStats {
+        /// The target peer.
+        peer: IpAddr,
+        /// Response channel.
+        reply: oneshot::Sender<NeighborPolicyStats>,
     },
     /// Replace the effective export policy for a peer and resync outbound state.
     ReplacePeerExportPolicy {

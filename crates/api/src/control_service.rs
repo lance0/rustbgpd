@@ -286,6 +286,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines)]
     async fn active_peers_counts_only_established() {
         use crate::peer_types::PeerInfo;
 
@@ -333,6 +334,10 @@ mod tests {
                         notifications_received: 0,
                         notifications_sent: 0,
                         otc_routes_blocked: 0,
+                        import_policy_routes_permitted: 0,
+                        import_policy_routes_denied: 0,
+                        export_policy_routes_permitted: 0,
+                        export_policy_routes_denied: 0,
                         flap_count: 0,
                         uptime_secs: 0,
                         last_error: String::new(),
@@ -365,6 +370,10 @@ mod tests {
                         notifications_received: 0,
                         notifications_sent: 0,
                         otc_routes_blocked: 0,
+                        import_policy_routes_permitted: 0,
+                        import_policy_routes_denied: 0,
+                        export_policy_routes_permitted: 0,
+                        export_policy_routes_denied: 0,
                         flap_count: 0,
                         uptime_secs: 0,
                         last_error: String::new(),

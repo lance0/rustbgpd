@@ -3,10 +3,11 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 use rustbgpd_policy::{
-    PolicyAction, PolicyChain, RouteContext, RouteType, evaluate_chain,
+    PolicyAction, PolicyChain, PolicyEvaluation, RouteContext, RouteType,
     evaluate_chain_with_attribution,
 };
 use rustbgpd_rpki::VrpTable;
+use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
 use tracing::{debug, info, warn};
 
@@ -19,7 +20,10 @@ use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
 use crate::event::{RouteEvent, RouteEventType};
 use crate::loc_rib::LocRib;
-use crate::update::{ExplainAdvertisedRoute, ExplainDecision, ExplainReason, OutboundRouteUpdate};
+use crate::update::{
+    ExplainAdvertisedRoute, ExplainDecision, ExplainReason, NeighborPolicyStats,
+    OutboundRouteUpdate,
+};
 
 fn route_type(origin: crate::route::RouteOrigin) -> RouteType {
     match origin {
@@ -43,6 +47,27 @@ fn route_type_message(route_type: RouteType) -> &'static str {
         RouteType::Internal => "best route was learned from an iBGP peer",
         RouteType::External => "best route was learned from an eBGP peer",
     }
+}
+
+fn record_export_policy_eval(
+    metrics: &BgpMetrics,
+    stats: &mut NeighborPolicyStats,
+    peer_label: &str,
+    evaluation: &PolicyEvaluation,
+) {
+    let policy = evaluation.matched_policy.as_deref().unwrap_or("inline");
+    let action = match evaluation.action {
+        PolicyAction::Permit => {
+            stats.export_policy_routes_permitted =
+                stats.export_policy_routes_permitted.saturating_add(1);
+            "permit"
+        }
+        PolicyAction::Deny => {
+            stats.export_policy_routes_denied = stats.export_policy_routes_denied.saturating_add(1);
+            "deny"
+        }
+    };
+    metrics.record_policy_routes(peer_label, policy, "export", action);
 }
 
 impl RibManager {
@@ -883,6 +908,9 @@ impl RibManager {
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
+        metrics: &BgpMetrics,
+        policy_stats: &mut NeighborPolicyStats,
+        target_peer_label: &str,
         announce: &mut Vec<crate::route::Route>,
         withdraw: &mut Vec<(Prefix, u32)>,
         nh_override_flags: &mut Vec<Option<rustbgpd_policy::NextHopAction>>,
@@ -965,7 +993,8 @@ impl RibManager {
                 local_pref: candidate.local_pref_attr(),
                 med: candidate.med_attr(),
             };
-            let result = evaluate_chain(export_pol, &ctx);
+            let (result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
+            record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
             if result.action != PolicyAction::Permit {
                 policy_filtered.push(PolicyFilteredRouteKey {
                     target_peer,
@@ -1029,6 +1058,9 @@ impl RibManager {
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
+        metrics: &BgpMetrics,
+        policy_stats: &mut NeighborPolicyStats,
+        target_peer_label: &str,
         announce: &mut Vec<crate::route::Route>,
         withdraw: &mut Vec<(Prefix, u32)>,
         nh_override_flags: &mut Vec<Option<rustbgpd_policy::NextHopAction>>,
@@ -1098,7 +1130,8 @@ impl RibManager {
             local_pref: best.local_pref_attr(),
             med: best.med_attr(),
         };
-        let result = evaluate_chain(export_pol, &ctx);
+        let (result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
+        record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
         if result.action != PolicyAction::Permit {
             policy_filtered.push(PolicyFilteredRouteKey {
                 target_peer,
@@ -1174,6 +1207,9 @@ impl RibManager {
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
+        metrics: &BgpMetrics,
+        policy_stats: &mut NeighborPolicyStats,
+        target_peer_label: &str,
         fs_announce: &mut Vec<crate::route::FlowSpecRoute>,
         fs_withdraw: &mut Vec<FlowSpecRule>,
     ) {
@@ -1246,7 +1282,9 @@ impl RibManager {
                     local_pref: best.local_pref_attr(),
                     med: best.med_attr(),
                 };
-                let result = rustbgpd_policy::evaluate_chain(export_pol, &ctx);
+                let (result, evaluation) =
+                    rustbgpd_policy::evaluate_chain_with_attribution(export_pol, &ctx);
+                record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
                 if result.action == rustbgpd_policy::PolicyAction::Permit {
                     fs_announce.push(best.clone());
                 } else if rib_out.get_flowspec(rule).is_some() {
@@ -1282,6 +1320,9 @@ impl RibManager {
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
+        metrics: &BgpMetrics,
+        policy_stats: &mut NeighborPolicyStats,
+        target_peer_label: &str,
         evpn_announce: &mut Vec<crate::route::EvpnRibRoute>,
         evpn_withdraw: &mut Vec<rustbgpd_wire::EvpnRouteKey>,
         force: bool,
@@ -1384,7 +1425,9 @@ impl RibManager {
                 local_pref: best.local_pref_attr(),
                 med: best.med_attr(),
             };
-            let result = rustbgpd_policy::evaluate_chain(export_pol, &ctx);
+            let (result, evaluation) =
+                rustbgpd_policy::evaluate_chain_with_attribution(export_pol, &ctx);
+            record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
             if result.action != rustbgpd_policy::PolicyAction::Permit {
                 if rib_out.get_evpn(key).is_some() {
                     evpn_withdraw.push(*key);
@@ -1560,6 +1603,9 @@ impl RibManager {
                 .unwrap_or_default();
             let loc_rib = &self.loc_rib;
             let loc_rib_len = loc_rib.len();
+            let target_peer_label = peer.to_string();
+            let metrics = self.metrics.clone();
+            let policy_stats = self.export_policy_stats.entry(peer).or_default();
 
             let rib_out = self
                 .adj_ribs_out
@@ -1592,6 +1638,9 @@ impl RibManager {
                         cluster_id,
                         sendable.as_ref(),
                         export_pol.as_ref(),
+                        &metrics,
+                        policy_stats,
+                        &target_peer_label,
                         &mut announce,
                         &mut withdraw,
                         &mut nh_override_flags,
@@ -1614,6 +1663,9 @@ impl RibManager {
                         cluster_id,
                         sendable.as_ref(),
                         export_pol.as_ref(),
+                        &metrics,
+                        policy_stats,
+                        &target_peer_label,
                         &mut announce,
                         &mut withdraw,
                         &mut nh_override_flags,
@@ -1638,6 +1690,9 @@ impl RibManager {
                     cluster_id,
                     sendable.as_ref(),
                     export_pol.as_ref(),
+                    &metrics,
+                    policy_stats,
+                    &target_peer_label,
                     &mut fs_announce,
                     &mut fs_withdraw,
                 );
@@ -1657,6 +1712,9 @@ impl RibManager {
                     cluster_id,
                     sendable.as_ref(),
                     export_pol.as_ref(),
+                    &metrics,
+                    policy_stats,
+                    &target_peer_label,
                     &mut evpn_announce,
                     &mut evpn_withdraw,
                     is_force,
@@ -1804,12 +1862,15 @@ impl RibManager {
             let target_peer_asn = self.peer_asn.get(&peer).copied();
             let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
             let export_pol = self.export_policy_for(peer).cloned();
+            let target_peer_label = peer.to_string();
+            let metrics = self.metrics.clone();
 
             let loc_rib_len = self.loc_rib.len();
             let rib_out = self
                 .adj_ribs_out
                 .entry(peer)
                 .or_insert_with(|| crate::adj_rib_out::AdjRibOut::with_capacity(peer, loc_rib_len));
+            let policy_stats = self.export_policy_stats.entry(peer).or_default();
 
             let mut fs_announce = Vec::new();
             let mut fs_withdraw = Vec::new();
@@ -1826,6 +1887,9 @@ impl RibManager {
                 self.cluster_id,
                 sendable.as_ref(),
                 export_pol.as_ref(),
+                &metrics,
+                policy_stats,
+                &target_peer_label,
                 &mut fs_announce,
                 &mut fs_withdraw,
             );
@@ -1856,6 +1920,7 @@ impl RibManager {
     /// gather candidates from all peer Adj-RIB-Ins, run best-path, and if
     /// the selection changed, stage announces/withdraws for each outbound
     /// peer that negotiated the L2VPN/EVPN family.
+    #[expect(clippy::too_many_lines)]
     pub(super) fn recompute_and_distribute_evpn(
         &mut self,
         affected: &HashSet<rustbgpd_wire::EvpnRouteKey>,
@@ -1928,12 +1993,15 @@ impl RibManager {
             let target_peer_asn = self.peer_asn.get(&peer).copied();
             let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
             let export_pol = self.export_policy_for(peer).cloned();
+            let target_peer_label = peer.to_string();
+            let metrics = self.metrics.clone();
 
             let loc_rib_len = self.loc_rib.len();
             let rib_out = self
                 .adj_ribs_out
                 .entry(peer)
                 .or_insert_with(|| crate::adj_rib_out::AdjRibOut::with_capacity(peer, loc_rib_len));
+            let policy_stats = self.export_policy_stats.entry(peer).or_default();
 
             let mut evpn_announce = Vec::new();
             let mut evpn_withdraw = Vec::new();
@@ -1950,6 +2018,9 @@ impl RibManager {
                 self.cluster_id,
                 sendable.as_ref(),
                 export_pol.as_ref(),
+                &metrics,
+                policy_stats,
+                &target_peer_label,
                 &mut evpn_announce,
                 &mut evpn_withdraw,
                 false, // EVPN delta path — equality check is correct

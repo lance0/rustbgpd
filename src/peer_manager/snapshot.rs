@@ -46,6 +46,11 @@ fn build_peer_info(
         notifications_received: session_state.map_or(0, |s| s.notifications_received),
         notifications_sent: session_state.map_or(0, |s| s.notifications_sent),
         otc_routes_blocked: session_state.map_or(0, |s| s.otc_routes_blocked),
+        import_policy_routes_permitted: session_state
+            .map_or(0, |s| s.import_policy_routes_permitted),
+        import_policy_routes_denied: session_state.map_or(0, |s| s.import_policy_routes_denied),
+        export_policy_routes_permitted: 0,
+        export_policy_routes_denied: 0,
         flap_count: session_state.map_or(0, |s| s.flap_count),
         uptime_secs: session_state.map_or(0, |s| s.uptime_secs),
         last_error: session_state.map_or_else(String::new, |s| s.last_error.clone()),
