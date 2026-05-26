@@ -9,6 +9,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **ADR-0070 read-only gNMI / OpenConfig telemetry adapter.** A native gNMI
+  target (`gnmi.gNMI`, gNMI v0.10.0) served over the mTLS TCP and UDS gRPC
+  listeners, backed by the existing typed snapshots — not a config datastore.
+  `Capabilities` advertises the OpenConfig BGP modules and `JSON` / `JSON_IETF`
+  encodings; `Get` and `Subscribe` (`ONCE` / `POLL` / `STREAM SAMPLE`) return a
+  strict OpenConfig BGP state subset under
+  `network-instances/network-instance[name=DEFAULT]/protocols/protocol[identifier=BGP][name=BGP]/bgp/`
+  — global `as` / `router-id` and per-neighbor `neighbor-address` / `enabled` /
+  `peer-as` / `local-as` / `session-state` / `established-transitions` / message
+  counters — rendered as RFC 7951 JSON. `Set` returns a stable `Unimplemented`.
+  gNMI read RPCs are classified `SensitiveRead` under the ADR-0064 tier model and
+  are only served on an mTLS-configured TCP listener (or local UDS). Per-AFI-SAFI
+  counters, negotiated capabilities, `ON_CHANGE`, and `Set` are deferred
+  (see ADR-0070).
+
 ## [0.29.0] — 2026-05-25
 
 ### Added
