@@ -1537,9 +1537,9 @@ pub fn encode_path_attributes(
             }
             PathAttribute::OnlyToCustomer(asn) => {
                 // RFC 9234 §5: Optional + Transitive, length 4, 32-bit ASN.
-                // We emit canonical 0xC0 flags even if a received OTC had the
-                // Partial bit set on ingress (per RFC 4271 §5 we may reset it
-                // when re-originating; preserving Partial is not required).
+                // This typed variant is only used for locally constructed
+                // canonical OTC. Received Partial-bearing OTC stays in the
+                // `Unknown` arm so the original Partial bit is preserved.
                 flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
                 type_code = attr_type::ONLY_TO_CUSTOMER;
                 value.extend_from_slice(&asn.to_be_bytes());
