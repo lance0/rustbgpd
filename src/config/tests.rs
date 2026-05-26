@@ -7444,3 +7444,118 @@ table_id = 5000
         "validate() must surface the bad rd: {err}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// docs/reload-matrix.md structural test
+//
+// Catches the "added a Neighbor / PeerGroupConfig field but forgot to
+// document its reload class" drift. The list is intentionally
+// **maintained explicitly**: serde aliases / #[serde(default)] /
+// #[serde(flatten)] make deriving from the struct brittle, and the
+// matrix doc has to mention each field name by hand anyway. One line
+// to add here when a field lands, with a clear failure message
+// pointing at the work that's missing.
+// ─────────────────────────────────────────────────────────────────────
+
+/// All Neighbor field names. Updated when `pub struct Neighbor` in
+/// `src/config/schema.rs` gains a field. The reload-matrix test below
+/// will fail loudly if this list and the doc fall out of sync.
+const RELOAD_MATRIX_NEIGHBOR_FIELDS: &[&str] = &[
+    "address",
+    "interface",
+    "remote_asn",
+    "description",
+    "peer_group",
+    "hold_time",
+    "max_prefixes",
+    "md5_password",
+    "tcp_ao",
+    "bfd",
+    "ttl_security",
+    "families",
+    "graceful_restart",
+    "gr_restart_time",
+    "gr_stale_routes_time",
+    "llgr_stale_time",
+    "local_ipv6_nexthop",
+    "route_reflector_client",
+    "route_server_client",
+    "role",
+    "strict_role",
+    "remove_private_as",
+    "add_path",
+    "log_level",
+    "import_policy",
+    "export_policy",
+    "import_policy_chain",
+    "export_policy_chain",
+];
+
+/// All `PeerGroupConfig` field names. Mirror of the `Neighbor` list
+/// minus the identity triple (`address`, `interface`, `remote_asn`)
+/// and policy fields (which neighbors own at the per-neighbor level).
+const RELOAD_MATRIX_PEER_GROUP_FIELDS: &[&str] = &[
+    "hold_time",
+    "max_prefixes",
+    "md5_password",
+    "tcp_ao",
+    "bfd",
+    "ttl_security",
+    "families",
+    "graceful_restart",
+    "gr_restart_time",
+    "gr_stale_routes_time",
+    "llgr_stale_time",
+    "local_ipv6_nexthop",
+    "route_reflector_client",
+    "route_server_client",
+    "role",
+    "strict_role",
+    "remove_private_as",
+    "add_path",
+    "log_level",
+];
+
+fn load_reload_matrix() -> String {
+    // CARGO_MANIFEST_DIR is the daemon crate root (`/home/.../rustbgpd`),
+    // so the matrix lives next to the docs/ tree two levels up from this
+    // test module.
+    let matrix_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/reload-matrix.md");
+    fs::read_to_string(&matrix_path).unwrap_or_else(|err| {
+        panic!(
+            "could not read {} for reload-matrix structural test: {err}",
+            matrix_path.display()
+        )
+    })
+}
+
+#[test]
+fn reload_matrix_documents_every_neighbor_field() {
+    let matrix = load_reload_matrix();
+    for field in RELOAD_MATRIX_NEIGHBOR_FIELDS {
+        let needle = format!("`{field}`");
+        assert!(
+            matrix.contains(&needle),
+            "Neighbor field {needle} is in RELOAD_MATRIX_NEIGHBOR_FIELDS \
+             (src/config/tests.rs) but absent from docs/reload-matrix.md. \
+             Either add a row for it in the [[neighbors]] section of the \
+             matrix, or remove the entry from the list."
+        );
+    }
+}
+
+#[test]
+fn reload_matrix_documents_every_peer_group_field() {
+    let matrix = load_reload_matrix();
+    for field in RELOAD_MATRIX_PEER_GROUP_FIELDS {
+        let needle = format!("`{field}`");
+        assert!(
+            matrix.contains(&needle),
+            "PeerGroupConfig field {needle} is in \
+             RELOAD_MATRIX_PEER_GROUP_FIELDS (src/config/tests.rs) but \
+             absent from docs/reload-matrix.md. Either add a row for it \
+             in the [[peer_groups]] section of the matrix, or remove the \
+             entry from the list."
+        );
+    }
+}

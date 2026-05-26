@@ -13,6 +13,11 @@ persisted back to the config file. Sending `SIGHUP` to the daemon triggers a
 config reload with per-peer reconciliation. Starting with zero `[[neighbors]]` is valid when
 all peers are managed via gRPC.
 
+> **Reload behavior.** For a per-field table of which config keys hot-apply,
+> which are restart-required, and which are rejected at parse time, see
+> [`reload-matrix.md`](reload-matrix.md). This page documents *what* each
+> field means; the matrix documents *when* a change takes effect.
+
 ---
 
 ## `[global]`

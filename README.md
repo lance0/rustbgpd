@@ -376,6 +376,7 @@ evolving API.**
 | [docs/DESIGN.md](docs/DESIGN.md) | Tradeoffs, protocol scope, rationale |
 | [docs/API.md](docs/API.md) | gRPC API reference with examples for every RPC |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Config reference and examples |
+| [docs/reload-matrix.md](docs/reload-matrix.md) | Per-field reload classification: which keys hot-apply, which need a restart, which are rejected at parse time |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Running in production: reload, upgrade, failure modes, debugging |
 | [docs/SECURITY.md](docs/SECURITY.md) | Security posture, firewall guidance, deployment tiers |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Wire codec and RIB performance numbers, scaling analysis |
