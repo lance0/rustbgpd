@@ -24,7 +24,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gNMI read RPCs are classified `SensitiveRead` under the ADR-0064 tier model and
   are only served on an mTLS-configured TCP listener (or local UDS). Per-AFI-SAFI
   counters, negotiated capabilities, `ON_CHANGE`, and `Set` are deferred
-  (see ADR-0070).
+  (see ADR-0070). M54 adds a hosted `gnmic` smoke for `Capabilities`, `Get`, and
+  `Subscribe STREAM/SAMPLE` over native mTLS.
 
 ## [0.29.0] — 2026-05-25
 

@@ -192,6 +192,7 @@ listener model rather than adding a new one:
 | PR1 — proto + codegen + `Capabilities` + `Set`-closed | Landed (PR #275) |
 | PR2 — `Get` OpenConfig BGP global + neighbors | Landed (PR #276) |
 | PR3 — `Subscribe` ONCE / POLL / SAMPLE | Landed (PR #277) |
+| M54 — hosted `gnmic` smoke over native mTLS | Landed: `Capabilities`, `Get`, and `Subscribe STREAM/SAMPLE` are exercised by a real OpenConfig collector client |
 | PR4 — counters / capabilities / non-BGP telemetry | Deferred |
 
 ## Repo seams

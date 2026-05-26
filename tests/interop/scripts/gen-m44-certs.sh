@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Generate the mTLS PKI fixture for the M44 gRPC tier-authorization
-# interop test. Produces a CA, a server certificate, and four client
+# Generate the mTLS PKI fixture for the gRPC mTLS interop tests.
+# Produces a CA, a server certificate, and four client
 # certificates whose `rustbgpd://` URI SANs map to ADR-0064 roles
 # (and one deliberately-unmapped principal).
 #
-# All material is written under tests/interop/configs/m44-certs/, which
-# is gitignored — the certs are regenerated per CI run so validity
-# windows never expire in the repo. The M44 topology bind-mounts that
-# directory into the rustbgpd container, and the test driver hands the
-# client certs to grpcurl.
+# By default, all material is written under
+# tests/interop/configs/m44-certs/, which is gitignored — the certs
+# are regenerated per CI run so validity windows never expire in the
+# repo. Set RUSTBGPD_MTLS_CERT_DIR to reuse the same fixture shape for
+# sibling tests.
 #
 # Usage:
 #   bash tests/interop/scripts/gen-m44-certs.sh
@@ -16,7 +16,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CERT_DIR="$SCRIPT_DIR/../configs/m44-certs"
+CERT_DIR="${RUSTBGPD_MTLS_CERT_DIR:-$SCRIPT_DIR/../configs/m44-certs}"
 SERVER_CN="rustbgpd.local"
 
 rm -rf "$CERT_DIR"
@@ -56,5 +56,5 @@ gen_client intruder   "rustbgpd://intruder/ci"
 
 chmod 0644 ./*.pem ./*.key
 
-echo "M44 mTLS fixture generated in $CERT_DIR:"
+echo "mTLS fixture generated in $CERT_DIR:"
 ls -1 "$CERT_DIR"

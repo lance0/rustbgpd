@@ -1,0 +1,27 @@
+# Containerlab topology: rustbgpd read-only gNMI / OpenConfig smoke.
+#
+# Single rustbgpd node with native mTLS on the gRPC listener. No BGP
+# peer is needed: the test exercises the gNMI collector-facing
+# telemetry surface using gnmic.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   bash tests/interop/scripts/gen-m54-certs.sh
+#   containerlab deploy -t tests/interop/m54-gnmi-openconfig.clab.yml
+#   bash tests/interop/scripts/test-m54-gnmi-openconfig.sh
+#   containerlab destroy -t tests/interop/m54-gnmi-openconfig.clab.yml --cleanup
+
+name: m54-gnmi-openconfig
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m54-gnmi.toml:/etc/rustbgpd/config.toml:ro
+        - ./configs/m54-certs:/etc/rustbgpd/certs:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      env:
+        RUST_LOG: info,rustbgpd_api=debug

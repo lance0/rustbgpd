@@ -34,3 +34,4 @@ tests/soak/runs/
 # M44 mTLS PKI fixture — regenerated per CI run by gen-m44-certs.sh so
 # certificate validity windows never expire in the repo.
 tests/interop/configs/m44-certs/
+tests/interop/configs/m54-certs/

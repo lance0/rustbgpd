@@ -702,6 +702,48 @@ jobs:
           topology: tests/interop/m44-grpc-tier-authz.clab.yml
           script: tests/interop/scripts/test-m44-grpc-tier-authz.sh
 
+  m54:
+    name: M54 — ADR-0070 gNMI / OpenConfig over mTLS
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Install grpcurl and gnmic
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+          curl -sL https://github.com/openconfig/gnmic/releases/download/v0.46.0/gnmic_0.46.0_Linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin gnmic
+          sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The mTLS PKI fixture must exist before deploy so the topology
+      # can bind-mount it into the rustbgpd container.
+      - name: Generate M54 mTLS certs
+        run: bash tests/interop/scripts/gen-m54-certs.sh
+
+      - name: Run M54 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M54
+          topology: tests/interop/m54-gnmi-openconfig.clab.yml
+          script: tests/interop/scripts/test-m54-gnmi-openconfig.sh
+
   m45:
     name: M45 — EVPN Type 5 injection (gRPC → FRR)
     runs-on: ubuntu-latest

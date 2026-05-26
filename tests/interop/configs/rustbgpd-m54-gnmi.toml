@@ -1,0 +1,28 @@
+# M54 smoke: read-only gNMI / OpenConfig over native mTLS.
+#
+# Single-node fixture: no BGP session is expected to establish. The
+# configured neighbor exists so the OpenConfig neighbor-state path has
+# a stable row to read through gnmic.
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+tls_cert_file = "/etc/rustbgpd/certs/server.pem"
+tls_key_file = "/etc/rustbgpd/certs/server.key"
+tls_client_ca_file = "/etc/rustbgpd/certs/ca.pem"
+
+[security.grpc.roles]
+"rustbgpd://operator/ci" = "operator"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "gnmi-fixture-peer"
+hold_time = 90
