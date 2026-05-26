@@ -22,8 +22,8 @@ use rustbgpd_rib::{
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
 use rustbgpd_wire::{
-    AddPathMode, Afi, AsPath, AsPathSegment, Capability, EvpnRoute, EvpnRouteKey, FlowSpecRule,
-    Ipv4NlriEntry, Ipv4UnicastMode, Message, MpReachNlri, MpUnreachNlri, NlriEntry,
+    AddPathMode, Afi, AsPath, AsPathSegment, BgpRole, Capability, EvpnRoute, EvpnRouteKey,
+    FlowSpecRule, Ipv4NlriEntry, Ipv4UnicastMode, Message, MpReachNlri, MpUnreachNlri, NlriEntry,
     NotificationMessage, PathAttribute, Prefix, RouteRefreshMessage, RouteRefreshSubtype, Safi,
     UpdateMessage, is_private_asn,
 };

@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use rustbgpd_wire::BgpRole;
+
 pub(super) const DEFAULT_HOLD_TIME: u16 = 90;
 pub(super) const DEFAULT_CONNECT_RETRY_SECS: u32 = 5;
 pub(super) const BGP_PORT: u16 = 179;
@@ -503,6 +505,10 @@ pub struct Neighbor {
     /// next hop and suppress automatic local-AS prepend. Explicit export
     /// policy next-hop rewrites still apply.
     pub route_server_client: Option<bool>,
+    /// Local BGP Role for RFC 9234 route-leak prevention. eBGP only.
+    pub role: Option<BgpRoleConfig>,
+    /// Require the peer to advertise a compatible BGP Role capability.
+    pub strict_role: Option<bool>,
     /// Remove private ASNs from `AS_PATH` before eBGP advertisement.
     ///
     /// - `"remove"` — only if the entire path consists of private ASNs
@@ -582,6 +588,8 @@ pub struct PeerGroupConfig {
     pub local_ipv6_nexthop: Option<String>,
     pub route_reflector_client: Option<bool>,
     pub route_server_client: Option<bool>,
+    pub role: Option<BgpRoleConfig>,
+    pub strict_role: Option<bool>,
     pub remove_private_as: Option<String>,
     pub add_path: Option<AddPathConfig>,
     /// Override log level for peers in this group.
@@ -594,6 +602,30 @@ pub struct PeerGroupConfig {
     pub import_policy_chain: Vec<String>,
     #[serde(default)]
     pub export_policy_chain: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BgpRoleConfig {
+    Provider,
+    #[serde(alias = "rs")]
+    RouteServer,
+    #[serde(alias = "rs-client")]
+    RouteServerClient,
+    Customer,
+    Peer,
+}
+
+impl BgpRoleConfig {
+    pub(crate) const fn to_wire(self) -> BgpRole {
+        match self {
+            Self::Provider => BgpRole::Provider,
+            Self::RouteServer => BgpRole::RouteServer,
+            Self::RouteServerClient => BgpRole::RouteServerClient,
+            Self::Customer => BgpRole::Customer,
+            Self::Peer => BgpRole::Peer,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

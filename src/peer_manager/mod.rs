@@ -359,6 +359,8 @@ impl PeerManager {
             add_path_receive: config.add_path_receive,
             add_path_send: config.add_path_send,
             add_path_send_max: config.add_path_send_max,
+            local_role: config.local_role,
+            strict_role: config.strict_role,
         };
         let scope_id = config.scope_id.or_else(|| {
             config

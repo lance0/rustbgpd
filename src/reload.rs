@@ -49,6 +49,8 @@ fn build_peer_mgr_config(
         add_path_receive: tc.peer.add_path_receive,
         add_path_send: tc.peer.add_path_send,
         add_path_send_max: tc.peer.add_path_send_max,
+        local_role: tc.peer.local_role,
+        strict_role: tc.peer.strict_role,
         import_policy: import.cloned(),
         export_policy: export.cloned(),
     }

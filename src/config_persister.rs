@@ -152,6 +152,8 @@ log_format = "json"
             local_ipv6_nexthop: None,
             route_reflector_client: Some(false),
             route_server_client: Some(false),
+            role: None,
+            strict_role: None,
             remove_private_as: None,
             add_path: None,
             import_policy: Vec::new(),

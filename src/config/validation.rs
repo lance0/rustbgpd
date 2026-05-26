@@ -347,6 +347,29 @@ impl Config {
                 });
             }
 
+            let role = neighbor.role.or_else(|| group.and_then(|g| g.role));
+            let strict_role = neighbor
+                .strict_role
+                .or_else(|| group.and_then(|g| g.strict_role))
+                .unwrap_or(false);
+            if strict_role && role.is_none() {
+                return Err(ConfigError::InvalidNeighborConfig {
+                    address: neighbor.address.clone(),
+                    field: "strict_role".to_string(),
+                    reason: "strict_role requires role to be configured".to_string(),
+                });
+            }
+            if role.is_some() && neighbor.remote_asn == self.global.asn {
+                return Err(ConfigError::InvalidNeighborConfig {
+                    address: neighbor.address.clone(),
+                    field: "role".to_string(),
+                    reason: format!(
+                        "BGP Roles require eBGP (remote_asn {} == local asn {})",
+                        neighbor.remote_asn, self.global.asn
+                    ),
+                });
+            }
+
             if let Some(mode) = neighbor
                 .remove_private_as
                 .as_deref()

@@ -2,8 +2,8 @@
 
 use bytes::Bytes;
 
-use rustbgpd_wire::OpenMessage;
-use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
+use rustbgpd_wire::notification::{NotificationCode, cease_subcode, open_subcode};
+use rustbgpd_wire::{Capability, OpenMessage};
 
 use crate::action::{Action, NegotiatedSession, TimerType};
 use crate::config::PeerConfig;
@@ -247,11 +247,28 @@ impl Session {
                 }
                 Err(notification) => {
                     self.connect_retry_counter += 1;
-                    let mut actions = vec![
-                        Action::SendNotification(notification),
-                        Action::CloseTcpConnection,
-                        Action::StopTimer(TimerType::Hold),
-                    ];
+                    let mut actions = Vec::with_capacity(5);
+                    // Observability hook for RFC 9234 Role-Mismatch (2/11):
+                    // emit a typed action so transport can label
+                    // bgp_role_mismatch_total{peer, local_role, remote_role}.
+                    // For OPENs carrying duplicate Role caps, the FIRST Role
+                    // value is reported as remote_role — sufficient for the
+                    // bounded label set; the negotiator already rejected.
+                    if notification.code == NotificationCode::OpenMessage
+                        && notification.subcode == open_subcode::ROLE_MISMATCH
+                    {
+                        let remote_role = open.capabilities.iter().find_map(|c| match c {
+                            Capability::Role { role } => Some(*role),
+                            _ => None,
+                        });
+                        actions.push(Action::RoleMismatchObserved {
+                            local_role: self.config.local_role,
+                            remote_role,
+                        });
+                    }
+                    actions.push(Action::SendNotification(notification));
+                    actions.push(Action::CloseTcpConnection);
+                    actions.push(Action::StopTimer(TimerType::Hold));
                     actions.push(self.transition_to(SessionState::Idle));
                     actions
                 }
@@ -557,6 +574,8 @@ mod tests {
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,
+            local_role: None,
+            strict_role: false,
         }
     }
 
@@ -839,6 +858,114 @@ mod tests {
             a,
             Action::SendNotification(_)
         )));
+    }
+
+    #[test]
+    fn opensent_role_mismatch_emits_observer_action_with_local_and_remote_roles() {
+        // RFC 9234 incompatible pair: both ends configured Provider.
+        // The negotiator returns NOTIFICATION 2/11; the session handler must
+        // ALSO emit `Action::RoleMismatchObserved { local, remote }` so the
+        // transport layer can record bgp_role_mismatch_total with bounded
+        // role labels (the notification body itself is empty per RFC).
+        let mut cfg = test_config();
+        cfg.local_role = Some(rustbgpd_wire::BgpRole::Provider);
+
+        let mut s = Session::new(cfg);
+        s.handle_event(Event::ManualStart);
+        s.handle_event(Event::TcpConnectionConfirmed);
+
+        let mut bad_open = peer_open();
+        bad_open.capabilities.push(Capability::Role {
+            role: rustbgpd_wire::BgpRole::Provider,
+        });
+        let actions = s.handle_event(Event::OpenReceived(bad_open));
+
+        assert_eq!(s.state(), SessionState::Idle);
+        // Both actions present.
+        assert!(
+            has_action(&actions, |a| matches!(
+                a,
+                Action::RoleMismatchObserved {
+                    local_role: Some(rustbgpd_wire::BgpRole::Provider),
+                    remote_role: Some(rustbgpd_wire::BgpRole::Provider),
+                }
+            )),
+            "expected RoleMismatchObserved with both roles; got {actions:?}"
+        );
+        assert!(has_action(&actions, |a| matches!(
+            a,
+            Action::SendNotification(n)
+                if n.code == NotificationCode::OpenMessage
+                    && n.subcode == open_subcode::ROLE_MISMATCH
+        )));
+
+        // Ordering: the observer action MUST come before the
+        // SendNotification so the metric is recorded even if the wire send
+        // is short-circuited by a downstream error.
+        let observer_idx = actions
+            .iter()
+            .position(|a| matches!(a, Action::RoleMismatchObserved { .. }))
+            .expect("RoleMismatchObserved present");
+        let notif_idx = actions
+            .iter()
+            .position(|a| matches!(a, Action::SendNotification(_)))
+            .expect("SendNotification present");
+        assert!(
+            observer_idx < notif_idx,
+            "RoleMismatchObserved must precede SendNotification (got idx {observer_idx} vs {notif_idx})"
+        );
+    }
+
+    #[test]
+    fn opensent_role_mismatch_strict_no_remote_role_reports_none_remote() {
+        // Strict mode: we configured Customer; peer didn't advertise Role.
+        // The observer action should label remote_role as None.
+        let mut cfg = test_config();
+        cfg.local_role = Some(rustbgpd_wire::BgpRole::Customer);
+        cfg.strict_role = true;
+
+        let mut s = Session::new(cfg);
+        s.handle_event(Event::ManualStart);
+        s.handle_event(Event::TcpConnectionConfirmed);
+
+        // peer_open() does NOT include a Role capability.
+        let actions = s.handle_event(Event::OpenReceived(peer_open()));
+
+        assert_eq!(s.state(), SessionState::Idle);
+        assert!(
+            has_action(&actions, |a| matches!(
+                a,
+                Action::RoleMismatchObserved {
+                    local_role: Some(rustbgpd_wire::BgpRole::Customer),
+                    remote_role: None,
+                }
+            )),
+            "strict-mode mismatch must report remote_role=None; got {actions:?}"
+        );
+    }
+
+    #[test]
+    fn opensent_non_role_open_error_does_not_emit_observer_action() {
+        // BAD_PEER_AS (subcode 2) must NOT emit RoleMismatchObserved —
+        // that's reserved strictly for subcode 11 (Role Mismatch). Confirms
+        // we don't over-fire the observability hook on unrelated rejections.
+        let mut s = Session::new(test_config());
+        s.handle_event(Event::ManualStart);
+        s.handle_event(Event::TcpConnectionConfirmed);
+
+        let mut bad_open = peer_open();
+        bad_open.my_as = 65099;
+        bad_open.capabilities = vec![Capability::FourOctetAs { asn: 65099 }];
+        let actions = s.handle_event(Event::OpenReceived(bad_open));
+
+        assert_eq!(s.state(), SessionState::Idle);
+        assert!(
+            !has_action(&actions, |a| matches!(
+                a,
+                Action::RoleMismatchObserved { .. }
+            )),
+            "non-role OPEN error must not emit RoleMismatchObserved; got {actions:?}"
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use rustbgpd_wire::{
-    AddPathMode, Afi, Capability, GracefulRestartFamily, LlgrFamily, NotificationMessage,
+    AddPathMode, Afi, BgpRole, Capability, GracefulRestartFamily, LlgrFamily, NotificationMessage,
     OpenMessage, Safi,
 };
 
@@ -34,6 +34,12 @@ pub struct NegotiatedSession {
     pub keepalive_interval: u16,
     /// Capabilities the peer advertised.
     pub peer_capabilities: Vec<Capability>,
+    /// Locally configured BGP Role advertised for this eBGP session.
+    pub local_role: Option<BgpRole>,
+    /// Peer-advertised BGP Role, if present and valid.
+    pub remote_role: Option<BgpRole>,
+    /// True when both sides advertised compatible BGP Roles.
+    pub role_negotiated: bool,
     /// Whether both sides support 4-octet AS numbers.
     pub four_octet_as: bool,
     /// Address families negotiated between both sides.
@@ -111,5 +117,20 @@ pub enum Action {
         state: SessionState,
         /// Which timer the daemon delivered.
         timer: TimerType,
+    },
+    /// RFC 9234 Role-Mismatch observed at OPEN time — emitted alongside
+    /// `SendNotification(OpenMessage / ROLE_MISMATCH)` so transport can
+    /// label `bgp_role_mismatch_total{peer, local_role, remote_role}`
+    /// with the configured local role and (where available) the peer's
+    /// advertised role. The notification + close + transition to Idle are
+    /// still driven by the surrounding `SendNotification`,
+    /// `CloseTcpConnection`, and `StateChanged` actions; this variant is
+    /// strictly observability.
+    RoleMismatchObserved {
+        /// Locally configured role (`None` if we didn't advertise Role).
+        local_role: Option<BgpRole>,
+        /// Peer's advertised role (`None` if absent; for duplicate-Role
+        /// OPENs the FIRST received Role value is reported).
+        remote_role: Option<BgpRole>,
     },
 }

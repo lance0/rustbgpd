@@ -7,7 +7,7 @@ use bytes::Bytes;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_transport::{RemovePrivateAs, TcpAoConfig};
-use rustbgpd_wire::{Afi, Safi};
+use rustbgpd_wire::{Afi, BgpRole, Safi};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, oneshot};
 
@@ -797,6 +797,10 @@ pub struct PeerManagerNeighborConfig {
     pub add_path_send: bool,
     /// Maximum number of paths to advertise per prefix (Add-Path).
     pub add_path_send_max: u32,
+    /// Local BGP Role advertised to this peer (RFC 9234).
+    pub local_role: Option<BgpRole>,
+    /// Require the peer to advertise a compatible BGP Role.
+    pub strict_role: bool,
     /// Import policy chain applied to inbound routes.
     pub import_policy: Option<PolicyChain>,
     /// Export policy chain applied to outbound routes.
