@@ -20,6 +20,7 @@ mod control_service;
 mod event_service;
 pub mod evpn_service;
 mod global_service;
+mod gnmi_service;
 mod injection_service;
 mod neighbor_service;
 mod peer_group_service;
@@ -35,4 +36,16 @@ pub use evpn_service::EvpnService;
 #[allow(clippy::all, clippy::pedantic, missing_docs)]
 pub mod proto {
     tonic::include_proto!("rustbgpd.v1");
+}
+
+/// Generated OpenConfig gNMI protobuf/gRPC types.
+#[allow(clippy::all, clippy::pedantic, missing_docs)]
+pub mod gnmi_ext {
+    tonic::include_proto!("gnmi_ext");
+}
+
+/// Generated OpenConfig gNMI service and message types.
+#[allow(clippy::all, clippy::pedantic, missing_docs)]
+pub mod gnmi {
+    tonic::include_proto!("gnmi");
 }

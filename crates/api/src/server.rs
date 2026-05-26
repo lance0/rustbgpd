@@ -30,6 +30,8 @@ use crate::evpn_service::{
     OriginatedLocalMacCountFn,
 };
 use crate::global_service::GlobalService;
+use crate::gnmi::g_nmi_server::GNmiServer;
+use crate::gnmi_service::GnmiService;
 use crate::injection_service::InjectionService;
 use crate::neighbor_service::NeighborService;
 use crate::peer_group_service::PeerGroupService;
@@ -524,6 +526,7 @@ async fn run_tcp_listener(
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
 ) -> Result<(), String> {
+    let tls_enabled = tls.is_some();
     let tcp_listener = TcpListener::bind(addr)
         .await
         .map_err(|e| format!("failed to bind gRPC TCP listener {addr}: {e}"))?;
@@ -533,7 +536,7 @@ async fn run_tcp_listener(
         requested_addr = %addr,
         access_mode = ?access_mode,
         auth_enabled = auth_token.is_some(),
-        tls_enabled = tls.is_some(),
+        tls_enabled,
         "starting gRPC TCP listener"
     );
     let audit_context = tcp_audit_context(
@@ -542,7 +545,7 @@ async fn run_tcp_listener(
         max_tier,
         RuntimeAuthzConfig { enforcement, roles },
         auth_token.as_deref(),
-        tls.is_some(),
+        tls_enabled,
         principal.as_deref(),
     );
     let interceptor = AuthInterceptor::new(auth_token.as_deref());
@@ -560,90 +563,98 @@ async fn run_tcp_listener(
     let mut builder = builder.layer(GrpcAuthzLayer::new(audit_context, metrics.clone()));
     let incoming =
         TcpListenerStream::new(tcp_listener).map(|accepted| accepted.map(RustbgpdTcpStream::new));
+    let mut routes = tonic::service::Routes::builder();
+    routes.add_service(RibServiceServer::with_interceptor(
+        RibService::with_status_snapshots_and_metrics(
+            rib_query_tx.clone(),
+            blackhole_discard_snapshot.clone(),
+            fib_route_snapshot.clone(),
+            metrics.clone(),
+        ),
+        interceptor.clone(),
+    ));
+    routes.add_service(EventServiceServer::with_interceptor(
+        EventService::with_dataplane_snapshots_broadcaster_and_metrics(
+            rib_tx.clone(),
+            peer_mgr_tx.clone(),
+            blackhole_discard_snapshot.clone(),
+            fib_route_snapshot.clone(),
+            dataplane_events,
+            dataplane_route_events,
+            bfd_events,
+            metrics.clone(),
+        ),
+        interceptor.clone(),
+    ));
+    routes.add_service(BfdServiceServer::with_interceptor(
+        BfdService::with_snapshot(bfd_session_snapshot),
+        interceptor.clone(),
+    ));
+    routes.add_service(InjectionServiceServer::with_interceptor(
+        InjectionService::new(rib_tx, access_mode),
+        interceptor.clone(),
+    ));
+    routes.add_service(NeighborServiceServer::with_interceptor(
+        NeighborService::new(
+            asn,
+            access_mode,
+            peer_mgr_tx.clone(),
+            rib_query_tx.clone(),
+            config_tx.clone(),
+        ),
+        interceptor.clone(),
+    ));
+    routes.add_service(PeerGroupServiceServer::with_interceptor(
+        PeerGroupService::new(access_mode, peer_mgr_tx.clone(), config_tx.clone()),
+        interceptor.clone(),
+    ));
+    routes.add_service(PolicyServiceServer::with_interceptor(
+        PolicyService::new(access_mode, peer_mgr_tx.clone(), config_tx.clone()),
+        interceptor.clone(),
+    ));
+    routes.add_service(GlobalServiceServer::with_interceptor(
+        GlobalService::new(access_mode, asn, router_id, listen_port),
+        interceptor.clone(),
+    ));
+    routes.add_service(ConfigServiceServer::with_interceptor(
+        ConfigService::new(peer_mgr_tx.clone()),
+        interceptor.clone(),
+    ));
+    routes.add_service(EvpnServiceServer::with_interceptor(
+        EvpnService::with_full_surface_runtime_and_duplicate_mac_control(
+            evpn_originated_local_mac_count,
+            evpn_ip_vrf_status_snapshot,
+            evpn_originated_ip_vrf_route_count,
+            evpn_installed_ip_vrf_route_count,
+            evpn_fdb_nexthop_snapshot,
+            evpn_runtime_model,
+            evpn_runtime_apply,
+            access_mode,
+            evpn_duplicate_mac_clear,
+        )
+        .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts),
+        interceptor.clone(),
+    ));
+    routes.add_service(ControlServiceServer::with_interceptor(
+        ControlService::new(
+            access_mode,
+            start_time,
+            metrics.clone(),
+            peer_mgr_tx,
+            rib_query_tx,
+            rpc_shutdown_tx,
+            mrt_trigger_tx,
+        ),
+        interceptor.clone(),
+    ));
+    if tls_enabled {
+        routes.add_service(GNmiServer::with_interceptor(
+            GnmiService,
+            interceptor.clone(),
+        ));
+    }
     builder
-        .add_service(RibServiceServer::with_interceptor(
-            RibService::with_status_snapshots_and_metrics(
-                rib_query_tx.clone(),
-                blackhole_discard_snapshot.clone(),
-                fib_route_snapshot.clone(),
-                metrics.clone(),
-            ),
-            interceptor.clone(),
-        ))
-        .add_service(EventServiceServer::with_interceptor(
-            EventService::with_dataplane_snapshots_broadcaster_and_metrics(
-                rib_tx.clone(),
-                peer_mgr_tx.clone(),
-                blackhole_discard_snapshot.clone(),
-                fib_route_snapshot.clone(),
-                dataplane_events,
-                dataplane_route_events,
-                bfd_events,
-                metrics.clone(),
-            ),
-            interceptor.clone(),
-        ))
-        .add_service(BfdServiceServer::with_interceptor(
-            BfdService::with_snapshot(bfd_session_snapshot),
-            interceptor.clone(),
-        ))
-        .add_service(InjectionServiceServer::with_interceptor(
-            InjectionService::new(rib_tx, access_mode),
-            interceptor.clone(),
-        ))
-        .add_service(NeighborServiceServer::with_interceptor(
-            NeighborService::new(
-                asn,
-                access_mode,
-                peer_mgr_tx.clone(),
-                rib_query_tx.clone(),
-                config_tx.clone(),
-            ),
-            interceptor.clone(),
-        ))
-        .add_service(PeerGroupServiceServer::with_interceptor(
-            PeerGroupService::new(access_mode, peer_mgr_tx.clone(), config_tx.clone()),
-            interceptor.clone(),
-        ))
-        .add_service(PolicyServiceServer::with_interceptor(
-            PolicyService::new(access_mode, peer_mgr_tx.clone(), config_tx.clone()),
-            interceptor.clone(),
-        ))
-        .add_service(GlobalServiceServer::with_interceptor(
-            GlobalService::new(access_mode, asn, router_id, listen_port),
-            interceptor.clone(),
-        ))
-        .add_service(ConfigServiceServer::with_interceptor(
-            ConfigService::new(peer_mgr_tx.clone()),
-            interceptor.clone(),
-        ))
-        .add_service(EvpnServiceServer::with_interceptor(
-            EvpnService::with_full_surface_runtime_and_duplicate_mac_control(
-                evpn_originated_local_mac_count,
-                evpn_ip_vrf_status_snapshot,
-                evpn_originated_ip_vrf_route_count,
-                evpn_installed_ip_vrf_route_count,
-                evpn_fdb_nexthop_snapshot,
-                evpn_runtime_model,
-                evpn_runtime_apply,
-                access_mode,
-                evpn_duplicate_mac_clear,
-            )
-            .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts),
-            interceptor.clone(),
-        ))
-        .add_service(ControlServiceServer::with_interceptor(
-            ControlService::new(
-                access_mode,
-                start_time,
-                metrics,
-                peer_mgr_tx,
-                rib_query_tx,
-                rpc_shutdown_tx,
-                mrt_trigger_tx,
-            ),
-            interceptor,
-        ))
+        .add_routes(routes.routes())
         .serve_with_incoming_shutdown(incoming, await_shutdown(shutdown_rx))
         .await
         .map_err(|e| format!("TCP listener {bound_addr} failed: {e}"))
@@ -708,91 +719,95 @@ async fn run_uds_listener(
         "starting gRPC UDS listener"
     );
     let interceptor = AuthInterceptor::new(auth_token.as_deref());
+    let mut routes = tonic::service::Routes::builder();
+    routes.add_service(RibServiceServer::with_interceptor(
+        RibService::with_status_snapshots_and_metrics(
+            rib_query_tx.clone(),
+            blackhole_discard_snapshot.clone(),
+            fib_route_snapshot.clone(),
+            metrics.clone(),
+        ),
+        interceptor.clone(),
+    ));
+    routes.add_service(EventServiceServer::with_interceptor(
+        EventService::with_dataplane_snapshots_broadcaster_and_metrics(
+            rib_tx.clone(),
+            peer_mgr_tx.clone(),
+            blackhole_discard_snapshot.clone(),
+            fib_route_snapshot.clone(),
+            dataplane_events,
+            dataplane_route_events,
+            bfd_events,
+            metrics.clone(),
+        ),
+        interceptor.clone(),
+    ));
+    routes.add_service(BfdServiceServer::with_interceptor(
+        BfdService::with_snapshot(bfd_session_snapshot),
+        interceptor.clone(),
+    ));
+    routes.add_service(InjectionServiceServer::with_interceptor(
+        InjectionService::new(rib_tx, access_mode),
+        interceptor.clone(),
+    ));
+    routes.add_service(NeighborServiceServer::with_interceptor(
+        NeighborService::new(
+            asn,
+            access_mode,
+            peer_mgr_tx.clone(),
+            rib_query_tx.clone(),
+            config_tx.clone(),
+        ),
+        interceptor.clone(),
+    ));
+    routes.add_service(PeerGroupServiceServer::with_interceptor(
+        PeerGroupService::new(access_mode, peer_mgr_tx.clone(), config_tx.clone()),
+        interceptor.clone(),
+    ));
+    routes.add_service(PolicyServiceServer::with_interceptor(
+        PolicyService::new(access_mode, peer_mgr_tx.clone(), config_tx.clone()),
+        interceptor.clone(),
+    ));
+    routes.add_service(GlobalServiceServer::with_interceptor(
+        GlobalService::new(access_mode, asn, router_id, listen_port),
+        interceptor.clone(),
+    ));
+    routes.add_service(ConfigServiceServer::with_interceptor(
+        ConfigService::new(peer_mgr_tx.clone()),
+        interceptor.clone(),
+    ));
+    routes.add_service(EvpnServiceServer::with_interceptor(
+        EvpnService::with_full_surface_runtime_and_duplicate_mac_control(
+            evpn_originated_local_mac_count,
+            evpn_ip_vrf_status_snapshot,
+            evpn_originated_ip_vrf_route_count,
+            evpn_installed_ip_vrf_route_count,
+            evpn_fdb_nexthop_snapshot,
+            evpn_runtime_model,
+            evpn_runtime_apply,
+            access_mode,
+            evpn_duplicate_mac_clear,
+        )
+        .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts),
+        interceptor.clone(),
+    ));
+    routes.add_service(ControlServiceServer::with_interceptor(
+        ControlService::new(
+            access_mode,
+            start_time,
+            metrics.clone(),
+            peer_mgr_tx,
+            rib_query_tx,
+            rpc_shutdown_tx,
+            mrt_trigger_tx,
+        ),
+        interceptor.clone(),
+    ));
+    routes.add_service(GNmiServer::with_interceptor(GnmiService, interceptor));
+
     let result = Server::builder()
         .layer(GrpcAuthzLayer::new(audit_context, metrics.clone()))
-        .add_service(RibServiceServer::with_interceptor(
-            RibService::with_status_snapshots_and_metrics(
-                rib_query_tx.clone(),
-                blackhole_discard_snapshot.clone(),
-                fib_route_snapshot.clone(),
-                metrics.clone(),
-            ),
-            interceptor.clone(),
-        ))
-        .add_service(EventServiceServer::with_interceptor(
-            EventService::with_dataplane_snapshots_broadcaster_and_metrics(
-                rib_tx.clone(),
-                peer_mgr_tx.clone(),
-                blackhole_discard_snapshot.clone(),
-                fib_route_snapshot.clone(),
-                dataplane_events,
-                dataplane_route_events,
-                bfd_events,
-                metrics.clone(),
-            ),
-            interceptor.clone(),
-        ))
-        .add_service(BfdServiceServer::with_interceptor(
-            BfdService::with_snapshot(bfd_session_snapshot),
-            interceptor.clone(),
-        ))
-        .add_service(InjectionServiceServer::with_interceptor(
-            InjectionService::new(rib_tx, access_mode),
-            interceptor.clone(),
-        ))
-        .add_service(NeighborServiceServer::with_interceptor(
-            NeighborService::new(
-                asn,
-                access_mode,
-                peer_mgr_tx.clone(),
-                rib_query_tx.clone(),
-                config_tx.clone(),
-            ),
-            interceptor.clone(),
-        ))
-        .add_service(PeerGroupServiceServer::with_interceptor(
-            PeerGroupService::new(access_mode, peer_mgr_tx.clone(), config_tx.clone()),
-            interceptor.clone(),
-        ))
-        .add_service(PolicyServiceServer::with_interceptor(
-            PolicyService::new(access_mode, peer_mgr_tx.clone(), config_tx.clone()),
-            interceptor.clone(),
-        ))
-        .add_service(GlobalServiceServer::with_interceptor(
-            GlobalService::new(access_mode, asn, router_id, listen_port),
-            interceptor.clone(),
-        ))
-        .add_service(ConfigServiceServer::with_interceptor(
-            ConfigService::new(peer_mgr_tx.clone()),
-            interceptor.clone(),
-        ))
-        .add_service(EvpnServiceServer::with_interceptor(
-            EvpnService::with_full_surface_runtime_and_duplicate_mac_control(
-                evpn_originated_local_mac_count,
-                evpn_ip_vrf_status_snapshot,
-                evpn_originated_ip_vrf_route_count,
-                evpn_installed_ip_vrf_route_count,
-                evpn_fdb_nexthop_snapshot,
-                evpn_runtime_model,
-                evpn_runtime_apply,
-                access_mode,
-                evpn_duplicate_mac_clear,
-            )
-            .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts),
-            interceptor.clone(),
-        ))
-        .add_service(ControlServiceServer::with_interceptor(
-            ControlService::new(
-                access_mode,
-                start_time,
-                metrics,
-                peer_mgr_tx,
-                rib_query_tx,
-                rpc_shutdown_tx,
-                mrt_trigger_tx,
-            ),
-            interceptor,
-        ))
+        .add_routes(routes.routes())
         .serve_with_incoming_shutdown(
             UnixListenerStream::new(uds_listener),
             await_shutdown(shutdown_rx),

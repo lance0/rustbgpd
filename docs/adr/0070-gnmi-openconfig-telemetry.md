@@ -164,8 +164,10 @@ listener model rather than adding a new one:
   because they disclose topology, neighbor, and routing state. They are governed
   automatically by the per-listener `max_tier` cap and per-principal role
   enforcement once their method paths are added to the authz matrix.
-- `Set` is closed (`Unimplemented`); a future `Set` would be `Mutating` /
-  `OperatorOnly` and gated on a daemon-wide config-transaction model.
+- `Set` is closed (`Unimplemented`) but still classified as **`OperatorOnly`**
+  in the authz matrix because it is mutation-shaped and must remain future-safe.
+  A future implemented `Set` would stay `Mutating` / `OperatorOnly` and be gated
+  on a daemon-wide config-transaction model.
 
 > **Load-bearing wiring note.** Authorization fails closed: any method path not
 > present in the static authz matrix is treated as `OperatorOnly` and denied. The
@@ -178,7 +180,7 @@ listener model rather than adding a new one:
 
 | PR | Scope | Verification |
 |----|-------|--------------|
-| **PR1** | Vendor `gnmi.proto` (+ `gnmi_ext.proto`), wire codegen, add `GnmiService`; implement `Capabilities`; `Get`/`Subscribe` return `Unimplemented`; `Set` returns a stable `Unimplemented`. Register on the UDS listener and on the TCP listener **only when mTLS is configured** (both `.add_service` chains in `server.rs`). Add the gNMI methods to the ADR-0064 authz matrix + `grpc-method-inventory.json` at `SensitiveRead` and fix the count tests. | `gnmic capabilities` returns version `0.10.0`, the advertised model subset, and `JSON`/`JSON_IETF`. |
+| **PR1** | Vendor `gnmi.proto` (+ `gnmi_ext.proto`), wire codegen, add `GnmiService`; implement `Capabilities`; `Get`/`Subscribe` return `Unimplemented`; `Set` returns a stable `Unimplemented`. Register on the UDS listener and on the TCP listener **only when mTLS is configured** (both `.add_service` chains in `server.rs`). Add the gNMI methods to the ADR-0064 authz matrix + `grpc-method-inventory.json` (`Capabilities` / `Get` / `Subscribe` as `SensitiveRead`, `Set` as `OperatorOnly`) and fix the count tests. | `gnmic capabilities` returns version `0.10.0`, the advertised model subset, and `JSON`/`JSON_IETF`. |
 | **PR2** | `Get` for the OpenConfig BGP global + neighbor subset above. Structured `PathElem` parser (not legacy string elements), strict supported-path whitelist. Error mapping: `INVALID_ARGUMENT` for malformed paths, `UNIMPLEMENTED` for valid-but-unsupported OpenConfig paths, `NOT_FOUND` for valid-but-absent keyed objects. | `gnmic get` against global + a keyed neighbor renders correct JSON_IETF. |
 | **PR3** | `Subscribe` `ONCE` / `POLL` / `STREAM SAMPLE` reusing the PR2 snapshot renderer; stream limits + sample-interval floors; no full route-table dumps. | `gnmic subscribe --mode once`, `--mode poll`, and stream/sample against the subset. |
 | **PR4** (post-v1) | Per-AFI-SAFI counters once per-family counts are plumbed; `supported-capabilities` once the peer snapshot is extended; BFD / FIB / EVPN OpenConfig-adjacent (or native-origin) telemetry. | — |
