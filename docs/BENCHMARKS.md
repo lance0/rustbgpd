@@ -1,9 +1,25 @@
 # Benchmarks
 
-Micro-benchmarks using [Criterion](https://github.com/bheisler/criterion.rs) 0.8.
-All numbers from a single run on an AMD Ryzen 9 / Linux 6.17, compiled with
-`--release` (LTO, codegen-units=1). Your mileage will vary — these are meant
+Micro-benchmarks using [Criterion](https://github.com/bheisler/criterion.rs) 0.8,
+compiled with `--release` (LTO, codegen-units=1). Numbers below are meant
 for relative comparison and regression tracking, not absolute guarantees.
+
+**Last measured: 2026-05-27 (v0.30.0)**
+
+| Field | Value |
+|-------|-------|
+| Hardware | AMD Ryzen Threadripper 7970X (32 cores / 64 threads) |
+| Kernel | Linux 6.17.0-20-generic |
+| rustc | 1.95.0 (2026-04-14) |
+| Criterion | 0.8 |
+| Measurement state | Unpinned — no `isolcpus`, no `cpufreq` governor pinning; light background load (`scaling_cur_freq` ~51% at run time) |
+
+Empirical run-to-run variance for the smaller benches on this box has been
+observed up to ~30% in this unpinned state — re-runs at the same commit can
+drift this much. Expect tighter results from a pinned, quiesced measurement
+state. The non-criterion **Memory Footprint**, **Optimization History**, and
+**End-to-End System Benchmarks** sections below have not been re-measured for
+v0.30.0 — they reflect the release in which they were last refreshed.
 
 ## Running
 
@@ -34,12 +50,12 @@ is O(n) structural decode.
 | Prefixes | Decode | Encode | Per-prefix decode |
 |----------|--------|--------|-------------------|
 | 1 | 21 ns | 12 ns | 21 ns |
-| 10 | 94 ns | 26 ns | 9.4 ns |
-| 100 | 662 ns | 198 ns | 6.6 ns |
-| 500 | 3.0 us | 1.0 us | 6.0 ns |
+| 10 | 94 ns | 30 ns | 9.4 ns |
+| 100 | 620 ns | 237 ns | 6.2 ns |
+| 500 | 2.77 µs | 1.06 µs | 5.5 ns |
 
 NLRI encoding is a tight `memcpy` loop. Decoding adds masking and validation.
-At 500 prefixes, decode throughput is ~167M prefixes/sec.
+At 500 prefixes, decode throughput is ~180M prefixes/sec.
 
 ### UPDATE Build / Parse
 
@@ -48,20 +64,20 @@ attributes and NLRI.
 
 | Prefixes | Build | Parse | Per-prefix parse |
 |----------|-------|-------|------------------|
-| 1 | 156 ns | 158 ns | 158 ns |
-| 10 | 207 ns | 231 ns | 23 ns |
-| 100 | 498 ns | 868 ns | 8.7 ns |
-| 500 | 1.6 us | 3.3 us | 6.6 ns |
+| 1 | 154 ns | 147 ns | 147 ns |
+| 10 | 206 ns | 205 ns | 20 ns |
+| 100 | 487 ns | 798 ns | 8.0 ns |
+| 500 | 1.50 µs | 3.11 µs | 6.2 ns |
 
-At 500 prefixes, parse throughput is ~151M prefixes/sec. The fixed cost
+At 500 prefixes, parse throughput is ~161M prefixes/sec. The fixed cost
 (~130 ns) is attribute decode; marginal cost per prefix is ~6 ns.
 
 ### Path Attributes
 
 | Set | Decode | Encode |
 |-----|--------|--------|
-| Typical (6 attrs) | 133 ns | 89 ns |
-| Rich (8 attrs, large communities) | 182 ns | 167 ns |
+| Typical (6 attrs) | 117 ns | 91 ns |
+| Rich (8 attrs, large communities) | 166 ns | 169 ns |
 
 "Typical" = Origin, AS_PATH (3 ASNs), NextHop, LocalPref, MED, Communities (2).
 
@@ -86,11 +102,11 @@ ORIGINATOR_ID, peer addr) is the inner loop of best-path selection.
 
 | Scenario | Time (1000 calls) | Per-call |
 |----------|-------------------|----------|
-| Equal routes (full tiebreak) | 18.5 us | 18.5 ns |
-| LOCAL_PREF differs (early exit) | 4.4 us | 4.4 ns |
-| Different peers (peer addr tiebreak) | 18.5 us | 18.5 ns |
+| Equal routes (full tiebreak) | 18.2 µs | 18.2 ns |
+| LOCAL_PREF differs (early exit) | 4.95 µs | 4.95 ns |
+| Different peers (full tiebreak) | 18.4 µs | 18.4 ns |
 
-Early exit at LOCAL_PREF is 4x faster than a full tiebreak. In typical eBGP
+Early exit at LOCAL_PREF is ~3.7× faster than a full tiebreak. In typical eBGP
 deployments most comparisons resolve at LOCAL_PREF or AS_PATH length.
 
 ### Adj-RIB-In Insert
@@ -100,14 +116,20 @@ secondary prefix index).
 
 | Routes | Time | Throughput |
 |--------|------|------------|
-| 10,000 | 2.6 ms | 3.8M routes/sec |
-| 100,000 | 40.5 ms | 2.5M routes/sec |
-| 500,000 | 190 ms | 2.6M routes/sec |
+| 10,000 | 4.01 ms | 2.5M routes/sec |
+| 100,000 | 52.3 ms | 1.9M routes/sec |
+| 500,000 | 191 ms | 2.6M routes/sec |
 
-Throughput is ~2.6M routes/sec (vs 4.5M without the prefix index). The
-trade-off is worthwhile: insert is ~1.8x slower, but `iter_prefix()` goes from
-O(N) to O(1), making the full pipeline 25-86x faster at scale. A full Internet
-table (900k prefixes) inserts in ~350ms.
+Throughput is ~2-2.6M routes/sec across scale (vs 4.5M without the prefix
+index). The trade-off is worthwhile: insert is ~1.8× slower, but
+`iter_prefix()` goes from O(N) to O(1), making the full pipeline 25-86× faster
+at scale. A full Internet table (900k prefixes) inserts in ~350 ms.
+
+The small-N number is ~14% slower than the v0.24.0 measurement (3.5 ms at
+10 k); this corresponds to a slight `Route` struct-size growth (added
+`next_hop_scope: Option<NextHopScope>` for RFC 8950 unnumbered link-local
+support) that increases per-clone memcpy cost. The effect disappears at
+100 k+ where memory bandwidth dominates.
 
 ### Loc-RIB Recompute
 
@@ -115,13 +137,13 @@ Best-path selection for a single prefix with N candidate routes.
 
 | Candidates | Time |
 |------------|------|
-| 1 | 88 ns |
-| 2 | 103 ns |
-| 4 | 140 ns |
-| 8 | 213 ns |
+| 1 | 75 ns |
+| 2 | 85 ns |
+| 4 | 119 ns |
+| 8 | 196 ns |
 
 Linear in candidate count, as expected. With Add-Path or multiple peers
-advertising the same prefix, each additional candidate adds ~18 ns
+advertising the same prefix, each additional candidate adds ~17 ns
 (one `best_path_cmp` call).
 
 ### Full Pipeline
@@ -130,19 +152,19 @@ End-to-end: insert routes from 2 peers into Adj-RIB-In, recompute best path
 for every prefix, install into Adj-RIB-Out. This exercises the real hot path
 without async/channel overhead.
 
-| Prefixes (x2 peers) | Time | Per-prefix |
+| Prefixes (×2 peers) | Time | Per-prefix |
 |----------------------|------|------------|
-| 1,000 | 759 us | 759 ns |
-| 10,000 | 10.8 ms | 1.08 us |
-| 50,000 | 82 ms | 1.64 us |
+| 1,000 | 783 µs | 783 ns |
+| 10,000 | 9.64 ms | 0.96 µs |
+| 50,000 | 80.7 ms | 1.61 µs |
 
-Scaling is now linear (O(N)) thanks to the secondary prefix index. Previous
-versions used an O(N) scan per prefix in `iter_prefix()`, making the full
-pipeline O(N^2) — the 50k benchmark took 7.1 seconds vs 82ms now (**86x
+Scaling is roughly linear (O(N)) thanks to the secondary prefix index.
+Previous versions used an O(N) scan per prefix in `iter_prefix()`, making the
+full pipeline O(N²) — the 50 k benchmark took 7.1 s vs 81 ms now (**~88×
 improvement**).
 
-Extrapolating linearly, a full Internet table (900k prefixes x 2 peers) would
-complete the pipeline in ~1.5 seconds.
+Extrapolating linearly, a full Internet table (900 k prefixes × 2 peers) would
+complete the pipeline in ~1.5 s.
 
 ### Route Churn
 
@@ -151,10 +173,11 @@ followed by 1,000 withdrawals, with best-path recomputation at each step.
 
 | Benchmark | Time |
 |-----------|------|
-| 10k base + 1k announce/withdraw cycle | 761 us |
+| 10k base + 1k announce/withdraw cycle | 633 µs |
 
-A 1k-prefix churn event reconverges in under 1ms, including both the announce
-and withdraw phases. This is 37x faster than the pre-index version (27.9ms).
+A 1 k-prefix churn event reconverges in under 1 ms, including both the
+announce and withdraw phases. This is ~44× faster than the pre-index version
+(27.9 ms).
 
 ## Memory Footprint
 
