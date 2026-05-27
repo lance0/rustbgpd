@@ -630,11 +630,24 @@ impl PeerSession {
         });
         let origin_asn = parsed_as_path.and_then(AsPath::origin_asn);
 
-        // Compute ASPA state once per UPDATE (same AS_PATH for all NLRI).
-        let aspa_state = validation
+        // Compute ASPA state once per UPDATE for the IPv4-unicast body NLRI
+        // surface. Other families compute their own state inside the
+        // MP_REACH_NLRI handling below — draft-ietf-sidrops-aspa-
+        // verification-25 §6.2 limits verification to IPv4/IPv6 unicast,
+        // and `ValidationSnapshot::validate_aspa` returns `Unknown` for
+        // every other family.
+        //
+        // NOTE: draft v25 §5.4 step 2 also requires that the most-recent
+        // AS in `AS_PATH` equals the negotiated neighbor ASN, with a
+        // transparent-route-server-client exception. rustbgpd does not
+        // yet enforce this precondition (no `enforce-first-as`-equivalent
+        // exists today); operators relying on ASPA against peers that
+        // strip or rewrite the leftmost AS may see misleading verdicts.
+        // Tracked as a follow-up.
+        let body_aspa_state = validation
             .as_ref()
             .map_or(rustbgpd_wire::AspaValidation::Unknown, |v| {
-                v.validate_aspa(parsed_as_path)
+                v.validate_aspa(parsed_as_path, (Afi::Ipv4, Safi::Unicast))
             });
 
         let unnumbered_ipv4_body_forbidden = self.is_scoped_link_local_peer();
@@ -671,7 +684,7 @@ impl PeerSession {
                             as_path_str: &aspath_str,
                             as_path_len: aspath_len,
                             validation_state: rpki_state,
-                            aspa_state,
+                            aspa_state: body_aspa_state,
                             peer_address: Some(self.peer_ip),
                             peer_asn: policy_peer_asn,
                             peer_group: self.config.peer_group.as_deref(),
@@ -720,7 +733,7 @@ impl PeerSession {
                             is_llgr_stale: false,
                             path_id: entry.path_id,
                             validation_state: rpki_state,
-                            aspa_state,
+                            aspa_state: body_aspa_state,
                         })
                     })
                     .collect()
@@ -778,6 +791,17 @@ impl PeerSession {
                         continue;
                     }
 
+                    // ASPA state for this MP_REACH family. Per draft v25 §6.2,
+                    // `ValidationSnapshot::validate_aspa` returns `Unknown` for
+                    // anything outside IPv4/IPv6 unicast — so FlowSpec and
+                    // EVPN announcements below propagate `Unknown` even when
+                    // an ASPA table is loaded, without any extra branching.
+                    let mp_aspa_state = validation
+                        .as_ref()
+                        .map_or(rustbgpd_wire::AspaValidation::Unknown, |v| {
+                            v.validate_aspa(parsed_as_path, family)
+                        });
+
                     if mp.safi == Safi::FlowSpec {
                         // FlowSpec announced routes — no next-hop (NH len = 0)
                         for rule in &mp.flowspec_announced {
@@ -800,7 +824,7 @@ impl PeerSession {
                                     .map_or(rustbgpd_wire::RpkiValidation::NotFound, |v| {
                                         v.validate_rpki(&fs_prefix, origin_asn)
                                     }),
-                                aspa_state,
+                                aspa_state: mp_aspa_state,
                                 peer_address: Some(self.peer_ip),
                                 peer_asn: policy_peer_asn,
                                 peer_group: self.config.peer_group.as_deref(),
@@ -865,7 +889,7 @@ impl PeerSession {
                                 as_path_str: &aspath_str,
                                 as_path_len: aspath_len,
                                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-                                aspa_state,
+                                aspa_state: mp_aspa_state,
                                 peer_address: Some(self.peer_ip),
                                 peer_asn: policy_peer_asn,
                                 peer_group: self.config.peer_group.as_deref(),
@@ -932,7 +956,7 @@ impl PeerSession {
                             as_path_str: &aspath_str,
                             as_path_len: aspath_len,
                             validation_state: mp_rpki_state,
-                            aspa_state,
+                            aspa_state: mp_aspa_state,
                             peer_address: Some(self.peer_ip),
                             peer_asn: policy_peer_asn,
                             peer_group: self.config.peer_group.as_deref(),
@@ -986,7 +1010,7 @@ impl PeerSession {
                                 is_llgr_stale: false,
                                 path_id: entry.path_id,
                                 validation_state: mp_rpki_state,
-                                aspa_state,
+                                aspa_state: mp_aspa_state,
                             });
                         }
                     }

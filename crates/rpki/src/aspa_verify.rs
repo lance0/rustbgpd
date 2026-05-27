@@ -30,7 +30,8 @@ fn compress_as_path(path: &AsPath) -> Option<Vec<u32>> {
     Some(result)
 }
 
-/// Verify an `AS_PATH` using upstream ASPA verification.
+/// Verify an `AS_PATH` using upstream ASPA verification per
+/// `draft-ietf-sidrops-aspa-verification-25` §5.4.
 ///
 /// The compressed path is indexed as `hop[0]` = neighbor AS (closest),
 /// `hop[N-1]` = origin AS (farthest). The algorithm walks from origin
@@ -41,6 +42,32 @@ fn compress_as_path(path: &AsPath) -> Option<Vec<u32>> {
 /// - `Valid` — all hops have authorized provider relationships
 /// - `Invalid` — at least one hop has a proven non-provider relationship
 /// - `Unknown` — verification incomplete due to missing ASPA records
+///
+/// # Equivalence to the §5.3 bounds-checker form
+///
+/// The spec describes the algorithm in §5.3 as a bounds-check that
+/// computes `max_up_ramp` (treating `NoAttestation` as optimistic-pass)
+/// and `min_up_ramp` (strict) walking from origin toward neighbor. For
+/// *upstream* verification (§5.4 with `max_down_ramp = min_down_ramp =
+/// 0`) the bounds form collapses into the pairwise walk here, because:
+///
+/// - "any pair `NotProviderPlus`" ⇔ "`max_up_ramp > 0`" — `max_up_ramp`
+///   stops walking at the first confirmed-bad edge from origin, so it
+///   reaches 0 iff no such edge exists.
+/// - "any pair `NoAttestation` and no pair `NotProviderPlus`" ⇔
+///   "`min_up_ramp > 0` and `max_up_ramp == 0`" — `min_up_ramp` stops
+///   at any non-`ProviderPlus`.
+/// - "every pair `ProviderPlus`" ⇔ "`min_up_ramp == 0`".
+///
+/// This equivalence is empirically verified by the
+/// `spike_bounds_equivalence_on_synthetic_corpus` test in this
+/// module, which exhaustively cross-products distinct-ASN paths of
+/// length 2..=5
+/// drawn from a 6-ASN pool with every per-pair attestation state
+/// combination (≈ 69k cases). The bounds-checker reference impl
+/// `verify_upstream_bounds_v25` lives in the test module as a
+/// regression oracle: any future divergence (e.g. a spec revision
+/// that introduces a non-zero `max_down_ramp`) fires the corpus test.
 #[must_use]
 pub fn verify_upstream(path: &AsPath, table: &AspaTable) -> AspaValidation {
     let Some(compressed) = compress_as_path(path) else {
@@ -239,5 +266,316 @@ mod tests {
             ],
         };
         assert_eq!(verify_upstream(&path, &table), AspaValidation::Valid);
+    }
+
+    // ----------------------------------------------------------------
+    // Bounds-checker equivalence spike (draft-ietf-sidrops-aspa-
+    // verification-25 §5.3 / §5.4).
+    //
+    // The production `verify_upstream` is a pairwise walk: any
+    // `NotProviderPlus` → Invalid; any `NoAttestation` (and no
+    // `NotProviderPlus`) → Unknown; otherwise Valid.
+    //
+    // Draft v25 §5.3 specifies the algorithm in a bounds-checker form:
+    // walk from origin toward neighbor twice, computing `max_up_ramp`
+    // (treating `NoAttestation` as optimistic-pass) and `min_up_ramp`
+    // (strict, only `ProviderPlus` passes). For *upstream* §5.4 the
+    // verdict is:
+    //
+    //   max_up_ramp > 0  → Invalid  (confirmed bad edge in the path)
+    //   min_up_ramp > 0  → Unknown  (no confirmed bad, but missing data)
+    //   min_up_ramp == 0 → Valid    (every edge fully attested)
+    //
+    // The hypothesis is that these two formulations are semantically
+    // equivalent for upstream (where the §5.4 simplification
+    // `max_down_ramp = min_down_ramp = 0` collapses the bounds check
+    // into the pairwise walk). The corpus test below is the empirical
+    // proof on a synthesized exhaustive cross product of small inputs.
+    // If it ever fails on a future draft revision or a refactor, the
+    // spike has caught a real divergence and the failing case prints.
+    // ----------------------------------------------------------------
+
+    /// Faithful transcription of draft v25 §5.3-5.4 upstream
+    /// verification in the bounds-checker form. Used as a regression
+    /// oracle against the production pairwise walk. NOT for production
+    /// use — `verify_upstream` is the authoritative entry point.
+    fn verify_upstream_bounds_v25(path: &AsPath, table: &AspaTable) -> AspaValidation {
+        let Some(hops) = compress_as_path(path) else {
+            return AspaValidation::Invalid;
+        };
+
+        if hops.is_empty() {
+            return AspaValidation::Invalid;
+        }
+        if hops.len() == 1 {
+            return AspaValidation::Valid;
+        }
+
+        let n = hops.len();
+
+        // max_up_ramp: walking from origin (hops[n-1]) toward neighbor
+        // (hops[0]), how far can we walk treating `NoAttestation` as
+        // optimistic-pass? Stops at the first confirmed-bad edge.
+        let mut max_up_ramp = n - 1;
+        for i in (1..n).rev() {
+            let customer = hops[i];
+            let provider = hops[i - 1];
+            match table.authorized(customer, provider) {
+                ProviderAuth::ProviderPlus | ProviderAuth::NoAttestation => {
+                    max_up_ramp = i - 1;
+                }
+                ProviderAuth::NotProviderPlus => break,
+            }
+        }
+
+        // min_up_ramp: same walk, but only `ProviderPlus` passes. Stops
+        // at the first non-`ProviderPlus` edge (missing OR bad).
+        let mut min_up_ramp = n - 1;
+        for i in (1..n).rev() {
+            let customer = hops[i];
+            let provider = hops[i - 1];
+            match table.authorized(customer, provider) {
+                ProviderAuth::ProviderPlus => {
+                    min_up_ramp = i - 1;
+                }
+                ProviderAuth::NoAttestation | ProviderAuth::NotProviderPlus => break,
+            }
+        }
+
+        // §5.4 upstream verdict (with max_down_ramp = min_down_ramp = 0).
+        if max_up_ramp > 0 {
+            AspaValidation::Invalid
+        } else if min_up_ramp > 0 {
+            AspaValidation::Unknown
+        } else {
+            AspaValidation::Valid
+        }
+    }
+
+    /// Per-pair attestation state used to synthesize an `AspaTable`
+    /// that produces a chosen `ProviderAuth` verdict at each edge of
+    /// a path.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum PairState {
+        /// Customer attests provider as upstream.
+        Pp,
+        /// Customer attests SOMEONE ELSE as upstream (provider is not in the set).
+        Npp,
+        /// No ASPA record exists for this customer.
+        NoAtt,
+    }
+
+    /// Build an `AspaTable` whose `authorized(hops[i], hops[i-1])`
+    /// matches `states[i-1]` for every pair in the path. Requires
+    /// `hops` to have distinct ASNs (else a single customer ASN could
+    /// be constrained inconsistently across pairs).
+    ///
+    /// For `Npp`, fabricates an ASPA record for the customer that
+    /// lists an out-of-pool ASN (`99`) so that the actual provider is
+    /// proven absent.
+    fn build_table_from_states(hops: &[u32], states: &[PairState]) -> AspaTable {
+        assert_eq!(states.len() + 1, hops.len());
+        // Distinct-ASN precondition keeps the table construction sound.
+        let mut sorted = hops.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), hops.len(), "hops must have distinct ASNs");
+
+        let mut records = Vec::new();
+        for (i, state) in states.iter().enumerate() {
+            let customer = hops[i + 1];
+            let provider = hops[i];
+            match state {
+                PairState::Pp => records.push(AspaRecord {
+                    customer_asn: customer,
+                    provider_asns: vec![provider],
+                }),
+                PairState::Npp => records.push(AspaRecord {
+                    customer_asn: customer,
+                    // ASN 99 is outside the test ASN pool {1..=6}, so it
+                    // cannot accidentally equal the actual provider.
+                    provider_asns: vec![99],
+                }),
+                PairState::NoAtt => {}
+            }
+        }
+        make_table(
+            records
+                .into_iter()
+                .map(|r| (r.customer_asn, r.provider_asns))
+                .collect(),
+        )
+    }
+
+    /// Enumerate all length-`k` permutations of distinct ASNs drawn
+    /// from `pool`. Recursive, returns vectors of length `k`.
+    fn distinct_paths(pool: &[u32], k: usize) -> Vec<Vec<u32>> {
+        fn recurse(pool: &[u32], k: usize, prefix: &mut Vec<u32>, out: &mut Vec<Vec<u32>>) {
+            if prefix.len() == k {
+                out.push(prefix.clone());
+                return;
+            }
+            for &asn in pool {
+                if !prefix.contains(&asn) {
+                    prefix.push(asn);
+                    recurse(pool, k, prefix, out);
+                    prefix.pop();
+                }
+            }
+        }
+        let mut out = Vec::new();
+        recurse(pool, k, &mut Vec::new(), &mut out);
+        out
+    }
+
+    /// Enumerate all `3^n` state-combinations of length `n`.
+    fn all_state_combos(n: usize) -> Vec<Vec<PairState>> {
+        let mut out = Vec::new();
+        // `n` is small (≤ 4 for the spike corpus); fold rather than `pow`
+        // sidesteps the usize→u32 cast that would trigger clippy.
+        let total: usize = (0..n).fold(1, |acc, _| acc * 3);
+        for mask in 0..total {
+            let mut combo = Vec::with_capacity(n);
+            let mut m = mask;
+            for _ in 0..n {
+                combo.push(match m % 3 {
+                    0 => PairState::Pp,
+                    1 => PairState::Npp,
+                    _ => PairState::NoAtt,
+                });
+                m /= 3;
+            }
+            out.push(combo);
+        }
+        out
+    }
+
+    #[test]
+    fn spike_bounds_equivalence_on_synthetic_corpus() {
+        // Pool of 6 ASNs; paths of length 2..=5 with all distinct ASNs;
+        // every possible per-pair state combination. Cross product
+        // size: P(6,2)·3 + P(6,3)·9 + P(6,4)·27 + P(6,5)·81 ≈ 69k cases.
+        let pool: Vec<u32> = (1..=6).collect();
+        let mut cases_checked = 0usize;
+        for path_len in 2..=5 {
+            let paths = distinct_paths(&pool, path_len);
+            let combos = all_state_combos(path_len - 1);
+            for hops in &paths {
+                for states in &combos {
+                    let table = build_table_from_states(hops, states);
+                    let path = make_path(hops);
+                    let prod = verify_upstream(&path, &table);
+                    let refr = verify_upstream_bounds_v25(&path, &table);
+                    assert_eq!(
+                        prod, refr,
+                        "divergence: hops={hops:?} states={states:?} \
+                         prod={prod:?} ref={refr:?}"
+                    );
+                    cases_checked += 1;
+                }
+            }
+        }
+        // Sanity: corpus is the expected size.
+        // P(6,2)=30·3=90; P(6,3)=120·9=1080; P(6,4)=360·27=9720;
+        // P(6,5)=720·81=58320. Total = 69210.
+        assert_eq!(cases_checked, 69210, "corpus size drifted");
+    }
+
+    #[test]
+    fn spike_bounds_equivalence_on_edge_lengths() {
+        // Length 1 (no pairs) and the empty-path / AS_SET / consecutive-
+        // duplicate edge cases are covered by the existing simple tests
+        // and by both impls' early returns. Re-check them here through
+        // the reference oracle to pin the contract.
+        let empty_table = make_table(vec![]);
+
+        let empty_path = AsPath { segments: vec![] };
+        assert_eq!(
+            verify_upstream(&empty_path, &empty_table),
+            verify_upstream_bounds_v25(&empty_path, &empty_table),
+        );
+
+        let single = make_path(&[1]);
+        assert_eq!(
+            verify_upstream(&single, &empty_table),
+            verify_upstream_bounds_v25(&single, &empty_table),
+        );
+
+        let as_set = AsPath {
+            segments: vec![
+                AsPathSegment::AsSequence(vec![1]),
+                AsPathSegment::AsSet(vec![2, 3]),
+            ],
+        };
+        assert_eq!(
+            verify_upstream(&as_set, &empty_table),
+            verify_upstream_bounds_v25(&as_set, &empty_table),
+        );
+
+        // Consecutive duplicates collapse to one ASN under compression;
+        // both impls share `compress_as_path`, so equivalence here is
+        // structural rather than algorithmic — but worth pinning.
+        let prepended = make_path(&[2, 1, 1, 1]);
+        let pp_table = make_table(vec![(1, vec![2])]);
+        assert_eq!(
+            verify_upstream(&prepended, &pp_table),
+            verify_upstream_bounds_v25(&prepended, &pp_table),
+        );
+    }
+
+    #[test]
+    fn spike_draft_v25_examples() {
+        // A handful of named cases drawn from draft v25 §5.4 prose,
+        // each spelled out for human-readable debugging if the corpus
+        // test ever fires.
+
+        // (a) Two-hop fully attested upstream: Valid.
+        {
+            let table = make_table(vec![(1, vec![2])]);
+            let path = make_path(&[2, 1]); // neighbor=2, origin=1
+            assert_eq!(
+                verify_upstream_bounds_v25(&path, &table),
+                AspaValidation::Valid
+            );
+        }
+        // (b) Two-hop with NotProviderPlus: Invalid.
+        {
+            let table = make_table(vec![(1, vec![99])]); // 1 says 99 is its provider, not 2
+            let path = make_path(&[2, 1]);
+            assert_eq!(
+                verify_upstream_bounds_v25(&path, &table),
+                AspaValidation::Invalid
+            );
+        }
+        // (c) Two-hop with NoAttestation: Unknown.
+        {
+            let table = make_table(vec![]);
+            let path = make_path(&[2, 1]);
+            assert_eq!(
+                verify_upstream_bounds_v25(&path, &table),
+                AspaValidation::Unknown
+            );
+        }
+        // (d) Three-hop with NoAttestation in the middle, ProviderPlus
+        //     elsewhere — bounds reach origin-side but not all the way:
+        //     Unknown (matches production).
+        {
+            let table = make_table(vec![(1, vec![2])]); // (3,2) has no attestation
+            let path = make_path(&[3, 2, 1]); // neighbor=3 → 2 → origin=1
+            assert_eq!(
+                verify_upstream_bounds_v25(&path, &table),
+                AspaValidation::Unknown
+            );
+        }
+        // (e) Three-hop with NotProviderPlus at neighbor side and
+        //     NoAttestation at origin side — Invalid still wins.
+        {
+            let table = make_table(vec![(2, vec![99])]); // (2,3) is NotProviderPlus
+            let path = make_path(&[3, 2, 1]); // no ASPA for 1; bad edge (2→3)
+            assert_eq!(
+                verify_upstream_bounds_v25(&path, &table),
+                AspaValidation::Invalid
+            );
+        }
     }
 }

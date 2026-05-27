@@ -118,6 +118,14 @@ pub(super) fn validate_route_rpki(route: &crate::route::Route, table: &VrpTable)
 ///
 /// Runs the upstream ASPA verification algorithm on the route's `AS_PATH`.
 /// Returns `Unknown` if no `AS_PATH` is present.
+///
+/// Per `draft-ietf-sidrops-aspa-verification-25` §6.2, ASPA applies only
+/// to IPv4/IPv6 unicast. This helper is invoked from unicast-RIB contexts
+/// only (distribution and graceful-restart revalidation of unicast
+/// routes), so the §6.2 precondition is satisfied by construction. If
+/// non-unicast routes are ever routed through this helper, callers must
+/// gate via [`ValidationSnapshot::validate_aspa`], which carries the
+/// explicit family check.
 pub(super) fn validate_route_aspa(
     route: &crate::route::Route,
     table: &AspaTable,

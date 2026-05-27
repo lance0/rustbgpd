@@ -65,15 +65,137 @@ impl ValidationSnapshot {
 
     /// Validate a route's `AS_PATH` against the ASPA table.
     ///
-    /// Returns `Unknown` if no ASPA table is loaded or no `AS_PATH` present.
+    /// Per `draft-ietf-sidrops-aspa-verification-25` §6.2, ASPA
+    /// verification is applied only to `{AFI 1 (IPv4), SAFI 1 (Unicast)}`
+    /// and `{AFI 2 (IPv6), SAFI 1 (Unicast)}`. For any other family this
+    /// returns `Unknown` immediately without consulting the table — the
+    /// §6.2 gate prevents EVPN, `FlowSpec`, multicast, MPLS-VPN, and other
+    /// non-unicast families from silently inheriting an ASPA verdict
+    /// computed from an unrelated AS path.
+    ///
+    /// Returns `Unknown` if no ASPA table is loaded or no `AS_PATH` is
+    /// present.
     #[must_use]
     pub fn validate_aspa(
         &self,
         as_path: Option<&rustbgpd_wire::AsPath>,
+        family: (rustbgpd_wire::Afi, rustbgpd_wire::Safi),
     ) -> rustbgpd_wire::AspaValidation {
+        use rustbgpd_wire::{Afi, AspaValidation, Safi};
+        // §6.2 family gate.
+        if !matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast)) {
+            return AspaValidation::Unknown;
+        }
         match (&self.aspa_table, as_path) {
             (Some(table), Some(path)) => aspa_verify::verify_upstream(path, table),
-            _ => rustbgpd_wire::AspaValidation::Unknown,
+            _ => AspaValidation::Unknown,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustbgpd_wire::{Afi, AsPath, AsPathSegment, AspaValidation, Safi};
+
+    fn snap_with_table() -> ValidationSnapshot {
+        ValidationSnapshot {
+            vrp_table: None,
+            aspa_table: Some(Arc::new(AspaTable::new(vec![AspaRecord {
+                customer_asn: 1,
+                provider_asns: vec![2],
+            }]))),
+        }
+    }
+
+    fn ipv4_unicast_path() -> AsPath {
+        // Compresses to [2, 1]: neighbor=2, origin=1; 1 attests 2 as provider.
+        AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![2, 1])],
+        }
+    }
+
+    #[test]
+    fn validate_aspa_runs_for_ipv4_unicast() {
+        let snap = snap_with_table();
+        let path = ipv4_unicast_path();
+        assert_eq!(
+            snap.validate_aspa(Some(&path), (Afi::Ipv4, Safi::Unicast)),
+            AspaValidation::Valid,
+        );
+    }
+
+    #[test]
+    fn validate_aspa_runs_for_ipv6_unicast() {
+        let snap = snap_with_table();
+        let path = ipv4_unicast_path();
+        assert_eq!(
+            snap.validate_aspa(Some(&path), (Afi::Ipv6, Safi::Unicast)),
+            AspaValidation::Valid,
+        );
+    }
+
+    #[test]
+    fn validate_aspa_returns_unknown_for_evpn() {
+        // §6.2: AFI L2VPN / SAFI EVPN is out of scope; gate returns Unknown
+        // regardless of how the AS_PATH would otherwise validate.
+        let snap = snap_with_table();
+        let path = ipv4_unicast_path();
+        assert_eq!(
+            snap.validate_aspa(Some(&path), (Afi::L2Vpn, Safi::Evpn)),
+            AspaValidation::Unknown,
+        );
+    }
+
+    #[test]
+    fn validate_aspa_returns_unknown_for_flowspec() {
+        let snap = snap_with_table();
+        let path = ipv4_unicast_path();
+        assert_eq!(
+            snap.validate_aspa(Some(&path), (Afi::Ipv4, Safi::FlowSpec)),
+            AspaValidation::Unknown,
+        );
+    }
+
+    #[test]
+    fn validate_aspa_returns_unknown_for_ipv6_flowspec() {
+        let snap = snap_with_table();
+        let path = ipv4_unicast_path();
+        assert_eq!(
+            snap.validate_aspa(Some(&path), (Afi::Ipv6, Safi::FlowSpec)),
+            AspaValidation::Unknown,
+        );
+    }
+
+    #[test]
+    fn validate_aspa_returns_unknown_for_multicast_safi() {
+        let snap = snap_with_table();
+        let path = ipv4_unicast_path();
+        assert_eq!(
+            snap.validate_aspa(Some(&path), (Afi::Ipv4, Safi::Multicast)),
+            AspaValidation::Unknown,
+        );
+    }
+
+    #[test]
+    fn validate_aspa_returns_unknown_when_no_table() {
+        let snap = ValidationSnapshot {
+            vrp_table: None,
+            aspa_table: None,
+        };
+        let path = ipv4_unicast_path();
+        assert_eq!(
+            snap.validate_aspa(Some(&path), (Afi::Ipv4, Safi::Unicast)),
+            AspaValidation::Unknown,
+        );
+    }
+
+    #[test]
+    fn validate_aspa_returns_unknown_when_no_path() {
+        let snap = snap_with_table();
+        assert_eq!(
+            snap.validate_aspa(None, (Afi::Ipv4, Safi::Unicast)),
+            AspaValidation::Unknown,
+        );
     }
 }
