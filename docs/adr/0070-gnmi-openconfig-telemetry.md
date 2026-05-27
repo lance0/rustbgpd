@@ -63,7 +63,7 @@ internal snapshot, never from CLI text.
 |-----|--------------|
 | `Capabilities` | Advertise gNMI version `0.10.0`, the **OpenConfig modules** (name / organization / version, via `ModelData`) backing the supported paths, and encodings `JSON` + `JSON_IETF`. `ModelData` is module-level, not per-path — the path subset is enforced at `Get` / `Subscribe`, not advertised here. |
 | `Get` | OpenConfig BGP operational-state subset (below). |
-| `Subscribe` | `ONCE`, `POLL`, and `STREAM` with `SAMPLE`. `ON_CHANGE` deferred. |
+| `Subscribe` | `ONCE`, `POLL`, and `STREAM` with `SAMPLE`. `STREAM` + `ON_CHANGE` v1 covers only `neighbor[neighbor-address=*]/state/session-state` (see Deferred). |
 | `Set` | Always returns a stable `Unimplemented` status. gNMI requires an explicit answer; rustbgpd has no config-transaction model, so mutation stays closed. |
 
 ### OpenConfig path scope — a supported *subset*, not full OpenConfig BGP
@@ -143,6 +143,26 @@ the spec makes it the fallback when a client omits the encoding.
   lossy and are not path-diffed into per-leaf OpenConfig updates, and true
   `ON_CHANGE` needs careful initial-snapshot, delete, and backpressure
   semantics. It depends on the P1 durable-event-history work.
+  - **Resolved by PR #293 (2026-05-27) — v1 scope:** `STREAM ON_CHANGE` is
+    accepted for the
+    `…/neighbor[neighbor-address=*]/state/session-state` leaf (both the
+    explicit `*` wildcard and the no-key shorthand). The handler
+    sources transitions from [ADR-0072](0072-durable-event-history.md)'s
+    `EventHistoryManager::subscribe_live()` and renders each FSM
+    transition as an OpenConfig leaf Update with the short-form state
+    name (`IDLE` / `CONNECT` / `ACTIVE` / `OPENSENT` / `OPENCONFIRM` /
+    `ESTABLISHED`). Other leaves under `ON_CHANGE` return
+    `Unimplemented`. `ON_CHANGE` on `ONCE` or `POLL` outer modes is
+    rejected — the v1 contract requires `STREAM`. `FailedPrecondition`
+    when `[event_history]` is disabled or EHM is in pass-through.
+    Reconnect semantics: gNMI carries no cursor on reconnect, so each
+    fresh subscription gets a fresh initial snapshot — the disconnect
+    window is NOT replayed. Collectors that need historical replay
+    use `SubscribeFromEvent` directly. On broadcast `Lagged` the
+    stream closes with `DataLoss` so the collector reconnects and
+    resyncs. Counter leaves (`messages/*`) and the `enabled` leaf
+    remain SAMPLE/POLL-only — counters need a separate event source,
+    and `enabled` is not on the lifecycle-event payload today.
 
 Wildcard / subtree `Get` and `Subscribe` requests are bounded so a broad path
 cannot turn into an accidental full route-table dump (v1 does not stream the RIB).

@@ -178,10 +178,13 @@ The API uses gRPC status codes consistently across services:
 ## gnmi.gNMI
 
 Read-only OpenConfig BGP telemetry surface (ADR-0070). The supported subset is
-deliberately narrow: `Capabilities`, `Get`, and `Subscribe` (`ONCE`, `POLL`, and
-`STREAM SAMPLE`) for global and neighbor `state` under the default network
-instance; `Set` is present because gNMI requires it, but always returns
-`UNIMPLEMENTED`.
+deliberately narrow: `Capabilities`, `Get`, and `Subscribe` (`ONCE`, `POLL`,
+`STREAM SAMPLE`, and `STREAM ON_CHANGE` — the last is scoped to the neighbor
+session-state leaf, requires `[event_history]` enabled, and returns
+`FAILED_PRECONDITION` otherwise) for global and neighbor `state` under the
+default network instance; `Set` is present because gNMI requires it, but always
+returns `UNIMPLEMENTED`. See [GNMI.md](GNMI.md) for the full `ON_CHANGE` v1
+scope (initial sync, reconnect-no-replay, lag → `DATA_LOSS`).
 
 Network gNMI is served only on mTLS TCP listeners. The UDS listener also exposes
 the service as a local-only extension.

@@ -1,0 +1,34 @@
+# M56 smoke: gNMI Subscribe ON_CHANGE for neighbor/state/session-state.
+#
+# Single rustbgpd ↔ single FRR peer. EHM enabled (the ON_CHANGE
+# handler sources transitions from the durable event broadcast); mTLS
+# gNMI listener using the same cert chain as M54.
+[global]
+asn = 65001
+router_id = "10.56.0.1"
+listen_port = 179
+runtime_state_dir = "/var/lib/rustbgpd"
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+tls_cert_file = "/etc/rustbgpd/certs/server.pem"
+tls_key_file = "/etc/rustbgpd/certs/server.key"
+tls_client_ca_file = "/etc/rustbgpd/certs/ca.pem"
+
+[security.grpc.roles]
+"rustbgpd://operator/ci" = "operator"
+
+# ON_CHANGE needs the durable event broadcast.
+[event_history]
+enabled = true
+path = "/var/lib/rustbgpd/events.db"
+
+[[neighbors]]
+address = "10.56.0.2"
+remote_asn = 65002
+description = "m56-frr-peer"
+hold_time = 90

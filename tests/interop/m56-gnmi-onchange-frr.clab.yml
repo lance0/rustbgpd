@@ -1,0 +1,51 @@
+# Containerlab topology: rustbgpd ↔ FRR + native mTLS gNMI (M56)
+#
+# Validates ADR-0070 deferred / ADR-0072 follow-up: `STREAM ON_CHANGE`
+# on `…/neighbor[neighbor-address=*]/state/session-state`. A single
+# FRR speaker peers with rustbgpd over a /30; the test flaps the FRR
+# side (`clear bgp 10.56.0.1` over vtysh — forces a BGP session
+# reset without changing config) and asserts that gnmic's ON_CHANGE
+# subscriber receives the new state without waiting for a SAMPLE
+# interval.
+#
+# Reconnect semantics are exercised explicitly: a second subscribe
+# after the flap gets a fresh initial snapshot, NOT a replay of the
+# disconnected-window transitions.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   bash tests/interop/scripts/gen-m54-certs.sh   # reuses M54 certs
+#   containerlab deploy -t tests/interop/m56-gnmi-onchange-frr.clab.yml
+#   bash tests/interop/scripts/test-m56-gnmi-onchange-frr.sh
+#   containerlab destroy -t tests/interop/m56-gnmi-onchange-frr.clab.yml --cleanup
+
+name: m56-gnmi-onchange-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m56-gnmi-onchange.toml:/etc/rustbgpd/config.toml:ro
+        - ./configs/m54-certs:/etc/rustbgpd/certs:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.56.0.1/30 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info,rustbgpd_api=debug
+
+    frr-peer:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m56-peer.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.56.0.2/30 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr-peer:eth1"]
