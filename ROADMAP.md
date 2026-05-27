@@ -95,16 +95,21 @@ and [docs/COMPARISON.md](docs/COMPARISON.md).*
 
 ### Release stance
 
-**rustbgpd is staying in v0.x until real-world deployment feedback and a
-gRPC security audit close.** Both are non-code gates (see Pre-1.0
-Requirements below). The core programmable-control-plane path is
-feature-complete for v1.0; the active roadmap is now about broadening the
-target from IX route-server parity into cloud / AI-scale data-center fabric
-use, standard telemetry integration, and route-leak prevention.
+**rustbgpd ships in v0.x indefinitely.** The core programmable-control-plane
+path is feature-complete by the criteria that matter — full BGP-4 + the
+extensions a modern operator needs (MP-BGP, Add-Path, Extended Messages,
+Graceful Restart + LLGR, Route Refresh + Enhanced Route Refresh, TCP MD5 /
+TCP-AO, BFD with RFC 5882 coupling, ECMP with weighted multipath, EVPN VXLAN
+with aliasing ECMP and DF election, RPKI + ASPA verification, BGP Roles +
+OTC, FlowSpec, durable event history, native gNMI / OpenConfig telemetry),
+all behind a gRPC-first control plane with mTLS + tier authorization.
 
-The release cadence is: keep shipping focused v0.x cuts as items below
-land. v1.0 itself is gated on external validation, not feature
-completeness.
+The active work remains feature breadth where it matters for protocol
+parity, polish, and code quality. v1.0 is not currently on a timeline: if
+real-world deployment feedback materializes it will reshape priorities; if
+not, the project keeps shipping focused v0.x cuts as items below land.
+Anyone who wants to audit, deploy, or stress-test rustbgpd has the
+documentation to do so — that's the v0.x posture.
 
 ### Current Priority Order
 
@@ -114,9 +119,7 @@ the active planning surface.
 
 | Priority | Item | Why now | Main proof / exit condition |
 |----------|------|---------|-----------------------------|
-| P0 | **ASPA completion + revalidation** | Last must-close core-protocol gap before mode-switching to perf/polish. rustbgpd already has upstream ASPA verification; the remaining value is complete-scope behavior, cache-update revalidation, and external test vectors rather than a rewrite. Pairs cleanly with the just-shipped Roles/OTC work as the route-leak prevention story. | One focused sprint with **explicit non-goals declared up front** (ASPA drafts have several optional behaviors not all operators need). Implement remaining draft scope that applies to supported roles/topologies; add NIST / independent test vectors where practical. **Fold revalidation into the same sprint:** trigger import-policy revalidation on ASPA/RPKI cache updates for peers whose policy depends on validation state — they share the validation cache and policy hook, splitting them doubles integration risk. |
-| P0 | **gRPC security audit prep** *(non-code, v1.0-gating)* | v1.0 release stance gates on "real-world deployment feedback **and** a gRPC security audit close." Audit prep is non-code but on the critical path. Best executed during the ASPA sprint so the audit itself can fire during polish. | Threat model doc, attack-surface inventory across the gRPC surface, principal-tier authz matrix audit (ADR-0064), mTLS scope summary covering UDS + TCP listener differences, redacted-field inventory across RPCs (the `DiffRuntimeConfig` precedent is documented). Engage external auditor (separately tracked as non-code work). |
-| P0 | **Deployment-feedback machinery** *(non-code, v1.0-gating)* | The other half of the v1.0 release stance. Needs a real artifact, not a vibe — without a defined "what 'production' means to us" criteria doc, "real-world deployment feedback" stays subjective. | `docs/DEPLOYMENT_FEEDBACK.md` template + criteria for what "production" means here (workload shape, scale envelope, control-plane uptime expectations, supported kernel / FRR / etc.); signposted GitHub issue label for production-readiness reports; outreach plan to candidate validators. Closes when independent deployments report production-readiness against the criteria. |
+| P0 | **ASPA completion + revalidation** | Last must-close core-protocol gap. rustbgpd already has upstream ASPA verification; the remaining value is complete-scope behavior, cache-update revalidation, and external test vectors rather than a rewrite. Pairs cleanly with the just-shipped Roles/OTC work as the route-leak prevention story. | One focused sprint with **explicit non-goals declared up front** (ASPA drafts have several optional behaviors not all operators need). Implement remaining draft scope that applies to supported roles/topologies; add NIST / independent test vectors where practical. **Fold revalidation into the same sprint:** trigger import-policy revalidation on ASPA/RPKI cache updates for peers whose policy depends on validation state — they share the validation cache and policy hook, splitting them doubles integration risk. |
 | P1 | **Config transaction model and runtime/file diff UX** *(decision gate — start or defer, do not bundle into polish)* | gRPC owns truth after startup, and gNMI `Set` would require transaction semantics. Substrate-shaped, not cleanup. `Set` is currently a stable `UNIMPLEMENTED` contract — deferring transactions breaks no operator promise. **Decide explicitly:** either start as the next major feature after ASPA, or defer and declare mutation surfaces out of scope for the perf/polish phase. | Candidate config object, validate-only, diff against live effective runtime, atomic commit where supported, explicit restart-required surfaces, rollback/receipt model; no partial silent drift. |
 | P1 | **FIB operational hardening** *(decision gate — pull only operator-confidence pieces)* | ADR-0061/0066/0068 cover configured-table install, ECMP, per-class caps, `multipath_relax`, and Link Bandwidth weighting. The next pain points are lifecycle and scale rather than base capability. Pull only the pieces that move operator confidence or unblock perf testing; defer the rest. | Hot-swap `[[fib_tables]]` (operator confidence; in-scope); over-cap detail APIs beyond sampled `route_limit_exceeded` rows (decide based on operator pain signal); incremental equal-cost sibling index for wide full-table multipath (defer unless perf-gated); platform-diversity interop for weighted multipath (defer unless demanded). |
 | P2 | **Policy / explain follow-ups** *(operator polish, not feature)* | Operator-polish surface: `reason` label coverage, FlowSpec/EVPN counter unit tests, import explain, best-path explain attribution. UX-shaped, not protocol gaps. | Stable `reason` labels across remaining ingress filter paths; per-feature counter unit-test coverage; `rustbgpctl policy explain --neighbor X --prefix Y` showing the chain that matched and the action taken; best-path explain surfacing the tiebreaker step that won. |
@@ -915,11 +918,13 @@ Type 5 control-plane injection.
 
 ---
 
-## Pre-1.0 Requirements
+## Pre-1.0 Worklog
 
-Quality gates before tagging 1.0.0. **The two open items below anchor the
-v1.0 cut**; everything else is shipped. Code-side polish continues in v0.x
-releases (see "Current Priority Order" above).
+Items historically tracked as pre-1.0 requirements during the v0.x build-out.
+All shipped. v1.0 itself is not currently on a timeline (see "Release
+stance" above) — this section is retained as a historical worklog rather
+than an active gate list. Code-side polish continues in v0.x releases (see
+"Current Priority Order" above).
 
 - [x] MP-BGP (at least IPv6 unicast)
 - [x] Graceful restart
@@ -927,20 +932,8 @@ releases (see "Current Priority Order" above).
 - [x] Policy actions (match + modify + filter)
 - [x] Large communities (RFC 8092)
 - [x] ASPA verification — upstream verification with RTR v2 (ADR-0049)
-- [ ] **Real-world deployment feedback** *(v1.0 gate)* — at least one
-  operator running rustbgpd in a production-shaped environment long
-  enough to surface bugs the soak harness can't. The 12 h soak verdict
-  + interop coverage establish the production *claim*; this gate
-  validates it.
 - [x] Wire crate API stability (`rustbgpd-wire` published on crates.io)
 - [x] Comprehensive rustdoc for public API (hand-written crates; generated proto stubs excluded)
-- [ ] **Security audit of gRPC surface** *(v1.0 gate)* — independent
-  review of the gRPC API surface, listener configuration (UDS default
-  + opt-in TCP + native mTLS + bearer-token auth), checked method-tier
-  matrix, audit-only runtime decisions, and remaining authorization
-  model. The ADR-0064 threat-model packet now exists; remaining work is
-  external reviewer sign-off plus the follow-up enforcement/hardening
-  slices tracked in ADR-0064.
 - [x] **RibManager submodule split** — 8,318-line manager.rs split into 7 submodules (mod.rs, distribution.rs, peer_lifecycle.rs, route_refresh.rs, graceful_restart.rs, helpers.rs, tests.rs)
 - [x] **RTR expire_interval enforcement** — VRPs are now cleared if no fresh EndOfData arrives before the expiry window
 
