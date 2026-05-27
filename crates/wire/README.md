@@ -3,7 +3,8 @@
 BGP message codec for Rust. Encode and decode OPEN, UPDATE, KEEPALIVE,
 NOTIFICATION, and ROUTE-REFRESH messages per RFC 4271, with extensions for
 MP-BGP, EVPN (including PMSI Tunnel for ingress-replication BUM), FlowSpec,
-Add-Path, Extended Messages, and more.
+Add-Path, Extended Messages, BGP Roles + Only-to-Customer (RFC 9234), and
+more.
 
 This crate is the wire-protocol foundation of
 [rustbgpd](https://github.com/lance0/rustbgpd) but is designed for standalone
