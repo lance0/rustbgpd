@@ -1576,6 +1576,65 @@ async fn otc_ingress_event_collects_mp_reach_v6_prefixes() {
 }
 
 #[tokio::test]
+async fn otc_ingress_skips_event_when_rejected_count_is_zero() {
+    // Regression: a malformed-length OTC UPDATE that carries only
+    // withdrawals (no announced unicast) must not produce a
+    // zero-count OtcRouteBlockedEvent — the proto contract is
+    // "blocks one or more unicast routes". The withdrawal still
+    // processes through the normal path; only the structured event
+    // and the per-peer counter bump are skipped.
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.peer.local_role = Some(BgpRole::Provider);
+    session.negotiated = Some(negotiated_session(65002, false));
+    let sink = install_recording_sink(&mut session);
+    let baseline_blocked = session.otc_routes_blocked;
+
+    let withdrawn_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
+            flags: rustbgpd_wire::constants::attr_flags::OPTIONAL
+                | rustbgpd_wire::constants::attr_flags::TRANSITIVE,
+            type_code: rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER,
+            data: Bytes::from_static(&[0, 0, 0]),
+        }),
+    ];
+    // No announced NLRI — only the withdrawal.
+    let update = UpdateMessage::build(
+        &[],
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: withdrawn_prefix,
+        }],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+
+    session.process_update(update).await;
+
+    assert!(
+        sink.snapshot().is_empty(),
+        "no announced unicast → no structured OtcRouteBlockedEvent"
+    );
+    assert_eq!(
+        session.otc_routes_blocked, baseline_blocked,
+        "rejected=0 must not bump the per-peer counter"
+    );
+
+    // Withdrawal still surfaces through the RIB path.
+    let RibUpdate::RoutesReceived { withdrawn, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(withdrawn, vec![(Prefix::V4(withdrawn_prefix), 0)]);
+}
+
+#[tokio::test]
 async fn otc_ingress_no_event_when_no_decision() {
     // Untagged UPDATE from a customer arrives at a Customer-role
     // local — no OTC rule fires, so the sink must stay empty.

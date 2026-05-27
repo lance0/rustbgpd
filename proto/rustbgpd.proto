@@ -1063,12 +1063,18 @@ message WatchEventsRequest {
   // Empty categories with empty event_types = default live categories
   // (route + session). A non-empty event_types filter narrows the
   // result; BGP_EVENT_TYPE_POLICY_CHANGED,
-  // BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED,
   // BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED, or
   // BGP_EVENT_TYPE_DATAPLANE_ROUTE_* with empty categories selects
   // those streams. Add EVENT_CATEGORY_POLICY or EVENT_CATEGORY_DATAPLANE
   // explicitly to combine them with the default route + session
   // categories.
+  //
+  // BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED is NOT served by this RPC: the
+  // OTC route-leak decision is published only through the durable
+  // outbox (ADR-0072). Filtering for it here would produce an empty
+  // live stream. Use SubscribeFromEvent with
+  // categories=[EVENT_CATEGORY_POLICY] and
+  // event_types=[BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED].
   repeated EventCategory categories = 1;
   // Empty = all event types for the selected categories.
   repeated BgpEventType event_types = 2;

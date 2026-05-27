@@ -35,7 +35,10 @@ pub enum OtcDirection {
     /// route invalid for this local role.
     Ingress,
     /// Outbound route suppressed because it carries OTC and the
-    /// session's local role is `Provider` / `Peer` / `RouteServer`.
+    /// session's local role is one of `Customer` / `Peer` /
+    /// `RouteServerClient` — i.e. we'd be advertising the route
+    /// up to a Provider / lateral Peer / Route Server, which RFC
+    /// 9234 §5 prohibits for OTC-tagged routes.
     Egress,
 }
 
@@ -122,8 +125,10 @@ pub trait TransportEventSink: Send + Sync + 'static {
 /// No-op sink used when `[event_history]` is disabled or EHM failed
 /// to start with `required = false`. Keeps `PeerSession`'s sink
 /// slot non-`Option<T>` so the publish hot path is one virtual call
-/// regardless of EHM state — the JIT can devirtualize the noop case
-/// to a no-op return.
+/// regardless of EHM state — and the published-event allocation is
+/// only paid on the OTC slow path, which is already a tracing
+/// `warn!` site, so the extra indirection never shows up in a hot
+/// loop.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoopTransportEventSink;
 

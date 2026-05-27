@@ -297,11 +297,12 @@ pub fn policy_event_to_bgp_event(event: PolicyEvent) -> proto::BgpEvent {
     }
 }
 
-/// Convert a transport-layer [`OtcRouteBlockedEvent`] into a proto
-/// `BgpEvent` envelope. The legacy `bgp_otc_routes_blocked_total`
-/// counter and the per-`NeighborState` `otc_routes_blocked` scalar
-/// are unchanged; this converter handles only the structured
-/// payload path (ADR-0072 follow-up, ADR-0071 deferred item).
+/// Convert a transport-layer [`rustbgpd_transport::OtcRouteBlockedEvent`]
+/// into a proto `BgpEvent` envelope. The legacy
+/// `bgp_otc_routes_blocked_total` counter and the per-`NeighborState`
+/// `otc_routes_blocked` scalar are unchanged; this converter handles
+/// only the structured payload path (ADR-0072 follow-up, ADR-0071
+/// deferred item).
 ///
 /// `local_role` / `remote_role` lower to the RFC 9234 §4 lowercase
 /// names (`provider`, `route_server`, `route_server_client`,

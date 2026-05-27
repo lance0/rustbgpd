@@ -366,30 +366,42 @@ impl PeerSession {
                 }
             }
             let rejected = blocked_prefixes.len();
-            warn!(
-                peer = %self.peer_label,
-                reason,
-                rejected,
-                "OTC route-leak rule rejected unicast announcements; withdrawals still processed"
-            );
-            self.record_otc_routes_blocked(reason, rejected as u64);
 
-            // Publish the structured event AFTER the counter +
-            // per-NeighborState scalar update, so a sink that drops
-            // (queue_full / closed) can never leave the legacy
-            // surfaces inconsistent.
-            let (otc_value, as_path_string) = otc_event_context(&parsed.attributes, reason);
-            let otc_event = crate::event_sink::OtcRouteBlockedEvent {
-                peer: self.peer_ip,
-                direction: crate::event_sink::OtcDirection::Ingress,
-                reason,
-                prefixes: blocked_prefixes,
-                local_role: self.config.peer.local_role,
-                remote_role: self.negotiated.as_ref().and_then(|n| n.remote_role),
-                otc_value,
-                as_path: as_path_string,
-            };
-            self.event_sink().publish_otc_route_blocked(&otc_event);
+            // An OTC-tagged UPDATE with no announced unicast routes —
+            // e.g. malformed-length on a body-NLRI withdrawals-only
+            // UPDATE, or any tagged UPDATE that carries only
+            // withdrawals or non-unicast MP_REACH — produces no
+            // counter bump and no structured event. The
+            // OtcRouteBlockedEvent proto contract is "blocks one or
+            // more unicast routes", so a zero-count event would be
+            // semantically wrong. Withdrawals still flow through the
+            // normal path regardless.
+            if rejected > 0 {
+                warn!(
+                    peer = %self.peer_label,
+                    reason,
+                    rejected,
+                    "OTC route-leak rule rejected unicast announcements; withdrawals still processed"
+                );
+                self.record_otc_routes_blocked(reason, rejected as u64);
+
+                // Publish the structured event AFTER the counter +
+                // per-NeighborState scalar update, so a sink that
+                // drops (queue_full / closed) can never leave the
+                // legacy surfaces inconsistent.
+                let (otc_value, as_path_string) = otc_event_context(&parsed.attributes, reason);
+                let otc_event = crate::event_sink::OtcRouteBlockedEvent {
+                    peer: self.peer_ip,
+                    direction: crate::event_sink::OtcDirection::Ingress,
+                    reason,
+                    prefixes: blocked_prefixes,
+                    local_role: self.config.peer.local_role,
+                    remote_role: self.negotiated.as_ref().and_then(|n| n.remote_role),
+                    otc_value,
+                    as_path: as_path_string,
+                };
+                self.event_sink().publish_otc_route_blocked(&otc_event);
+            }
         }
 
         // AS_PATH loop detection (RFC 4271 §9.1.2): discard all

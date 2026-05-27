@@ -692,6 +692,10 @@ rustbgpctl events watch --prefix 203.0.113.0/24 --type added,best_changed
 rustbgpctl events watch --category session --type established,lost
 rustbgpctl events watch --category session --type notification_sent,notification_received
 rustbgpctl events watch --category policy --type policy_changed
+# OTC route-leak decisions are published only through the durable
+# outbox; the CLI automatically routes this filter through
+# SubscribeFromEvent in live-only mode. Add `--from-event-id 0` to
+# also replay any retained history.
 rustbgpctl events watch --category policy --type otc_route_blocked
 rustbgpctl events watch --category dataplane --type dataplane_status_changed
 rustbgpctl events watch --category dataplane --type dataplane_route_failed --prefix 203.0.113.0/24

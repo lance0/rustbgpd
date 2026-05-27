@@ -523,11 +523,22 @@ fn parse_policy_event_type_filter(event_types: &[i32]) -> Result<(), Status> {
         let event_type = proto::BgpEventType::try_from(*event_type)
             .map_err(|_| Status::invalid_argument("unknown event type"))?;
         match event_type {
-            // Both PolicyChanged (config-mutation event) and
-            // OtcRouteBlocked (per-decision route-leak event) ride on
-            // EVENT_CATEGORY_POLICY, so ListPolicyEvents accepts both
-            // as filter values.
-            proto::BgpEventType::PolicyChanged | proto::BgpEventType::OtcRouteBlocked => {}
+            proto::BgpEventType::PolicyChanged => {}
+            // OtcRouteBlocked is a sibling under EVENT_CATEGORY_POLICY
+            // but it is published only through the durable outbox
+            // (ADR-0072 follow-up); the in-memory policy ring this
+            // RPC drains carries only config-mutation `PolicyChanged`
+            // events. Accepting the filter here would silently
+            // return unrelated policy mutations — reject and point
+            // at the right RPC.
+            proto::BgpEventType::OtcRouteBlocked => {
+                return Err(Status::invalid_argument(
+                    "BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED is published only through \
+                     the durable event outbox; use SubscribeFromEvent with \
+                     categories=[EVENT_CATEGORY_POLICY] and \
+                     event_types=[BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED]",
+                ));
+            }
             proto::BgpEventType::Unspecified => {
                 return Err(Status::invalid_argument(
                     "BGP_EVENT_TYPE_UNSPECIFIED is not a valid filter",

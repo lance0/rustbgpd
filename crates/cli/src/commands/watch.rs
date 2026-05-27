@@ -138,9 +138,10 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
         "bfd_state_changed" | "bfd_session_state_changed" => {
             Ok(BgpEventType::BfdSessionStateChanged as i32)
         }
+        "otc_route_blocked" => Ok(BgpEventType::OtcRouteBlocked as i32),
         "stream_lagged" | "lagged" => Ok(BgpEventType::StreamLagged as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported event type {other:?}; expected added, withdrawn, best_changed, policy_filtered, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, dataplane_status_changed, dataplane_route_installed, dataplane_route_withdrawn, dataplane_route_failed, evpn_added, evpn_withdrawn, evpn_best_changed, bfd_up, bfd_down, bfd_state_changed, or stream_lagged"
+            "unsupported event type {other:?}; expected added, withdrawn, best_changed, policy_filtered, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, otc_route_blocked, dataplane_status_changed, dataplane_route_installed, dataplane_route_withdrawn, dataplane_route_failed, evpn_added, evpn_withdrawn, evpn_best_changed, bfd_up, bfd_down, bfd_state_changed, or stream_lagged"
         ))),
     }
 }
@@ -266,6 +267,7 @@ fn bgp_event_type_json_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::BfdSessionUp) => "bfd_session_up",
         Ok(BgpEventType::BfdSessionDown) => "bfd_session_down",
         Ok(BgpEventType::BfdSessionStateChanged) => "bfd_session_state_changed",
+        Ok(BgpEventType::OtcRouteBlocked) => "otc_route_blocked",
         Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
@@ -295,6 +297,7 @@ fn bgp_event_type_display_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::BfdSessionUp) => "bfd_up",
         Ok(BgpEventType::BfdSessionDown) => "bfd_down",
         Ok(BgpEventType::BfdSessionStateChanged) => "bfd_state_changed",
+        Ok(BgpEventType::OtcRouteBlocked) => "otc_route_blocked",
         Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
@@ -844,11 +847,23 @@ pub async fn events_watch(
     // server emits a leading `StreamLagEvent` if `N` is older than
     // the retention floor — the existing print path already renders
     // it as a stream_lag payload.
-    if let Some(cursor) = from_event_id {
+    //
+    // Some event types are EHM-only (no legacy WatchEvents
+    // broadcast). Today that's `OtcRouteBlocked` — the OTC
+    // route-leak decision is published exclusively through the
+    // durable outbox under EVENT_CATEGORY_POLICY. If the user
+    // asked for one of those types without `--from-event-id`, we
+    // transparently route through SubscribeFromEvent in live-only
+    // mode (`from_event_id = None`) so the filter actually works.
+    // If EHM is disabled, the server returns FailedPrecondition,
+    // which the CLI surfaces as a clear error rather than the
+    // silent zero-event-stream the legacy path would produce.
+    let request_requires_ehm = event_types.contains(&(BgpEventType::OtcRouteBlocked as i32));
+    if from_event_id.is_some() || request_requires_ehm {
         let mut client =
             EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
         let request = crate::proto::SubscribeFromEventRequest {
-            from_event_id: Some(cursor),
+            from_event_id,
             categories,
             event_types,
             neighbor_address: neighbor.unwrap_or_default(),
