@@ -11,6 +11,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0070 deferral resolved: gNMI `Subscribe ON_CHANGE` v1.**
+  `STREAM` + `ON_CHANGE` is accepted for
+  `…/neighbor[neighbor-address=*]/state/session-state` (the explicit
+  `*` wildcard and the no-key shorthand both lower to the same
+  all-neighbors target). The handler sources live FSM transitions
+  from `EventHistoryManager::subscribe_live()`, decodes each
+  `CommittedEvent`'s prost-encoded `BgpEvent` payload, and emits a
+  per-leaf OpenConfig Update with the short-form state name. Initial
+  sync delivers one Update per configured peer (including non-
+  Established peers) followed by `sync_response`. Other leaves under
+  `ON_CHANGE` return `Unimplemented`; the `ONCE` and `POLL` outer
+  modes continue to reject `ON_CHANGE`. `FailedPrecondition` when
+  `[event_history]` is disabled or EHM is in pass-through.
+  Reconnect = fresh initial snapshot (no replay); broadcast `Lagged`
+  closes with `DataLoss` so the collector reconnects and resyncs.
+  Authz: gNMI Subscribe stays at the `SensitiveRead` tier — the
+  external contract is unchanged even though the implementation is
+  EHM-backed.
 - **ADR-0072 follow-up: `OtcRouteBlocked` structured event payload.**
   Closes the deferred ADR-0071 (RFC 9234 BGP Roles + OTC) item.
   Every OTC ingress / egress block decision now publishes a

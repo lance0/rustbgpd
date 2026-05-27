@@ -779,6 +779,47 @@ jobs:
           topology: tests/interop/m55-bgp-roles-otc-frr.clab.yml
           script: tests/interop/scripts/test-m55-bgp-roles-otc-frr.sh
 
+  m56:
+    name: M56 — gNMI Subscribe ON_CHANGE (ADR-0070 deferral resolved)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Install grpcurl, gnmic, and jq
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+          curl -sL https://github.com/openconfig/gnmic/releases/download/v0.46.0/gnmic_0.46.0_Linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin gnmic
+          sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Reuses the M54 mTLS PKI; same operator cert chain.
+      - name: Generate M54 mTLS certs
+        run: bash tests/interop/scripts/gen-m54-certs.sh
+
+      - name: Run M56 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M56
+          topology: tests/interop/m56-gnmi-onchange-frr.clab.yml
+          script: tests/interop/scripts/test-m56-gnmi-onchange-frr.sh
+
   m45:
     name: M45 — EVPN Type 5 injection (gRPC → FRR)
     runs-on: ubuntu-latest

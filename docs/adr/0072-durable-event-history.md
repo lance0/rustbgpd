@@ -719,6 +719,29 @@ reference bridge at `examples/event-bridge/`:
   string form (`{…}` notation for AS_SET / confed segments) —
   lossless and matches existing operator-facing renderings — not
   a lossy `repeated uint32`.
+- **gNMI `Subscribe ON_CHANGE` deferred from v1.**
+  *Historical rationale.* PR5 wired the durable cursor
+  (`SubscribeFromEvent`) end-to-end, which gave the daemon a
+  path-diffed change source for the first time. The gNMI surface
+  (ADR-0070) only supported `STREAM SAMPLE` because the legacy
+  broadcasts were lossy and not path-diffed — `ON_CHANGE` needs an
+  initial-snapshot + per-leaf delta model that PR5 unblocked.
+
+  *Resolved by PR #N (2026-05-27).* `GnmiService` accepts
+  `Subscribe` with `mode = STREAM` + `subscription.mode = ON_CHANGE`
+  for the
+  `…/neighbor[neighbor-address=*]/state/session-state` leaf. It
+  consumes live FSM transitions via
+  `EventHistoryManager::subscribe_live()` (filtered to
+  `Category::Session`), decodes each `CommittedEvent`'s
+  prost-encoded `BgpEvent` payload, and emits one OpenConfig leaf
+  Update per transition. `FailedPrecondition` when EHM is disabled.
+  Reconnect = fresh initial snapshot (no replay); broadcast `Lagged`
+  closes with `DataLoss` so the collector reconnects. The gNMI
+  Subscribe surface stays at the `SensitiveRead` authz tier
+  regardless of internal EHM backing — the external contract is
+  still gNMI Subscribe. See [ADR-0070](0070-gnmi-openconfig-telemetry.md)
+  for the v1 scope contract.
 - **`List*Events` RPCs stay on the in-memory rings in v1.**
   `ListRouteEvents` / `ListSessionEvents` / `ListPolicyEvents` /
   `ListEvpnEvents` keep their existing bounded-ring backing

@@ -7,12 +7,17 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use prost::Message;
+use rustbgpd_event_history::{Category, EventHistoryHandle, PayloadCodec};
 use rustbgpd_fsm::SessionState;
+use tokio::sync::broadcast::error::RecvError;
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
+use tracing::debug;
 
 use crate::gnmi;
 use crate::peer_types::{PeerInfo, PeerManagerCommand};
+use crate::proto;
 
 const GNMI_VERSION: &str = "0.10.0";
 const DEFAULT_NETWORK_INSTANCE: &str = "DEFAULT";
@@ -44,6 +49,11 @@ pub struct GnmiService {
     /// Bounds concurrent `Subscribe` streams; a permit is held for the lifetime
     /// of each open stream.
     subscribe_slots: Arc<tokio::sync::Semaphore>,
+    /// Optional handle to the durable event outbox (ADR-0072). Wired
+    /// in by `ServeConfig` when `[event_history]` is enabled and EHM
+    /// started cleanly. `Subscribe ON_CHANGE` is the only consumer
+    /// today; it returns `FailedPrecondition` when this is `None`.
+    event_history: Option<EventHistoryHandle>,
 }
 
 type SubscribeStream =
@@ -80,7 +90,18 @@ impl GnmiService {
             router_id: router_id.into(),
             peer_snapshot: Arc::new(move || Box::pin(peer_snapshot())),
             subscribe_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SUBSCRIPTIONS)),
+            event_history: None,
         }
+    }
+
+    /// Install the durable event-outbox handle (ADR-0072) used by
+    /// `Subscribe ON_CHANGE` to source live session-state transitions.
+    /// Called once at startup by `ServeConfig` when
+    /// `[event_history].enabled = true`.
+    #[must_use]
+    pub fn with_event_history(mut self, handle: Option<EventHistoryHandle>) -> Self {
+        self.event_history = handle;
+        self
     }
 
     async fn render_get(&self, request: gnmi::GetRequest) -> Result<gnmi::GetResponse, Status> {
@@ -288,6 +309,175 @@ impl GnmiService {
             }
         }
     }
+
+    /// `STREAM` / `ON_CHANGE` task (ADR-0070 deferred → ADR-0072 follow-up):
+    /// emit an initial snapshot of the session-state leaf for every
+    /// peer the subscription targets, a `sync_response` marker, then
+    /// stream a fresh leaf Update for every committed session-state
+    /// transition until the client disconnects or the durable
+    /// broadcast lags.
+    ///
+    /// Reconnect semantics: gNMI carries no cursor on reconnect, so a
+    /// fresh subscription starts a fresh initial snapshot. The
+    /// disconnect window is intentionally NOT replayed — collectors
+    /// that need historical replay use `SubscribeFromEvent` directly.
+    /// On broadcast `Lagged`, the stream closes with `DataLoss` so
+    /// the collector reconnects and resyncs from a fresh snapshot.
+    async fn run_on_change(
+        self,
+        plan: SubscriptionPlan,
+        tx: tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
+    ) {
+        // FailedPrecondition when EHM is unavailable — matches the
+        // SubscribeFromEvent path so collectors get the same signal
+        // regardless of which RPC they're driving.
+        let Some(handle) = self.event_history.as_ref() else {
+            let _ = tx
+                .send(Err(Status::failed_precondition(
+                    "gNMI Subscribe ON_CHANGE requires the durable event outbox; \
+                     enable [event_history] and restart the daemon",
+                )))
+                .await;
+            return;
+        };
+        if handle.state().pass_through() {
+            let _ = tx
+                .send(Err(Status::failed_precondition(
+                    "gNMI Subscribe ON_CHANGE requires the durable event outbox; \
+                     the outbox is in pass-through mode — see the daemon log and \
+                     bgp_event_outbox_degraded",
+                )))
+                .await;
+            return;
+        }
+
+        // Subscribe to the live broadcast BEFORE the initial snapshot.
+        // Any transition that lands between snapshot capture and
+        // attach would otherwise be silently lost; the broadcast
+        // attach happens first, then the snapshot dedup-overrides
+        // anything stale the broadcast might also carry.
+        let mut broadcast_rx = handle.subscribe_live();
+
+        // Initial snapshot — one Update per configured peer (including
+        // non-Established peers; the contract is "baseline the world,
+        // then stream transitions"). Empty peer set is fine; the
+        // sync_response still flushes downstream.
+        if !self.forward_on_change_snapshot(&plan, &tx).await {
+            return;
+        }
+        if tx.send(Ok(sync_response())).await.is_err() {
+            return;
+        }
+
+        loop {
+            tokio::select! {
+                event = broadcast_rx.recv() => match event {
+                    Ok(committed) => {
+                        if committed.envelope.category != Category::Session {
+                            continue;
+                        }
+                        if committed.envelope.payload_codec != PayloadCodec::Proto {
+                            continue;
+                        }
+                        match build_session_state_on_change(&plan, &committed, self.asn) {
+                            Ok(Some(response)) => {
+                                if tx.send(Ok(response)).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                debug!(error = %e, "decoding session event payload failed");
+                            }
+                        }
+                    }
+                    Err(RecvError::Lagged(missed)) => {
+                        // Per the contract, ON_CHANGE does not paper
+                        // over gaps. Close with DataLoss so the
+                        // collector reconnects and gets a fresh
+                        // initial snapshot. SubscribeFromEvent is the
+                        // RPC for historical replay.
+                        let _ = tx
+                            .send(Err(Status::data_loss(format!(
+                                "gNMI ON_CHANGE broadcast lagged by {missed} events; \
+                                 reconnect to resync from a fresh snapshot"
+                            ))))
+                            .await;
+                        return;
+                    }
+                    Err(RecvError::Closed) => return,
+                },
+                () = tx.closed() => return,
+            }
+        }
+    }
+
+    /// Emit the initial Updates for an `ON_CHANGE` subscription —
+    /// one `session-state` leaf Update per peer the plan's paths
+    /// target. Returns `false` when the client dropped (in which
+    /// case the caller stops without sending `sync_response`).
+    async fn forward_on_change_snapshot(
+        &self,
+        plan: &SubscriptionPlan,
+        tx: &tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
+    ) -> bool {
+        if plan.updates_only {
+            return true;
+        }
+
+        let peers = match (self.peer_snapshot)().await {
+            Ok(mut peers) => {
+                peers.sort_by_key(|peer| peer.address);
+                peers
+            }
+            Err(err) => {
+                let _ = tx.send(Err(err)).await;
+                return false;
+            }
+        };
+
+        let mut updates: Vec<gnmi::Update> = Vec::new();
+        for query in &plan.paths {
+            match query {
+                SupportedPath::Neighbor { address, .. } => {
+                    if let Some(peer) = peers.iter().find(|p| p.address == *address) {
+                        updates.push(leaf_update(
+                            neighbor_leaf_path(peer.address, NeighborLeaf::SessionState),
+                            &LeafValue::Str(session_state_name(peer.state).to_string()),
+                            plan.encoding,
+                        ));
+                    }
+                }
+                SupportedPath::AllNeighbors { .. } => {
+                    for peer in &peers {
+                        updates.push(leaf_update(
+                            neighbor_leaf_path(peer.address, NeighborLeaf::SessionState),
+                            &LeafValue::Str(session_state_name(peer.state).to_string()),
+                            plan.encoding,
+                        ));
+                    }
+                }
+                SupportedPath::Global { .. } => {}
+            }
+        }
+
+        if updates.is_empty() {
+            return true;
+        }
+        let response = gnmi::SubscribeResponse {
+            response: Some(gnmi::subscribe_response::Response::Update(
+                gnmi::Notification {
+                    timestamp: now_nanos(),
+                    prefix: None,
+                    update: updates,
+                    delete: Vec::new(),
+                    atomic: false,
+                },
+            )),
+            extension: Vec::new(),
+        };
+        tx.send(Ok(response)).await.is_ok()
+    }
 }
 
 fn supported_models() -> Vec<gnmi::ModelData> {
@@ -411,6 +601,13 @@ impl SupportedPath {
 #[derive(Clone, Debug)]
 struct SubscriptionPlan {
     mode: gnmi::subscription_list::Mode,
+    /// Per-subscription delivery mode. v1 `ON_CHANGE` is a homogeneous
+    /// plan attribute (the upstream `parse_subscription_list` already
+    /// rejects mixed `ON_CHANGE` / `SAMPLE` subscriptions within one
+    /// `SubscriptionList` for `STREAM` mode by requiring every
+    /// subscription's path be the supported leaf), so storing one
+    /// value here is enough.
+    stream_mode: Option<gnmi::SubscriptionMode>,
     paths: Vec<SupportedPath>,
     updates_only: bool,
     sample_interval: Duration,
@@ -477,13 +674,17 @@ fn parse_subscription_list(list: &gnmi::SubscriptionList) -> Result<Subscription
 
     let mut paths = Vec::with_capacity(list.subscription.len());
     let mut sample_interval = MIN_SAMPLE_INTERVAL;
+    let mut stream_mode: Option<gnmi::SubscriptionMode> = None;
     for subscription in &list.subscription {
-        validate_subscription_mode(mode, subscription)?;
         let path = subscription
             .path
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("subscription path is required"))?;
         let full_path = combine_paths(list.prefix.as_ref(), path)?;
+        // Validate the mode against the fully-joined path so the
+        // ON_CHANGE leaf check still works when the subscription
+        // splits prefix and tail across `list.prefix` + `path`.
+        validate_subscription_mode(mode, subscription, &full_path)?;
         paths.push(parse_supported_path(&full_path)?);
 
         if mode == gnmi::subscription_list::Mode::Stream {
@@ -495,11 +696,30 @@ fn parse_subscription_list(list: &gnmi::SubscriptionList) -> Result<Subscription
             let requested = Duration::from_nanos(subscription.sample_interval)
                 .clamp(MIN_SAMPLE_INTERVAL, MAX_SAMPLE_INTERVAL);
             sample_interval = sample_interval.max(requested);
+
+            // Reject mixed STREAM modes within one SubscriptionList:
+            // the v1 dispatch picks SAMPLE *or* ON_CHANGE for the
+            // whole task, not per-path. Two same-mode subscriptions
+            // are fine.
+            let this_mode = gnmi::SubscriptionMode::try_from(subscription.mode).map_err(|_| {
+                Status::invalid_argument(format!("unknown subscription mode {}", subscription.mode))
+            })?;
+            match stream_mode {
+                None => stream_mode = Some(this_mode),
+                Some(existing) if existing == this_mode => {}
+                Some(_) => {
+                    return Err(Status::unimplemented(
+                        "STREAM Subscribe mixes SAMPLE and ON_CHANGE subscriptions; \
+                         v1 requires a single mode per stream",
+                    ));
+                }
+            }
         }
     }
 
     Ok(SubscriptionPlan {
         mode,
+        stream_mode,
         paths,
         updates_only: list.updates_only,
         sample_interval,
@@ -510,6 +730,7 @@ fn parse_subscription_list(list: &gnmi::SubscriptionList) -> Result<Subscription
 fn validate_subscription_mode(
     list_mode: gnmi::subscription_list::Mode,
     subscription: &gnmi::Subscription,
+    full_path: &gnmi::Path,
 ) -> Result<(), Status> {
     let mode = gnmi::SubscriptionMode::try_from(subscription.mode).map_err(|_| {
         Status::invalid_argument(format!("unknown subscription mode {}", subscription.mode))
@@ -518,7 +739,7 @@ fn validate_subscription_mode(
         gnmi::subscription_list::Mode::Once | gnmi::subscription_list::Mode::Poll => {
             if mode == gnmi::SubscriptionMode::OnChange {
                 Err(Status::unimplemented(
-                    "gNMI Subscribe ON_CHANGE is not supported",
+                    "gNMI Subscribe ON_CHANGE requires STREAM mode",
                 ))
             } else {
                 Ok(())
@@ -526,14 +747,50 @@ fn validate_subscription_mode(
         }
         gnmi::subscription_list::Mode::Stream => match mode {
             gnmi::SubscriptionMode::Sample => Ok(()),
-            gnmi::SubscriptionMode::OnChange => Err(Status::unimplemented(
-                "gNMI Subscribe ON_CHANGE is not supported",
-            )),
+            // ADR-0070 deferral, resolved by the ADR-0072 follow-up
+            // sprint: v1 supports ON_CHANGE only on the
+            // `…/neighbor[neighbor-address=…]/state/session-state`
+            // leaf (and its all-neighbors form). Other leaves stay
+            // SAMPLE/POLL-only — they need either a separate event
+            // source (counters) or a state-source that v1 does not
+            // expose on the lifecycle event payload (`enabled`).
+            gnmi::SubscriptionMode::OnChange => {
+                if !is_on_change_supported_path(full_path) {
+                    return Err(Status::unimplemented(
+                        "gNMI Subscribe ON_CHANGE in v1 covers only \
+                         neighbor[neighbor-address=*]/state/session-state",
+                    ));
+                }
+                Ok(())
+            }
             gnmi::SubscriptionMode::TargetDefined => Err(Status::unimplemented(
                 "gNMI Subscribe TARGET_DEFINED is not supported",
             )),
         },
     }
+}
+
+/// True when `path` (relative or absolute, relying on the prefix
+/// joining done elsewhere) selects the
+/// `…/neighbor[neighbor-address=…]/state/session-state` leaf — the
+/// only ON_CHANGE-supported path in v1.
+///
+/// Inspects raw `PathElem`s rather than relying on `parse_supported_path`
+/// so the check stays in sync with the path parser's wildcard +
+/// concrete-address handling (`neighbor-address=*` and no-key both
+/// mean all-neighbors).
+fn is_on_change_supported_path(path: &gnmi::Path) -> bool {
+    let Some(neighbor_pos) = path.elem.iter().position(|e| e.name == "neighbor") else {
+        return false;
+    };
+    let tail = &path.elem[neighbor_pos..];
+    // Expect `neighbor[…]/state/session-state` — three elements
+    // exactly. A bare `…/neighbor` or `…/neighbor/state` Get-style
+    // path is not a leaf, so ON_CHANGE refuses it.
+    if tail.len() != 3 {
+        return false;
+    }
+    tail[1].name == "state" && tail[2].name == "session-state"
 }
 
 fn combine_paths(prefix: Option<&gnmi::Path>, path: &gnmi::Path) -> Result<gnmi::Path, Status> {
@@ -651,7 +908,12 @@ fn parse_neighbors_path(tail: &[gnmi::PathElem]) -> Result<SupportedPath, Status
             "unsupported OpenConfig BGP neighbors path",
         ));
     }
+    // `neighbor-address=*` is the explicit wildcard spelling that gnmic
+    // and most OpenConfig collectors emit when subscribing to every
+    // neighbor; `neighbor` with no keys is the equivalent shorthand.
+    // Both map to `AllNeighbors` so collectors can use either form.
     let address = match neighbor.key.get("neighbor-address") {
+        Some(raw) if raw == "*" => None,
         Some(raw) => Some(raw.parse::<IpAddr>().map_err(|_| {
             Status::invalid_argument(format!("invalid neighbor-address key {raw}"))
         })?),
@@ -662,7 +924,7 @@ fn parse_neighbors_path(tail: &[gnmi::PathElem]) -> Result<SupportedPath, Status
             ));
         }
     };
-    if neighbor.key.len() > usize::from(address.is_some()) {
+    if neighbor.key.len() > usize::from(!neighbor.key.is_empty()) {
         return Err(Status::invalid_argument(
             "neighbor supports only the neighbor-address key",
         ));
@@ -925,6 +1187,88 @@ fn session_state_name(state: SessionState) -> &'static str {
     }
 }
 
+/// Parse a lowercase `SessionState::as_str()` value back into a
+/// [`SessionState`]. The proto BGP-event envelope carries the
+/// lowercase form (the producer is `SessionState::as_str()`), but
+/// `OpenConfig` wants the uppercase short form, so the `ON_CHANGE`
+/// emitter round-trips through this helper.
+fn parse_session_state_lowercase(s: &str) -> Option<SessionState> {
+    match s {
+        "idle" => Some(SessionState::Idle),
+        "connect" => Some(SessionState::Connect),
+        "active" => Some(SessionState::Active),
+        "open_sent" | "opensent" => Some(SessionState::OpenSent),
+        "open_confirm" | "openconfirm" => Some(SessionState::OpenConfirm),
+        "established" => Some(SessionState::Established),
+        _ => None,
+    }
+}
+
+/// Build a single `SubscribeResponse` Update for one committed
+/// session-state transition, returning `None` if the event doesn't
+/// target the plan's peer scope or is not a lifecycle event with a
+/// new state to surface. Errors map to debug-log + skip (the
+/// envelope is malformed enough that we couldn't read what state
+/// changed — the next event will resync).
+fn build_session_state_on_change(
+    plan: &SubscriptionPlan,
+    committed: &rustbgpd_event_history::CommittedEvent,
+    _local_as: u32,
+) -> Result<Option<gnmi::SubscribeResponse>, prost::DecodeError> {
+    // Peer scope filter — quick check before paying the prost decode.
+    // The envelope's `EnvelopePeers.peer` carries the IP for the
+    // session that changed. The plan's paths target either one
+    // concrete peer or all peers; build the filter once.
+    let Some(peer) = committed.envelope.peers.peer else {
+        return Ok(None);
+    };
+    let mut targets_peer = false;
+    for query in &plan.paths {
+        match query {
+            SupportedPath::Neighbor { address, .. } if *address == peer => {
+                targets_peer = true;
+                break;
+            }
+            SupportedPath::AllNeighbors { .. } => {
+                targets_peer = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    if !targets_peer {
+        return Ok(None);
+    }
+
+    let bgp_event = proto::BgpEvent::decode(committed.envelope.payload.as_slice())?;
+    let Some(proto::bgp_event::Payload::Session(session)) = bgp_event.payload.as_ref() else {
+        // Notification events also live under Category::Session but
+        // do not carry a session-state transition.
+        return Ok(None);
+    };
+    let Some(new_state) = parse_session_state_lowercase(session.new_state.as_str()) else {
+        return Ok(None);
+    };
+
+    let update = leaf_update(
+        neighbor_leaf_path(peer, NeighborLeaf::SessionState),
+        &LeafValue::Str(session_state_name(new_state).to_string()),
+        plan.encoding,
+    );
+    Ok(Some(gnmi::SubscribeResponse {
+        response: Some(gnmi::subscribe_response::Response::Update(
+            gnmi::Notification {
+                timestamp: now_nanos(),
+                prefix: None,
+                update: vec![update],
+                delete: Vec::new(),
+                atomic: false,
+            },
+        )),
+        extension: Vec::new(),
+    }))
+}
+
 fn global_leaf_path(leaf: &str) -> gnmi::Path {
     mounted_path(&[pe("bgp"), pe("global"), pe("state"), pe(leaf)])
 }
@@ -1178,10 +1522,20 @@ impl gnmi::g_nmi_server::GNmi for GnmiService {
             gnmi::subscription_list::Mode::Stream => {
                 let service = self.clone();
                 let (tx, rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+                let stream_mode = plan.stream_mode;
                 tokio::spawn(async move {
                     // Hold the concurrency permit for the lifetime of the task.
                     let _permit = permit;
-                    service.run_stream_sample(plan, tx).await;
+                    match stream_mode {
+                        Some(gnmi::SubscriptionMode::OnChange) => {
+                            service.run_on_change(plan, tx).await;
+                        }
+                        // SAMPLE is the default for any STREAM
+                        // subscription whose `mode` field is unset or
+                        // set to SAMPLE. TARGET_DEFINED is rejected
+                        // upstream by validate_subscription_mode.
+                        _ => service.run_stream_sample(plan, tx).await,
+                    }
                 });
                 Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
             }
@@ -2058,6 +2412,400 @@ mod tests {
         ));
         // Dropping the client end lets the sample task exit promptly via select!.
         drop(stream);
+    }
+
+    // --- ADR-0072 follow-up: Subscribe ON_CHANGE -------------------------
+
+    fn neighbor_session_state_path(addr: &str) -> gnmi::Path {
+        mounted_path(&[
+            pe("bgp"),
+            pe("neighbors"),
+            keyed_pe("neighbor", "neighbor-address", addr),
+            pe("state"),
+            pe("session-state"),
+        ])
+    }
+
+    fn neighbor_session_state_wildcard_path() -> gnmi::Path {
+        mounted_path(&[
+            pe("bgp"),
+            pe("neighbors"),
+            keyed_pe("neighbor", "neighbor-address", "*"),
+            pe("state"),
+            pe("session-state"),
+        ])
+    }
+
+    fn stream_on_change_list(path: gnmi::Path) -> gnmi::SubscriptionList {
+        gnmi::SubscriptionList {
+            prefix: None,
+            subscription: vec![gnmi::Subscription {
+                path: Some(path),
+                mode: gnmi::SubscriptionMode::OnChange as i32,
+                sample_interval: 0,
+                suppress_redundant: false,
+                heartbeat_interval: 0,
+            }],
+            qos: None,
+            mode: gnmi::subscription_list::Mode::Stream as i32,
+            allow_aggregation: false,
+            use_models: Vec::new(),
+            encoding: gnmi::Encoding::JsonIetf as i32,
+            updates_only: false,
+        }
+    }
+
+    #[test]
+    fn path_parser_accepts_wildcard_neighbor_address() {
+        // Regression: gnmic and most OpenConfig collectors emit
+        // `neighbor[neighbor-address=*]` to mean "all neighbors".
+        // Both the explicit `*` and the no-key shorthand must lower
+        // to the same `AllNeighbors` internal representation.
+        let wildcard = parse_supported_path(&neighbor_session_state_wildcard_path()).unwrap();
+        assert!(matches!(
+            wildcard,
+            SupportedPath::AllNeighbors {
+                select: NeighborSelect::One(NeighborLeaf::SessionState)
+            }
+        ));
+
+        let no_key = parse_supported_path(&mounted_path(&[
+            pe("bgp"),
+            pe("neighbors"),
+            pe("neighbor"),
+            pe("state"),
+            pe("session-state"),
+        ]))
+        .unwrap();
+        assert_eq!(no_key, wildcard);
+    }
+
+    #[test]
+    fn validate_subscription_mode_accepts_on_change_for_session_state() {
+        let path = neighbor_session_state_path("10.0.0.2");
+        let subscription = gnmi::Subscription {
+            path: Some(path.clone()),
+            mode: gnmi::SubscriptionMode::OnChange as i32,
+            sample_interval: 0,
+            suppress_redundant: false,
+            heartbeat_interval: 0,
+        };
+        validate_subscription_mode(gnmi::subscription_list::Mode::Stream, &subscription, &path)
+            .expect("ON_CHANGE on the supported leaf must be accepted");
+
+        // Wildcard form likewise.
+        let wildcard = neighbor_session_state_wildcard_path();
+        let subscription_wild = gnmi::Subscription {
+            path: Some(wildcard.clone()),
+            mode: gnmi::SubscriptionMode::OnChange as i32,
+            sample_interval: 0,
+            suppress_redundant: false,
+            heartbeat_interval: 0,
+        };
+        validate_subscription_mode(
+            gnmi::subscription_list::Mode::Stream,
+            &subscription_wild,
+            &wildcard,
+        )
+        .expect("ON_CHANGE on the wildcard form must be accepted");
+    }
+
+    #[test]
+    fn validate_subscription_mode_rejects_on_change_for_other_leaves() {
+        let path = mounted_path(&[
+            pe("bgp"),
+            pe("neighbors"),
+            keyed_pe("neighbor", "neighbor-address", "10.0.0.2"),
+            pe("state"),
+            pe("peer-as"),
+        ]);
+        let subscription = gnmi::Subscription {
+            path: Some(path.clone()),
+            mode: gnmi::SubscriptionMode::OnChange as i32,
+            sample_interval: 0,
+            suppress_redundant: false,
+            heartbeat_interval: 0,
+        };
+        let err =
+            validate_subscription_mode(gnmi::subscription_list::Mode::Stream, &subscription, &path)
+                .expect_err("ON_CHANGE on peer-as must be Unimplemented in v1");
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        assert!(
+            err.message().contains("session-state"),
+            "v1 rejection should mention the supported leaf so operators know what works"
+        );
+    }
+
+    #[test]
+    fn validate_subscription_mode_rejects_on_change_in_poll_and_once_modes() {
+        let path = neighbor_session_state_path("10.0.0.2");
+        let subscription = gnmi::Subscription {
+            path: Some(path.clone()),
+            mode: gnmi::SubscriptionMode::OnChange as i32,
+            sample_interval: 0,
+            suppress_redundant: false,
+            heartbeat_interval: 0,
+        };
+        for outer in [
+            gnmi::subscription_list::Mode::Once,
+            gnmi::subscription_list::Mode::Poll,
+        ] {
+            let err = validate_subscription_mode(outer, &subscription, &path)
+                .expect_err("ON_CHANGE outside STREAM must be rejected");
+            assert_eq!(err.code(), tonic::Code::Unimplemented);
+        }
+    }
+
+    #[test]
+    fn parse_subscription_list_rejects_mixed_sample_and_on_change() {
+        // STREAM with one SAMPLE and one ON_CHANGE subscription is
+        // not v1-supported — the dispatch picks one mode for the
+        // whole task.
+        let list = gnmi::SubscriptionList {
+            prefix: None,
+            subscription: vec![
+                gnmi::Subscription {
+                    path: Some(neighbor_session_state_path("10.0.0.2")),
+                    mode: gnmi::SubscriptionMode::OnChange as i32,
+                    sample_interval: 0,
+                    suppress_redundant: false,
+                    heartbeat_interval: 0,
+                },
+                gnmi::Subscription {
+                    path: Some(mounted_path(&[pe("bgp"), pe("global"), pe("state")])),
+                    mode: gnmi::SubscriptionMode::Sample as i32,
+                    sample_interval: 0,
+                    suppress_redundant: false,
+                    heartbeat_interval: 0,
+                },
+            ],
+            qos: None,
+            mode: gnmi::subscription_list::Mode::Stream as i32,
+            allow_aggregation: false,
+            use_models: Vec::new(),
+            encoding: gnmi::Encoding::JsonIetf as i32,
+            updates_only: false,
+        };
+        let err = parse_subscription_list(&list).expect_err("mixed modes must be rejected");
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+    }
+
+    #[tokio::test]
+    async fn subscribe_on_change_returns_failed_precondition_without_event_history() {
+        // gNMI ON_CHANGE needs the durable outbox as its in-process
+        // event source. Without an EventHistoryHandle, the client
+        // must see FailedPrecondition — same shape as
+        // SubscribeFromEvent's EHM-disabled path.
+        let mut harness = serve(test_service(vec![test_peer("10.0.0.2".parse().unwrap())])).await;
+        let mut stream = harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(
+                stream_on_change_list(neighbor_session_state_wildcard_path()),
+            )]))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let err = stream
+            .message()
+            .await
+            .expect_err("expected FailedPrecondition status, got a message");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    async fn ehm_service(
+        peers: Vec<PeerInfo>,
+    ) -> (GnmiService, rustbgpd_event_history::EventHistoryManager) {
+        use rustbgpd_event_history::{EventHistoryConfig, EventHistoryManager, SynchronousMode};
+        let dir = tempfile::tempdir().unwrap();
+        let manager = EventHistoryManager::start(EventHistoryConfig {
+            path: dir.path().join("events.db"),
+            max_events: 100,
+            max_bytes: 1_000_000,
+            synchronous: SynchronousMode::Full,
+            required: false,
+            queue_capacity: 64,
+            batch_size: 1,
+            batch_interval: Duration::from_millis(10),
+            broadcast_capacity: 64,
+            retention_interval: Duration::from_mins(1),
+            sidecar_flush_interval_batches: 100,
+            metrics: None,
+        })
+        .await
+        .expect("EHM start");
+        // Keep tempdir alive for the manager lifetime by leaking — tests are short.
+        std::mem::forget(dir);
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            let peers = peers.clone();
+            async move { Ok(peers) }
+        })
+        .with_event_history(Some(manager.handle()));
+        (service, manager)
+    }
+
+    #[tokio::test]
+    async fn subscribe_on_change_emits_initial_snapshot_then_sync() {
+        // Initial sync contract: one Update per configured peer
+        // (including non-Established peers), then sync_response. The
+        // wildcard subscription targets all peers.
+        let mut peer_a = test_peer("10.0.0.2".parse().unwrap());
+        peer_a.state = SessionState::Established;
+        let mut peer_b = test_peer("10.0.0.3".parse().unwrap());
+        peer_b.state = SessionState::Idle;
+        let (service, manager) = ehm_service(vec![peer_a, peer_b]).await;
+        let mut harness = serve(service).await;
+
+        let mut stream = harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(
+                stream_on_change_list(neighbor_session_state_wildcard_path()),
+            )]))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let first = stream.message().await.unwrap().unwrap();
+        let Some(gnmi::subscribe_response::Response::Update(update)) = first.response else {
+            panic!("expected initial Update batch, got {first:?}");
+        };
+        assert_eq!(
+            update.update.len(),
+            2,
+            "one Update per peer in the snapshot"
+        );
+        // The sort by address means 10.0.0.2 (Established) comes first.
+        // Decode the JSON_IETF value to confirm the state strings round-trip.
+        let states: Vec<String> = update
+            .update
+            .iter()
+            .map(|u| match u.val.as_ref().unwrap().value.as_ref().unwrap() {
+                gnmi::typed_value::Value::JsonIetfVal(bytes) => {
+                    String::from_utf8(bytes.clone()).unwrap()
+                }
+                _ => panic!("unexpected encoding"),
+            })
+            .collect();
+        assert_eq!(states, vec!["\"ESTABLISHED\"", "\"IDLE\""]);
+
+        let second = stream.message().await.unwrap().unwrap();
+        assert_eq!(
+            second.response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+
+        drop(stream);
+        drop(harness);
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn subscribe_on_change_streams_session_transitions() {
+        // Inject a SessionStateChanged event through EHM and verify
+        // the ON_CHANGE subscriber receives the new state on the
+        // session-state leaf.
+        use rustbgpd_event_history::{
+            Category, EnvelopePeers, EventEnvelope, PayloadCodec, Severity,
+        };
+        let peer = test_peer("10.0.0.2".parse().unwrap());
+        let (service, manager) = ehm_service(vec![peer]).await;
+        let mut harness = serve(service).await;
+
+        let mut stream = harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(
+                stream_on_change_list(neighbor_session_state_path("10.0.0.2")),
+            )]))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Drain the initial snapshot + sync_response so the test
+        // observes only the post-sync transition.
+        let _initial = stream.message().await.unwrap().unwrap();
+        let sync = stream.message().await.unwrap().unwrap();
+        assert_eq!(
+            sync.response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+
+        // Build a synthetic proto::BgpEvent representing a session
+        // lifecycle transition to Idle (peer down). Encode it and
+        // shove it through EHM's producer channel; the broadcast
+        // will deliver it to the ON_CHANGE task.
+        let payload = proto::SessionEvent {
+            event_type: proto::BgpEventType::SessionLost as i32,
+            peer_address: "10.0.0.2".to_string(),
+            old_state: "established".to_string(),
+            new_state: "idle".to_string(),
+            timestamp: "1".to_string(),
+            session_role: "primary".to_string(),
+            reason: String::new(),
+        };
+        let bgp_event = proto::BgpEvent {
+            timestamp: "1".to_string(),
+            category: proto::EventCategory::Session as i32,
+            event_type: proto::BgpEventType::SessionLost as i32,
+            severity: proto::EventSeverity::Warning as i32,
+            peer_address: "10.0.0.2".to_string(),
+            previous_peer_address: String::new(),
+            prefix: String::new(),
+            prefix_length: 0,
+            afi_safi: proto::AddressFamily::Unspecified as i32,
+            summary: "session lost".to_string(),
+            target_peer_address: String::new(),
+            event_id: None,
+            payload: Some(proto::bgp_event::Payload::Session(payload)),
+        };
+        let envelope = EventEnvelope {
+            timestamp_ns: 1,
+            category: Category::Session,
+            event_type: "BGP_EVENT_TYPE_SESSION_LOST".to_string(),
+            peers: EnvelopePeers {
+                peer: Some("10.0.0.2".parse().unwrap()),
+                previous_peer: None,
+                target_peer: None,
+            },
+            afi_safi: None,
+            prefix: None,
+            rd: None,
+            evpn_route_type: None,
+            severity: Severity::Warn,
+            payload_codec: PayloadCodec::Proto,
+            payload: bgp_event.encode_to_vec(),
+        };
+        manager.handle().sender().try_send(envelope).unwrap();
+
+        // The ON_CHANGE task forwards the transition with the new
+        // OpenConfig short-form state name. Bounded wait so the test
+        // doesn't hang on a regression.
+        let response = tokio::time::timeout(Duration::from_secs(2), stream.message())
+            .await
+            .expect("ON_CHANGE Update did not arrive within 2s")
+            .unwrap()
+            .unwrap();
+        let Some(gnmi::subscribe_response::Response::Update(notif)) = response.response else {
+            panic!("expected Update, got {response:?}");
+        };
+        assert_eq!(notif.update.len(), 1);
+        let val = match notif.update[0]
+            .val
+            .as_ref()
+            .unwrap()
+            .value
+            .as_ref()
+            .unwrap()
+        {
+            gnmi::typed_value::Value::JsonIetfVal(bytes) => {
+                String::from_utf8(bytes.clone()).unwrap()
+            }
+            other => panic!("unexpected encoding {other:?}"),
+        };
+        assert_eq!(val, "\"IDLE\"");
+
+        drop(stream);
+        drop(harness);
+        manager.shutdown().await;
     }
 
     #[tokio::test]
