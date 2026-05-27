@@ -66,6 +66,12 @@ pub(crate) fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto
         afi_safi: route.afi_safi,
         summary,
         target_peer_address: route.target_peer_address.clone(),
+        // event_id is carried by the durable outbox (ADR-0072); these
+        // converters build BgpEvent from the legacy in-memory rings and
+        // don't have a durable id to surface. PR5+ replaces these sites
+        // with EHM-fed conversions that fill the field from the
+        // `CommittedEvent` envelope.
+        event_id: None,
         payload: Some(proto::bgp_event::Payload::Route(route)),
     }
 }
@@ -113,6 +119,7 @@ pub(crate) fn evpn_event_to_bgp_event(event: rustbgpd_rib::EvpnRouteEvent) -> pr
         afi_safi: proto::AddressFamily::L2vpnEvpn as i32,
         summary,
         target_peer_address: String::new(),
+        event_id: None,
         payload: Some(proto::bgp_event::Payload::Evpn(payload)),
     }
 }
@@ -206,6 +213,7 @@ fn session_lifecycle_event_to_bgp_event(event: SessionLifecycleEvent) -> proto::
         afi_safi: proto::AddressFamily::Unspecified as i32,
         summary: event.reason,
         target_peer_address: String::new(),
+        event_id: None,
         payload: Some(proto::bgp_event::Payload::Session(session)),
     }
 }
@@ -242,6 +250,7 @@ fn session_notification_event_to_bgp_event(event: SessionNotificationEvent) -> p
         afi_safi: proto::AddressFamily::Unspecified as i32,
         summary: event.reason,
         target_peer_address: String::new(),
+        event_id: None,
         payload: Some(proto::bgp_event::Payload::Notification(notification)),
     }
 }
@@ -280,6 +289,7 @@ pub(super) fn policy_event_to_bgp_event(event: PolicyEvent) -> proto::BgpEvent {
         afi_safi: proto::AddressFamily::Unspecified as i32,
         summary: reason,
         target_peer_address: String::new(),
+        event_id: None,
         payload: Some(proto::bgp_event::Payload::Policy(policy)),
     }
 }
@@ -310,6 +320,7 @@ pub(crate) fn stream_lag_bgp_event(
         afi_safi: proto::AddressFamily::Unspecified as i32,
         summary: summary.clone(),
         target_peer_address: String::new(),
+        event_id: None,
         payload: Some(proto::bgp_event::Payload::StreamLag(
             proto::StreamLagEvent {
                 source_category: source_category as i32,
@@ -349,6 +360,7 @@ pub(super) fn dataplane_summary_to_bgp_event(
             summary.source, summary.installed, summary.rejected, summary.failed
         ),
         target_peer_address: String::new(),
+        event_id: None,
         payload: Some(proto::bgp_event::Payload::Dataplane(payload)),
     }
 }
