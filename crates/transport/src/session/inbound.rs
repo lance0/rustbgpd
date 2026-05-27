@@ -643,7 +643,7 @@ impl PeerSession {
         // yet enforce this precondition (no `enforce-first-as`-equivalent
         // exists today); operators relying on ASPA against peers that
         // strip or rewrite the leftmost AS may see misleading verdicts.
-        // Tracked as a follow-up; see plan file `aspa-sprint.md`.
+        // Tracked as a follow-up.
         let body_aspa_state = validation
             .as_ref()
             .map_or(rustbgpd_wire::AspaValidation::Unknown, |v| {
