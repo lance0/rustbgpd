@@ -9,6 +9,31 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **ASPA verification: tighter scope + proven §5.4 algorithm
+  equivalence (ADR-0049 amended).** ADR-0049 retargeted to
+  `draft-ietf-sidrops-aspa-verification-25` (April 19, 2026).
+  - §6.2 family gate: `ValidationSnapshot::validate_aspa` now takes
+    `(Afi, Safi)` and returns `Unknown` for any family outside IPv4
+    / IPv6 unicast. Previously the ASPA verdict was computed once
+    per UPDATE from the shared AS_PATH and propagated to every NLRI
+    in the UPDATE — including FlowSpec, EVPN, and other non-unicast
+    families that the draft explicitly excludes from ASPA.
+    `match_aspa_validation` import policy against non-unicast
+    families now sees `Unknown` instead of unsafely inheriting the
+    upstream walk's verdict. IPv4 / IPv6 unicast routes are
+    unchanged.
+  - Proven equivalence: production `verify_upstream` (pairwise walk)
+    matches draft v25 §5.4's bounds-checker form across a
+    synthesized 69k-case corpus (distinct-ASN paths of length 2..=5
+    × every per-pair attestation state combination). A
+    `#[cfg(test)]` reference implementation of the bounds-checker
+    stays in tree as a regression oracle.
+  - Inline note flags the missing draft v25 §5.4 step 2 first-AS
+    check (no `enforce-first-as`-equivalent today); tracked as a
+    follow-up, not addressed in this PR.
+
 ### Added
 
 - **ADR-0070 deferral resolved: gNMI `Subscribe ON_CHANGE` v1.**

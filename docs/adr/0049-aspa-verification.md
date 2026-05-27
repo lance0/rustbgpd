@@ -184,3 +184,54 @@ ingress and updated on ASPA table changes.
   ASPA is only available when the cache supports RTR v2
 - No new config is needed for ASPA — it uses the same RTR cache servers
   as RPKI ROV
+
+## Amendments
+
+### 2026-05-27 — Algorithm fidelity + §6.2 family gate (PR #TBD)
+
+ADR retargeted from `draft-ietf-sidrops-aspa-verification` (IESG-
+submission state at original ADR write) to
+`draft-ietf-sidrops-aspa-verification-25` (April 19, 2026). Two
+correctness updates:
+
+**§5.4 algorithm equivalence (no production code change).** The
+draft describes upstream verification in §5.3 as a bounds-checker
+that computes `max_up_ramp` and `min_up_ramp` walking from origin
+toward neighbor. For *upstream* verification (§5.4 with
+`max_down_ramp = min_down_ramp = 0`), the bounds form collapses
+into the pairwise walk this ADR specifies. The equivalence is
+empirically verified by `spike_bounds_equivalence_on_synthetic_corpus`
+in `crates/rpki/src/aspa_verify.rs`, which exhaustively cross-
+products distinct-ASN paths of length 2..=5 drawn from a 6-ASN pool
+with every per-pair attestation state (≈ 69k cases). A
+`#[cfg(test)]` reference implementation of the bounds-checker stays
+in tree as a regression oracle — any future spec revision that
+breaks the equivalence (e.g. a non-zero `max_down_ramp`) surfaces at
+PR time.
+
+**§6.2 per-AFI/SAFI family gate.**
+`ValidationSnapshot::validate_aspa` now takes an `(Afi, Safi)`
+parameter and returns `Unknown` immediately for any family outside
+`(IPv4 | IPv6, Unicast)`. Previously, the ASPA verdict was computed
+once per UPDATE from the shared AS_PATH and propagated to every NLRI
+in the UPDATE — including FlowSpec, EVPN, and other non-unicast
+families that the draft explicitly excludes from ASPA. Operators
+using `match_aspa_validation` import policy against non-unicast
+families will now see `Unknown` instead of unsafely inheriting the
+upstream walk's verdict. IPv4 / IPv6 unicast routes are unchanged.
+
+**Still deferred (not closed by this PR):**
+
+- Downstream verification (routes from providers) per §5.5.
+  Requires per-peer relationship configuration; remains deferred —
+  see "Upstream-only verification (initial scope)" above for the
+  original rationale.
+- Automatic import-policy re-validation on validation-cache update.
+  Best-path demotion still provides convergent semantics; the sharp
+  edge documented in KNOWN_ISSUES.md and CONFIGURATION.md remains.
+- Draft v25 §5.4 step 2 first-AS precondition: the most-recent AS in
+  the `AS_PATH` MUST equal the negotiated neighbor ASN, with a
+  transparent-route-server-client exception. rustbgpd has no
+  `enforce-first-as`-equivalent today; tracked as a follow-up. ASPA
+  verdicts against peers that strip or rewrite the leftmost AS may
+  be misleading until this lands.
