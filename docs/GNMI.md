@@ -47,12 +47,47 @@ are `sensitive_read`; `Set` is `operator_only` even though it is unimplemented.
 |-----|--------|
 | `Capabilities` | Returns gNMI version `0.10.0`, the OpenConfig modules backing the supported paths, and `JSON` / `JSON_IETF` encodings. |
 | `Get` | Returns the supported OpenConfig BGP global and neighbor `state` subset. |
-| `Subscribe` | Supports `ONCE`, `POLL`, and `STREAM` with `SAMPLE`. |
+| `Subscribe` | Supports `ONCE`, `POLL`, `STREAM SAMPLE`, and `STREAM ON_CHANGE` (the last is scoped to the neighbor session-state leaf — see below). |
 | `Set` | Returns `UNIMPLEMENTED` for an authorized operator-tier principal. Lower-tier callers receive `PERMISSION_DENIED` before the handler runs. |
 
-`ON_CHANGE` is deferred until rustbgpd has durable event replay and per-leaf
-OpenConfig change rendering. Broad subtree requests are bounded; v1 does not use
-gNMI to stream the full route table.
+### `STREAM ON_CHANGE` v1 scope
+
+`STREAM ON_CHANGE` covers the
+`…/neighbor[neighbor-address=*]/state/session-state` leaf only.
+Both the explicit `*` wildcard (the form gnmic and most OpenConfig
+collectors emit) and the no-key shorthand `…/neighbor/state/session-state`
+lower to "all configured neighbors"; a concrete address is also
+accepted.
+
+- **EHM required.** `Subscribe ON_CHANGE` sources transitions from the
+  durable event broadcast (ADR-0072). When `[event_history]` is
+  disabled or EHM is in pass-through, the RPC returns
+  `FAILED_PRECONDITION` immediately on subscribe.
+- **Initial sync.** The handler emits one OpenConfig leaf `Update`
+  per configured peer (including non-Established peers — `IDLE` /
+  `CONNECT` / `ACTIVE` / `OPENSENT` / `OPENCONFIRM` / `ESTABLISHED`)
+  followed by `sync_response`.
+- **Live stream.** For every FSM transition committed to EHM under
+  `EVENT_CATEGORY_SESSION`, the handler emits a single
+  `session-state` leaf `Update` with the new short-form state.
+- **Reconnect.** gNMI carries no cursor on reconnect, so a fresh
+  subscription gets a fresh initial snapshot — the disconnect
+  window is **not** replayed. Collectors that need historical
+  replay use `EventService.SubscribeFromEvent` directly.
+- **Unsupported leaves.** Any other path under `ON_CHANGE` returns
+  `UNIMPLEMENTED` with a message naming the supported leaf. The
+  counter leaves (`messages/*`) and the `enabled` leaf stay
+  SAMPLE/POLL-only in v1.
+- **Lag.** When the EHM broadcast receiver falls behind, the stream
+  closes with `DATA_LOSS` so the collector reconnects and resyncs
+  from a fresh initial snapshot. `Subscribe ON_CHANGE` does not
+  paper over gaps.
+- **Mixed-mode subscriptions.** A `SubscriptionList` that mixes
+  `SAMPLE` and `ON_CHANGE` subscriptions is rejected with
+  `UNIMPLEMENTED` — the v1 dispatch picks one mode per stream.
+
+Broad subtree requests are bounded; v1 does not use gNMI to stream
+the full route table.
 
 ## Supported Paths
 

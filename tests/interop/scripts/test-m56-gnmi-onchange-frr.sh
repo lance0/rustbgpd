@@ -146,21 +146,63 @@ main() {
         printf '%s\n' "$err_output" | tail -20 >&2
     fi
 
-    # --- Test 2: ON_CHANGE on session-state emits initial snapshot + sync_response,
-    # then a fresh Update on FRR flap. Run gnmic in the background so we can
-    # drive the flap while the stream is open.
-    log "Starting ON_CHANGE subscription in background..."
-    local stream_log
-    stream_log=$(mktemp)
-    # 12s is enough for: initial sync (~immediate) + flap-down-up-up
-    # cycle (down ≤3s + up reconverge ≤6s + slack).
+    # --- Test 2a: Initial snapshot scope — short-window subscribe with
+    # NO flap, so the captured log can only contain the initial-sync
+    # Updates + sync_response. Asserting on the full post-flap log
+    # would let a later re-ESTABLISHED transition satisfy the
+    # initial-snapshot check, hiding a regression where the initial
+    # snapshot is missing.
+    log "Validating initial snapshot (no flap window)..."
+    local initial_log
+    initial_log=$(mktemp)
     set +e
-    gnmic_mtls_timeout 12s subscribe \
+    gnmic_mtls_timeout 3s subscribe \
         --encoding json_ietf \
         --mode stream \
         --stream-mode on-change \
         --path "$OC_BGP/neighbors/neighbor[neighbor-address=*]/state/session-state" \
-        > "$stream_log" 2>&1 &
+        > "$initial_log" 2>&1
+    set -e
+    local initial
+    initial=$(cat "$initial_log")
+    rm -f "$initial_log"
+
+    if printf '%s' "$initial" | grep -Fq 'ESTABLISHED'; then
+        ok "Initial snapshot includes ESTABLISHED state for the peer"
+    else
+        fail "Initial snapshot did not include ESTABLISHED state"
+        printf '  output:\n%s\n' "$initial" >&2
+    fi
+
+    # gnmic prints `sync_response` under at least one of its output
+    # modes; some versions render it as a separate key `sync-response`.
+    if printf '%s' "$initial" | grep -qiE 'sync[_-]response'; then
+        ok "Initial sync_response marker observed"
+    else
+        # Not all gnmic versions print sync_response in --format json;
+        # treat as informational rather than a hard fail so a future
+        # gnmic upgrade doesn't break CI.
+        log "WARN: sync_response marker not visible (gnmic render quirk; acceptable)"
+    fi
+
+    # --- Test 2b: Post-flap transition delivery. Subscribe in the
+    # background, sleep briefly to clear the initial-sync window,
+    # then flap. The assertion below scans for a non-ESTABLISHED
+    # state which can ONLY come from the flap (the initial snapshot
+    # already showed ESTABLISHED, so any IDLE/CONNECT/etc must be
+    # post-flap).
+    log "Validating post-flap transition delivery..."
+    local flap_log
+    flap_log=$(mktemp)
+    # 8s is enough for: initial sync (~immediate) + flap-down-up
+    # cycle (down ≤3s + transition observable within another second).
+    set +e
+    gnmic_mtls_timeout 8s subscribe \
+        --encoding json_ietf \
+        --mode stream \
+        --stream-mode on-change \
+        --path "$OC_BGP/neighbors/neighbor[neighbor-address=*]/state/session-state" \
+        > "$flap_log" 2>&1 &
     local sub_pid=$!
     set -e
 
@@ -174,52 +216,17 @@ main() {
     wait "$sub_pid" || true
 
     local stream
-    stream=$(cat "$stream_log")
-    rm -f "$stream_log"
+    stream=$(cat "$flap_log")
+    rm -f "$flap_log"
 
-    # 2a. Initial snapshot included the established state for the
-    # configured peer (raw text match — gnmic renders updates as
-    # multiple JSON objects).
-    if printf '%s' "$stream" | grep -Fq 'ESTABLISHED'; then
-        ok "Initial snapshot includes ESTABLISHED state for the peer"
-    else
-        fail "Initial snapshot did not include ESTABLISHED state"
-        printf '  output:\n%s\n' "$stream" >&2
-    fi
-
-    # 2b. Sync-response marker is present (gnmic prints `sync_response`
-    # under at least one of its output modes; some versions render it
-    # as a separate key `sync-response`. Accept either.)
-    if printf '%s' "$stream" | grep -qiE 'sync[_-]response'; then
-        ok "Initial sync_response marker observed"
-    else
-        # Not all gnmic versions print sync_response in --format json;
-        # treat as informational rather than a hard fail so a future
-        # gnmic upgrade doesn't break CI.
-        log "WARN: sync_response marker not visible (gnmic render quirk; acceptable)"
-    fi
-
-    # 2c. The flap produced a transition Update. Either IDLE or
-    # CONNECT / ACTIVE appears once the session bounces.
+    # Any non-ESTABLISHED state in this log must be post-flap (the
+    # initial snapshot saw ESTABLISHED; the only way to see a
+    # different state is via a transition the flap triggered).
     if printf '%s' "$stream" | grep -qE 'IDLE|CONNECT|ACTIVE|OPENSENT|OPENCONFIRM'; then
         ok "ON_CHANGE delivered a post-flap transition Update"
     else
         fail "ON_CHANGE did not deliver a post-flap transition Update"
         printf '  output:\n%s\n' "$stream" >&2
-    fi
-
-    # 2d. The session should recover to ESTABLISHED a second time
-    # (transition during the 12s window). At least two ESTABLISHED
-    # appearances proves the post-flap recovery streamed.
-    local established_count
-    established_count=$( (printf '%s' "$stream" | grep -Fo 'ESTABLISHED' || true) | wc -l | tr -d ' ')
-    if [ "$established_count" -ge 2 ]; then
-        ok "ON_CHANGE streamed the post-flap re-ESTABLISHED transition"
-    else
-        # Recovery may not have completed inside the 12s window; this
-        # is a timing-sensitive assertion. Treat as informational so
-        # the harder contract assertions above remain stable.
-        log "INFO: only $established_count ESTABLISHED markers (slow reconverge; acceptable)"
     fi
 
     # --- Test 3: Reconnect yields a FRESH initial snapshot, no replay. -------
