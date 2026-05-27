@@ -117,6 +117,12 @@ pub struct BgpMetrics {
     event_outbox_latest_event_id: IntGauge,
     event_outbox_open_failures: IntCounter,
     event_outbox_degraded: IntGauge,
+    /// Number of `SubscribeFromEvent` requests that emitted a
+    /// leading `StreamLagEvent` because the client cursor was
+    /// older than the retained floor. Operator signal that
+    /// `[event_history].max_events` / `max_bytes` is undersized
+    /// for the collector reconnect SLA (ADR-0072 PR5).
+    event_outbox_cursor_gap: IntCounter,
 }
 
 impl BgpMetrics {
@@ -738,6 +744,12 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let event_outbox_cursor_gap = IntCounter::new(
+            "bgp_event_outbox_cursor_gap_total",
+            "SubscribeFromEvent requests that emitted a leading StreamLagEvent because the client cursor was older than the retained floor. Operator signal that [event_history].max_events / max_bytes is undersized for the collector reconnect SLA (ADR-0072).",
+        )
+        .expect("valid metric definition");
+
         registry
             .register(Box::new(state_transitions.clone()))
             .expect("metric not already registered");
@@ -945,6 +957,9 @@ impl BgpMetrics {
         registry
             .register(Box::new(event_outbox_degraded.clone()))
             .expect("metric not already registered");
+        registry
+            .register(Box::new(event_outbox_cursor_gap.clone()))
+            .expect("metric not already registered");
 
         Self {
             registry,
@@ -1017,6 +1032,7 @@ impl BgpMetrics {
             event_outbox_latest_event_id,
             event_outbox_open_failures,
             event_outbox_degraded,
+            event_outbox_cursor_gap,
         }
     }
 
@@ -1551,14 +1567,16 @@ impl BgpMetrics {
             .inc();
     }
 
-    /// Record a drop. `reason` is bounded: `queue_full` or `db_error`.
-    /// Also flips the degraded flag (the gauge stays at 1 until
-    /// daemon restart in v1).
+    /// Record an outbox drop or cursor-delivery skip. `reason` is
+    /// bounded by caller: `queue_full`, `closed`, `db_error`,
+    /// `decode_failure`, or `opaque_codec`. Call
+    /// [`Self::mark_event_outbox_degraded`] separately when the drop
+    /// represents an operator-visible outbox degradation; shutdown-time
+    /// `closed` drops intentionally do not mark degraded.
     pub fn record_event_outbox_drop(&self, category: &str, reason: &str) {
         self.event_outbox_dropped
             .with_label_values(&[category, reason])
             .inc();
-        self.event_outbox_degraded.set(1);
     }
 
     /// Update the per-category queue depth gauge. EHM calls this
@@ -1586,6 +1604,18 @@ impl BgpMetrics {
     pub fn record_event_outbox_open_failure(&self) {
         self.event_outbox_open_failures.inc();
         self.event_outbox_degraded.set(1);
+    }
+
+    pub fn mark_event_outbox_degraded(&self) {
+        self.event_outbox_degraded.set(1);
+    }
+
+    /// Increment the `SubscribeFromEvent` cursor-gap counter. The
+    /// gRPC handler calls this whenever it emits a leading
+    /// `StreamLagEvent` because the requested cursor was below the
+    /// retention floor (ADR-0072 PR5).
+    pub fn record_event_outbox_cursor_gap(&self) {
+        self.event_outbox_cursor_gap.inc();
     }
 
     /// Whether the outbox is currently flagged degraded. 1 = at least

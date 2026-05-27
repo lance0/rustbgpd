@@ -10,7 +10,8 @@ use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
-mod convert;
+pub(crate) mod convert;
+mod cursor;
 mod dataplane;
 mod filters;
 
@@ -60,6 +61,12 @@ pub struct EventService {
     dataplane_events: DataplaneEventBroadcaster,
     dataplane_route_events: DataplaneRouteEventBroadcaster,
     bfd_events: BfdEventBroadcaster,
+    /// Optional handle to the durable event outbox (ADR-0072). When
+    /// `None`, `SubscribeFromEvent` returns
+    /// `Status::failed_precondition`; the legacy `WatchEvents` /
+    /// `WatchRoutes` / `List*Events` surfaces continue to work
+    /// unchanged regardless of this field.
+    event_history: Option<rustbgpd_event_history::EventHistoryHandle>,
     metrics: BgpMetrics,
 }
 
@@ -137,8 +144,23 @@ impl EventService {
             dataplane_events,
             dataplane_route_events,
             bfd_events,
+            event_history: None,
             metrics,
         }
+    }
+
+    /// Install the durable event-outbox handle (ADR-0072). Called
+    /// once at daemon startup when `[event_history].enabled = true`.
+    /// `None` means `SubscribeFromEvent` returns
+    /// `Status::failed_precondition`; the rest of the live surface
+    /// is unaffected.
+    #[must_use]
+    pub fn with_event_history(
+        mut self,
+        handle: Option<rustbgpd_event_history::EventHistoryHandle>,
+    ) -> Self {
+        self.event_history = handle;
+        self
     }
 
     fn subscribe_dataplane_events(&self) -> broadcast::Receiver<proto::BgpEvent> {
@@ -559,21 +581,40 @@ impl proto::event_service_server::EventService for EventService {
 
     /// `SubscribeFromEvent` — durable cursor replay + live (ADR-0072).
     ///
-    /// PR4: proto + stub only. The actual cursor handoff lives in
-    /// `rustbgpd_event_history::EventHistoryManager::subscribe_from_event`
-    /// (shipped in #288); PR5 wires it through the daemon binary + this
-    /// service handler. Until then, callers see `UNIMPLEMENTED` so the
-    /// proto contract is observable on the wire without the runtime
-    /// behavior accidentally light up before the producers are wired.
+    /// Server-side replay-then-live join of the durable event outbox.
+    /// Cursor semantics on `from_event_id`:
+    ///
+    /// - `None` ⇒ live-only (no replay).
+    /// - `Some(0)` ⇒ replay everything retained, then live.
+    /// - `Some(N>0)` ⇒ replay events with `event_id > N`, then live.
+    ///
+    /// When the requested cursor is older than the retention floor,
+    /// the server emits a single leading `StreamLagEvent` with the
+    /// missed count over the **global committed stream** (not the
+    /// filtered subset), then continues replay from the earliest
+    /// retained event. Collectors continue moving while observing
+    /// the gap.
+    ///
+    /// When the daemon was started with `[event_history].enabled =
+    /// false`, when EHM failed to start with
+    /// `required = false`, or when EHM dropped into pass-through
+    /// mode at runtime, returns `Status::failed_precondition`. The
+    /// legacy `WatchEvents` / `WatchRoutes` / `List*Events` surfaces
+    /// continue to work in all those cases.
     async fn subscribe_from_event(
         &self,
-        _request: Request<proto::SubscribeFromEventRequest>,
+        request: Request<proto::SubscribeFromEventRequest>,
     ) -> Result<Response<Self::SubscribeFromEventStream>, Status> {
-        Err(Status::unimplemented(
-            "SubscribeFromEvent: durable cursor replay is staged for the \
-             ADR-0072 PR5 wiring; this surface is reserved on the wire so \
-             clients can codegen against it now",
-        ))
+        let req = request.into_inner();
+        let handle = self.event_history.as_ref().ok_or_else(|| {
+            Status::failed_precondition(
+                "event history disabled or unavailable; \
+                 see [event_history] config and \
+                 the bgp_event_outbox_degraded gauge",
+            )
+        })?;
+        let stream = cursor::subscribe(handle, &req, self.metrics.clone())?;
+        Ok(Response::new(stream))
     }
 }
 
@@ -2270,5 +2311,152 @@ mod tests {
             IpAddr::V6(Ipv6Addr::LOCALHOST),
         );
         assert!(!filter.matches_route_event(&event));
+    }
+
+    // ── ADR-0072 PR5 — SubscribeFromEvent handler tests ────────
+
+    #[tokio::test]
+    async fn subscribe_from_event_unavailable_returns_failed_precondition() {
+        // EventService constructed without `with_event_history` ⇒
+        // handle is None ⇒ the handler returns FAILED_PRECONDITION
+        // and the legacy WatchEvents surface is unaffected.
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+
+        match service
+            .subscribe_from_event(Request::new(proto::SubscribeFromEventRequest::default()))
+            .await
+        {
+            Ok(_) => panic!("subscribe_from_event must error when EHM is None"),
+            Err(status) => assert_eq!(
+                status.code(),
+                tonic::Code::FailedPrecondition,
+                "expected FAILED_PRECONDITION when event_history handle is None"
+            ),
+        }
+
+        // Legacy WatchEvents is unaffected: it still returns a stream.
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest::default()))
+            .await
+            .expect("WatchEvents must still work when EHM is None");
+        drop(response);
+    }
+
+    #[tokio::test]
+    async fn subscribe_from_event_route_durable_id_overrides_nested_field() {
+        use prost::Message;
+        use rustbgpd_event_history::{
+            Category, EnvelopePeers, EventEnvelope, EventHistoryConfig, EventHistoryManager,
+            PayloadCodec, Severity, SynchronousMode,
+        };
+
+        // Spin up an EHM in a tempdir.
+        let dir = tempfile::tempdir().unwrap();
+        let ehm = EventHistoryManager::start(EventHistoryConfig {
+            path: dir.path().join("events.db"),
+            max_events: 100,
+            max_bytes: 1_000_000,
+            synchronous: SynchronousMode::Full,
+            required: false,
+            queue_capacity: 64,
+            batch_size: 4,
+            batch_interval: std::time::Duration::from_millis(20),
+            broadcast_capacity: 64,
+            retention_interval: std::time::Duration::from_mins(1),
+            sidecar_flush_interval_batches: 100,
+            metrics: None,
+        })
+        .await
+        .expect("EHM start");
+        let handle = ehm.handle();
+
+        // Enqueue one route event with a deliberately wrong
+        // process-local `event_id = 99` on the nested payload.
+        // The cursor handler must overwrite it with the durable
+        // id (which will be 1 since this is the first committed).
+        let route_payload = proto::RouteEvent {
+            event_id: 99,
+            event_type: proto::BgpEventType::RouteAdded as i32,
+            prefix: "10.0.0.0".to_string(),
+            prefix_length: 24,
+            afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
+            peer_address: "10.0.0.1".to_string(),
+            previous_peer_address: String::new(),
+            target_peer_address: String::new(),
+            path_id: 0,
+            timestamp: "0".to_string(),
+            reason: String::new(),
+        };
+        let envelope_proto = proto::BgpEvent {
+            timestamp: "0".to_string(),
+            category: proto::EventCategory::Route as i32,
+            event_type: proto::BgpEventType::RouteAdded as i32,
+            severity: proto::EventSeverity::Info as i32,
+            peer_address: "10.0.0.1".to_string(),
+            previous_peer_address: String::new(),
+            prefix: "10.0.0.0".to_string(),
+            prefix_length: 24,
+            afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
+            summary: String::new(),
+            target_peer_address: String::new(),
+            event_id: None,
+            payload: Some(proto::bgp_event::Payload::Route(route_payload)),
+        };
+        handle
+            .sender()
+            .try_send(EventEnvelope {
+                timestamp_ns: 0,
+                category: Category::Route,
+                event_type: "ROUTE_ADDED".to_string(),
+                peers: EnvelopePeers::default(),
+                afi_safi: Some("ipv4_unicast".to_string()),
+                prefix: Some("10.0.0.0/24".to_string()),
+                rd: None,
+                evpn_route_type: None,
+                severity: Severity::Info,
+                payload_codec: PayloadCodec::Proto,
+                payload: envelope_proto.encode_to_vec(),
+            })
+            .expect("try_send");
+
+        // Wait for the commit so the cursor query sees it.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Plumb the handle into a fresh EventService and subscribe
+        // from the start (cursor = Some(0)).
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx).with_event_history(Some(handle.clone()));
+
+        let response = service
+            .subscribe_from_event(Request::new(proto::SubscribeFromEventRequest {
+                from_event_id: Some(0),
+                ..Default::default()
+            }))
+            .await
+            .expect("subscribe_from_event must succeed");
+        let mut stream = response.into_inner();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("first event within 2s")
+            .expect("stream still attached")
+            .expect("no status error");
+
+        // Envelope-level event_id is set to the durable id.
+        assert_eq!(event.event_id, Some(1));
+        // Nested RouteEvent.event_id is overwritten from the
+        // durable id (was 99 before the handler stamped it).
+        let Some(proto::bgp_event::Payload::Route(ref route)) = event.payload else {
+            panic!("expected route payload");
+        };
+        assert_eq!(
+            route.event_id, 1,
+            "nested RouteEvent.event_id must mirror the durable envelope id"
+        );
+
+        ehm.shutdown().await;
     }
 }

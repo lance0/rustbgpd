@@ -2063,9 +2063,49 @@ system of record.
 
 ### External-bus integration
 
-The documented pattern is `SubscribeFromEvent(from_event_id)` (the
-PR3 cursor RPC; ships after the foundation merges). A reference
-bridge example will live at `examples/event-bridge/` (PR5).
+The documented pattern is `SubscribeFromEvent(from_event_id)` —
+a server-side replay-then-live join over the durable outbox.
+Cursor semantics on `from_event_id`:
+
+- absent ⇒ live-only (no replay), like `WatchEvents`.
+- `0` ⇒ replay everything retained, then live (fresh-collector
+  case).
+- `N > 0` ⇒ replay events with `event_id > N`, then live (the
+  normal reconnect case).
+
+When the requested cursor is older than the retention floor,
+the server emits a leading `StreamLagEvent` with the missed
+count over the global committed stream (not the filtered
+subset) and then resumes replay from the earliest retained
+event. The `bgp_event_outbox_cursor_gap_total` counter
+tracks how often that fires — alert on non-zero to know your
+retention is undersized for the collector reconnect SLA.
+
+The CLI `rustbgpctl events watch --from-event-id <N>` drives
+the same RPC and is mutually exclusive with `--backfill`
+(`--backfill` replays the daemon's process-local route ring,
+which resets on restart; `--from-event-id` replays the
+durable outbox, which survives restart).
+
+`examples/event-bridge/` is the reference workspace binary
+that streams `BgpEvent` as JSON-lines to stdout. Operators
+copy it and replace the stdout writer with their Kafka /
+NATS / Vector / journald sink, then persist
+`last_seen_event_id` after their downstream sink confirms
+durable receipt. See `OPERATIONS.md` "Durable Event Cursor"
+for the alert + sizing playbook.
+
+When `enabled = false`, when EHM failed to start with
+`required = false`, or when EHM dropped into pass-through
+mode at runtime, `SubscribeFromEvent` returns
+`FAILED_PRECONDITION`. The legacy `WatchEvents`,
+`WatchRoutes`, and `List*Events` surfaces are byte-identical
+to pre-ADR-0072 behavior in all three cases — they're
+backed by the existing in-memory rings.
+
+**v1 producer set:** route, EVPN, session-lifecycle,
+session-notification, policy, BFD. Dataplane events stay
+live-only in v1; their durable outbox wiring is a follow-up.
 
 ## Config Persistence
 

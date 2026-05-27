@@ -9,8 +9,8 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use rustbgpd_event_history::{
-    Category, EnvelopePeers, EventEnvelope, EventHistoryConfig, EventHistoryManager, PayloadCodec,
-    Severity, SubscribeFilter, SubscribeRequest,
+    Category, EnvelopePeers, EventEnvelope, EventHistoryConfig, EventHistoryManager,
+    EventSubscriptionItem, PayloadCodec, Severity, SubscribeFilter, SubscribeRequest,
 };
 use tempfile::TempDir;
 
@@ -40,7 +40,7 @@ fn fast_cfg(path: std::path::PathBuf) -> EventHistoryConfig {
 }
 
 async fn drain_subscription(
-    mut rx: tokio::sync::mpsc::Receiver<rustbgpd_event_history::CommittedEvent>,
+    mut rx: tokio::sync::mpsc::Receiver<EventSubscriptionItem>,
     timeout: Duration,
     expected_at_least: usize,
 ) -> Vec<u64> {
@@ -49,7 +49,13 @@ async fn drain_subscription(
     while ids.len() < expected_at_least && tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(remaining, rx.recv()).await {
-            Ok(Some(evt)) => ids.push(evt.event_id),
+            Ok(Some(EventSubscriptionItem::Event(evt))) => ids.push(evt.event_id),
+            Ok(Some(EventSubscriptionItem::Lagged(missed))) => {
+                panic!("unexpected lag signal while draining test subscription: {missed}")
+            }
+            Ok(Some(EventSubscriptionItem::RetentionGap(missed))) => {
+                panic!("unexpected retention-gap signal while draining: missed={missed}")
+            }
             Ok(None) => break,
             Err(_) => break,
         }
@@ -59,7 +65,13 @@ async fn drain_subscription(
         while tokio::time::Instant::now() < grace_deadline {
             let remaining = grace_deadline.saturating_duration_since(tokio::time::Instant::now());
             match tokio::time::timeout(remaining, rx.recv()).await {
-                Ok(Some(evt)) => ids.push(evt.event_id),
+                Ok(Some(EventSubscriptionItem::Event(evt))) => ids.push(evt.event_id),
+                Ok(Some(EventSubscriptionItem::Lagged(missed))) => {
+                    panic!("unexpected lag signal while draining test subscription: {missed}")
+                }
+                Ok(Some(EventSubscriptionItem::RetentionGap(missed))) => {
+                    panic!("unexpected retention-gap signal while draining: missed={missed}")
+                }
                 Ok(None) | Err(_) => break,
             }
         }
@@ -351,13 +363,102 @@ async fn replay_preserves_payload_codec() {
         .await
         .unwrap()
         .unwrap();
+    let EventSubscriptionItem::Event(evt) = evt else {
+        panic!("unexpected lag signal");
+    };
     assert_eq!(evt.envelope.payload_codec, PayloadCodec::Proto);
 
     manager.shutdown().await;
 }
 
 #[tokio::test]
-async fn output_full_is_observable_in_subscription_stats() {
+async fn retention_gap_emits_as_leading_subscription_item_race_free() {
+    // ADR-0072 PR5 review finding: the upfront `oldest_retained_event_id`
+    // query that the gRPC handler did, followed by `subscribe_from_event`
+    // starting a separate replay query, left a window where retention
+    // could fire between the two storage ops and quietly move the floor
+    // past the requested cursor without emitting a leading lag signal.
+    //
+    // This test pins the new contract: `subscribe_from_event` issues
+    // `OldestEventId` + the first replay chunk in one storage-thread op
+    // (`QueryWithFloor`), and emits the gap as `EventSubscriptionItem
+    // ::RetentionGap(missed)` immediately before any replay rows. The
+    // gRPC handler translates that to a leading `StreamLagEvent` on the
+    // wire.
+    let dir = TempDir::new().unwrap();
+    let mut cfg = fast_cfg(dir.path().join("events.db"));
+    cfg.max_events = 10;
+    // The default retention interval is 60s; in a test we need the
+    // pass to actually run before we subscribe. 50ms tick + the wait
+    // below give the actor at least one retention round.
+    cfg.retention_interval = Duration::from_millis(50);
+    let manager = EventHistoryManager::start(cfg).await.unwrap();
+
+    // Fill past the retention cap so id 1..N have been evicted by the
+    // time we subscribe. Retain at most 10 events; emit 30 so the
+    // floor is at least id 21.
+    for i in 1..=30_u64 {
+        loop {
+            match manager.sender().try_send(make_envelope(i)) {
+                Ok(()) => break,
+                Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+    }
+    // Wait for the actor to flush, retention to run, and the DB to
+    // settle into the post-eviction state.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let oldest_now = manager
+        .handle()
+        .oldest_retained_event_id()
+        .await
+        .unwrap()
+        .expect("DB must not be empty after 30 commits");
+    assert!(
+        oldest_now > 1,
+        "retention should have evicted at least id 1; got oldest={oldest_now}"
+    );
+
+    // Subscribe with a cursor that is below the live retained floor.
+    // The first item on the stream MUST be a `RetentionGap` with the
+    // exact missed count = oldest - from - 1.
+    let from = 0_u64;
+    let subscription = manager
+        .subscribe_from_event(SubscribeRequest {
+            from_event_id: Some(from),
+            ..SubscribeRequest::default()
+        })
+        .await
+        .unwrap();
+    let mut rx = subscription.into_receiver();
+
+    let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .expect("stream must yield at least the retention-gap item");
+    let missed = match first {
+        EventSubscriptionItem::RetentionGap(n) => n,
+        EventSubscriptionItem::Event(evt) => {
+            panic!(
+                "expected leading RetentionGap, got Event id={}",
+                evt.event_id
+            )
+        }
+        EventSubscriptionItem::Lagged(n) => {
+            panic!("expected leading RetentionGap, got Lagged({n})")
+        }
+    };
+    assert_eq!(
+        missed,
+        oldest_now - from - 1,
+        "missed must equal the global retention gap"
+    );
+
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn slow_consumer_backpressures_without_dropping() {
     let dir = TempDir::new().unwrap();
     let manager = EventHistoryManager::start(fast_cfg(dir.path().join("events.db")))
         .await
@@ -371,18 +472,14 @@ async fn output_full_is_observable_in_subscription_stats() {
         })
         .await
         .unwrap();
-    let stats = subscription.stats();
-    let _rx = subscription.into_receiver();
+    let rx = subscription.into_receiver();
 
     for i in 1..=20_u64 {
         manager.sender().try_send(make_envelope(i)).unwrap();
     }
-    tokio::time::sleep(Duration::from_millis(150)).await;
 
-    assert!(
-        stats.snapshot().output_full > 0,
-        "slow consumers should have observable output_full stats"
-    );
+    let ids = drain_subscription(rx, Duration::from_secs(3), 20).await;
+    assert_eq!(ids, (1..=20_u64).collect::<Vec<_>>());
 
     manager.shutdown().await;
 }

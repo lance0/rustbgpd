@@ -16,6 +16,9 @@ pub mod adj_rib_out;
 pub mod best_path;
 /// Route change event types for broadcast subscribers.
 pub mod event;
+/// Sink boundary for handing route + EVPN events to an out-of-crate
+/// consumer (ADR-0072 durable event outbox).
+pub mod event_sink;
 /// Loc-RIB: best route per prefix.
 pub mod loc_rib;
 /// RIB manager task and submodules.
@@ -27,6 +30,7 @@ pub mod update;
 
 pub use best_path::{BestPathReason, best_path_cmp, multipath_equal};
 pub use event::{EvpnRouteEvent, RouteEvent, RouteEventType};
+pub use event_sink::{NoopRibEventSink, RibEventSink};
 pub use loc_rib::LocRib;
 pub use manager::RibManager;
 pub use route::{

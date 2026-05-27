@@ -16,7 +16,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   survives restart with a monotonic `event_id` cursor. External
   collectors (Kafka, NATS, Vector, journald, custom) bridge to their
   own bus via the existing gRPC stream; rustbgpd does not try to be
-  an event bus itself. Resolves the deferred `OtcRouteBlocked`
+  an event bus itself. Unblocks the deferred `OtcRouteBlocked`
   structured event payload from ADR-0071 and the `Subscribe
   ON_CHANGE` deferral from ADR-0070.
 - **Event-history foundation crate (`rustbgpd-event-history`).** New
@@ -38,6 +38,41 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `_retention_evicted_total{reason}`, `_latest_event_id`,
   `_open_failures_total`, `_degraded`. The degraded flag flips on
   the first drop or open failure and does not auto-clear in v1.
+- **ADR-0072 PR5 — `EventHistoryManager` runtime wiring + cursor
+  handler.** Closes the durable event outbox end-to-end. New
+  `EventHistoryHandle` (Clone) is the read/write projection
+  threaded into `EventService`, `RibManager`, `PeerManager`, and
+  the BFD bridge; the parent `EventHistoryManager` keeps lifecycle
+  (consuming `shutdown(self)`) on the daemon binary. Producers
+  flow into EHM alongside their existing rings + broadcasts via a
+  new `crates/rib/src/event_sink.rs` `RibEventSink` trait (route
+  + EVPN), in-place `try_send` calls at every
+  `src/peer_manager/events.rs` publish site (session-lifecycle +
+  notification + policy — **first time notification events are
+  durably persisted**, closing ADR-0071's notification-history
+  gap), and an EHM `try_send` inside the existing BFD →
+  `BgpEvent` bridge. `SubscribeFromEvent` returns a real stream
+  (replay-then-live via the PR3 actor-ordered handoff); when the
+  requested cursor is older than the live retention floor the
+  handler emits a leading `StreamLagEvent` (global-stream gap
+  count, not filtered) and then resumes from the earliest
+  retained event; new `bgp_event_outbox_cursor_gap_total` counter
+  tracks how often that fires. `Status::failed_precondition` on
+  disabled / pass-through / `required = false` start-failure
+  paths; the legacy `WatchEvents` / `WatchRoutes` /
+  `List*Events` surfaces are byte-identical to pre-PR. CLI
+  `rustbgpctl events watch --from-event-id <u64>` (mutually
+  exclusive with `--backfill`); the watch formatters now print
+  the envelope-level `event_id` for every category, not only
+  routes. New `examples/event-bridge/` reference workspace
+  binary streams `BgpEvent` as JSON-lines to stdout via a shared
+  `rustbgpd_api::json_format::bgp_event_to_json_line` helper —
+  operators replace the stdout writer with Kafka / NATS / Vector
+  / journald and persist `last_seen_event_id` after their
+  downstream sink confirms durable receipt. **Dataplane events
+  stay live-only in v1**: their existing
+  `dataplane_events` / `dataplane_route_events` broadcasts are
+  not wired through EHM; documented as a follow-up.
 
 - **Operator Confidence Polish Sprint 1.**
   - **Reload matrix** (`docs/reload-matrix.md`). Per-field classification —

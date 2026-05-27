@@ -131,6 +131,14 @@ fn collect_example_toml_files(dir: &Path, out: &mut Vec<PathBuf>) {
         if path.is_dir() {
             collect_example_toml_files(&path, out);
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("toml") {
+            // Some `examples/` entries are Rust workspace members
+            // (e.g. ADR-0072 `examples/event-bridge/`) and ship a
+            // `Cargo.toml`, not a daemon config. Skip those here;
+            // their compile-time correctness is enforced by the
+            // workspace build, not this validator.
+            if path.file_name().and_then(|f| f.to_str()) == Some("Cargo.toml") {
+                continue;
+            }
             out.push(path);
         }
     }

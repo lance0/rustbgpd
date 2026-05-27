@@ -6,6 +6,7 @@ use rustbgpd_api::peer_types::{
     SESSION_EVENT_HISTORY_CAPACITY, SessionEvent, SessionLifecycleEvent, SessionLifecycleEventType,
     SessionNotificationEvent, SessionNotificationEventType,
 };
+use rustbgpd_event_history::Category;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_rib::event::unix_timestamp_now;
 use rustbgpd_transport::{
@@ -48,6 +49,25 @@ impl PeerManager {
             }
             self.session_event_history.push_back(lifecycle.clone());
         }
+        // ADR-0072 durable outbox enqueue. The legacy ring +
+        // broadcast surfaces above are unchanged — they back the
+        // existing `WatchEvents` / `ListSessionEvents` RPCs.
+        // SubscribeFromEvent is the durable cursor consumer.
+        if let Some(handle) = &self.event_history {
+            let peer = match &event {
+                SessionEvent::Lifecycle(l) => Some(l.peer),
+                SessionEvent::Notification(n) => Some(n.peer),
+            };
+            let proto_event =
+                rustbgpd_api::event_converters::session_event_to_bgp_event(event.clone());
+            let envelope = rustbgpd_api::event_history_sinks::envelope_from_bgp_event(
+                &proto_event,
+                Category::Session,
+                peer,
+                None,
+            );
+            rustbgpd_api::event_history_sinks::try_send_envelope(handle, &self.metrics, envelope);
+        }
         let _ = self.session_events_tx.send(event);
     }
 
@@ -60,6 +80,21 @@ impl PeerManager {
             self.policy_event_history.pop_front();
         }
         self.policy_event_history.push_back(event.clone());
+        // ADR-0072 durable outbox enqueue; legacy ring + broadcast
+        // above remain authoritative for `ListPolicyEvents` /
+        // `WatchEvents`.
+        if let Some(handle) = &self.event_history {
+            let peer = event.peer;
+            let proto_event =
+                rustbgpd_api::event_converters::policy_event_to_bgp_event(event.clone());
+            let envelope = rustbgpd_api::event_history_sinks::envelope_from_bgp_event(
+                &proto_event,
+                Category::Policy,
+                peer,
+                None,
+            );
+            rustbgpd_api::event_history_sinks::try_send_envelope(handle, &self.metrics, envelope);
+        }
         let _ = self.policy_events_tx.send(event);
     }
 

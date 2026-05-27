@@ -348,12 +348,24 @@ counters operators watch:
   `bgp_event_outbox_dropped_total{category, reason}`,
   `bgp_event_outbox_db_size_bytes`,
   `bgp_event_outbox_latest_event_id`,
-  `bgp_event_outbox_degraded`. The degraded gauge is the
-  alert-on-this signal — flips to `1` on the first drop or
-  open failure since process start; does not auto-clear in
-  v1, so any non-zero value warrants investigation. See
-  `[event_history]` in `CONFIGURATION.md` for tuning and
-  recovery semantics.
+  `bgp_event_outbox_degraded`,
+  `bgp_event_outbox_cursor_gap_total`. The degraded gauge is
+  the alert-on-this signal — flips to `1` on a durability-impacting
+  drop, decode/codec failure, or open failure since process start;
+  does not auto-clear in v1, so any non-zero value warrants
+  investigation. The
+  cursor-gap counter alerts on collectors whose persisted
+  `last_seen_event_id` fell below the daemon's retention
+  floor — typically a sign the collector was offline longer
+  than `[event_history].max_events` / `max_bytes` planned for.
+  External collectors stream the cursor via the
+  `SubscribeFromEvent` gRPC RPC; `examples/event-bridge/` is
+  the reference skeleton — copy and replace the stdout writer
+  with your Kafka / NATS / Vector / journald sink, persisting
+  `last_seen_event_id` after the sink confirms durable receipt.
+  See `[event_history]` in `CONFIGURATION.md` for tuning and
+  recovery semantics, and the "Durable Event Cursor" section
+  in `OPERATIONS.md` for the alert + sizing playbook.
 
 **Policy filtering visibility — Prometheus.** `bgp_policy_routes_total
 {peer, policy, direction, action}` attributes each import and export

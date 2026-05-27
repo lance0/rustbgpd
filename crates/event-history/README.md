@@ -10,16 +10,16 @@ custom) bridge to their own bus via the daemon's gRPC stream; this
 crate is the daemon-local persistence layer, not an event bus.
 
 Single-writer model. The `EventHistoryManager` actor owns the
-broadcast channels currently scattered across producers, batches
-inserts into one SQLite transaction, and serves cursor-based replay
-through the `SubscribeFromEvent` gRPC RPC (wired in PR3).
+broadcast channels for the durable cursor path, batches inserts into
+one SQLite transaction, and serves cursor-based replay through the
+`SubscribeFromEvent` gRPC RPC.
 
 ## Module layout
 
 - `lib.rs` — public API. `EventHistoryManager`, `EventHistoryConfig`,
   `EventEnvelope`, `CommittedEvent`, `EventHistorySender`,
   `Category`, `Severity`, `PayloadCodec`, `EnvelopePeers`, plus the
-  shared `EhmState` and the async actor loop (`run_actor`). PR3 also
+  shared `EhmState` and the async actor loop (`run_actor`). It also
   re-exports `EventSubscription` / `SubscribeFilter` /
   `SubscribeRequest` / `SubscribeStats` from `cursor.rs`.
 - `storage.rs` — the `spawn_blocking` boundary. Owns the rusqlite
@@ -50,8 +50,8 @@ through the `SubscribeFromEvent` gRPC RPC (wired in PR3).
   INSERTs it. ROWID auto-assignment is never used.
 - **Producer-encoded opaque payload.** EHM treats
   `EventEnvelope.payload` as opaque bytes. The producer is
-  responsible for whatever encoding it wants (eventually the
-  prost-encoded `BgpEvent`; PR2 accepts any `Vec<u8>`). The assigned
+  responsible for whatever encoding it wants (production producers use
+  prost-encoded `BgpEvent`; tests can still use any `Vec<u8>`). The assigned
   `event_id` is delivered to subscribers via the `CommittedEvent`
   wrapper — never by mutating the payload bytes.
 - **Byte-equality across persist + broadcast.** The bytes the

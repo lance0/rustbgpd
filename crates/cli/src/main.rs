@@ -572,9 +572,22 @@ enum EventsAction {
         event_types: Vec<String>,
 
         /// Print recent route history before tailing the live stream.
-        /// Applies only to route-capable event streams.
+        /// Applies only to route-capable event streams. Mutually
+        /// exclusive with `--from-event-id`; `--backfill` replays the
+        /// daemon's process-local route ring (resets on restart),
+        /// while `--from-event-id` replays the durable event outbox
+        /// (survives restart).
         #[arg(long, default_value_t = 0)]
         backfill: u32,
+
+        /// ADR-0072 durable cursor: replay committed events with
+        /// `event_id > N` from the daemon's local event outbox,
+        /// then tail the live stream. `0` replays everything
+        /// retained. Survives daemon restart. Returns
+        /// `FAILED_PRECONDITION` when the daemon was started with
+        /// `[event_history].enabled = false` or EHM is unavailable.
+        #[arg(long, value_name = "EVENT_ID")]
+        from_event_id: Option<u64>,
     },
     /// Show recent session lifecycle events
     Sessions {
@@ -1194,6 +1207,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 prefix: watch_prefix,
                 event_types,
                 backfill,
+                from_event_id,
             }) => {
                 reject_events_parent_filters_for_subcommand(
                     "events watch",
@@ -1212,6 +1226,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                         prefix: watch_prefix,
                         event_types,
                         backfill,
+                        from_event_id,
                         json,
                     },
                 )

@@ -118,6 +118,12 @@ pub struct ServeConfig {
     /// Live ADR-0067 BFD session-event source (state transitions) for the
     /// unified `WatchEvents` stream. `None` disables the BFD event stream.
     pub bfd_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
+    /// Cloneable handle to the durable event outbox (ADR-0072). When
+    /// `Some`, `EventService::subscribe_from_event` returns a real
+    /// cursor stream. When `None`, the new RPC returns
+    /// `Status::failed_precondition` — the legacy live surfaces are
+    /// not affected.
+    pub event_history: Option<rustbgpd_event_history::EventHistoryHandle>,
 }
 
 /// Resolved gRPC listener configuration.
@@ -389,6 +395,7 @@ async fn run_listener(
     let dataplane_route_events = config.dataplane_route_events;
     let bfd_session_snapshot = config.bfd_session_snapshot;
     let bfd_events = config.bfd_events;
+    let event_history = config.event_history;
     let ListenerConfig {
         endpoint,
         access_mode,
@@ -435,6 +442,7 @@ async fn run_listener(
                 bfd_session_snapshot,
                 bfd_events,
                 dataplane_events,
+                event_history.clone(),
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
@@ -475,6 +483,7 @@ async fn run_listener(
                 bfd_session_snapshot,
                 bfd_events,
                 dataplane_events,
+                event_history,
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
@@ -522,6 +531,7 @@ async fn run_tcp_listener(
     bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
     bfd_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     dataplane_events: DataplaneEventBroadcaster,
+    event_history: Option<rustbgpd_event_history::EventHistoryHandle>,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -583,7 +593,8 @@ async fn run_tcp_listener(
             dataplane_route_events,
             bfd_events,
             metrics.clone(),
-        ),
+        )
+        .with_event_history(event_history.clone()),
         interceptor.clone(),
     ));
     routes.add_service(BfdServiceServer::with_interceptor(
@@ -698,6 +709,7 @@ async fn run_uds_listener(
     bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
     bfd_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     dataplane_events: DataplaneEventBroadcaster,
+    event_history: Option<rustbgpd_event_history::EventHistoryHandle>,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -739,7 +751,8 @@ async fn run_uds_listener(
             dataplane_route_events,
             bfd_events,
             metrics.clone(),
-        ),
+        )
+        .with_event_history(event_history.clone()),
         interceptor.clone(),
     ));
     routes.add_service(BfdServiceServer::with_interceptor(

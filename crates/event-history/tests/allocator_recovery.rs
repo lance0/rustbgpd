@@ -45,8 +45,8 @@ async fn drain_and_count(manager: &EventHistoryManager) -> Vec<u64> {
 
 #[tokio::test]
 async fn shutdown_completes_even_with_live_sender_clones() {
-    // Codex review regression test: shutdown must NOT depend on all
-    // EventHistorySender clones being dropped. Producers commonly
+    // Regression test: shutdown must NOT depend on all EventHistorySender
+    // clones being dropped. Producers commonly
     // hold a sender across the lifetime of the daemon; if shutdown
     // waited for the producer channel to close, the actor would
     // deadlock on rx.recv().
@@ -158,7 +158,7 @@ async fn corrupted_db_with_unrecoverable_anchor_and_required_true_refuses_start(
 
 #[tokio::test]
 async fn stale_only_with_no_sidecar_refuses_to_restart_allocator_at_one() {
-    // Codex review regression test for the critical bug pre-merge of PR2:
+    // Regression test for the critical bug pre-merge of PR2:
     //
     // Scenario: corrupt-DB + missing-sidecar on the first start
     // quarantines events.db → events.db.stale and returns PassThrough

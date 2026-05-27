@@ -864,8 +864,8 @@ mod tests {
         );
     }
 
-    /// Reproduces the second wedge mode Codex flagged: with a command
-    /// channel buffer of `COMMAND_BUFFER = 8`, repeated probes during a
+    /// Reproduces the second wedge mode: with a command channel buffer
+    /// of `COMMAND_BUFFER = 8`, repeated probes during a
     /// stall can fill the channel itself, so `tx.send().await` parks
     /// indefinitely. The bounded variant must surface that as `None` too,
     /// not hang on send.

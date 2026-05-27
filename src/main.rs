@@ -235,15 +235,66 @@ fn bfd_runtime_event_to_bgp_event(
     }
 }
 
+/// Translate the operator-facing `[event_history]` TOML block into
+/// the `EventHistoryConfig` shape the `rustbgpd-event-history` crate
+/// understands. The validation pass on the parent `Config` has
+/// already enforced the field invariants (synchronous / overflow
+/// values, positive sizes).
+fn build_event_history_config(
+    config: &Config,
+    metrics: &BgpMetrics,
+) -> rustbgpd_event_history::EventHistoryConfig {
+    let block = &config.event_history;
+    let synchronous = if block.synchronous.eq_ignore_ascii_case("normal") {
+        rustbgpd_event_history::SynchronousMode::Normal
+    } else {
+        rustbgpd_event_history::SynchronousMode::Full
+    };
+    rustbgpd_event_history::EventHistoryConfig {
+        path: config.event_history_db_path(),
+        max_events: block.max_events,
+        max_bytes: block.max_bytes,
+        synchronous,
+        required: block.required,
+        queue_capacity: block.queue_capacity,
+        batch_size: block.batch_size,
+        batch_interval: std::time::Duration::from_millis(block.batch_interval_ms),
+        metrics: Some(metrics.clone()),
+        ..rustbgpd_event_history::EventHistoryConfig::default()
+    }
+}
+
 fn spawn_bfd_event_bridge(
     mut bfd_events: broadcast::Receiver<bfd_runtime::BfdRuntimeEvent>,
     bgp_events: broadcast::Sender<rustbgpd_api::proto::BgpEvent>,
+    event_history: Option<rustbgpd_event_history::EventHistoryHandle>,
+    metrics: rustbgpd_telemetry::BgpMetrics,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             match bfd_events.recv().await {
                 Ok(event) => {
-                    let _ = bgp_events.send(bfd_runtime_event_to_bgp_event(&event));
+                    let proto_event = bfd_runtime_event_to_bgp_event(&event);
+                    // ADR-0072 durable outbox enqueue. The legacy live
+                    // `bgp_events` broadcast (consumed by WatchEvents +
+                    // the EVPN service) stays unchanged.
+                    if let Some(handle) = &event_history {
+                        let envelope = rustbgpd_api::event_history_sinks::envelope_from_bgp_event(
+                            &proto_event,
+                            rustbgpd_event_history::Category::Bfd,
+                            // BFD events are keyed by peer address;
+                            // pull it from the proto envelope so the
+                            // payload->envelope mapping stays in one
+                            // place (the proto field is the source of
+                            // truth for outbox-side filtering by peer).
+                            proto_event.peer_address.parse().ok(),
+                            None,
+                        );
+                        rustbgpd_api::event_history_sinks::try_send_envelope(
+                            handle, &metrics, envelope,
+                        );
+                    }
+                    let _ = bgp_events.send(proto_event);
                 }
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
                     warn!(
@@ -838,26 +889,75 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         });
     }
 
+    // ── ADR-0072: Durable event outbox (EventHistoryManager) ───────
+    //
+    // Spawned before any producer so the handle is available when
+    // constructing the RIB sink + plumbing into PeerManager,
+    // EventService, and the BFD bridge. On start failure the
+    // behavior depends on `[event_history].required`: required=true
+    // bails out; required=false logs an error, flips the degraded
+    // gauge, and continues in live-only mode (SubscribeFromEvent
+    // returns FAILED_PRECONDITION while the rest of the live
+    // surface keeps working).
+    let (event_history_manager, event_history_handle) = if config.event_history.enabled {
+        let ehm_config = build_event_history_config(&config, &metrics);
+        match rustbgpd_event_history::EventHistoryManager::start(ehm_config).await {
+            Ok(mgr) => {
+                let handle = mgr.handle();
+                info!(
+                    path = %config.event_history_db_path().display(),
+                    "event history manager started",
+                );
+                (Some(mgr), Some(handle))
+            }
+            Err(e) if config.event_history.required => {
+                error!(
+                    error = %e,
+                    path = %config.event_history_db_path().display(),
+                    "[event_history].required = true but EHM failed to start"
+                );
+                process::exit(1);
+            }
+            Err(e) => {
+                error!(
+                    error = %e,
+                    path = %config.event_history_db_path().display(),
+                    "event_history open failed; continuing in live-only mode"
+                );
+                metrics.record_event_outbox_open_failure();
+                (None, None)
+            }
+        }
+    } else {
+        info!("event history disabled via [event_history].enabled = false");
+        (None, None)
+    };
+
     // Build global export policy chain for RIB manager fallback
     let export_policy = config.export_chain().unwrap_or_else(|e| {
         error!("invalid global export policy: {e}");
         process::exit(1);
     });
 
-    // Spawn RIB manager
+    // Spawn RIB manager. When EHM is enabled, install an EHM-backed
+    // event sink so route + EVPN events flow into the durable
+    // outbox alongside the existing process-local ring + broadcast.
     let cluster_id = config.cluster_id();
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4096);
     let (rib_query_tx, rib_query_rx) = mpsc::channel::<RibUpdate>(256);
-    tokio::spawn(
-        RibManager::new(
-            rib_rx,
-            rib_query_rx,
-            export_policy,
-            cluster_id,
-            metrics.clone(),
-        )
-        .run(),
+    let mut rib_manager = RibManager::new(
+        rib_rx,
+        rib_query_rx,
+        export_policy,
+        cluster_id,
+        metrics.clone(),
     );
+    if let Some(handle) = event_history_handle.clone() {
+        rib_manager = rib_manager.with_event_sink(
+            rustbgpd_api::event_history_sinks::make_rib_event_sink(handle, metrics.clone()),
+        );
+    }
+    tokio::spawn(rib_manager.run());
 
     // Validation snapshot channel: broadcast VRP + ASPA tables to transport
     // sessions for import-time route validation.  Starts empty — sessions fall
@@ -1048,7 +1148,8 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         bmp_tx,
         Some(validation_watch_rx),
         config.clone(),
-    );
+    )
+    .with_event_history(event_history_handle.clone());
     // Wire BFD coupling only when BFD is configured; otherwise the unused ends
     // are dropped (the actor won't spawn either). PeerManager holds the desired
     // sender for life and never recreates it (the actor treats sender drop as
@@ -1563,7 +1664,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         tokio::sync::broadcast::channel::<bfd_runtime::BfdRuntimeEvent>(1024);
     let (bfd_bgp_event_tx, _) =
         tokio::sync::broadcast::channel::<rustbgpd_api::proto::BgpEvent>(1024);
-    let _bfd_event_bridge = spawn_bfd_event_bridge(bfd_event_rx, bfd_bgp_event_tx.clone());
+    let _bfd_event_bridge = spawn_bfd_event_bridge(
+        bfd_event_rx,
+        bfd_bgp_event_tx.clone(),
+        event_history_handle.clone(),
+        metrics.clone(),
+    );
     // The desired-set receiver + state-change sender are the actor's ends of the
     // coupling channels created above (PeerManager owns the other ends).
     let bfd_runtime_shutdown = tokio_util::sync::CancellationToken::new();
@@ -1775,6 +1881,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             })
         },
         bfd_events: Some(bfd_bgp_event_tx),
+        event_history: event_history_handle.clone(),
     };
     let mut grpc_handle = tokio::spawn(async move {
         rustbgpd_api::server::serve(
@@ -2173,6 +2280,19 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
 
     // 4. Stop the gRPC server
     let _ = grpc_shutdown_tx.send(());
+
+    // 5. Shut down the durable event outbox (ADR-0072) after the
+    // producers and gRPC have drained. EHM owns its own bounded
+    // 5-second hard timeout on the storage thread; we don't await
+    // unconditionally because a wedged SQLite must not stall the
+    // daemon exit. Holding EHM alive across the producer + gRPC
+    // drain means any final SubscribeFromEvent observers see their
+    // last committed events and any in-flight `try_send` reaches
+    // disk before shutdown.
+    if let Some(manager) = event_history_manager {
+        info!("flushing event history outbox");
+        manager.shutdown().await;
+    }
 
     info!("rustbgpd exiting");
 }
