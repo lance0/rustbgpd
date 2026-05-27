@@ -196,12 +196,12 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 40 | 52.6% |
-| `mutating` | 17 | 22.4% |
-| `operator_only` | 19 | 25.0% |
-| **Total** | **76** | **100%** |
+| `sensitive_read` | 41 | 53.2% |
+| `mutating` | 17 | 22.1% |
+| `operator_only` | 19 | 24.7% |
+| **Total** | **77** | **100%** |
 
-(Counts treat `SetGracefulShutdown` as one RPC even though it appears once in `NeighborService`; the 76 total is 72 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts treat `SetGracefulShutdown` as one RPC even though it appears once in `NeighborService`; the 77 total is 73 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 

@@ -103,8 +103,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   diagnostic-only in v1. Adds `event_peers` join table for any-role peer queries,
   count + byte retention with explicit `ORDER BY event_id ASC`
   eviction. Behind `[event_history]` config — default-on, ~256 MB
-  soft retention target on disk. No producer wiring yet (PR4 + PR5); validated
-  by direct test injection. Pinned by the byte-equality invariant
+  soft retention target on disk. Producer wiring shipped in PR5
+  (RIB route + EVPN + PeerManager + BFD) and the follow-up sprint
+  (dataplane #291). Pinned by the byte-equality invariant
   test: producer bytes == persisted bytes == broadcast bytes.
 - **`[event_history]` config block** with `enabled` (default-on),
   `required` (fail-start vs pass-through), `max_events`,

@@ -172,10 +172,12 @@ for the EVPN gate ladder.
 
 [^gnmi]: rustbgpd ships a native read-only `gnmi.gNMI` target for a strict
     OpenConfig BGP operational-state subset: `Capabilities`, `Get`, and
-    `Subscribe` (ONCE / POLL / STREAM SAMPLE) over UDS or mTLS TCP; `Set`
-    returns `Unimplemented`. M54 verifies the path with `gnmic`. FRR's
-    OpenConfig story is through broader management frameworks such as `mgmtd` /
-    SONiC-style northbound layers rather than a clean per-`bgpd` gNMI service.
+    `Subscribe` (ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE for
+    neighbor `session-state` when `[event_history]` is enabled) over UDS or
+    mTLS TCP; `Set` returns `Unimplemented`. M54 verifies the path with
+    `gnmic`; M56 covers the ON_CHANGE flow. FRR's OpenConfig story is
+    through broader management frameworks such as `mgmtd` / SONiC-style
+    northbound layers rather than a clean per-`bgpd` gNMI service.
 
 ## Best-Path Selection
 

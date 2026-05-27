@@ -267,7 +267,8 @@ Grounded against the current checkout:
 - **`Subscribe ON_CHANGE`** — needs loss-free, path-diffed leaf events.
   **Unblocked by [ADR-0072](0072-durable-event-history.md);** ships
   once the durable outbox lands and provides restart-survivable change
-  cursors.
+  cursors. *Resolved by PR #293 (2026-05-27) for neighbor `session-state`;
+  other leaves under ON_CHANGE remain `Unimplemented`.*
 - **Per-AFI-SAFI prefix counters** (`received` / `sent` / `installed`) — no
   trustworthy per-family source today.
 - **Per-neighbor `installed` / `accepted` prefix split** — only a global Loc-RIB
