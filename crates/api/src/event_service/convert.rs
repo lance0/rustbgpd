@@ -11,7 +11,8 @@ use super::filters::{
     session_notification_event_type_to_bgp_event_type,
 };
 
-pub(crate) fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto::BgpEvent {
+#[must_use]
+pub fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto::BgpEvent {
     let event_type = route_event_type_to_bgp_event_type(event.event_type);
     let route = route_event_to_proto(event);
     let summary = format!(
@@ -76,7 +77,7 @@ pub(crate) fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto
     }
 }
 
-pub(crate) fn evpn_event_to_bgp_event(event: rustbgpd_rib::EvpnRouteEvent) -> proto::BgpEvent {
+pub fn evpn_event_to_bgp_event(event: rustbgpd_rib::EvpnRouteEvent) -> proto::BgpEvent {
     let event_type = route_event_type_to_evpn_bgp_event_type(event.event_type);
     let peer_address = event.peer.map_or_else(String::new, |peer| peer.to_string());
     let previous_peer_address = event
@@ -163,7 +164,8 @@ fn format_evpn_route_key(key: &rustbgpd_wire::EvpnRouteKey) -> String {
     }
 }
 
-pub(super) fn session_event_to_bgp_event(event: SessionEvent) -> proto::BgpEvent {
+#[must_use]
+pub fn session_event_to_bgp_event(event: SessionEvent) -> proto::BgpEvent {
     match event {
         SessionEvent::Lifecycle(event) => session_lifecycle_event_to_bgp_event(event),
         SessionEvent::Notification(event) => session_notification_event_to_bgp_event(event),
@@ -255,7 +257,7 @@ fn session_notification_event_to_bgp_event(event: SessionNotificationEvent) -> p
     }
 }
 
-pub(super) fn policy_event_to_bgp_event(event: PolicyEvent) -> proto::BgpEvent {
+pub fn policy_event_to_bgp_event(event: PolicyEvent) -> proto::BgpEvent {
     let PolicyEvent {
         operation,
         target_type,

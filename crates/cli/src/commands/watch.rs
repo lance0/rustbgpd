@@ -17,6 +17,14 @@ pub struct EventsWatchOptions {
     pub prefix: Option<String>,
     pub event_types: Vec<String>,
     pub backfill: u32,
+    /// ADR-0072 durable cursor (`--from-event-id`). When `Some`,
+    /// the CLI subscribes via `SubscribeFromEvent` instead of
+    /// `WatchEvents`, replays committed events with
+    /// `event_id > N` from the daemon's local outbox, then attaches
+    /// the live stream. `Some(0)` replays everything retained. Mutually
+    /// exclusive with `--backfill` because the two operate on
+    /// independent ID spaces (process-local vs durable).
+    pub from_event_id: Option<u64>,
     pub json: bool,
 }
 
@@ -354,13 +362,14 @@ fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
         },
         "summary": event.summary,
     });
-    if let Some(crate::proto::bgp_event::Payload::Route(route)) = event.payload.as_ref()
-        && let Some(object) = value.as_object_mut()
-        && route.event_id > 0
+    if let Some(object) = value.as_object_mut()
+        && let Some(event_id) = event
+            .event_id
+            .or_else(|| route_event_id(event).filter(|id| *id > 0))
     {
         object.insert(
             "event_id".to_string(),
-            serde_json::Value::Number(route.event_id.into()),
+            serde_json::Value::Number(event_id.into()),
         );
     }
     if let Some(crate::proto::bgp_event::Payload::Session(session)) = event.payload.as_ref()
@@ -560,8 +569,14 @@ fn route_event_id(event: &BgpEvent) -> Option<u64> {
 }
 
 fn format_bgp_event_line(event: &BgpEvent) -> String {
-    let event_id = route_event_id(event)
-        .filter(|id| *id > 0)
+    // Envelope-level `event_id` (ADR-0072) takes precedence — it
+    // exists for every category on the SubscribeFromEvent path and
+    // is the durable cursor source. Fall back to the nested
+    // `RouteEvent.event_id` for legacy `WatchEvents` / `WatchRoutes`
+    // route events that don't carry an envelope id.
+    let event_id = event
+        .event_id
+        .or_else(|| route_event_id(event).filter(|id| *id > 0))
         .map_or_else(String::new, |id| format!(" id={id}"));
     format!(
         "[{}] {} {}{}",
@@ -790,6 +805,7 @@ pub async fn events_watch(
         prefix,
         event_types,
         backfill,
+        from_event_id,
         json,
     } = options;
 
@@ -806,6 +822,15 @@ pub async fn events_watch(
         .map(parse_bgp_event_type)
         .collect::<Result<Vec<_>, _>>()?;
     let route_events_requested = wants_route_events(&categories, &event_types);
+    if backfill > 0 && from_event_id.is_some() {
+        return Err(CliError::Argument(
+            "--from-event-id and --backfill are mutually exclusive: \
+             --backfill replays the daemon's process-local route ring \
+             (resets on restart), while --from-event-id replays the \
+             durable event outbox (survives restart). Pick one."
+                .into(),
+        ));
+    }
     if backfill > 0 && !route_events_requested {
         return Err(CliError::Argument(
             "--backfill requires a route-capable event stream".into(),
@@ -813,6 +838,31 @@ pub async fn events_watch(
     }
     validate_route_only_filters(&categories, &event_types, family, prefix.as_deref())?;
     let (prefix, prefix_length) = parse_optional_prefix_filter(prefix, family)?;
+
+    // ADR-0072 durable cursor path. SubscribeFromEvent replays
+    // committed events with `event_id > N`, then attaches live. The
+    // server emits a leading `StreamLagEvent` if `N` is older than
+    // the retention floor — the existing print path already renders
+    // it as a stream_lag payload.
+    if let Some(cursor) = from_event_id {
+        let mut client =
+            EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+        let request = crate::proto::SubscribeFromEventRequest {
+            from_event_id: Some(cursor),
+            categories,
+            event_types,
+            neighbor_address: neighbor.unwrap_or_default(),
+            afi_safi: family.unwrap_or(0),
+            prefix,
+            prefix_length,
+        };
+        let mut stream = client.subscribe_from_event(request).await?.into_inner();
+        while let Some(event) = stream.message().await? {
+            print_bgp_event(&event, json);
+        }
+        return Ok(());
+    }
+
     let mut client =
         EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let mut stream = client
@@ -1415,6 +1465,23 @@ mod tests {
 
         let value = json_bgp_event(&event);
         assert!(value["afi_safi"].is_null());
+    }
+
+    #[test]
+    fn json_bgp_event_session_includes_envelope_event_id() {
+        let event = BgpEvent {
+            timestamp: "1".to_string(),
+            category: EventCategory::Session as i32,
+            event_type: BgpEventType::SessionEstablished as i32,
+            severity: 1,
+            peer_address: "10.0.0.1".to_string(),
+            summary: "session established".to_string(),
+            event_id: Some(42),
+            ..Default::default()
+        };
+
+        let value = json_bgp_event(&event);
+        assert_eq!(value["event_id"], 42);
     }
 
     #[test]

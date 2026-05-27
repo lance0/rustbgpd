@@ -1,0 +1,20 @@
+[package]
+name = "event-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Reference external-collector bridge for rustbgpd's ADR-0072 durable event outbox. Streams BgpEvent over SubscribeFromEvent as JSON-lines to stdout."
+
+[[bin]]
+name = "event-bridge"
+path = "src/main.rs"
+
+[dependencies]
+rustbgpd-api.workspace = true
+tonic.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "io-util"] }
+clap = { workspace = true, features = ["derive"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true

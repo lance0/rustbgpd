@@ -148,7 +148,7 @@ shape itself does not raise the tier.
 | `ListSessionEvents` | `sensitive_read` | Bounded session lifecycle history per peer. |
 | `ListPolicyEvents` | `sensitive_read` | Bounded policy mutation history. |
 | `ListEvpnEvents` | `sensitive_read` | Bounded EVPN route add / withdraw / best-change history. |
-| `SubscribeFromEvent` (stream) | `sensitive_read` | ADR-0072 durable cursor replay + live. Same disclosure scope as `WatchEvents` plus historical events from the durable outbox. **Currently staged / `UNIMPLEMENTED`** — the proto contract is reserved; the runtime handler lands with ADR-0072 PR5. |
+| `SubscribeFromEvent` (stream) | `sensitive_read` | ADR-0072 durable cursor replay + live. Same disclosure scope as `WatchEvents` plus historical events from the durable outbox. Returns `FAILED_PRECONDITION` when `[event_history].enabled = false` or EHM is in pass-through mode; the legacy `WatchEvents` / `WatchRoutes` / `List*Events` surfaces are unaffected. |
 
 ### InjectionService (6 RPCs)
 

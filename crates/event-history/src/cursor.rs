@@ -1,4 +1,4 @@
-//! Cursor API — `SubscribeFromEvent` actor-ordered handoff (ADR-0072 PR3).
+//! Cursor API — `SubscribeFromEvent` actor-ordered handoff (ADR-0072).
 //!
 //! See "Cursor API — `SubscribeFromEvent` with actor-ordered handoff"
 //! in `docs/adr/0072-durable-event-history.md` for the contract.
@@ -34,12 +34,14 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::{debug, warn};
 
-use crate::storage::QueryFilter;
-use crate::{Category, CommittedEvent, EventHistoryError, EventHistoryManager, PayloadCodec};
+use crate::storage::{QueryFilter, StoreHandle};
+use crate::{
+    Category, CommittedEvent, EhmState, EventHistoryError, EventHistoryManager, PayloadCodec,
+};
 
 /// Filter applied to both replay and live segments of a
 /// [`EventHistoryManager::subscribe_from_event`] stream. Mirrors
-/// the indexable surface on [`crate::EventEnvelope`]; PR4's gRPC
+/// the indexable surface on [`crate::EventEnvelope`]; the gRPC
 /// `SubscribeFromEventRequest` proto maps onto this struct.
 #[derive(Debug, Default, Clone)]
 pub struct SubscribeFilter {
@@ -92,7 +94,7 @@ impl SubscribeFilter {
 /// Request shape for [`EventHistoryManager::subscribe_from_event`].
 ///
 /// `from_event_id` semantics (matches the proto3 `optional uint64`
-/// the gRPC layer will use in PR4):
+/// the gRPC layer uses):
 ///
 /// - `None` — **live-only** subscription, no replay. Streams events
 ///   committed after the live subscription is registered.
@@ -106,10 +108,10 @@ pub struct SubscribeRequest {
     pub from_event_id: Option<u64>,
     pub filter: SubscribeFilter,
     /// Capacity of the output channel handed back to the caller.
-    /// Slow consumers cause `try_send` failures on the replay+live
-    /// drain task, which then logs and drops; the cursor contract
-    /// is "no gaps from the daemon side" — consumer slowness shows
-    /// up as a per-consumer drop, not a daemon-wide degraded state.
+    /// Slow consumers backpressure this per-subscriber task; they do
+    /// not block the producer hot path. If the task falls behind EHM's
+    /// committed-event broadcast ring, it emits a `Lagged` item so the
+    /// gRPC layer can surface an explicit `StreamLagEvent`.
     pub output_capacity: usize,
 }
 
@@ -123,19 +125,17 @@ impl Default for SubscribeRequest {
     }
 }
 
-/// Per-subscription drop counter surfaced to the caller. PR4's gRPC
+/// Per-subscription lag counter surfaced to the caller. The gRPC
 /// layer surfaces this via `StreamLagEvent` so external collectors
 /// know they fell behind.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SubscribeStatsSnapshot {
     pub broadcast_lagged: u64,
-    pub output_full: u64,
 }
 
 #[derive(Debug, Default)]
 pub struct SubscribeStats {
     broadcast_lagged: AtomicU64,
-    output_full: AtomicU64,
 }
 
 impl SubscribeStats {
@@ -143,28 +143,40 @@ impl SubscribeStats {
     pub fn snapshot(&self) -> SubscribeStatsSnapshot {
         SubscribeStatsSnapshot {
             broadcast_lagged: self.broadcast_lagged.load(Ordering::Acquire),
-            output_full: self.output_full.load(Ordering::Acquire),
         }
     }
 
     fn record_broadcast_lagged(&self, n: u64) {
         self.broadcast_lagged.fetch_add(n, Ordering::AcqRel);
     }
+}
 
-    fn record_output_full(&self) {
-        self.output_full.fetch_add(1, Ordering::AcqRel);
-    }
+/// Item produced by a durable cursor subscription.
+pub enum EventSubscriptionItem {
+    Event(CommittedEvent),
+    /// The per-subscriber broadcast receiver fell behind the live
+    /// stream. The producing path is EHM's broadcast; gRPC translates
+    /// this to a `StreamLagEvent` payload.
+    Lagged(u64),
+    /// The caller's `from_event_id` is below the live retention floor
+    /// as observed atomically with the first replay chunk. Carries the
+    /// missed count over the global committed stream:
+    /// `floor - from_event_id - 1`. Emitted exactly once, as the
+    /// stream-leading item, when a gap is detected; gRPC translates
+    /// it to a leading `StreamLagEvent` and increments
+    /// `bgp_event_outbox_cursor_gap_total`.
+    RetentionGap(u64),
 }
 
 /// Handle returned by [`EventHistoryManager::subscribe_from_event`].
 pub struct EventSubscription {
-    receiver: mpsc::Receiver<CommittedEvent>,
+    receiver: mpsc::Receiver<EventSubscriptionItem>,
     stats: Arc<SubscribeStats>,
 }
 
 impl EventSubscription {
     #[must_use]
-    pub fn into_receiver(self) -> mpsc::Receiver<CommittedEvent> {
+    pub fn into_receiver(self) -> mpsc::Receiver<EventSubscriptionItem> {
         self.receiver
     }
 
@@ -192,46 +204,62 @@ impl EventHistoryManager {
         &self,
         req: SubscribeRequest,
     ) -> Result<EventSubscription, EventHistoryError> {
-        if self.state().pass_through() {
-            return Err(EventHistoryError::PassThrough);
-        }
-
-        // STEP 1: subscribe to the live broadcast FIRST. Any event
-        // committed-and-broadcast from this point forward arrives on
-        // `live_rx`, even if its `event_id` is `<= high_watermark`.
-        let live_rx = self.broadcast_tx_for_cursor();
-
-        // STEP 2: capture the high-watermark. The actor's
-        // `latest_event_id.store(...)` happens BEFORE
-        // `broadcast.send(...)`, so any event with id > this value is
-        // guaranteed to be on the live stream we just attached.
-        let high_watermark = self.state().latest_event_id();
-
-        let output_capacity = req.output_capacity.max(1);
-        let (out_tx, out_rx) = mpsc::channel(output_capacity);
-        let stats = Arc::new(SubscribeStats::default());
-
-        // STEP 3: spawn the replay-then-live drain task.
-        let storage = self.storage_handle_for_cursor();
-        let req_clone = req.clone();
-        let stats_for_task = stats.clone();
-        tokio::spawn(async move {
-            run_subscription(
-                req_clone,
-                high_watermark,
-                storage,
-                live_rx,
-                out_tx,
-                stats_for_task,
-            )
-            .await;
-        });
-
-        Ok(EventSubscription {
-            receiver: out_rx,
-            stats,
-        })
+        subscribe_from_event_inner(
+            req,
+            self.state().as_ref(),
+            self.broadcast_tx_for_cursor(),
+            self.storage_handle_for_cursor(),
+        )
     }
+}
+
+/// Free-function form of the cursor handshake. The
+/// [`EventHistoryManager`] method and [`crate::EventHistoryHandle`]
+/// both delegate here so the actor-ordered handoff has exactly one
+/// implementation. Note: not async because the 3 steps must run in
+/// caller order without yielding (subscribe-then-watermark-then-spawn
+/// is the race-free shape; an `await` between steps 1 and 2 would
+/// allow the actor to commit and skip the broadcast we just attached
+/// to).
+pub(crate) fn subscribe_from_event_inner(
+    req: SubscribeRequest,
+    state: &EhmState,
+    live_rx: broadcast::Receiver<CommittedEvent>,
+    storage: StoreHandle,
+) -> Result<EventSubscription, EventHistoryError> {
+    if state.pass_through() {
+        return Err(EventHistoryError::PassThrough);
+    }
+
+    // The broadcast receiver was already attached by the caller —
+    // step (1) of the 3-step handoff. Capture the high-watermark
+    // next; the actor's `latest_event_id.store(...)` happens BEFORE
+    // `broadcast.send(...)`, so any event with id > this value is
+    // guaranteed to be on the live stream we just attached.
+    let high_watermark = state.latest_event_id();
+
+    let output_capacity = req.output_capacity.max(1);
+    let (out_tx, out_rx) = mpsc::channel(output_capacity);
+    let stats = Arc::new(SubscribeStats::default());
+
+    let req_clone = req.clone();
+    let stats_for_task = stats.clone();
+    tokio::spawn(async move {
+        run_subscription(
+            req_clone,
+            high_watermark,
+            storage,
+            live_rx,
+            out_tx,
+            stats_for_task,
+        )
+        .await;
+    });
+
+    Ok(EventSubscription {
+        receiver: out_rx,
+        stats,
+    })
 }
 
 async fn run_subscription(
@@ -239,7 +267,7 @@ async fn run_subscription(
     high_watermark: u64,
     storage: crate::storage::StoreHandle,
     live_rx: broadcast::Receiver<CommittedEvent>,
-    out_tx: mpsc::Sender<CommittedEvent>,
+    out_tx: mpsc::Sender<EventSubscriptionItem>,
     stats: Arc<SubscribeStats>,
 ) {
     let cursor_floor = req.from_event_id.unwrap_or(high_watermark);
@@ -252,6 +280,7 @@ async fn run_subscription(
         // the receiving side as a defensive boundary around storage.
         let chunk_size = req.output_capacity.max(64);
         let mut next_from = from_id;
+        let mut first_chunk = true;
         loop {
             let query_filter = QueryFilter {
                 category: req.filter.category,
@@ -259,14 +288,47 @@ async fn run_subscription(
                 prefix: req.filter.prefix.clone(),
                 rd: req.filter.rd.clone(),
             };
-            let rows = match storage
-                .query(next_from, high_watermark, chunk_size, query_filter)
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!(error = %e, "replay chunk query failed; aborting subscription");
-                    return;
+            // FIRST chunk uses `query_with_floor` so the live
+            // `MIN(event_id)` and the row read happen in one
+            // storage-thread iteration. Submitting a separate
+            // `OldestEventId` then `Query` would let `Retain` slip
+            // between them — that race is what ADR-0072 PR5's review
+            // surfaced. Subsequent chunks use the cheaper plain
+            // `Query`; the floor only matters for the leading-gap
+            // signal, and once the first chunk has run any further
+            // retention is reported via the live broadcast lag path,
+            // not as a cursor gap.
+            let rows = if first_chunk {
+                first_chunk = false;
+                let outcome = match storage
+                    .query_with_floor(next_from, high_watermark, chunk_size, query_filter)
+                    .await
+                {
+                    Ok(o) => o,
+                    Err(e) => {
+                        warn!(error = %e, "replay first-chunk query failed; aborting subscription");
+                        return;
+                    }
+                };
+                if let Some(floor) = outcome.floor
+                    && from_id + 1 < floor
+                {
+                    let missed = floor - from_id - 1;
+                    if !emit_retention_gap(&out_tx, missed).await {
+                        return;
+                    }
+                }
+                outcome.rows
+            } else {
+                match storage
+                    .query(next_from, high_watermark, chunk_size, query_filter)
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!(error = %e, "replay chunk query failed; aborting subscription");
+                        return;
+                    }
                 }
             };
             if rows.is_empty() {
@@ -301,7 +363,7 @@ async fn run_subscription(
                 if !req.filter.matches(&committed) {
                     continue;
                 }
-                if !try_emit(&out_tx, &stats, committed, "replay") {
+                if !emit_event(&out_tx, committed).await {
                     return;
                 }
             }
@@ -325,6 +387,9 @@ async fn run_subscription(
                     missed = n,
                     "subscribe_from_event live stream lagged; consumer too slow"
                 );
+                if !emit_lag(&out_tx, n).await {
+                    return;
+                }
                 continue;
             }
         };
@@ -342,37 +407,46 @@ async fn run_subscription(
             continue;
         }
 
-        if !try_emit(&out_tx, &stats, committed, "live") {
+        if !emit_event(&out_tx, committed).await {
             return;
         }
     }
     let snapshot = stats.snapshot();
     debug!(
         broadcast_lagged = snapshot.broadcast_lagged,
-        output_full = snapshot.output_full,
         "subscribe_from_event drain task exiting"
     );
 }
 
-fn try_emit(
-    out_tx: &mpsc::Sender<CommittedEvent>,
-    stats: &SubscribeStats,
+async fn emit_event(
+    out_tx: &mpsc::Sender<EventSubscriptionItem>,
     committed: CommittedEvent,
-    phase: &'static str,
 ) -> bool {
-    match out_tx.try_send(committed) {
+    match out_tx.send(EventSubscriptionItem::Event(committed)).await {
         Ok(()) => true,
-        Err(mpsc::error::TrySendError::Closed(_)) => {
-            debug!(phase, "subscription output closed");
+        Err(_) => false,
+    }
+}
+
+async fn emit_lag(out_tx: &mpsc::Sender<EventSubscriptionItem>, missed: u64) -> bool {
+    match out_tx.send(EventSubscriptionItem::Lagged(missed)).await {
+        Ok(()) => true,
+        Err(_) => {
+            debug!("subscription output closed");
             false
         }
-        Err(mpsc::error::TrySendError::Full(_)) => {
-            stats.record_output_full();
-            warn!(
-                phase,
-                "subscription output full; dropping event for this subscriber"
-            );
-            true
+    }
+}
+
+async fn emit_retention_gap(out_tx: &mpsc::Sender<EventSubscriptionItem>, missed: u64) -> bool {
+    match out_tx
+        .send(EventSubscriptionItem::RetentionGap(missed))
+        .await
+    {
+        Ok(()) => true,
+        Err(_) => {
+            debug!("subscription output closed before retention-gap signal");
+            false
         }
     }
 }

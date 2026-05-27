@@ -39,9 +39,9 @@ pub(crate) enum StoreOp {
     /// Envelopes are passed as `Arc`s so the actor can hand the SAME
     /// underlying payload bytes to both the storage path (here) and
     /// the broadcast path (after commit) without cloning the payload
-    /// vec a second time. Per Copilot review on PR2: the original
-    /// design cloned the full `Vec<EventEnvelope>` (including payload
-    /// bytes) twice, doubling allocation per batch.
+    /// vec a second time. The earlier design cloned the full
+    /// `Vec<EventEnvelope>` (including payload bytes) twice, doubling
+    /// allocation per batch.
     ///
     /// Reply carries:
     /// - the assigned `(event_id, ...)` tuples in order (same order as
@@ -56,14 +56,30 @@ pub(crate) enum StoreOp {
     /// Read events with `from_event_id < event_id <= to_event_id`,
     /// limited to `limit` rows, optionally filtered by category /
     /// peer / prefix / rd. Returns persisted rows in `event_id` ascending
-    /// order. PR3 uses this for `SubscribeFromEvent` replay; PR2 only
-    /// exposes it for tests.
+    /// order. `SubscribeFromEvent` uses this for replay; tests call it
+    /// directly.
     Query {
         from_event_id: u64,
         to_event_id: u64,
         limit: usize,
         filter: QueryFilter,
         reply: oneshot::Sender<Result<Vec<PersistedEvent>, EventHistoryError>>,
+    },
+
+    /// Same as `Query` but additionally returns the live `MIN(event_id)`
+    /// over the events table, evaluated under the SAME storage-thread
+    /// iteration that runs the row read. The cursor handler uses this
+    /// op for the FIRST replay chunk of a `SubscribeFromEvent` request
+    /// to compute the retention-gap signal race-free against retention
+    /// — submitting `OldestEventId` then `Query` as two ops lets
+    /// retention be processed in between, which is the race ADR-0072
+    /// PR5 review flagged.
+    QueryWithFloor {
+        from_event_id: u64,
+        to_event_id: u64,
+        limit: usize,
+        filter: QueryFilter,
+        reply: oneshot::Sender<Result<QueryWithFloorOutcome, EventHistoryError>>,
     },
 
     /// Run one pass of retention. Caller cadence is the EHM loop's
@@ -79,6 +95,16 @@ pub(crate) enum StoreOp {
         reply: oneshot::Sender<Result<u64, EventHistoryError>>,
     },
 
+    /// Return `MIN(event_id)` over the live `events` table, or `None`
+    /// when the table is empty. Used by the cursor handler to
+    /// detect "client cursor older than retention floor" before
+    /// kicking off the actor-ordered handoff. Resolved live against
+    /// the connection thread so retention races don't surface as
+    /// stale gap counts.
+    OldestEventId {
+        reply: oneshot::Sender<Result<Option<u64>, EventHistoryError>>,
+    },
+
     /// Graceful shutdown — drain anything pending, checkpoint WAL, close.
     Shutdown { reply: oneshot::Sender<()> },
 }
@@ -92,6 +118,19 @@ pub(crate) struct AppendOutcome {
     pub new_high_water: u64,
     /// Daemon boot ID stamped on every row in this batch.
     pub daemon_boot_id: Arc<str>,
+    /// Combined size of events.db + WAL immediately after the commit.
+    pub db_size_bytes: u64,
+}
+
+/// What `StoreOp::QueryWithFloor` returns. The floor reflects the
+/// live `MIN(event_id)` as of the same storage-thread iteration that
+/// ran the row read, so the cursor handler can compute the gap to a
+/// client-supplied `from_event_id` without a separate
+/// `OldestEventId` round-trip that retention could slip between.
+#[derive(Debug)]
+pub(crate) struct QueryWithFloorOutcome {
+    pub rows: Vec<PersistedEvent>,
+    pub floor: Option<u64>,
 }
 
 /// What `StoreOp::Retain` returns.
@@ -103,8 +142,8 @@ pub(crate) struct RetentionOutcome {
 }
 
 /// Filter for persisted-event queries. Each field is optional; `None`
-/// means "any." Public so PR3's cursor API and PR2's tests can
-/// construct one; the storage-thread internals are still private.
+/// means "any." Public so the cursor API and tests can construct one;
+/// the storage-thread internals are still private.
 #[derive(Debug, Default, Clone)]
 pub struct QueryFilter {
     pub category: Option<Category>,
@@ -183,6 +222,32 @@ impl StoreHandle {
         rx.await.map_err(|_| EventHistoryError::PassThrough)?
     }
 
+    /// `Query` plus the live `MIN(event_id)` evaluated under the same
+    /// storage-thread iteration. The cursor handler uses this for the
+    /// first replay chunk so the retention-gap signal it emits is
+    /// race-free against a retention pass that fires between separate
+    /// `OldestEventId` and `Query` calls.
+    pub(crate) async fn query_with_floor(
+        &self,
+        from_event_id: u64,
+        to_event_id: u64,
+        limit: usize,
+        filter: QueryFilter,
+    ) -> Result<QueryWithFloorOutcome, EventHistoryError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(StoreOp::QueryWithFloor {
+                from_event_id,
+                to_event_id,
+                limit,
+                filter,
+                reply,
+            })
+            .await
+            .map_err(|_| EventHistoryError::PassThrough)?;
+        rx.await.map_err(|_| EventHistoryError::PassThrough)?
+    }
+
     pub(crate) async fn retain(
         &self,
         max_events: u64,
@@ -204,6 +269,18 @@ impl StoreHandle {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(StoreOp::FlushSidecar { reply })
+            .await
+            .map_err(|_| EventHistoryError::PassThrough)?;
+        rx.await.map_err(|_| EventHistoryError::PassThrough)?
+    }
+
+    /// `MIN(event_id)` over the live table, or `None` when the table
+    /// is empty. Resolves a live query rather than reading a cached
+    /// atomic so retention races don't surface as stale gap counts.
+    pub(crate) async fn oldest_event_id(&self) -> Result<Option<u64>, EventHistoryError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(StoreOp::OldestEventId { reply })
             .await
             .map_err(|_| EventHistoryError::PassThrough)?;
         rx.await.map_err(|_| EventHistoryError::PassThrough)?
@@ -292,7 +369,7 @@ fn open_with_recovery(
     let sidecar = sidecar_path(path);
     let stale = stale_path(path);
 
-    // STALE/SIDECAR-ONLY GUARD (Codex review finding): when a previous start
+    // STALE/SIDECAR-ONLY GUARD: when a previous start
     // quarantined `events.db` and the daemon exited before producing a
     // replacement, the next start would see no primary file. The plain
     // `Connection::open(path)` below WOULD CREATE a fresh empty DB and
@@ -454,7 +531,7 @@ fn run_storage_thread(
     while let Some(op) = rx.blocking_recv() {
         match op {
             StoreOp::Append { envelopes, reply } => {
-                let outcome = append_batch_blocking(&mut conn, envelopes, &daemon_boot_id);
+                let outcome = append_batch_blocking(&mut conn, &path, envelopes, &daemon_boot_id);
                 let _ = reply.send(outcome);
             }
             StoreOp::Query {
@@ -467,6 +544,26 @@ fn run_storage_thread(
                 let outcome = query_blocking(&conn, from_event_id, to_event_id, limit, &filter);
                 let _ = reply.send(outcome);
             }
+            StoreOp::QueryWithFloor {
+                from_event_id,
+                to_event_id,
+                limit,
+                filter,
+                reply,
+            } => {
+                // Read MIN(event_id) and the row chunk in one storage-
+                // thread iteration. The single-threaded run loop
+                // serializes us against StoreOp::Retain, which is the
+                // only op that can move the floor. Submitting these
+                // two SELECTs as separate StoreOps would let a Retain
+                // message interleave between them; that's the race
+                // ADR-0072 PR5 review flagged.
+                let outcome = oldest_event_id_blocking(&conn).and_then(|floor| {
+                    query_blocking(&conn, from_event_id, to_event_id, limit, &filter)
+                        .map(|rows| QueryWithFloorOutcome { rows, floor })
+                });
+                let _ = reply.send(outcome);
+            }
             StoreOp::Retain {
                 max_events,
                 max_bytes,
@@ -477,6 +574,10 @@ fn run_storage_thread(
             }
             StoreOp::FlushSidecar { reply } => {
                 let outcome = flush_sidecar_blocking(&conn, &sidecar);
+                let _ = reply.send(outcome);
+            }
+            StoreOp::OldestEventId { reply } => {
+                let outcome = oldest_event_id_blocking(&conn);
                 let _ = reply.send(outcome);
             }
             StoreOp::Shutdown { reply } => {
@@ -498,6 +599,7 @@ fn run_storage_thread(
 
 fn append_batch_blocking(
     conn: &mut Connection,
+    db_path: &Path,
     envelopes: Vec<Arc<EventEnvelope>>,
     daemon_boot_id: &Arc<str>,
 ) -> Result<AppendOutcome, EventHistoryError> {
@@ -506,6 +608,7 @@ fn append_batch_blocking(
             assigned_ids: Vec::new(),
             new_high_water: crate::sequence::read_allocator(conn)?.unwrap_or(0),
             daemon_boot_id: daemon_boot_id.clone(),
+            db_size_bytes: file_size(db_path),
         });
     }
 
@@ -574,6 +677,7 @@ fn append_batch_blocking(
         assigned_ids,
         new_high_water,
         daemon_boot_id: daemon_boot_id.clone(),
+        db_size_bytes: file_size(db_path),
     })
 }
 
@@ -851,4 +955,22 @@ fn flush_sidecar_blocking(conn: &Connection, sidecar: &Path) -> Result<u64, Even
         .ok_or_else(|| EventHistoryError::AllocatorCorrupt("missing".to_string()))?;
     write_sidecar(sidecar, last_id)?;
     Ok(last_id)
+}
+
+/// `MIN(event_id)` over `events`. Returns `Ok(None)` for an empty
+/// table; the caller maps that to "nothing retained yet, no gap
+/// possible." Indexed primary-key scan; cheap.
+fn oldest_event_id_blocking(conn: &Connection) -> Result<Option<u64>, EventHistoryError> {
+    // SELECT MIN(...) returns one row with a single SQL NULL when the
+    // table is empty. `rusqlite::Row::get` over `Option<i64>` maps
+    // that NULL to `Ok(None)`, which is what we want — avoid the
+    // `QueryReturnedNoRows` round-trip.
+    let row: Option<i64> = conn
+        .query_row("SELECT MIN(event_id) FROM events", [], |r| r.get(0))
+        .map_err(EventHistoryError::Sqlite)?;
+    // `event_id` is stored as INTEGER NOT NULL on insert; values must
+    // be positive (the allocator skips 0). Cast through i64 only because
+    // SQLite's INTEGER column type is i64; the runtime invariant gives
+    // us a safe `as u64` cast.
+    Ok(row.map(|v| v as u64))
 }

@@ -13,6 +13,7 @@ readme = "README.md"
 
 [dependencies]
 rusqlite.workspace = true
+rustbgpd-telemetry.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tracing.workspace = true

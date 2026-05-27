@@ -365,14 +365,13 @@ Producers `try_send`. On full queue:
 
 - Drop the event.
 - Increment `bgp_event_outbox_dropped_total{category, reason="queue_full"}`.
-- Track `bgp_event_outbox_oldest_queued_age_seconds` — climbs
-  before drops start, gives operators an early-warning signal.
-- Emit one deduplicated `warn!` log per second with the per-
-  category drop count.
+- Track `bgp_event_outbox_queue_depth{category}` — climbs before
+  drops start, gives operators an early-warning signal.
+- Emit a `warn!` log for the dropped event with category and event
+  type.
 - On the first non-zero drop in a process lifetime, flip the
-  daemon-wide health flag `event_outbox_degraded = true`. The flag
-  is surfaced on the existing `/healthz` and `rustbgpctl status`
-  paths. **In v1 it never auto-clears** — operator restarts to
+  Prometheus gauge `bgp_event_outbox_degraded = 1`. **In v1 it never
+  auto-clears** — operator restarts to
   clear. A future `rustbgpctl event-history reset-health` command
   is a P1 nice-to-have.
 
@@ -596,24 +595,23 @@ Prometheus counters and gauges added by this work:
 - `bgp_event_outbox_committed_total{category}` — events durably
   committed.
 - `bgp_event_outbox_dropped_total{category, reason}` — drops by
-  category and reason (`queue_full`, `db_error`).
+  category and reason (`queue_full`, `closed`, `db_error`,
+  `decode_failure`, `opaque_codec`).
 - `bgp_event_outbox_queue_depth{category}` — pending in-memory
   queue per category (gauge).
-- `bgp_event_outbox_oldest_queued_age_seconds` — gauge; oldest
-  event waiting in any producer queue. Operator early-warning.
-- `bgp_event_outbox_batch_commit_seconds` — histogram of commit
-  durations.
 - `bgp_event_outbox_db_size_bytes` — current
   `events.db` + WAL combined.
 - `bgp_event_outbox_retention_evicted_total{reason}` — events
   evicted by retention (`count_cap`, `byte_cap`).
-- `bgp_event_outbox_wal_checkpoints_total{result}` — checkpoint
-  outcomes (`success`, `failure`).
 - `bgp_event_outbox_latest_event_id` — gauge of current allocator
   value. "Is the daemon making progress?"
 - `bgp_event_outbox_open_failures_total` — DB-open failure counter.
-- `bgp_event_outbox_degraded` — 0 or 1; flipped to 1 on first drop
-  or open failure, never auto-clears in v1.
+- `bgp_event_outbox_degraded` — 0 or 1; flipped to 1 on
+  durability-impacting drops, decode/codec failures, or open
+  failures, never auto-clears in v1.
+- `bgp_event_outbox_cursor_gap_total` — requests whose cursor was
+  older than the retained floor and therefore received a leading
+  `StreamLagEvent`.
 
 The existing
 `bgp_event_stream_lagged_total{service, source}` counter
@@ -668,6 +666,26 @@ reference bridge at `examples/event-bridge/`:
   set until restart in v1. A future
   `rustbgpctl event-history reset-health` command is a P1 nice-to-
   have.
+- **Dataplane events stay live-only in v1 (PR5 producer set).**
+  PR5 wires the following five categories through EHM: `route`,
+  `evpn`, `session`, `policy`, `bfd`. The `dataplane` /
+  `dataplane_route` categories continue to flow on their existing
+  `dataplane_events` / `dataplane_route_events` broadcasts
+  (consumed by `WatchEvents` and the EVPN service) and are NOT
+  enqueued into the durable outbox. `SubscribeFromEvent` with an
+  empty `categories` filter therefore returns events from the
+  five EHM-fed categories only; the proto comment on
+  `SubscribeFromEventRequest.categories` documents this
+  divergence so collectors that need durable dataplane history
+  know it is a follow-up. Wiring dataplane through EHM is
+  scoped for a later PR after the v1 producer set has soaked.
+- **`List*Events` RPCs stay on the in-memory rings in v1.**
+  `ListRouteEvents` / `ListSessionEvents` / `ListPolicyEvents` /
+  `ListEvpnEvents` keep their existing bounded-ring backing
+  (resets on daemon restart, process-local `RouteEvent.event_id`
+  for routes). Migrating them to EHM-backed queries is a
+  follow-up; the v1 split is "legacy live + ring stays legacy;
+  durable cursor is `SubscribeFromEvent` only."
 
 ### Alternatives considered
 

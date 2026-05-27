@@ -297,6 +297,69 @@ durable queues. Non-zero `bgp_event_stream_lagged_total` means at least one
 client missed events and should combine a fresh snapshot or `ListRouteEvents`
 query with a new live watch.
 
+### Durable Event Cursor (ADR-0072)
+
+The durable outbox (`SubscribeFromEvent` RPC, CLI
+`rustbgpctl events watch --from-event-id <N>`, and the
+`examples/event-bridge/` reference binary) survives daemon restart and
+exposes a monotonic `event_id` cursor. The legacy live surfaces above
+(`WatchEvents` / `WatchRoutes` / `List*Events`) keep their existing
+ring-backed behavior and are unaffected by this section.
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `bgp_event_outbox_committed_total{category}` | Events durably committed to the local outbox, per category. Increments inside EHM after the SQLite transaction commits — not on producer enqueue. |
+| `bgp_event_outbox_dropped_total{category, reason}` | Events dropped before reaching durable storage, or skipped during cursor decode. `reason` is `queue_full`, `closed`, `db_error`, `decode_failure`, or `opaque_codec`. `queue_full`, `db_error`, and decode/codec failures flip `bgp_event_outbox_degraded` to `1`; shutdown-time `closed` drops do not. |
+| `bgp_event_outbox_queue_depth{category}` | Pending events in the EHM producer queue by category. Climbs before drops start — early-warning signal. |
+| `bgp_event_outbox_db_size_bytes` | Combined size of `events.db` + WAL on disk, refreshed after commits and retention passes. `[event_history].max_bytes` is the soft retention trigger. |
+| `bgp_event_outbox_retention_evicted_total{reason}` | Events evicted by the retention pass. `reason` is `count_cap` or `byte_cap`. |
+| `bgp_event_outbox_latest_event_id` | The latest committed `event_id`. Forward progress indicator. |
+| `bgp_event_outbox_open_failures_total` | DB-open failures across the process lifetime. Typically 0 or 1; non-zero means EHM went into recovery or pass-through at startup. |
+| `bgp_event_outbox_degraded` | `1` once the outbox has seen a durability-impacting drop, decode/codec failure, or open failure since start. Does not auto-clear in v1; the operator restarts to clear. |
+| `bgp_event_outbox_cursor_gap_total` | `SubscribeFromEvent` requests whose leading frame was a `StreamLagEvent` (the requested cursor was older than the retention floor). Operator signal that `[event_history].max_events` / `max_bytes` is undersized for the collector reconnect SLA. |
+
+**`FAILED_PRECONDITION` on `SubscribeFromEvent`** means one of:
+
+1. `[event_history].enabled = false` in the daemon config — by design;
+   the legacy live surfaces still work, but the durable cursor is
+   intentionally off. Flip to `true` and restart.
+2. `[event_history].required = false` and EHM failed to open
+   `events.db` at startup (permission denied, disk full, corruption).
+   `bgp_event_outbox_open_failures_total` will be ≥ 1 and
+   `bgp_event_outbox_degraded` is `1`. Check the daemon log for the
+   reason; fix permissions / free disk / restore from backup, then
+   restart. Pre-1.0, `required = true` is the strictest posture — the
+   daemon refuses to start when the outbox cannot be opened.
+3. EHM dropped into pass-through mode at runtime because the
+   allocator anchor became unrecoverable (e.g. a moved
+   `.stale-<ts>` quarantine file with no sidecar fallback). Same
+   recovery: check log, fix the underlying I/O issue, restart.
+
+**Sizing retention** — `max_events` and `max_bytes` are *both* hard
+caps; whichever fires first wins. Default `100_000` events /
+`256_000_000` bytes covers a few minutes of even a busy daemon's
+event stream. Operators with longer collector-reconnect tolerance
+should raise both proportionally; collectors should alert on
+`bgp_event_outbox_cursor_gap_total > 0` to know when retention is
+too small for their SLA. Note that `bgp_event_outbox_db_size_bytes`
+can briefly exceed `max_bytes` between retention passes — `max_bytes`
+is the trigger, not a strict cap. SQLite may also hold onto freed
+pages rather than immediately shrink the main DB.
+
+**External-bus integration** — see `examples/event-bridge/` for the
+reference skeleton. The pattern is:
+1. Connect with the last `event_id` your downstream sink confirmed
+   durable.
+2. Forward `BgpEvent` records to your sink.
+3. Advance the persisted `last_seen_event_id` **only after** the
+   sink confirms durable receipt.
+4. Treat a leading `StreamLagEvent` as a gap signal, not a stream
+   end — your collector lost events older than the retention floor.
+5. Use `BgpEvent.timestamp`, not `event_id`, for causal joins
+   across event categories. The durable `event_id` is
+   order-of-arrival at the EHM actor, not order-of-occurrence at
+   each producer.
+
 ## gRPC authorization audit and resource guardrails
 
 ADR-0064 v1 uses the daemon's structured JSON log path plus Prometheus metrics

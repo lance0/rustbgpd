@@ -8,8 +8,8 @@
 //! into one SQLite transaction, assigns a durable `event_id`, and
 //! broadcasts a [`CommittedEvent`] carrying that `event_id` alongside
 //! the **unchanged** producer payload bytes (the byte-equality
-//! invariant — see `tests/byte_equality.rs`). The cursor-based replay
-//! gRPC surface lands in PR3.
+//! invariant — see `tests/byte_equality.rs`). The daemon's gRPC layer
+//! exposes this through `SubscribeFromEvent`.
 //!
 //! ## Quick-start (for tests)
 //!
@@ -54,7 +54,8 @@ mod sequence;
 mod storage;
 
 pub use cursor::{
-    EventSubscription, SubscribeFilter, SubscribeRequest, SubscribeStats, SubscribeStatsSnapshot,
+    EventSubscription, EventSubscriptionItem, SubscribeFilter, SubscribeRequest, SubscribeStats,
+    SubscribeStatsSnapshot,
 };
 
 use std::net::IpAddr;
@@ -63,6 +64,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use rustbgpd_telemetry::BgpMetrics;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -149,6 +151,11 @@ pub struct EventHistoryConfig {
     pub retention_interval: Duration,
     /// Sidecar flush cadence (batches between writes).
     pub sidecar_flush_interval_batches: u64,
+    /// Optional Prometheus metrics handle. Tests and non-daemon callers
+    /// can leave this unset; the daemon passes its workspace metrics so
+    /// EHM can update commit, queue-depth, DB-size, retention, and latest
+    /// cursor gauges from inside the actor.
+    pub metrics: Option<BgpMetrics>,
 }
 
 impl Default for EventHistoryConfig {
@@ -165,6 +172,7 @@ impl Default for EventHistoryConfig {
             synchronous: SynchronousMode::Full,
             retention_interval: DEFAULT_RETENTION_INTERVAL,
             sidecar_flush_interval_batches: DEFAULT_SIDECAR_FLUSH_INTERVAL_BATCHES,
+            metrics: None,
         }
     }
 }
@@ -181,6 +189,15 @@ pub enum Category {
 }
 
 impl Category {
+    pub const ALL: [Self; 6] = [
+        Self::Route,
+        Self::Evpn,
+        Self::Session,
+        Self::Policy,
+        Self::Bfd,
+        Self::Dataplane,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -239,14 +256,14 @@ impl Severity {
 /// Names the encoding of [`EventEnvelope::payload`].
 ///
 /// Producer-driven — EHM treats payload bytes opaquely. The literal
-/// string `"opaque"` is the PR2 default; PR3+ producers will set
-/// `"proto"` once a single canonical proto envelope type is wired in.
+/// string `"opaque"` is available for tests and non-proto callers;
+/// production producers set `"proto"` for prost-encoded `BgpEvent`
+/// envelopes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayloadCodec {
-    /// Bytes are opaque to EHM. Used by PR2 tests + early producers
-    /// that haven't been wired to a proto envelope yet.
+    /// Bytes are opaque to EHM. Used by tests and non-proto callers.
     Opaque,
-    /// Bytes are a prost-encoded `BgpEvent` envelope. PR3+.
+    /// Bytes are a prost-encoded `BgpEvent` envelope.
     Proto,
 }
 
@@ -322,7 +339,7 @@ pub struct EventEnvelope {
 /// A committed event delivered on the EHM broadcast channel.
 ///
 /// Carries the assigned `event_id` alongside the byte-identical
-/// `payload` from [`EventEnvelope::payload`]. PR3's gRPC layer
+/// `payload` from [`EventEnvelope::payload`]. The gRPC layer
 /// converts these to `BgpEvent` envelopes for the wire.
 #[derive(Debug, Clone)]
 pub struct CommittedEvent {
@@ -336,6 +353,8 @@ pub struct CommittedEvent {
 #[derive(Debug, Clone)]
 pub struct EventHistorySender {
     tx: mpsc::Sender<EventEnvelope>,
+    queue_depths: Arc<QueueDepths>,
+    metrics: Option<BgpMetrics>,
 }
 
 impl EventHistorySender {
@@ -351,7 +370,17 @@ impl EventHistorySender {
         &self,
         env: EventEnvelope,
     ) -> Result<(), mpsc::error::TrySendError<EventEnvelope>> {
-        self.tx.try_send(env)
+        let category = env.category;
+        let depth = self.queue_depths.increment(category);
+        set_queue_depth_metric(self.metrics.as_ref(), category, depth);
+        match self.tx.try_send(env) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let depth = self.queue_depths.decrement(category);
+                set_queue_depth_metric(self.metrics.as_ref(), category, depth);
+                Err(e)
+            }
+        }
     }
 
     /// Currently-available slots in the underlying mpsc — the
@@ -371,8 +400,105 @@ impl EventHistorySender {
     }
 }
 
+#[derive(Debug, Default)]
+struct QueueDepths {
+    route: AtomicU64,
+    evpn: AtomicU64,
+    session: AtomicU64,
+    policy: AtomicU64,
+    bfd: AtomicU64,
+    dataplane: AtomicU64,
+}
+
+impl QueueDepths {
+    fn counter(&self, category: Category) -> &AtomicU64 {
+        match category {
+            Category::Route => &self.route,
+            Category::Evpn => &self.evpn,
+            Category::Session => &self.session,
+            Category::Policy => &self.policy,
+            Category::Bfd => &self.bfd,
+            Category::Dataplane => &self.dataplane,
+        }
+    }
+
+    fn increment(&self, category: Category) -> u64 {
+        self.counter(category).fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    fn decrement(&self, category: Category) -> u64 {
+        self.counter(category)
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                Some(value.saturating_sub(1))
+            })
+            .map_or(0, |previous| previous.saturating_sub(1))
+    }
+}
+
+fn set_queue_depth_metric(metrics: Option<&BgpMetrics>, category: Category, depth: u64) {
+    if let Some(metrics) = metrics {
+        metrics.set_event_outbox_queue_depth(
+            category.as_str(),
+            i64::try_from(depth).unwrap_or(i64::MAX),
+        );
+    }
+}
+
+fn initialize_queue_depth_metrics(metrics: Option<&BgpMetrics>) {
+    if let Some(metrics) = metrics {
+        for category in Category::ALL {
+            metrics.set_event_outbox_queue_depth(category.as_str(), 0);
+        }
+    }
+}
+
+fn record_append_metrics(
+    metrics: Option<&BgpMetrics>,
+    envelopes: &[Arc<EventEnvelope>],
+    outcome: &storage::AppendOutcome,
+) {
+    if let Some(metrics) = metrics {
+        for env in envelopes {
+            metrics.record_event_outbox_committed(env.category.as_str());
+        }
+        metrics.set_event_outbox_latest_event_id(
+            i64::try_from(outcome.new_high_water).unwrap_or(i64::MAX),
+        );
+        metrics.set_event_outbox_db_size_bytes(
+            i64::try_from(outcome.db_size_bytes).unwrap_or(i64::MAX),
+        );
+    }
+}
+
+fn record_commit_failure_metrics(metrics: Option<&BgpMetrics>, envelopes: &[Arc<EventEnvelope>]) {
+    if let Some(metrics) = metrics {
+        for env in envelopes {
+            metrics.record_event_outbox_drop(env.category.as_str(), "db_error");
+        }
+        metrics.mark_event_outbox_degraded();
+    }
+}
+
+fn record_retention_metrics(metrics: Option<&BgpMetrics>, outcome: storage::RetentionOutcome) {
+    if let Some(metrics) = metrics {
+        if outcome.evicted_count_cap > 0 {
+            metrics.record_event_outbox_retention_evicted(
+                "count_cap",
+                outcome.evicted_count_cap as u64,
+            );
+        }
+        if outcome.evicted_byte_cap > 0 {
+            metrics
+                .record_event_outbox_retention_evicted("byte_cap", outcome.evicted_byte_cap as u64);
+        }
+        metrics.set_event_outbox_db_size_bytes(
+            i64::try_from(outcome.db_size_bytes).unwrap_or(i64::MAX),
+        );
+    }
+}
+
 /// Broadcast subscription for committed events. Subscribers falling
-/// behind see `RecvError::Lagged` — the gRPC layer (PR3) emits a
+/// behind see `RecvError::Lagged` — the gRPC layer emits a
 /// `StreamLagEvent` in that case.
 pub type CommittedSubscriber = broadcast::Receiver<CommittedEvent>;
 
@@ -412,8 +538,116 @@ impl std::fmt::Debug for EventHistoryManager {
     }
 }
 
-/// Shared atomic state surfaced by EHM. The gRPC layer (PR3) reads
-/// these for `/healthz` + the `bgp_event_outbox_degraded` gauge.
+/// Cloneable read/write projection of [`EventHistoryManager`].
+///
+/// Returned by [`EventHistoryManager::handle`]. Holds:
+/// - the producer-facing [`EventHistorySender`] (clone-safe),
+/// - the live committed-event broadcast,
+/// - the shared [`EhmState`] (degraded / pass-through / latest id),
+/// - the daemon boot id, stamped on every committed event,
+/// - the (crate-internal) storage handle, so the cursor RPC can
+///   resolve `MIN(event_id)` live for cursor-gap detection.
+///
+/// Crucially, the handle does **not** keep the actor or storage
+/// thread alive — those are owned by the parent
+/// [`EventHistoryManager`], whose [`EventHistoryManager::shutdown`]
+/// is a consuming method. Producers and gRPC handlers may hold any
+/// number of `EventHistoryHandle` clones without affecting shutdown.
+#[derive(Clone)]
+pub struct EventHistoryHandle {
+    sender: EventHistorySender,
+    broadcast_tx: broadcast::Sender<CommittedEvent>,
+    state: Arc<EhmState>,
+    daemon_boot_id: Arc<str>,
+    storage: storage::StoreHandle,
+}
+
+impl std::fmt::Debug for EventHistoryHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventHistoryHandle")
+            .field("daemon_boot_id", &self.daemon_boot_id)
+            .field("latest_event_id", &self.state.latest_event_id())
+            .field("degraded", &self.state.degraded())
+            .field("pass_through", &self.state.pass_through())
+            .finish()
+    }
+}
+
+impl EventHistoryHandle {
+    /// Producer-facing sender. Clone freely; producers should hold
+    /// their own [`EventHistorySender`] from [`Self::sender`] (not the
+    /// handle) so producer call sites don't carry the full handle.
+    #[must_use]
+    pub fn sender(&self) -> EventHistorySender {
+        self.sender.clone()
+    }
+
+    /// Shared atomic state — degraded flag, pass-through flag, latest
+    /// committed `event_id`. Lock-free reads.
+    #[must_use]
+    pub fn state(&self) -> &Arc<EhmState> {
+        &self.state
+    }
+
+    /// Daemon boot id for the running process. Useful for collectors
+    /// that want to detect "the daemon I was talking to restarted"
+    /// without parsing event payloads.
+    #[must_use]
+    pub fn daemon_boot_id(&self) -> &Arc<str> {
+        &self.daemon_boot_id
+    }
+
+    /// Subscribe to the durable committed-event stream with optional
+    /// cursor replay. Delegates to the shared free-function form so
+    /// the actor-ordered handoff has exactly one implementation. See
+    /// [`SubscribeRequest`] for the cursor semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EventHistoryError::PassThrough`] when EHM is in
+    /// pass-through mode (no durable backing).
+    pub fn subscribe_from_event(
+        &self,
+        req: SubscribeRequest,
+    ) -> Result<EventSubscription, EventHistoryError> {
+        // Step (1) of the 3-step handoff: attach the live receiver
+        // here, BEFORE the inner function reads the high-watermark.
+        // Doing the subscribe inline (no `await` between subscribe
+        // and watermark capture) preserves the race-free shape.
+        let live_rx = self.broadcast_tx.subscribe();
+        cursor::subscribe_from_event_inner(req, self.state.as_ref(), live_rx, self.storage.clone())
+    }
+
+    /// Subscribe to the live broadcast directly (no cursor replay).
+    /// Equivalent to `subscribe_from_event(None, …)` but returns the
+    /// raw broadcast receiver — useful in tests and for live-only
+    /// consumers that want the broadcast's `Lagged` signal.
+    #[must_use]
+    pub fn subscribe_live(&self) -> broadcast::Receiver<CommittedEvent> {
+        self.broadcast_tx.subscribe()
+    }
+
+    /// `MIN(event_id)` over the live `events` table, or `None` when
+    /// the table is empty. Resolves a live SQLite query rather than
+    /// reading a cached atomic so retention races don't surface as
+    /// stale gap counts. The gRPC `SubscribeFromEvent` handler calls
+    /// this once at subscribe time to decide whether to emit a
+    /// leading `StreamLagEvent`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EventHistoryError::PassThrough`] when the storage
+    /// thread has exited or EHM is in pass-through mode.
+    pub async fn oldest_retained_event_id(&self) -> Result<Option<u64>, EventHistoryError> {
+        if self.state.pass_through() {
+            return Err(EventHistoryError::PassThrough);
+        }
+        self.storage.oldest_event_id().await
+    }
+}
+
+/// Shared atomic state surfaced by EHM. The gRPC layer and metrics
+/// plumbing read these for cursor availability and degraded state.
 #[derive(Debug, Default)]
 pub struct EhmState {
     /// Latest committed `event_id`. Updated atomically after each
@@ -445,7 +679,12 @@ impl EhmState {
         self.pass_through.load(Ordering::Acquire)
     }
 
-    fn flip_degraded(&self) {
+    /// Flip the degraded flag to `true`. Public so out-of-crate
+    /// producers (the EHM-backed RIB sink, the BFD bridge, etc.) can
+    /// signal that they had to drop an event before it reached the
+    /// outbox. Idempotent: re-flipping a true flag is a no-op. Never
+    /// auto-clears in v1; operator restarts to clear.
+    pub fn flip_degraded(&self) {
         self.degraded.store(true, Ordering::Release);
     }
 }
@@ -489,6 +728,9 @@ impl EventHistoryManager {
 
         if init.had_quarantine {
             state.flip_degraded();
+            if let Some(metrics) = &config.metrics {
+                metrics.mark_event_outbox_degraded();
+            }
             warn!(
                 path = %config.path.display(),
                 recovered_via_fallback = init.recovered_via_fallback,
@@ -499,24 +741,35 @@ impl EventHistoryManager {
         state
             .latest_event_id
             .store(init.initial_allocator, Ordering::Release);
+        if let Some(metrics) = &config.metrics {
+            metrics.set_event_outbox_latest_event_id(
+                i64::try_from(init.initial_allocator).unwrap_or(i64::MAX),
+            );
+        }
 
         let (producer_tx, producer_rx) = mpsc::channel(config.queue_capacity);
         let (broadcast_tx, _) = broadcast::channel(config.broadcast_capacity);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let queue_depths = Arc::new(QueueDepths::default());
+        initialize_queue_depth_metrics(config.metrics.as_ref());
 
         let actor_state = state.clone();
         let actor_store = store_handle.clone();
         let actor_broadcast = broadcast_tx.clone();
         let actor_boot_id = daemon_boot_id.clone();
         let actor_config = config.clone();
+        let actor_queue_depths = queue_depths.clone();
 
         let actor = tokio::spawn(async move {
             run_actor(
-                actor_config,
-                actor_state,
-                actor_store,
-                actor_broadcast,
-                actor_boot_id,
+                ActorContext {
+                    config: actor_config,
+                    state: actor_state,
+                    store: actor_store,
+                    broadcast_tx: actor_broadcast,
+                    daemon_boot_id: actor_boot_id,
+                    queue_depths: actor_queue_depths,
+                },
                 producer_rx,
                 shutdown_rx,
             )
@@ -531,7 +784,11 @@ impl EventHistoryManager {
         );
 
         Ok(Self {
-            sender: EventHistorySender { tx: producer_tx },
+            sender: EventHistorySender {
+                tx: producer_tx,
+                queue_depths,
+                metrics: config.metrics.clone(),
+            },
             broadcast_tx,
             storage: store_handle,
             actor: Some(actor),
@@ -550,7 +807,8 @@ impl EventHistoryManager {
 
     /// Subscribe to committed events. New subscribers see events
     /// committed AFTER subscription only — cursor-based replay lives
-    /// in PR3.
+    /// in [`EventHistoryManager::subscribe_from_event`] and
+    /// [`EventHistoryHandle::subscribe_from_event`].
     #[must_use]
     pub fn subscribe(&self) -> CommittedSubscriber {
         self.broadcast_tx.subscribe()
@@ -569,8 +827,8 @@ impl EventHistoryManager {
         self.daemon_boot_id.clone()
     }
 
-    /// Force a query against the durable store. PR2 exposes this for
-    /// tests; PR3 wraps it in the `SubscribeFromEvent` cursor RPC.
+    /// Force a query against the durable store. Tests use this directly;
+    /// the daemon wraps it in the `SubscribeFromEvent` cursor RPC.
     pub async fn query_persisted(
         &self,
         from_event_id: u64,
@@ -597,6 +855,25 @@ impl EventHistoryManager {
     /// drain task's replay-phase queries.
     pub(crate) fn storage_handle_for_cursor(&self) -> storage::StoreHandle {
         self.storage.clone()
+    }
+
+    /// Return a cloneable read/write projection of this manager.
+    ///
+    /// The handle exposes the producer-facing sender, the cursor RPC
+    /// (`subscribe_from_event`), the live broadcast, and the shared
+    /// state. Lifecycle (`shutdown`) stays on the manager, which is
+    /// **not** `Clone` — the binary holds the manager and threads
+    /// handle clones into `EventService`, the RIB sink adapter,
+    /// `PeerManager`, and the BFD bridge.
+    #[must_use]
+    pub fn handle(&self) -> EventHistoryHandle {
+        EventHistoryHandle {
+            sender: self.sender.clone(),
+            broadcast_tx: self.broadcast_tx.clone(),
+            state: self.state.clone(),
+            daemon_boot_id: self.daemon_boot_id.clone(),
+            storage: self.storage.clone(),
+        }
     }
 
     /// Graceful shutdown: signals the actor, drains pending events
@@ -637,19 +914,35 @@ impl EventHistoryManager {
     }
 }
 
-async fn run_actor(
+struct ActorContext {
     config: EventHistoryConfig,
     state: Arc<EhmState>,
     store: storage::StoreHandle,
     broadcast_tx: broadcast::Sender<CommittedEvent>,
     daemon_boot_id: Arc<str>,
+    queue_depths: Arc<QueueDepths>,
+}
+
+async fn run_actor(
+    ctx: ActorContext,
     mut rx: mpsc::Receiver<EventEnvelope>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
+    let ActorContext {
+        config,
+        state,
+        store,
+        broadcast_tx,
+        daemon_boot_id,
+        queue_depths,
+    } = ctx;
+
     let mut buffer: Vec<EventEnvelope> = Vec::with_capacity(config.batch_size);
     let mut batches_since_sidecar_flush: u64 = 0;
     let mut retention_interval = tokio::time::interval(config.retention_interval);
-    let mut retention_task: Option<JoinHandle<()>> = None;
+    let mut retention_task: Option<
+        JoinHandle<Result<storage::RetentionOutcome, EventHistoryError>>,
+    > = None;
     retention_interval.tick().await; // skip the immediate tick
 
     loop {
@@ -668,6 +961,8 @@ async fn run_actor(
                 maybe = rx.recv() => {
                     match maybe {
                         Some(env) => {
+                            let depth = queue_depths.decrement(env.category);
+                            set_queue_depth_metric(config.metrics.as_ref(), env.category, depth);
                             buffer.push(env);
                             if buffer.len() >= config.batch_size {
                                 break;
@@ -693,17 +988,20 @@ async fn run_actor(
                         continue;
                     }
                     if let Some(task) = retention_task.take()
-                        && let Err(e) = task.await
                     {
-                        warn!(error = %e, "retention task join failed");
+                        match task.await {
+                            Ok(Ok(outcome)) => {
+                                record_retention_metrics(config.metrics.as_ref(), outcome);
+                            }
+                            Ok(Err(e)) => warn!(error = %e, "retention pass failed"),
+                            Err(e) => warn!(error = %e, "retention task join failed"),
+                        }
                     }
                     let store = store.clone();
                     let max_events = config.max_events;
                     let max_bytes = config.max_bytes;
                     retention_task = Some(tokio::spawn(async move {
-                        if let Err(e) = store.retain(max_events, max_bytes).await {
-                            warn!(error = %e, "retention pass failed");
-                        }
+                        store.retain(max_events, max_bytes).await
                     }));
                 }
             }
@@ -717,7 +1015,11 @@ async fn run_actor(
             let drain_cap = config.batch_size.saturating_mul(2);
             while buffer.len() < drain_cap {
                 match rx.try_recv() {
-                    Ok(env) => buffer.push(env),
+                    Ok(env) => {
+                        let depth = queue_depths.decrement(env.category);
+                        set_queue_depth_metric(config.metrics.as_ref(), env.category, depth);
+                        buffer.push(env);
+                    }
                     Err(_) => break,
                 }
             }
@@ -725,9 +1027,9 @@ async fn run_actor(
 
         // Phase 2: commit, broadcast, update state.
         //
-        // Codex review finding [HIGH]: `store.append()` is a
-        // spawn_blocking-backed operation that can wedge behind a
-        // slow/locked SQLite or a stalled disk. We race it against
+        // `store.append()` is a spawn_blocking-backed operation that
+        // can wedge behind a slow/locked SQLite or a stalled disk. We
+        // race it against
         // `shutdown_rx.changed()` so a stalled append can't hold the
         // actor past shutdown. The committed-side guarantee still
         // holds — if shutdown cancels the await before append
@@ -775,6 +1077,7 @@ async fn run_actor(
                     state
                         .latest_event_id
                         .store(outcome.new_high_water, Ordering::Release);
+                    record_append_metrics(config.metrics.as_ref(), &shared, &outcome);
                     // Broadcast every committed envelope with its assigned ID.
                     // CommittedEvent carries the same Arc handed to storage, so
                     // broadcast fanout clones a pointer, not payload bytes.
@@ -802,6 +1105,7 @@ async fn run_actor(
                 }
                 Err(e) => {
                     error!(error = %e, "batch commit failed; events dropped");
+                    record_commit_failure_metrics(config.metrics.as_ref(), &shared);
                     state.flip_degraded();
                 }
             }

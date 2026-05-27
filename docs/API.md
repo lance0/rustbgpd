@@ -828,6 +828,7 @@ ADR-0061 per-route FIB apply outcomes, and BFD session state changes.
 | RPC | Description |
 |-----|-------------|
 | `WatchEvents` | Server-streaming: unified typed event stream sourced from structured daemon events |
+| `SubscribeFromEvent` | Server-streaming: durable event-history cursor replay from the local outbox, then live |
 | `ListSessionEvents` | Unary: recent session lifecycle events from the peer manager's bounded in-memory history |
 | `ListPolicyEvents` | Unary: recent policy / neighbor-set / peer-group / chain mutation events from the peer manager's bounded in-memory history |
 | `ListEvpnEvents` | Unary: recent EVPN route add / withdraw / best-change events from the RIB's bounded in-memory history |
@@ -884,6 +885,11 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"categories": ["EVENT_CATEGORY_EVPN"], "event_types": ["BGP_EVENT_TYPE_EVPN_ROUTE_ADDED", "BGP_EVENT_TYPE_EVPN_ROUTE_WITHDRAWN", "BGP_EVENT_TYPE_EVPN_ROUTE_BEST_CHANGED"], "neighbor_address": "10.0.0.2"}' \
   localhost:50051 rustbgpd.v1.EventService/WatchEvents
 
+# Replay all retained durable events, then continue live
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"from_event_id": 0}' \
+  localhost:50051 rustbgpd.v1.EventService/SubscribeFromEvent
+
 # Query recent Type 2 EVPN route events for one RD
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"route_type_filter": 2, "rd_filter": "65000:100", "limit": 20}' \
@@ -898,6 +904,20 @@ through the same `BgpEvent` renderer used by the live stream, and suppressing
 live route events whose `event_id` was already printed. The command prints a
 history block followed by the live tail; it does not server-side merge the two
 streams by wall-clock timestamp.
+
+`SubscribeFromEvent` is the restart-safe durable cursor surface backed by
+`[event_history]`'s local SQLite outbox. Its `from_event_id` field uses explicit
+presence: absent means live-only, `0` replays every retained event before
+joining live, and `N > 0` replays events with `event_id > N` before joining
+live. If `N` is older than the retention floor, the first response is a
+`BGP_EVENT_TYPE_STREAM_LAGGED` event whose `missed_count` describes the global
+outbox gap; the stream then continues from the earliest retained event. Empty
+category and type filters select every EHM-fed category on this RPC: route,
+EVPN, session lifecycle, session notifications, policy, and BFD. Dataplane
+events remain live-only on `WatchEvents` in this release. When event history is
+disabled or unavailable, the RPC returns `FAILED_PRECONDITION`; legacy live and
+`List*Events` RPCs are unaffected.
+
 Filters compose
 AND-wise across category, type, peer, family, and exact prefix. Repeated
 category and type filters are OR-matched within their own dimension. Route
