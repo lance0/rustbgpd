@@ -194,6 +194,12 @@ pub struct PeerManager {
     /// durable enqueue is skipped — daemons with `[event_history]
     /// .enabled = false` see no behavior change.
     event_history: Option<rustbgpd_event_history::EventHistoryHandle>,
+    /// Out-of-crate transport event sink (ADR-0072 follow-up). When
+    /// `Some`, each spawned `PeerHandle` is wired with this sink so
+    /// transport-layer policy events (today: OTC route-leak
+    /// decisions) are published through the durable cursor. Wired
+    /// at the same daemon-startup site as `event_history`.
+    transport_event_sink: Option<std::sync::Arc<dyn rustbgpd_transport::TransportEventSink>>,
 }
 
 impl PeerManager {
@@ -328,6 +334,7 @@ impl PeerManager {
             current_config,
             bfd_coupling: None,
             event_history: None,
+            transport_event_sink: None,
         }
     }
 
@@ -343,6 +350,21 @@ impl PeerManager {
         handle: Option<rustbgpd_event_history::EventHistoryHandle>,
     ) -> Self {
         self.event_history = handle;
+        self
+    }
+
+    /// Install the out-of-crate transport event sink (ADR-0072
+    /// follow-up). Each spawned `PeerHandle` carries this sink so
+    /// transport-layer policy events (OTC route-leak decisions) are
+    /// published through the durable cursor alongside the existing
+    /// counter + per-`NeighborState` scalar. Called at the same
+    /// startup site as `with_event_history`.
+    #[must_use]
+    pub fn with_transport_event_sink(
+        mut self,
+        sink: Option<std::sync::Arc<dyn rustbgpd_transport::TransportEventSink>>,
+    ) -> Self {
+        self.transport_event_sink = sink;
         self
     }
 

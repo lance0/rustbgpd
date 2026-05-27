@@ -307,9 +307,12 @@ exposes a monotonic `event_id` cursor. The legacy live surfaces above
 ring-backed behavior and are unaffected by this section.
 
 Producer set: `route`, `evpn`, `session` (lifecycle + notification),
-`policy`, `bfd`, and `dataplane` (FIB + blackhole summaries and
-per-route install / withdraw / failure events). All six categories
-are produced through the durable outbox when
+`policy` (config-mutation `POLICY_CHANGED` events **plus**
+transport-layer `OTC_ROUTE_BLOCKED` route-leak decisions — both
+ride on `EVENT_CATEGORY_POLICY`, discriminated by `BgpEventType`),
+`bfd`, and `dataplane` (FIB + blackhole summaries and per-route
+install / withdraw / failure events). All six categories are
+produced through the durable outbox when
 `[event_history].enabled = true`. The dataplane poller is
 startup-spawned so durable summaries flow regardless of whether
 any `WatchEvents` subscriber is alive.
@@ -689,6 +692,7 @@ rustbgpctl events watch --prefix 203.0.113.0/24 --type added,best_changed
 rustbgpctl events watch --category session --type established,lost
 rustbgpctl events watch --category session --type notification_sent,notification_received
 rustbgpctl events watch --category policy --type policy_changed
+rustbgpctl events watch --category policy --type otc_route_blocked
 rustbgpctl events watch --category dataplane --type dataplane_status_changed
 rustbgpctl events watch --category dataplane --type dataplane_route_failed --prefix 203.0.113.0/24
 rustbgpctl events watch --prefix 203.0.113.0/24 --type policy_filtered

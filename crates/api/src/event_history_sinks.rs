@@ -29,6 +29,7 @@ use rustbgpd_event_history::{
 };
 use rustbgpd_rib::{EvpnRouteEvent, RibEventSink, RouteEvent};
 use rustbgpd_telemetry::BgpMetrics;
+use rustbgpd_transport::{OtcRouteBlockedEvent, TransportEventSink};
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::warn;
 
@@ -129,6 +130,39 @@ pub fn make_rib_event_sink(
     metrics: BgpMetrics,
 ) -> Arc<dyn RibEventSink> {
     Arc::new(EhmRibSink { handle, metrics })
+}
+
+/// Concrete sink that encodes transport-layer OTC decisions to proto
+/// and enqueues them into the local event outbox under
+/// [`Category::Policy`].
+struct EhmTransportSink {
+    handle: EventHistoryHandle,
+    metrics: BgpMetrics,
+}
+
+impl TransportEventSink for EhmTransportSink {
+    fn publish_otc_route_blocked(&self, event: &OtcRouteBlockedEvent) {
+        let proto_event = convert::otc_route_blocked_event_to_bgp_event(event);
+        let envelope =
+            envelope_from_bgp_event(&proto_event, Category::Policy, Some(event.peer), None);
+        try_send_envelope(&self.handle, &self.metrics, envelope);
+    }
+}
+
+/// Construct an EHM-backed transport event sink for installation on
+/// `PeerManager` via the binary's wiring layer. The returned
+/// `Arc<dyn TransportEventSink>` is `Clone` and `Send + Sync`.
+///
+/// All publishes are non-blocking and category-tagged `policy` — the
+/// OTC route-leak rule is policy enforcement at session ingress /
+/// egress (ADR-0071), so it shares the existing policy storage
+/// bucket and authz tier rather than requiring a fresh category.
+#[must_use]
+pub fn make_transport_event_sink(
+    handle: EventHistoryHandle,
+    metrics: BgpMetrics,
+) -> Arc<dyn TransportEventSink> {
+    Arc::new(EhmTransportSink { handle, metrics })
 }
 
 /// Build an [`EventEnvelope`] from a fully-formed proto [`proto::BgpEvent`]
@@ -306,6 +340,70 @@ mod tests {
         assert!(
             metrics.event_outbox_degraded(),
             "Prometheus degraded gauge must flip on source_lagged drop"
+        );
+
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn make_transport_event_sink_enqueues_under_policy_category() {
+        // End-to-end smoke for the EHM-backed transport sink. An
+        // OTC ingress decision feeds the sink; the durable broadcast
+        // receiver should observe one envelope under
+        // `Category::Policy` with the expected event_type label and
+        // a non-empty payload. This is the only test that exercises
+        // the conversion + enqueue path against a real EHM actor.
+        let dir = tempfile::tempdir().unwrap();
+        let manager = EventHistoryManager::start(EventHistoryConfig {
+            path: dir.path().join("events.db"),
+            max_events: 100,
+            max_bytes: 1_000_000,
+            synchronous: SynchronousMode::Full,
+            required: false,
+            queue_capacity: 64,
+            batch_size: 1,
+            batch_interval: Duration::from_millis(10),
+            broadcast_capacity: 64,
+            retention_interval: Duration::from_mins(1),
+            sidecar_flush_interval_batches: 100,
+            metrics: None,
+        })
+        .await
+        .expect("EHM start");
+        let handle = manager.handle();
+        let metrics = BgpMetrics::new();
+        let sink = make_transport_event_sink(handle.clone(), metrics);
+
+        let mut broadcast_rx = handle.subscribe_live();
+
+        let event = OtcRouteBlockedEvent {
+            peer: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2)),
+            direction: rustbgpd_transport::OtcDirection::Ingress,
+            reason: "ingress_from_customer_rsclient",
+            prefixes: vec!["203.0.113.0/24".to_string()],
+            local_role: Some(rustbgpd_wire::BgpRole::Provider),
+            remote_role: Some(rustbgpd_wire::BgpRole::Customer),
+            otc_value: Some(65002),
+            as_path: "65002".to_string(),
+        };
+        sink.publish_otc_route_blocked(&event);
+
+        // The EHM actor commits in batches of 1 with a 10ms interval;
+        // wait for the first event to land on the broadcast.
+        let committed = tokio::time::timeout(Duration::from_secs(2), broadcast_rx.recv())
+            .await
+            .expect("EHM broadcast did not deliver within 2s")
+            .expect("EHM broadcast closed before delivery");
+
+        assert_eq!(committed.envelope.category, Category::Policy);
+        assert!(
+            committed.envelope.event_type.contains("OTC_ROUTE_BLOCKED"),
+            "event_type label should name the new variant, got {:?}",
+            committed.envelope.event_type
+        );
+        assert!(
+            !committed.envelope.payload.is_empty(),
+            "payload must round-trip the prost-encoded BgpEvent"
         );
 
         manager.shutdown().await;

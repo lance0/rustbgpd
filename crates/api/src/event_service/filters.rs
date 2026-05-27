@@ -425,6 +425,7 @@ fn bgp_event_type_to_session_event_type(
         | proto::BgpEventType::BfdSessionUp
         | proto::BgpEventType::BfdSessionDown
         | proto::BgpEventType::BfdSessionStateChanged
+        | proto::BgpEventType::OtcRouteBlocked
         | proto::BgpEventType::StreamLagged => None,
     }
 }
@@ -481,6 +482,7 @@ fn parse_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<i32>, Status>
             | proto::BgpEventType::BfdSessionUp
             | proto::BgpEventType::BfdSessionDown
             | proto::BgpEventType::BfdSessionStateChanged
+            | proto::BgpEventType::OtcRouteBlocked
             | proto::BgpEventType::StreamLagged => {
                 parsed.insert(event_type as i32);
             }
@@ -521,7 +523,11 @@ fn parse_policy_event_type_filter(event_types: &[i32]) -> Result<(), Status> {
         let event_type = proto::BgpEventType::try_from(*event_type)
             .map_err(|_| Status::invalid_argument("unknown event type"))?;
         match event_type {
-            proto::BgpEventType::PolicyChanged => {}
+            // Both PolicyChanged (config-mutation event) and
+            // OtcRouteBlocked (per-decision route-leak event) ride on
+            // EVENT_CATEGORY_POLICY, so ListPolicyEvents accepts both
+            // as filter values.
+            proto::BgpEventType::PolicyChanged | proto::BgpEventType::OtcRouteBlocked => {}
             proto::BgpEventType::Unspecified => {
                 return Err(Status::invalid_argument(
                     "BGP_EVENT_TYPE_UNSPECIFIED is not a valid filter",
@@ -597,6 +603,7 @@ fn parse_evpn_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<RouteEve
             | proto::BgpEventType::BfdSessionUp
             | proto::BgpEventType::BfdSessionDown
             | proto::BgpEventType::BfdSessionStateChanged
+            | proto::BgpEventType::OtcRouteBlocked
             | proto::BgpEventType::StreamLagged => {
                 return Err(Status::invalid_argument(
                     "ListEvpnEvents only supports EVPN event types",

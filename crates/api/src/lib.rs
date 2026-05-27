@@ -46,8 +46,8 @@ pub use evpn_service::EvpnService;
 /// requires bumping the api crate's version.
 pub mod event_converters {
     pub use crate::event_service::convert::{
-        evpn_event_to_bgp_event, policy_event_to_bgp_event, route_event_to_bgp_event,
-        session_event_to_bgp_event,
+        evpn_event_to_bgp_event, otc_route_blocked_event_to_bgp_event, policy_event_to_bgp_event,
+        route_event_to_bgp_event, session_event_to_bgp_event,
     };
 }
 

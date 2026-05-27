@@ -11,6 +11,7 @@
 
 pub mod config;
 pub mod error;
+pub mod event_sink;
 pub mod framing;
 pub mod handle;
 pub mod listener;
@@ -21,6 +22,9 @@ pub mod timer;
 
 pub use config::{RemovePrivateAs, TcpAoAlgorithm, TcpAoConfig, TransportConfig};
 pub use error::TransportError;
+pub use event_sink::{
+    NoopTransportEventSink, OtcDirection, OtcRouteBlockedEvent, TransportEventSink,
+};
 pub use handle::{
     PeerCommand, PeerHandle, PeerSessionState, SessionIdentity, SessionLifecycleNotification,
     SessionNotification, SessionNotificationDirection, SessionNotificationEvent, SessionRole,

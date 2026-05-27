@@ -1208,7 +1208,10 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         Some(validation_watch_rx),
         config.clone(),
     )
-    .with_event_history(event_history_handle.clone());
+    .with_event_history(event_history_handle.clone())
+    .with_transport_event_sink(event_history_handle.clone().map(|handle| {
+        rustbgpd_api::event_history_sinks::make_transport_event_sink(handle, metrics.clone())
+    }));
     // Wire BFD coupling only when BFD is configured; otherwise the unused ends
     // are dropped (the actor won't spawn either). PeerManager holds the desired
     // sender for life and never recreates it (the actor treats sender drop as

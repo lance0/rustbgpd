@@ -189,6 +189,19 @@ fn render_payload(payload: &proto::bgp_event::Payload) -> Value {
             "missed_count": l.missed_count,
             "reason": l.reason,
         }),
+        proto::bgp_event::Payload::OtcRouteBlocked(o) => json!({
+            "type": "otc_route_blocked",
+            "peer": o.peer_address,
+            "direction": o.direction,
+            "reason": o.reason,
+            "prefixes": o.prefixes,
+            "count": o.count,
+            "local_role": o.local_role,
+            "remote_role": o.remote_role,
+            "otc_value": o.otc_value,
+            "as_path": o.as_path,
+            "summary": o.summary,
+        }),
     }
 }
 

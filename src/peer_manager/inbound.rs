@@ -32,7 +32,7 @@ impl PeerManager {
         let export_policy = managed.export_policy.clone();
         let advertise_graceful_shutdown = managed.advertise_graceful_shutdown;
         let session_id = self.allocate_session_id();
-        let handle = PeerHandle::spawn_inbound_with_identity_and_lifecycle(
+        let handle = PeerHandle::spawn_inbound_with_event_sink_and_identity_and_lifecycle(
             transport_config,
             self.metrics.clone(),
             self.rib_tx.clone(),
@@ -46,6 +46,7 @@ impl PeerManager {
             self.validation_rx.clone(),
             advertise_graceful_shutdown,
             SessionIdentity::inbound_candidate(session_id),
+            self.transport_event_sink.clone(),
         );
 
         if let Err(e) = handle.start().await {
@@ -173,7 +174,7 @@ impl PeerManager {
                     .is_some_and(|pending| pending.graceful_shutdown);
 
                 let session_id = self.allocate_session_id();
-                let handle = PeerHandle::spawn_inbound_with_identity_and_lifecycle(
+                let handle = PeerHandle::spawn_inbound_with_event_sink_and_identity_and_lifecycle(
                     transport.clone(),
                     self.metrics.clone(),
                     self.rib_tx.clone(),
@@ -187,6 +188,7 @@ impl PeerManager {
                     self.validation_rx.clone(),
                     advertise_graceful_shutdown,
                     SessionIdentity::primary(session_id),
+                    self.transport_event_sink.clone(),
                 );
 
                 if let Err(e) = handle.start().await {
@@ -414,7 +416,7 @@ impl PeerManager {
             let old_session_id = managed.session_id;
             let old_handle = std::mem::replace(
                 &mut managed.handle,
-                PeerHandle::spawn_inbound_with_identity_and_lifecycle(
+                PeerHandle::spawn_inbound_with_event_sink_and_identity_and_lifecycle(
                     managed.transport_config.clone(),
                     self.metrics.clone(),
                     self.rib_tx.clone(),
@@ -428,6 +430,7 @@ impl PeerManager {
                     self.validation_rx.clone(),
                     advertise_graceful_shutdown,
                     SessionIdentity::primary(session_id),
+                    self.transport_event_sink.clone(),
                 ),
             );
             managed.session_id = session_id;

@@ -36,6 +36,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::{RemovePrivateAs, TransportConfig};
 use crate::error::TransportError;
+use crate::event_sink::{NoopTransportEventSink, TransportEventSink};
 use crate::framing::ReadBuffer;
 use crate::handle::{
     PeerCommand, PeerSessionState, SessionIdentity, SessionLifecycleNotification,
@@ -200,6 +201,12 @@ pub(crate) struct PeerSession {
     received_hard_reset: bool,
     /// RFC 8538: we sent Cease/Hard Reset — skip GR on this teardown.
     sent_hard_reset: bool,
+    /// Out-of-crate sink for structured transport-policy events
+    /// (ADR-0072 follow-up). Defaults to
+    /// [`NoopTransportEventSink`]; the binary plugs in an EHM-backed
+    /// implementation via [`PeerSession::set_event_sink`] before
+    /// the session task runs when `[event_history]` is enabled.
+    event_sink: Arc<dyn TransportEventSink>,
 }
 
 /// Outbound channel buffer size.
@@ -370,6 +377,7 @@ impl PeerSession {
             notification_teardown: false,
             received_hard_reset: false,
             sent_hard_reset: false,
+            event_sink: Arc::new(NoopTransportEventSink),
         }
     }
 
@@ -451,6 +459,7 @@ impl PeerSession {
             notification_teardown: false,
             received_hard_reset: false,
             sent_hard_reset: false,
+            event_sink: Arc::new(NoopTransportEventSink),
         }
     }
 
@@ -528,6 +537,20 @@ impl PeerSession {
         self.otc_routes_blocked = self.otc_routes_blocked.saturating_add(count);
         self.metrics
             .record_otc_routes_blocked(&self.peer_label, reason, count);
+    }
+
+    /// Install a transport event sink for ADR-0072 structured event
+    /// publishing. Called by [`crate::handle::PeerHandle::spawn_with_event_sink`]
+    /// (and its inbound counterpart) before [`Self::run`] starts; the
+    /// session task runs single-threaded so this `&mut` cannot race
+    /// with publishes. Tests can also call this to install a
+    /// recording sink before driving fixture UPDATEs.
+    pub(crate) fn set_event_sink(&mut self, sink: Arc<dyn TransportEventSink>) {
+        self.event_sink = sink;
+    }
+
+    pub(super) fn event_sink(&self) -> &Arc<dyn TransportEventSink> {
+        &self.event_sink
     }
 
     /// Main event loop. Runs until Shutdown command or fatal error.

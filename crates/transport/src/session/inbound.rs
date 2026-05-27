@@ -78,6 +78,38 @@ fn otc_state(attrs: &[PathAttribute]) -> OtcState {
     found
 }
 
+/// Build the `(otc_value, as_path_string)` pair attached to an
+/// [`OtcRouteBlockedEvent`] for the ingress decision sites.
+///
+/// `otc_value` is `None` on the `malformed_length` path because the
+/// attribute could not be decoded (the codec returns
+/// `OtcState::MalformedLength` rather than a usable ASN). For both
+/// I1 (`ingress_from_customer_rsclient`) and I2
+/// (`ingress_peer_mismatch`) the codec returns the present ASN.
+///
+/// `as_path_string` uses
+/// [`rustbgpd_wire::AsPath::to_aspath_string`] so `AS_SET` / confed
+/// segments survive the lossless round-trip into the structured
+/// event — the proto field is `string`, not `repeated uint32`.
+fn otc_event_context(attrs: &[PathAttribute], reason: &'static str) -> (Option<u32>, String) {
+    let otc_value = if reason == "malformed_length" {
+        None
+    } else {
+        match otc_state(attrs) {
+            OtcState::Present(asn) => Some(asn),
+            OtcState::Absent | OtcState::MalformedLength => None,
+        }
+    };
+    let as_path_string = attrs
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::AsPath(p) => Some(p.to_aspath_string()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    (otc_value, as_path_string)
+}
+
 fn otc_ingress_action(
     local_role: Option<BgpRole>,
     remote_asn: Option<u32>,
@@ -315,20 +347,25 @@ impl PeerSession {
         let otc_drop_unicast_announcements =
             matches!(otc_action, OtcIngressAction::DropUnicastAnnouncements(_));
         if let OtcIngressAction::DropUnicastAnnouncements(reason) = otc_action {
-            let rejected = parsed.announced.len()
-                + parsed
-                    .attributes
-                    .iter()
-                    .filter_map(|attr| match attr {
-                        PathAttribute::MpReachNlri(mp)
-                            if (mp.afi, mp.safi) == (Afi::Ipv4, Safi::Unicast)
-                                || (mp.afi, mp.safi) == (Afi::Ipv6, Safi::Unicast) =>
-                        {
-                            Some(mp.announced.len())
-                        }
-                        _ => None,
-                    })
-                    .sum::<usize>();
+            // Collect every unicast prefix the OTC rule rejected:
+            // body NLRI (always IPv4) plus IPv4/IPv6 unicast
+            // MP_REACH_NLRI. Other families are out of scope for OTC.
+            let mut blocked_prefixes: Vec<String> = parsed
+                .announced
+                .iter()
+                .map(|e| e.prefix.to_string())
+                .collect();
+            for attr in &parsed.attributes {
+                if let PathAttribute::MpReachNlri(mp) = attr
+                    && ((mp.afi, mp.safi) == (Afi::Ipv4, Safi::Unicast)
+                        || (mp.afi, mp.safi) == (Afi::Ipv6, Safi::Unicast))
+                {
+                    for entry in &mp.announced {
+                        blocked_prefixes.push(entry.prefix.to_string());
+                    }
+                }
+            }
+            let rejected = blocked_prefixes.len();
             warn!(
                 peer = %self.peer_label,
                 reason,
@@ -336,6 +373,23 @@ impl PeerSession {
                 "OTC route-leak rule rejected unicast announcements; withdrawals still processed"
             );
             self.record_otc_routes_blocked(reason, rejected as u64);
+
+            // Publish the structured event AFTER the counter +
+            // per-NeighborState scalar update, so a sink that drops
+            // (queue_full / closed) can never leave the legacy
+            // surfaces inconsistent.
+            let (otc_value, as_path_string) = otc_event_context(&parsed.attributes, reason);
+            let otc_event = crate::event_sink::OtcRouteBlockedEvent {
+                peer: self.peer_ip,
+                direction: crate::event_sink::OtcDirection::Ingress,
+                reason,
+                prefixes: blocked_prefixes,
+                local_role: self.config.peer.local_role,
+                remote_role: self.negotiated.as_ref().and_then(|n| n.remote_role),
+                otc_value,
+                as_path: as_path_string,
+            };
+            self.event_sink().publish_otc_route_blocked(&otc_event);
         }
 
         // AS_PATH loop detection (RFC 4271 §9.1.2): discard all

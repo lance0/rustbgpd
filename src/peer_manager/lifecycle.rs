@@ -95,7 +95,7 @@ impl PeerManager {
         let max_prefixes = transport.max_prefixes;
 
         let session_id = self.allocate_session_id();
-        let handle = PeerHandle::spawn_with_identity_and_lifecycle(
+        let handle = PeerHandle::spawn_with_event_sink_and_identity_and_lifecycle(
             transport.clone(),
             self.metrics.clone(),
             self.rib_tx.clone(),
@@ -108,6 +108,7 @@ impl PeerManager {
             self.validation_rx.clone(),
             false,
             SessionIdentity::primary(session_id),
+            self.transport_event_sink.clone(),
         );
 
         // ADR-0067 step 4b — strict BFD: create/store the peer but withhold BGP
