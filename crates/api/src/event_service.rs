@@ -1321,6 +1321,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dataplane_summary_durable_without_any_watch_events_subscriber() {
+        // ADR-0072 PR-FU1 review: the lifetime test pinned that
+        // the broadcaster's `Option` stays `Some` after WatchEvents
+        // drops, but didn't prove the poller is still doing useful
+        // work — i.e. still observing snapshot diffs and enqueuing
+        // to EHM. This test closes that gap: spawn the poller with
+        // an EHM handle but ZERO WatchEvents receivers, mutate the
+        // fib snapshot, then read through the EHM live broadcast
+        // and assert a durable dataplane event arrives.
+        let dir = tempfile::tempdir().unwrap();
+        let manager = rustbgpd_event_history::EventHistoryManager::start(
+            rustbgpd_event_history::EventHistoryConfig {
+                path: dir.path().join("events.db"),
+                max_events: 100,
+                max_bytes: 1_000_000,
+                synchronous: rustbgpd_event_history::SynchronousMode::Full,
+                required: false,
+                queue_capacity: 64,
+                batch_size: 1,
+                batch_interval: std::time::Duration::from_millis(10),
+                broadcast_capacity: 64,
+                retention_interval: std::time::Duration::from_mins(1),
+                sidecar_flush_interval_batches: 100,
+                metrics: None,
+            },
+        )
+        .await
+        .expect("EHM start");
+        let handle = manager.handle();
+        let mut ehm_live = handle.subscribe_live();
+
+        let fib_routes: Arc<Mutex<Vec<proto::FibRouteStatus>>> = Arc::new(Mutex::new(Vec::new()));
+        let fib_snapshot: FibRouteSnapshotFn = {
+            let fib_routes = fib_routes.clone();
+            Arc::new(move || fib_routes.lock().unwrap().clone())
+        };
+
+        let shared = dataplane_event_broadcaster();
+        let (tx, initial_rx) = broadcast::channel(16);
+        {
+            let mut guard = shared.lock().unwrap();
+            *guard = Some(tx.clone());
+        }
+        dataplane::spawn_dataplane_poller(
+            tx,
+            shared.clone(),
+            Arc::new(Vec::new),
+            fib_snapshot,
+            Some(handle.clone()),
+            BgpMetrics::new(),
+        );
+
+        // Wait for the poller's initial `previous` baseline to be
+        // captured (with empty fib), THEN drop the only
+        // WatchEvents-side receiver. Mutating the snapshot after
+        // that proves the poller continues to do useful work
+        // without any live broadcast subscriber.
+        tokio::time::sleep(DATAPLANE_EVENT_POLL_INTERVAL * 2).await;
+        drop(initial_rx);
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(tokio::sync::broadcast::Sender::receiver_count),
+            Some(0),
+            "WatchEvents receiver count must be zero before the diff fires"
+        );
+        fib_routes.lock().unwrap().push(proto::FibRouteStatus {
+            state: proto::FibRouteState::Installed as i32,
+            ..Default::default()
+        });
+
+        let committed = tokio::time::timeout(std::time::Duration::from_secs(2), ehm_live.recv())
+            .await
+            .expect("committed event within 2s with no WatchEvents subscriber")
+            .expect("EHM broadcast still attached");
+        assert_eq!(
+            committed.envelope.category,
+            rustbgpd_event_history::Category::Dataplane,
+            "summary must be classified under Category::Dataplane"
+        );
+        // The broadcaster's `Option` must still be `Some` — the
+        // EHM-enabled poller is daemon-lifetime even though the
+        // only live receiver was dropped before the diff fired.
+        assert!(
+            shared.lock().unwrap().is_some(),
+            "shared broadcaster must stay Some when EHM is the consumer"
+        );
+
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn dataplane_summary_enqueued_to_ehm_handle_alongside_broadcast() {
         // ADR-0072 PR-FU1: every dataplane summary that the poller
         // broadcasts must also be enqueued into EHM so

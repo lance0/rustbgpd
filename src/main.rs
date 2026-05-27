@@ -170,6 +170,12 @@ fn spawn_fib_dataplane_event_bridge(
         loop {
             match fib_events.recv().await {
                 Ok(event) => {
+                    // Capture the typed peer before consuming `event`
+                    // into the proto converter. The proto envelope's
+                    // peer field is a stringified IpAddr, so parsing
+                    // it back is wasted work when the source struct
+                    // already carries `Option<IpAddr>` directly.
+                    let envelope_peer = event.peer;
                     let proto_event = fib_runtime_event_to_bgp_event(event);
                     // ADR-0072 PR-FU1: durable outbox enqueue. The
                     // legacy `bgp_events` broadcast (consumed by
@@ -181,7 +187,7 @@ fn spawn_fib_dataplane_event_bridge(
                         let envelope = rustbgpd_api::event_history_sinks::envelope_from_bgp_event(
                             &proto_event,
                             rustbgpd_event_history::Category::Dataplane,
-                            proto_event.peer_address.parse().ok(),
+                            envelope_peer,
                             None,
                         );
                         rustbgpd_api::event_history_sinks::try_send_envelope(
@@ -191,10 +197,25 @@ fn spawn_fib_dataplane_event_bridge(
                     let _ = bgp_events.send(proto_event);
                 }
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    // The bridge consumes `fib_events` via a bounded
+                    // tokio broadcast; if the bridge falls behind the
+                    // FIB runtime, those `missed` events never reach
+                    // the bridge body and therefore never reach EHM.
+                    // When EHM is the durable producer for this
+                    // category, that's a real cursor gap — record it
+                    // as a `source_lagged` drop and flip the
+                    // degraded gauge so operators see the signal.
+                    // When EHM is disabled the lag is purely a
+                    // live-stream concern (matches pre-ADR-0072
+                    // behavior); leave the gauge alone in that case.
                     warn!(
                         missed,
                         "FIB dataplane event bridge lagged; dropping stale route events"
                     );
+                    if event_history.is_some() {
+                        metrics.record_event_outbox_drops_by("dataplane", "source_lagged", missed);
+                        metrics.mark_event_outbox_degraded();
+                    }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -317,10 +338,19 @@ fn spawn_bfd_event_bridge(
                     let _ = bgp_events.send(proto_event);
                 }
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    // See FIB bridge above: when EHM is the durable
+                    // producer for this category, broadcast lag at
+                    // the bridge boundary is a real cursor gap and
+                    // must surface on the outbox metrics. Pre-PR
+                    // behavior (no EHM) leaves the gauge alone.
                     warn!(
                         missed,
                         "BFD event bridge lagged; dropping stale session events"
                     );
+                    if event_history.is_some() {
+                        metrics.record_event_outbox_drops_by("bfd", "source_lagged", missed);
+                        metrics.mark_event_outbox_degraded();
+                    }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }

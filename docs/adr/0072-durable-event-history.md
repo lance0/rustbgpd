@@ -666,31 +666,34 @@ reference bridge at `examples/event-bridge/`:
   set until restart in v1. A future
   `rustbgpctl event-history reset-health` command is a P1 nice-to-
   have.
-- **Dataplane events stay live-only in v1 (PR5 producer set).**
-  PR5 wires the following five categories through EHM: `route`,
-  `evpn`, `session`, `policy`, `bfd`. The `dataplane` /
-  `dataplane_route` categories continue to flow on their existing
+- **Dataplane events deferred from the v1 PR5 producer set.**
+  *Historical rationale.* PR5 wired five categories through EHM:
+  `route`, `evpn`, `session`, `policy`, `bfd`. The `dataplane`
+  / `dataplane_route` categories were left on their existing
   `dataplane_events` / `dataplane_route_events` broadcasts
-  (consumed by `WatchEvents` and the EVPN service) and are NOT
-  enqueued into the durable outbox. `SubscribeFromEvent` with an
-  empty `categories` filter therefore returns events from the
-  five EHM-fed categories only; the proto comment on
-  `SubscribeFromEventRequest.categories` documents this
-  divergence so collectors that need durable dataplane history
-  know it is a follow-up. Wiring dataplane through EHM is
-  scoped for a later PR after the v1 producer set has soaked.
+  (consumed by `WatchEvents` and the EVPN service) and were NOT
+  enqueued into the durable outbox. `SubscribeFromEvent` with
+  an empty `categories` filter therefore returned events from
+  the five EHM-fed categories only — operators that wanted full
+  durable coverage had to combine the cursor stream with the
+  legacy live surfaces. Wiring dataplane through EHM was
+  scoped for a follow-up after the v1 producer set had soaked.
 
-  **Resolved by PR-FU1 (this PR).** Both the
+  *Resolved by PR #291 (2026-05-27).* Both the
   `spawn_dataplane_poller` summary producer and the
   `spawn_fib_dataplane_event_bridge` per-route producer now
   enqueue into EHM alongside their existing `WatchEvents`
   broadcasts. Both event flavors live under
   `EVENT_CATEGORY_DATAPLANE`, discriminated by `BgpEventType`
   (`DATAPLANE_STATUS_CHANGED` for summaries,
-  `DATAPLANE_ROUTE_INSTALLED` / `_WITHDRAWN` / `_FAILED` for the
-  per-route stream). The poller is startup-spawned when
-  `[event_history].enabled` so durable summaries flow even when
-  no `WatchEvents` subscriber is alive.
+  `DATAPLANE_ROUTE_INSTALLED` / `_WITHDRAWN` / `_FAILED` for
+  the per-route stream). The poller is startup-spawned when
+  `[event_history].enabled` so durable summaries flow even
+  when no `WatchEvents` subscriber is alive. Broadcast lag at
+  the FIB and BFD bridges surfaces as
+  `bgp_event_outbox_dropped_total{reason="source_lagged"}` +
+  `bgp_event_outbox_degraded = 1` so a cursor gap from
+  upstream backpressure is observable.
 - **`List*Events` RPCs stay on the in-memory rings in v1.**
   `ListRouteEvents` / `ListSessionEvents` / `ListPolicyEvents` /
   `ListEvpnEvents` keep their existing bounded-ring backing

@@ -317,7 +317,7 @@ any `WatchEvents` subscriber is alive.
 | Metric | What it tells you |
 |--------|-------------------|
 | `bgp_event_outbox_committed_total{category}` | Events durably committed to the local outbox, per category. Increments inside EHM after the SQLite transaction commits — not on producer enqueue. |
-| `bgp_event_outbox_dropped_total{category, reason}` | Events dropped before reaching durable storage, or skipped during cursor decode. `reason` is `queue_full`, `closed`, `db_error`, `decode_failure`, or `opaque_codec`. `queue_full`, `db_error`, and decode/codec failures flip `bgp_event_outbox_degraded` to `1`; shutdown-time `closed` drops do not. |
+| `bgp_event_outbox_dropped_total{category, reason}` | Events dropped before reaching durable storage, or skipped during cursor decode. `reason` is `queue_full`, `closed`, `db_error`, `decode_failure`, `opaque_codec`, or `source_lagged`. `source_lagged` fires when an upstream broadcast receiver (FIB or BFD bridge) reports `Lagged(missed)` — those missed events never reached the bridge body and therefore never reached EHM; the counter increments by `missed`. `queue_full`, `db_error`, decode/codec failures, and `source_lagged` flip `bgp_event_outbox_degraded` to `1`; shutdown-time `closed` drops do not. |
 | `bgp_event_outbox_queue_depth{category}` | Pending events in the EHM producer queue by category. Climbs before drops start — early-warning signal. |
 | `bgp_event_outbox_db_size_bytes` | Combined size of `events.db` + WAL on disk, refreshed after commits and retention passes. `[event_history].max_bytes` is the soft retention trigger. |
 | `bgp_event_outbox_retention_evicted_total{reason}` | Events evicted by the retention pass. `reason` is `count_cap` or `byte_cap`. |

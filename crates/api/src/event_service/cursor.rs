@@ -225,9 +225,9 @@ fn parse_prefix_filter(
 }
 
 /// Parse a proto `EventCategory` into the storage-side `Category`
-/// enum. Dataplane maps to the storage-side category even though this release
-/// does not yet produce dataplane events; filtering to dataplane simply
-/// returns an empty durable stream until that producer is wired.
+/// enum. All six categories — route, session, policy, EVPN, BFD,
+/// and dataplane — are produced through EHM when
+/// `[event_history].enabled = true`.
 fn map_proto_category(c: proto::EventCategory) -> Option<Category> {
     match c {
         proto::EventCategory::Route => Some(Category::Route),

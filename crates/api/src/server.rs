@@ -297,10 +297,14 @@ impl Interceptor for AuthInterceptor {
 ///
 /// # Panics
 ///
-/// Panics only if the dataplane event broadcaster mutex is
-/// poisoned (no other holder of this lock can poison it because
-/// every guard is dropped before any `.await`, so this is
-/// effectively unreachable).
+/// Panics if the dataplane event broadcaster mutex is poisoned —
+/// a `Mutex` is poisoned when a thread panics while holding the
+/// guard, not on `.await`. The dataplane code paths that lock
+/// this mutex do trivial assignments and don't call any code
+/// that could panic mid-guard, so poisoning is not expected in
+/// practice; expressing the failure as a panic rather than a
+/// fallback matches the broader daemon convention for "should
+/// be unreachable" lock acquisitions on startup paths.
 #[expect(clippy::too_many_arguments, reason = "startup wiring for gRPC server")]
 pub async fn serve(
     listeners: Vec<ListenerConfig>,
