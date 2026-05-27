@@ -9,6 +9,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Reduced `AdjRibIn::insert` small-N clone overhead by boxing the rare
+  RFC 8950 unnumbered `Route.next_hop_scope` payload. Pinned repeat
+  measurements on the v0.30.0 benchmark host confirmed the 10k insert
+  regression versus v0.24.0 was real (+11.9% median on `main`) and the
+  layout change brings the 10k median back within 1.2% of the v0.24.0
+  baseline without moving the 500k case.
+
 ## [0.30.0] — 2026-05-27
 
 ### Changed

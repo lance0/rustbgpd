@@ -926,7 +926,7 @@ mod tests {
             next_hops: vec![FibInstallNextHop {
                 next_hop: route.next_hop,
                 link_local_next_hop: route.link_local_next_hop,
-                next_hop_scope: route.next_hop_scope.clone(),
+                next_hop_scope: route.next_hop_scope.as_deref().cloned(),
                 peer: route.peer,
                 path_id: route.path_id,
                 weight: 1,
@@ -947,7 +947,7 @@ mod tests {
         let mut next_hops = vec![FibInstallNextHop {
             next_hop: best.next_hop,
             link_local_next_hop: best.link_local_next_hop,
-            next_hop_scope: best.next_hop_scope.clone(),
+            next_hop_scope: best.next_hop_scope.as_deref().cloned(),
             peer: best.peer,
             path_id: best.path_id,
             weight: 1,
@@ -976,7 +976,7 @@ mod tests {
         let mut next_hops = vec![FibInstallNextHop {
             next_hop: best.next_hop,
             link_local_next_hop: best.link_local_next_hop,
-            next_hop_scope: best.next_hop_scope.clone(),
+            next_hop_scope: best.next_hop_scope.as_deref().cloned(),
             peer: best.peer,
             path_id: best.path_id,
             weight: best_weight,
@@ -1094,10 +1094,10 @@ mod tests {
 
     fn scoped_route(prefix: Prefix, next_hop: IpAddr, ifindex: u32) -> Route {
         let mut route = route(prefix, next_hop, RouteOrigin::Ebgp, 0);
-        route.next_hop_scope = Some(NextHopScope {
+        route.next_hop_scope = Some(Box::new(NextHopScope {
             interface: Arc::from("fib0"),
             ifindex,
-        });
+        }));
         route
     }
 
