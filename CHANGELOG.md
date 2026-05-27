@@ -9,8 +9,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.30.0] — 2026-05-27
+
 ### Changed
 
+- **`rustbgpd-wire` 0.9.4 → 0.10.0** (breaking). RFC 9234 BGP Roles
+  + OTC work landed three additive `pub` API changes that are
+  breaking on existing enums without `#[non_exhaustive]`:
+  - New `pub enum BgpRole` (provider / customer / peer / route-server
+    / route-server-client) re-exported from `lib`.
+  - New `Capability::Role(BgpRole)` variant on the OPEN capability
+    enum (RFC 9234 §4 capability code 9).
+  - New `PathAttribute::OnlyToCustomer(u32)` variant on the path-
+    attribute enum (RFC 9234 §6, attribute type 35).
+  Consumers exhaustively matching on `Capability` or `PathAttribute`
+  will need to add the new arms. Internal OTC Partial-bit
+  preservation fixes are non-breaking and roll up in the same
+  version.
 - **ASPA verification: tighter scope + proven §5.4 algorithm
   equivalence (ADR-0049 amended).** ADR-0049 retargeted to
   `draft-ietf-sidrops-aspa-verification-25` (April 19, 2026).
