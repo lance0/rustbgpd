@@ -143,7 +143,7 @@ the spec makes it the fallback when a client omits the encoding.
   lossy and are not path-diffed into per-leaf OpenConfig updates, and true
   `ON_CHANGE` needs careful initial-snapshot, delete, and backpressure
   semantics. It depends on the P1 durable-event-history work.
-  - **Resolved by PR #N (2026-05-27) — v1 scope:** `STREAM ON_CHANGE` is
+  - **Resolved by PR #293 (2026-05-27) — v1 scope:** `STREAM ON_CHANGE` is
     accepted for the
     `…/neighbor[neighbor-address=*]/state/session-state` leaf (both the
     explicit `*` wildcard and the no-key shorthand). The handler

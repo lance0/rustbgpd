@@ -727,7 +727,7 @@ reference bridge at `examples/event-bridge/`:
   broadcasts were lossy and not path-diffed — `ON_CHANGE` needs an
   initial-snapshot + per-leaf delta model that PR5 unblocked.
 
-  *Resolved by PR #N (2026-05-27).* `GnmiService` accepts
+  *Resolved by PR #293 (2026-05-27).* `GnmiService` accepts
   `Subscribe` with `mode = STREAM` + `subscription.mode = ON_CHANGE`
   for the
   `…/neighbor[neighbor-address=*]/state/session-state` leaf. It
