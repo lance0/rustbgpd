@@ -244,6 +244,18 @@ Validation:
   the durable event-history / replay work so operators get a backfillable event,
   not another lossy live-stream-only signal. **Unblocked by [ADR-0072](0072-durable-event-history.md);**
   ships once the durable outbox lands.
+  - **Resolved by PR #292 (2026-05-27).** `OtcRouteBlockedEvent`
+    rides on `EVENT_CATEGORY_POLICY` with the next-free
+    `BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED` enum value (23). The
+    payload carries `peer`, `direction`, `reason` (the same bounded
+    label vocabulary as the existing counter), `prefixes` (all
+    blocked prefixes from one rejected UPDATE for ingress; one
+    prefix per route for egress), `local_role` / `remote_role`,
+    optional `otc_value` (omitted on `malformed_length`), and
+    `as_path` as a lossless string (preserves `AS_SET` / confed
+    segments via `{…}` notation). The legacy
+    `bgp_otc_routes_blocked_total` counter and
+    `NeighborState.otc_routes_blocked` scalar are unchanged.
 
 ### Interop gate
 

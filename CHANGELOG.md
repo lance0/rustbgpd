@@ -11,6 +11,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0072 follow-up: `OtcRouteBlocked` structured event payload.**
+  Closes the deferred ADR-0071 (RFC 9234 BGP Roles + OTC) item.
+  Every OTC ingress / egress block decision now publishes a
+  durable `OtcRouteBlockedEvent` payload on `SubscribeFromEvent`
+  alongside the existing `bgp_otc_routes_blocked_total{peer, reason}`
+  counter and the per-`NeighborState` `otc_routes_blocked` scalar.
+  The payload carries `peer`, `direction` (`ingress` / `egress`),
+  `reason` (the same bounded label vocabulary as the counter), all
+  blocked `prefixes` from one rejected UPDATE (or one prefix per
+  blocked route for egress), `local_role` / `remote_role`, optional
+  `otc_value` (omitted on `malformed_length` where the attribute
+  couldn't be decoded), and a lossless string AS_PATH that preserves
+  `AS_SET` / confederation segments via `{…}` notation. Rides on
+  `EVENT_CATEGORY_POLICY` with the next-free
+  `BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED` enum value. A new
+  `TransportEventSink` trait (mirroring `RibEventSink` from PR5)
+  keeps the producer-side hot path free of any proto / event-history
+  dependency cycle; the binary plugs in an EHM-backed implementation
+  when `[event_history].enabled = true` and a no-op sink otherwise,
+  so the legacy counter + scalar surfaces are byte-identical
+  pre-PR.
 - **ADR-0072 follow-up: dataplane events flow through EHM.** The
   `spawn_dataplane_poller` summary producer
   (FIB / blackhole installed / rejected / failed rollups) and the

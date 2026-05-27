@@ -1,6 +1,7 @@
 //! Peer session handle and command types.
 
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -18,6 +19,7 @@ use tracing::Instrument;
 
 use crate::config::TransportConfig;
 use crate::error::TransportError;
+use crate::event_sink::TransportEventSink;
 use crate::session::PeerSession;
 
 /// Role of a session relative to the `PeerManager` entry that owns it.
@@ -375,6 +377,46 @@ impl PeerHandle {
         advertise_graceful_shutdown: bool,
         session_identity: SessionIdentity,
     ) -> Self {
+        Self::spawn_with_event_sink_and_identity_and_lifecycle(
+            config,
+            metrics,
+            rib_tx,
+            import_policy,
+            export_policy,
+            session_notify_tx,
+            session_event_tx,
+            session_lifecycle_tx,
+            bmp_tx,
+            validation_rx,
+            advertise_graceful_shutdown,
+            session_identity,
+            None,
+        )
+    }
+
+    /// Spawn variant that also installs an out-of-crate
+    /// [`TransportEventSink`] for ADR-0072 structured event
+    /// publishing. `event_sink = None` is equivalent to the legacy
+    /// spawn (no-op sink), so the binary's wiring layer can pass
+    /// `None` when `[event_history]` is disabled without branching
+    /// at every call site.
+    #[must_use]
+    #[expect(clippy::too_many_arguments)]
+    pub fn spawn_with_event_sink_and_identity_and_lifecycle(
+        config: TransportConfig,
+        metrics: BgpMetrics,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
+        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
+        session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
+        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+        validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
+        advertise_graceful_shutdown: bool,
+        session_identity: SessionIdentity,
+        event_sink: Option<Arc<dyn TransportEventSink>>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let peer_addr = config.remote_addr.ip();
         let remote_asn = config.peer.remote_asn;
@@ -397,6 +439,9 @@ impl PeerHandle {
                     advertise_graceful_shutdown,
                     session_identity,
                 );
+                if let Some(sink) = event_sink {
+                    session.set_event_sink(sink);
+                }
                 session.run().await
             }
             .instrument(span),
@@ -491,6 +536,46 @@ impl PeerHandle {
         advertise_graceful_shutdown: bool,
         session_identity: SessionIdentity,
     ) -> Self {
+        Self::spawn_inbound_with_event_sink_and_identity_and_lifecycle(
+            config,
+            metrics,
+            rib_tx,
+            import_policy,
+            export_policy,
+            stream,
+            session_notify_tx,
+            session_event_tx,
+            session_lifecycle_tx,
+            bmp_tx,
+            validation_rx,
+            advertise_graceful_shutdown,
+            session_identity,
+            None,
+        )
+    }
+
+    /// Inbound spawn variant that also installs an out-of-crate
+    /// [`TransportEventSink`] (ADR-0072). See
+    /// [`Self::spawn_with_event_sink_and_identity_and_lifecycle`]
+    /// for the lifetime contract.
+    #[must_use]
+    #[expect(clippy::too_many_arguments)]
+    pub fn spawn_inbound_with_event_sink_and_identity_and_lifecycle(
+        config: TransportConfig,
+        metrics: BgpMetrics,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
+        stream: TcpStream,
+        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
+        session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
+        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+        validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
+        advertise_graceful_shutdown: bool,
+        session_identity: SessionIdentity,
+        event_sink: Option<Arc<dyn TransportEventSink>>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let peer_addr = config.remote_addr.ip();
         let remote_asn = config.peer.remote_asn;
@@ -514,6 +599,9 @@ impl PeerHandle {
                     advertise_graceful_shutdown,
                     session_identity,
                 );
+                if let Some(sink) = event_sink {
+                    session.set_event_sink(sink);
+                }
                 session.run().await
             }
             .instrument(span),

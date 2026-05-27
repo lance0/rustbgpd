@@ -138,9 +138,10 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
         "bfd_state_changed" | "bfd_session_state_changed" => {
             Ok(BgpEventType::BfdSessionStateChanged as i32)
         }
+        "otc_route_blocked" => Ok(BgpEventType::OtcRouteBlocked as i32),
         "stream_lagged" | "lagged" => Ok(BgpEventType::StreamLagged as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported event type {other:?}; expected added, withdrawn, best_changed, policy_filtered, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, dataplane_status_changed, dataplane_route_installed, dataplane_route_withdrawn, dataplane_route_failed, evpn_added, evpn_withdrawn, evpn_best_changed, bfd_up, bfd_down, bfd_state_changed, or stream_lagged"
+            "unsupported event type {other:?}; expected added, withdrawn, best_changed, policy_filtered, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, otc_route_blocked, dataplane_status_changed, dataplane_route_installed, dataplane_route_withdrawn, dataplane_route_failed, evpn_added, evpn_withdrawn, evpn_best_changed, bfd_up, bfd_down, bfd_state_changed, or stream_lagged"
         ))),
     }
 }
@@ -266,6 +267,7 @@ fn bgp_event_type_json_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::BfdSessionUp) => "bfd_session_up",
         Ok(BgpEventType::BfdSessionDown) => "bfd_session_down",
         Ok(BgpEventType::BfdSessionStateChanged) => "bfd_session_state_changed",
+        Ok(BgpEventType::OtcRouteBlocked) => "otc_route_blocked",
         Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
@@ -295,6 +297,7 @@ fn bgp_event_type_display_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::BfdSessionUp) => "bfd_up",
         Ok(BgpEventType::BfdSessionDown) => "bfd_down",
         Ok(BgpEventType::BfdSessionStateChanged) => "bfd_state_changed",
+        Ok(BgpEventType::OtcRouteBlocked) => "otc_route_blocked",
         Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
@@ -531,6 +534,53 @@ fn json_bgp_event(event: &BgpEvent) -> serde_json::Value {
                 .map_or(serde_json::Value::Null, json_evpn_route_entry),
         );
     }
+    if let Some(crate::proto::bgp_event::Payload::OtcRouteBlocked(otc)) = event.payload.as_ref()
+        && let Some(object) = value.as_object_mut()
+    {
+        // ADR-0072 follow-up — surface the OTC payload fields the
+        // operator actually needs for incident reconstruction.
+        // Without these the --json output is just the envelope +
+        // summary string, which loses prefixes, role pair, OTC
+        // value, AS_PATH, etc. Matches the shared bridge formatter
+        // in crates/api/src/json_format.rs so external consumers
+        // and the CLI render identical JSON.
+        object.insert(
+            "direction".to_string(),
+            serde_json::Value::String(otc.direction.clone()),
+        );
+        object.insert(
+            "reason".to_string(),
+            serde_json::Value::String(otc.reason.clone()),
+        );
+        object.insert(
+            "prefixes".to_string(),
+            serde_json::Value::Array(
+                otc.prefixes
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+        object.insert("count".to_string(), serde_json::Value::from(otc.count));
+        object.insert(
+            "local_role".to_string(),
+            serde_json::Value::String(otc.local_role.clone()),
+        );
+        object.insert(
+            "remote_role".to_string(),
+            serde_json::Value::String(otc.remote_role.clone()),
+        );
+        object.insert(
+            "otc_value".to_string(),
+            otc.otc_value
+                .map_or(serde_json::Value::Null, serde_json::Value::from),
+        );
+        object.insert(
+            "as_path".to_string(),
+            serde_json::Value::String(otc.as_path.clone()),
+        );
+    }
     if let Some(crate::proto::bgp_event::Payload::StreamLag(lag)) = event.payload.as_ref()
         && let Some(object) = value.as_object_mut()
     {
@@ -757,14 +807,26 @@ fn validate_event_filter_categories(
     let wants_session = categories.contains(&(EventCategory::Session as i32));
     let wants_dataplane = categories.contains(&(EventCategory::Dataplane as i32));
     let wants_evpn = categories.contains(&(EventCategory::Evpn as i32));
+    // EVENT_CATEGORY_POLICY carries OtcRouteBlocked which IS peer-
+    // scoped (the structured event stores the peer address), so
+    // `--address` is meaningful here. The legacy PolicyChanged
+    // entries scope by peer too when the mutation targets one
+    // neighbor; --address narrows to those.
+    let wants_policy = categories.contains(&(EventCategory::Policy as i32));
     if !wants_route && !wants_dataplane && (family.is_some() || prefix.is_some()) {
         return Err(CliError::Argument(
             "--family and --prefix require --category route or --category dataplane".into(),
         ));
     }
-    if !wants_route && !wants_session && !wants_dataplane && !wants_evpn && neighbor.is_some() {
+    if !wants_route
+        && !wants_session
+        && !wants_dataplane
+        && !wants_evpn
+        && !wants_policy
+        && neighbor.is_some()
+    {
         return Err(CliError::Argument(
-            "--address requires --category route, --category session, --category dataplane, or --category evpn"
+            "--address requires --category route, --category session, --category dataplane, --category evpn, or --category policy"
                 .into(),
         ));
     }
@@ -844,11 +906,23 @@ pub async fn events_watch(
     // server emits a leading `StreamLagEvent` if `N` is older than
     // the retention floor — the existing print path already renders
     // it as a stream_lag payload.
-    if let Some(cursor) = from_event_id {
+    //
+    // Some event types are EHM-only (no legacy WatchEvents
+    // broadcast). Today that's `OtcRouteBlocked` — the OTC
+    // route-leak decision is published exclusively through the
+    // durable outbox under EVENT_CATEGORY_POLICY. If the user
+    // asked for one of those types without `--from-event-id`, we
+    // transparently route through SubscribeFromEvent in live-only
+    // mode (`from_event_id = None`) so the filter actually works.
+    // If EHM is disabled, the server returns FailedPrecondition,
+    // which the CLI surfaces as a clear error rather than the
+    // silent zero-event-stream the legacy path would produce.
+    let request_requires_ehm = event_types.contains(&(BgpEventType::OtcRouteBlocked as i32));
+    if from_event_id.is_some() || request_requires_ehm {
         let mut client =
             EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
         let request = crate::proto::SubscribeFromEventRequest {
-            from_event_id: Some(cursor),
+            from_event_id,
             categories,
             event_types,
             neighbor_address: neighbor.unwrap_or_default(),
@@ -1194,6 +1268,117 @@ mod tests {
         });
 
         assert!(format_bgp_event_line(&event).ends_with(" id=42"));
+    }
+
+    #[test]
+    fn json_bgp_event_surfaces_otc_route_blocked_payload() {
+        // Regression: --json output must surface every
+        // OtcRouteBlockedEvent payload field. Earlier versions
+        // dropped the payload arm and rendered only the envelope +
+        // summary string, hiding prefixes, role pair, OTC value,
+        // and AS_PATH from operators driving the CLI.
+        let payload = crate::proto::OtcRouteBlockedEvent {
+            event_type: BgpEventType::OtcRouteBlocked as i32,
+            peer_address: "10.0.0.2".to_string(),
+            timestamp: "1".to_string(),
+            direction: "ingress".to_string(),
+            reason: "ingress_from_customer_rsclient".to_string(),
+            prefixes: vec!["203.0.113.0/24".to_string(), "2001:db8::/32".to_string()],
+            count: 2,
+            local_role: "provider".to_string(),
+            remote_role: "customer".to_string(),
+            otc_value: Some(65002),
+            as_path: "65002 {65003 65004}".to_string(),
+            summary:
+                "OTC ingress blocked 2 route(s) on peer 10.0.0.2 (ingress_from_customer_rsclient)"
+                    .to_string(),
+        };
+        let event = BgpEvent {
+            timestamp: "1".to_string(),
+            category: EventCategory::Policy as i32,
+            event_type: BgpEventType::OtcRouteBlocked as i32,
+            severity: crate::proto::EventSeverity::Warning as i32,
+            peer_address: "10.0.0.2".to_string(),
+            previous_peer_address: String::new(),
+            prefix: String::new(),
+            prefix_length: 0,
+            afi_safi: AddressFamily::Unspecified as i32,
+            summary: payload.summary.clone(),
+            target_peer_address: String::new(),
+            event_id: Some(7),
+            payload: Some(crate::proto::bgp_event::Payload::OtcRouteBlocked(payload)),
+        };
+
+        let value = json_bgp_event(&event);
+        assert_eq!(value["category"], "policy");
+        assert_eq!(value["event_type"], "otc_route_blocked");
+        assert_eq!(value["event_id"], 7);
+        assert_eq!(value["direction"], "ingress");
+        assert_eq!(value["reason"], "ingress_from_customer_rsclient");
+        assert_eq!(value["count"], 2);
+        assert_eq!(value["local_role"], "provider");
+        assert_eq!(value["remote_role"], "customer");
+        assert_eq!(value["otc_value"], 65002);
+        // AS_SET segment survives lossless via {…} notation.
+        assert_eq!(value["as_path"], "65002 {65003 65004}");
+        let prefixes = value["prefixes"].as_array().expect("prefixes array");
+        assert_eq!(prefixes.len(), 2);
+        assert_eq!(prefixes[0], "203.0.113.0/24");
+        assert_eq!(prefixes[1], "2001:db8::/32");
+    }
+
+    #[test]
+    fn json_bgp_event_omits_otc_value_when_payload_value_absent() {
+        // Malformed_length path: the attribute couldn't be decoded
+        // and otc_value is None. The CLI JSON must surface that as
+        // a JSON null, not silently drop the field or emit zero.
+        let payload = crate::proto::OtcRouteBlockedEvent {
+            event_type: BgpEventType::OtcRouteBlocked as i32,
+            peer_address: "10.0.0.2".to_string(),
+            timestamp: "1".to_string(),
+            direction: "ingress".to_string(),
+            reason: "malformed_length".to_string(),
+            prefixes: vec!["203.0.113.0/24".to_string()],
+            count: 1,
+            local_role: "provider".to_string(),
+            remote_role: String::new(),
+            otc_value: None,
+            as_path: String::new(),
+            summary: "summary".to_string(),
+        };
+        let event = BgpEvent {
+            timestamp: "1".to_string(),
+            category: EventCategory::Policy as i32,
+            event_type: BgpEventType::OtcRouteBlocked as i32,
+            severity: crate::proto::EventSeverity::Warning as i32,
+            peer_address: "10.0.0.2".to_string(),
+            previous_peer_address: String::new(),
+            prefix: String::new(),
+            prefix_length: 0,
+            afi_safi: AddressFamily::Unspecified as i32,
+            summary: payload.summary.clone(),
+            target_peer_address: String::new(),
+            event_id: Some(7),
+            payload: Some(crate::proto::bgp_event::Payload::OtcRouteBlocked(payload)),
+        };
+        let value = json_bgp_event(&event);
+        assert!(value["otc_value"].is_null());
+        assert_eq!(value["remote_role"], "");
+    }
+
+    #[test]
+    fn validate_event_filter_categories_accepts_policy_with_address() {
+        // OTC events ride on EVENT_CATEGORY_POLICY and are peer-
+        // scoped. The CLI must not reject the natural shape
+        // `--category policy --address 10.0.0.2` before the
+        // request even reaches the EHM auto-route.
+        validate_event_filter_categories(
+            &[EventCategory::Policy as i32],
+            &Some("10.0.0.2".to_string()),
+            None,
+            &None,
+        )
+        .expect("--address must be allowed on --category policy");
     }
 
     #[test]

@@ -694,6 +694,31 @@ reference bridge at `examples/event-bridge/`:
   `bgp_event_outbox_dropped_total{reason="source_lagged"}` +
   `bgp_event_outbox_degraded = 1` so a cursor gap from
   upstream backpressure is observable.
+- **Transport-layer policy events (OTC route-leak) deferred from v1.**
+  *Historical rationale.* The ADR-0071 (BGP Roles + OTC) deferral
+  block already pointed at this work as the home for a structured
+  `OtcRouteBlocked` event payload. PR5 wired five categories
+  through EHM; the OTC route-leak decision sites in
+  `crates/transport/src/session/{inbound,outbound}.rs` still only
+  emitted the bounded Prometheus counter and the per-`NeighborState`
+  scalar. Operators wanting per-decision incident context
+  (`peer`, `direction`, `reason`, `prefixes`, role pair, OTC value,
+  AS_PATH) had to correlate the counter with NOTIFICATION and
+  UPDATE logs by hand.
+
+  *Resolved by PR #292 (2026-05-27).* A new
+  `TransportEventSink` trait (mirroring `RibEventSink`) lets the
+  binary plug an EHM-backed sink into `PeerSession`. The four OTC
+  decision sites (3 ingress in `inbound.rs`, 1 egress in
+  `outbound.rs`) publish a structured `OtcRouteBlockedEvent`
+  payload **after** the counter + scalar update, so a sink that
+  drops on full queue cannot leave the legacy surfaces
+  inconsistent. The new payload rides on
+  `EVENT_CATEGORY_POLICY` with the next-free
+  `BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED` enum value. AS_PATH is the
+  string form (`{…}` notation for AS_SET / confed segments) —
+  lossless and matches existing operator-facing renderings — not
+  a lossy `repeated uint32`.
 - **`List*Events` RPCs stay on the in-memory rings in v1.**
   `ListRouteEvents` / `ListSessionEvents` / `ListPolicyEvents` /
   `ListEvpnEvents` keep their existing bounded-ring backing

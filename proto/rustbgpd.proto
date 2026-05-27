@@ -1032,6 +1032,10 @@ enum BgpEventType {
   BGP_EVENT_TYPE_NOTIFICATION_SENT = 20;
   BGP_EVENT_TYPE_NOTIFICATION_RECEIVED = 21;
   BGP_EVENT_TYPE_POLICY_CHANGED = 22;
+  // OTC route-leak rule (RFC 9234 §5) blocked one or more unicast
+  // routes at either an ingress or egress decision site. Payload
+  // is OtcRouteBlockedEvent. Category: EVENT_CATEGORY_POLICY.
+  BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED = 23;
   BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED = 30;
   BGP_EVENT_TYPE_DATAPLANE_ROUTE_INSTALLED = 31;
   BGP_EVENT_TYPE_DATAPLANE_ROUTE_WITHDRAWN = 32;
@@ -1064,6 +1068,13 @@ message WatchEventsRequest {
   // those streams. Add EVENT_CATEGORY_POLICY or EVENT_CATEGORY_DATAPLANE
   // explicitly to combine them with the default route + session
   // categories.
+  //
+  // BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED is NOT served by this RPC: the
+  // OTC route-leak decision is published only through the durable
+  // outbox (ADR-0072). Filtering for it here would produce an empty
+  // live stream. Use SubscribeFromEvent with
+  // categories=[EVENT_CATEGORY_POLICY] and
+  // event_types=[BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED].
   repeated EventCategory categories = 1;
   // Empty = all event types for the selected categories.
   repeated BgpEventType event_types = 2;
@@ -1327,6 +1338,52 @@ message BfdSessionEvent {
   string reason = 7;
 }
 
+// Emitted whenever an OTC route-leak rule (RFC 9234 §5) blocks one
+// or more unicast routes at either an ingress or egress decision
+// site. The legacy `bgp_otc_routes_blocked_total{peer, reason}`
+// counter and the `otc_routes_blocked` scalar on NeighborState are
+// unchanged — this structured event is the per-decision surface
+// needed for incident reconstruction.
+message OtcRouteBlockedEvent {
+  BgpEventType event_type = 1;
+  string peer_address = 2;
+  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
+  string timestamp = 3;
+  // "ingress" | "egress" — which decision site fired.
+  string direction = 4;
+  // Bounded reason vocabulary, matching the
+  // `bgp_otc_routes_blocked_total{reason=…}` label:
+  //   - "ingress_from_customer_rsclient"
+  //   - "ingress_peer_mismatch"
+  //   - "malformed_length"
+  //   - "egress_to_upstream_via_otc"
+  string reason = 5;
+  // Wire-format prefix strings ("203.0.113.0/24"). For ingress this
+  // is every announced unicast prefix in the rejected UPDATE; for
+  // egress this is a single prefix (the loop runs per route).
+  repeated string prefixes = 6;
+  // Convenience count — `prefixes.size()` would also work, but
+  // collectors that filter on count without parsing the array benefit
+  // from the explicit field.
+  uint32 count = 7;
+  // Local BGP role at the moment of the decision (RFC 9234 §4 names:
+  // "provider", "route_server", "route_server_client", "customer",
+  // "peer"). Empty when no local role is configured.
+  string local_role = 8;
+  // Peer's negotiated BGP role. Empty when the peer did not advertise
+  // the Role capability.
+  string remote_role = 9;
+  // The OTC attribute value (ASN). Omitted on the malformed_length
+  // path because the attribute couldn't be decoded.
+  optional uint32 otc_value = 10;
+  // AS_PATH in the same wire-string form used by gRPC matchers
+  // (`{…}` notation preserves AS_SET / confederation segments).
+  // Empty when the UPDATE / route carried no AS_PATH attribute.
+  string as_path = 11;
+  // Stable operator-facing reason/summary string for this event.
+  string summary = 12;
+}
+
 message BgpEvent {
   // Unix epoch seconds, matching existing RouteEvent timestamp shape.
   string timestamp = 1;
@@ -1376,6 +1433,9 @@ message BgpEvent {
     EvpnRouteEvent evpn = 17;
     DataplaneRouteEvent dataplane_route = 18;
     BfdSessionEvent bfd = 20;
+    // Tag 21 is reserved at the message level for `event_id`; the
+    // next free oneof variant tag is 22.
+    OtcRouteBlockedEvent otc_route_blocked = 22;
   }
 }
 

@@ -41,6 +41,7 @@ pub fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto::BgpEv
             | proto::BgpEventType::BfdSessionUp
             | proto::BgpEventType::BfdSessionDown
             | proto::BgpEventType::BfdSessionStateChanged
+            | proto::BgpEventType::OtcRouteBlocked
             | proto::BgpEventType::StreamLagged => "changed",
         },
         route.prefix,
@@ -296,6 +297,76 @@ pub fn policy_event_to_bgp_event(event: PolicyEvent) -> proto::BgpEvent {
     }
 }
 
+/// Convert a transport-layer [`rustbgpd_transport::OtcRouteBlockedEvent`]
+/// into a proto `BgpEvent` envelope. The legacy
+/// `bgp_otc_routes_blocked_total` counter and the per-`NeighborState`
+/// `otc_routes_blocked` scalar are unchanged; this converter handles
+/// only the structured payload path (ADR-0072 follow-up, ADR-0071
+/// deferred item).
+///
+/// `local_role` / `remote_role` lower to the RFC 9234 §4 lowercase
+/// names (`provider`, `route_server`, `route_server_client`,
+/// `customer`, `peer`). The `otc_value` is `None` only on the
+/// `malformed_length` path where the attribute couldn't be decoded.
+#[must_use]
+pub fn otc_route_blocked_event_to_bgp_event(
+    event: &rustbgpd_transport::OtcRouteBlockedEvent,
+) -> proto::BgpEvent {
+    let peer_address = event.peer.to_string();
+    let timestamp = rustbgpd_rib::event::unix_timestamp_now();
+    let count = u32::try_from(event.prefixes.len()).unwrap_or(u32::MAX);
+    let summary = format!(
+        "OTC {} blocked {} route(s) on peer {} ({})",
+        event.direction.as_str(),
+        count,
+        peer_address,
+        event.reason,
+    );
+    let payload = proto::OtcRouteBlockedEvent {
+        event_type: proto::BgpEventType::OtcRouteBlocked as i32,
+        peer_address: peer_address.clone(),
+        timestamp: timestamp.clone(),
+        direction: event.direction.as_str().to_string(),
+        reason: event.reason.to_string(),
+        prefixes: event.prefixes.clone(),
+        count,
+        local_role: event.local_role.map(bgp_role_label).unwrap_or_default(),
+        remote_role: event.remote_role.map(bgp_role_label).unwrap_or_default(),
+        otc_value: event.otc_value,
+        as_path: event.as_path.clone(),
+        summary: summary.clone(),
+    };
+
+    proto::BgpEvent {
+        timestamp,
+        category: proto::EventCategory::Policy as i32,
+        event_type: proto::BgpEventType::OtcRouteBlocked as i32,
+        severity: proto::EventSeverity::Warning as i32,
+        peer_address,
+        previous_peer_address: String::new(),
+        prefix: String::new(),
+        prefix_length: 0,
+        afi_safi: proto::AddressFamily::Unspecified as i32,
+        summary,
+        target_peer_address: String::new(),
+        event_id: None,
+        payload: Some(proto::bgp_event::Payload::OtcRouteBlocked(payload)),
+    }
+}
+
+/// Operator-facing string form of a BGP Role (RFC 9234 §4).
+/// Lowercase `snake_case` matches existing event-surface conventions.
+fn bgp_role_label(role: rustbgpd_wire::BgpRole) -> String {
+    match role {
+        rustbgpd_wire::BgpRole::Provider => "provider",
+        rustbgpd_wire::BgpRole::RouteServer => "route_server",
+        rustbgpd_wire::BgpRole::RouteServerClient => "route_server_client",
+        rustbgpd_wire::BgpRole::Customer => "customer",
+        rustbgpd_wire::BgpRole::Peer => "peer",
+    }
+    .to_string()
+}
+
 pub(crate) fn stream_lag_bgp_event(
     source_category: proto::EventCategory,
     missed_count: u64,
@@ -364,5 +435,88 @@ pub(super) fn dataplane_summary_to_bgp_event(
         target_peer_address: String::new(),
         event_id: None,
         payload: Some(proto::bgp_event::Payload::Dataplane(payload)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn otc_route_blocked_event_lowers_with_full_context() {
+        let event = rustbgpd_transport::OtcRouteBlockedEvent {
+            peer: std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            direction: rustbgpd_transport::OtcDirection::Ingress,
+            reason: "ingress_from_customer_rsclient",
+            prefixes: vec!["203.0.113.0/24".to_string(), "2001:db8::/32".to_string()],
+            local_role: Some(rustbgpd_wire::BgpRole::Provider),
+            remote_role: Some(rustbgpd_wire::BgpRole::Customer),
+            otc_value: Some(65002),
+            as_path: "65002 {65003 65004}".to_string(),
+        };
+
+        let bgp = otc_route_blocked_event_to_bgp_event(&event);
+
+        assert_eq!(bgp.category, proto::EventCategory::Policy as i32);
+        assert_eq!(bgp.event_type, proto::BgpEventType::OtcRouteBlocked as i32);
+        assert_eq!(bgp.severity, proto::EventSeverity::Warning as i32);
+        assert_eq!(bgp.peer_address, "10.0.0.2");
+
+        let Some(proto::bgp_event::Payload::OtcRouteBlocked(payload)) = bgp.payload else {
+            panic!("expected OtcRouteBlocked payload variant");
+        };
+        assert_eq!(payload.direction, "ingress");
+        assert_eq!(payload.reason, "ingress_from_customer_rsclient");
+        assert_eq!(payload.count, 2);
+        assert_eq!(payload.prefixes.len(), 2);
+        assert_eq!(payload.local_role, "provider");
+        assert_eq!(payload.remote_role, "customer");
+        assert_eq!(payload.otc_value, Some(65002));
+        // Lossless: AS_SET segment survives the round-trip.
+        assert_eq!(payload.as_path, "65002 {65003 65004}");
+    }
+
+    #[test]
+    fn otc_route_blocked_event_omits_otc_value_on_malformed_length() {
+        let event = rustbgpd_transport::OtcRouteBlockedEvent {
+            peer: std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            direction: rustbgpd_transport::OtcDirection::Ingress,
+            reason: "malformed_length",
+            prefixes: vec!["203.0.113.0/24".to_string()],
+            local_role: Some(rustbgpd_wire::BgpRole::Provider),
+            remote_role: None,
+            otc_value: None,
+            as_path: String::new(),
+        };
+
+        let bgp = otc_route_blocked_event_to_bgp_event(&event);
+        let Some(proto::bgp_event::Payload::OtcRouteBlocked(payload)) = bgp.payload else {
+            panic!("expected OtcRouteBlocked payload variant");
+        };
+        assert!(payload.otc_value.is_none());
+        assert_eq!(
+            payload.remote_role, "",
+            "missing role lowers to empty string"
+        );
+    }
+
+    #[test]
+    fn otc_route_blocked_egress_lowers_direction_string() {
+        let event = rustbgpd_transport::OtcRouteBlockedEvent {
+            peer: std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            direction: rustbgpd_transport::OtcDirection::Egress,
+            reason: "egress_to_upstream_via_otc",
+            prefixes: vec!["203.0.113.0/24".to_string()],
+            local_role: Some(rustbgpd_wire::BgpRole::Customer),
+            remote_role: Some(rustbgpd_wire::BgpRole::Provider),
+            otc_value: Some(65001),
+            as_path: "65001".to_string(),
+        };
+        let bgp = otc_route_blocked_event_to_bgp_event(&event);
+        let Some(proto::bgp_event::Payload::OtcRouteBlocked(payload)) = bgp.payload else {
+            panic!("expected OtcRouteBlocked payload variant");
+        };
+        assert_eq!(payload.direction, "egress");
     }
 }
