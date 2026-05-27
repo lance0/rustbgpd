@@ -699,6 +699,7 @@ fn route_event_to_bgp_event(event: RouteEvent) -> BgpEvent {
         afi_safi: event.afi_safi,
         summary,
         target_peer_address: event.target_peer_address.clone(),
+        event_id: None,
         payload: Some(crate::proto::bgp_event::Payload::Route(event)),
     }
 }
@@ -1397,6 +1398,7 @@ mod tests {
             peer_address: "10.0.0.1".to_string(),
             afi_safi: AddressFamily::Unspecified as i32,
             summary: "session established".to_string(),
+            event_id: None,
             payload: Some(crate::proto::bgp_event::Payload::Session(
                 crate::proto::SessionEvent {
                     event_type: BgpEventType::SessionEstablished as i32,
@@ -1424,6 +1426,7 @@ mod tests {
             severity: 2,
             afi_safi: AddressFamily::Unspecified as i32,
             summary: "route event stream lagged; missed 7 event(s)".to_string(),
+            event_id: None,
             payload: Some(crate::proto::bgp_event::Payload::StreamLag(
                 crate::proto::StreamLagEvent {
                     source_category: EventCategory::Route as i32,
@@ -1451,6 +1454,7 @@ mod tests {
             severity: 2,
             afi_safi: AddressFamily::Unspecified as i32,
             summary: "route event stream lagged; missed 7 event(s)".to_string(),
+            event_id: None,
             payload: Some(crate::proto::bgp_event::Payload::StreamLag(
                 crate::proto::StreamLagEvent {
                     source_category: EventCategory::Route as i32,
@@ -1482,6 +1486,7 @@ mod tests {
             peer_address: "10.0.0.1".to_string(),
             afi_safi: AddressFamily::Unspecified as i32,
             summary: "BGP NOTIFICATION sent for peer 10.0.0.1: 6/7 (Connection Collision Resolution)".to_string(),
+            event_id: None,
             payload: Some(crate::proto::bgp_event::Payload::Notification(
                 crate::proto::NotificationEvent {
                     event_type: BgpEventType::NotificationSent as i32,
@@ -1516,6 +1521,7 @@ mod tests {
             event_type: BgpEventType::PolicyChanged as i32,
             severity: 1,
             summary: "policy set policy audit-policy".to_string(),
+            event_id: None,
             payload: Some(crate::proto::bgp_event::Payload::Policy(
                 crate::proto::PolicyEvent {
                     event_type: BgpEventType::PolicyChanged as i32,
@@ -1595,6 +1601,7 @@ mod tests {
             severity: 2,
             afi_safi: AddressFamily::Unspecified as i32,
             summary: "dataplane fib status changed".to_string(),
+            event_id: None,
             payload: Some(crate::proto::bgp_event::Payload::Dataplane(
                 crate::proto::DataplaneEvent {
                     source: "fib".to_string(),
@@ -1628,6 +1635,7 @@ mod tests {
             prefix_length: 24,
             afi_safi: AddressFamily::Ipv4Unicast as i32,
             summary: "dataplane fib route failed 203.0.113.0/24".to_string(),
+            event_id: None,
             payload: Some(crate::proto::bgp_event::Payload::DataplaneRoute(
                 crate::proto::DataplaneRouteEvent {
                     source: "fib".to_string(),
@@ -1671,6 +1679,7 @@ mod tests {
             previous_peer_address: "10.0.0.3".to_string(),
             afi_safi: AddressFamily::L2vpnEvpn as i32,
             summary: "EVPN route best changed mac".to_string(),
+            event_id: None,
             payload: Some(crate::proto::bgp_event::Payload::Evpn(
                 crate::proto::EvpnRouteEvent {
                     event_type: BgpEventType::EvpnRouteBestChanged as i32,

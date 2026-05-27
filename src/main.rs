@@ -153,6 +153,7 @@ fn fib_runtime_event_to_bgp_event(
             event.reason
         ),
         target_peer_address: String::new(),
+        event_id: None,
         payload: Some(rustbgpd_api::proto::bgp_event::Payload::DataplaneRoute(
             route,
         )),
@@ -221,6 +222,7 @@ fn bfd_runtime_event_to_bgp_event(
         afi_safi: proto::AddressFamily::Unspecified as i32,
         summary,
         target_peer_address: String::new(),
+        event_id: None,
         payload: Some(proto::bgp_event::Payload::Bfd(proto::BfdSessionEvent {
             event_type: event_type as i32,
             peer_address,

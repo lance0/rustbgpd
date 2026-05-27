@@ -553,6 +553,28 @@ impl proto::event_service_server::EventService for EventService {
             events: events.into_iter().map(policy_event_to_bgp_event).collect(),
         }))
     }
+
+    type SubscribeFromEventStream =
+        Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send + 'static>>;
+
+    /// `SubscribeFromEvent` — durable cursor replay + live (ADR-0072).
+    ///
+    /// PR4: proto + stub only. The actual cursor handoff lives in
+    /// `rustbgpd_event_history::EventHistoryManager::subscribe_from_event`
+    /// (shipped in #288); PR5 wires it through the daemon binary + this
+    /// service handler. Until then, callers see `UNIMPLEMENTED` so the
+    /// proto contract is observable on the wire without the runtime
+    /// behavior accidentally light up before the producers are wired.
+    async fn subscribe_from_event(
+        &self,
+        _request: Request<proto::SubscribeFromEventRequest>,
+    ) -> Result<Response<Self::SubscribeFromEventStream>, Status> {
+        Err(Status::unimplemented(
+            "SubscribeFromEvent: durable cursor replay is staged for the \
+             ADR-0072 PR5 wiring; this surface is reserved on the wire so \
+             clients can codegen against it now",
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -952,6 +974,7 @@ mod tests {
             },
             summary: format!("dataplane fib route {action} {prefix}/{prefix_length}"),
             target_peer_address: String::new(),
+            event_id: None,
             payload: Some(proto::bgp_event::Payload::DataplaneRoute(
                 proto::DataplaneRouteEvent {
                     source: "fib".to_string(),
@@ -1375,6 +1398,7 @@ mod tests {
             afi_safi: proto::AddressFamily::Unspecified as i32,
             summary: format!("bfd {peer}"),
             target_peer_address: String::new(),
+            event_id: None,
             payload: Some(proto::bgp_event::Payload::Bfd(proto::BfdSessionEvent {
                 event_type: event_type as i32,
                 peer_address: peer.to_string(),
