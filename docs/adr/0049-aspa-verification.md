@@ -187,7 +187,7 @@ ingress and updated on ASPA table changes.
 
 ## Amendments
 
-### 2026-05-27 — Algorithm fidelity + §6.2 family gate (PR #TBD)
+### 2026-05-27 — Algorithm fidelity + §6.2 family gate (PR #294)
 
 ADR retargeted from `draft-ietf-sidrops-aspa-verification` (IESG-
 submission state at original ADR write) to
