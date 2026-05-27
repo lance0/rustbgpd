@@ -679,6 +679,18 @@ reference bridge at `examples/event-bridge/`:
   divergence so collectors that need durable dataplane history
   know it is a follow-up. Wiring dataplane through EHM is
   scoped for a later PR after the v1 producer set has soaked.
+
+  **Resolved by PR-FU1 (this PR).** Both the
+  `spawn_dataplane_poller` summary producer and the
+  `spawn_fib_dataplane_event_bridge` per-route producer now
+  enqueue into EHM alongside their existing `WatchEvents`
+  broadcasts. Both event flavors live under
+  `EVENT_CATEGORY_DATAPLANE`, discriminated by `BgpEventType`
+  (`DATAPLANE_STATUS_CHANGED` for summaries,
+  `DATAPLANE_ROUTE_INSTALLED` / `_WITHDRAWN` / `_FAILED` for the
+  per-route stream). The poller is startup-spawned when
+  `[event_history].enabled` so durable summaries flow even when
+  no `WatchEvents` subscriber is alive.
 - **`List*Events` RPCs stay on the in-memory rings in v1.**
   `ListRouteEvents` / `ListSessionEvents` / `ListPolicyEvents` /
   `ListEvpnEvents` keep their existing bounded-ring backing

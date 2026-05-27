@@ -163,12 +163,32 @@ fn fib_runtime_event_to_bgp_event(
 fn spawn_fib_dataplane_event_bridge(
     mut fib_events: broadcast::Receiver<fib_runtime::FibRuntimeEvent>,
     bgp_events: broadcast::Sender<rustbgpd_api::proto::BgpEvent>,
+    event_history: Option<rustbgpd_event_history::EventHistoryHandle>,
+    metrics: rustbgpd_telemetry::BgpMetrics,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             match fib_events.recv().await {
                 Ok(event) => {
-                    let _ = bgp_events.send(fib_runtime_event_to_bgp_event(event));
+                    let proto_event = fib_runtime_event_to_bgp_event(event);
+                    // ADR-0072 PR-FU1: durable outbox enqueue. The
+                    // legacy `bgp_events` broadcast (consumed by
+                    // WatchEvents) stays unchanged. Per-route FIB
+                    // events carry peer (when sourced from a
+                    // BGP path) and prefix on the envelope so
+                    // collectors can filter by either.
+                    if let Some(handle) = &event_history {
+                        let envelope = rustbgpd_api::event_history_sinks::envelope_from_bgp_event(
+                            &proto_event,
+                            rustbgpd_event_history::Category::Dataplane,
+                            proto_event.peer_address.parse().ok(),
+                            None,
+                        );
+                        rustbgpd_api::event_history_sinks::try_send_envelope(
+                            handle, &metrics, envelope,
+                        );
+                    }
+                    let _ = bgp_events.send(proto_event);
                 }
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
                     warn!(
@@ -1629,8 +1649,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         tokio::sync::broadcast::channel::<fib_runtime::FibRuntimeEvent>(4096);
     let (fib_bgp_event_tx, _) =
         tokio::sync::broadcast::channel::<rustbgpd_api::proto::BgpEvent>(4096);
-    let _fib_event_bridge_handle =
-        spawn_fib_dataplane_event_bridge(fib_event_rx, fib_bgp_event_tx.clone());
+    let _fib_event_bridge_handle = spawn_fib_dataplane_event_bridge(
+        fib_event_rx,
+        fib_bgp_event_tx.clone(),
+        event_history_handle.clone(),
+        metrics.clone(),
+    );
     let fib_runtime_shutdown = tokio_util::sync::CancellationToken::new();
     let fib_runtime_handle = fib_runtime::spawn(
         fib_runtime::FibRuntimeConfig {

@@ -306,6 +306,14 @@ exposes a monotonic `event_id` cursor. The legacy live surfaces above
 (`WatchEvents` / `WatchRoutes` / `List*Events`) keep their existing
 ring-backed behavior and are unaffected by this section.
 
+Producer set: `route`, `evpn`, `session` (lifecycle + notification),
+`policy`, `bfd`, and `dataplane` (FIB + blackhole summaries and
+per-route install / withdraw / failure events). All six categories
+are produced through the durable outbox when
+`[event_history].enabled = true`. The dataplane poller is
+startup-spawned so durable summaries flow regardless of whether
+any `WatchEvents` subscriber is alive.
+
 | Metric | What it tells you |
 |--------|-------------------|
 | `bgp_event_outbox_committed_total{category}` | Events durably committed to the local outbox, per category. Increments inside EHM after the SQLite transaction commits — not on producer enqueue. |

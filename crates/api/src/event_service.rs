@@ -12,7 +12,7 @@ use tracing::debug;
 
 pub(crate) mod convert;
 mod cursor;
-mod dataplane;
+pub(crate) mod dataplane;
 mod filters;
 
 use convert::{evpn_event_to_bgp_event, policy_event_to_bgp_event, session_event_to_bgp_event};
@@ -176,11 +176,19 @@ impl EventService {
         *guard = Some(tx.clone());
         drop(guard);
 
+        // ADR-0072 PR-FU1: this lazy-spawn path runs when EHM is
+        // disabled (or pre-startup-spawn). The EHM-enabled startup
+        // spawn in `serve()` populates the broadcaster eagerly, so
+        // we never get here in that case. Pass None / a fresh
+        // metrics handle — the latter is used only for drop
+        // accounting which is a no-op without an EHM handle.
         spawn_dataplane_poller(
             tx,
             self.dataplane_events.clone(),
             self.blackhole_discard_snapshot.clone(),
             self.fib_route_snapshot.clone(),
+            None,
+            self.metrics.clone(),
         );
         rx
     }
@@ -1252,6 +1260,154 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dataplane_poller_with_ehm_handle_outlives_watch_events_subscribers() {
+        // ADR-0072 PR-FU1: when EHM is enabled, the poller must
+        // stay alive even after every WatchEvents subscriber drops
+        // — `SubscribeFromEvent` collectors need durable summaries
+        // regardless of who else is watching.
+        let dir = tempfile::tempdir().unwrap();
+        let manager = rustbgpd_event_history::EventHistoryManager::start(
+            rustbgpd_event_history::EventHistoryConfig {
+                path: dir.path().join("events.db"),
+                max_events: 100,
+                max_bytes: 1_000_000,
+                synchronous: rustbgpd_event_history::SynchronousMode::Full,
+                required: false,
+                queue_capacity: 64,
+                batch_size: 4,
+                batch_interval: std::time::Duration::from_millis(20),
+                broadcast_capacity: 64,
+                retention_interval: std::time::Duration::from_mins(1),
+                sidecar_flush_interval_batches: 100,
+                metrics: None,
+            },
+        )
+        .await
+        .expect("EHM start");
+        let handle = manager.handle();
+
+        let shared = dataplane_event_broadcaster();
+        let (tx, initial_rx) = broadcast::channel(16);
+        {
+            let mut guard = shared.lock().unwrap();
+            *guard = Some(tx.clone());
+        }
+        dataplane::spawn_dataplane_poller(
+            tx,
+            shared.clone(),
+            Arc::new(Vec::new),
+            Arc::new(Vec::new),
+            Some(handle),
+            BgpMetrics::new(),
+        );
+
+        // Drop the only WatchEvents-side receiver.
+        drop(initial_rx);
+
+        // Wait for several poll intervals; the EHM-enabled poller
+        // must NOT reset the shared broadcaster to None.
+        for _ in 0..5 {
+            tokio::time::sleep(DATAPLANE_EVENT_POLL_INTERVAL).await;
+        }
+        assert!(
+            shared.lock().unwrap().is_some(),
+            "EHM-enabled dataplane poller must outlive WatchEvents subscribers"
+        );
+
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn dataplane_summary_enqueued_to_ehm_handle_alongside_broadcast() {
+        // ADR-0072 PR-FU1: every dataplane summary that the poller
+        // broadcasts must also be enqueued into EHM so
+        // `SubscribeFromEvent` collectors see the same event the
+        // legacy `WatchEvents` consumer sees.
+        let dir = tempfile::tempdir().unwrap();
+        let manager = rustbgpd_event_history::EventHistoryManager::start(
+            rustbgpd_event_history::EventHistoryConfig {
+                path: dir.path().join("events.db"),
+                max_events: 100,
+                max_bytes: 1_000_000,
+                synchronous: rustbgpd_event_history::SynchronousMode::Full,
+                required: false,
+                queue_capacity: 64,
+                batch_size: 1,
+                batch_interval: std::time::Duration::from_millis(10),
+                broadcast_capacity: 64,
+                retention_interval: std::time::Duration::from_mins(1),
+                sidecar_flush_interval_batches: 100,
+                metrics: None,
+            },
+        )
+        .await
+        .expect("EHM start");
+        let handle = manager.handle();
+        let mut ehm_live = handle.subscribe_live();
+
+        // Empty snapshots at spawn time so the poller's initial
+        // `previous` baseline is "no rows." We mutate the fib
+        // snapshot AFTER spawning so the first tick diff sees a
+        // non-empty current and emits a DataplaneEvent.
+        let fib_routes: Arc<Mutex<Vec<proto::FibRouteStatus>>> = Arc::new(Mutex::new(Vec::new()));
+        let fib_snapshot: FibRouteSnapshotFn = {
+            let fib_routes = fib_routes.clone();
+            Arc::new(move || fib_routes.lock().unwrap().clone())
+        };
+
+        let shared = dataplane_event_broadcaster();
+        let (tx, mut watch_rx) = broadcast::channel(16);
+        {
+            let mut guard = shared.lock().unwrap();
+            *guard = Some(tx.clone());
+        }
+        dataplane::spawn_dataplane_poller(
+            tx,
+            shared,
+            Arc::new(Vec::new),
+            fib_snapshot,
+            Some(handle.clone()),
+            BgpMetrics::new(),
+        );
+
+        // The poller's `previous` baseline is captured at the
+        // start of its spawned task. Yield + wait one poll
+        // interval so the baseline definitely sees the empty
+        // snapshot BEFORE we mutate it; without this, the
+        // baseline can race with the push below and the poller
+        // initializes already in the "installed=1" steady state
+        // (no diff, no event ever).
+        tokio::time::sleep(DATAPLANE_EVENT_POLL_INTERVAL * 2).await;
+        fib_routes.lock().unwrap().push(proto::FibRouteStatus {
+            state: proto::FibRouteState::Installed as i32,
+            ..Default::default()
+        });
+
+        // The poller broadcasts the summary on the WatchEvents
+        // channel first — confirm we see it there so the test
+        // distinguishes "diff didn't fire" from "EHM enqueue
+        // didn't fire" if it ever regresses.
+        let _broadcast_event =
+            tokio::time::timeout(std::time::Duration::from_secs(2), watch_rx.recv())
+                .await
+                .expect("WatchEvents broadcast within 2s")
+                .expect("WatchEvents receiver still attached");
+
+        // EHM commits it on the next batch interval (10ms).
+        let committed = tokio::time::timeout(std::time::Duration::from_secs(2), ehm_live.recv())
+            .await
+            .expect("committed event within 2s")
+            .expect("EHM broadcast still attached");
+        assert_eq!(
+            committed.envelope.category,
+            rustbgpd_event_history::Category::Dataplane,
+            "summary must be classified under Category::Dataplane"
+        );
+
+        manager.shutdown().await;
     }
 
     #[tokio::test]

@@ -1118,15 +1118,10 @@ message SubscribeFromEventRequest {
   // live half of an absent-cursor subscription. Empty filters
   // select all categories for this RPC in every case.
   //
-  // **v1 producer set caveat:** an empty `categories` filter
-  // selects all *EHM-fed* categories — currently route, EVPN,
-  // session, policy, and BFD. Dataplane events are NOT yet
-  // produced by the durable outbox in this release; they continue
-  // to flow live-only on the legacy `WatchEvents` / `WatchRoutes`
-  // surfaces. Durable dataplane wiring is a follow-up; collectors
-  // that want full coverage today should consume both
-  // `SubscribeFromEvent` (durable, restart-safe) and the legacy
-  // live surfaces.
+  // An empty `categories` filter selects every EHM-fed category:
+  // route, EVPN, session, policy, BFD, and dataplane. All six are
+  // produced through the durable outbox when
+  // `[event_history].enabled = true`.
   repeated EventCategory categories = 2;
   repeated BgpEventType event_types = 3;
   string neighbor_address = 4;
