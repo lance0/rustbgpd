@@ -11,6 +11,34 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0072 — durable event history (local outbox).** New design
+  contract for a SQLite WAL-backed daemon-local event outbox that
+  survives restart with a monotonic `event_id` cursor. External
+  collectors (Kafka, NATS, Vector, journald, custom) bridge to their
+  own bus via the existing gRPC stream; rustbgpd does not try to be
+  an event bus itself. Resolves the deferred `OtcRouteBlocked`
+  structured event payload from ADR-0071 and the `Subscribe
+  ON_CHANGE` deferral from ADR-0070.
+- **Event-history foundation crate (`rustbgpd-event-history`).** New
+  `EventHistoryManager` actor + storage thread, explicit
+  `metadata.last_event_id` allocator with primary DB plus
+  `events.db.stale` quarantine recovery; `events.last_id` is
+  diagnostic-only in v1. Adds `event_peers` join table for any-role peer queries,
+  count + byte retention with explicit `ORDER BY event_id ASC`
+  eviction. Behind `[event_history]` config — default-on, ~256 MB
+  soft retention target on disk. No producer wiring yet (PR4 + PR5); validated
+  by direct test injection. Pinned by the byte-equality invariant
+  test: producer bytes == persisted bytes == broadcast bytes.
+- **`[event_history]` config block** with `enabled` (default-on),
+  `required` (fail-start vs pass-through), `max_events`,
+  `max_bytes`, `synchronous`, `overflow`, batching tuning. All
+  fields are restart-required.
+- **`bgp_event_outbox_*` Prometheus metrics:** `_committed_total`,
+  `_dropped_total{reason}`, `_queue_depth`, `_db_size_bytes`,
+  `_retention_evicted_total{reason}`, `_latest_event_id`,
+  `_open_failures_total`, `_degraded`. The degraded flag flips on
+  the first drop or open failure and does not auto-clear in v1.
+
 - **Operator Confidence Polish Sprint 1.**
   - **Reload matrix** (`docs/reload-matrix.md`). Per-field classification —
     `live` / `restart-required` / `rejected` / `unsupported` / `validation-only`

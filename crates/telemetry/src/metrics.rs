@@ -107,6 +107,16 @@ pub struct BgpMetrics {
     bmp_collector_drops: IntCounterVec,
     bmp_replay_attempts: IntCounterVec,
     bmp_control_event_drops: IntCounterVec,
+
+    // ── Event history outbox (ADR-0072) ───────────────────────
+    event_outbox_committed: IntCounterVec,
+    event_outbox_dropped: IntCounterVec,
+    event_outbox_queue_depth: IntGaugeVec,
+    event_outbox_db_size_bytes: IntGauge,
+    event_outbox_retention_evicted: IntCounterVec,
+    event_outbox_latest_event_id: IntGauge,
+    event_outbox_open_failures: IntCounter,
+    event_outbox_degraded: IntGauge,
 }
 
 impl BgpMetrics {
@@ -667,6 +677,67 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        // ── Event history outbox (ADR-0072) ─────────────────────
+        let event_outbox_committed = IntCounterVec::new(
+            Opts::new(
+                "bgp_event_outbox_committed_total",
+                "Events durably committed to the local event outbox (ADR-0072) by category.",
+            ),
+            &["category"],
+        )
+        .expect("valid metric definition");
+
+        let event_outbox_dropped = IntCounterVec::new(
+            Opts::new(
+                "bgp_event_outbox_dropped_total",
+                "Events dropped before reaching durable storage. The outbox is best-effort under overload (ADR-0072); drops are observable but lie outside the committed cursor sequence by design.",
+            ),
+            &["category", "reason"],
+        )
+        .expect("valid metric definition");
+
+        let event_outbox_queue_depth = IntGaugeVec::new(
+            Opts::new(
+                "bgp_event_outbox_queue_depth",
+                "Pending events in the producer queue per category. Climbs before drops start; an operator early-warning signal.",
+            ),
+            &["category"],
+        )
+        .expect("valid metric definition");
+
+        let event_outbox_db_size_bytes = IntGauge::new(
+            "bgp_event_outbox_db_size_bytes",
+            "Combined size of events.db + WAL on disk. The [event_history].max_bytes setting is a retention trigger/target, not a strict filesystem cap.",
+        )
+        .expect("valid metric definition");
+
+        let event_outbox_retention_evicted = IntCounterVec::new(
+            Opts::new(
+                "bgp_event_outbox_retention_evicted_total",
+                "Events evicted by the retention pass, by reason (count_cap or byte_cap).",
+            ),
+            &["reason"],
+        )
+        .expect("valid metric definition");
+
+        let event_outbox_latest_event_id = IntGauge::new(
+            "bgp_event_outbox_latest_event_id",
+            "Latest committed monotonic event_id. Operator sanity check that the daemon is making forward progress.",
+        )
+        .expect("valid metric definition");
+
+        let event_outbox_open_failures = IntCounter::new(
+            "bgp_event_outbox_open_failures_total",
+            "Events DB open failures across the process lifetime. Typically 0 or 1; non-zero means the daemon went into recovery or pass-through (ADR-0072).",
+        )
+        .expect("valid metric definition");
+
+        let event_outbox_degraded = IntGauge::new(
+            "bgp_event_outbox_degraded",
+            "1 = the event outbox has experienced at least one drop or open failure since process start. 0 = healthy. Does not auto-clear in v1; operator restarts to clear.",
+        )
+        .expect("valid metric definition");
+
         registry
             .register(Box::new(state_transitions.clone()))
             .expect("metric not already registered");
@@ -850,6 +921,30 @@ impl BgpMetrics {
         registry
             .register(Box::new(bmp_control_event_drops.clone()))
             .expect("metric not already registered");
+        registry
+            .register(Box::new(event_outbox_committed.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(event_outbox_dropped.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(event_outbox_queue_depth.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(event_outbox_db_size_bytes.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(event_outbox_retention_evicted.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(event_outbox_latest_event_id.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(event_outbox_open_failures.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(event_outbox_degraded.clone()))
+            .expect("metric not already registered");
 
         Self {
             registry,
@@ -914,6 +1009,14 @@ impl BgpMetrics {
             bmp_collector_drops,
             bmp_replay_attempts,
             bmp_control_event_drops,
+            event_outbox_committed,
+            event_outbox_dropped,
+            event_outbox_queue_depth,
+            event_outbox_db_size_bytes,
+            event_outbox_retention_evicted,
+            event_outbox_latest_event_id,
+            event_outbox_open_failures,
+            event_outbox_degraded,
         }
     }
 
@@ -1436,6 +1539,60 @@ impl BgpMetrics {
         self.bmp_control_event_drops
             .with_label_values(&[collector, kind, reason])
             .inc();
+    }
+
+    // ── Event history outbox (ADR-0072) ─────────────────────────
+
+    /// Record a successful durable commit. Called by EHM after each
+    /// committed batch, once per event in the batch.
+    pub fn record_event_outbox_committed(&self, category: &str) {
+        self.event_outbox_committed
+            .with_label_values(&[category])
+            .inc();
+    }
+
+    /// Record a drop. `reason` is bounded: `queue_full` or `db_error`.
+    /// Also flips the degraded flag (the gauge stays at 1 until
+    /// daemon restart in v1).
+    pub fn record_event_outbox_drop(&self, category: &str, reason: &str) {
+        self.event_outbox_dropped
+            .with_label_values(&[category, reason])
+            .inc();
+        self.event_outbox_degraded.set(1);
+    }
+
+    /// Update the per-category queue depth gauge. EHM calls this
+    /// from the actor loop after each batch drain.
+    pub fn set_event_outbox_queue_depth(&self, category: &str, depth: i64) {
+        self.event_outbox_queue_depth
+            .with_label_values(&[category])
+            .set(depth);
+    }
+
+    pub fn set_event_outbox_db_size_bytes(&self, bytes: i64) {
+        self.event_outbox_db_size_bytes.set(bytes);
+    }
+
+    pub fn record_event_outbox_retention_evicted(&self, reason: &str, count: u64) {
+        self.event_outbox_retention_evicted
+            .with_label_values(&[reason])
+            .inc_by(count);
+    }
+
+    pub fn set_event_outbox_latest_event_id(&self, event_id: i64) {
+        self.event_outbox_latest_event_id.set(event_id);
+    }
+
+    pub fn record_event_outbox_open_failure(&self) {
+        self.event_outbox_open_failures.inc();
+        self.event_outbox_degraded.set(1);
+    }
+
+    /// Whether the outbox is currently flagged degraded. 1 = at least
+    /// one drop or open failure since process start.
+    #[must_use]
+    pub fn event_outbox_degraded(&self) -> bool {
+        self.event_outbox_degraded.get() != 0
     }
 }
 

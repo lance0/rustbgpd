@@ -14,6 +14,7 @@ members = [
     "crates/mrt",
     "crates/evpn",
     "crates/evpn-linux",
+    "crates/event-history",
     "bench/evpn-load",
 ]
 resolver = "2"
@@ -42,6 +43,7 @@ rustbgpd-bmp = { path = "crates/bmp", version = "0.29.0" }
 rustbgpd-mrt = { path = "crates/mrt", version = "0.29.0" }
 rustbgpd-evpn = { path = "crates/evpn", version = "0.29.0" }
 rustbgpd-evpn-linux = { path = "crates/evpn-linux", version = "0.29.0" }
+rustbgpd-event-history = { path = "crates/event-history", version = "0.29.0" }
 
 # External dependencies — pinned across workspace
 bytes = "1"
@@ -78,6 +80,13 @@ smallvec = "1"
 tikv-jemallocator = { version = "0.6", features = ["profiling"] }
 dhat = "0.3"
 rcgen = "0.14"
+# Embedded SQLite for the durable event history outbox (ADR-0072).
+# Bundled libsqlite avoids per-distro packaging variance — the outbox
+# is a daemon-local file, not something operators expect to inspect
+# with a system sqlite3 CLI.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# Daemon boot ID stamping for restart detection (ADR-0072).
+uuid = { version = "1", features = ["v4"] }
 
 [package]
 name = "rustbgpd"

@@ -81,9 +81,109 @@ pub struct Config {
     /// the flip.
     #[serde(default = "default_enabled")]
     pub apply_bum_enforcement: bool,
+    /// Durable event-history outbox (ADR-0072). Default-on; set
+    /// `[event_history].enabled = false` to opt out for minimal
+    /// deployments. All fields are restart-required.
+    #[serde(default)]
+    pub event_history: EventHistoryConfig,
     /// Path of the config file (populated by `Config::load`, not serialized).
     #[serde(skip)]
     pub file_path: Option<PathBuf>,
+}
+
+/// Durable event-history outbox configuration (ADR-0072).
+///
+/// All fields are restart-required — toggling the outbox or its
+/// bounds requires a daemon restart. The reload matrix documents the
+/// classification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventHistoryConfig {
+    /// Enable the outbox. Default `true`. When `false`, EHM is
+    /// spawned but in pass-through mode (broadcasts only, no
+    /// persistence) — the minimal-deployment escape hatch.
+    #[serde(default = "default_event_history_enabled")]
+    pub enabled: bool,
+    /// Fail to start if the events DB cannot be opened or recovered.
+    /// Default `false` — degrade to pass-through with the
+    /// `bgp_event_outbox_degraded` flag set.
+    #[serde(default)]
+    pub required: bool,
+    /// Path of `events.db` relative to `runtime_state_dir`.
+    /// Empty string ⇒ `<runtime_state_dir>/events.db`.
+    #[serde(default = "default_event_history_path")]
+    pub path: String,
+    /// Hard count cap on retained events.
+    #[serde(default = "default_event_history_max_events")]
+    pub max_events: u64,
+    /// Byte retention trigger on `events.db` + WAL combined. `SQLite`
+    /// may reuse freed pages rather than shrink the main DB immediately.
+    #[serde(default = "default_event_history_max_bytes")]
+    pub max_bytes: u64,
+    /// `SQLite` `PRAGMA synchronous` mode. `full` (default) fsyncs
+    /// per commit; `normal` checkpoints periodically and trades a
+    /// small crash window for throughput.
+    #[serde(default = "default_event_history_synchronous")]
+    pub synchronous: String,
+    /// Behavior on full producer queue. v1 only supports `drop`;
+    /// `block` is reserved for a future ADR. ADR-0072 documents the
+    /// rationale for uniform best-effort drop.
+    #[serde(default = "default_event_history_overflow")]
+    pub overflow: String,
+    /// Per-producer mpsc capacity.
+    #[serde(default = "default_event_history_queue_capacity")]
+    pub queue_capacity: usize,
+    /// Batch-commit size threshold.
+    #[serde(default = "default_event_history_batch_size")]
+    pub batch_size: usize,
+    /// Batch-commit time threshold (milliseconds).
+    #[serde(default = "default_event_history_batch_interval_ms")]
+    pub batch_interval_ms: u64,
+}
+
+impl Default for EventHistoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_event_history_enabled(),
+            required: false,
+            path: default_event_history_path(),
+            max_events: default_event_history_max_events(),
+            max_bytes: default_event_history_max_bytes(),
+            synchronous: default_event_history_synchronous(),
+            overflow: default_event_history_overflow(),
+            queue_capacity: default_event_history_queue_capacity(),
+            batch_size: default_event_history_batch_size(),
+            batch_interval_ms: default_event_history_batch_interval_ms(),
+        }
+    }
+}
+
+fn default_event_history_enabled() -> bool {
+    true
+}
+fn default_event_history_path() -> String {
+    String::new()
+}
+fn default_event_history_max_events() -> u64 {
+    100_000
+}
+fn default_event_history_max_bytes() -> u64 {
+    256_000_000
+}
+fn default_event_history_synchronous() -> String {
+    "full".to_string()
+}
+fn default_event_history_overflow() -> String {
+    "drop".to_string()
+}
+fn default_event_history_queue_capacity() -> usize {
+    4096
+}
+fn default_event_history_batch_size() -> usize {
+    1024
+}
+fn default_event_history_batch_interval_ms() -> u64 {
+    50
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1164,6 +1264,8 @@ pub enum ConfigError {
     InvalidRouteServerConfig { reason: String },
     #[error("invalid runtime_state_dir {value:?}: {reason}")]
     InvalidRuntimeStateDir { value: String, reason: String },
+    #[error("invalid event_history config: {reason}")]
+    InvalidEventHistoryConfig { reason: String },
     #[error("invalid RPKI config: {reason}")]
     InvalidRpkiConfig { reason: String },
     #[error("undefined policy {name:?} referenced in chain")]

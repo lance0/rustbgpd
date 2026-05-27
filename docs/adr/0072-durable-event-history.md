@@ -134,9 +134,8 @@ semantic contract is "EHM assigns, never SQLite."
 
 The "never reused" promise has one explicit failure mode:
 **catastrophic loss of the allocator anchor** (DB corrupted *and*
-the quarantined `metadata` table unreadable *and* — once it
-exists — the sidecar described in "Failure modes" below also
-unreadable). In that case EHM refuses to issue new `event_id`s
+the quarantined `metadata` table unreadable). In that case EHM
+refuses to issue new `event_id`s
 rather than restart allocation from 1 and silently collide with
 prior IDs. Behavior split by `[event_history].required`:
 
@@ -273,23 +272,47 @@ columns are decoded scratch space. Foreign keys stay OFF for
 ingest throughput; retention `DELETE` against `events`
 explicitly deletes from `event_peers` in the same transaction.
 
-`payload` is the prost-encoded `BgpEvent` envelope — identical wire
-format to what `WatchEvents` already delivers over gRPC. No separate
-codec.
+`payload` is **producer-encoded opaque bytes** from EHM's
+perspective. The producer is responsible for encoding its own
+event shape (eventually the prost-encoded `BgpEvent` envelope;
+PR2 accepts any opaque `Vec<u8>` so test fixtures don't need the
+proto type). EHM does not decode the payload; it never has to.
 
-**Encoding-order invariant.** `BgpEvent.event_id` is part of the
-envelope, so the encoded payload bytes depend on the assigned ID.
-Inside the storage transaction the order is **strict**:
+**Architectural rationale for opaque payload (PR2 refinement).**
+The original draft of this ADR had EHM mutate the in-memory
+`BgpEvent`, stamp the `event_id`, and re-encode inside the
+storage transaction. That sequence forced a build-time dependency
+from `rustbgpd-event-history` onto `rustbgpd-api` (the proto-
+source crate), which would create a circular dep when producers
+in `rustbgpd-rib` and the PeerManager (in the top-level
+`rustbgpd` binary crate) eventually wire up — both already depend
+on `rustbgpd-api`. PR2 broke the cycle by making EHM payload-
+agnostic: the producer encodes its own event with whatever shape
+it wants, hands EHM opaque bytes plus the indexable scalar
+fields, and EHM persists + broadcasts those exact bytes. The
+`event_id` is delivered to subscribers via the `CommittedEvent`
+wrapper struct (which carries the durable id + the unchanged
+producer envelope), **not** by mutating the payload bytes. PR4
+and PR5 producers can still stamp `event_id` into a structured
+field of their own envelope post-commit if they want a self-
+describing payload — but that's an upstream-of-EHM concern that
+doesn't touch the storage contract.
 
-1. Receive in-memory `BgpEvent` from the producer with
-   `event_id == 0`.
-2. Allocate `event_id` (the read-increment-update against
-   `metadata.last_event_id`).
-3. Mutate the in-memory envelope to carry the assigned ID.
-4. Encode the mutated envelope to bytes **once**.
-5. INSERT those exact bytes as `payload`.
-6. After the transaction commits, broadcast those same bytes (or
-   a deserialized clone) on the EHM-owned broadcast sender.
+**Byte-equality invariant.** The bytes the producer hands EHM in
+`EventEnvelope.payload` are byte-identical to:
+
+- the `payload` BLOB in the SQLite `events` row, and
+- the `payload` field on the `CommittedEvent` delivered to live
+  broadcast subscribers.
+
+So a live subscriber and a `SubscribeFromEvent` replay subscriber
+observing the same `event_id` see byte-identical payloads. Pinned
+by `payload_bytes_identical_persisted_and_broadcast` in
+`crates/event-history/tests/byte_equality.rs`. PR3 (the cursor
+gRPC surface) and PR4/PR5 (producer wiring) build on this
+property — breaking it would silently re-introduce the "history
+says one thing, live stream said another" bug class the outbox
+exists to prevent.
 
 The bytes persisted to SQLite and the bytes (or struct) handed to
 broadcast subscribers are byte-identical, so a live subscriber and
@@ -436,16 +459,19 @@ absent.
 
 ### Retention — small, hard-capped, two dimensions
 
-Defaults are **deliberately small** so default-on cannot surprise
-an operator with hundreds of MB of unexpected disk growth:
+Defaults are **deliberately small** so default-on keeps local
+retention pressure bounded:
 
 - `max_events = 100_000` — hard count cap.
-- `max_bytes = 256_000_000` (~256 MB) — hard byte cap measured
-  against `events.db` + WAL combined.
+- `max_bytes = 256_000_000` (~256 MB) — byte retention trigger
+  measured against `events.db` + WAL combined. SQLite DELETE frees
+  pages for reuse and does not guarantee the main DB file immediately
+  shrinks without a compaction/vacuum step, so this is a soft
+  filesystem-size target in v1.
 
-Whichever cap fires first wins. No time-based retention dimension
-in v1 — operators wanting >hours of history push to their bus,
-not grow the local file. Retention runs every 60 s on EHM and
+Both retention triggers run. No time-based retention dimension in v1
+— operators wanting >hours of history push to their bus, not grow the
+local file. Retention runs every 60 s on EHM and
 **always evicts in `event_id` ascending order** (oldest first).
 SQLite's `DELETE … LIMIT` without an explicit `ORDER BY` is
 implementation-defined, so each pass uses the explicit shape:
@@ -475,7 +501,7 @@ enabled = true                  # default-on; opt-out for minimal deployments
 required = false                # if true, daemon fails to start when DB unavailable
 path = ""                       # relative to runtime_state_dir; "" = events.db
 max_events = 100_000            # count retention bound
-max_bytes = 256_000_000         # byte retention bound (~256 MB)
+max_bytes = 256_000_000         # byte retention target (~256 MB)
 synchronous = "full"            # full|normal — "full" = fsync per commit
 overflow = "drop"               # "drop" only in v1; "block" reserved for future
 queue_capacity_per_producer = 4096
@@ -519,8 +545,7 @@ the manual-rename cost is acceptable.
 
 **Allocator recovery ladder.** Because losing the allocator anchor
 silently and restarting at 1 would violate the never-reused
-contract, recovery is explicit and falls through a three-step
-ladder, picking the maximum of whatever is recoverable:
+contract, recovery is explicit and uses only authoritative metadata:
 
 1. **Primary**: the open DB's `metadata.last_event_id`. Used
    verbatim when the DB opens cleanly.
@@ -529,30 +554,27 @@ ladder, picking the maximum of whatever is recoverable:
    quarantined file read-only and reads its
    `metadata.last_event_id`. If recoverable, the fresh DB's
    allocator seeds from that value.
-3. **Sidecar fallback**: EHM also maintains
+3. **Diagnostic sidecar**: EHM also maintains
    `<runtime_state_dir>/events.last_id` — a tiny file
    (just the allocator value as ASCII, written via the
    `tempfile + rename` atomic pattern at `src/fib_runtime.rs:1159-1161`)
-   updated every N commits (default N=100, configurable as
-   `[event_history].sidecar_flush_interval_batches`). The
-   sidecar is written **after** each WAL commit it covers, so
-   it's at most N-1 commits behind the DB. On open, if both
-   the primary DB metadata and the quarantine fallback fail,
-   EHM uses `max(sidecar_value, 0) + 1` as the next allocator
-   value.
+   updated periodically. Because this file can lag committed and
+   broadcast events, it is **not** authoritative for allocator
+   recovery in v1. It is kept as an operator diagnostic and a future
+   reset-tool hint only.
 
-If **all three** fail (no DB, no quarantine, no sidecar — the
-"truly fresh install" case), the allocator starts at 1. This is
-the only path where event_id=1 is correct, because no prior IDs
-exist to collide with.
+If both authoritative sources are absent and there is no diagnostic
+sidecar (no DB, no quarantine, no sidecar — the "truly fresh install"
+case), the allocator starts at 1. This is the only path where
+event_id=1 is correct, because no prior IDs exist to collide with.
 
 If the primary DB is unreadable AND the quarantine fallback fails
-AND the sidecar is unreadable but `<runtime_state_dir>/events.db`
-did exist at some prior point (detected by the existence of an
-`events.db.stale` file regardless of its readability), EHM enters
-the pass-through + degraded path described in the Event ID
-section: refuse to issue new IDs, leave the operator to resolve
-explicitly. Restarting at 1 in this state is **never** automatic.
+but `<runtime_state_dir>/events.db` did exist at some prior point
+(detected by the existence of `events.db.stale` or `events.last_id`
+regardless of readability), EHM enters the pass-through + degraded
+path described in the Event ID section: refuse to issue new IDs, leave
+the operator to resolve explicitly. Restarting at 1 in this state is
+**never** automatic.
 
 **Schema downgrade fence**: a future daemon version bumps
 `schema_version`. Downgrading the daemon binary while pointing at
@@ -708,8 +730,10 @@ reference bridge at `examples/event-bridge/`:
 
 - New on-disk file (`events.db` + WAL) under `runtime_state_dir`.
   Default-on means existing deployments will see disk usage they
-  did not see before — capped at ~256 MB, but non-zero. Documented
-  prominently; `enabled = false` is the escape hatch.
+  did not see before. v1 has a hard event-count cap and a byte
+  retention target, but SQLite may reuse freed pages rather than
+  shrink the main DB file immediately; `enabled = false` is the
+  escape hatch for zero-footprint deployments.
 - New crate (`rustbgpd-event-history`) and a small dependency
   footprint addition: `rusqlite` (bundled libsqlite) plus `uuid`.
   rusqlite-bundled adds ~5 MB to the release binary.

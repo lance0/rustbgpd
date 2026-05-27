@@ -343,6 +343,17 @@ counters operators watch:
   `bgp_routes_installed_total`, `bgp_max_prefix_exceeded`.
 - **GR / FIB** — `bgp_gr_active_peers`, `bgp_gr_stale_routes`,
   `bgp_fib_routes_installed_total`, `bgp_fib_kernel_failures_total`.
+- **Durable event outbox** (ADR-0072) —
+  `bgp_event_outbox_committed_total{category}`,
+  `bgp_event_outbox_dropped_total{category, reason}`,
+  `bgp_event_outbox_db_size_bytes`,
+  `bgp_event_outbox_latest_event_id`,
+  `bgp_event_outbox_degraded`. The degraded gauge is the
+  alert-on-this signal — flips to `1` on the first drop or
+  open failure since process start; does not auto-clear in
+  v1, so any non-zero value warrants investigation. See
+  `[event_history]` in `CONFIGURATION.md` for tuning and
+  recovery semantics.
 
 **Policy filtering visibility — Prometheus.** `bgp_policy_routes_total
 {peer, policy, direction, action}` attributes each import and export
