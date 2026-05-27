@@ -163,18 +163,64 @@ fn fib_runtime_event_to_bgp_event(
 fn spawn_fib_dataplane_event_bridge(
     mut fib_events: broadcast::Receiver<fib_runtime::FibRuntimeEvent>,
     bgp_events: broadcast::Sender<rustbgpd_api::proto::BgpEvent>,
+    event_history: Option<rustbgpd_event_history::EventHistoryHandle>,
+    metrics: rustbgpd_telemetry::BgpMetrics,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             match fib_events.recv().await {
                 Ok(event) => {
-                    let _ = bgp_events.send(fib_runtime_event_to_bgp_event(event));
+                    // Capture the typed peer before consuming `event`
+                    // into the proto converter. The proto envelope's
+                    // peer field is a stringified IpAddr, so parsing
+                    // it back is wasted work when the source struct
+                    // already carries `Option<IpAddr>` directly.
+                    let envelope_peer = event.peer;
+                    let proto_event = fib_runtime_event_to_bgp_event(event);
+                    // ADR-0072 PR-FU1: durable outbox enqueue. The
+                    // legacy `bgp_events` broadcast (consumed by
+                    // WatchEvents) stays unchanged. Per-route FIB
+                    // events carry peer (when sourced from a
+                    // BGP path) and prefix on the envelope so
+                    // collectors can filter by either.
+                    if let Some(handle) = &event_history {
+                        let envelope = rustbgpd_api::event_history_sinks::envelope_from_bgp_event(
+                            &proto_event,
+                            rustbgpd_event_history::Category::Dataplane,
+                            envelope_peer,
+                            None,
+                        );
+                        rustbgpd_api::event_history_sinks::try_send_envelope(
+                            handle, &metrics, envelope,
+                        );
+                    }
+                    let _ = bgp_events.send(proto_event);
                 }
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    // The bridge consumes `fib_events` via a bounded
+                    // tokio broadcast; if the bridge falls behind the
+                    // FIB runtime, those `missed` events never reach
+                    // the bridge body and therefore never reach EHM.
+                    // When EHM is the durable producer for this
+                    // category, that's a real cursor gap — call
+                    // `record_source_lag` so the drop counter, the
+                    // Prometheus degraded gauge, AND EHM's in-process
+                    // degraded state are all flipped together. When
+                    // EHM is disabled the lag is purely a live-stream
+                    // concern (matches pre-ADR-0072 behavior); leave
+                    // the bookkeeping alone in that case.
                     warn!(
                         missed,
                         "FIB dataplane event bridge lagged; dropping stale route events"
                     );
+                    if let Some(handle) = &event_history {
+                        rustbgpd_api::event_history_sinks::record_source_lag(
+                            handle,
+                            &metrics,
+                            "dataplane",
+                            missed,
+                        );
+                    }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -297,10 +343,23 @@ fn spawn_bfd_event_bridge(
                     let _ = bgp_events.send(proto_event);
                 }
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    // See FIB bridge above: when EHM is the durable
+                    // producer for this category, broadcast lag at
+                    // the bridge boundary is a real cursor gap.
+                    // `record_source_lag` flips the drop counter,
+                    // the Prometheus degraded gauge, AND EHM's
+                    // in-process degraded state together. Pre-PR
+                    // behavior (no EHM) leaves the bookkeeping
+                    // alone.
                     warn!(
                         missed,
                         "BFD event bridge lagged; dropping stale session events"
                     );
+                    if let Some(handle) = &event_history {
+                        rustbgpd_api::event_history_sinks::record_source_lag(
+                            handle, &metrics, "bfd", missed,
+                        );
+                    }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -1629,8 +1688,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         tokio::sync::broadcast::channel::<fib_runtime::FibRuntimeEvent>(4096);
     let (fib_bgp_event_tx, _) =
         tokio::sync::broadcast::channel::<rustbgpd_api::proto::BgpEvent>(4096);
-    let _fib_event_bridge_handle =
-        spawn_fib_dataplane_event_bridge(fib_event_rx, fib_bgp_event_tx.clone());
+    let _fib_event_bridge_handle = spawn_fib_dataplane_event_bridge(
+        fib_event_rx,
+        fib_bgp_event_tx.clone(),
+        event_history_handle.clone(),
+        metrics.clone(),
+    );
     let fib_runtime_shutdown = tokio_util::sync::CancellationToken::new();
     let fib_runtime_handle = fib_runtime::spawn(
         fib_runtime::FibRuntimeConfig {

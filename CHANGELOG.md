@@ -11,6 +11,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0072 follow-up: dataplane events flow through EHM.** The
+  `spawn_dataplane_poller` summary producer
+  (FIB / blackhole installed / rejected / failed rollups) and the
+  `spawn_fib_dataplane_event_bridge` per-route producer now enqueue
+  into `EventHistoryManager` alongside the existing `WatchEvents`
+  broadcast. Both event flavors live under
+  `EVENT_CATEGORY_DATAPLANE`, discriminated by `BgpEventType`. The
+  poller is **startup-spawned** when `[event_history].enabled` so
+  `SubscribeFromEvent` collectors see dataplane summaries from
+  the first tick — independent of whether any `WatchEvents`
+  subscriber ever attaches. When EHM is disabled, the existing
+  lazy-spawn-and-exit behavior is byte-identical to pre-PR.
+  Closes the v1 producer-set deferral from ADR-0072.
 - **ADR-0072 — durable event history (local outbox).** New design
   contract for a SQLite WAL-backed daemon-local event outbox that
   survives restart with a monotonic `event_id` cursor. External

@@ -165,6 +165,30 @@ pub fn envelope_from_bgp_event(
     }
 }
 
+/// Record that an upstream broadcast source lost `missed` events
+/// before a durable producer could enqueue them. Today this is
+/// called from the FIB and BFD bridges when `fib_events.recv()` or
+/// `bfd_events.recv()` returns `RecvError::Lagged(missed)` — those
+/// missed events never reach the bridge body and therefore never
+/// reach EHM. Mirrors the bookkeeping the queue-full path in
+/// `try_send_envelope` does: the bounded drop counter, the
+/// Prometheus degraded gauge, AND EHM's in-process degraded state
+/// are all flipped, so a health probe reading either signal sees
+/// the degradation. The previous draft of this PR set only the
+/// Prometheus side, which left
+/// `EventHistoryHandle::state().degraded()` reading `false` even
+/// after a real durable-cursor gap.
+pub fn record_source_lag(
+    handle: &EventHistoryHandle,
+    metrics: &BgpMetrics,
+    category: &str,
+    missed: u64,
+) {
+    metrics.record_event_outbox_drops_by(category, "source_lagged", missed);
+    metrics.mark_event_outbox_degraded();
+    handle.state().flip_degraded();
+}
+
 /// Try-send convenience for producers that already have a built
 /// envelope. Increments the matching drop metric on failure.
 pub fn try_send_envelope(
@@ -223,5 +247,67 @@ fn prefix_with_length(e: &proto::BgpEvent) -> Option<String> {
         None
     } else {
         Some(format!("{}/{}", e.prefix, e.prefix_length))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustbgpd_event_history::{EventHistoryConfig, EventHistoryManager, SynchronousMode};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn record_source_lag_flips_metric_and_in_process_state() {
+        // Regression for the dual-signal bug the PR #291 second
+        // review pass caught: `mark_event_outbox_degraded()` was
+        // called but `handle.state().flip_degraded()` was not, so
+        // any health probe reading the in-process EHM state would
+        // see `degraded() == false` even after a real source lag.
+        let dir = tempfile::tempdir().unwrap();
+        let manager = EventHistoryManager::start(EventHistoryConfig {
+            path: dir.path().join("events.db"),
+            max_events: 100,
+            max_bytes: 1_000_000,
+            synchronous: SynchronousMode::Full,
+            required: false,
+            queue_capacity: 64,
+            batch_size: 1,
+            batch_interval: Duration::from_millis(10),
+            broadcast_capacity: 64,
+            retention_interval: Duration::from_mins(1),
+            sidecar_flush_interval_batches: 100,
+            metrics: None,
+        })
+        .await
+        .expect("EHM start");
+        let handle = manager.handle();
+        let metrics = BgpMetrics::new();
+
+        // Baseline: nothing is degraded, no drops recorded.
+        assert!(
+            !handle.state().degraded(),
+            "EHM state must not start degraded"
+        );
+        assert!(
+            !metrics.event_outbox_degraded(),
+            "metric must not start degraded"
+        );
+
+        // Simulate one source lag of 7 missed events on the
+        // dataplane category. Both the metric and the in-process
+        // state must flip; the drop counter must increment by
+        // exactly `missed`.
+        record_source_lag(&handle, &metrics, "dataplane", 7);
+
+        assert!(
+            handle.state().degraded(),
+            "EHM in-process state must flip on source_lagged drop"
+        );
+        assert!(
+            metrics.event_outbox_degraded(),
+            "Prometheus degraded gauge must flip on source_lagged drop"
+        );
+
+        manager.shutdown().await;
     }
 }

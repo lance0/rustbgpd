@@ -294,6 +294,17 @@ impl Interceptor for AuthInterceptor {
 
 /// Start all configured gRPC listeners. Runs until the shutdown signal fires
 /// or a listener exits unexpectedly.
+///
+/// # Panics
+///
+/// Panics if the dataplane event broadcaster mutex is poisoned —
+/// a `Mutex` is poisoned when a thread panics while holding the
+/// guard, not on `.await`. The dataplane code paths that lock
+/// this mutex do trivial assignments and don't call any code
+/// that could panic mid-guard, so poisoning is not expected in
+/// practice; expressing the failure as a panic rather than a
+/// fallback matches the broader daemon convention for "should
+/// be unreachable" lock acquisitions on startup paths.
 #[expect(clippy::too_many_arguments, reason = "startup wiring for gRPC server")]
 pub async fn serve(
     listeners: Vec<ListenerConfig>,
@@ -308,6 +319,30 @@ pub async fn serve(
     let (listener_shutdown_tx, listener_shutdown_rx) = watch::channel(false);
     let mut listener_tasks = JoinSet::new();
     let dataplane_events = dataplane_event_broadcaster();
+
+    // ADR-0072 PR-FU1: when the durable outbox is enabled, eagerly
+    // spawn the dataplane poller so SubscribeFromEvent collectors
+    // see dataplane summaries from the first tick — independent of
+    // whether any WatchEvents subscriber ever attaches. Without
+    // this, a collector that goes straight to the cursor stream
+    // would see an empty dataplane category.
+    if let Some(handle) = config.event_history.as_ref() {
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        {
+            let mut guard = dataplane_events
+                .lock()
+                .expect("dataplane event broadcaster mutex poisoned");
+            *guard = Some(tx.clone());
+        }
+        crate::event_service::dataplane::spawn_dataplane_poller(
+            tx,
+            dataplane_events.clone(),
+            config.blackhole_discard_snapshot.clone(),
+            config.fib_route_snapshot.clone(),
+            Some(handle.clone()),
+            config.metrics.clone(),
+        );
+    }
 
     for listener in listeners {
         let rib_tx = rib_tx.clone();

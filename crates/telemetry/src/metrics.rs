@@ -1569,7 +1569,7 @@ impl BgpMetrics {
 
     /// Record an outbox drop or cursor-delivery skip. `reason` is
     /// bounded by caller: `queue_full`, `closed`, `db_error`,
-    /// `decode_failure`, or `opaque_codec`. Call
+    /// `decode_failure`, `opaque_codec`, or `source_lagged`. Call
     /// [`Self::mark_event_outbox_degraded`] separately when the drop
     /// represents an operator-visible outbox degradation; shutdown-time
     /// `closed` drops intentionally do not mark degraded.
@@ -1577,6 +1577,18 @@ impl BgpMetrics {
         self.event_outbox_dropped
             .with_label_values(&[category, reason])
             .inc();
+    }
+
+    /// Bulk version of [`Self::record_event_outbox_drop`] for the case
+    /// where a single upstream signal represents `count` lost events
+    /// — e.g. a `broadcast::error::RecvError::Lagged(missed)` on the
+    /// FIB or BFD bridge, where `missed` events were never seen by
+    /// the bridge body and therefore never enqueued into EHM. Same
+    /// bounded `reason` vocabulary as `record_event_outbox_drop`.
+    pub fn record_event_outbox_drops_by(&self, category: &str, reason: &str, count: u64) {
+        self.event_outbox_dropped
+            .with_label_values(&[category, reason])
+            .inc_by(count);
     }
 
     /// Update the per-category queue depth gauge. EHM calls this
