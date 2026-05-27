@@ -1088,9 +1088,9 @@ message WatchEventsRequest {
 
 // SubscribeFromEvent cursor request (ADR-0072).
 //
-// Mirrors the filter surface of WatchEventsRequest, plus an explicit-
-// presence cursor field. See the RPC doc on EventService for the
-// presence semantics.
+// Carries the same filter field surface as WatchEventsRequest, plus
+// an explicit-presence cursor field. See the RPC doc on EventService
+// for the presence semantics.
 message SubscribeFromEventRequest {
   // Explicit-presence cursor. proto3 `optional` distinguishes
   // "field absent on the wire" (live-only subscription) from
@@ -1098,9 +1098,25 @@ message SubscribeFromEventRequest {
   // See ADR-0072 § "Cursor API" for the contract.
   optional uint64 from_event_id = 1;
 
-  // Filter surface — mirrors WatchEventsRequest so existing clients
-  // can switch over without rebuilding their filter logic. All
-  // filters are AND-combined; an empty filter accepts every event.
+  // Filters. All set filters are AND-combined.
+  //
+  // Default-filter semantics diverge from WatchEventsRequest on
+  // purpose: SubscribeFromEvent treats an empty `categories` +
+  // empty `event_types` as **all categories** — the natural
+  // default for a durable replay client that wants to see
+  // everything the outbox emits. WatchEventsRequest's empty-
+  // filter default of "route + session only" exists for
+  // historical live-stream ergonomics and would surprise a
+  // cursor-driven collector that loses non-route/non-session
+  // events on first connect. Clients that want to scope the
+  // stream name the categories explicitly.
+  //
+  // This default applies regardless of whether `from_event_id`
+  // is set. The cursor field above only changes replay behavior
+  // (absent ⇒ live-only, present ⇒ replay-then-live); it does
+  // NOT swap in WatchEventsRequest's category default for the
+  // live half of an absent-cursor subscription. Empty filters
+  // select all categories for this RPC in every case.
   repeated EventCategory categories = 2;
   repeated BgpEventType event_types = 3;
   string neighbor_address = 4;
@@ -1327,14 +1343,18 @@ message BgpEvent {
   string target_peer_address = 19;
 
   // Durable monotonic event_id (ADR-0072). Carried at the envelope
-  // level rather than duplicated onto every nested payload — see the
-  // ADR's "Envelope strategy" section for the rationale.
+  // level rather than duplicated onto every nested payload — see
+  // the ADR's "Envelope strategy" section for the rationale.
   //
   // `optional uint64` (proto3 explicit-presence) so clients can
-  // distinguish "no cursor available (events from a pre-ADR-0072
-  // daemon)" from "cursor = 0" on the rare case where the outbox is
-  // empty. Old daemons that pre-date the durable outbox simply omit
-  // the field; new daemons set it on every committed event.
+  // tell whether the daemon emitted this event through the durable
+  // outbox. Events from EHM-fed broadcasts (PR5+) set the field on
+  // every event. Events from pre-ADR-0072 surfaces — including the
+  // legacy in-memory ring path used by ListRouteEvents and the
+  // existing WatchEvents stream until producer wiring lands — omit
+  // the field. The allocator starts at 0 and the first committed
+  // event gets id 1, so a present-but-zero value should never
+  // appear on an emitted BgpEvent in practice.
   //
   // RouteEvent.event_id continues to mirror this value for wire
   // backwards-compatibility with route-only consumers, but the
