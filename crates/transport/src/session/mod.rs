@@ -216,9 +216,12 @@ pub(crate) struct PeerSession {
     /// Per-session import-policy decision cache (ADR-0073). Records
     /// every import evaluation — permit and deny — so
     /// `PolicyService.ExplainImportPolicy` can answer "why didn't this
-    /// prefix come in?". Owned outright by the session: it resets for
-    /// free when the session task ends (peer flap / daemon restart),
-    /// which is exactly the ADR-0073 reset contract.
+    /// prefix come in?". Owned outright by the session, but a peer flap
+    /// does NOT reconstruct the `PeerSession` task, so the ADR-0073
+    /// "resets on peer session reset" contract is enforced **explicitly**:
+    /// the cache is cleared in the `Action::SessionDown` handler alongside
+    /// the per-session import counters (see `fsm.rs`). A daemon restart
+    /// drops it with the process.
     import_decision_cache: import_decision_cache::ImportDecisionCache,
     /// Session-local import-policy generation. Bumped whenever the
     /// effective import chain is hot-applied
