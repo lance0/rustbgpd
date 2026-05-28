@@ -805,6 +805,20 @@ fn main() {
         eprintln!("error: --json can only be used with --diff");
         process::exit(2);
     }
+    // `--stdout` is only the `--init-config` output target. Without it,
+    // a bare `--stdout` would otherwise fall through to normal daemon
+    // startup (silently, on a box with /etc/rustbgpd/config.toml).
+    if to_stdout && init_profile.is_none() {
+        eprintln!("error: --stdout can only be used with --init-config");
+        process::exit(2);
+    }
+    // `--init-config` is a standalone mode, not a modifier on a daemon
+    // run — reject combining it with the other one-shot modes rather
+    // than silently letting init win and ignoring them.
+    if init_profile.is_some() && (check_only || diff_path.is_some()) {
+        eprintln!("error: --init-config cannot be combined with --check or --diff");
+        process::exit(2);
+    }
 
     // `--init-config PROFILE --stdout` prints a curated starter config and
     // exits — handled before loading any runtime config, since config
