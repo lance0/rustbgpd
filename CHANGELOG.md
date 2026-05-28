@@ -9,6 +9,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Inlined the per-peer Adj-RIB-In secondary prefix index
+  (`HashMap<Prefix, HashSet<u32>>` → `HashMap<Prefix, SmallVec<[u32; 1]>>`),
+  eliminating one heap-allocated `HashSet` per prefix for the common
+  no-Add-Path case — ~21–22% lower Adj-RIB-In resident memory at scale
+  (−110 MB at 900k prefixes × 2 peers in the `memory_profile` test).
+  Mirrors the existing `AdjRibOut::prefix_path_ids` layout; no behaviour
+  change.
+
 ## [0.31.0] — 2026-05-28
 
 ### Added
