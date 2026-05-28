@@ -367,17 +367,43 @@ docker run --rm --entrypoint rustbgpctl rustbgpd:dev --help
    and confirm every user-visible change (features, fixes, interop suites) is
    listed under the new version — not misattributed to a prior release. Check
    that stale counts (test totals, interop suite counts, script counts) are
-   updated in CHANGELOG.md, README.md, and ROADMAP.md.
-3. Bump version in root `Cargo.toml` (`[workspace.package] version`)
-4. Run the full checklist above
-5. Commit: `Bump version to vX.Y.Z`
-6. Tag: `git tag vX.Y.Z`
+   updated in CHANGELOG.md, README.md, and ROADMAP.md. Also sweep
+   `(post-vX.Y.Z)` annotations in ROADMAP.md and the Maturity row in README.md.
+3. Bump versions:
+   - Root `Cargo.toml`: `[workspace.package] version` plus every internal
+     `rustbgpd-*` pin in `[workspace.dependencies]` (the `rustbgpd-wire`
+     entry is path-only and has no version pin — leave it alone).
+   - `crates/wire/Cargo.toml`: bump **only** if `crates/wire/src/` changed
+     since the last wire publish (see semver rules in the next section).
+     Land the wire bump in its **own commit** before the workspace bump so
+     the wire publish is reproducible from the commit alone.
+4. Run the full checklist above (fmt, clippy `-D warnings`, test, doc
+   `-D warnings`, release build)
+5. Commit (workspace): `release: prep vX.Y.Z — bump workspace, roll CHANGELOG`
+6. **Annotated** tag (lightweight tags break the release-history convention
+   here): `git tag -a vX.Y.Z -m "vX.Y.Z — <one-line headline>"`
 7. Push: `git push origin main && git push origin vX.Y.Z`
-8. Verify CI passes on the tag
-9. Verify container image published to GHCR (tagged builds)
-10. **Verify GitHub release notes**: check that the release created by CI has
-    accurate notes. If the workflow only generates a changelog link, edit the
-    release to include a human-written summary matching CHANGELOG.md.
+8. Verify CI passes on the tag (build matrix x86_64 + aarch64, doc, GHCR
+   push, release.yml binary build + GitHub Release creation)
+9. **Verify container image published to GHCR** via `docker/metadata-action`'s
+   semver pattern:
+   - `ghcr.io/lance0/rustbgpd:X.Y.Z` (exact, immutable)
+   - `ghcr.io/lance0/rustbgpd:X.Y` (rolls forward within the minor)
+   - `ghcr.io/lance0/rustbgpd:latest` (auto-published for non-prerelease
+     tags via the action's default `latest=auto` flavor)
+   Tags are emitted **without** the `v` prefix — `0.30.0`, not `v0.30.0`.
+10. **Verify release tarballs** under
+    [GitHub Releases](https://github.com/lance0/rustbgpd/releases) — each
+    tag should publish version-less `rustbgpd-linux-amd64.tar.gz` and
+    `rustbgpd-linux-arm64.tar.gz` plus per-arch `checksums-<arch>.txt`.
+    The version-less filenames are what powers the static
+    `releases/latest/download/` URLs in `docs/deployment.md`; if the
+    filenames drift, deployment.md silently breaks for new operators.
+11. **Verify GitHub release notes**: check that the release created by CI has
+    accurate notes. The `release` workflow extracts the matching
+    `## [X.Y.Z]` block out of `CHANGELOG.md` via awk; if the body shows
+    "no `[X.Y.Z]` section found" or the auto-generated commit list,
+    fix the CHANGELOG heading and either re-tag or edit the release body.
 
 ### rustbgpd-wire crate release
 
