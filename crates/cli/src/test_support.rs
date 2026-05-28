@@ -34,6 +34,7 @@ pub(crate) struct MockState {
     // neighbor_set.rs CLI tests.
     pub(crate) last_set_policy: Mutex<Option<server_proto::SetPolicyRequest>>,
     pub(crate) last_delete_policy: Mutex<Option<server_proto::DeletePolicyRequest>>,
+    pub(crate) last_explain_import: Mutex<Option<server_proto::ExplainImportPolicyRequest>>,
     pub(crate) last_set_neighbor_set: Mutex<Option<server_proto::SetNeighborSetRequest>>,
     pub(crate) last_delete_neighbor_set: Mutex<Option<server_proto::DeleteNeighborSetRequest>>,
     pub(crate) last_set_global_import_chain:
@@ -963,14 +964,69 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
 
     async fn explain_import_policy(
         &self,
-        _request: Request<server_proto::ExplainImportPolicyRequest>,
+        request: Request<server_proto::ExplainImportPolicyRequest>,
     ) -> Result<Response<server_proto::ExplainImportPolicyResponse>, Status> {
-        // No CLI commands exercise this yet (PR2 work). Stubbed to
-        // satisfy the trait so the rest of the policy-service mock
-        // compiles.
-        Err(Status::unimplemented(
-            "MockPolicyService::explain_import_policy",
-        ))
+        let req = request.into_inner();
+        *self.state.last_explain_import.lock().await = Some(req.clone());
+
+        let modifications = Some(server_proto::ExplainModifications {
+            set_local_pref: Some(200),
+            set_med: None,
+            set_next_hop: String::new(),
+            communities_add: vec![65001 << 16 | 100],
+            communities_remove: vec![],
+            extended_communities_add: vec![],
+            extended_communities_remove: vec![],
+            large_communities_add: vec![],
+            large_communities_remove: vec![],
+            as_path_prepend_asn: None,
+            as_path_prepend_count: None,
+        });
+        let permit = |path_id: u32| server_proto::ImportExplainMatch {
+            outcome: server_proto::ImportExplainOutcome::Permit as i32,
+            peer_address: req.peer_address.clone(),
+            prefix: req.prefix.clone(),
+            prefix_length: req.prefix_length,
+            path_id,
+            afi_safi: req.afi_safi,
+            matched_policy: "from-transit".to_string(),
+            rpki_validation: "valid".to_string(),
+            aspa_validation: "unknown".to_string(),
+            modifications: modifications.clone(),
+            evaluated_at_unix_ns: 1_700_000_000_000_000_000,
+            policy_generation: 3,
+        };
+        // When the caller pins a path_id, return exactly that path;
+        // otherwise return two paths so the Add-Path "all matches"
+        // rendering is exercised (one permit, one deny).
+        let matches = match req.path_id {
+            Some(path_id) => vec![permit(path_id)],
+            None => vec![
+                permit(1),
+                server_proto::ImportExplainMatch {
+                    outcome: server_proto::ImportExplainOutcome::Deny as i32,
+                    peer_address: req.peer_address.clone(),
+                    prefix: req.prefix.clone(),
+                    prefix_length: req.prefix_length,
+                    path_id: 2,
+                    afi_safi: req.afi_safi,
+                    matched_policy: "block-bogons".to_string(),
+                    rpki_validation: "invalid".to_string(),
+                    aspa_validation: "unknown".to_string(),
+                    modifications: None,
+                    evaluated_at_unix_ns: 1_700_000_000_000_000_000,
+                    policy_generation: 3,
+                },
+            ],
+        };
+        Ok(Response::new(server_proto::ExplainImportPolicyResponse {
+            peer_address: req.peer_address,
+            prefix: req.prefix,
+            prefix_length: req.prefix_length,
+            afi_safi: req.afi_safi,
+            current_policy_generation: 3,
+            matches,
+        }))
     }
 }
 

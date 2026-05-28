@@ -21,9 +21,10 @@ use crate::proto::policy_service_client::PolicyServiceClient;
 use crate::proto::{
     self, ClearGlobalExportChainRequest, ClearGlobalImportChainRequest,
     ClearNeighborExportChainRequest, ClearNeighborImportChainRequest, DeletePolicyRequest,
-    GetGlobalPolicyChainsRequest, GetNeighborPolicyChainsRequest, GetPolicyRequest,
-    ListPoliciesRequest, SetGlobalExportChainRequest, SetGlobalImportChainRequest,
-    SetNeighborExportChainRequest, SetNeighborImportChainRequest, SetPolicyRequest,
+    ExplainImportPolicyRequest, GetGlobalPolicyChainsRequest, GetNeighborPolicyChainsRequest,
+    GetPolicyRequest, ListPoliciesRequest, SetGlobalExportChainRequest,
+    SetGlobalImportChainRequest, SetNeighborExportChainRequest, SetNeighborImportChainRequest,
+    SetPolicyRequest,
 };
 
 #[derive(Debug, Serialize)]
@@ -251,6 +252,241 @@ pub async fn delete(connection: Connection, name: &str, json: bool) -> Result<()
         &format!("Policy {name} deleted"),
     );
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct JsonImportExplainMatch {
+    outcome: String,
+    path_id: u32,
+    matched_policy: Option<String>,
+    rpki_validation: Option<String>,
+    aspa_validation: Option<String>,
+    modifications: Option<JsonImportExplainModifications>,
+    evaluated_at_unix_ns: Option<i64>,
+    policy_generation: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonImportExplainModifications {
+    set_local_pref: Option<u32>,
+    set_med: Option<u32>,
+    set_next_hop: Option<String>,
+    communities_add: Vec<u32>,
+    communities_remove: Vec<u32>,
+    large_communities_add: Vec<String>,
+    large_communities_remove: Vec<String>,
+    as_path_prepend_asn: Option<u32>,
+    as_path_prepend_count: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonImportExplain {
+    peer_address: String,
+    prefix: String,
+    afi_safi: String,
+    current_policy_generation: u64,
+    matches: Vec<JsonImportExplainMatch>,
+}
+
+/// Render a proto outcome enum as a stable lowercase operator string.
+fn outcome_label(outcome: i32) -> &'static str {
+    match proto::ImportExplainOutcome::try_from(outcome) {
+        Ok(proto::ImportExplainOutcome::Permit) => "permit",
+        Ok(proto::ImportExplainOutcome::Deny) => "deny",
+        Ok(proto::ImportExplainOutcome::Withdrawn) => "withdrawn",
+        Ok(proto::ImportExplainOutcome::Evicted) => "evicted",
+        Ok(proto::ImportExplainOutcome::Stale) => "stale",
+        Ok(proto::ImportExplainOutcome::NotSeen) => "not_seen",
+        Ok(proto::ImportExplainOutcome::Unspecified) | Err(_) => "unspecified",
+    }
+}
+
+/// Whether an outcome carries a recorded decision (and therefore
+/// populated policy / validation / modification fields).
+fn outcome_has_decision(outcome: i32) -> bool {
+    matches!(
+        proto::ImportExplainOutcome::try_from(outcome),
+        Ok(proto::ImportExplainOutcome::Permit
+            | proto::ImportExplainOutcome::Deny
+            | proto::ImportExplainOutcome::Withdrawn
+            | proto::ImportExplainOutcome::Stale)
+    )
+}
+
+/// Split a CIDR (`"192.0.2.0/24"` / `"2001:db8::/32"`) into the address
+/// string, prefix length, and the matching `AddressFamily`. ADR-0073
+/// scopes explain to IPv4 / IPv6 unicast, so the address family is
+/// inferred from the prefix rather than asked for separately.
+fn parse_cidr(prefix: &str) -> Result<(String, u32, proto::AddressFamily), CliError> {
+    let (addr, len) = prefix
+        .split_once('/')
+        .ok_or_else(|| CliError::Argument(format!("--prefix must be CIDR (got {prefix:?})")))?;
+    let length: u32 = len
+        .parse()
+        .map_err(|_| CliError::Argument(format!("invalid prefix length in {prefix:?}")))?;
+    let ip: std::net::IpAddr = addr
+        .parse()
+        .map_err(|_| CliError::Argument(format!("invalid prefix address in {prefix:?}")))?;
+    match ip {
+        std::net::IpAddr::V4(_) if length <= 32 => {
+            Ok((addr.to_string(), length, proto::AddressFamily::Ipv4Unicast))
+        }
+        std::net::IpAddr::V6(_) if length <= 128 => {
+            Ok((addr.to_string(), length, proto::AddressFamily::Ipv6Unicast))
+        }
+        _ => Err(CliError::Argument(format!(
+            "prefix length out of range for address family in {prefix:?}"
+        ))),
+    }
+}
+
+pub async fn explain_import(
+    connection: Connection,
+    neighbor: &str,
+    prefix: &str,
+    path_id: Option<u32>,
+    json: bool,
+) -> Result<(), CliError> {
+    let (addr, prefix_length, afi_safi) = parse_cidr(prefix)?;
+    let mut client =
+        PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .explain_import_policy(ExplainImportPolicyRequest {
+            peer_address: neighbor.to_string(),
+            afi_safi: afi_safi as i32,
+            prefix: addr,
+            prefix_length,
+            path_id,
+        })
+        .await?
+        .into_inner();
+
+    if json {
+        let out = JsonImportExplain {
+            peer_address: resp.peer_address.clone(),
+            prefix: format!("{}/{}", resp.prefix, resp.prefix_length),
+            afi_safi: address_family_label(resp.afi_safi).to_string(),
+            current_policy_generation: resp.current_policy_generation,
+            matches: resp.matches.iter().map(match_to_json).collect(),
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).expect("failed to serialize explain as JSON")
+        );
+        return Ok(());
+    }
+
+    println!(
+        "import policy explain — peer {} prefix {}/{} (policy generation {})",
+        resp.peer_address, resp.prefix, resp.prefix_length, resp.current_policy_generation
+    );
+    if resp.matches.len() > 1 {
+        println!("{} matching paths:", resp.matches.len());
+    }
+    for m in &resp.matches {
+        let path = if m.path_id == 0 {
+            String::new()
+        } else {
+            format!(" path-id {}", m.path_id)
+        };
+        println!("  {}{}", outcome_label(m.outcome), path);
+        if outcome_has_decision(m.outcome) {
+            if !m.matched_policy.is_empty() {
+                println!("    policy:  {}", m.matched_policy);
+            } else {
+                println!("    policy:  inline");
+            }
+            println!(
+                "    rpki:    {}    aspa: {}",
+                blank_dash(&m.rpki_validation),
+                blank_dash(&m.aspa_validation)
+            );
+            println!("    eval-ns: {}", m.evaluated_at_unix_ns);
+            if let Some(mods) = &m.modifications {
+                let summary = modifications_summary(mods);
+                if !summary.is_empty() {
+                    println!("    mods:    {summary}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn blank_dash(s: &str) -> &str {
+    if s.is_empty() { "-" } else { s }
+}
+
+/// Map one proto match into its JSON shape. Decision-bearing fields
+/// (policy / validation / modifications / timestamps) are populated
+/// only for outcomes that recorded a decision; `NOT_SEEN` / `EVICTED`
+/// leave them `None` so the JSON doesn't imply data that isn't there.
+fn match_to_json(m: &proto::ImportExplainMatch) -> JsonImportExplainMatch {
+    let has_decision = outcome_has_decision(m.outcome);
+    let non_empty = |s: &str| (!s.is_empty()).then(|| s.to_string());
+    JsonImportExplainMatch {
+        outcome: outcome_label(m.outcome).to_string(),
+        path_id: m.path_id,
+        matched_policy: has_decision.then(|| non_empty(&m.matched_policy)).flatten(),
+        rpki_validation: has_decision
+            .then(|| non_empty(&m.rpki_validation))
+            .flatten(),
+        aspa_validation: has_decision
+            .then(|| non_empty(&m.aspa_validation))
+            .flatten(),
+        modifications: if has_decision {
+            m.modifications.as_ref().map(modifications_to_json)
+        } else {
+            None
+        },
+        evaluated_at_unix_ns: has_decision.then_some(m.evaluated_at_unix_ns),
+        policy_generation: has_decision.then_some(m.policy_generation),
+    }
+}
+
+fn address_family_label(afi_safi: i32) -> &'static str {
+    match proto::AddressFamily::try_from(afi_safi) {
+        Ok(proto::AddressFamily::Ipv4Unicast) => "ipv4-unicast",
+        Ok(proto::AddressFamily::Ipv6Unicast) => "ipv6-unicast",
+        _ => "unspecified",
+    }
+}
+
+fn modifications_to_json(m: &proto::ExplainModifications) -> JsonImportExplainModifications {
+    JsonImportExplainModifications {
+        set_local_pref: m.set_local_pref,
+        set_med: m.set_med,
+        set_next_hop: Some(m.set_next_hop.clone()).filter(|s| !s.is_empty()),
+        communities_add: m.communities_add.clone(),
+        communities_remove: m.communities_remove.clone(),
+        large_communities_add: m.large_communities_add.clone(),
+        large_communities_remove: m.large_communities_remove.clone(),
+        as_path_prepend_asn: m.as_path_prepend_asn,
+        as_path_prepend_count: m.as_path_prepend_count,
+    }
+}
+
+fn modifications_summary(m: &proto::ExplainModifications) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(lp) = m.set_local_pref {
+        parts.push(format!("local_pref={lp}"));
+    }
+    if let Some(med) = m.set_med {
+        parts.push(format!("med={med}"));
+    }
+    if !m.set_next_hop.is_empty() {
+        parts.push(format!("next_hop={}", m.set_next_hop));
+    }
+    if !m.communities_add.is_empty() {
+        parts.push(format!("comm+={}", m.communities_add.len()));
+    }
+    if !m.communities_remove.is_empty() {
+        parts.push(format!("comm-={}", m.communities_remove.len()));
+    }
+    if let (Some(asn), Some(count)) = (m.as_path_prepend_asn, m.as_path_prepend_count) {
+        parts.push(format!("prepend={asn}x{count}"));
+    }
+    parts.join(" ")
 }
 
 pub async fn chain_show(
@@ -562,6 +798,81 @@ mod tests {
         assert_eq!(def.statements.len(), 1);
         assert_eq!(def.statements[0].action, "permit");
         assert_eq!(def.statements[0].set_local_pref, Some(300));
+    }
+
+    #[tokio::test]
+    async fn explain_infers_afi_from_prefix_and_sends_request() {
+        // Pin: the CLI infers AFI from the prefix (no --afi flag) and
+        // sends a well-formed request with the parsed address + length.
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        explain_import(connection, "192.0.2.1", "2001:db8::/32", Some(7), true)
+            .await
+            .unwrap();
+        let captured = server
+            .state
+            .last_explain_import
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        assert_eq!(captured.peer_address, "192.0.2.1");
+        assert_eq!(captured.prefix, "2001:db8::");
+        assert_eq!(captured.prefix_length, 32);
+        assert_eq!(captured.path_id, Some(7));
+        assert_eq!(
+            captured.afi_safi,
+            crate::proto::AddressFamily::Ipv6Unicast as i32,
+            "AFI inferred from the v6 prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn explain_rejects_non_cidr_prefix() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let err = explain_import(connection, "192.0.2.1", "192.0.2.0", None, true)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CliError::Argument(_)));
+    }
+
+    #[tokio::test]
+    async fn explain_all_paths_returns_every_match() {
+        // Pin 7: omitting --path-id surfaces all matching paths, not an
+        // arbitrary first hit. The mock returns two paths in that case.
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        explain_import(connection, "192.0.2.1", "192.0.2.0/24", None, true)
+            .await
+            .unwrap();
+        let captured = server
+            .state
+            .last_explain_import
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        assert_eq!(captured.path_id, None);
+        assert_eq!(
+            captured.afi_safi,
+            crate::proto::AddressFamily::Ipv4Unicast as i32
+        );
+    }
+
+    #[tokio::test]
+    async fn explain_renders_text_and_json() {
+        // Pin 8: both render paths run cleanly over a populated
+        // multi-match response (permit + deny, modifications present).
+        let server = spawn_mock_server(None).await;
+        let json_conn = connect(&server.addr, None).await.unwrap();
+        explain_import(json_conn, "192.0.2.1", "192.0.2.0/24", None, true)
+            .await
+            .unwrap();
+        let text_conn = connect(&server.addr, None).await.unwrap();
+        explain_import(text_conn, "192.0.2.1", "192.0.2.0/24", None, false)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -280,6 +280,21 @@ enum PolicyAction {
         #[command(subcommand)]
         action: PolicyChainAction,
     },
+    /// Explain the import-policy decision for a prefix on a neighbor
+    /// (ADR-0073): why it was permitted / denied / withdrawn, or
+    /// not-seen / evicted / stale. Reads the per-session decision
+    /// cache; requires `[policy.explain].enabled` on the daemon.
+    Explain {
+        /// Neighbor (peer) address whose import-decision cache to read
+        #[arg(long)]
+        neighbor: String,
+        /// Prefix in CIDR form, e.g. `192.0.2.0/24` or `2001:db8::/32`
+        #[arg(long)]
+        prefix: String,
+        /// Add-Path identifier; omit to show every matching path
+        #[arg(long)]
+        path_id: Option<u32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1483,6 +1498,14 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
             PolicyAction::Delete { name } => {
                 commands::policy::delete(connection, &name, json).await
+            }
+            PolicyAction::Explain {
+                neighbor,
+                prefix,
+                path_id,
+            } => {
+                commands::policy::explain_import(connection, &neighbor, &prefix, path_id, json)
+                    .await
             }
             PolicyAction::Chain { action } => match action {
                 PolicyChainAction::Show { neighbor } => {

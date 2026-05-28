@@ -278,16 +278,20 @@ review added the enable flag (7). They are pinned here, not deferred:
 
 ## Implementation sequencing
 
-PR-shaped, after this ADR is Accepted:
+**Shipped as a single reviewable PR** (the transport cache, proto
+surface, RPC, config, authz, the `rustbgpctl policy explain` CLI, and
+the IPv4 + IPv6 unicast write paths landed together). The work was
+built in stages but is not split across PRs:
 
-1. Transport cache + proto surface. Add the per-session cache,
-   wire write and clear sites, add `ExplainImportPolicy` reading
-   from the cache, thread `policy_generation` through.
-2. CLI + Add-Path semantics. `rustbgpctl policy explain`, text +
-   JSON renderers, Add-Path disambiguation.
-3. (deferred) Statement-level enrichment of `PolicyEvaluation` and
-   the cached entry — only if operator feedback says terminal-only
-   attribution is insufficient.
+1. Transport cache + proto surface: per-session cache, write + clear
+   sites, `ExplainImportPolicy` reading from the cache, session-local
+   `policy_generation`, `[policy.explain].enabled` write-gating, lighter
+   `WITHDRAWN` tombstones.
+2. CLI + Add-Path semantics: `rustbgpctl policy explain`, text + JSON
+   renderers, AFI inferred from the prefix, all-paths vs `--path-id`.
+3. (deferred, not in this PR) Statement-level enrichment of
+   `PolicyEvaluation` and the cached entry — only if operator feedback
+   says terminal-only attribution is insufficient.
 
 ## Anchors
 

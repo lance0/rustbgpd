@@ -801,22 +801,6 @@ impl PeerSession {
                 .collect()
         };
 
-        // ADR-0073: tombstone any cached decision for a withdrawn
-        // prefix as WITHDRAWN, so the explain surface distinguishes
-        // "seen then withdrawn" from "never seen". No-op for keys the
-        // cache never held; skipped entirely when explain is disabled.
-        if explain_enabled {
-            for (prefix, path_id) in &withdrawn {
-                self.import_decision_cache
-                    .mark_withdrawn(&ImportDecisionKey {
-                        afi: Afi::Ipv4,
-                        safi: Safi::Unicast,
-                        prefix: *prefix,
-                        path_id: *path_id,
-                    });
-            }
-        }
-
         // MP-BGP NLRI from attributes
         // For IPv6 routes, also strip body NEXT_HOP — it's IPv4-specific and
         // would contaminate IPv6 route attributes in mixed UPDATEs.
@@ -1043,6 +1027,32 @@ impl PeerSession {
                             &mut import_policy_routes_permitted,
                             &mut import_policy_routes_denied,
                         );
+                        // ADR-0073 (IPv6 / MP_REACH unicast): record the
+                        // decision before the permit gate, gated on
+                        // explain_enabled so the clone is skipped when
+                        // disabled. Keyed by the MP family (afi from
+                        // mp.afi, safi == Unicast here — FlowSpec / EVPN
+                        // `continue` above and never reach this loop).
+                        if explain_enabled {
+                            self.import_decision_cache.insert(
+                                ImportDecisionKey {
+                                    afi: mp.afi,
+                                    safi: mp.safi,
+                                    prefix: entry.prefix,
+                                    path_id: entry.path_id,
+                                },
+                                CachedDecision {
+                                    outcome: result.action.into(),
+                                    matched_policy: evaluation.matched_policy.clone(),
+                                    rpki: mp_rpki_state,
+                                    aspa: mp_aspa_state,
+                                    pre_policy_attrs: mp_unicast_route_attrs.clone(),
+                                    modifications: result.modifications.clone(),
+                                    evaluated_at: SystemTime::now(),
+                                    policy_generation: self.import_policy_generation,
+                                },
+                            );
+                        }
                         if result.action == rustbgpd_policy::PolicyAction::Permit {
                             let mut attrs = mp_unicast_route_attrs.clone();
                             let nh_action = rustbgpd_policy::apply_modifications(
@@ -1099,6 +1109,29 @@ impl PeerSession {
                     evpn_withdrawn.extend(mp.evpn_withdrawn.iter().map(EvpnRoute::key));
                 }
                 _ => {}
+            }
+        }
+
+        // ADR-0073: tombstone any cached decision for a withdrawn prefix
+        // as WITHDRAWN, so the explain surface distinguishes "seen then
+        // withdrawn" from "never seen". Runs here — after the attribute
+        // loop — so `withdrawn` already includes both IPv4 body and
+        // IPv6 MP_UNREACH prefixes. AFI is derived per-prefix (the vec
+        // mixes families); SAFI is unicast on this path. No-op for keys
+        // the cache never held; skipped entirely when explain is off.
+        if explain_enabled {
+            for (prefix, path_id) in &withdrawn {
+                let afi = match prefix {
+                    Prefix::V4(_) => Afi::Ipv4,
+                    Prefix::V6(_) => Afi::Ipv6,
+                };
+                self.import_decision_cache
+                    .mark_withdrawn(&ImportDecisionKey {
+                        afi,
+                        safi: Safi::Unicast,
+                        prefix: *prefix,
+                        path_id: *path_id,
+                    });
             }
         }
 

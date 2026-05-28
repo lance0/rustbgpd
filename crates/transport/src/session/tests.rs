@@ -2679,6 +2679,57 @@ fn fresh_session_import_decision_cache_is_empty() {
     ));
 }
 
+/// ADR-0073 IPv6 scope: an `MP_REACH` IPv6-unicast announcement is
+/// recorded in the explain cache keyed by `(Ipv6, Unicast, prefix,
+/// path_id)`, proving the `MP_REACH` write path mirrors the IPv4 body
+/// path.
+#[tokio::test]
+async fn import_decision_cache_records_ipv6_mp_reach() {
+    use super::import_decision_cache::{CachedOutcome, ImportDecisionKey, LookupResult};
+
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let v6 = Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64);
+    let mp_reach = rustbgpd_wire::MpReachNlri {
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+        next_hop: IpAddr::V6("2001:db8:1::1".parse().unwrap()),
+        link_local_next_hop: None,
+        announced: vec![rustbgpd_wire::NlriEntry {
+            path_id: 0,
+            prefix: Prefix::V6(v6),
+        }],
+        flowspec_announced: vec![],
+        evpn_announced: vec![],
+    };
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::MpReachNlri(mp_reach),
+    ];
+    let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
+    session.process_update(update).await;
+
+    let key = ImportDecisionKey {
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+        prefix: Prefix::V6(v6),
+        path_id: 0,
+    };
+    match session.import_decision_cache.lookup(&key, 0) {
+        LookupResult::Hit(d) => assert_eq!(d.outcome, CachedOutcome::Permit),
+        other => panic!("expected Hit(Permit) for IPv6 MP_REACH prefix, got {other:?}"),
+    }
+}
+
 /// ADR-0073 write-gating: with `[policy.explain].enabled = false`,
 /// processing an UPDATE stores **no** decision — the eval-site clone is
 /// skipped entirely. The empty cache after a *permitted* UPDATE is the
