@@ -22,3 +22,7 @@ criterion.workspace = true
 [[bench]]
 name = "policy_eval"
 harness = false
+
+[[bench]]
+name = "explain_snapshot"
+harness = false

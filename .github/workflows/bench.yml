@@ -32,7 +32,7 @@ on:
         required: true
         default: "3"
       require_performance:
-        description: "Fail if the selected CPU is not using the performance governor (leave false on lancebox-cloud — virtualized CPU has no cpufreq sysfs)"
+        description: "Fail if the selected CPU is not using the performance governor (leave false on the self-hosted VPS runner — virtualized CPU has no cpufreq sysfs)"
         required: true
         default: "false"
         type: boolean
@@ -47,7 +47,7 @@ concurrency:
   group: criterion-bench-compare
   cancel-in-progress: false
 
-# Empirical noise floor on the `lancebox-cloud` runner is ~11% spread
+# Empirical noise floor on the self-hosted VPS runner is ~11% spread
 # across 5 pinned runs at the same SHA (`adj_rib_in_insert/10000`,
 # 2026-05-28 calibration). Single-dispatch comparisons across two
 # different SHAs are wider than that — base/head cache-warming bias and
