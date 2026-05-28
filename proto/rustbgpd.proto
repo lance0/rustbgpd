@@ -720,8 +720,10 @@ message ExplainImportPolicyResponse {
   uint32 prefix_length   = 3;
   AddressFamily afi_safi = 4;
 
-  // The policy registry's current generation. Clients can compare
-  // this to each match's `policy_generation` to confirm freshness.
+  // The session's current import-policy generation (a per-session
+  // counter bumped on each import-policy reload, not a global registry
+  // value). Clients compare this to each match's `policy_generation` to
+  // confirm freshness; when they disagree the outcome is STALE.
   uint64 current_policy_generation = 5;
 
   // One match per cached (peer, prefix, path_id) entry the
