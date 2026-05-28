@@ -97,7 +97,45 @@ impl PeerSession {
             }
             PeerCommand::UpdateImportPolicy { policy, reply } => {
                 self.import_policy = policy;
+                // ADR-0073: advancing the session-local generation makes
+                // every decision recorded under the prior chain read as
+                // STALE on a subsequent explain lookup. saturating_add so
+                // a pathologically long-lived session that somehow wraps
+                // u64 degrades to "always current" rather than panicking.
+                self.import_policy_generation = self.import_policy_generation.saturating_add(1);
                 let _ = reply.send(Ok(()));
+                ControlFlow::Continue(())
+            }
+            PeerCommand::ExplainImportPolicy {
+                afi,
+                safi,
+                prefix,
+                path_id,
+                reply,
+            } => {
+                use super::import_decision_cache::{ImportDecisionKey, ResolvedMatch};
+                let generation = self.import_policy_generation;
+                let matches = match path_id {
+                    Some(path_id) => {
+                        let key = ImportDecisionKey {
+                            afi,
+                            safi,
+                            prefix,
+                            path_id,
+                        };
+                        vec![ResolvedMatch {
+                            path_id,
+                            result: self.import_decision_cache.lookup(&key, generation),
+                        }]
+                    }
+                    None => self
+                        .import_decision_cache
+                        .lookup_all_paths(afi, safi, &prefix, generation),
+                };
+                let _ = reply.send(super::import_decision_cache::ImportExplainReply {
+                    current_generation: generation,
+                    matches,
+                });
                 ControlFlow::Continue(())
             }
             PeerCommand::UpdateExportPolicy { policy, reply } => {

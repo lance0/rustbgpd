@@ -106,6 +106,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         route_server_client: false,
         remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
         cluster_id: None,
+        explain_cache_size: 4096,
     }
 }
 

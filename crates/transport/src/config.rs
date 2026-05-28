@@ -125,6 +125,11 @@ pub struct TransportConfig {
     /// Local cluster ID for route reflection. `Some` means this speaker is a
     /// route reflector; used for `CLUSTER_LIST` prepend and loop detection.
     pub cluster_id: Option<Ipv4Addr>,
+    /// Per-session import-decision cache capacity (ADR-0073). Bounds the
+    /// number of `(AFI, SAFI, prefix, path_id)` import decisions retained
+    /// for `PolicyService.ExplainImportPolicy`. Operator knob:
+    /// `[policy.explain] cache_size`.
+    pub explain_cache_size: usize,
 }
 
 impl TransportConfig {
@@ -153,6 +158,7 @@ impl TransportConfig {
             route_server_client: false,
             remove_private_as: RemovePrivateAs::Disabled,
             cluster_id: None,
+            explain_cache_size: crate::session::import_decision_cache::DEFAULT_EXPLAIN_CACHE_SIZE,
         }
     }
 }

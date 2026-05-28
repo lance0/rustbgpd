@@ -11,6 +11,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `PolicyService.ExplainImportPolicy` (ADR-0073): answer "why didn't
+  this prefix come in?" — or "what did the chain do to it when it
+  did?" — from a new bounded per-session import-decision cache. Every
+  import evaluation (permit **and** deny) is recorded at the transport
+  eval site keyed by `(AFI, SAFI, prefix, path_id)`, so denied routes
+  that never reached the RIB stay explainable. Outcomes:
+  `PERMIT` / `DENY` / `WITHDRAWN` (tombstone) / `EVICTED` / `STALE`
+  (policy reloaded since the decision) / `NOT_SEEN`. The query is
+  side-effect-free (no RIB touch, no counter movement). Scope is
+  IPv4 / IPv6 unicast; the cache resets on peer session reset and is
+  not durable across restart (it is diagnostic state, not event
+  history). Per-peer capacity is `[policy.explain] cache_size`
+  (default 4096). `SensitiveRead` authz tier.
 - `bench/compare-criterion.sh` gains `--attempts N`: run the A/B
   comparison N times with alternating base-first / head-first ordering
   to dampen base/head cache-warming bias. Each ref's run uses its own

@@ -30,4 +30,9 @@ pub use handle::{
     SessionNotification, SessionNotificationDirection, SessionNotificationEvent, SessionRole,
 };
 pub use listener::{AcceptedConnection, BgpListener, ListenerSocketOptions, TcpAoListenerKey};
+// ADR-0073: import-decision explain types crossing into the api +
+// binary layers (PeerManagerCommand reply, PolicyService mapping).
+pub use session::import_decision_cache::{
+    CachedDecision, CachedOutcome, ImportExplainReply, LookupResult, ResolvedMatch,
+};
 pub use socket_opts::{TcpAoInfoSnapshot, TcpAoSupport, probe_tcp_ao_support};

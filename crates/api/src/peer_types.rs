@@ -6,8 +6,8 @@ use std::net::{IpAddr, Ipv6Addr};
 use bytes::Bytes;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_transport::{RemovePrivateAs, TcpAoConfig};
-use rustbgpd_wire::{Afi, BgpRole, Safi};
+use rustbgpd_transport::{ImportExplainReply, RemovePrivateAs, TcpAoConfig};
+use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, oneshot};
 
@@ -366,6 +366,24 @@ pub enum PeerManagerCommand {
     ListPolicies {
         /// Reply channel returning all named policies.
         reply: oneshot::Sender<Vec<NamedPolicySnapshot>>,
+    },
+    /// ADR-0073: query a peer's per-session import-decision cache.
+    /// Side-effect-free. `reply` carries `None` when the peer has no
+    /// live session (its session-local cache is gone), which the
+    /// caller renders as a synthetic `NOT_SEEN`.
+    ExplainImportPolicy {
+        /// Peer whose import-decision cache to consult.
+        address: IpAddr,
+        /// Address family of the queried NLRI.
+        afi: Afi,
+        /// Subsequent address family of the queried NLRI.
+        safi: Safi,
+        /// Queried prefix.
+        prefix: Prefix,
+        /// Optional Add-Path identifier; `None` = all paths.
+        path_id: Option<u32>,
+        /// Reply channel; `None` = no live session for `address`.
+        reply: oneshot::Sender<Option<ImportExplainReply>>,
     },
     /// Query a single named policy definition.
     GetPolicy {

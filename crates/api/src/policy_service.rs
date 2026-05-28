@@ -1,8 +1,10 @@
 //! gRPC policy service — named policy definitions and chain assignment.
 
 use std::net::IpAddr;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
+use rustbgpd_transport::{CachedOutcome, ImportExplainReply, LookupResult, ResolvedMatch};
+use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Prefix, Safi};
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
@@ -14,6 +16,146 @@ use crate::proto;
 use crate::server::{AccessMode, read_only_rejection};
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Map the v1-supported `AddressFamily` proto values to `(Afi, Safi)`.
+/// ADR-0073 scopes `ExplainImportPolicy` to IPv4 / IPv6 unicast; anything
+/// else is an explicit `invalid_argument` rather than a silent miss.
+fn explain_afi_safi(afi_safi: i32) -> Result<(Afi, Safi), Status> {
+    match proto::AddressFamily::try_from(afi_safi) {
+        Ok(proto::AddressFamily::Ipv4Unicast) => Ok((Afi::Ipv4, Safi::Unicast)),
+        Ok(proto::AddressFamily::Ipv6Unicast) => Ok((Afi::Ipv6, Safi::Unicast)),
+        _ => Err(Status::invalid_argument(
+            "ExplainImportPolicy v1 supports IPv4-unicast and IPv6-unicast only",
+        )),
+    }
+}
+
+/// Parse the request prefix string + length into a typed [`Prefix`],
+/// validating it against the requested address family.
+fn explain_prefix(afi: Afi, prefix: &str, prefix_length: u32) -> Result<Prefix, Status> {
+    let addr: IpAddr = prefix
+        .parse()
+        .map_err(|e| Status::invalid_argument(format!("invalid prefix: {e}")))?;
+    let len = u8::try_from(prefix_length)
+        .map_err(|_| Status::invalid_argument("prefix_length out of range"))?;
+    match (afi, addr) {
+        (Afi::Ipv4, IpAddr::V4(v4)) if len <= 32 => Ok(Prefix::V4(Ipv4Prefix::new(v4, len))),
+        (Afi::Ipv6, IpAddr::V6(v6)) if len <= 128 => Ok(Prefix::V6(Ipv6Prefix::new(v6, len))),
+        _ => Err(Status::invalid_argument(
+            "prefix does not match the requested address family / length",
+        )),
+    }
+}
+
+fn cached_outcome_to_proto(outcome: CachedOutcome) -> proto::ImportExplainOutcome {
+    match outcome {
+        CachedOutcome::Permit => proto::ImportExplainOutcome::Permit,
+        CachedOutcome::Deny => proto::ImportExplainOutcome::Deny,
+        CachedOutcome::Withdrawn => proto::ImportExplainOutcome::Withdrawn,
+    }
+}
+
+fn explain_modifications_to_proto(
+    modifications: &rustbgpd_policy::RouteModifications,
+) -> proto::ExplainModifications {
+    let (as_path_prepend_asn, as_path_prepend_count) = modifications
+        .as_path_prepend
+        .map_or((None, None), |(asn, count)| {
+            (Some(asn), Some(u32::from(count)))
+        });
+    proto::ExplainModifications {
+        set_local_pref: modifications.set_local_pref,
+        set_med: modifications.set_med,
+        set_next_hop: modifications
+            .set_next_hop
+            .as_ref()
+            .map_or_else(String::new, |nh| match nh {
+                rustbgpd_policy::NextHopAction::Self_ => "self".to_string(),
+                rustbgpd_policy::NextHopAction::Specific(addr) => addr.to_string(),
+            }),
+        communities_add: modifications.communities_add.clone(),
+        communities_remove: modifications.communities_remove.clone(),
+        extended_communities_add: modifications
+            .extended_communities_add
+            .iter()
+            .map(|ec| ec.as_u64())
+            .collect(),
+        extended_communities_remove: modifications
+            .extended_communities_remove
+            .iter()
+            .map(|ec| ec.as_u64())
+            .collect(),
+        large_communities_add: modifications
+            .large_communities_add
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        large_communities_remove: modifications
+            .large_communities_remove
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        as_path_prepend_asn,
+        as_path_prepend_count,
+    }
+}
+
+/// Render one resolved cache entry into the proto match. The echoed
+/// scope (`peer_address`, `prefix`, `prefix_length`, `afi_safi`) is
+/// stamped on every match; decision-specific fields are populated only
+/// for `Hit` / `Stale` (an `Evicted` / `NotSeen` entry has no recorded
+/// decision to render).
+fn resolved_match_to_proto(
+    peer_address: &str,
+    prefix: &str,
+    prefix_length: u32,
+    afi_safi: i32,
+    resolved: ResolvedMatch,
+) -> proto::ImportExplainMatch {
+    let mut m = proto::ImportExplainMatch {
+        outcome: proto::ImportExplainOutcome::Unspecified as i32,
+        peer_address: peer_address.to_string(),
+        prefix: prefix.to_string(),
+        prefix_length,
+        path_id: resolved.path_id,
+        afi_safi,
+        matched_policy: String::new(),
+        rpki_validation: String::new(),
+        aspa_validation: String::new(),
+        modifications: None,
+        evaluated_at_unix_ns: 0,
+        policy_generation: 0,
+    };
+    // `Hit` reports the recorded permit/deny/withdrawn outcome; `Stale`
+    // keeps the same historical decision fields but overrides the
+    // outcome to STALE so the operator knows the policy has since moved.
+    let fill = |m: &mut proto::ImportExplainMatch, d: rustbgpd_transport::CachedDecision| {
+        m.matched_policy = d.matched_policy.unwrap_or_default();
+        m.rpki_validation = d.rpki.to_string();
+        m.aspa_validation = d.aspa.to_string();
+        m.modifications = Some(explain_modifications_to_proto(&d.modifications));
+        m.evaluated_at_unix_ns = d
+            .evaluated_at
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|dur| i64::try_from(dur.as_nanos()).ok())
+            .unwrap_or(0);
+        m.policy_generation = d.policy_generation;
+    };
+    match resolved.result {
+        LookupResult::Hit(d) => {
+            m.outcome = cached_outcome_to_proto(d.outcome) as i32;
+            fill(&mut m, d);
+        }
+        LookupResult::Stale(d) => {
+            m.outcome = proto::ImportExplainOutcome::Stale as i32;
+            fill(&mut m, d);
+        }
+        LookupResult::Evicted => m.outcome = proto::ImportExplainOutcome::Evicted as i32,
+        LookupResult::NotSeen => m.outcome = proto::ImportExplainOutcome::NotSeen as i32,
+    }
+    m
+}
 
 fn input_statement_to_proto(statement: &PolicyStatementDefinition) -> proto::PolicyStatement {
     proto::PolicyStatement {
@@ -714,6 +856,79 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         }
 
         Ok(Response::new(proto::ClearNeighborExportChainResponse {}))
+    }
+
+    async fn explain_import_policy(
+        &self,
+        request: Request<proto::ExplainImportPolicyRequest>,
+    ) -> Result<Response<proto::ExplainImportPolicyResponse>, Status> {
+        let req = request.into_inner();
+        let address: IpAddr = req
+            .peer_address
+            .parse()
+            .map_err(|e| Status::invalid_argument(format!("invalid peer_address: {e}")))?;
+        let (afi, safi) = explain_afi_safi(req.afi_safi)?;
+        let prefix = explain_prefix(afi, &req.prefix, req.prefix_length)?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::ExplainImportPolicy {
+                address,
+                afi,
+                safi,
+                prefix,
+                path_id: req.path_id,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("peer manager unavailable"))?;
+        let reply: Option<ImportExplainReply> = reply_rx
+            .await
+            .map_err(|_| Status::internal("peer manager dropped reply"))?;
+
+        // `None` (no live session) and an empty match set (never seen)
+        // both render as a single synthetic NOT_SEEN so the operator
+        // always gets a definite answer rather than an empty list.
+        let (current_generation, mut matches) = match reply {
+            Some(r) => {
+                let proto_matches: Vec<proto::ImportExplainMatch> = r
+                    .matches
+                    .into_iter()
+                    .map(|resolved| {
+                        resolved_match_to_proto(
+                            &req.peer_address,
+                            &req.prefix,
+                            req.prefix_length,
+                            req.afi_safi,
+                            resolved,
+                        )
+                    })
+                    .collect();
+                (r.current_generation, proto_matches)
+            }
+            None => (0, Vec::new()),
+        };
+        if matches.is_empty() {
+            matches.push(resolved_match_to_proto(
+                &req.peer_address,
+                &req.prefix,
+                req.prefix_length,
+                req.afi_safi,
+                ResolvedMatch {
+                    path_id: req.path_id.unwrap_or(0),
+                    result: LookupResult::NotSeen,
+                },
+            ));
+        }
+
+        Ok(Response::new(proto::ExplainImportPolicyResponse {
+            peer_address: req.peer_address,
+            prefix: req.prefix,
+            prefix_length: req.prefix_length,
+            afi_safi: req.afi_safi,
+            current_policy_generation: current_generation,
+            matches,
+        }))
     }
 }
 

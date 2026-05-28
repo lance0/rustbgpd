@@ -83,7 +83,7 @@ shape itself does not raise the tier.
 | `DeleteDynamicNeighbor` | `mutating` | Removes a prefix range; existing sessions inside the range tear down. |
 | `SetGracefulShutdown` | `operator_only` | Network-wide when `address` is empty; listed here because the proto puts it in `NeighborService`. |
 
-### PolicyService (18 RPCs)
+### PolicyService (19 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -104,6 +104,7 @@ shape itself does not raise the tier.
 | `SetNeighborImportChain` | `mutating` | Per-neighbor scope. |
 | `SetNeighborExportChain` | `mutating` | Per-neighbor. |
 | `ClearNeighborImportChain` | `mutating` | Per-neighbor. |
+| `ExplainImportPolicy` | `sensitive_read` | ADR-0073. Reads the per-session import-decision cache to explain why a prefix was permitted / denied / withdrawn on import. Side-effect-free; no RIB or counter mutation. |
 | `ClearNeighborExportChain` | `mutating` | Per-neighbor. |
 
 ### PeerGroupService (6 RPCs)
@@ -196,12 +197,12 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 41 | 53.2% |
-| `mutating` | 17 | 22.1% |
-| `operator_only` | 19 | 24.7% |
-| **Total** | **77** | **100%** |
+| `sensitive_read` | 42 | 53.8% |
+| `mutating` | 17 | 21.8% |
+| `operator_only` | 19 | 24.4% |
+| **Total** | **78** | **100%** |
 
-(Counts treat `SetGracefulShutdown` as one RPC even though it appears once in `NeighborService`; the 77 total is 73 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts treat `SetGracefulShutdown` as one RPC even though it appears once in `NeighborService`; the 78 total is 74 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 

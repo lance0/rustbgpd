@@ -2769,6 +2769,7 @@ version = "0.30.0"
 dependencies = [
  "bytes",
  "libc",
+ "lru",
  "prometheus",
  "rustbgpd-bmp",
  "rustbgpd-fsm",

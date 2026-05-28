@@ -960,6 +960,18 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
             server_proto::ClearNeighborExportChainResponse {},
         ))
     }
+
+    async fn explain_import_policy(
+        &self,
+        _request: Request<server_proto::ExplainImportPolicyRequest>,
+    ) -> Result<Response<server_proto::ExplainImportPolicyResponse>, Status> {
+        // No CLI commands exercise this yet (PR2 work). Stubbed to
+        // satisfy the trait so the rest of the policy-service mock
+        // compiles.
+        Err(Status::unimplemented(
+            "MockPolicyService::explain_import_policy",
+        ))
+    }
 }
 
 struct MockPeerGroupService {

@@ -336,6 +336,19 @@ service PolicyService {
   rpc SetNeighborExportChain(SetNeighborExportChainRequest) returns (SetNeighborExportChainResponse);
   rpc ClearNeighborImportChain(ClearNeighborImportChainRequest) returns (ClearNeighborImportChainResponse);
   rpc ClearNeighborExportChain(ClearNeighborExportChainRequest) returns (ClearNeighborExportChainResponse);
+
+  // ExplainImportPolicy — answer "why didn't this prefix come in?"
+  // (or "what did the chain do to this one when it did?") from the
+  // per-session import-decision cache populated at the transport
+  // eval site. The cache is bounded, process-local, and resets on
+  // peer session reset — see ADR-0073 ("Import policy explain via
+  // per-session decision cache") for the contract, including the
+  // "not durable event history" scope and the operator-facing knob
+  // [policy.explain] cache_size.
+  //
+  // Side-effect free read. Does not touch RIB, does not increment
+  // any policy counter, does not log a new policy decision.
+  rpc ExplainImportPolicy(ExplainImportPolicyRequest) returns (ExplainImportPolicyResponse);
 }
 
 service PeerGroupService {
@@ -596,6 +609,126 @@ message ClearNeighborExportChainRequest {
 }
 
 message ClearNeighborExportChainResponse {}
+
+// ---------------------------------------------------------------------------
+// ExplainImportPolicy — ADR-0073 per-session decision-cache surface.
+// ---------------------------------------------------------------------------
+
+// Outcome of a single cached import decision. See ADR-0073 for the
+// full state contract; in short:
+//
+//   PERMIT     — the chain admitted this prefix; the route is in
+//                Adj-RIB-In (modulo subsequent withdraw or session
+//                state changes since).
+//   DENY       — the chain rejected this prefix; the route never
+//                reached RIB.
+//   WITHDRAWN  — was previously permitted, then withdrawn by the
+//                peer. Retained as a tombstone instead of dropping
+//                to NOT_SEEN — the distinction is operationally
+//                meaningful.
+//   EVICTED    — was in the cache; pushed out by the per-peer LRU
+//                cap. The decision is gone; the eviction marker is
+//                the honest answer (rather than NOT_SEEN, which
+//                would lie).
+//   STALE      — a cached decision exists, but the policy registry
+//                generation has advanced since it was recorded.
+//                The cached decision is still returned (operator
+//                value is "here's what was decided then, against
+//                the policy as it was then"), with the caveat that
+//                it no longer reflects current policy.
+//   NOT_SEEN   — the peer has not advertised this prefix on this
+//                session and the cache has no record of an
+//                eviction.
+enum ImportExplainOutcome {
+  IMPORT_EXPLAIN_OUTCOME_UNSPECIFIED = 0;
+  IMPORT_EXPLAIN_OUTCOME_PERMIT      = 1;
+  IMPORT_EXPLAIN_OUTCOME_DENY        = 2;
+  IMPORT_EXPLAIN_OUTCOME_WITHDRAWN   = 3;
+  IMPORT_EXPLAIN_OUTCOME_EVICTED     = 4;
+  IMPORT_EXPLAIN_OUTCOME_STALE       = 5;
+  IMPORT_EXPLAIN_OUTCOME_NOT_SEEN    = 6;
+}
+
+message ExplainImportPolicyRequest {
+  // IPv4 or IPv6 literal of the peer whose import-decision cache
+  // should be consulted. Required.
+  string peer_address = 1;
+  // Address-family / sub-address-family scope. v1 supports
+  // IPv4-unicast and IPv6-unicast only; FlowSpec and EVPN need
+  // their own request shapes and are tracked separately.
+  AddressFamily afi_safi = 2;
+  // Prefix and prefix length. Required.
+  string prefix = 3;
+  uint32 prefix_length = 4;
+  // Add-Path path identifier (RFC 7911). When absent, the response
+  // returns every matching path_id for the prefix — useful when the
+  // caller doesn't know which path they're asking about, or when
+  // Add-Path is not negotiated and the implicit path_id is 0.
+  optional uint32 path_id = 5;
+}
+
+message ImportExplainMatch {
+  ImportExplainOutcome outcome = 1;
+  string peer_address          = 2;
+  string prefix                = 3;
+  uint32 prefix_length         = 4;
+  uint32 path_id               = 5;
+  AddressFamily afi_safi       = 6;
+
+  // Terminal-decision policy label from
+  // `PolicyEvaluation.matched_policy`. Empty when the terminal
+  // policy is inline / anonymous (read as "inline" by the operator).
+  // Unset on NOT_SEEN / EVICTED outcomes.
+  string matched_policy        = 7;
+
+  // RPKI origin-validation state at evaluation time, as a stable
+  // snake_case string: "valid", "invalid", "not_found", "unknown".
+  // Unset on NOT_SEEN / EVICTED.
+  string rpki_validation       = 8;
+
+  // ASPA upstream-path verification state at evaluation time, as a
+  // stable snake_case string: "valid", "invalid", "unknown",
+  // "unverified". Unset on NOT_SEEN / EVICTED.
+  string aspa_validation       = 9;
+
+  // Modifications the chain applied (PERMIT) or would have applied
+  // (DENY, before the deny terminator fired). Shape mirrors
+  // `ExplainModifications` on the export-explain surface for
+  // operator parity.
+  ExplainModifications modifications = 10;
+
+  // Evaluation wall-clock time as Unix nanoseconds — matches the
+  // durable event outbox's `timestamp_ns` convention rather than a
+  // string, so collectors don't have to parse. Zero for NOT_SEEN /
+  // EVICTED outcomes (no decision was recorded).
+  int64 evaluated_at_unix_ns   = 11;
+
+  // Policy registry generation at the time of evaluation. The
+  // response also carries the current generation; STALE is the
+  // outcome when these disagree.
+  uint64 policy_generation     = 12;
+}
+
+message ExplainImportPolicyResponse {
+  // Echo of the request scope.
+  string peer_address    = 1;
+  string prefix          = 2;
+  uint32 prefix_length   = 3;
+  AddressFamily afi_safi = 4;
+
+  // The policy registry's current generation. Clients can compare
+  // this to each match's `policy_generation` to confirm freshness.
+  uint64 current_policy_generation = 5;
+
+  // One match per cached (peer, prefix, path_id) entry the
+  // request resolves to. Always populated with at least one
+  // element — a NOT_SEEN outcome carries a synthetic match with
+  // empty fields beyond the echoed request. When the request
+  // specifies `path_id` the response has exactly one element;
+  // when it does not, every matching path_id appears (Add-Path
+  // disambiguation).
+  repeated ImportExplainMatch matches = 6;
+}
 
 // ---------------------------------------------------------------------------
 // RibService — RIB queries (paginated + streaming)

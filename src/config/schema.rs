@@ -816,6 +816,41 @@ pub struct PolicyConfig {
     /// Global export policy chain (references named definitions).
     #[serde(default)]
     pub export_chain: Vec<String>,
+    /// Import-decision explain cache tuning (ADR-0073). Diagnostic
+    /// retention only — does not affect which routes are accepted.
+    #[serde(default)]
+    pub explain: PolicyExplainConfig,
+}
+
+/// Tuning for the per-session import-decision cache that backs
+/// `rustbgpctl policy explain` / `PolicyService.ExplainImportPolicy`
+/// (ADR-0073).
+///
+/// This is **diagnostic retention**, not policy evaluation behaviour:
+/// shrinking or disabling the cache changes only what the explain
+/// surface can answer, never which routes the import chain admits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyExplainConfig {
+    /// Per-peer cache capacity (entries). Each entry is one
+    /// `(AFI, SAFI, prefix, path_id)` import decision. Default 4096 —
+    /// the same mental model as the event rings: enough for
+    /// operational debug, not full-table retention. Raise it for
+    /// eBGP-internet-scale peers and own the memory cost.
+    #[serde(default = "default_explain_cache_size")]
+    pub cache_size: usize,
+}
+
+fn default_explain_cache_size() -> usize {
+    4096
+}
+
+impl Default for PolicyExplainConfig {
+    fn default() -> Self {
+        Self {
+            cache_size: default_explain_cache_size(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
