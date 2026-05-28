@@ -449,7 +449,11 @@ impl PeerManager {
         transport.route_server_client = config.route_server_client;
         transport.remove_private_as = config.remove_private_as;
         transport.cluster_id = self.cluster_id;
-        // ADR-0073: per-session import-decision explain cache capacity.
+        // ADR-0073: per-session import-decision explain cache wiring.
+        // Both the enable flag and the capacity must be threaded — a
+        // missing `explain_enabled` here would silently leave the
+        // write-path gate at its `true` default regardless of config.
+        transport.explain_enabled = self.current_config.policy.explain.enabled;
         transport.explain_cache_size = self.current_config.policy.explain.cache_size;
         transport
     }

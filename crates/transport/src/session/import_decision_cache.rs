@@ -39,9 +39,12 @@ use lru::LruCache;
 use rustbgpd_policy::{PolicyAction, RouteModifications};
 use rustbgpd_wire::{Afi, AspaValidation, PathAttribute, Prefix, RpkiValidation, Safi};
 
-/// Default per-peer cap. Matches ADR-0073 ("4096 entries — same mental
-/// model as the existing event rings"). The operator-facing knob is
-/// `[policy.explain] cache_size`.
+/// Default per-peer cap. Per ADR-0073 this is a deliberate fabric /
+/// partial-table starter size (hundreds–low-thousands of prefixes fully
+/// observable), **not** sized for internet full-table retention — a
+/// 100k-prefix peer keeps the cache saturated, so operators wanting
+/// reliable full-table explain raise `[policy.explain] cache_size`
+/// toward their expected retained-prefix count and own the memory.
 pub const DEFAULT_EXPLAIN_CACHE_SIZE: usize = 4096;
 
 /// Bound for the recent-eviction tracker. Small fixed cap — its job is
@@ -65,7 +68,7 @@ pub struct ImportDecisionKey {
 /// The outcome stored in a cache entry.
 ///
 /// `Permit` and `Deny` are produced by an import-policy evaluation.
-/// `Withdrawn` is produced by [`ImportDecisionCache::mark_withdrawn`]
+/// `Withdrawn` is produced by `ImportDecisionCache::mark_withdrawn`
 /// when the peer subsequently withdraws a permitted prefix — the
 /// entry is retained as a tombstone rather than dropped to `NotSeen`
 /// because the operator distinction matters (see ADR-0073).

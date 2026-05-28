@@ -273,6 +273,8 @@ struct JsonImportExplainModifications {
     set_next_hop: Option<String>,
     communities_add: Vec<u32>,
     communities_remove: Vec<u32>,
+    extended_communities_add: Vec<u64>,
+    extended_communities_remove: Vec<u64>,
     large_communities_add: Vec<String>,
     large_communities_remove: Vec<String>,
     as_path_prepend_asn: Option<u32>,
@@ -459,6 +461,8 @@ fn modifications_to_json(m: &proto::ExplainModifications) -> JsonImportExplainMo
         set_next_hop: Some(m.set_next_hop.clone()).filter(|s| !s.is_empty()),
         communities_add: m.communities_add.clone(),
         communities_remove: m.communities_remove.clone(),
+        extended_communities_add: m.extended_communities_add.clone(),
+        extended_communities_remove: m.extended_communities_remove.clone(),
         large_communities_add: m.large_communities_add.clone(),
         large_communities_remove: m.large_communities_remove.clone(),
         as_path_prepend_asn: m.as_path_prepend_asn,
@@ -482,6 +486,18 @@ fn modifications_summary(m: &proto::ExplainModifications) -> String {
     }
     if !m.communities_remove.is_empty() {
         parts.push(format!("comm-={}", m.communities_remove.len()));
+    }
+    if !m.extended_communities_add.is_empty() {
+        parts.push(format!("extcomm+={}", m.extended_communities_add.len()));
+    }
+    if !m.extended_communities_remove.is_empty() {
+        parts.push(format!("extcomm-={}", m.extended_communities_remove.len()));
+    }
+    if !m.large_communities_add.is_empty() {
+        parts.push(format!("largecomm+={}", m.large_communities_add.len()));
+    }
+    if !m.large_communities_remove.is_empty() {
+        parts.push(format!("largecomm-={}", m.large_communities_remove.len()));
     }
     if let (Some(asn), Some(count)) = (m.as_path_prepend_asn, m.as_path_prepend_count) {
         parts.push(format!("prepend={asn}x{count}"));

@@ -703,9 +703,13 @@ message ImportExplainMatch {
   // EVICTED outcomes (no decision was recorded).
   int64 evaluated_at_unix_ns   = 11;
 
-  // Policy registry generation at the time of evaluation. The
-  // response also carries the current generation; STALE is the
-  // outcome when these disagree.
+  // The session's import-policy generation at the time of evaluation.
+  // This is a session-local counter bumped only when this peer's
+  // import chain is hot-applied — not a global policy-registry
+  // generation (a global counter would mark a peer STALE when an
+  // unrelated peer's chain changed). The response also carries the
+  // session's current generation; STALE is the outcome when these
+  // disagree.
   uint64 policy_generation     = 12;
 }
 

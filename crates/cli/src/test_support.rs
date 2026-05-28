@@ -975,7 +975,7 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
             set_next_hop: String::new(),
             communities_add: vec![65001 << 16 | 100],
             communities_remove: vec![],
-            extended_communities_add: vec![],
+            extended_communities_add: vec![0x0002_fde8_0000_0064],
             extended_communities_remove: vec![],
             large_communities_add: vec![],
             large_communities_remove: vec![],

@@ -454,14 +454,40 @@ pub(crate) async fn reload_config(
     let peer_groups_unchanged = peer_group_diff.added.is_empty()
         && peer_group_diff.removed.is_empty()
         && peer_group_diff.changed.is_empty();
+    // ADR-0073: `[policy.explain]` (enabled / cache_size) is read when a
+    // session is constructed (`build_transport_config`), so a reload of
+    // those fields is restart-required per peer — the new snapshot is
+    // adopted (new sessions honour it) but live sessions keep their
+    // current behaviour until they re-establish. The diff machinery
+    // tracks neighbors / policy chains / peer-groups, not this
+    // diagnostic-retention knob, so detect it explicitly rather than
+    // letting an explain-only reload report "no changes detected".
+    let explain_changed = current.policy.explain != new_config.policy.explain;
     if !policy_diff.has_changes()
         && peer_groups_unchanged
         && neighbors_unchanged
         && !honor_graceful_shutdown_changed
         && !honor_blackhole_changed
     {
-        info!("config reloaded — no neighbor / policy / peer-group changes detected");
+        if explain_changed {
+            warn!(
+                "config reloaded — only [policy.explain] changed; the new \
+                 enabled/cache_size apply to sessions established after this reload \
+                 (restart-required per peer). Existing sessions keep their current \
+                 import-explain behaviour until they re-establish."
+            );
+        } else {
+            info!("config reloaded — no neighbor / policy / peer-group changes detected");
+        }
         return Some(ReloadedConfig::new(new_config, desired_config));
+    }
+
+    if explain_changed {
+        warn!(
+            "[policy.explain] changed — the new enabled/cache_size apply to sessions \
+             established after this reload (restart-required per peer); existing \
+             sessions are unaffected until they re-establish."
+        );
     }
 
     if policy_diff.import_changed || policy_diff.export_changed {
