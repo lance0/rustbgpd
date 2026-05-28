@@ -28,10 +28,7 @@ const MIN_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 /// Upper bound on a client-requested `STREAM` `SAMPLE` interval. Clamps absurd
 /// values (a client could otherwise request an interval of centuries) so a
 /// subscription always resamples within a sane bound.
-// `from_secs(3600)` (1 hour) is kept over `from_hours` to stay within the
-// workspace MSRV.
-#[allow(clippy::duration_suboptimal_units)]
-const MAX_SAMPLE_INTERVAL: Duration = Duration::from_secs(3600);
+const MAX_SAMPLE_INTERVAL: Duration = Duration::from_hours(1);
 /// Application-level ceiling on concurrent `Subscribe` streams. `MAX_SUBSCRIPTIONS`
 /// bounds the paths within a single request; this bounds how many open streams the
 /// target will service at once so a flood of collectors cannot exhaust resources.
