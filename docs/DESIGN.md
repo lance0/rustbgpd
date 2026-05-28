@@ -80,7 +80,7 @@ Rationale: GoBGP's protos carry Go-specific patterns and years of accumulated fe
 
 ### Service Architecture
 
-Ten separate gRPC services (Global, Config, Neighbor, Policy, PeerGroup, Rib, Event, Injection, Control, Evpn), not one. This forces API boundary clarity, prevents god-service creep, enables permission scoping (for example, read-only listeners for monitoring), and mirrors internal architecture.
+Eleven separate gRPC services (Global, Config, Neighbor, Policy, PeerGroup, Rib, Bfd, Event, Injection, Control, Evpn), not one. This forces API boundary clarity, prevents god-service creep, enables permission scoping (for example, read-only listeners for monitoring), and mirrors internal architecture.
 
 ```protobuf
 // Global daemon configuration and identity
@@ -599,7 +599,7 @@ If the global limit is hit, it means either the limit is configured too low or t
 - No built-in TLS in v1. For non-loopback exposure, front rustbgpd with an
   mTLS/TLS-authenticated proxy.
 - Per-listener access mode (`read_only` / `read_write`) controls which RPCs
-  are available. The nine-service split supports per-service auth policies
+  are available. The eleven-service split supports per-service auth policies
   when finer-grained authorization is added.
 
 ---

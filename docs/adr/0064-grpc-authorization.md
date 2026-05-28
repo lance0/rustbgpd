@@ -13,11 +13,13 @@ clients must satisfy the listener's transport/authentication boundary
 accepted client, and `read_only` does not distinguish liveness from
 RIB/policy/topology reads.
 
-The inventory in `docs/grpc-method-inventory.md` classifies the current 76
-RPCs (72 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs) across the
-management surface into four tiers by worst-case effect on a compromised
-credential: `read` (0), `sensitive_read` (40), `mutating` (17),
-`operator_only` (19). That distribution makes
+The inventory in `docs/grpc-method-inventory.md` classifies every
+RPC across the management surface into four tiers by worst-case effect
+on a compromised credential. At this ADR's acceptance that was 76 RPCs
+(72 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs) distributed as
+`read` (0), `sensitive_read` (40), `mutating` (17), `operator_only`
+(19); the surface has grown since (see `docs/grpc-method-inventory.{md,json}`
+for the live counts). That distribution makes
 unscoped `read_write` access too broad for v1.0 — a leaked automation
 credential grants the holder `Shutdown`, network-wide
 `SetGracefulShutdown`, route injection, FlowSpec filter installation,
@@ -302,7 +304,7 @@ review/rollback unit.
 
 1. **Foundation.** Add the `AuthTier` enum and static method matrix in
    `crates/api/src/authz.rs`; tests parse `proto/rustbgpd.proto` and
-   require all 66 methods to have an inventory-assigned tier. Export the same
+   require all methods in it to have an inventory-assigned tier. Export the same
    source-of-truth matrix as `docs/grpc-method-inventory.json` for auditors and
    generated clients, with tests that fail on JSON drift.
    `UNIMPLEMENTED` defaults to `operator_only`. Correct this ADR and

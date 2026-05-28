@@ -1213,6 +1213,32 @@ chain.
 **Mutual exclusion:** Inline policy and policy chain cannot both be set for the
 same direction on the same neighbor. This is a config validation error.
 
+### Import-decision explain (`[policy.explain]`)
+
+Optional. Controls the per-session import-decision cache that backs
+`PolicyService.ExplainImportPolicy` and `rustbgpctl policy explain`
+(ADR-0073). Every import evaluation — permit **and** deny — is recorded
+at the transport eval site keyed by `(AFI, SAFI, prefix, path_id)`, so a
+prefix that was denied and never reached the RIB stays explainable.
+
+```toml
+[policy.explain]
+enabled = true
+cache_size = 4096
+```
+
+| Field        | Type    | Required | Default | Description |
+|--------------|---------|----------|---------|-------------|
+| `enabled`    | bool    | no       | `true`  | Gates the cache write-path. When `false`, the inbound UPDATE path skips the decision-snapshot clone entirely (one boolean check, nothing stored) and explain queries answer `not_seen`. Set `false` on perf-sensitive full-table peers. |
+| `cache_size` | integer | no       | `4096`  | Per-peer LRU capacity, one entry per `(AFI, SAFI, prefix, path_id)`. The 4096 default suits fabric / partial-table peers; raise it for full-table peers. |
+
+This is **diagnostic state only** — it never affects which routes are
+accepted. Scope is IPv4 / IPv6 unicast. The cache resets on peer session
+reset and is **not durable across restart** (for durable history use the
+event-history outbox, ADR-0072). Both fields are **restart-required
+per-peer** on reload; see [`reload-matrix.md`](reload-matrix.md) and the
+"Explain an import decision" runbook in [`OPERATIONS.md`](OPERATIONS.md).
+
 ---
 
 ## Policy entries

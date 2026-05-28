@@ -23,6 +23,11 @@ events.
   runtime config/session wiring is still deferred
 - **Import/export policy** — policy chains evaluated inline during
   UPDATE processing
+- **Import-decision explain** (ADR-0073) — a bounded per-session LRU
+  cache of import-policy decisions (permit and deny) backing
+  `PolicyService.ExplainImportPolicy` / `rustbgpctl policy explain`;
+  diagnostic state only, resets on session reset / restart, gated by
+  `[policy.explain].enabled`
 - **Private AS removal** — strip/replace private ASNs before eBGP export
 - **Route server transparency** — preserve original NEXT_HOP and skip
   local ASN prepend for route-server clients

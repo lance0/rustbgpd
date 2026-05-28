@@ -9,13 +9,16 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 | Service | Scope |
 |---------|-------|
 | **GlobalService** | Read daemon identity and bootstrap config |
+| **ConfigService** | Diff a candidate config against the running daemon's effective view |
 | **NeighborService** | Dynamic peer CRUD, enable/disable, soft reset |
-| **PolicyService** | Named policy CRUD and global/per-neighbor chain assignment |
+| **PolicyService** | Named policy CRUD, neighbor-set CRUD, global/per-neighbor chain assignment, and import-policy explain (`ExplainImportPolicy`) |
 | **PeerGroupService** | Peer-group CRUD, neighbor-to-group assignment |
-| **RibService** | Received/best/advertised route queries (incl. EVPN), BLACKHOLE discard status, and watch stream |
+| **RibService** | Received/best/advertised route queries (incl. EVPN), BLACKHOLE discard status, FIB route status, and watch stream |
+| **BfdService** | BFD session queries (RFC 5880/5881/5882) |
+| **EventService** | Live event stream (`WatchEvents`), recent session/policy/EVPN history, and the durable `SubscribeFromEvent` cursor (ADR-0072) |
 | **InjectionService** | Inject/withdraw unicast, FlowSpec, and EVPN routes |
 | **ControlService** | Health, metrics, shutdown, MRT trigger |
-| **EvpnService** | List configured local EVPN instances (Phase-2 VTEP foundation; read-only) |
+| **EvpnService** | EVPN runtime read + L2VNI / next-hop / IP-VRF queries, duplicate-MAC quarantine clear, and the mutating `ApplyEvpnRuntime` (no longer read-only) |
 
 See [docs/API.md](../../docs/API.md) for the full RPC reference and examples.
 

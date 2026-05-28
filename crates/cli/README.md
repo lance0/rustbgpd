@@ -26,6 +26,16 @@ rustbgpctl rib --prefix <prefix> --explain
 rustbgpctl rib blackholes              # BLACKHOLE discard status
 rustbgpctl rib fib                     # general FIB route status
 rustbgpctl flowspec                    # list FlowSpec rules
+rustbgpctl policy list                 # list named policies (names + statement counts)
+rustbgpctl policy get <name>           # show one named policy
+rustbgpctl policy set <name> --from-file pol.json   # create/replace from a JSON PolicyDefinition
+rustbgpctl policy delete <name>        # delete a named policy
+rustbgpctl policy chain show [--neighbor <addr>]    # show global (or per-neighbor) import/export chains
+rustbgpctl policy chain set-import [--neighbor <addr>] <names...>   # replace the import chain
+rustbgpctl policy chain set-export [--neighbor <addr>] <names...>   # replace the export chain
+rustbgpctl policy chain clear-import [--neighbor <addr>]            # clear the import chain
+rustbgpctl policy chain clear-export [--neighbor <addr>]            # clear the export chain
+rustbgpctl policy explain --neighbor <addr> --prefix <cidr> [--path-id <n>]   # why a prefix was permitted/denied on import (ADR-0073)
 rustbgpctl evpn                        # list EVPN routes (RFC 7432)
 rustbgpctl evpn runtime                # committed EVPN runtime model
 rustbgpctl evpn instances              # resolved L2VNI state

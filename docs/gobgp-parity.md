@@ -90,7 +90,7 @@ Last updated: 2026-05-27 (v0.30.0, adding ADR-0071 RFC 9234 BGP Roles + Only-to-
 
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
-| Total RPCs | ~55 | 76 | 72 `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs |
+| Total RPCs | ~55 | 78 | 74 `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs |
 | Peer CRUD | Yes | Yes | Add/Delete/List/Enable/Disable |
 | Peer groups | Yes | Yes | `PeerGroupService` + neighbor membership RPCs |
 | Dynamic neighbors (prefix-based) | Yes | Yes | `[[dynamic_neighbors]]` config + `ListDynamicNeighbors` (M28); runtime Add/Delete RPCs defined but stubbed |
@@ -102,6 +102,7 @@ Last updated: 2026-05-27 (v0.30.0, adding ADR-0071 RFC 9234 BGP Roles + Only-to-
 | Table statistics | Yes | Partial | Health endpoint |
 | VRF management | Yes | No | |
 | Policy CRUD via API | Yes | Yes | Named policy definition CRUD plus global/per-neighbor chain assignment |
+| Import-policy explain | No | Yes | `ExplainImportPolicy` RPC + `rustbgpctl policy explain` — per-prefix PERMIT/DENY/WITHDRAWN/EVICTED/STALE/NOT_SEEN decision trace at the transport eval site, IPv4/IPv6 unicast (ADR-0073) |
 | RPKI management | Yes | Partial | VRP/cache status via metrics; no gRPC RPKI CRUD |
 | BMP management | Yes | Partial | Config-file only; no runtime gRPC add/remove |
 | MRT control | Yes | Yes | `TriggerMrtDump` RPC |
@@ -178,7 +179,7 @@ Last updated: 2026-05-27 (v0.30.0, adding ADR-0071 RFC 9234 BGP Roles + Only-to-
 | Core protocol | 14 | 14 | 100% |
 | Path attributes | 13 | 9 | ~69% |
 | Policy engine | 18 | 18 | 100% |
-| gRPC RPCs | ~55 | 76 | 100%+ (broader surface, including read-only gNMI) |
+| gRPC RPCs | ~55 | 78 | 100%+ (broader surface, including read-only gNMI) |
 | Monitoring | 5 | 6 | 100%+ |
 | Security | 4 | 5 | 100%+ |
 | Best-path steps | 11 | 11 | 100% except AIGP |
@@ -224,7 +225,8 @@ Competing head-to-head with GoBGP for all use cases:
 - **ASPA upstream path verification** — RTR v2, best-path step 0.7, export policy matching; GoBGP has no ASPA support
 - **BFD integration (RFC 5880/5881/5882)** — rustbgpd has in-process single-hop async BFD with strict and non-strict RFC 5882 BGP coupling; GoBGP has no BFD integration
 - **Unicast FIB ECMP beyond Add-Path** — rustbgpd installs kernel `RTA_MULTIPATH` routes with `maximum_paths`, per-class eBGP/iBGP caps, `multipath_relax`, and Link Bandwidth weighted multipath
-- **Read-only gNMI / OpenConfig telemetry** — rustbgpd exposes a native `gnmi.gNMI` service for OpenConfig BGP operational state (`Capabilities`, `Get`, `Subscribe` SAMPLE/POLL/ONCE), verified with `gnmic`; GoBGP exposes its own gRPC API but not an OpenConfig/gNMI target
+- **Read-only gNMI / OpenConfig telemetry** — rustbgpd exposes a native `gnmi.gNMI` service for OpenConfig BGP operational state (`Capabilities`, `Get`, `Subscribe` SAMPLE/POLL/ONCE, plus STREAM ON_CHANGE v1 for neighbor `session-state`), verified with `gnmic`; GoBGP exposes its own gRPC API but not an OpenConfig/gNMI target
+- **Import-policy explain** — `ExplainImportPolicy` RPC + `rustbgpctl policy explain` answer "why didn't this prefix come in?" from a per-session import-decision cache that records both permits and denies at the transport eval site (ADR-0073); GoBGP has no per-prefix import-decision diagnostic
 - **Config persistence** — gRPC mutations atomically persisted to TOML; GoBGP doesn't persist runtime changes
 - **Operator packaging** — systemd unit, example configs, operations guide, release checklist, container image CI out of the box
 - **Secure-by-default gRPC** — UDS default listener, optional token auth per listener, read-only/read-write split; GoBGP defaults to open TCP

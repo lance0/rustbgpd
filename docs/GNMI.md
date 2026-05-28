@@ -199,6 +199,10 @@ gnmic \
   --path "$OC_BGP/global/state/router-id"
 ```
 
+The requested `--sample-interval` is clamped to `[1s, 1h]`: a sub-second
+or zero/missing interval is raised to the 1-second floor, and anything
+above one hour is capped at the 1-hour ceiling.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |

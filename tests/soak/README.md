@@ -16,25 +16,25 @@ log redirection in each runner.
 **sudo / $HOME trap.** When the soak runs under `sudo`, `$HOME` flips
 to `/root` and the default lock path becomes
 `/root/.local/state/rustbgpd-host.lock` — a different file from the
-bench runner's lock at `/home/lance/.local/state/rustbgpd-host.lock`.
+bench runner's lock at `$HOME/.local/state/rustbgpd-host.lock`.
 The two workloads would not see each other. The convention on the
 shared host is:
 
 - Run `containerlab deploy` / `containerlab destroy` with `sudo` where
-  the host requires it, but invoke the soak harness as the normal user
-  (`lance`).
+  the host requires it, but invoke the soak harness as the normal
+  (non-root) bench user.
 - If sudo on the harness itself is unavoidable, export
   `RUSTBGPD_HOST_LOCK` explicitly so it points at the bench user's lock
   file:
 
   ```bash
-  sudo RUSTBGPD_HOST_LOCK=/home/lance/.local/state/rustbgpd-host.lock \
+  sudo RUSTBGPD_HOST_LOCK=/home/<bench-user>/.local/state/rustbgpd-host.lock \
       bash tests/soak/run-<gate>-soak.sh
   ```
 
 Local dev boxes without `$HOME/.local/state` skip the locking entirely,
-so this is transparent for laptop / Threadripper-style hosts that
-aren't shared with a bench runner.
+so this is transparent for laptops / dev boxes that aren't shared with
+a bench runner.
 
 ---
 

@@ -74,6 +74,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Added a `bulk_initial_load` Criterion group to the RIB benchmark
   suite for cold single-peer table convergence into Adj-RIB-In,
   Loc-RIB, and Adj-RIB-Out.
+- Added `policy_eval` (policy-chain walk + early-deny short-circuit) and
+  `explain_snapshot` (ADR-0073 import-decision-snapshot clone cost)
+  Criterion benches under `crates/policy/benches/`, so the policy-eval
+  hot path and the explain-cache write-path clone are individually
+  measurable.
 
 ### Fixed
 
@@ -83,6 +88,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   regression versus v0.24.0 was real (+11.9% median on `main`) and the
   layout change brings the 10k median back within 1.2% of the v0.24.0
   baseline without moving the 500k case.
+
+### Docs
+
+- Added a per-release gRPC authorization release-readiness gate to
+  `docs/RELEASE_CHECKLIST.md` (verify every RPC has an authz tier, the
+  matrix matches `proto/rustbgpd.proto`, and the inventory export is
+  current) plus a dataplane-programming guardrail.
+- Codified the per-row benchmark grading rule in `docs/BENCHMARKS.md`
+  (`min..max` straddling zero = noise; stddev at/above the ~10% same-SHA
+  noise floor = inconclusive; ~3% regression floor) as reviewer guidance,
+  with a "how to read bench output" reading guide.
 
 ## [0.30.0] — 2026-05-27
 
