@@ -669,6 +669,12 @@ impl PeerSession {
         // The closure only borrows `self` immutably, so we accumulate
         // here and drain into `self.import_decision_cache` (a `&mut`
         // borrow) after the `.collect()` completes.
+        //
+        // `explain_enabled` gates the whole snapshot: when explain is
+        // disabled this stays a single boolean check per NLRI and the
+        // per-route attribute / modification clone never happens
+        // (ADR-0073 write-path cost control).
+        let explain_enabled = self.import_explain_enabled;
         let mut import_decisions: Vec<(ImportDecisionKey, CachedDecision)> = Vec::new();
         let mut announced: Vec<Route> =
             if unnumbered_ipv4_body_forbidden || otc_drop_unicast_announcements {
@@ -715,27 +721,32 @@ impl PeerSession {
                         );
                         // ADR-0073: record the decision before the
                         // permit gate so denies — the load-bearing
-                        // explain case — are captured too. `modifications`
-                        // is cloned here because the permit path consumes
-                        // it via `apply_modifications` just below.
-                        import_decisions.push((
-                            ImportDecisionKey {
-                                afi: Afi::Ipv4,
-                                safi: Safi::Unicast,
-                                prefix,
-                                path_id: entry.path_id,
-                            },
-                            CachedDecision {
-                                outcome: result.action.into(),
-                                matched_policy: evaluation.matched_policy.clone(),
-                                rpki: rpki_state,
-                                aspa: body_aspa_state,
-                                pre_policy_attrs: unicast_route_attrs.clone(),
-                                modifications: result.modifications.clone(),
-                                evaluated_at: SystemTime::now(),
-                                policy_generation: self.import_policy_generation,
-                            },
-                        ));
+                        // explain case — are captured too. Gated on
+                        // `explain_enabled` so a disabled deployment
+                        // never pays the attribute / modification clone.
+                        // `modifications` is cloned here because the
+                        // permit path consumes it via
+                        // `apply_modifications` just below.
+                        if explain_enabled {
+                            import_decisions.push((
+                                ImportDecisionKey {
+                                    afi: Afi::Ipv4,
+                                    safi: Safi::Unicast,
+                                    prefix,
+                                    path_id: entry.path_id,
+                                },
+                                CachedDecision {
+                                    outcome: result.action.into(),
+                                    matched_policy: evaluation.matched_policy.clone(),
+                                    rpki: rpki_state,
+                                    aspa: body_aspa_state,
+                                    pre_policy_attrs: unicast_route_attrs.clone(),
+                                    modifications: result.modifications.clone(),
+                                    evaluated_at: SystemTime::now(),
+                                    policy_generation: self.import_policy_generation,
+                                },
+                            ));
+                        }
                         if result.action != rustbgpd_policy::PolicyAction::Permit {
                             return None;
                         }
@@ -793,15 +804,17 @@ impl PeerSession {
         // ADR-0073: tombstone any cached decision for a withdrawn
         // prefix as WITHDRAWN, so the explain surface distinguishes
         // "seen then withdrawn" from "never seen". No-op for keys the
-        // cache never held.
-        for (prefix, path_id) in &withdrawn {
-            self.import_decision_cache
-                .mark_withdrawn(&ImportDecisionKey {
-                    afi: Afi::Ipv4,
-                    safi: Safi::Unicast,
-                    prefix: *prefix,
-                    path_id: *path_id,
-                });
+        // cache never held; skipped entirely when explain is disabled.
+        if explain_enabled {
+            for (prefix, path_id) in &withdrawn {
+                self.import_decision_cache
+                    .mark_withdrawn(&ImportDecisionKey {
+                        afi: Afi::Ipv4,
+                        safi: Safi::Unicast,
+                        prefix: *prefix,
+                        path_id: *path_id,
+                    });
+            }
         }
 
         // MP-BGP NLRI from attributes

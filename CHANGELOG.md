@@ -23,7 +23,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   IPv4 / IPv6 unicast; the cache resets on peer session reset and is
   not durable across restart (it is diagnostic state, not event
   history). Per-peer capacity is `[policy.explain] cache_size`
-  (default 4096). `SensitiveRead` authz tier.
+  (default 4096, a fabric / partial-table size — raise it for
+  full-table peers). `[policy.explain] enabled` (default `true`)
+  gates the write path: when `false`, the inbound UPDATE path skips
+  the decision-snapshot clone entirely (one boolean check, nothing
+  stored) for perf-sensitive full-table peers. `WITHDRAWN` entries
+  are kept as lightweight tombstones (attributes/modifications
+  dropped). `SensitiveRead` authz tier.
 - `bench/compare-criterion.sh` gains `--attempts N`: run the A/B
   comparison N times with alternating base-first / head-first ordering
   to dampen base/head cache-warming bias. Each ref's run uses its own

@@ -192,12 +192,23 @@ impl ImportDecisionCache {
         }
     }
 
-    /// Tombstone the entry under `key` as `Withdrawn`, refreshing its
-    /// LRU position. No-op when the key is absent — withdrawing a
-    /// prefix we never accepted carries no operator value.
+    /// Tombstone the entry under `key` as `Withdrawn`. No-op when the
+    /// key is absent — withdrawing a prefix we never accepted carries
+    /// no operator value.
+    ///
+    /// The tombstone is **lighter** than a live entry: the pre-policy
+    /// attributes and modifications are dropped, keeping only outcome,
+    /// matched policy, RPKI/ASPA state, timestamp, and generation. A
+    /// peer that churns announce/withdraw/announce therefore can't fill
+    /// the bounded LRU with full-payload dead entries that crowd out
+    /// live decisions (ADR-0073). The withdrawn route's attributes are
+    /// the least useful field for the "why is it gone?" question
+    /// anyway.
     pub fn mark_withdrawn(&mut self, key: &ImportDecisionKey) {
         if let Some(decision) = self.entries.get_mut(key) {
             decision.outcome = CachedOutcome::Withdrawn;
+            decision.pre_policy_attrs = Vec::new();
+            decision.modifications = RouteModifications::default();
         }
     }
 
@@ -394,6 +405,34 @@ mod tests {
         cache.mark_withdrawn(&key(3, 0));
         match cache.lookup(&key(3, 0), 0) {
             LookupResult::Hit(decision) => assert_eq!(decision.outcome, CachedOutcome::Withdrawn),
+            other => panic!("expected Hit(Withdrawn), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn withdraw_drops_stored_payload() {
+        // ADR-0073: a WITHDRAWN tombstone must shed its attrs/mods so a
+        // churny peer can't fill the LRU with full-payload dead entries.
+        let mut cache = ImportDecisionCache::with_capacity(4);
+        let mut decision = permit_at(0);
+        decision.pre_policy_attrs = vec![PathAttribute::Origin(rustbgpd_wire::Origin::Igp)];
+        decision.modifications = RouteModifications {
+            set_local_pref: Some(150),
+            ..RouteModifications::default()
+        };
+        cache.insert(key(3, 0), decision);
+        cache.mark_withdrawn(&key(3, 0));
+        match cache.lookup(&key(3, 0), 0) {
+            LookupResult::Hit(d) => {
+                assert_eq!(d.outcome, CachedOutcome::Withdrawn);
+                assert!(d.pre_policy_attrs.is_empty(), "attrs dropped on withdraw");
+                assert!(
+                    d.modifications.set_local_pref.is_none(),
+                    "modifications dropped on withdraw"
+                );
+                // The lightweight fields survive for the explain answer.
+                assert_eq!(d.matched_policy.as_deref(), Some("test-permit"));
+            }
             other => panic!("expected Hit(Withdrawn), got {other:?}"),
         }
     }

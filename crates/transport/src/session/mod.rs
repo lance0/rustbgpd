@@ -208,6 +208,11 @@ pub(crate) struct PeerSession {
     /// implementation via [`PeerSession::set_event_sink`] before
     /// the session task runs when `[event_history]` is enabled.
     event_sink: Arc<dyn TransportEventSink>,
+    /// Whether the import-decision cache is populated (ADR-0073
+    /// `[policy.explain].enabled`). Read on the inbound UPDATE hot path
+    /// to skip the decision snapshot build/clone entirely when explain
+    /// is disabled.
+    import_explain_enabled: bool,
     /// Per-session import-policy decision cache (ADR-0073). Records
     /// every import evaluation — permit and deny — so
     /// `PolicyService.ExplainImportPolicy` can answer "why didn't this
@@ -342,6 +347,7 @@ impl PeerSession {
         let peer_ip = config.remote_addr.ip();
         let link_local_next_hop_scope = Self::link_local_next_hop_scope_from_config(&config);
         let fsm = Session::new(config.peer.clone());
+        let explain_enabled = config.explain_enabled;
         let explain_cache_size = config.explain_cache_size;
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
         Self {
@@ -395,6 +401,7 @@ impl PeerSession {
             received_hard_reset: false,
             sent_hard_reset: false,
             event_sink: Arc::new(NoopTransportEventSink),
+            import_explain_enabled: explain_enabled,
             import_decision_cache: import_decision_cache::ImportDecisionCache::with_capacity(
                 explain_cache_size,
             ),
@@ -423,6 +430,7 @@ impl PeerSession {
         let peer_ip = config.remote_addr.ip();
         let link_local_next_hop_scope = Self::link_local_next_hop_scope_from_config(&config);
         let fsm = Session::new(config.peer.clone());
+        let explain_enabled = config.explain_enabled;
         let explain_cache_size = config.explain_cache_size;
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
         // Split the inbound stream and spawn the writer immediately —
@@ -482,6 +490,7 @@ impl PeerSession {
             received_hard_reset: false,
             sent_hard_reset: false,
             event_sink: Arc::new(NoopTransportEventSink),
+            import_explain_enabled: explain_enabled,
             import_decision_cache: import_decision_cache::ImportDecisionCache::with_capacity(
                 explain_cache_size,
             ),
