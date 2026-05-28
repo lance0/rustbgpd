@@ -60,6 +60,14 @@ const PEER_QUERY_TIMEOUT: Duration = Duration::from_millis(100);
 /// the peer's next session restart — the warn! is just a heads-up.
 const PEER_POLICY_UPDATE_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// ADR-0073: deadline for an `ExplainImportPolicy` round-trip to a
+/// session task. Bounded for the same reason as the policy-update
+/// timeout — a session parked on TCP back-pressure must not park the
+/// peer-manager actor. On timeout the explain RPC reports the peer as
+/// having no answer (synthetic `NOT_SEEN`), which is honest: we could
+/// not read its cache in time.
+const EXPLAIN_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
+
 pub(crate) enum InternalCommand {
     ReplaceConfigSnapshot(Box<Config>),
 }
@@ -441,6 +449,12 @@ impl PeerManager {
         transport.route_server_client = config.route_server_client;
         transport.remove_private_as = config.remove_private_as;
         transport.cluster_id = self.cluster_id;
+        // ADR-0073: per-session import-decision explain cache wiring.
+        // Both the enable flag and the capacity must be threaded — a
+        // missing `explain_enabled` here would silently leave the
+        // write-path gate at its `true` default regardless of config.
+        transport.explain_enabled = self.current_config.policy.explain.enabled;
+        transport.explain_cache_size = self.current_config.policy.explain.cache_size;
         transport
     }
 
@@ -562,8 +576,40 @@ impl PeerManager {
                             let result = self.reconcile_peers(added, removed, changed).await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::SyncExplainConfig { enabled, cache_size, reply } => {
+                            // ADR-0073: make the explain snapshot fresh before
+                            // any subsequent reconcile/peer-group command on
+                            // this FIFO channel constructs a session via
+                            // build_transport_config.
+                            self.current_config.policy.explain.enabled = enabled;
+                            self.current_config.policy.explain.cache_size = cache_size;
+                            let _ = reply.send(());
+                        }
                         PeerManagerCommand::ListPolicies { reply } => {
                             let _ = reply.send(named_policies_from_config(&self.current_config));
+                        }
+                        PeerManagerCommand::ExplainImportPolicy {
+                            address, afi, safi, prefix, path_id, reply,
+                        } => {
+                            // Resolve the unique session for this address and
+                            // forward to its task. No live session → None,
+                            // which the RPC layer renders as NOT_SEEN (the
+                            // session-local cache is gone, per ADR-0073).
+                            let result = match self
+                                .unique_peer_key_for_address(address)
+                                .and_then(|key| self.peers.get(&key))
+                            {
+                                Some(managed) => {
+                                    managed
+                                        .handle
+                                        .explain_import_policy_timeout(
+                                            afi, safi, prefix, path_id, EXPLAIN_QUERY_TIMEOUT,
+                                        )
+                                        .await
+                                }
+                                None => None,
+                            };
+                            let _ = reply.send(result);
                         }
                         PeerManagerCommand::GetPolicy { name, reply } => {
                             let _ = reply.send(named_policy_from_config(&self.current_config, &name));

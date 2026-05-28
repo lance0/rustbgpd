@@ -660,6 +660,43 @@ the session.
 > of the original reload. The `pending_refresh` retry semantics on
 > `ManagedPeer` cover most of those edge cases automatically.
 
+### Explain an import decision (ADR-0073)
+
+Answer "why didn't this prefix come in?" — or "what did the chain do to
+it when it did?" — from the per-session import-decision cache:
+
+```bash
+rustbgpctl policy explain --neighbor 10.0.0.2 --prefix 198.51.100.0/24
+rustbgpctl policy explain --neighbor 10.0.0.2 --prefix 2001:db8::/32 --json
+# Add-Path peer: omit --path-id to see every path, or pin one:
+rustbgpctl policy explain --neighbor 10.0.0.2 --prefix 192.0.2.0/24 --path-id 3
+```
+
+The address family is inferred from the prefix (IPv4 / IPv6 unicast).
+Each result reports an outcome:
+
+| Outcome | Meaning |
+|---|---|
+| `permit` / `deny` | The chain admitted / rejected the prefix; a `deny` is explainable even though it never reached the RIB. |
+| `withdrawn` | Was permitted, then withdrawn by the peer (tombstone; attributes dropped). |
+| `evicted` | Was cached but pushed out by the per-peer cap — raise `cache_size`. |
+| `stale` | A decision exists but the peer's import policy has changed since; the historical decision is shown with its original generation. |
+| `not_seen` | The peer hasn't advertised this prefix on the current session (cache resets on flap / restart), or explain is disabled. |
+
+This is a side-effect-free read: it does not touch the RIB or move any
+policy counter. The cache is **diagnostic session state**, not durable
+history — it resets on peer flap and daemon restart.
+
+Tuning (`[policy.explain]` in the config, diagnostic retention only —
+never affects which routes are accepted):
+
+- `enabled` (default `true`) — set `false` on hot full-table peers to
+  skip the write-path cost entirely (the daemon then answers
+  `not_seen`).
+- `cache_size` (default `4096`) — a fabric / partial-table size. For
+  reliable full-table explain, raise it toward the peer's
+  expected retained-prefix count and budget the memory.
+
 ### Enable / disable a peer
 
 ```bash

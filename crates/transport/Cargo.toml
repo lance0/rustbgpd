@@ -26,6 +26,7 @@ thiserror.workspace = true
 prometheus.workspace = true
 socket2.workspace = true
 libc.workspace = true
+lru.workspace = true
 
 [dev-dependencies]
 rustbgpd-rib.workspace = true

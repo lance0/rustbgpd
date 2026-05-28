@@ -1356,6 +1356,38 @@ fn build_transport_config_preserves_local_ipv6_nexthop() {
 }
 
 #[test]
+fn build_transport_config_threads_policy_explain_settings() {
+    // ADR-0073: both [policy.explain] knobs must propagate from the
+    // daemon config snapshot into the per-session TransportConfig.
+    // A regression here would silently leave `enabled` at its
+    // TransportConfig::new default (true), ignoring the operator's
+    // off-switch in production sessions.
+    let (_, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    mgr.current_config.policy.explain.enabled = false;
+    mgr.current_config.policy.explain.cache_size = 256;
+
+    let config = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
+    let transport = mgr.build_transport_config(&config);
+    assert!(!transport.explain_enabled, "enabled must propagate");
+    assert_eq!(
+        transport.explain_cache_size, 256,
+        "cache_size must propagate"
+    );
+}
+
+#[test]
 fn build_transport_config_preserves_route_server_client() {
     let (_, rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);

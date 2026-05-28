@@ -83,6 +83,10 @@ impl fmt::Debug for TcpAoConfig {
 
 /// Transport-layer configuration for a single BGP peer.
 #[derive(Clone, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "flat per-peer transport config; each bool is an independent BGP feature toggle, not a state enum"
+)]
 pub struct TransportConfig {
     /// FSM-level peer configuration (ASN, hold time, router ID, etc.).
     pub peer: PeerConfig,
@@ -125,6 +129,16 @@ pub struct TransportConfig {
     /// Local cluster ID for route reflection. `Some` means this speaker is a
     /// route reflector; used for `CLUSTER_LIST` prepend and loop detection.
     pub cluster_id: Option<Ipv4Addr>,
+    /// Whether the per-session import-decision cache is populated
+    /// (ADR-0073). When `false`, the inbound UPDATE path skips building
+    /// and storing any decision snapshot — the write-path cost control.
+    /// Operator knob: `[policy.explain] enabled`.
+    pub explain_enabled: bool,
+    /// Per-session import-decision cache capacity (ADR-0073). Bounds the
+    /// number of `(AFI, SAFI, prefix, path_id)` import decisions retained
+    /// for `PolicyService.ExplainImportPolicy`. Operator knob:
+    /// `[policy.explain] cache_size`.
+    pub explain_cache_size: usize,
 }
 
 impl TransportConfig {
@@ -153,6 +167,8 @@ impl TransportConfig {
             route_server_client: false,
             remove_private_as: RemovePrivateAs::Disabled,
             cluster_id: None,
+            explain_enabled: true,
+            explain_cache_size: crate::session::import_decision_cache::DEFAULT_EXPLAIN_CACHE_SIZE,
         }
     }
 }

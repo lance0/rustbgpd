@@ -2428,6 +2428,386 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
     assert_eq!(all_announced[0].prefix, Prefix::V4(permitted_prefix));
 }
 
+/// ADR-0073 end-to-end pins 1 + 2: after `process_update`, the
+/// per-session import-decision cache holds an explainable `Deny` entry
+/// for the denied prefix (which never reached RIB) and a `Permit` entry
+/// — carrying the applied modifications — for the permitted one.
+#[expect(clippy::too_many_lines)]
+#[tokio::test]
+async fn import_decision_cache_records_deny_and_permit_for_explain() {
+    use super::import_decision_cache::{CachedOutcome, ImportDecisionKey, LookupResult};
+
+    let peer_config = PeerConfig {
+        local_asn: 65001,
+        remote_asn: 65002,
+        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        hold_time: 90,
+        connect_retry_secs: 30,
+        families: vec![(Afi::Ipv4, Safi::Unicast)],
+        graceful_restart: false,
+        gr_restart_time: 120,
+        llgr_stale_time: 0,
+        add_path_receive: false,
+        add_path_send: false,
+        add_path_send_max: 0,
+        local_role: None,
+        strict_role: false,
+    };
+    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let metrics = BgpMetrics::new();
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+
+    let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let permitted_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+
+    // One chain, two statements: deny the first prefix, permit + set
+    // LOCAL_PREF=200 on the second.
+    let deny_stmt = PolicyStatement {
+        prefix: Some(Prefix::V4(denied_prefix)),
+        ge: None,
+        le: None,
+        action: PolicyAction::Deny,
+        match_community: vec![],
+        match_as_path: None,
+        match_neighbor_set: None,
+        match_route_type: None,
+        match_evpn_route_type: None,
+        match_rpki_validation: None,
+        match_aspa_validation: None,
+        match_as_path_length_ge: None,
+        match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
+        match_next_hop: None,
+        modifications: RouteModifications::default(),
+    };
+    let permit_stmt = PolicyStatement {
+        prefix: Some(Prefix::V4(permitted_prefix)),
+        ge: None,
+        le: None,
+        action: PolicyAction::Permit,
+        match_community: vec![],
+        match_as_path: None,
+        match_neighbor_set: None,
+        match_route_type: None,
+        match_evpn_route_type: None,
+        match_rpki_validation: None,
+        match_aspa_validation: None,
+        match_as_path_length_ge: None,
+        match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
+        match_next_hop: None,
+        modifications: RouteModifications {
+            set_local_pref: Some(200),
+            ..RouteModifications::default()
+        },
+    };
+    let chain = PolicyChain::new(vec![Policy {
+        entries: vec![deny_stmt, permit_stmt],
+        default_action: PolicyAction::Permit,
+    }]);
+
+    let mut session = PeerSession::new(
+        config,
+        metrics,
+        cmd_rx,
+        rib_tx,
+        Some(chain),
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.peer_enhanced_route_refresh = true;
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let update = UpdateMessage::build(
+        &[
+            Ipv4NlriEntry {
+                path_id: 0,
+                prefix: denied_prefix,
+            },
+            Ipv4NlriEntry {
+                path_id: 0,
+                prefix: permitted_prefix,
+            },
+        ],
+        &[],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+
+    let generation = session.import_policy_generation;
+    let key = |p: Ipv4Prefix| ImportDecisionKey {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        prefix: Prefix::V4(p),
+        path_id: 0,
+    };
+
+    // Pin 1: the denied prefix is explainable even though it never
+    // reached RIB.
+    match session
+        .import_decision_cache
+        .lookup(&key(denied_prefix), generation)
+    {
+        LookupResult::Hit(d) => assert_eq!(d.outcome, CachedOutcome::Deny),
+        other => panic!("expected Hit(Deny) for denied prefix, got {other:?}"),
+    }
+    // Pin 2: the permitted prefix is explainable and carries the
+    // modifications the chain applied.
+    match session
+        .import_decision_cache
+        .lookup(&key(permitted_prefix), generation)
+    {
+        LookupResult::Hit(d) => {
+            assert_eq!(d.outcome, CachedOutcome::Permit);
+            assert_eq!(d.modifications.set_local_pref, Some(200));
+        }
+        other => panic!("expected Hit(Permit) for permitted prefix, got {other:?}"),
+    }
+}
+
+/// ADR-0073 pin 3: an `ExplainImportPolicy` command is a read — it must
+/// not move the import-policy permit/deny counters.
+#[tokio::test]
+async fn explain_import_policy_command_does_not_touch_counters() {
+    use super::import_decision_cache::{LookupResult, ResolvedMatch};
+
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.peer_enhanced_route_refresh = true;
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    // Populate the cache with one permitted prefix (permit-all default).
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry { path_id: 0, prefix }],
+        &[],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+
+    let permitted_before = session.import_policy_routes_permitted;
+    let denied_before = session.import_policy_routes_denied;
+
+    // Issue the explain command through the real dispatch path.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let flow = session
+        .handle_command(PeerCommand::ExplainImportPolicy {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            prefix: Prefix::V4(prefix),
+            path_id: None,
+            reply: reply_tx,
+        })
+        .await;
+    assert_eq!(flow, ControlFlow::Continue(()));
+
+    let reply = reply_rx.await.expect("session replied");
+    assert!(
+        matches!(
+            reply.matches.as_slice(),
+            [ResolvedMatch {
+                result: LookupResult::Hit(_),
+                ..
+            }]
+        ),
+        "expected a single Hit match, got {:?}",
+        reply.matches
+    );
+
+    // The read must not have moved either counter.
+    assert_eq!(session.import_policy_routes_permitted, permitted_before);
+    assert_eq!(session.import_policy_routes_denied, denied_before);
+}
+
+/// ADR-0073 pin 4 (reset semantics): a freshly constructed session — the
+/// state every peer reconnect / daemon restart starts from — has an
+/// empty import-decision cache, so an explain query returns `NOT_SEEN`.
+/// The cache is owned by `PeerSession`, so it cannot survive the session
+/// drop; this pins the "resets on session reset" contract at the unit
+/// boundary the lifecycle guarantees.
+#[test]
+fn fresh_session_import_decision_cache_is_empty() {
+    use super::import_decision_cache::{ImportDecisionKey, LookupResult};
+
+    let (session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let key = ImportDecisionKey {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24)),
+        path_id: 0,
+    };
+    assert!(matches!(
+        session.import_decision_cache.lookup(&key, 0),
+        LookupResult::NotSeen
+    ));
+}
+
+/// ADR-0073 IPv6 scope: an `MP_REACH` IPv6-unicast announcement is
+/// recorded in the explain cache keyed by `(Ipv6, Unicast, prefix,
+/// path_id)`, proving the `MP_REACH` write path mirrors the IPv4 body
+/// path.
+#[tokio::test]
+async fn import_decision_cache_records_ipv6_mp_reach() {
+    use super::import_decision_cache::{CachedOutcome, ImportDecisionKey, LookupResult};
+
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let v6 = Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64);
+    let mp_reach = rustbgpd_wire::MpReachNlri {
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+        next_hop: IpAddr::V6("2001:db8:1::1".parse().unwrap()),
+        link_local_next_hop: None,
+        announced: vec![rustbgpd_wire::NlriEntry {
+            path_id: 0,
+            prefix: Prefix::V6(v6),
+        }],
+        flowspec_announced: vec![],
+        evpn_announced: vec![],
+    };
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::MpReachNlri(mp_reach),
+    ];
+    let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
+    session.process_update(update).await;
+
+    let key = ImportDecisionKey {
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+        prefix: Prefix::V6(v6),
+        path_id: 0,
+    };
+    match session.import_decision_cache.lookup(&key, 0) {
+        LookupResult::Hit(d) => assert_eq!(d.outcome, CachedOutcome::Permit),
+        other => panic!("expected Hit(Permit) for IPv6 MP_REACH prefix, got {other:?}"),
+    }
+}
+
+/// ADR-0073 write-gating: with `[policy.explain].enabled = false`,
+/// processing an UPDATE stores **no** decision — the eval-site clone is
+/// skipped entirely. The empty cache after a *permitted* UPDATE is the
+/// observable proof that the `if explain_enabled` guard runs before any
+/// snapshot is built.
+#[tokio::test]
+async fn explain_disabled_stores_no_decisions() {
+    use super::import_decision_cache::{ImportDecisionKey, LookupResult};
+
+    let peer_config = PeerConfig {
+        local_asn: 65001,
+        remote_asn: 65002,
+        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        hold_time: 90,
+        connect_retry_secs: 30,
+        families: vec![(Afi::Ipv4, Safi::Unicast)],
+        graceful_restart: false,
+        gr_restart_time: 120,
+        llgr_stale_time: 0,
+        add_path_receive: false,
+        add_path_send: false,
+        add_path_send_max: 0,
+        local_role: None,
+        strict_role: false,
+    };
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    config.explain_enabled = false;
+    let metrics = BgpMetrics::new();
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+
+    // Permit-all (no import policy) so the route is accepted; only the
+    // explain cache should differ from the enabled case.
+    let mut session = PeerSession::new(
+        config, metrics, cmd_rx, rib_tx, None, None, None, None, None, false,
+    );
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.peer_enhanced_route_refresh = true;
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry { path_id: 0, prefix }],
+        &[],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+
+    // The route was permitted (counter moved) but nothing was cached.
+    assert_eq!(session.import_policy_routes_permitted, 1);
+    let key = ImportDecisionKey {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        prefix: Prefix::V4(prefix),
+        path_id: 0,
+    };
+    assert!(
+        matches!(
+            session.import_decision_cache.lookup(&key, 0),
+            LookupResult::NotSeen
+        ),
+        "explain disabled must store no decision"
+    );
+}
+
 /// Import policy chains accumulate modifications across matching permit
 /// policies before the route reaches the RIB.
 #[expect(clippy::too_many_lines)]

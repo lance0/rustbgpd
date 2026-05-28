@@ -6,8 +6,8 @@ use std::net::{IpAddr, Ipv6Addr};
 use bytes::Bytes;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_transport::{RemovePrivateAs, TcpAoConfig};
-use rustbgpd_wire::{Afi, BgpRole, Safi};
+use rustbgpd_transport::{ImportExplainReply, RemovePrivateAs, TcpAoConfig};
+use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, oneshot};
 
@@ -362,10 +362,46 @@ pub enum PeerManagerCommand {
         /// Reply channel with reconciliation results.
         reply: oneshot::Sender<ReconcileResult>,
     },
+    /// ADR-0073: refresh the peer manager's `[policy.explain]` snapshot
+    /// (`enabled` / `cache_size`) ahead of any reload step that
+    /// constructs sessions. `build_transport_config` reads these from
+    /// the peer manager's `current_config`, which is otherwise replaced
+    /// only *after* reconcile — so a peer re-added mid-reload would read
+    /// stale explain settings. reload sends this first on the FIFO
+    /// command channel (awaited) when explain changed, so both the
+    /// neighbor-reconcile and peer-group re-add paths see the new
+    /// values. Carries primitives (not the config type) to respect the
+    /// api → binary crate-dependency direction.
+    SyncExplainConfig {
+        /// New `[policy.explain].enabled`.
+        enabled: bool,
+        /// New `[policy.explain].cache_size`.
+        cache_size: usize,
+        /// Reply channel acknowledging the snapshot update.
+        reply: oneshot::Sender<()>,
+    },
     /// List all named policy definitions.
     ListPolicies {
         /// Reply channel returning all named policies.
         reply: oneshot::Sender<Vec<NamedPolicySnapshot>>,
+    },
+    /// ADR-0073: query a peer's per-session import-decision cache.
+    /// Side-effect-free. `reply` carries `None` when the peer has no
+    /// live session (its session-local cache is gone), which the
+    /// caller renders as a synthetic `NOT_SEEN`.
+    ExplainImportPolicy {
+        /// Peer whose import-decision cache to consult.
+        address: IpAddr,
+        /// Address family of the queried NLRI.
+        afi: Afi,
+        /// Subsequent address family of the queried NLRI.
+        safi: Safi,
+        /// Queried prefix.
+        prefix: Prefix,
+        /// Optional Add-Path identifier; `None` = all paths.
+        path_id: Option<u32>,
+        /// Reply channel; `None` = no live session for `address`.
+        reply: oneshot::Sender<Option<ImportExplainReply>>,
     },
     /// Query a single named policy definition.
     GetPolicy {

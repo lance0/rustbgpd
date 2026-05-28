@@ -1,5 +1,7 @@
 use std::sync::Arc;
+use std::time::SystemTime;
 
+use super::import_decision_cache::{CachedDecision, ImportDecisionKey};
 use super::{
     Afi, AsPath, BgpRole, Event, EvpnRibRoute, EvpnRoute, EvpnRouteKey, FlowSpecRoute,
     FlowSpecRule, Instant, IpAddr, Ipv4Addr, NextHopScope, NotificationCode, NotificationMessage,
@@ -662,7 +664,18 @@ impl PeerSession {
             );
         }
 
-        // Body NLRI routes (IPv4)
+        // Body NLRI routes (IPv4). `import_decisions` collects every
+        // evaluation — permit and deny — for the ADR-0073 explain cache.
+        // The closure only borrows `self` immutably, so we accumulate
+        // here and drain into `self.import_decision_cache` (a `&mut`
+        // borrow) after the `.collect()` completes.
+        //
+        // `explain_enabled` gates the whole snapshot: when explain is
+        // disabled this stays a single boolean check per NLRI and the
+        // per-route attribute / modification clone never happens
+        // (ADR-0073 write-path cost control).
+        let explain_enabled = self.import_explain_enabled;
+        let mut import_decisions: Vec<(ImportDecisionKey, CachedDecision)> = Vec::new();
         let mut announced: Vec<Route> =
             if unnumbered_ipv4_body_forbidden || otc_drop_unicast_announcements {
                 Vec::new()
@@ -706,6 +719,34 @@ impl PeerSession {
                             &mut import_policy_routes_permitted,
                             &mut import_policy_routes_denied,
                         );
+                        // ADR-0073: record the decision before the
+                        // permit gate so denies — the load-bearing
+                        // explain case — are captured too. Gated on
+                        // `explain_enabled` so a disabled deployment
+                        // never pays the attribute / modification clone.
+                        // `modifications` is cloned here because the
+                        // permit path consumes it via
+                        // `apply_modifications` just below.
+                        if explain_enabled {
+                            import_decisions.push((
+                                ImportDecisionKey {
+                                    afi: Afi::Ipv4,
+                                    safi: Safi::Unicast,
+                                    prefix,
+                                    path_id: entry.path_id,
+                                },
+                                CachedDecision {
+                                    outcome: result.action.into(),
+                                    matched_policy: evaluation.matched_policy.clone(),
+                                    rpki: rpki_state,
+                                    aspa: body_aspa_state,
+                                    pre_policy_attrs: unicast_route_attrs.clone(),
+                                    modifications: result.modifications.clone(),
+                                    evaluated_at: SystemTime::now(),
+                                    policy_generation: self.import_policy_generation,
+                                },
+                            ));
+                        }
                         if result.action != rustbgpd_policy::PolicyAction::Permit {
                             return None;
                         }
@@ -740,6 +781,14 @@ impl PeerSession {
                     })
                     .collect()
             };
+
+        // Drain the collected import decisions into the per-session
+        // explain cache (ADR-0073). Now that the `.collect()` above has
+        // released its immutable borrow of `self`, the `&mut
+        // self.import_decision_cache` borrow is free.
+        for (key, decision) in import_decisions {
+            self.import_decision_cache.insert(key, decision);
+        }
 
         // Body withdrawn routes (IPv4) — carry path_id for Add-Path peers
         let mut withdrawn: Vec<(Prefix, u32)> = if unnumbered_ipv4_body_forbidden {
@@ -978,6 +1027,32 @@ impl PeerSession {
                             &mut import_policy_routes_permitted,
                             &mut import_policy_routes_denied,
                         );
+                        // ADR-0073 (IPv6 / MP_REACH unicast): record the
+                        // decision before the permit gate, gated on
+                        // explain_enabled so the clone is skipped when
+                        // disabled. Keyed by the MP family (afi from
+                        // mp.afi, safi == Unicast here — FlowSpec / EVPN
+                        // `continue` above and never reach this loop).
+                        if explain_enabled {
+                            self.import_decision_cache.insert(
+                                ImportDecisionKey {
+                                    afi: mp.afi,
+                                    safi: mp.safi,
+                                    prefix: entry.prefix,
+                                    path_id: entry.path_id,
+                                },
+                                CachedDecision {
+                                    outcome: result.action.into(),
+                                    matched_policy: evaluation.matched_policy.clone(),
+                                    rpki: mp_rpki_state,
+                                    aspa: mp_aspa_state,
+                                    pre_policy_attrs: mp_unicast_route_attrs.clone(),
+                                    modifications: result.modifications.clone(),
+                                    evaluated_at: SystemTime::now(),
+                                    policy_generation: self.import_policy_generation,
+                                },
+                            );
+                        }
                         if result.action == rustbgpd_policy::PolicyAction::Permit {
                             let mut attrs = mp_unicast_route_attrs.clone();
                             let nh_action = rustbgpd_policy::apply_modifications(
@@ -1034,6 +1109,29 @@ impl PeerSession {
                     evpn_withdrawn.extend(mp.evpn_withdrawn.iter().map(EvpnRoute::key));
                 }
                 _ => {}
+            }
+        }
+
+        // ADR-0073: tombstone any cached decision for a withdrawn prefix
+        // as WITHDRAWN, so the explain surface distinguishes "seen then
+        // withdrawn" from "never seen". Runs here — after the attribute
+        // loop — so `withdrawn` already includes both IPv4 body and
+        // IPv6 MP_UNREACH prefixes. AFI is derived per-prefix (the vec
+        // mixes families); SAFI is unicast on this path. No-op for keys
+        // the cache never held; skipped entirely when explain is off.
+        if explain_enabled {
+            for (prefix, path_id) in &withdrawn {
+                let afi = match prefix {
+                    Prefix::V4(_) => Afi::Ipv4,
+                    Prefix::V6(_) => Afi::Ipv6,
+                };
+                self.import_decision_cache
+                    .mark_withdrawn(&ImportDecisionKey {
+                        afi,
+                        safi: Safi::Unicast,
+                        prefix: *prefix,
+                        path_id: *path_id,
+                    });
             }
         }
 

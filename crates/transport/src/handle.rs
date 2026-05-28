@@ -10,7 +10,7 @@ use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::{Afi, BgpRole, Safi};
+use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -21,6 +21,7 @@ use crate::config::TransportConfig;
 use crate::error::TransportError;
 use crate::event_sink::TransportEventSink;
 use crate::session::PeerSession;
+use crate::session::import_decision_cache::ImportExplainReply;
 
 /// Role of a session relative to the `PeerManager` entry that owns it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,6 +223,23 @@ pub enum PeerCommand {
     },
     /// Collision resolution: send Cease/7 NOTIFICATION and tear down.
     CollisionDump,
+    /// ADR-0073: query this session's import-decision cache. Read-only
+    /// — must not mutate session state or counters. `path_id = None`
+    /// returns every cached path for the prefix (Add-Path
+    /// disambiguation); `Some(id)` resolves the single key.
+    ExplainImportPolicy {
+        /// Address family of the queried NLRI.
+        afi: Afi,
+        /// Subsequent address family of the queried NLRI.
+        safi: Safi,
+        /// Queried prefix.
+        prefix: Prefix,
+        /// Optional Add-Path identifier. `None` = all paths.
+        path_id: Option<u32>,
+        /// Reply channel carrying the resolved matches plus this
+        /// session's current import-policy generation.
+        reply: oneshot::Sender<ImportExplainReply>,
+    },
 }
 
 /// Snapshot of a peer session's runtime state.
@@ -795,6 +813,43 @@ impl PeerHandle {
             Ok(result) => result,
             Err(_elapsed) => Err(format!("update_import_policy timed out after {deadline:?}")),
         }
+    }
+
+    /// Query this session's import-decision cache (ADR-0073).
+    ///
+    /// Bounded like [`Self::query_state_timeout`]: a session parked on
+    /// TCP write back-pressure cannot service the command, so the
+    /// caller must not block indefinitely. Returns `None` on timeout,
+    /// on a full command channel, or if the session task has exited —
+    /// the caller (`PeerManager`) renders that as "no live session", a
+    /// `NOT_SEEN`-equivalent, which is the correct answer for a peer
+    /// whose session-local cache is gone.
+    pub async fn explain_import_policy_timeout(
+        &self,
+        afi: Afi,
+        safi: Safi,
+        prefix: Prefix,
+        path_id: Option<u32>,
+        deadline: Duration,
+    ) -> Option<ImportExplainReply> {
+        let commands = self.commands.clone();
+        tokio::time::timeout(deadline, async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            commands
+                .send(PeerCommand::ExplainImportPolicy {
+                    afi,
+                    safi,
+                    prefix,
+                    path_id,
+                    reply: reply_tx,
+                })
+                .await
+                .ok()?;
+            reply_rx.await.ok()
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     /// Replace the effective export policy chain for future `PeerUp` messages.

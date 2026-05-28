@@ -693,6 +693,14 @@ impl Config {
             .or_else(|| group.and_then(|g| g.route_reflector_client))
             .unwrap_or(false);
         transport.remove_private_as = Self::resolved_remove_private_as(neighbor, group);
+        // ADR-0073: this is the second transport-construction path (the
+        // resolved-neighbor one used by snapshot-sync gRPC peer adds);
+        // it must thread the explain knobs just like
+        // PeerManager::build_transport_config, or a gRPC-added peer
+        // silently gets the `TransportConfig::new` defaults regardless
+        // of `[policy.explain]`.
+        transport.explain_enabled = self.policy.explain.enabled;
+        transport.explain_cache_size = self.policy.explain.cache_size;
 
         let (import_policy, export_policy) = self.effective_policy_chains_for_neighbor(neighbor)?;
 
@@ -1344,6 +1352,13 @@ pub struct ConfigDiff {
     /// restart-required until actor reconfiguration is implemented and must
     /// remain visible in `--diff`.
     pub bfd_changed: bool,
+    /// `[policy.explain]` (`enabled` / `cache_size`, ADR-0073) changed.
+    /// These are read by `build_transport_config` / `resolve_neighbor`
+    /// when a session is constructed, so they do not hot-apply to live
+    /// sessions — surfaced as restart-required (the new value reaches a
+    /// peer only on its next session establishment). Diagnostic
+    /// retention only; never affects which routes are accepted.
+    pub policy_explain_changed: bool,
 }
 
 /// Per-neighbor impact derived from inheritance / chain resolution.
@@ -1444,6 +1459,7 @@ impl ConfigDiff {
             || self.blackhole_fib_discard_changed
             || self.neighbor_tcp_ao_changed
             || self.bfd_changed
+            || self.policy_explain_changed
     }
 
     /// Changes detected but not applied by current SIGHUP. Empty
@@ -1508,6 +1524,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "blackhole_fib_discard_changed": diff.blackhole_fib_discard_changed,
             "neighbor_tcp_ao_changed": diff.neighbor_tcp_ao_changed,
             "bfd_changed": diff.bfd_changed,
+            "policy_explain_changed": diff.policy_explain_changed,
             "inline_policy_import_changed": diff.policy.import_changed,
             "inline_policy_export_changed": diff.policy.export_changed,
         },
@@ -1715,6 +1732,9 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     if diff.bfd_changed {
         restart_sections.push("[[bfd_profiles]] / [neighbors.bfd] / [peer_groups.*.bfd]");
     }
+    if diff.policy_explain_changed {
+        restart_sections.push("[policy.explain] (per-peer; applies on next session)");
+    }
     if p.import_changed {
         restart_sections.push("[policy.import] (inline)");
     }
@@ -1831,6 +1851,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         blackhole_fib_discard_changed,
         neighbor_tcp_ao_changed,
         bfd_changed,
+        policy_explain_changed: old.policy.explain != new.policy.explain,
     }
 }
 

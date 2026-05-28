@@ -454,14 +454,40 @@ pub(crate) async fn reload_config(
     let peer_groups_unchanged = peer_group_diff.added.is_empty()
         && peer_group_diff.removed.is_empty()
         && peer_group_diff.changed.is_empty();
+    // ADR-0073: `[policy.explain]` (enabled / cache_size) is read when a
+    // session is constructed (`build_transport_config`), so a reload of
+    // those fields is restart-required per peer — the new snapshot is
+    // adopted (new sessions honour it) but live sessions keep their
+    // current behaviour until they re-establish. The diff machinery
+    // tracks neighbors / policy chains / peer-groups, not this
+    // diagnostic-retention knob, so detect it explicitly rather than
+    // letting an explain-only reload report "no changes detected".
+    let explain_changed = current.policy.explain != new_config.policy.explain;
     if !policy_diff.has_changes()
         && peer_groups_unchanged
         && neighbors_unchanged
         && !honor_graceful_shutdown_changed
         && !honor_blackhole_changed
     {
-        info!("config reloaded — no neighbor / policy / peer-group changes detected");
+        if explain_changed {
+            warn!(
+                "config reloaded — only [policy.explain] changed; the new \
+                 enabled/cache_size apply to sessions established after this reload \
+                 (restart-required per peer). Existing sessions keep their current \
+                 import-explain behaviour until they re-establish."
+            );
+        } else {
+            info!("config reloaded — no neighbor / policy / peer-group changes detected");
+        }
         return Some(ReloadedConfig::new(new_config, desired_config));
+    }
+
+    if explain_changed {
+        warn!(
+            "[policy.explain] changed — the new enabled/cache_size apply to sessions \
+             established after this reload (restart-required per peer); existing \
+             sessions are unaffected until they re-establish."
+        );
     }
 
     if policy_diff.import_changed || policy_diff.export_changed {
@@ -487,6 +513,51 @@ pub(crate) async fn reload_config(
     // prior state" to "matching live state", which is the practical
     // step short of true rollback.
     let mut working_config = current.clone();
+
+    // ADR-0073: `working_config` starts from `current` and only absorbs
+    // the reconciled (hot-applied) ConfigEvents, none of which touch
+    // `[policy.explain]`. So on a mixed reload — explain changed
+    // alongside neighbor/policy/peer-group edits — the returned snapshot
+    // would otherwise keep the *old* explain settings, contradicting the
+    // restart-required-per-peer warning (new sessions read the snapshot
+    // and must see the new values). Copy the new explain block in
+    // explicitly. Safe: no ConfigEvent mutates `policy.explain`, and the
+    // explain-only reload already returns `new_config` directly above.
+    if explain_changed {
+        working_config.policy.explain = new_config.policy.explain.clone();
+
+        // Push the new explain snapshot to the peer manager *before* any
+        // reconcile step below constructs a session. `build_transport_config`
+        // reads `[policy.explain]` from the peer manager's `current_config`,
+        // which is otherwise replaced only after this whole reload completes
+        // (`apply_reload_outcome`). Without this, a peer re-added by a
+        // neighbor reconcile or peer-group change in *this same* reload would
+        // be built with the stale explain settings. Sent on the same FIFO
+        // command channel and awaited, so it is applied before every
+        // subsequent step. A send failure means the peer manager is gone —
+        // halt with the honest partial snapshot like any other step.
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if peer_mgr_tx
+            .send(PeerManagerCommand::SyncExplainConfig {
+                enabled: new_config.policy.explain.enabled,
+                cache_size: new_config.policy.explain.cache_size,
+                reply: ack_tx,
+            })
+            .await
+            .is_err()
+            || ack_rx.await.is_err()
+        {
+            return halt_partial(
+                working_config,
+                &desired_config,
+                ReloadStepFailure {
+                    bucket: "policy.explain.sync",
+                    target: "[policy.explain]".to_string(),
+                    error: "peer manager unavailable while syncing explain snapshot".to_string(),
+                },
+            );
+        }
+    }
 
     // 1. Neighbor sets (no upstream dependencies) — add and change.
     for name in policy_diff
@@ -2000,6 +2071,13 @@ hold_time = 90
             PeerManagerCommand::SoftResetIn { peer, .. } => {
                 format!("SoftResetIn({peer})")
             }
+            PeerManagerCommand::SyncExplainConfig {
+                enabled,
+                cache_size,
+                ..
+            } => {
+                format!("SyncExplainConfig(enabled={enabled},cache_size={cache_size})")
+            }
             _ => "Other".to_string(),
         }
     }
@@ -2043,6 +2121,9 @@ hold_time = 90
                     }
                     PeerManagerCommand::ReconcilePeers { reply, .. } => {
                         let _ = reply.send(ReconcileResult::default());
+                    }
+                    PeerManagerCommand::SyncExplainConfig { reply, .. } => {
+                        let _ = reply.send(());
                     }
                     _ => {}
                 }
@@ -2304,6 +2385,86 @@ peer_group = "secure"
         );
     }
 
+    /// ADR-0073: an explain-only reload must adopt the new
+    /// `[policy.explain]` into the returned snapshot (so sessions
+    /// established after the reload honour it) even though it takes the
+    /// "no neighbor/policy/peer-group changes" early-return path.
+    #[tokio::test]
+    async fn reload_explain_only_adopts_new_snapshot() {
+        let new_toml = format!(
+            "{}\n[policy.explain]\nenabled = false\ncache_size = 512\n",
+            baseline_toml()
+        );
+        let (returned, _tags) = drive_reload(baseline_toml(), &new_toml).await;
+        let reloaded = returned.expect("reload must succeed");
+        assert!(!reloaded.policy.explain.enabled);
+        assert_eq!(reloaded.policy.explain.cache_size, 512);
+    }
+
+    /// ADR-0073 (mixed reload): when `[policy.explain]` changes alongside
+    /// a hot-applied edit, the returned snapshot must still carry the new
+    /// explain block. The reconcile path builds `working_config` from
+    /// `current`, so without the explicit copy the new explain would be
+    /// lost despite the warning promising new sessions honour it.
+    #[tokio::test]
+    async fn reload_mixed_change_preserves_new_explain() {
+        let new_toml = format!(
+            "{}\n[policy.definitions.block-private]\ndefault_action = \"deny\"\n\n[policy.explain]\nenabled = false\ncache_size = 333\n",
+            baseline_toml()
+        );
+        let (returned, tags) = drive_reload(baseline_toml(), &new_toml).await;
+        let reloaded = returned.expect("reload must succeed");
+        // The hot-applied policy addition still reconciled...
+        assert!(
+            tags.contains(&"SetPolicy(block-private)".to_string()),
+            "expected SetPolicy(block-private) — saw {tags:?}"
+        );
+        // ...and the restart-required explain block is in the snapshot.
+        assert!(
+            !reloaded.policy.explain.enabled,
+            "mixed reload must adopt the new explain.enabled"
+        );
+        assert_eq!(
+            reloaded.policy.explain.cache_size, 333,
+            "mixed reload must adopt the new explain.cache_size"
+        );
+    }
+
+    /// ADR-0073 (mid-reload race): when explain changes alongside a
+    /// neighbor edit that re-adds the peer, the peer manager's explain
+    /// snapshot must be refreshed *before* the reconcile constructs the
+    /// session — otherwise the re-added peer reads stale explain via
+    /// `build_transport_config`. Proven by command ordering on the FIFO
+    /// channel: `SyncExplainConfig` must precede `ReconcilePeers`.
+    #[tokio::test]
+    async fn reload_syncs_explain_before_peer_reconcile() {
+        // Change the neighbor (hold_time) → ReconcilePeers(changed); and
+        // flip [policy.explain] in the same reload.
+        let new_toml = format!(
+            "{}\n[policy.explain]\nenabled = false\n",
+            baseline_toml().replace("hold_time = 90", "hold_time = 120")
+        );
+        let (returned, tags) = drive_reload(baseline_toml(), &new_toml).await;
+        assert!(returned.is_some(), "reload must succeed");
+
+        let sync_idx = tags
+            .iter()
+            .position(|t| t.starts_with("SyncExplainConfig"))
+            .unwrap_or_else(|| panic!("expected SyncExplainConfig — saw {tags:?}"));
+        let reconcile_idx = tags
+            .iter()
+            .position(|t| t.starts_with("ReconcilePeers"))
+            .unwrap_or_else(|| panic!("expected ReconcilePeers — saw {tags:?}"));
+        assert!(
+            sync_idx < reconcile_idx,
+            "explain snapshot must sync before peer reconcile — saw {tags:?}"
+        );
+        assert!(
+            tags[sync_idx].contains("enabled=false"),
+            "sync must carry the new explain value — saw {tags:?}"
+        );
+    }
+
     /// Adding a peer-group definition on reload must surface as a
     /// `SetPeerGroup` command. Catches the silent-ignore failure mode
     /// where peer-group edits would only be detected, not applied.
@@ -2419,6 +2580,9 @@ peer_group = "secure"
                             }],
                         };
                         let _ = reply.send(result);
+                    }
+                    PeerManagerCommand::SyncExplainConfig { reply, .. } => {
+                        let _ = reply.send(());
                     }
                     _ => {}
                 }
