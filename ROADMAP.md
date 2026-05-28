@@ -249,13 +249,23 @@ items below are gated.
 
 #### Active
 
+- [ ] **Manual pinned-bench runbook + compare script.** Unblocked
+  today (no runner dependency). Captures the `taskset -c <core>` +
+  `cpufreq` `performance`-governor invocation pattern used during
+  PR #295's investigation, plus a thin wrapper around
+  `cargo bench --save-baseline` / `--baseline` so two commits can be
+  A/B'd by hand. Lives under `bench/` with a short README. Lets us
+  grade perf PRs by hand until the CI runner lands, and becomes the
+  prior-art the runner workflow will port from.
 - [ ] **CI bench tracking** *(blocked on replacement runner)* —
   self-hosted runner with `taskset` + `performance`-governor pinning;
-  `cargo bench --baseline main` diff posted as a PR comment when moves
-  exceed a threshold (~5% above the empirical noise floor on small-N
-  benches, generous on large-N). Path-scoped to PRs touching
-  `crates/{rib,wire,transport}/src/` or `bench/`. Uses the existing
-  criterion suites; no new benches in this scope.
+  `cargo bench --baseline main` diff posted as a PR comment. Path-
+  scoped to PRs touching `crates/{rib,wire,transport}/src/` or
+  `bench/`. Uses the existing criterion suites; no new benches in
+  this scope. Exit criteria: PR comment shows before/after medians,
+  raw criterion artifacts attached for follow-up inspection,
+  regression thresholds advisory until empirically calibrated against
+  the new runner's noise floor.
 - [ ] **Bulk initial-load bench** *(depends on CI bench tracking)* —
   full-table-from-cold-session scenario. Operator-visible hot path
   that has no continuous signal today.
@@ -275,8 +285,10 @@ items below are gated.
   unpinned runs, refreshed every criterion-tracked table.
 - [x] **Route struct shrink — `next_hop_scope` boxed** (PR #295,
   `f4cf9b8`) — recovered the 14% `adj_rib_in_insert/10000` regression
-  by crossing the ~128-byte memcpy-vs-inline-move codegen threshold
-  (`Route` 136 → 120 B). First perf PR after the phase kickoff.
+  by shrinking `Route` from 136 → 120 B. The delta is consistent
+  with crossing a clone-codegen / cache-pressure threshold; no
+  perf / asm capture was taken, but the small-N hit cleared and
+  large-N stayed flat. First perf PR after the phase kickoff.
 - [x] **Release asset hygiene** (`d0d9c49`, `43b3833`) — version-less
   tarball filenames + `releases/latest/download/` URLs eliminate
   per-release deployment.md maintenance; release checklist aligned
@@ -340,9 +352,6 @@ those priorities exist.
   and non-teardown mixed edits (an add combined with a delete/redefine — fail
   closed with a "split the request" error, pending a generalized
   converge-to-candidate follow-up).
-- [ ] **CI regression tracking for benchmarks** — automated runs of
-  the criterion benchmarks with threshold-based alerts on PR. The
-  benchmarks exist; the regression gate doesn't.
 - [x] **`rustbgpctl` policy / peer-group / neighbor-set commands**
   (PR #61) — three new subcommand trees wrap `PolicyService` (18
   RPCs) and `PeerGroupService` (6 RPCs):
@@ -857,8 +866,7 @@ Prove it works under pressure before 1.0.
 
 - [x] **RIB scale benchmarks** — criterion benchmarks for AdjRibIn insert (10k–500k), best-path comparison, LocRib recompute, full pipeline, route churn
 - [x] **Wire codec benchmarks** — criterion benchmarks for NLRI encode/decode, UPDATE build/parse, path attribute codec, validation
-- [ ] **Churn benchmarks** — route flap throughput, reconvergence latency under UPDATE storms
-- [ ] **CI regression tracking** — automated benchmark runs with threshold-based alerts
+- Continuous churn benchmark + per-PR CI regression tracking are now tracked under [Performance & Polish](#performance--polish) above; the criterion suites above are the inputs the tracking will run against.
 - [x] **Peer flap storms** (`tests/chaos/chaos-flap-storm.sh`) — bounces a configured peer via `EnableNeighbor`/`DisableNeighbor` in a tight loop; verifies the daemon stays responsive (gRPC `GetHealth` clean throughout), memory growth across the storm < 10 MB, and the FSM completes ≥3 disable→enable cycles without stuck state. Smoke verdict: `clean` after 3 cycles in 10 s, mem delta 1.14 MB.
 - [x] **gRPC churn** (`tests/chaos/chaos-grpc-churn.sh`) — fires concurrent `AddNeighbor`/`DeleteNeighbor`/`SoftResetIn` calls via `xargs -P` against 10.99.0.0/16 churn IPs; verifies no deadlock (≥90 % of shots produce a structured response, including expected validation errors), no `GetHealth` probe failures during the storm, no process restart. Smoke verdict: `clean` at 3 328 shots / 100 % response / 0 probe failures.
 - [x] **Repeated GR recovery** (`tests/chaos/chaos-gr-cycles.sh`) — bounces FRR's bgpd repeatedly under negotiated GR (M16 LLGR topology); verifies each cycle peaks `bgp_gr_stale_routes > 0` (GR path fires) and returns to 0 within the configured window (stale-sweep correctness). Documented for the M16 topology — runs against any GR-capable peer.
