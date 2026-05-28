@@ -2721,6 +2721,7 @@ dependencies = [
 name = "rustbgpd-policy"
 version = "0.30.0"
 dependencies = [
+ "criterion",
  "regex",
  "rustbgpd-wire",
  "thiserror 2.0.18",
