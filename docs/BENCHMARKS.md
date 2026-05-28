@@ -84,15 +84,18 @@ not a merge gate.
 ### Host coexistence: bench vs. soak
 
 The `lancebox-cloud` host is also planned to run rustbgpd's soak suite.
-The bench script unilaterally takes an exclusive `flock` on
-`$HOME/.local/state/rustbgpd-host.lock` before doing any work and fails
-fast with a clear error if the lock is already held. The soak harnesses
-under `tests/soak/` do **not** acquire this lock yet — the path is
-reserved and documented so soak adoption is a small drop-in change, but
-until that lands the operator is responsible for not dispatching the
-bench workflow while a soak is active. Local dev boxes without that XDG
-state directory skip the locking entirely so this doesn't change
-anything for laptop / Threadripper-style hosts.
+Both workloads acquire an exclusive `flock` on
+`$HOME/.local/state/rustbgpd-host.lock` before doing real work — the
+bench script via `bench/compare-criterion.sh` directly, the soak
+runners via the shared `tests/soak/host-lock.sh` helper. A bench
+dispatch refuses to start while a soak is active and a soak refuses to
+start while a bench is mid-attempt; either workload fails fast with a
+clear error rather than producing useless numbers next to a busy host.
+Local dev boxes without that XDG state directory skip the locking
+entirely so this doesn't change anything for laptop /
+Threadripper-style hosts. The sudo / `$HOME` trap (running soak as
+root moves the lock to `/root/...` and bypasses the guard) is covered
+in `tests/soak/README.md` under "Host mutex".
 
 ## Running
 

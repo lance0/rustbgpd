@@ -67,6 +67,14 @@ RUN_JSON="$RUN_DIR/run.json"
 # progress in the foreground tmux pane.
 exec > >(tee -a "$SOAK_LOG") 2>&1
 
+# Host mutex shared with bench/compare-criterion.sh. See
+# tests/soak/host-lock.sh for sudo/HOME caveats; the gist is "do not
+# invoke this harness under sudo, or export RUSTBGPD_HOST_LOCK
+# explicitly so it points at the bench user's lock file."
+# shellcheck source=./host-lock.sh
+source "$SOAK_SCRIPT_DIR/host-lock.sh"
+acquire_rustbgpd_host_lock
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

@@ -1,3 +1,43 @@
+# Cross-cutting — host mutex (bench vs. soak)
+
+Every soak entrypoint in this directory acquires an exclusive `flock` on
+`${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}` before
+doing real work. The `bench/compare-criterion.sh` script (and the
+`Criterion Bench Compare` GitHub Actions workflow that drives it) takes
+the same lock on the same path. When the soak host is also the bench
+host, this guarantees only one workload runs at a time — a bench
+dispatch refuses to start while a soak is active, and a soak refuses to
+start while a bench is mid-attempt.
+
+The shared logic lives in `tests/soak/host-lock.sh`; sourcing it and
+calling `acquire_rustbgpd_host_lock` is a two-line block right after
+log redirection in each runner.
+
+**sudo / $HOME trap.** When the soak runs under `sudo`, `$HOME` flips
+to `/root` and the default lock path becomes
+`/root/.local/state/rustbgpd-host.lock` — a different file from the
+bench runner's lock at `/home/lance/.local/state/rustbgpd-host.lock`.
+The two workloads would not see each other. The convention on the
+shared host is:
+
+- Run `containerlab deploy` / `containerlab destroy` with `sudo` where
+  the host requires it, but invoke the soak harness as the normal user
+  (`lance`).
+- If sudo on the harness itself is unavoidable, export
+  `RUSTBGPD_HOST_LOCK` explicitly so it points at the bench user's lock
+  file:
+
+  ```bash
+  sudo RUSTBGPD_HOST_LOCK=/home/lance/.local/state/rustbgpd-host.lock \
+      bash tests/soak/run-<gate>-soak.sh
+  ```
+
+Local dev boxes without `$HOME/.local/state` skip the locking entirely,
+so this is transparent for laptop / Threadripper-style hosts that
+aren't shared with a bench runner.
+
+---
+
 # M33 24-Hour Soak Harness
 
 Long-running variant of `tests/interop/scripts/test-m33-evpn-scale.sh` that

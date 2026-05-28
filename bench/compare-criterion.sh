@@ -163,14 +163,13 @@ fi
 
 # Host-level mutex with any concurrent soak / other perf workload.
 # The bench host is shared between this workflow and the soak runner;
-# letting both run at once would corrupt every reading from both. We
-# take the lock unilaterally here — the soak harnesses under
-# `tests/soak/` do not yet acquire it, so this only catches collisions
-# the operator (or a future soak-side adopter) initiates while a bench
-# is already running. Look for the shared lock under XDG state (works
-# for non-root user `lance` on the dedicated host) and skip locking
-# when the directory isn't present (local dev boxes not shared with
-# soaks).
+# letting both run at once would corrupt every reading from both. The
+# soak harnesses under `tests/soak/` acquire the same lock via
+# `tests/soak/host-lock.sh`; the path and semantics here must stay in
+# sync with that helper. Look for the shared lock under XDG state
+# (works for non-root user `lance` on the dedicated host) and skip
+# locking when the directory isn't present (local dev boxes not
+# shared with soaks).
 host_lock=""
 if [[ -d "${HOME:-/}/.local/state" ]] || [[ -n "${RUSTBGPD_HOST_LOCK:-}" ]]; then
   host_lock="${RUSTBGPD_HOST_LOCK:-${HOME}/.local/state/rustbgpd-host.lock}"

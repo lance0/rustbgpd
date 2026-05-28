@@ -69,6 +69,12 @@ LIVE_SET_FILE="$RUN_DIR/live-mac-indexes.txt"
 
 exec > >(tee -a "$SOAK_LOG") 2>&1
 
+# Host mutex shared with bench/compare-criterion.sh. See
+# tests/soak/host-lock.sh for sudo/HOME caveats.
+# shellcheck source=./host-lock.sh
+source "$SOAK_SCRIPT_DIR/host-lock.sh"
+acquire_rustbgpd_host_lock
+
 log() {
     printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
 }

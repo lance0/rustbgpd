@@ -21,15 +21,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   conservatively propagated last-run 95% CI alongside the mean delta.
   The `Criterion Bench Compare` workflow defaults to `attempts=3`.
   Single-attempt behaviour is the same simpler table as before.
-- `bench/compare-criterion.sh` now takes an exclusive `flock` on
-  `$HOME/.local/state/rustbgpd-host.lock` before doing real work, so a
-  bench dispatch on a host already running a workload that respects the
-  same lock fails fast rather than producing useless numbers. The path
-  is reserved as the future bench/soak coexistence point; the soak
-  harnesses under `tests/soak/` do not yet acquire it, so until soak
-  adoption lands the operator is responsible for not dispatching bench
-  during an active soak. Local dev boxes without that XDG state
-  directory skip the locking.
+- `bench/compare-criterion.sh` and all five soak entrypoints under
+  `tests/soak/` now acquire a shared exclusive `flock` on
+  `$HOME/.local/state/rustbgpd-host.lock` before doing real work. A
+  bench dispatch on a host with an active soak (or vice versa) fails
+  fast with a clear error rather than producing useless numbers. The
+  soak side shares logic through a new `tests/soak/host-lock.sh`
+  helper. Local dev boxes without that XDG state directory skip the
+  locking. Running soak under `sudo` moves the lock path to
+  `/root/.local/state/...` and bypasses the guard; the soak README's
+  "Host mutex" section documents the `RUSTBGPD_HOST_LOCK` override for
+  the rare case where sudo is unavoidable.
 - Added `bench/compare-criterion.sh` and a short `bench/` runbook for
   pinned local Criterion comparisons. The tool creates detached
   worktrees for two refs, runs the same bench target on a selected CPU

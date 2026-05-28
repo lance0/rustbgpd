@@ -138,6 +138,12 @@ echo 0 >"$CHURN_MOVES_FILE"
 # live progress in the foreground tmux pane.
 exec > >(tee -a "$SOAK_LOG") 2>&1
 
+# Host mutex shared with bench/compare-criterion.sh. See
+# tests/soak/host-lock.sh for sudo/HOME caveats.
+# shellcheck source=./host-lock.sh
+source "$SOAK_SCRIPT_DIR/host-lock.sh"
+acquire_rustbgpd_host_lock
+
 # ---------------------------------------------------------------------------
 # Helpers (shared shape with run-gate8b-soak.sh)
 # ---------------------------------------------------------------------------
