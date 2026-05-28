@@ -225,6 +225,63 @@ priority table above because it has the biggest blast radius.
   broken intra-doc-links and bare crate references on the developer
   machine rather than at PR time.
 
+### Performance & Polish
+
+Active work theme during v0.30.0+. The ASPA PR1 correctness slice
+(PR #294, v0.30.0) was the kickoff that unblocked this phase. Current
+focus is making perf improvements measurable so the phase compounds —
+without continuous regression signal, every perf claim costs hours of
+manual bisecting to validate.
+
+**Load-bearing first step: CI bench tracking on a pinned runner.**
+The v0.30.0 BENCHMARKS.md refresh established a ~30% empirical noise
+floor on this box for unpinned criterion runs. PR #295's
+`adj_rib_in_insert/10000` regression was found accidentally during a
+doc refresh, not by automation, because no per-PR bench signal exists.
+The Route boxing fix is in tree; the missing infrastructure is what
+would have caught the regression at PR time.
+
+**Prerequisite (out of code scope, on operator list):** a replacement
+self-hosted runner. The previous box was retired; CI bench tracking
+needs `taskset` + `performance`-governor pinning that GitHub-hosted
+runners cannot provide. Until the runner exists, the CI-bench-tracking
+items below are gated.
+
+#### Active
+
+- [ ] **CI bench tracking** *(blocked on replacement runner)* —
+  self-hosted runner with `taskset` + `performance`-governor pinning;
+  `cargo bench --baseline main` diff posted as a PR comment when moves
+  exceed a threshold (~5% above the empirical noise floor on small-N
+  benches, generous on large-N). Path-scoped to PRs touching
+  `crates/{rib,wire,transport}/src/` or `bench/`. Uses the existing
+  criterion suites; no new benches in this scope.
+- [ ] **Bulk initial-load bench** *(depends on CI bench tracking)* —
+  full-table-from-cold-session scenario. Operator-visible hot path
+  that has no continuous signal today.
+- [ ] **Continuous churn bench in CI** *(depends on CI bench tracking)*
+  — short criterion variant of the M33 soak shape (announce + withdraw
+  cycles over a pre-loaded RIB), so steady-state hot-path regressions
+  surface per-PR rather than only at soak time.
+- [ ] **Shared route storage / compact indexing research.** Next
+  bigger structural perf refactor (interning beyond Arc-dedup,
+  columnar layout, prefix-tree). Research PR first; prototype grading
+  needs CI bench tracking to be useful.
+
+#### Shipped (this phase)
+
+- [x] **BENCHMARKS.md v0.30.0 refresh + methodology stamp** (`4ad4507`)
+  — corrected hardware stamp, documented the ~30% noise floor for
+  unpinned runs, refreshed every criterion-tracked table.
+- [x] **Route struct shrink — `next_hop_scope` boxed** (PR #295,
+  `f4cf9b8`) — recovered the 14% `adj_rib_in_insert/10000` regression
+  by crossing the ~128-byte memcpy-vs-inline-move codegen threshold
+  (`Route` 136 → 120 B). First perf PR after the phase kickoff.
+- [x] **Release asset hygiene** (`d0d9c49`, `43b3833`) — version-less
+  tarball filenames + `releases/latest/download/` URLs eliminate
+  per-release deployment.md maintenance; release checklist aligned
+  with the actual ship workflow conventions.
+
 ### Pre-v1.0 Worklog
 
 Operator-visible gaps and completed work that feed the priority table above.
