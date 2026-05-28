@@ -122,16 +122,28 @@ For running rustbgpd on a real host with real peers.
 
 ### 1. Configure
 
+Generate a starter config from a built-in profile — nothing to copy or hunt
+down:
+
 ```bash
-# Copy and edit the minimal example
-cp examples/minimal/config.toml config.toml
+# `lab` = minimal single-box setup (gRPC over a local UDS, state in /tmp).
+./target/release/rustbgpd --init-config lab --stdout > config.toml
 $EDITOR config.toml   # set your ASN, router ID, and peer address
 ```
 
-The minimal example sets `runtime_state_dir` to a user-writable path and
-includes `prometheus_addr` for metrics. For a route-server deployment, start
-from `examples/route-server/config.toml` instead. Full reference:
-[docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+`edge` is an eBGP edge skeleton with a default-route-dropping import chain.
+Each profile is validated through the real config loader before it is
+printed, so the output always loads. Prefer a worked example? Copy one
+instead:
+
+```bash
+cp examples/minimal/config.toml config.toml
+```
+
+The `lab` profile and the minimal example both set `runtime_state_dir` to a
+user-writable path under `/tmp` and include `prometheus_addr` for metrics. For
+a route-server deployment, start from `examples/route-server/config.toml`. Full
+reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ### 2. Validate and run
 
