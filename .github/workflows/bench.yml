@@ -43,6 +43,21 @@ concurrency:
   group: criterion-bench-compare
   cancel-in-progress: false
 
+# Empirical noise floor on the `lancebox-cloud` runner is ~11% spread
+# across 5 pinned runs at the same SHA (`adj_rib_in_insert/10000`,
+# 2026-05-28 calibration). Treat workflow output as advisory:
+#
+#   delta < ~11%   →  inside noise; report as informational
+#   delta 11–15%   →  watch; worth a second run to confirm
+#   delta ≥ 15%    →  advisory regression; investigate before merge
+#
+# These thresholds are not enforced anywhere in code — the workflow
+# emits the table and the reviewer applies judgment. Hardening to a
+# pass/fail gate is deferred until the noise floor is re-measured on a
+# host with cpufreq governor control (the virtualized CPU on
+# `lancebox-cloud` has no `performance` governor available). See
+# `docs/BENCHMARKS.md` for the full secondary-environment context.
+
 jobs:
   compare:
     # Defensive: refuse to run on anything but the canonical repository.

@@ -24,6 +24,54 @@ v0.30.0 — they reflect the release in which they were last refreshed.
 The **Adj-RIB-In Insert** regression check below was re-run in a pinned state
 (`performance` governor, `taskset -c 8`) after a small route-layout fix.
 
+## Secondary measurement environment — `lancebox-cloud` CI runner
+
+The `Criterion Bench Compare` workflow (`.github/workflows/bench.yml`)
+runs on a dedicated VPS registered as a `[self-hosted, rustbgpd-bench]`
+runner. Numbers from CI dispatches are produced in this environment,
+not the primary host described above. Two environments give us A/B
+deltas on PRs without coupling them to a single machine.
+
+| Field | Value |
+|-------|-------|
+| Hostname | `lancebox-cloud` |
+| Hardware | Virtualized x86_64 guest on bare-metal Intel host (2 vCPU, ~1.9 GiB RAM, 2 GiB swap, 30 GB disk) |
+| Kernel | Linux 6.8.0-117-generic |
+| OS | Ubuntu 24.04.2 LTS |
+| rustc | 1.95.0 (matches the primary host) |
+| Criterion | 0.8 |
+| Pinning | `taskset -c <core>` (set by the workflow input; default core 0) |
+| cpufreq governor | **Not available** — virtualized CPU does not expose `cpufreq` sysfs, so `--require-performance` is set to `false` for runs on this host |
+
+**Empirical noise floor: ~11% spread.** Five sequential pinned runs at
+the same `main` SHA (2026-05-28 calibration on `adj_rib_in_insert/10000`)
+produced medians of 8.232 ms, 8.446 ms, 8.693 ms, 8.979 ms, and
+9.212 ms — a max-minus-min spread of 11.2% of the mean. This is the
+floor every CI delta must clear before the signal exceeds the noise.
+
+**Hardware speed ratio: ~2.2× slower than the primary host.** Wire
+`validate_update` measures 323 ns here vs 133 ns on the primary host;
+`adj_rib_in_insert/10000` median is ~8.7 ms vs ~4.0 ms. The ratio is
+consistent across crates, so the **scaling shape is preserved** — what
+matters for regression tracking — even though absolute numbers differ.
+
+**Advisory regression bands** (not enforced in code; applied by the
+reviewer reading the workflow summary):
+
+| Delta | Interpretation |
+|-------|----------------|
+| < ~11% | Inside the noise floor. Report as informational only. |
+| 11% – 15% | Watch. Worth a second dispatch to confirm before treating as signal. |
+| ≥ 15% | Advisory regression. Investigate before merge. |
+
+The 15% threshold is ~1.4× the noise floor — tight enough to catch the
+14% `adj_rib_in_insert/10000` signal that PR #295 chased down, generous
+enough to absorb day-to-day VM scheduling variance from the hypervisor.
+A pass/fail gate is deferred until a host with full `cpufreq` governor
+control is available (the virtualized CPU here does not expose
+`performance` mode). Until then, the workflow output is reviewer input,
+not a merge gate.
+
 ## Running
 
 ```bash
