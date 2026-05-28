@@ -170,29 +170,66 @@ these columns:
 | `min..max` | range of per-attempt deltas | If this brackets `0` (e.g. `-3%..+4%`), the sign of the mean delta is not reliable — it's inside the noise. |
 | `last-run 95% CI` | conservatively propagated from the last attempt's saved median CIs | Wider than Criterion's own change CI by construction; a sanity bound, not the primary signal. |
 
-**The accept / investigate decision** (these bands are advisory, applied
-by the reviewer — they are *not* enforced in code; see the
+### The grading rule (reviewer guidance, not a CI gate)
+
+This is **reviewer guidance, applied per benchmark row — not CI
+policy**; nothing auto-fails. It is deliberately a *rule* rather than a
+flat percentage: the VPS runner's same-SHA noise floor is ~11% and
+small benchmarks carry several points of spread depending on shape, so
+a magnitude-only threshold would both miss real small regressions and
+cry wolf on noisy ones. Read `stddev` and `min..max` **before** the
+mean delta.
+
+```
+ONE benchmark row (attempts = N, N ≥ 3 recommended)
+│
+│ attempts n/N with n < N ? ───────────► LOW CONFIDENCE: re-dispatch (don't grade)
+│ no
+│ min..max straddles 0 ? ──────────────► NOISE: not actionable (sign unreliable)
+│ no  (entirely one side of 0)
+│ stddev ≥ ~ same-SHA noise floor
+│         (~10–11%) ? ─────────────────► INCONCLUSIVE: re-dispatch, more attempts
+│ no  (single-digit stddev)
+▼ CONFIRMED SIGNAL
+│
+├─ mean delta < 0 (faster) ────────────► IMPROVEMENT: note it, no gate
+│
+└─ mean delta > 0 (slower) → CONFIRMED REGRESSION
+       ├─ < ~3%, explained by the PR ──► ACCEPTABLE: mention the tradeoff, proceed
+       ├─ < ~3%, unexplained, hot path ─► INVESTIGATE anyway
+       └─ ≥ ~3%, or unexplained ────────► BLOCK + investigate before merge
+```
+
+| Result | Action |
+|---|---|
+| `min..max` straddles 0 | noise — not actionable |
+| `stddev` ≥ ~10% (≈ same-SHA noise floor) | inconclusive — rerun with more attempts |
+| confirmed improvement | note it, no gate |
+| confirmed regression < ~3% | acceptable if explained by the PR; mention the tradeoff |
+| confirmed regression < ~3% but unexplained in a hot path | investigate anyway |
+| confirmed regression ≥ ~3% | block + investigate before merge |
+
+> **Confirmed regression** means `min..max` is entirely above zero and
+> `stddev` is below the same-SHA noise floor. Regressions under ~3% may
+> be accepted when the PR explains the tradeoff; regressions at or above
+> ~3%, or unexplained regressions in a hot path, should block pending
+> investigation.
+
+**Worked example** — the first multi-attempt comparison on the VPS
+runner (`rib_ops`, `v0.30.0` → `main`, 3 attempts; the span includes
+the `shrink route clone payload` change):
+
+- `route_churn/10k+1k`: `-7.31%`, stddev 1.5%, `-8.9%..-5.9%` → a
+  **confirmed improvement** (one side of 0, tight) — the methodology
+  surfacing the real win.
+- `adj_rib_in_insert/100000`: `+2.84%`, stddev 5.0%, `-1.4%..+8.4%` →
+  **noise** (straddles 0), not actionable despite the positive mean.
+
+That run is why this is a rule and not a number: the same comparison
+held a real −7% signal and a +2.8% non-signal side by side. The
+guidance is reviewer input, not a merge gate (see the
 [secondary measurement environment](#secondary-measurement-environment--self-hosted-vps-bench-runner)
-section for why):
-
-1. **Look at `stddev` and `min..max` first, not the mean delta.** If
-   `min..max` straddles `0` or `stddev` is large, the run is noise —
-   re-dispatch with more attempts before drawing any conclusion.
-2. **Then the `mean delta` against the advisory band.** On the VPS
-   runner the same-SHA noise floor is ~11% and single-dispatch
-   inter-SHA spread is wider; a multi-attempt mean delta only earns a
-   verdict once `stddev` is single-digit and `min..max` clears `0`. A
-   sub-band delta with tight spread is real; a large delta with wide
-   spread is not yet.
-3. **Regression (tight, clearly positive mean delta past the band):**
-   block and investigate. **Improvement (tight, clearly negative):**
-   note it. **Inside the band / wide spread:** not actionable — say so
-   in the PR rather than reporting a number as if it were signal.
-
-A formal post-attempts numeric threshold is deliberately still
-deferred until empirical data accumulates from real PR dispatches on
-the VPS runner; until then the table is reviewer input, not a merge
-gate.
+for the noise-floor rationale).
 
 ## Wire Codec
 
