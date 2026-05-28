@@ -11,6 +11,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `rustbgpd --init-config <profile> --stdout` prints a curated, commented
+  starter config to stdout and exits — a zero-setup bootstrap that works
+  before any config file or daemon exists. Profiles: `lab` (minimal
+  single-box local setup, gRPC over a local UDS) and `edge` (eBGP edge
+  skeleton with a named import-policy chain). Each built-in profile is
+  validated through the real config loader before it is emitted (and a
+  unit test round-trips every profile), so the output is always loadable.
+  Daemon flag rather than a subcommand to avoid retrofitting the
+  hand-rolled arg parser; `--stdout` is required (file output is a future
+  addition).
+
 - `PolicyService.ExplainImportPolicy` (ADR-0073): answer "why didn't
   this prefix come in?" — or "what did the chain do to it when it
   did?" — from a new bounded per-session import-decision cache. Every
