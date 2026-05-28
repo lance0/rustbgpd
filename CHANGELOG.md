@@ -11,6 +11,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `bench/compare-criterion.sh` gains `--attempts N`: run the A/B
+  comparison N times with alternating base-first / head-first ordering
+  to dampen base/head cache-warming bias. Each ref's run uses its own
+  saved Criterion baseline (`attempt-N-base` / `attempt-N-head`); deltas
+  are computed head-vs-base from the saved baseline medians so the sign
+  convention is independent of which ref ran first. With `attempts ≥ 2`
+  the summary table reports across-attempt stddev, min..max, and a
+  conservatively propagated last-run 95% CI alongside the mean delta.
+  The `Criterion Bench Compare` workflow defaults to `attempts=3`.
+  Single-attempt behaviour is the same simpler table as before.
+- `bench/compare-criterion.sh` and the soak harness now share an
+  exclusive `flock` on `$HOME/.local/state/rustbgpd-host.lock` so the
+  two workloads cannot collide on the same host. Bench dispatches
+  refuse to start while a soak is running, and vice versa. Local dev
+  boxes without that XDG state directory skip the locking.
 - Added `bench/compare-criterion.sh` and a short `bench/` runbook for
   pinned local Criterion comparisons. The tool creates detached
   worktrees for two refs, runs the same bench target on a selected CPU

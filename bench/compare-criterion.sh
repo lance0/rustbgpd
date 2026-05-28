@@ -15,6 +15,10 @@ Options:
   --bench NAME            Criterion bench target (default: rib_ops)
   --filter TEXT           Criterion benchmark filter, for example adj_rib_in_insert
   --core CPU              CPU core passed to taskset -c (default: 0)
+  --attempts N            Number of A/B attempts with alternating order to
+                          dampen base/head cache-warming bias (default: 1).
+                          Odd attempts run base first, even attempts run head
+                          first. Even N fully cancels first-vs-second bias.
   --out-dir PATH          Output directory (default: target/bench-compare)
   --allow-dirty           Allow a dirty worktree; refs still resolve to commits
   --no-taskset            Run without taskset pinning
@@ -46,6 +50,7 @@ package="rustbgpd-rib"
 bench_name="rib_ops"
 filter=""
 core="0"
+attempts=1
 out_root="target/bench-compare"
 allow_dirty=0
 use_taskset=1
@@ -76,6 +81,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --core)
       core="${2:?missing value for --core}"
+      shift 2
+      ;;
+    --attempts)
+      attempts="${2:?missing value for --attempts}"
       shift 2
       ;;
     --out-dir)
@@ -147,6 +156,31 @@ if [[ "$governor" != "performance" ]]; then
   echo "warning: cpu${core} governor is '${governor}', not 'performance'" >&2
 fi
 
+if ! [[ "$attempts" =~ ^[0-9]+$ ]] || [[ "$attempts" -lt 1 ]]; then
+  echo "error: --attempts must be a positive integer (got '${attempts}')" >&2
+  exit 1
+fi
+
+# Host-level mutex with any concurrent soak / other perf workload.
+# The bench host is shared between this workflow and the soak runner;
+# letting both run at once would corrupt every reading from both.
+# Look for the shared lock under XDG state (works for non-root user
+# `lance` on the dedicated host) and skip locking when the directory
+# isn't present (local dev boxes that aren't shared with soaks).
+host_lock=""
+if [[ -d "${HOME:-/}/.local/state" ]] || [[ -n "${RUSTBGPD_HOST_LOCK:-}" ]]; then
+  host_lock="${RUSTBGPD_HOST_LOCK:-${HOME}/.local/state/rustbgpd-host.lock}"
+  mkdir -p "$(dirname "$host_lock")"
+  touch "$host_lock"
+  exec {host_lock_fd}>"$host_lock"
+  if ! flock -n "$host_lock_fd"; then
+    echo "error: ${host_lock} is held by another process (soak or bench)" >&2
+    echo "       wait for it to finish or remove the lock if stale" >&2
+    exit 1
+  fi
+  echo "acquired host lock: ${host_lock}"
+fi
+
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-${base_short}-vs-${head_short}-${package}-${bench_name}"
 case "$out_root" in
   /*) out_parent="$out_root" ;;
@@ -174,8 +208,6 @@ echo "Creating detached worktrees under ${run_dir}"
 git worktree add --detach "$base_dir" "$base_sha" >/dev/null
 git worktree add --detach "$head_dir" "$head_sha" >/dev/null
 
-baseline_name="base-${base_short}"
-
 write_metadata() {
   {
     echo "run_id=${run_id}"
@@ -187,6 +219,7 @@ write_metadata() {
     echo "bench=${bench_name}"
     echo "filter=${filter}"
     echo "core=${core}"
+    echo "attempts=${attempts}"
     echo "governor=${governor}"
     echo "use_taskset=${use_taskset}"
     echo "target_dir=${target_dir}"
@@ -224,40 +257,76 @@ run_bench() {
   ) 2>&1 | tee "$log_file"
 }
 
-criterion_base=(--save-baseline "$baseline_name")
-criterion_head=(--baseline "$baseline_name")
-if [[ -n "$filter" ]]; then
-  criterion_base+=("$filter")
-  criterion_head+=("$filter")
-fi
-
 write_metadata
 
-echo "Running baseline ${base_ref} (${base_short})"
-run_bench "$base_dir" "$log_dir/base.log" \
-  cargo bench -p "$package" --bench "$bench_name" -- "${criterion_base[@]}"
+# Attempt loop. Odd attempts run base first then head; even attempts
+# run head first then base. Cache and codegen state warm during the
+# first bench; alternating ordering lets the across-attempt mean
+# cancel that bias. Each ref's run uses `--save-baseline` only — not
+# `--baseline` — because criterion rejects the two flags combined
+# ("an argument cannot be used with one or more of the other
+# specified arguments"). Deltas are computed from the saved-baseline
+# medians in the summariser, so the sign convention stays head-vs-base
+# regardless of which ref ran first.
+build_args() {
+  local baseline_name="$1"
+  printf '%s\n%s\n' "--save-baseline" "$baseline_name"
+  if [[ -n "$filter" ]]; then
+    printf '%s\n' "$filter"
+  fi
+}
 
-echo "Running head ${head_ref} (${head_short})"
-run_bench "$head_dir" "$log_dir/head.log" \
-  cargo bench -p "$package" --bench "$bench_name" -- "${criterion_head[@]}"
+for attempt in $(seq 1 "$attempts"); do
+  if (( attempt % 2 == 1 )); then
+    order="base-first"
+  else
+    order="head-first"
+  fi
+
+  base_baseline="attempt-${attempt}-base"
+  head_baseline="attempt-${attempt}-head"
+
+  mapfile -t base_args < <(build_args "$base_baseline")
+  mapfile -t head_args < <(build_args "$head_baseline")
+
+  echo "===== attempt ${attempt} / ${attempts} (order: ${order}) ====="
+
+  if [[ "$order" == "base-first" ]]; then
+    echo "[attempt ${attempt}] Running base ${base_ref} (${base_short})"
+    run_bench "$base_dir" "${log_dir}/attempt-${attempt}-base.log" \
+      cargo bench -p "$package" --bench "$bench_name" -- "${base_args[@]}"
+    echo "[attempt ${attempt}] Running head ${head_ref} (${head_short})"
+    run_bench "$head_dir" "${log_dir}/attempt-${attempt}-head.log" \
+      cargo bench -p "$package" --bench "$bench_name" -- "${head_args[@]}"
+  else
+    echo "[attempt ${attempt}] Running head ${head_ref} (${head_short})"
+    run_bench "$head_dir" "${log_dir}/attempt-${attempt}-head.log" \
+      cargo bench -p "$package" --bench "$bench_name" -- "${head_args[@]}"
+    echo "[attempt ${attempt}] Running base ${base_ref} (${base_short})"
+    run_bench "$base_dir" "${log_dir}/attempt-${attempt}-base.log" \
+      cargo bench -p "$package" --bench "$bench_name" -- "${base_args[@]}"
+  fi
+done
 
 CRITERION_DIR="${target_dir}/criterion" \
 SUMMARY_FILE="$summary_file" \
+ATTEMPTS="$attempts" \
 BASE_SHA="$base_sha" \
 HEAD_SHA="$head_sha" \
 BASE_SHORT="$base_short" \
 HEAD_SHORT="$head_short" \
-BASELINE_NAME="$baseline_name" \
 RUN_ID="$run_id" \
 METADATA_FILE="$metadata_file" \
 python3 - <<'PY'
 import json
 import os
+import statistics
 from pathlib import Path
 
 criterion_dir = Path(os.environ["CRITERION_DIR"])
 summary_file = Path(os.environ["SUMMARY_FILE"])
-baseline_name = os.environ["BASELINE_NAME"]
+attempts = int(os.environ["ATTEMPTS"])
+
 
 def fmt_ns(ns: float) -> str:
     if ns < 1_000:
@@ -268,43 +337,85 @@ def fmt_ns(ns: float) -> str:
         return f"{ns / 1_000_000:.2f} ms"
     return f"{ns / 1_000_000_000:.2f} s"
 
-rows = []
-for new_estimates in sorted(criterion_dir.glob("**/new/estimates.json")):
-    bench_dir = new_estimates.parent.parent
+
+def load_estimates(path: Path):
+    """Return (point_estimate, ci_lower, ci_upper) for the median, or None."""
     try:
-        bench_id = bench_dir.relative_to(criterion_dir).as_posix()
-        new_data = json.loads(new_estimates.read_text())
-        head_median = float(new_data["median"]["point_estimate"])
+        data = json.loads(path.read_text())["median"]
+        return (
+            float(data["point_estimate"]),
+            float(data["confidence_interval"]["lower_bound"]),
+            float(data["confidence_interval"]["upper_bound"]),
+        )
     except (OSError, KeyError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def propagated_ci_pct(base_est, head_est):
+    """Conservative bracket on (head-vs-base) ratio from saved median CIs.
+
+    head ∈ [head_lo, head_hi], base ∈ [base_lo, base_hi]; the delta
+    (head-base)/base is maximised by (head_hi - base_lo)/base_lo and
+    minimised by (head_lo - base_hi)/base_hi. Wider than Criterion's
+    `change/estimates.json` mean CI, but it does not require running a
+    `--baseline` comparison (which conflicts with `--save-baseline`).
+    """
+    _, base_lo, base_hi = base_est
+    _, head_lo, head_hi = head_est
+    if base_lo <= 0 or base_hi <= 0:
+        return None
+    lo = (head_lo - base_hi) / base_hi * 100.0
+    hi = (head_hi - base_lo) / base_lo * 100.0
+    return (lo, hi)
+
+
+# Discover bench_ids via attempt-1-base saved baselines.
+bench_ids = sorted({
+    p.parent.parent.relative_to(criterion_dir).as_posix()
+    for p in criterion_dir.glob("**/attempt-1-base/estimates.json")
+})
+
+rows = []
+for bench_id in bench_ids:
+    deltas_pct = []
+    base_medians = []
+    head_medians = []
+    last_ci = None
+    attempts_completed = 0
+    for attempt in range(1, attempts + 1):
+        base_est = load_estimates(
+            criterion_dir / bench_id / f"attempt-{attempt}-base" / "estimates.json"
+        )
+        head_est = load_estimates(
+            criterion_dir / bench_id / f"attempt-{attempt}-head" / "estimates.json"
+        )
+        if base_est is None or head_est is None or base_est[0] == 0:
+            continue
+        base_med = base_est[0]
+        head_med = head_est[0]
+        # head-vs-base from saved medians; sign-independent of order.
+        deltas_pct.append((head_med - base_med) / base_med * 100.0)
+        base_medians.append(base_med)
+        head_medians.append(head_med)
+        attempts_completed += 1
+        last_ci = propagated_ci_pct(base_est, head_est)
+
+    if attempts_completed == 0:
+        rows.append((bench_id, 0, None, None, None, None, None, None))
         continue
 
-    change_file = bench_dir / "change" / "estimates.json"
-    base_median = None
-    delta_pct = None
-    ci = None
-    baseline_estimates = bench_dir / baseline_name / "estimates.json"
-    if baseline_estimates.exists():
-        try:
-            base_data = json.loads(baseline_estimates.read_text())
-            base_median = float(base_data["median"]["point_estimate"])
-        except (OSError, KeyError, ValueError, json.JSONDecodeError):
-            pass
-
-    if change_file.exists():
-        try:
-            change_data = json.loads(change_file.read_text())
-            mean = change_data["mean"]
-            delta = float(mean["point_estimate"])
-            delta_pct = delta * 100.0
-            interval = mean["confidence_interval"]
-            ci = (
-                float(interval["lower_bound"]) * 100.0,
-                float(interval["upper_bound"]) * 100.0,
-            )
-        except (OSError, KeyError, ValueError, json.JSONDecodeError):
-            pass
-
-    rows.append((bench_id, base_median, head_median, delta_pct, ci))
+    rows.append(
+        (
+            bench_id,
+            attempts_completed,
+            statistics.mean(base_medians),
+            statistics.mean(head_medians),
+            statistics.mean(deltas_pct),
+            statistics.stdev(deltas_pct) if attempts_completed >= 2 else None,
+            (min(deltas_pct), max(deltas_pct)) if attempts_completed >= 2 else None,
+            last_ci,
+        )
+    )
 
 lines = [
     "# Criterion Compare Summary",
@@ -312,22 +423,78 @@ lines = [
     f"- Run: `{os.environ['RUN_ID']}`",
     f"- Base: `{os.environ['BASE_SHORT']}` (`{os.environ['BASE_SHA']}`)",
     f"- Head: `{os.environ['HEAD_SHORT']}` (`{os.environ['HEAD_SHA']}`)",
+    f"- Attempts: {attempts}"
+    + (" (alternating order: odd = base-first, even = head-first)" if attempts >= 2 else ""),
     f"- Metadata: `{os.environ['METADATA_FILE']}`",
     f"- Criterion artifacts: `{criterion_dir}`",
     "",
-    "| Benchmark | Base median | Head median | Mean delta | 95% CI |",
-    "|---|---:|---:|---:|---:|",
 ]
 
-for bench_id, base_median, head_median, delta_pct, ci in rows:
-    base_cell = fmt_ns(base_median) if base_median is not None else "n/a"
-    head_cell = fmt_ns(head_median)
-    delta_cell = f"{delta_pct:+.2f}%" if delta_pct is not None else "n/a"
-    ci_cell = f"{ci[0]:+.2f}%..{ci[1]:+.2f}%" if ci is not None else "n/a"
-    lines.append(f"| `{bench_id}` | {base_cell} | {head_cell} | {delta_cell} | {ci_cell} |")
+if attempts >= 2:
+    lines.extend([
+        "| Benchmark | attempts | base median (mean) | head median (mean) | mean delta | stddev | min..max | last-run 95% CI |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+    ])
+    for (
+        bench_id,
+        n,
+        base_med,
+        head_med,
+        mean_delta,
+        stddev,
+        minmax,
+        last_ci,
+    ) in rows:
+        if base_med is None:
+            lines.append(
+                f"| `{bench_id}` | 0/{attempts} | n/a | n/a | n/a | n/a | n/a | n/a |"
+            )
+            continue
+        attempts_cell = f"{n}/{attempts}"
+        base_cell = fmt_ns(base_med)
+        head_cell = fmt_ns(head_med)
+        delta_cell = f"{mean_delta:+.2f}%"
+        stddev_cell = f"{stddev:.2f}%" if stddev is not None else "n/a"
+        minmax_cell = (
+            f"{minmax[0]:+.2f}%..{minmax[1]:+.2f}%" if minmax is not None else "n/a"
+        )
+        ci_cell = (
+            f"{last_ci[0]:+.2f}%..{last_ci[1]:+.2f}%" if last_ci is not None else "n/a"
+        )
+        lines.append(
+            f"| `{bench_id}` | {attempts_cell} | {base_cell} | {head_cell} | "
+            f"{delta_cell} | {stddev_cell} | {minmax_cell} | {ci_cell} |"
+        )
+else:
+    lines.extend([
+        "| Benchmark | base median | head median | delta | 95% CI |",
+        "|---|---:|---:|---:|---:|",
+    ])
+    for (
+        bench_id,
+        _n,
+        base_med,
+        head_med,
+        mean_delta,
+        _stddev,
+        _minmax,
+        last_ci,
+    ) in rows:
+        if base_med is None:
+            lines.append(f"| `{bench_id}` | n/a | n/a | n/a | n/a |")
+            continue
+        base_cell = fmt_ns(base_med)
+        head_cell = fmt_ns(head_med)
+        delta_cell = f"{mean_delta:+.2f}%"
+        ci_cell = (
+            f"{last_ci[0]:+.2f}%..{last_ci[1]:+.2f}%" if last_ci is not None else "n/a"
+        )
+        lines.append(
+            f"| `{bench_id}` | {base_cell} | {head_cell} | {delta_cell} | {ci_cell} |"
+        )
 
 if not rows:
-    lines.append("| n/a | n/a | n/a | n/a | n/a |")
+    lines.append("| n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
 
 summary_file.write_text("\n".join(lines) + "\n")
 print(summary_file.read_text())
