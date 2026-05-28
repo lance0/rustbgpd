@@ -17,6 +17,7 @@ rustbgpd-policy.workspace = true
 rustbgpd-telemetry.workspace = true
 rustbgpd-rpki.workspace = true
 smallvec.workspace = true
+rustc-hash.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

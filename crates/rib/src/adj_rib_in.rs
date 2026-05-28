@@ -1,11 +1,21 @@
-use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 
+// Route-bearing maps use FxHash (rustc-hash) rather than the default SipHash.
+// The keys here — `Prefix`, `(Prefix, path_id)`, `EvpnRouteKey`, and interned
+// attribute sets — are internal and not adversary-controlled in a way SipHash
+// would protect against, so the faster hasher is a pure insert/lookup win on
+// the convergence + churn hot path. Aliased to the std names so the storage
+// type declarations read unchanged.
 use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, PathAttribute, Prefix, Safi};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
 
 use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
+
+// rustc-hash 1.x exposes no `FxBuildHasher` alias; name the Fx build-hasher
+// locally so the `with_capacity_and_hasher` calls read clearly.
+type FxBuildHasher = std::hash::BuildHasherDefault<rustc_hash::FxHasher>;
 
 /// Per-peer Adj-RIB-In: stores the routes received from a single peer.
 ///
@@ -62,14 +72,23 @@ impl AdjRibIn {
         let flowspec_capacity = flowspec_capacity.max(4);
         Self {
             peer,
-            routes: HashMap::with_capacity(route_capacity),
-            prefix_index: HashMap::with_capacity(route_capacity),
-            llgr_stale_local_tags: HashSet::new(),
-            flowspec_routes: HashMap::with_capacity(flowspec_capacity),
-            flowspec_llgr_stale_local_tags: HashSet::new(),
-            evpn_routes: HashMap::new(),
-            evpn_llgr_stale_local_tags: HashSet::new(),
-            attr_intern: HashSet::with_capacity(route_capacity.clamp(16, 64)),
+            routes: HashMap::with_capacity_and_hasher(route_capacity, FxBuildHasher::default()),
+            prefix_index: HashMap::with_capacity_and_hasher(
+                route_capacity,
+                FxBuildHasher::default(),
+            ),
+            llgr_stale_local_tags: HashSet::default(),
+            flowspec_routes: HashMap::with_capacity_and_hasher(
+                flowspec_capacity,
+                FxBuildHasher::default(),
+            ),
+            flowspec_llgr_stale_local_tags: HashSet::default(),
+            evpn_routes: HashMap::default(),
+            evpn_llgr_stale_local_tags: HashSet::default(),
+            attr_intern: HashSet::with_capacity_and_hasher(
+                route_capacity.clamp(16, 64),
+                FxBuildHasher::default(),
+            ),
         }
     }
 
