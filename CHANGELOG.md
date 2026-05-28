@@ -9,6 +9,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Added `bench/compare-criterion.sh` and a short `bench/` runbook for
+  pinned local Criterion comparisons. The tool creates detached
+  worktrees for two refs, runs the same bench target on a selected CPU
+  core, and writes a paste-ready Markdown summary plus raw Criterion
+  artifacts under `target/bench-compare/`.
+- Added a manual `Criterion Bench Compare` workflow that reuses the
+  local compare script on a future `[self-hosted, rustbgpd-bench]`
+  runner. It is deliberately not wired into normal pull-request CI
+  until the runner exists and its noise floor is calibrated.
+- Added a `bulk_initial_load` Criterion group to the RIB benchmark
+  suite for cold single-peer table convergence into Adj-RIB-In,
+  Loc-RIB, and Adj-RIB-Out.
+
 ### Fixed
 
 - Reduced `AdjRibIn::insert` small-N clone overhead by boxing the rare

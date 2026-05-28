@@ -249,26 +249,24 @@ items below are gated.
 
 #### Active
 
-- [ ] **Manual pinned-bench runbook + compare script.** Unblocked
-  today (no runner dependency). Captures the `taskset -c <core>` +
-  `cpufreq` `performance`-governor invocation pattern used during
-  PR #295's investigation, plus a thin wrapper around
-  `cargo bench --save-baseline` / `--baseline` so two commits can be
-  A/B'd by hand. Lives under `bench/` with a short README. Lets us
-  grade perf PRs by hand until the CI runner lands, and becomes the
-  prior-art the runner workflow will port from.
+- [x] **Manual pinned-bench runbook + compare script.** `bench/`
+  now contains a `taskset -c <core>` + Criterion baseline wrapper that
+  records commit SHAs, host metadata, logs, raw Criterion artifacts,
+  and a paste-ready Markdown delta table. This lets us grade perf PRs
+  by hand until the CI runner lands, and becomes the prior art the
+  runner workflow will port from.
 - [ ] **CI bench tracking** *(blocked on replacement runner)* —
-  self-hosted runner with `taskset` + `performance`-governor pinning;
-  `cargo bench --baseline main` diff posted as a PR comment. Path-
-  scoped to PRs touching `crates/{rib,wire,transport}/src/` or
-  `bench/`. Uses the existing criterion suites; no new benches in
-  this scope. Exit criteria: PR comment shows before/after medians,
-  raw criterion artifacts attached for follow-up inspection,
-  regression thresholds advisory until empirically calibrated against
-  the new runner's noise floor.
-- [ ] **Bulk initial-load bench** *(depends on CI bench tracking)* —
-  full-table-from-cold-session scenario. Operator-visible hot path
-  that has no continuous signal today.
+  manual `Criterion Bench Compare` workflow exists and reuses the
+  local compare script on a `[self-hosted, rustbgpd-bench]` runner.
+  Automatic PR triggering is intentionally still disabled until that
+  runner exists and its noise floor is calibrated. Final shape:
+  path-scoped PR runs for `crates/{rib,wire,transport}/src/` or
+  `bench/`, paste-ready PR comment, raw Criterion artifacts, and
+  advisory thresholds before any hard regression gate.
+- [x] **Bulk initial-load bench.** `rustbgpd-rib/rib_ops` now has a
+  `bulk_initial_load` Criterion group for cold single-peer table load
+  into pre-sized Adj-RIB-In / Loc-RIB / Adj-RIB-Out. Runner-backed
+  tracking of this group still depends on CI bench calibration.
 - [ ] **Continuous churn bench in CI** *(depends on CI bench tracking)*
   — short criterion variant of the M33 soak shape (announce + withdraw
   cycles over a pre-loaded RIB), so steady-state hot-path regressions

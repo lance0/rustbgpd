@@ -42,6 +42,44 @@ cargo bench -p rustbgpd-rib --bench rib_ops -- "adj_rib_in_insert"
 
 HTML reports are generated to `target/criterion/`.
 
+## Comparing Two Refs
+
+Use `bench/compare-criterion.sh` when judging a performance PR locally. It
+creates detached worktrees for the baseline and head refs, runs both with a
+shared Criterion target directory, and writes a Markdown summary plus raw
+Criterion artifacts under `target/bench-compare/`.
+
+It requires `bash`, `git`, `cargo`, `python3`, and `taskset` from util-linux.
+
+```bash
+bench/compare-criterion.sh \
+  --base origin/main \
+  --head HEAD \
+  --core 8 \
+  --package rustbgpd-rib \
+  --bench rib_ops \
+  --filter adj_rib_in_insert
+```
+
+For pinned runs, put the selected CPU into the `performance` governor first
+where the host allows it:
+
+```bash
+sudo cpupower frequency-set -g performance
+```
+
+The script records the observed governor, CPU model, kernel, rustc version,
+commit SHAs, logs, and raw Criterion artifact path. Treat unpinned runs as
+directional only.
+
+## Manual CI Workflow
+
+`.github/workflows/bench.yml` exposes the same comparison as a manual
+`Criterion Bench Compare` workflow. It targets a `[self-hosted,
+rustbgpd-bench]` runner and is intentionally not wired to normal pull-request
+events yet. Enable PR-triggered benchmark comments only after the replacement
+runner exists and its run-to-run noise floor is measured.
+
 ## Wire Codec
 
 The wire codec (`rustbgpd-wire`) is the hot path for every inbound and outbound
@@ -170,6 +208,22 @@ improvement**).
 
 Extrapolating linearly, a full Internet table (900 k prefixes × 2 peers) would
 complete the pipeline in ~1.5 s.
+
+### Bulk Initial Load
+
+Cold single-peer table load into pre-sized Adj-RIB-In / Loc-RIB /
+Adj-RIB-Out. This is the benchmark shape to use when judging full-table
+convergence changes; it intentionally separates initial table load from the
+two-peer `rib_pipeline` micro-benchmark above.
+
+Run it with:
+
+```bash
+cargo bench -p rustbgpd-rib --bench rib_ops -- "bulk_initial_load"
+```
+
+The v0.30.0 baseline has not been pinned yet. Record numbers here only after
+running through the pinned compare workflow described above.
 
 ### Route Churn
 
