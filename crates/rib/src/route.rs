@@ -40,8 +40,9 @@ pub struct Route {
     /// `MP_REACH_NLRI` had a 32-byte next-hop. Re-encoded by the MRT
     /// exporter and the BGP UPDATE encoder when present.
     pub link_local_next_hop: Option<Ipv6Addr>,
-    /// Interface scope for an IPv6 link-local primary next-hop.
-    pub next_hop_scope: Option<NextHopScope>,
+    /// Interface scope for an IPv6 link-local primary next-hop. Boxed so the
+    /// common `None` case keeps clone-heavy `Route` values small.
+    pub next_hop_scope: Option<Box<NextHopScope>>,
     /// The peer that advertised this route.
     pub peer: IpAddr,
     /// BGP path attributes (ORIGIN, `AS_PATH`, communities, etc.).

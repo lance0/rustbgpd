@@ -10318,7 +10318,7 @@ async fn fib_install_candidates_preserve_link_local_next_hop_scope() {
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V6("fe80::1".parse().unwrap()),
         link_local_next_hop: Some("fe80::1".parse().unwrap()),
-        next_hop_scope: Some(scope.clone()),
+        next_hop_scope: Some(Box::new(scope.clone())),
         peer: IpAddr::V6("fe80::2".parse().unwrap()),
         attributes: Arc::new(vec![]),
         received_at: Instant::now(),
@@ -10344,7 +10344,7 @@ async fn fib_install_candidates_preserve_link_local_next_hop_scope() {
 
     let cands = query_fib_install_candidates(&tx, 1).await;
     assert_eq!(cands.len(), 1);
-    assert_eq!(cands[0].best.next_hop_scope, Some(scope.clone()));
+    assert_eq!(cands[0].best.next_hop_scope.as_deref(), Some(&scope));
     assert_eq!(cands[0].next_hops[0].next_hop_scope, Some(scope));
 
     drop(tx);
@@ -10367,10 +10367,10 @@ async fn fib_install_candidates_keep_same_link_local_on_distinct_ifindexes() {
         prefix: Prefix::V4(prefix),
         next_hop: shared_nh,
         link_local_next_hop: Some("fe80::1".parse().unwrap()),
-        next_hop_scope: Some(NextHopScope {
+        next_hop_scope: Some(Box::new(NextHopScope {
             interface: Arc::from(ifname),
             ifindex,
-        }),
+        })),
         peer: IpAddr::V6(peer.parse().unwrap()),
         attributes: Arc::new(vec![]),
         received_at: Instant::now(),

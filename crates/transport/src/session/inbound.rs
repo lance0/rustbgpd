@@ -185,9 +185,11 @@ impl PeerSession {
             && self.config.peer_scope_id.is_some()
     }
 
-    fn link_local_next_hop_scope(&self, next_hop: IpAddr) -> Option<NextHopScope> {
+    fn link_local_next_hop_scope(&self, next_hop: IpAddr) -> Option<Box<NextHopScope>> {
         match next_hop {
-            IpAddr::V6(v6) if is_ipv6_link_local(&v6) => self.link_local_next_hop_scope.clone(),
+            IpAddr::V6(v6) if is_ipv6_link_local(&v6) => {
+                self.link_local_next_hop_scope.clone().map(Box::new)
+            }
             _ => None,
         }
     }

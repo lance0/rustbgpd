@@ -12,7 +12,7 @@ for relative comparison and regression tracking, not absolute guarantees.
 | Kernel | Linux 6.17.0-20-generic |
 | rustc | 1.95.0 (2026-04-14) |
 | Criterion | 0.8 |
-| Measurement state | Unpinned — no `isolcpus`, no `cpufreq` governor pinning; light background load (`scaling_cur_freq` ~51% at run time) |
+| Measurement state | Unpinned unless noted — no `isolcpus`, no `cpufreq` governor pinning; light background load (`scaling_cur_freq` ~51% at run time) |
 
 Empirical run-to-run variance for the smaller benches on this box has been
 observed up to ~30% in this unpinned state — re-runs at the same commit can
@@ -20,6 +20,9 @@ drift this much. Expect tighter results from a pinned, quiesced measurement
 state. The non-criterion **Memory Footprint**, **Optimization History**, and
 **End-to-End System Benchmarks** sections below have not been re-measured for
 v0.30.0 — they reflect the release in which they were last refreshed.
+
+The **Adj-RIB-In Insert** regression check below was re-run in a pinned state
+(`performance` governor, `taskset -c 8`) after a small route-layout fix.
 
 ## Running
 
@@ -116,20 +119,22 @@ secondary prefix index).
 
 | Routes | Time | Throughput |
 |--------|------|------------|
-| 10,000 | 4.01 ms | 2.5M routes/sec |
-| 100,000 | 52.3 ms | 1.9M routes/sec |
-| 500,000 | 191 ms | 2.6M routes/sec |
+| 10,000 | 3.60 ms | 2.8M routes/sec |
+| 100,000 | 54.1 ms | 1.8M routes/sec |
+| 500,000 | 178 ms | 2.8M routes/sec |
 
-Throughput is ~2-2.6M routes/sec across scale (vs 4.5M without the prefix
+Throughput is ~1.8-2.8M routes/sec across scale (vs 4.5M without the prefix
 index). The trade-off is worthwhile: insert is ~1.8× slower, but
 `iter_prefix()` goes from O(N) to O(1), making the full pipeline 25-86× faster
 at scale. A full Internet table (900k prefixes) inserts in ~350 ms.
 
-The small-N number is ~14% slower than the v0.24.0 measurement (3.5 ms at
-10 k); this corresponds to a slight `Route` struct-size growth (added
-`next_hop_scope: Option<NextHopScope>` for RFC 8950 unnumbered link-local
-support) that increases per-clone memcpy cost. The effect disappears at
-100 k+ where memory bandwidth dominates.
+Pinned follow-up measurements confirmed the previous small-N regression was
+real, not noise: current `main` measured 3.98 ms median at 10 k versus
+3.56 ms at v0.24.0 (+11.9%). The cause was per-clone `Route` size growth from
+the RFC 8950 unnumbered `next_hop_scope` field. Boxing the rare scope payload
+reduces `Route` from 136 bytes to 120 bytes and brings the 10 k insert median
+back to 3.60 ms, within 1.2% of the v0.24.0 baseline. The 500 k insert median
+stays flat against current `main` within measurement noise.
 
 ### Loc-RIB Recompute
 
