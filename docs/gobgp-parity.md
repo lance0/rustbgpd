@@ -1,6 +1,6 @@
 # rustbgpd vs GoBGP Feature Parity
 
-Last updated: 2026-05-26 (post-v0.29.0 main, including ADR-0067 BFD, ADR-0066/0068 unicast multipath / ECMP FIB, ADR-0069 BGP unnumbered, and ADR-0070 read-only gNMI / OpenConfig telemetry)
+Last updated: 2026-05-27 (v0.30.0, adding ADR-0071 RFC 9234 BGP Roles + Only-to-Customer route-leak prevention, ADR-0072 durable event history with `SubscribeFromEvent` cursor replay + gNMI `Subscribe ON_CHANGE` v1 for neighbor session-state, and PR #294 ASPA algorithm fidelity / §6.2 per-AFI/SAFI gate; on top of ADR-0067 BFD, ADR-0066/0068 unicast multipath / ECMP FIB, ADR-0069 BGP unnumbered, and ADR-0070 read-only gNMI / OpenConfig telemetry from the prior release window)
 
 ## Address Families
 
@@ -42,6 +42,7 @@ Last updated: 2026-05-26 (post-v0.29.0 main, including ADR-0067 BFD, ADR-0066/00
 | Extended Nexthop (RFC 8950) | Yes | Yes | IPv4 unicast over IPv6 next hop |
 | BGP unnumbered (interface-scoped IPv6 link-local) | Yes | Yes | Both carry IPv4 unicast over RFC 8950 on link-local interface neighbors. GoBGP uses interface autodiscovery (`neighbor-interface`, derives the peer from the link-local); rustbgpd v1 uses static `address` + `interface` (FRR-style autodiscovery deferred) and additionally installs the scoped Linux FIB next-hop with the egress `dev`. M53 validates rustbgpd against FRR. ADR-0069 |
 | Admin Shutdown Comm (RFC 8203) | Yes | Yes | Reason text in NOTIFICATION |
+| BGP Roles + Only-to-Customer (RFC 9234) | Partial | Yes | rustbgpd negotiates the OPEN Role capability, applies §5 strict-mode rejection on mismatch, and enforces OTC ingress / egress rules per §6 with a structured `OtcRouteBlockedEvent` payload on `SubscribeFromEvent` alongside the `bgp_otc_routes_blocked_total{peer, reason}` counter and per-peer scalar. GoBGP has draft-era support without OTC enforcement parity at last check. ADR-0071, M55. |
 
 ## Path Attributes
 
@@ -57,6 +58,7 @@ Last updated: 2026-05-26 (post-v0.29.0 main, including ADR-0067 BFD, ADR-0066/00
 | MP_REACH / MP_UNREACH (RFC 4760) | Yes | Yes | |
 | AIGP (type 26) | Yes | No | |
 | PMSI_TUNNEL (type 22) | Yes | Yes | RFC 6514 §5; originated on Type 3 IMET for ingress-replication BUM |
+| Only-to-Customer (type 35, RFC 9234) | Partial | Yes | Codec + ingress/egress enforcement (see Core Protocol row above). |
 | TUNNEL_ENCAP (type 23) | Yes | No | |
 | PREFIX_SID (type 40) | Yes | No | |
 | Unknown attribute passthrough | Yes | Yes | Partial bit on re-advert |
@@ -96,7 +98,7 @@ Last updated: 2026-05-26 (post-v0.29.0 main, including ADR-0067 BFD, ADR-0066/00
 | Streaming path injection | Yes | No | AddPathStream |
 | List paths (Adj-In/Loc/Adj-Out) | Yes | Yes | |
 | Watch events (streaming) | Yes | Yes | WatchRoutes |
-| gNMI / OpenConfig telemetry | No | Partial | Read-only `Capabilities` / `Get` / `Subscribe` for a strict OpenConfig BGP state subset; `Set` returns `Unimplemented`; ADR-0070 / M54 |
+| gNMI / OpenConfig telemetry | No | Partial | Read-only `Capabilities` / `Get` / `Subscribe` (ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE v1 for neighbor `session-state` when `[event_history]` is enabled) on a strict OpenConfig BGP state subset; `Set` returns `Unimplemented`. ADR-0070 / M54; ON_CHANGE wired in ADR-0072 / M56. |
 | Table statistics | Yes | Partial | Health endpoint |
 | VRF management | Yes | No | |
 | Policy CRUD via API | Yes | Yes | Named policy definition CRUD plus global/per-neighbor chain assignment |
@@ -117,8 +119,9 @@ Last updated: 2026-05-26 (post-v0.29.0 main, including ADR-0067 BFD, ADR-0066/00
 | Structured logging | No | Yes | JSON via tracing-subscriber |
 | BMP exporter (RFC 7854) | Yes | Yes | Per-collector TCP client, Initiation/PeerUp/PeerDown/RouteMonitoring/StatsReport/Termination |
 | MRT dump (RFC 6396) | Yes | Yes | `TABLE_DUMP_V2` periodic + on-demand; gzip optional (ADR-0044) |
-| WatchEvent streaming | Yes | Yes | WatchRoutes |
-| gNMI / OpenConfig telemetry | No | Yes | Read-only `gnmi.gNMI` target for a strict OpenConfig BGP state subset (`Capabilities`, `Get`, `Subscribe` ONCE/POLL/STREAM SAMPLE; `Set` returns `Unimplemented`). Served on mTLS TCP or local UDS; M54 validates with `gnmic` |
+| WatchEvent streaming | Yes | Yes | `WatchRoutes` + `WatchEvents` (legacy broadcast) plus `SubscribeFromEvent` with a durable monotonic-`event_id` cursor that survives daemon restart and post-incident reconnect; backed by the SQLite-WAL event outbox (ADR-0072). `rustbgpctl events watch --from-event-id N` and the `examples/event-bridge` reference binary consume the cursor. |
+| Durable event history / cursor replay | No | Yes | ADR-0072: producers across RIB, EVPN, PeerManager session lifecycle, policy, BFD, and dataplane FIB / blackhole all enqueue durable events; the `[event_history]` config block controls retention by count + bytes. `bgp_event_outbox_cursor_gap_total` counts subscribe requests where the requested cursor was older than the retention floor. |
+| gNMI / OpenConfig telemetry | No | Yes | Read-only `gnmi.gNMI` target for a strict OpenConfig BGP state subset (`Capabilities`, `Get`, `Subscribe` ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE v1 for neighbor `session-state` when `[event_history]` is enabled; `Set` returns `Unimplemented`). Served on mTLS TCP or local UDS; M54 + M56 validate with `gnmic` |
 | Sentry integration | Yes | No | |
 
 ## Security
@@ -252,8 +255,10 @@ target. Remaining gaps are narrower:
    IPv4 / IPv6 single-hop first.
 3. **Config transaction / diff UX** — required before any serious gNMI `Set`
    or broader remote-mutation story.
-4. **Durable event replay** — prerequisite for honest gNMI `ON_CHANGE` and
-   post-incident fabric debugging.
+4. ~~**Durable event replay**~~ — *shipped in v0.30.0 (ADR-0072 + ADR-0072
+   follow-up sprint).* `SubscribeFromEvent` with monotonic-`event_id` cursor
+   carries the post-incident debugging story; gNMI `ON_CHANGE` v1 for
+   neighbor `session-state` consumes the same in-process broadcast.
 
 ### General-Purpose BGP Speaker (~87% parity)
 

@@ -194,7 +194,7 @@ Measured using a tracking global allocator that counts every `alloc` and
 
 | Type | Size |
 |------|------|
-| `Route` | 88 bytes |
+| `Route` | 120 bytes |
 | `Prefix` | 18 bytes |
 | `PathAttribute` | 72 bytes |
 | `AsPath` | 24 bytes |
@@ -215,11 +215,11 @@ each having their own copy.
 
 | Attribute set | Heap | Stack | Total |
 |---------------|------|-------|-------|
-| Typical (6 attrs, 3-ASN path, 2 communities) | 524 B | 88 B | 612 B |
-| Rich (8 attrs, 5-ASN+SET path, 5 communities, ORIGINATOR_ID, CLUSTER_LIST) | 736 B | 88 B | 824 B |
+| Typical (6 attrs, 3-ASN path, 2 communities) | 524 B | 120 B | 644 B |
+| Rich (8 attrs, 5-ASN+SET path, 5 communities, ORIGINATOR_ID, CLUSTER_LIST) | 736 B | 120 B | 856 B |
 
 These are per-unique-attribute-set costs. With interning, routes sharing the
-same attributes pay only the 88-byte `Route` stack cost plus an 8-byte `Arc`
+same attributes pay only the 120-byte `Route` stack cost plus an 8-byte `Arc`
 pointer.
 
 ### AdjRibIn at Scale (single peer, typical attrs)
