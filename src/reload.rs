@@ -525,6 +525,38 @@ pub(crate) async fn reload_config(
     // explain-only reload already returns `new_config` directly above.
     if explain_changed {
         working_config.policy.explain = new_config.policy.explain.clone();
+
+        // Push the new explain snapshot to the peer manager *before* any
+        // reconcile step below constructs a session. `build_transport_config`
+        // reads `[policy.explain]` from the peer manager's `current_config`,
+        // which is otherwise replaced only after this whole reload completes
+        // (`apply_reload_outcome`). Without this, a peer re-added by a
+        // neighbor reconcile or peer-group change in *this same* reload would
+        // be built with the stale explain settings. Sent on the same FIFO
+        // command channel and awaited, so it is applied before every
+        // subsequent step. A send failure means the peer manager is gone —
+        // halt with the honest partial snapshot like any other step.
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if peer_mgr_tx
+            .send(PeerManagerCommand::SyncExplainConfig {
+                enabled: new_config.policy.explain.enabled,
+                cache_size: new_config.policy.explain.cache_size,
+                reply: ack_tx,
+            })
+            .await
+            .is_err()
+            || ack_rx.await.is_err()
+        {
+            return halt_partial(
+                working_config,
+                &desired_config,
+                ReloadStepFailure {
+                    bucket: "policy.explain.sync",
+                    target: "[policy.explain]".to_string(),
+                    error: "peer manager unavailable while syncing explain snapshot".to_string(),
+                },
+            );
+        }
     }
 
     // 1. Neighbor sets (no upstream dependencies) — add and change.
@@ -2039,6 +2071,13 @@ hold_time = 90
             PeerManagerCommand::SoftResetIn { peer, .. } => {
                 format!("SoftResetIn({peer})")
             }
+            PeerManagerCommand::SyncExplainConfig {
+                enabled,
+                cache_size,
+                ..
+            } => {
+                format!("SyncExplainConfig(enabled={enabled},cache_size={cache_size})")
+            }
             _ => "Other".to_string(),
         }
     }
@@ -2082,6 +2121,9 @@ hold_time = 90
                     }
                     PeerManagerCommand::ReconcilePeers { reply, .. } => {
                         let _ = reply.send(ReconcileResult::default());
+                    }
+                    PeerManagerCommand::SyncExplainConfig { reply, .. } => {
+                        let _ = reply.send(());
                     }
                     _ => {}
                 }
@@ -2388,6 +2430,41 @@ peer_group = "secure"
         );
     }
 
+    /// ADR-0073 (mid-reload race): when explain changes alongside a
+    /// neighbor edit that re-adds the peer, the peer manager's explain
+    /// snapshot must be refreshed *before* the reconcile constructs the
+    /// session — otherwise the re-added peer reads stale explain via
+    /// `build_transport_config`. Proven by command ordering on the FIFO
+    /// channel: `SyncExplainConfig` must precede `ReconcilePeers`.
+    #[tokio::test]
+    async fn reload_syncs_explain_before_peer_reconcile() {
+        // Change the neighbor (hold_time) → ReconcilePeers(changed); and
+        // flip [policy.explain] in the same reload.
+        let new_toml = format!(
+            "{}\n[policy.explain]\nenabled = false\n",
+            baseline_toml().replace("hold_time = 90", "hold_time = 120")
+        );
+        let (returned, tags) = drive_reload(baseline_toml(), &new_toml).await;
+        assert!(returned.is_some(), "reload must succeed");
+
+        let sync_idx = tags
+            .iter()
+            .position(|t| t.starts_with("SyncExplainConfig"))
+            .unwrap_or_else(|| panic!("expected SyncExplainConfig — saw {tags:?}"));
+        let reconcile_idx = tags
+            .iter()
+            .position(|t| t.starts_with("ReconcilePeers"))
+            .unwrap_or_else(|| panic!("expected ReconcilePeers — saw {tags:?}"));
+        assert!(
+            sync_idx < reconcile_idx,
+            "explain snapshot must sync before peer reconcile — saw {tags:?}"
+        );
+        assert!(
+            tags[sync_idx].contains("enabled=false"),
+            "sync must carry the new explain value — saw {tags:?}"
+        );
+    }
+
     /// Adding a peer-group definition on reload must surface as a
     /// `SetPeerGroup` command. Catches the silent-ignore failure mode
     /// where peer-group edits would only be detected, not applied.
@@ -2503,6 +2580,9 @@ peer_group = "secure"
                             }],
                         };
                         let _ = reply.send(result);
+                    }
+                    PeerManagerCommand::SyncExplainConfig { reply, .. } => {
+                        let _ = reply.send(());
                     }
                     _ => {}
                 }

@@ -576,6 +576,15 @@ impl PeerManager {
                             let result = self.reconcile_peers(added, removed, changed).await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::SyncExplainConfig { enabled, cache_size, reply } => {
+                            // ADR-0073: make the explain snapshot fresh before
+                            // any subsequent reconcile/peer-group command on
+                            // this FIFO channel constructs a session via
+                            // build_transport_config.
+                            self.current_config.policy.explain.enabled = enabled;
+                            self.current_config.policy.explain.cache_size = cache_size;
+                            let _ = reply.send(());
+                        }
                         PeerManagerCommand::ListPolicies { reply } => {
                             let _ = reply.send(named_policies_from_config(&self.current_config));
                         }

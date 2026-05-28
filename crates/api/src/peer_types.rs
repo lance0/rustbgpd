@@ -362,6 +362,24 @@ pub enum PeerManagerCommand {
         /// Reply channel with reconciliation results.
         reply: oneshot::Sender<ReconcileResult>,
     },
+    /// ADR-0073: refresh the peer manager's `[policy.explain]` snapshot
+    /// (`enabled` / `cache_size`) ahead of any reload step that
+    /// constructs sessions. `build_transport_config` reads these from
+    /// the peer manager's `current_config`, which is otherwise replaced
+    /// only *after* reconcile — so a peer re-added mid-reload would read
+    /// stale explain settings. reload sends this first on the FIFO
+    /// command channel (awaited) when explain changed, so both the
+    /// neighbor-reconcile and peer-group re-add paths see the new
+    /// values. Carries primitives (not the config type) to respect the
+    /// api → binary crate-dependency direction.
+    SyncExplainConfig {
+        /// New `[policy.explain].enabled`.
+        enabled: bool,
+        /// New `[policy.explain].cache_size`.
+        cache_size: usize,
+        /// Reply channel acknowledging the snapshot update.
+        reply: oneshot::Sender<()>,
+    },
     /// List all named policy definitions.
     ListPolicies {
         /// Reply channel returning all named policies.
