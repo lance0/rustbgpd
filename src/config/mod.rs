@@ -1,5 +1,6 @@
 pub mod diagnostic;
 mod parse;
+pub mod profiles;
 mod schema;
 mod validation;
 

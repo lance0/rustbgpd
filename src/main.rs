@@ -741,11 +741,14 @@ fn main() {
              Arguments:\n  \
                CONFIG_PATH  Path to TOML config file [default: /etc/rustbgpd/config.toml]\n\n\
              Options:\n  \
-               --check      Validate config and exit without starting the daemon\n  \
-               --diff PATH  Compare config against PATH and show what SIGHUP would change\n  \
-               --json       Output diff as JSON (only with --diff)\n  \
-               --version    Print version and exit\n  \
-               --help       Print this help message",
+               --check               Validate config and exit without starting the daemon\n  \
+               --diff PATH           Compare config against PATH and show what SIGHUP would change\n  \
+               --json                Output diff as JSON (only with --diff)\n  \
+               --init-config PROFILE Print a starter config to stdout and exit (needs --stdout).\n                        \
+                                     Profiles: lab, edge\n  \
+               --stdout              Write --init-config output to stdout (the only target for now)\n  \
+               --version             Print version and exit\n  \
+               --help                Print this help message",
             env!("CARGO_PKG_VERSION")
         );
         return;
@@ -755,23 +758,35 @@ fn main() {
     let mut check_only = false;
     let mut diff_path: Option<String> = None;
     let mut json_output = false;
+    let mut init_profile: Option<String> = None;
+    let mut to_stdout = false;
     let mut config_path = "/etc/rustbgpd/config.toml".to_string();
     let mut expect_diff_path = false;
+    let mut expect_init_profile = false;
     for arg in &args[1..] {
         if expect_diff_path {
             diff_path = Some(arg.clone());
             expect_diff_path = false;
+        } else if expect_init_profile {
+            init_profile = Some(arg.clone());
+            expect_init_profile = false;
         } else if arg == "--check" {
             check_only = true;
         } else if arg == "--diff" {
             expect_diff_path = true;
         } else if arg == "--json" {
             json_output = true;
+        } else if arg == "--init-config" {
+            expect_init_profile = true;
+        } else if arg == "--stdout" {
+            to_stdout = true;
         } else if !arg.starts_with('-') {
             config_path.clone_from(arg);
         } else {
             eprintln!("error: unknown option: {arg}");
-            eprintln!("usage: rustbgpd [--check] [--diff PATH] [--json] [--version] [CONFIG_PATH]");
+            eprintln!(
+                "usage: rustbgpd [--check] [--diff PATH] [--json] [--init-config PROFILE --stdout] [--version] [CONFIG_PATH]"
+            );
             process::exit(1);
         }
     }
@@ -779,9 +794,48 @@ fn main() {
         eprintln!("error: --diff requires a path argument");
         process::exit(2);
     }
+    if expect_init_profile {
+        eprintln!(
+            "error: --init-config requires a profile name (one of: {})",
+            crate::config::profiles::PROFILE_NAMES.join(", ")
+        );
+        process::exit(2);
+    }
     if json_output && diff_path.is_none() {
         eprintln!("error: --json can only be used with --diff");
         process::exit(2);
+    }
+
+    // `--init-config PROFILE --stdout` prints a curated starter config and
+    // exits — handled before loading any runtime config, since config
+    // generation must work before a config file (or daemon) exists.
+    if let Some(profile) = init_profile {
+        if !to_stdout {
+            eprintln!(
+                "error: --init-config currently requires --stdout (file output is not yet supported)"
+            );
+            process::exit(2);
+        }
+        let Some(toml) = crate::config::profiles::profile_toml(&profile) else {
+            eprintln!(
+                "error: unknown profile {profile:?}; available: {}",
+                crate::config::profiles::PROFILE_NAMES.join(", ")
+            );
+            process::exit(2);
+        };
+        // Self-check: the built-in template must validate. A failure here
+        // is a bug in the profile, not operator error — fail loud so it's
+        // never emitted as broken bootstrap.
+        if let Err(diagnostic) =
+            Config::load_toml_with_diagnostics(toml, &format!("--init-config {profile}"))
+        {
+            eprintln!(
+                "internal error: built-in profile {profile:?} failed validation:\n{diagnostic}"
+            );
+            process::exit(70);
+        }
+        print!("{toml}");
+        return;
     }
 
     let config = match Config::load_with_diagnostics(&config_path) {
