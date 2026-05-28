@@ -514,6 +514,19 @@ pub(crate) async fn reload_config(
     // step short of true rollback.
     let mut working_config = current.clone();
 
+    // ADR-0073: `working_config` starts from `current` and only absorbs
+    // the reconciled (hot-applied) ConfigEvents, none of which touch
+    // `[policy.explain]`. So on a mixed reload — explain changed
+    // alongside neighbor/policy/peer-group edits — the returned snapshot
+    // would otherwise keep the *old* explain settings, contradicting the
+    // restart-required-per-peer warning (new sessions read the snapshot
+    // and must see the new values). Copy the new explain block in
+    // explicitly. Safe: no ConfigEvent mutates `policy.explain`, and the
+    // explain-only reload already returns `new_config` directly above.
+    if explain_changed {
+        working_config.policy.explain = new_config.policy.explain.clone();
+    }
+
     // 1. Neighbor sets (no upstream dependencies) — add and change.
     for name in policy_diff
         .neighbor_sets_added
@@ -2327,6 +2340,51 @@ peer_group = "secure"
         assert!(
             tags.contains(&"SetPolicy(block-private)".to_string()),
             "expected SetPolicy(block-private) — saw {tags:?}"
+        );
+    }
+
+    /// ADR-0073: an explain-only reload must adopt the new
+    /// `[policy.explain]` into the returned snapshot (so sessions
+    /// established after the reload honour it) even though it takes the
+    /// "no neighbor/policy/peer-group changes" early-return path.
+    #[tokio::test]
+    async fn reload_explain_only_adopts_new_snapshot() {
+        let new_toml = format!(
+            "{}\n[policy.explain]\nenabled = false\ncache_size = 512\n",
+            baseline_toml()
+        );
+        let (returned, _tags) = drive_reload(baseline_toml(), &new_toml).await;
+        let reloaded = returned.expect("reload must succeed");
+        assert!(!reloaded.policy.explain.enabled);
+        assert_eq!(reloaded.policy.explain.cache_size, 512);
+    }
+
+    /// ADR-0073 (mixed reload): when `[policy.explain]` changes alongside
+    /// a hot-applied edit, the returned snapshot must still carry the new
+    /// explain block. The reconcile path builds `working_config` from
+    /// `current`, so without the explicit copy the new explain would be
+    /// lost despite the warning promising new sessions honour it.
+    #[tokio::test]
+    async fn reload_mixed_change_preserves_new_explain() {
+        let new_toml = format!(
+            "{}\n[policy.definitions.block-private]\ndefault_action = \"deny\"\n\n[policy.explain]\nenabled = false\ncache_size = 333\n",
+            baseline_toml()
+        );
+        let (returned, tags) = drive_reload(baseline_toml(), &new_toml).await;
+        let reloaded = returned.expect("reload must succeed");
+        // The hot-applied policy addition still reconciled...
+        assert!(
+            tags.contains(&"SetPolicy(block-private)".to_string()),
+            "expected SetPolicy(block-private) — saw {tags:?}"
+        );
+        // ...and the restart-required explain block is in the snapshot.
+        assert!(
+            !reloaded.policy.explain.enabled,
+            "mixed reload must adopt the new explain.enabled"
+        );
+        assert_eq!(
+            reloaded.policy.explain.cache_size, 333,
+            "mixed reload must adopt the new explain.cache_size"
         );
     }
 

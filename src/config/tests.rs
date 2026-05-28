@@ -3397,6 +3397,56 @@ fn diff_config_flags_tcp_ao_changes_as_restart_required() {
 }
 
 #[test]
+fn resolve_neighbor_threads_policy_explain_settings() {
+    // ADR-0073: the resolved-neighbor transport path (used by
+    // snapshot-sync gRPC peer adds via PeerManager) must thread the
+    // [policy.explain] knobs, not leave them at TransportConfig::new
+    // defaults.
+    let mut config = parse(valid_toml()).unwrap();
+    config.policy.explain.enabled = false;
+    config.policy.explain.cache_size = 256;
+    let resolved = config.resolve_neighbor(&config.neighbors[0]).unwrap();
+    assert!(
+        !resolved.transport_config.explain_enabled,
+        "enabled must propagate through resolve_neighbor"
+    );
+    assert_eq!(resolved.transport_config.explain_cache_size, 256);
+}
+
+#[test]
+fn diff_config_flags_policy_explain_as_restart_required() {
+    // ADR-0073: a [policy.explain] edit is restart-required-per-peer and
+    // must be visible in `--diff` (JSON + text), not silently dropped.
+    let old = parse(valid_toml()).unwrap();
+    let mut new = old.clone();
+    new.policy.explain.enabled = false;
+    new.policy.explain.cache_size = 512;
+
+    let diff = super::diff_config(&old, &new);
+    assert!(diff.policy_explain_changed);
+    assert!(diff.has_restart_required_changes());
+    assert!(
+        !diff.has_reload_applied_changes(),
+        "an explain-only edit does not hot-apply"
+    );
+
+    let json = super::config_diff_json_value(&diff);
+    assert_eq!(json["restart_required"]["policy_explain_changed"], true);
+
+    let text = super::format_config_diff_with_style(&diff, &super::ConfigDiffTextStyle::default());
+    assert!(text.contains("[policy.explain]"), "{text}");
+}
+
+#[test]
+fn diff_config_no_policy_explain_change_is_clean() {
+    let old = parse(valid_toml()).unwrap();
+    let new = old.clone();
+    let diff = super::diff_config(&old, &new);
+    assert!(!diff.policy_explain_changed);
+    assert!(!diff.has_actionable_changes());
+}
+
+#[test]
 fn diff_config_pins_entire_neighbor_when_tcp_ao_changes() {
     let mut old = parse(valid_toml()).unwrap();
     old.neighbors[0].hold_time = Some(90);
