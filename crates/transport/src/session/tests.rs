@@ -2589,6 +2589,131 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
     }
 }
 
+/// ADR-0073 contract: the per-session import-decision cache must be
+/// flushed on `Action::SessionDown`. A reconnecting `PeerSession` is not
+/// reconstructed, so without the flush an explain query on the new
+/// session could return a decision recorded on the *previous* session
+/// for any prefix the peer has not yet re-advertised. Mirrors the
+/// per-session permit/deny counter reset in the same handler.
+#[expect(clippy::too_many_lines)]
+#[tokio::test]
+async fn session_down_flushes_import_decision_cache() {
+    use super::import_decision_cache::{ImportDecisionKey, LookupResult};
+
+    let peer_config = PeerConfig {
+        local_asn: 65001,
+        remote_asn: 65002,
+        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        hold_time: 90,
+        connect_retry_secs: 30,
+        families: vec![(Afi::Ipv4, Safi::Unicast)],
+        graceful_restart: false,
+        gr_restart_time: 120,
+        llgr_stale_time: 0,
+        add_path_receive: false,
+        add_path_send: false,
+        add_path_send_max: 0,
+        local_role: None,
+        strict_role: false,
+    };
+    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let metrics = BgpMetrics::new();
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let chain = PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: Some(Prefix::V4(prefix)),
+            ge: None,
+            le: None,
+            action: PolicyAction::Permit,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: RouteModifications::default(),
+        }],
+        default_action: PolicyAction::Permit,
+    }]);
+
+    let mut session = PeerSession::new(
+        config,
+        metrics,
+        cmd_rx,
+        rib_tx,
+        Some(chain),
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.peer_enhanced_route_refresh = true;
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry { path_id: 0, prefix }],
+        &[],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+
+    let generation = session.import_policy_generation;
+    let key = ImportDecisionKey {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        prefix: Prefix::V4(prefix),
+        path_id: 0,
+    };
+
+    // Precondition: the decision is cached and explainable on this session.
+    assert!(
+        matches!(
+            session.import_decision_cache.lookup(&key, generation),
+            LookupResult::Hit(_)
+        ),
+        "expected the permitted prefix to be cached before SessionDown",
+    );
+
+    // Flap: SessionDown must flush the per-session cache.
+    session.execute_actions(vec![Action::SessionDown]).await;
+
+    // Postcondition: the prior session's decision is gone — explain
+    // reports NotSeen rather than a stale Hit from the dead session.
+    assert!(
+        matches!(
+            session.import_decision_cache.lookup(&key, generation),
+            LookupResult::NotSeen
+        ),
+        "import-decision cache must be flushed on SessionDown (ADR-0073)",
+    );
+}
+
 /// ADR-0073 pin 3: an `ExplainImportPolicy` command is a read — it must
 /// not move the import-policy permit/deny counters.
 #[tokio::test]
