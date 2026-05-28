@@ -1,7 +1,8 @@
 # rustbgpd-fsm
 
 Pure RFC 4271 BGP finite state machine. No I/O, no async runtime, no
-sockets — just `(State, Event) -> (State, Vec<Action>)`.
+sockets — just `handle_event(&mut self, Event) -> Vec<Action>` over an
+in-place `SessionState`.
 
 Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
@@ -19,8 +20,8 @@ handled during OPEN exchange.
 
 ## Key types
 
-- **`Session`** — the state machine: `handle_event(Event) -> (State, Vec<Action>)`
-- **`State`** — `Idle`, `Connect`, `Active`, `OpenSent`, `OpenConfirm`, `Established`
+- **`Session`** — the state machine: `handle_event(&mut self, Event) -> Vec<Action>` (state is mutated in place on `&mut self`)
+- **`SessionState`** — `Idle`, `Connect`, `Active`, `OpenSent`, `OpenConfirm`, `Established`
 - **`Event`** — `ManualStart`, `TcpConnectionConfirmed`, `BgpOpen`, `KeepAliveTimerExpires`, etc.
 - **`Action`** — `SendOpen`, `SendKeepalive`, `SendNotification`, `StartTimer`, `StopTimer`, etc.
 - **`NegotiatedSession`** — post-OPEN capabilities: families, Add-Path modes, GR state, extended message support

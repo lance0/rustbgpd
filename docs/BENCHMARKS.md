@@ -91,16 +91,18 @@ dispatch refuses to start while a soak is active and a soak refuses to
 start while a bench is mid-attempt; either workload fails fast with a
 clear error rather than producing useless numbers next to a busy host.
 Local dev boxes without that XDG state directory skip the locking
-entirely so this doesn't change anything for laptop /
-Threadripper-style hosts. The sudo / `$HOME` trap (running soak as
+entirely so this doesn't change anything for laptops / dev boxes that
+aren't shared with a bench runner. The sudo / `$HOME` trap (running soak as
 root moves the lock to `/root/...` and bypasses the guard) is covered
 in `tests/soak/README.md` under "Host mutex".
 
 ## Running
 
 ```bash
-# All benchmarks
-cargo bench --bench codec --bench rib_ops --bench policy_eval
+# All benchmarks (every package's benches; the targets live in different
+# crates, so a bare --bench cannot resolve them — run them per-package below
+# or use no args to sweep the whole workspace)
+cargo bench
 
 # Wire codec only
 cargo bench -p rustbgpd-wire --bench codec
@@ -187,8 +189,7 @@ ONE benchmark row (attempts = N, N ≥ 3 recommended)
 │ no
 │ min..max straddles 0 ? ──────────────► NOISE: not actionable (sign unreliable)
 │ no  (entirely one side of 0)
-│ stddev ≥ ~ same-SHA noise floor
-│         (~10–11%) ? ─────────────────► INCONCLUSIVE: re-dispatch, more attempts
+│ stddev ≥ ~10% (≈ same-SHA noise floor) ? ─► INCONCLUSIVE: re-dispatch, more attempts
 │ no  (single-digit stddev)
 ▼ CONFIRMED SIGNAL
 │
@@ -711,7 +712,7 @@ a Docker-based BGP benchmarking harness. bgperf2 lives outside the rustbgpd repo
 ### Prerequisites
 
 - Docker running
-- bgperf2 checked out (e.g. `/home/lance/projects/bgperf2`)
+- bgperf2 checked out (e.g. `~/projects/bgperf2`)
 - Python virtualenv with bgperf2 dependencies
 
 ### Build the Docker image

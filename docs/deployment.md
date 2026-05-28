@@ -333,10 +333,11 @@ according to your needs.
 
 ## Config validation workflow
 
-Three subcommands cover the lifecycle:
+Four flags cover the config lifecycle, from bootstrap to reload:
 
 | Command | What it does |
 |---|---|
+| `rustbgpd --init-config <lab\|edge> --stdout` | Print a curated, commented starter TOML to stdout and exit (file output is not yet supported). `lab` is a minimal single-box profile (gRPC over a local UDS, no auth); `edge` is an eBGP edge skeleton with a default-route-dropping import chain. Cannot be combined with `--check` / `--diff`. |
 | `rustbgpd --check <file>` | Parse + validate; print `config OK` or rustc-style diagnostic. Does not start the daemon. |
 | `rustbgpd --diff <file>` | Compute the diff against the running daemon's view; print per-section change list with expected reload class. |
 | `systemctl reload rustbgpd` (or `kill -HUP $(pidof rustbgpd)`) | Apply the diff. Live fields hot-apply; restart-required fields are pinned and logged at `ERROR` (the live values are kept). |
@@ -531,14 +532,16 @@ the AS, addresses, and TLS material before deploying.
 See [`SECURITY.md`](SECURITY.md) for the full posture document. The
 short version for first deployment:
 
-- **Bind addresses.** `prometheus_addr`, `grpc_tcp.addr`, `grpc_uds.socket_path`
+- **Bind addresses.** `prometheus_addr`, `grpc_tcp.addr`, `grpc_uds.path`
   default to listening on what the config says. Don't expose the
   Prometheus or gRPC endpoint to untrusted networks without
   authentication.
-- **gRPC.** Use mTLS in production. Configure
-  `[security.grpc.read_authz]`, `…sensitive_read_authz`,
-  `…mutating_authz`, `…operator_only_authz` per
-  [`SECURITY.md`](SECURITY.md). UDS with restrictive `socket_mode`
+- **gRPC.** Use mTLS in production. Set `[security.grpc] enforcement = "tier"`
+  and map principals to roles under `[security.grpc.roles]`
+  (`observer` / `automation` / `operator`) per
+  [`SECURITY.md`](SECURITY.md); the per-method tier matrix itself is
+  compiled into the daemon (`crates/api/src/authz.rs`), not configured
+  per-tier in TOML. UDS with a restrictive `mode`
   is fine for single-host operator access.
 - **BGP authentication.** TCP-MD5 (RFC 2385) and TCP-AO (RFC 5925) are
   both supported. TCP-AO is preferred; see ADR-0062.

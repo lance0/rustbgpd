@@ -8,13 +8,13 @@
 `rustbgpctl` already explains *export* decisions cleanly: RIB owns
 both the candidate route and the export-policy chain
 (`crates/rib/src/manager/distribution.rs:75`), and the RPC surface
-hangs off the route-explain group at `proto/rustbgpd.proto:608`.
+hangs off the route-explain group at `proto/rustbgpd.proto:745`.
 
 There is no equivalent for **import**. The operator question
 "why didn't this route come in?" cannot be answered today, because:
 
 - Import policy is evaluated in the transport layer at
-  `crates/transport/src/session/inbound.rs:698`. A denied route
+  `crates/transport/src/session/inbound.rs:711`. A denied route
   drops at that point and never reaches RIB. Existing tests pin
   this behaviour.
 - Adj-RIB-In holds only **accepted, post-policy** routes; a
@@ -86,7 +86,7 @@ flag on this one.
   full-payload dead entries crowding out live decisions.
 - **Write triggers:** every return from
   `evaluate_chain_with_attribution` at
-  `crates/transport/src/session/inbound.rs:698`, **gated on
+  `crates/transport/src/session/inbound.rs:711`, **gated on
   `[policy.explain].enabled`** (see below). Insert or replace under
   the key. When explain is disabled the gate is checked *before* the
   decision snapshot is built, so a disabled deployment pays one
@@ -295,10 +295,10 @@ built in stages but is not split across PRs:
 
 ## Anchors
 
-- Eval call site: `crates/transport/src/session/inbound.rs:698`
+- Eval call site: `crates/transport/src/session/inbound.rs:711`
 - `PolicyEvaluation`: `crates/policy/src/engine.rs:797`
 - Export-explain reference: `crates/rib/src/manager/distribution.rs:75`,
-  RPC at `proto/rustbgpd.proto:608`
+  RPC at `proto/rustbgpd.proto:745`
 - Existing import counters: `record_import_policy_eval` at
-  `crates/transport/src/session/inbound.rs:15`
+  `crates/transport/src/session/inbound.rs:17`
 - Authz tier reference: `crates/api/src/authz.rs`

@@ -148,7 +148,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `GlobalService` | `GetGlobal` | `SetGlobal` |
 | `ConfigService` | `DiffRuntimeConfig` | None |
 | `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
-| `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
+| `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
 | `RibService` | All RPCs | None |
 | `EventService` | All RPCs | None |
@@ -382,6 +382,7 @@ changes do not retroactively re-evaluate existing Adj-RIB-In state; use
 | `GetNeighborPolicyChains` | Return one neighbor's import/export chain assignments |
 | `SetNeighborImportChain` / `SetNeighborExportChain` | Replace one neighbor's chain assignment |
 | `ClearNeighborImportChain` / `ClearNeighborExportChain` | Remove one neighbor's chain assignment |
+| `ExplainImportPolicy` | Explain why a prefix was permitted / denied / withdrawn / evicted / stale / not-seen on import for a given neighbor, reading the per-session import-decision cache (ADR-0073). Side-effect-free; IPv4/IPv6 unicast only. `SensitiveRead` tier. |
 
 Policy statements support the same match surface as TOML config:
 `prefix`, `ge`, `le`, `match_community`, `match_as_path`,
@@ -389,6 +390,31 @@ Policy statements support the same match surface as TOML config:
 `match_local_pref_ge/le`, `match_med_ge/le`, `match_next_hop`,
 `match_rpki_validation`, `match_aspa_validation`, and
 `match_evpn_route_type`.
+
+### Explain an import decision
+
+Answer "why didn't this prefix come in?" (or "what did the chain do to it?")
+from the per-session import-decision cache (ADR-0073). Side-effect-free —
+no RIB touch, no counter movement. Omit `path_id` to return every matching
+path. Requires `[policy.explain].enabled` on the daemon (otherwise the
+outcome is `NOT_SEEN`).
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{
+    "peer_address": "10.0.0.2",
+    "afi_safi": "IPV4_UNICAST",
+    "prefix": "192.0.2.0",
+    "prefix_length": 24
+  }' \
+  localhost:50051 rustbgpd.v1.PolicyService/ExplainImportPolicy
+```
+
+Each `matches` entry carries an outcome — `PERMIT` / `DENY` / `WITHDRAWN` /
+`EVICTED` / `STALE` / `NOT_SEEN` — and, when a chain matched, the matched
+policy plus the modifications it applied. Compare a match's
+`policy_generation` to the response's `current_policy_generation` to spot a
+`STALE` decision recorded before a policy reload.
 
 ### Create or replace a named policy
 
@@ -597,8 +623,9 @@ they would carry on the wire; everything else stays at `advertised_path_id =
 0`. The response echoes `peer_address` and the effective `add_path_send_max`
 so the operator can read advertisement intent without cross-referencing the
 peer config. Empty `peer_address` returns the v0.7.0 global Loc-RIB view
-unchanged. Unknown `peer_address` → `NOT_FOUND`. Import explain and exact
-policy/statement attribution are deferred.
+unchanged. Unknown `peer_address` → `NOT_FOUND`. Import explain is available via
+`PolicyService.ExplainImportPolicy` (ADR-0073); exact per-statement
+attribution within a matched policy remains deferred.
 
 ### Address family filtering
 

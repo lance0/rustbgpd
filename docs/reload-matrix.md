@@ -147,8 +147,8 @@ rebind on reload.
 |---|---|---|
 | `addr` | restart-required | Listener address. |
 | `tls.*` (mTLS material) | restart-required | All TLS/mTLS fields pinned. |
-| `socket_path` (`grpc_uds`) | restart-required | UDS path bound at startup. |
-| `socket_mode` (`grpc_uds`) | restart-required | Permissions set at bind time. |
+| `path` (`grpc_uds`) | restart-required | UDS path bound at startup. |
+| `mode` (`grpc_uds`) | restart-required | Permissions set at bind time. |
 
 ## `[policy]`
 
@@ -205,10 +205,8 @@ scope for SIGHUP reload today.
 
 | Field | Class | Notes |
 |---|---|---|
-| `[security.grpc.read_authz]` | restart-required | Read-tier authz matrix consumed by the gRPC interceptor at server bind time. |
-| `[security.grpc.sensitive_read_authz]` | restart-required | |
-| `[security.grpc.mutating_authz]` | restart-required | |
-| `[security.grpc.operator_only_authz]` | restart-required | |
+| `[security.grpc] enforcement` | restart-required | `tier` vs `legacy` mode, consumed by the gRPC interceptor at server bind time. |
+| `[security.grpc.roles]` | restart-required | Principal → role (`observer` / `automation` / `operator`) map read at bind. The per-method tier matrix is compiled into `crates/api/src/authz.rs` and is not runtime-configurable. |
 
 ## `[event_history]` (ADR-0072)
 

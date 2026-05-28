@@ -31,13 +31,13 @@
 #   When the soak runs under sudo, $HOME flips to /root (or whatever
 #   sudo configures), so the default lock path moves to
 #   /root/.local/state/rustbgpd-host.lock — a DIFFERENT file from the
-#   bench runner's lock under /home/lance/.local/state. The two
+#   bench runner's lock under $HOME/.local/state. The two
 #   workloads would not see each other. The convention on the
 #   shared host is: run containerlab deploy/destroy with sudo where
 #   required, but invoke the soak harness as the normal user.
 #   If sudo is unavoidable, export RUSTBGPD_HOST_LOCK explicitly:
 #
-#       sudo RUSTBGPD_HOST_LOCK=/home/lance/.local/state/rustbgpd-host.lock \
+#       sudo RUSTBGPD_HOST_LOCK=/home/<bench-user>/.local/state/rustbgpd-host.lock \
 #           bash tests/soak/run-<gate>-soak.sh
 #
 #   See tests/soak/README.md ("Host mutex") for the full rationale.

@@ -61,7 +61,7 @@ Decode a single BGP message from raw bytes:
 
 ```rust
 use bytes::Bytes;
-use rustbgpd_wire::{decode_message, encode_message, Message, MAX_MESSAGE_LEN};
+use rustbgpd_wire::{decode_message, Message, MAX_MESSAGE_LEN};
 
 # fn handle(raw_bytes: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
 let mut buf = Bytes::from(raw_bytes);
@@ -106,7 +106,8 @@ let open = OpenMessage {
         Capability::RouteRefresh,
     ],
 };
-let bytes = encode_message(&Message::Open(open));
+// encode_message returns Result<BytesMut, EncodeError>
+let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
 ```
 
 ## Key types
@@ -134,11 +135,14 @@ let bytes = encode_message(&Message::Open(open));
 
 ## Fuzz tested
 
-Three fuzz targets exercise the decode paths continuously in CI:
+Six fuzz targets exercise the codec continuously in CI:
 
 - `decode_message` — full BGP message framing
 - `decode_update` — UPDATE parsing with Add-Path and MP-BGP variants
 - `decode_flowspec` — FlowSpec NLRI component decoding
+- `decode_evpn` — EVPN NLRI (Types 1–5) decoding
+- `encode_evpn` — EVPN NLRI encode round-trip
+- `parse_rd` — `RouteDistinguisher` `FromStr` parsing
 
 ## License
 

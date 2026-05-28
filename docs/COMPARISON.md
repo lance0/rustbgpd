@@ -2,7 +2,7 @@
 
 A feature comparison of open-source BGP daemon implementations.
 
-Last updated: 2026-05-26. See [CHANGELOG.md](../CHANGELOG.md) for
+Last updated: 2026-05-28. See [CHANGELOG.md](../CHANGELOG.md) for
 per-release feature deltas and [evpn-enablement.md](evpn-enablement.md)
 for the EVPN gate ladder.
 
@@ -89,6 +89,7 @@ for the EVPN gate ladder.
 | Neighbor/peer matching | Yes | Yes | Yes | Yes | Yes |
 | Named policy definitions | Yes | Yes | Yes | Yes | Yes |
 | Policy chaining | Yes | Yes | Yes | Yes | Yes |
+| Import-policy explain (per-prefix decision trace) | Yes | No | No | No | No |
 | Custom filter language | No | No | Yes | No | Yes |
 
 ## Security

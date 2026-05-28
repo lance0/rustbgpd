@@ -108,6 +108,20 @@ export RUSTBGPD_ADDR=unix:///tmp/rustbgpd/grpc.sock
 kill $DAEMON_PID
 ```
 
+### Config-init smoke
+
+```bash
+# Each built-in profile emits a starter config that loads cleanly.
+for p in lab edge; do
+  ./target/release/rustbgpd --init-config "$p" --stdout > "/tmp/init-$p.toml"
+  ./target/release/rustbgpd --check "/tmp/init-$p.toml"   # expect: config OK
+done
+
+# Guards must exit non-zero:
+./target/release/rustbgpd --stdout                              # --stdout without --init-config
+./target/release/rustbgpd --init-config lab --stdout --check x  # --init-config combined with --check/--diff
+```
+
 ### README quickstart smoke
 
 Walk the exact README quickstart from a clean tree and confirm:
