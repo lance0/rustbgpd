@@ -36,11 +36,26 @@ on:
 permissions:
   contents: read
 
+# Serialise dispatches on the single pinned runner. Queue newer
+# dispatches behind older ones rather than cancel-in-progress — we'd
+# rather lose dispatch latency than throw away a half-finished bench.
+concurrency:
+  group: criterion-bench-compare
+  cancel-in-progress: false
+
 jobs:
   compare:
-    # Deliberately manual-only until a replacement perf runner exists.
-    # GitHub-hosted runners are too noisy for these numbers and cannot
-    # provide the CPU pinning / governor posture this workflow assumes.
+    # Defensive: refuse to run on anything but the canonical repository.
+    # The `workflow_dispatch` trigger already requires write access (so
+    # fork PRs cannot trigger this), and self-hosted runners are scoped
+    # to a single repo by registration — but this guard is the
+    # belt-and-suspenders catch if either of those assumptions ever
+    # breaks (e.g. a fork accidentally inherits the runner registration
+    # via repo transfer, or a misconfigured org-level runner group).
+    if: github.repository == 'lance0/rustbgpd'
+    # Self-hosted, label-locked runner. GitHub-hosted runners are too
+    # noisy for these numbers and cannot provide the CPU pinning /
+    # governor posture this workflow assumes.
     runs-on: [self-hosted, rustbgpd-bench]
     timeout-minutes: 120
 
