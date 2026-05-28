@@ -10,7 +10,7 @@
 | Build under test | git rev `5619ace` = **v0.18.0 + soak harness PR #80** (no code under test beyond v0.18.0) |
 | Image | `sha256:30fd891d5603a36047b2640ed9ac99da5950c27436ceed04f06226551304d066` |
 | Topology | `tests/soak/gate9-slice6-soak.clab.yml` (rustbgpd PE1 ↔ FRR 10.3.1 PE2, vrf1/L3VNI 100, Interface-less symmetric IRB) |
-| Host kernel | Linux 5.15.0-177-generic (cloudbox `lancebox-cloud`) |
+| Host kernel | Linux 5.15.0-177-generic (cloud soak host) |
 | `SAMPLE_INTERVAL` | 60 s |
 | `CHURN_INTERVAL_SEC` (configured) | 30 s |
 | Churn cadence (observed) | ~61 s/transition / ~122 s/cycle — see "Anomaly: churn cadence" |
@@ -300,8 +300,8 @@ path as anything that touches `reconcile.rs`).
 Four load-bearing files mirrored into version control at
 [`docs/artifacts/soak/gate9-slice6-20260511T214936Z/`](artifacts/soak/gate9-slice6-20260511T214936Z/)
 — `samples.csv`, `churn.log`, `soak.log`, `run.json`. Originals
-live on cloudbox `lancebox-cloud` at
-`/home/lance/projects/rustbgpd/tests/soak/runs/gate9-slice6-20260511T214936Z/`
+live on the cloud soak host at
+`<repo>/tests/soak/runs/gate9-slice6-20260511T214936Z/`
 (gitignored per `tests/soak/README.md`'s "runs stay local to the
 host" rule).
 

@@ -884,7 +884,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   linker. The `kernel-dataplane.yml` workflow's `Build rustbgpd:dev` step
   moves from plain `docker build` to `docker/build-push-action@v7` with
   `type=gha` cache backend matching the existing `interop.yml` pattern.
-  Measured wall-clock on lancebox: warm-cache no-source-change baseline
+  Measured wall-clock on the dev box: warm-cache no-source-change baseline
   2m 15s → 0.7s (cache hit); source-only-change rebuild
   2m 15s → 17.8s; first cold build 1m 03s.
 
