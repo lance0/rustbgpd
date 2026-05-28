@@ -12,7 +12,7 @@ real iproute2 run, not invented from the UAPI spec alone.
 
 ## Environment
 
-- iproute2 version: 6.1.0 (lancebox, 2026-05-12)
+- iproute2 version: 6.1.0 (dev box, 2026-05-12)
 - libbpf: 1.3.0
 - Kernel: 6.17.0-20-generic
 - Capture command:
