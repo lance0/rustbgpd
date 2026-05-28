@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, PathAttribute, Prefix, Safi};
+use smallvec::SmallVec;
 
 use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
 
@@ -11,7 +12,7 @@ use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
 /// Routes are keyed by `(Prefix, path_id)` to support Add-Path (RFC 7911).
 /// Non-Add-Path peers always use `path_id = 0`.
 ///
-/// A secondary `prefix_index` maps each prefix to its set of path IDs,
+/// A secondary `prefix_index` maps each prefix to its path IDs,
 /// enabling O(candidates) `iter_prefix()` lookups instead of O(N) full scans.
 ///
 /// Path attribute interning: routes from the same peer that share identical
@@ -22,8 +23,11 @@ use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
 pub struct AdjRibIn {
     peer: IpAddr,
     routes: HashMap<(Prefix, u32), Route>,
-    /// Secondary index: prefix → set of path IDs stored for that prefix.
-    prefix_index: HashMap<Prefix, HashSet<u32>>,
+    /// Secondary index: prefix → path IDs stored for that prefix.
+    /// `SmallVec<[u32; 1]>` inlines the single-path case (`path_id=0`, no
+    /// Add-Path) without a per-prefix heap allocation; Add-Path multi-path
+    /// spills to the heap transparently. Mirrors `AdjRibOut::prefix_path_ids`.
+    prefix_index: HashMap<Prefix, SmallVec<[u32; 1]>>,
     /// Route keys where `LLGR_STALE` was injected locally by this daemon.
     llgr_stale_local_tags: HashSet<(Prefix, u32)>,
     /// `FlowSpec` routes keyed by `(rule, path_id)`.
@@ -82,10 +86,10 @@ impl AdjRibIn {
     /// instead of keeping a separate allocation.
     pub fn insert(&mut self, mut route: Route) {
         let key = (route.prefix, route.path_id);
-        self.prefix_index
-            .entry(route.prefix)
-            .or_default()
-            .insert(route.path_id);
+        let ids = self.prefix_index.entry(route.prefix).or_default();
+        if !ids.contains(&route.path_id) {
+            ids.push(route.path_id);
+        }
         self.llgr_stale_local_tags.remove(&key);
 
         // Intern: reuse an existing Arc if one matches
@@ -736,7 +740,7 @@ impl AdjRibIn {
     /// Remove a `path_id` from the prefix index, cleaning up empty entries.
     fn remove_from_prefix_index(&mut self, prefix: &Prefix, path_id: u32) {
         if let Some(ids) = self.prefix_index.get_mut(prefix) {
-            ids.remove(&path_id);
+            ids.retain(|id| *id != path_id);
             if ids.is_empty() {
                 self.prefix_index.remove(prefix);
             }
