@@ -204,6 +204,60 @@ fn bench_rib_pipeline(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_bulk_initial_load(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bulk_initial_load");
+    group.sample_size(10);
+
+    // Keep this CI-sized. The larger 500k cold-load shape is useful for
+    // manual perf work, but 100k is enough to expose scaling regressions
+    // without making routine benchmark comparisons drag.
+    for count in [10_000, 100_000] {
+        let prefixes = generate_prefixes(count);
+        let routes: Vec<Route> = prefixes.iter().map(|p| make_route(*p, 1)).collect();
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(count),
+            &(&prefixes, &routes),
+            |b, (prefixes, routes)| {
+                b.iter_batched(
+                    || {
+                        (
+                            AdjRibIn::with_capacity(
+                                IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+                                routes.len(),
+                                0,
+                            ),
+                            LocRib::with_capacity(routes.len()),
+                            AdjRibOut::with_capacity(
+                                IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
+                                routes.len(),
+                            ),
+                        )
+                    },
+                    |(mut rib, mut loc, mut out)| {
+                        for route in *routes {
+                            rib.insert(route.clone());
+                        }
+
+                        for prefix in *prefixes {
+                            if loc.recompute(*prefix, rib.iter_prefix(prefix))
+                                && let Some(best) = loc.get(prefix)
+                            {
+                                out.insert(best.clone());
+                            }
+                        }
+
+                        (rib, loc, out)
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn bench_route_churn(c: &mut Criterion) {
     let mut group = c.benchmark_group("route_churn");
     group.sample_size(10);
@@ -262,6 +316,7 @@ criterion_group!(
     bench_adj_rib_in_insert,
     bench_loc_rib_recompute,
     bench_rib_pipeline,
+    bench_bulk_initial_load,
     bench_route_churn,
 );
 criterion_main!(benches);

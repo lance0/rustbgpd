@@ -1,0 +1,99 @@
+name: Criterion Bench Compare
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: "Baseline git ref"
+        required: true
+        default: "origin/main"
+      head_ref:
+        description: "Head git ref"
+        required: true
+        default: "HEAD"
+      package:
+        description: "Cargo package"
+        required: true
+        default: "rustbgpd-rib"
+      bench:
+        description: "Criterion bench target"
+        required: true
+        default: "rib_ops"
+      filter:
+        description: "Optional Criterion benchmark filter"
+        required: false
+        default: ""
+      core:
+        description: "CPU core for taskset pinning"
+        required: true
+        default: "0"
+      require_performance:
+        description: "Fail if the selected CPU is not using the performance governor"
+        required: true
+        default: "true"
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    # Deliberately manual-only until a replacement perf runner exists.
+    # GitHub-hosted runners are too noisy for these numbers and cannot
+    # provide the CPU pinning / governor posture this workflow assumes.
+    runs-on: [self-hosted, rustbgpd-bench]
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench-${{ inputs.package }}-${{ inputs.bench }}
+
+      - name: Run Criterion comparison
+        run: |
+          set -euo pipefail
+          args=(
+            --base "${{ inputs.base_ref }}"
+            --head "${{ inputs.head_ref }}"
+            --package "${{ inputs.package }}"
+            --bench "${{ inputs.bench }}"
+            --core "${{ inputs.core }}"
+            --out-dir "target/bench-compare"
+          )
+          if [ -n "${{ inputs.filter }}" ]; then
+            args+=(--filter "${{ inputs.filter }}")
+          fi
+          if [ "${{ inputs.require_performance }}" = "true" ]; then
+            args+=(--require-performance)
+          fi
+          bench/compare-criterion.sh "${args[@]}"
+
+      - name: Publish summary
+        if: always()
+        run: |
+          set -euo pipefail
+          summary="$(
+            find target/bench-compare -name summary.md -print 2>/dev/null \
+              | sort \
+              | tail -n 1 \
+              || true
+          )"
+          if [ -n "$summary" ]; then
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No benchmark summary found." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload Criterion artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: criterion-bench-compare
+          path: target/bench-compare/
+          if-no-files-found: warn
