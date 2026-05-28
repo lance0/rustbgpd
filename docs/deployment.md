@@ -33,19 +33,29 @@ note.
 
 ### Pre-built binary tarball
 
-Tagged releases publish `rustbgpd-vX.Y.Z-linux-amd64` and
-`rustbgpd-vX.Y.Z-linux-arm64` tarballs under
+Tagged releases publish `rustbgpd-linux-amd64.tar.gz` and
+`rustbgpd-linux-arm64.tar.gz` under
 [GitHub Releases](https://github.com/lance0/rustbgpd/releases). Each
-ships `rustbgpd` (the daemon) and `rustbgpctl` (the CLI).
+ships `rustbgpd` (the daemon) and `rustbgpctl` (the CLI). The
+filename is the same on every release; `releases/latest/download/`
+always resolves to the current tag, so this snippet never needs a
+version bump.
 
 ```sh
-# Pick the right arch
-TARBALL=rustbgpd-v0.29.0-linux-amd64.tar.gz
+# Pick the right arch.
+SUFFIX=linux-amd64    # or linux-arm64
+TARBALL=rustbgpd-${SUFFIX}.tar.gz
+
 curl -fL -o "$TARBALL" \
-  "https://github.com/lance0/rustbgpd/releases/download/v0.29.0/$TARBALL"
+  "https://github.com/lance0/rustbgpd/releases/latest/download/${TARBALL}"
 tar -xzf "$TARBALL"
 sudo install -m 0755 rustbgpd rustbgpctl /usr/local/bin/
 ```
+
+To pin to a specific tag for reproducibility, swap `latest` for the
+version, e.g. `releases/download/v0.30.0/${TARBALL}`. SHA-256
+checksums are published alongside each tarball as
+`checksums-${SUFFIX}.txt`.
 
 Verify:
 
@@ -68,15 +78,25 @@ sudo install -m 0755 \
 
 ### Container image
 
-A container image is built on every tagged release. If a published
-image is available, pull by tag:
+A container image is built on every tagged release and published to
+GHCR. Three tag flavors are available per the
+`docker/metadata-action` rules in
+[`.github/workflows/container.yml`](../.github/workflows/container.yml):
+
+| Tag | Resolves to | Updates on |
+|-----|-------------|------------|
+| `:0.30.0` | exact version | nothing (immutable) |
+| `:0.30` | latest patch in the 0.30 minor | each 0.30.x release |
+| `:latest` | latest non-prerelease release | each minor or patch release |
+
+Major-minor is the usual operator default — auto-receives bug-fix
+releases but pins against minor-version churn:
 
 ```sh
-docker pull ghcr.io/lance0/rustbgpd:v0.29.0
+docker pull ghcr.io/lance0/rustbgpd:0.30
 ```
 
-If you'd rather build locally (the publishing story is not fully
-settled — verify the tag exists before relying on it in automation):
+If you'd rather build locally:
 
 ```sh
 docker build -t rustbgpd:dev .
@@ -179,7 +199,7 @@ For your own deployment:
     -p 9179:9179 \
     --cap-add=NET_BIND_SERVICE \
     --cap-add=NET_RAW \
-    ghcr.io/lance0/rustbgpd:v0.29.0
+    ghcr.io/lance0/rustbgpd:0.30
   ```
 
 - **Logs**: structured JSON when `[global.telemetry] log_format =

@@ -45,12 +45,21 @@ jobs:
 
       - name: Package binaries
         run: |
-          VERSION=${GITHUB_REF_NAME}
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/rustbgpd dist/rustbgpd-${VERSION}-${{ matrix.suffix }}
-          cp target/${{ matrix.target }}/release/rustbgpctl dist/rustbgpctl-${VERSION}-${{ matrix.suffix }}
+          # Pack both binaries into a single per-arch tarball with a
+          # version-less filename. This is what powers the static
+          # `https://github.com/lance0/rustbgpd/releases/latest/download/rustbgpd-<arch>.tar.gz`
+          # URL pattern in docs/deployment.md — operators never have to
+          # bump a version pin to get the current release. Pinned
+          # downloads still work via the per-tag
+          # `releases/download/vX.Y.Z/` path; the asset filename is the
+          # same on every release.
+          SUFFIX=${{ matrix.suffix }}
+          mkdir -p dist staging
+          cp target/${{ matrix.target }}/release/rustbgpd staging/
+          cp target/${{ matrix.target }}/release/rustbgpctl staging/
+          tar -C staging -czf dist/rustbgpd-${SUFFIX}.tar.gz rustbgpd rustbgpctl
           cd dist
-          sha256sum rustbgpd-${VERSION}-${{ matrix.suffix }} rustbgpctl-${VERSION}-${{ matrix.suffix }} > checksums-${{ matrix.suffix }}.txt
+          sha256sum rustbgpd-${SUFFIX}.tar.gz > checksums-${SUFFIX}.txt
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
