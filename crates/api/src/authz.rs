@@ -782,6 +782,16 @@ mod tests {
             method_authz("/rustbgpd.v1.EvpnService/ClearDuplicateMacQuarantine").map(|m| m.tier),
             Some(AuthTier::Mutating)
         );
+        // DELIBERATE PIN (ADR-0073 audit, WS2): ApplyEvpnRuntime is the
+        // only `Mutating` method that programs the kernel dataplane. It
+        // stays `Mutating` on purpose — ADR-0063 v1 is a single
+        // validated, additive L2VNI/IP-VRF apply (the EVPN sibling of
+        // AddNeighbor), and moving it to `operator_only` would force
+        // EVPN automation to over-grant Operator credentials. Do not
+        // flip this to "fix" it; if its scope widens past single-add
+        // (issue #210), change the tier via a deliberate ADR update —
+        // not by editing this assertion. See the dataplane-programming
+        // RPC guardrail in docs/RELEASE_CHECKLIST.md.
         assert_eq!(
             method_authz("/rustbgpd.v1.EvpnService/ApplyEvpnRuntime").map(|m| m.tier),
             Some(AuthTier::Mutating)

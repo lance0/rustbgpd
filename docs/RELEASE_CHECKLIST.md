@@ -59,14 +59,21 @@ release:
 - [ ] **Anything that injects into the dataplane/network, mutates
       process-wide or daemon-wide state, or is otherwise high-blast is
       `operator_only`** — route/FlowSpec/EVPN injection, `SetGlobal*`,
-      global policy chains, `Shutdown`, `SetGracefulShutdown`. A new
-      mutating RPC that programs the kernel dataplane is the boundary
-      case to re-confirm: today `EvpnService/ApplyEvpnRuntime` is
-      `Mutating` (deliberately — v1 is a single validated, additive
-      L2VNI/IP-VRF apply, the EVPN sibling of `AddNeighbor`), and it is
-      the only `Mutating` method that touches the kernel dataplane. If
-      its scope ever widens past single-add (issue #210), re-evaluate
-      whether it should move to `operator_only`.
+      global policy chains, `Shutdown`, `SetGracefulShutdown`.
+- [ ] **Dataplane-programming guardrail.** Any *new* RPC that programs
+      the kernel dataplane (FIB / VXLAN / FDB / L3VNI / nexthop groups)
+      must have its tier **explicitly justified in review** — it must
+      not land in `mutating` by inattention. The standing exception is
+      `EvpnService/ApplyEvpnRuntime`, deliberately `Mutating` because
+      ADR-0063 v1 is a single validated, additive L2VNI/IP-VRF apply
+      (the EVPN sibling of `AddNeighbor`); a tier-pin test in
+      `crates/api/src/authz.rs` guards it against accidental drift, and
+      it is today the *only* `Mutating` method touching the kernel
+      dataplane. If a second one appears, prefer a dedicated
+      `dataplane_mutating` tier over stretching `mutating` or
+      `operator_only`, captured in an ADR. If `ApplyEvpnRuntime`'s scope
+      widens past single-add (issue #210), re-evaluate its tier via an
+      ADR update — not by editing the pin.
 - [ ] **Tier ↔ role boundary is intentional** — recall
       `Observer ≤ sensitive_read`, `Automation ≤ mutating`,
       `Operator ≤ operator_only`. Ask: should the Automation role be
