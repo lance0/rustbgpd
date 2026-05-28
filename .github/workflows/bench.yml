@@ -32,9 +32,9 @@ on:
         required: true
         default: "3"
       require_performance:
-        description: "Fail if the selected CPU is not using the performance governor"
+        description: "Fail if the selected CPU is not using the performance governor (leave false on lancebox-cloud — virtualized CPU has no cpufreq sysfs)"
         required: true
-        default: "true"
+        default: "false"
         type: boolean
 
 permissions:

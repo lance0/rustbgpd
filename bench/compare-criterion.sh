@@ -163,10 +163,14 @@ fi
 
 # Host-level mutex with any concurrent soak / other perf workload.
 # The bench host is shared between this workflow and the soak runner;
-# letting both run at once would corrupt every reading from both.
-# Look for the shared lock under XDG state (works for non-root user
-# `lance` on the dedicated host) and skip locking when the directory
-# isn't present (local dev boxes that aren't shared with soaks).
+# letting both run at once would corrupt every reading from both. We
+# take the lock unilaterally here — the soak harnesses under
+# `tests/soak/` do not yet acquire it, so this only catches collisions
+# the operator (or a future soak-side adopter) initiates while a bench
+# is already running. Look for the shared lock under XDG state (works
+# for non-root user `lance` on the dedicated host) and skip locking
+# when the directory isn't present (local dev boxes not shared with
+# soaks).
 host_lock=""
 if [[ -d "${HOME:-/}/.local/state" ]] || [[ -n "${RUSTBGPD_HOST_LOCK:-}" ]]; then
   host_lock="${RUSTBGPD_HOST_LOCK:-${HOME}/.local/state/rustbgpd-host.lock}"
@@ -494,7 +498,11 @@ else:
         )
 
 if not rows:
-    lines.append("| n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
+    # Column width must match whichever table header was emitted above.
+    if attempts >= 2:
+        lines.append("| n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
+    else:
+        lines.append("| n/a | n/a | n/a | n/a | n/a |")
 
 summary_file.write_text("\n".join(lines) + "\n")
 print(summary_file.read_text())

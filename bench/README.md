@@ -95,11 +95,15 @@ is written.
 
 ## Host coexistence (bench vs. soak)
 
-When the bench runner shares a host with the soak runner, both workloads
-acquire a shared `flock` on `${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}`
-before doing real work. If the lock is already held the script exits with a
-clear error rather than producing useless numbers next to a busy soak. The
-soak harness uses the same path. Local dev boxes without that XDG state
+When the bench runner shares a host with the soak runner, the bench
+script unilaterally takes an exclusive `flock` on
+`${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}` before
+doing real work. If the lock is already held the script exits with a
+clear error rather than producing useless numbers next to a busy soak.
+The soak harnesses under `tests/soak/` do not yet acquire this lock —
+the path is reserved as the future coexistence point, but until soak
+adoption lands the operator is responsible for not running the bench
+workflow during an active soak. Local dev boxes without that XDG state
 directory skip the locking entirely.
 
 The output summary is designed to be pasted into a PR comment. Keep the raw
