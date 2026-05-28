@@ -62,15 +62,21 @@ fn walk_chain(len: u32) -> PolicyChain {
     }])
 }
 
-/// A chain whose first statement matches the route's prefix and denies —
-/// the best case: evaluation terminates at statement 1 regardless of
-/// chain length behind it.
+/// A 32-statement chain whose **first** statement matches the route's
+/// prefix and denies, followed by 31 non-matching statements that are
+/// never reached. This guards short-circuit behaviour: contrasted with
+/// `policy_chain_eval/32` (which walks all 32), a working early-out
+/// terminates at statement 1 and costs ~the 1-statement walk, not the
+/// 32-statement walk — so the trailing tail must be present for the
+/// "regardless of chain length behind it" claim to mean anything.
 fn early_deny_chain() -> PolicyChain {
     let mut deny = non_matching_community_stmt(0);
-    deny.match_community.clear(); // match on prefix alone
+    deny.match_community.clear(); // match on prefix alone → Deny terminates
     deny.action = PolicyAction::Deny;
+    let mut entries = vec![deny];
+    entries.extend((1..32).map(non_matching_community_stmt));
     PolicyChain::new(vec![Policy {
-        entries: vec![deny],
+        entries,
         default_action: PolicyAction::Permit,
     }])
 }
