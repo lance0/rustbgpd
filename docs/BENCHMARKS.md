@@ -24,7 +24,7 @@ v0.30.0 — they reflect the release in which they were last refreshed.
 The **Adj-RIB-In Insert** regression check below was re-run in a pinned state
 (`performance` governor, `taskset -c 8`) after a small route-layout fix.
 
-## Secondary measurement environment — `lancebox-cloud` CI runner
+## Secondary measurement environment — self-hosted VPS bench runner
 
 The `Criterion Bench Compare` workflow (`.github/workflows/bench.yml`)
 runs on a dedicated VPS registered as a `[self-hosted, rustbgpd-bench]`
@@ -34,7 +34,6 @@ deltas on PRs without coupling them to a single machine.
 
 | Field | Value |
 |-------|-------|
-| Hostname | `lancebox-cloud` |
 | Hardware | Virtualized x86_64 guest on bare-metal Intel host (2 vCPU, ~1.9 GiB RAM, 2 GiB swap, 30 GB disk) |
 | Kernel | Linux 6.8.0-117-generic |
 | OS | Ubuntu 24.04.2 LTS |
@@ -83,7 +82,7 @@ not a merge gate.
 
 ### Host coexistence: bench vs. soak
 
-The `lancebox-cloud` host is also planned to run rustbgpd's soak suite.
+The VPS bench runner is also planned to run rustbgpd's soak suite.
 Both workloads acquire an exclusive `flock` on
 `$HOME/.local/state/rustbgpd-host.lock` before doing real work — the
 bench script via `bench/compare-criterion.sh` directly, the soak
@@ -101,13 +100,17 @@ in `tests/soak/README.md` under "Host mutex".
 
 ```bash
 # All benchmarks
-cargo bench --bench codec --bench rib_ops
+cargo bench --bench codec --bench rib_ops --bench policy_eval
 
 # Wire codec only
 cargo bench -p rustbgpd-wire --bench codec
 
 # RIB only
 cargo bench -p rustbgpd-rib --bench rib_ops
+
+# Policy chain eval + the explain-snapshot clone cost
+cargo bench -p rustbgpd-policy --bench policy_eval
+cargo bench -p rustbgpd-policy --bench explain_snapshot
 
 # Specific group
 cargo bench -p rustbgpd-rib --bench rib_ops -- "adj_rib_in_insert"
@@ -152,6 +155,44 @@ directional only.
 rustbgpd-bench]` runner and is intentionally not wired to normal pull-request
 events yet. Enable PR-triggered benchmark comments only after the replacement
 runner exists and its run-to-run noise floor is measured.
+
+## Reading the comparison output (for PR review)
+
+With `--attempts ≥ 2` the summary table has one row per benchmark with
+these columns:
+
+| Column | What it is | How to read it |
+|---|---|---|
+| `attempts` | `n/N` — successful attempts over requested | `n < N` means some attempts failed to produce a baseline; treat the row as low-confidence. |
+| `base median (mean)` / `head median (mean)` | per-ref median, averaged across attempts | The absolute numbers; useful for sanity (right order of magnitude?) more than for the verdict. |
+| `mean delta` | head-vs-base, averaged across attempts (**+ = head slower = regression**) | The headline. Sign convention is fixed regardless of which ref ran first. |
+| `stddev` | spread of the per-attempt deltas | **The confidence signal.** Single-digit-% stddev → the mean delta is trustworthy. Large stddev → the host was noisy; the mean is soft. |
+| `min..max` | range of per-attempt deltas | If this brackets `0` (e.g. `-3%..+4%`), the sign of the mean delta is not reliable — it's inside the noise. |
+| `last-run 95% CI` | conservatively propagated from the last attempt's saved median CIs | Wider than Criterion's own change CI by construction; a sanity bound, not the primary signal. |
+
+**The accept / investigate decision** (these bands are advisory, applied
+by the reviewer — they are *not* enforced in code; see the
+[secondary measurement environment](#secondary-measurement-environment--self-hosted-vps-bench-runner)
+section for why):
+
+1. **Look at `stddev` and `min..max` first, not the mean delta.** If
+   `min..max` straddles `0` or `stddev` is large, the run is noise —
+   re-dispatch with more attempts before drawing any conclusion.
+2. **Then the `mean delta` against the advisory band.** On the VPS
+   runner the same-SHA noise floor is ~11% and single-dispatch
+   inter-SHA spread is wider; a multi-attempt mean delta only earns a
+   verdict once `stddev` is single-digit and `min..max` clears `0`. A
+   sub-band delta with tight spread is real; a large delta with wide
+   spread is not yet.
+3. **Regression (tight, clearly positive mean delta past the band):**
+   block and investigate. **Improvement (tight, clearly negative):**
+   note it. **Inside the band / wide spread:** not actionable — say so
+   in the PR rather than reporting a number as if it were signal.
+
+A formal post-attempts numeric threshold is deliberately still
+deferred until empirical data accumulates from real PR dispatches on
+the VPS runner; until then the table is reviewer input, not a merge
+gate.
 
 ## Wire Codec
 
