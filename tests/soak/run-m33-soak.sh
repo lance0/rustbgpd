@@ -99,6 +99,12 @@ REPORT_JSON="$RUN_DIR/report.json"
 # Mirror everything to soak.log from this point on.
 exec > >(tee -a "$SOAK_LOG") 2>&1
 
+# Host mutex shared with bench/compare-criterion.sh. See
+# tests/soak/host-lock.sh for sudo/HOME caveats.
+# shellcheck source=./host-lock.sh
+source "$SOAK_SCRIPT_DIR/host-lock.sh"
+acquire_rustbgpd_host_lock
+
 log "M33 soak run $RUN_ID"
 SOAK_DURATION_DESC=$(awk -v s="$SOAK_SEC" 'BEGIN { printf "%.2fh", s/3600.0 }')
 log "  duration:   ${SOAK_DURATION_DESC} (${SOAK_SEC}s)"

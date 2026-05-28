@@ -56,21 +56,46 @@ consistent across crates, so the **scaling shape is preserved** — what
 matters for regression tracking — even though absolute numbers differ.
 
 **Advisory regression bands** (not enforced in code; applied by the
-reviewer reading the workflow summary):
+reviewer reading the workflow summary). The 11% same-SHA noise floor is
+the lower bound; inter-SHA comparisons add base/head cache-warming bias
+on top, so single-dispatch results are wider than the floor suggests.
+Empirical reverify against the PR #295 +12% regression (2026-05-28,
+two single-dispatch comparisons) **could not surface the signal** —
+deltas swung between −2.7% and +2.0% on the 10k case across two runs.
+
+For **single-dispatch** (`attempts=1`) comparisons:
 
 | Delta | Interpretation |
 |-------|----------------|
-| < ~11% | Inside the noise floor. Report as informational only. |
-| 11% – 15% | Watch. Worth a second dispatch to confirm before treating as signal. |
-| ≥ 15% | Advisory regression. Investigate before merge. |
+| < ~20% | Inside single-dispatch noise + bias band. Do not act on it without re-dispatching with more attempts. |
+| ≥ 20% | Advisory regression. Investigate before merge. |
 
-The 15% threshold is ~1.4× the noise floor — tight enough to catch the
-14% `adj_rib_in_insert/10000` signal that PR #295 chased down, generous
-enough to absorb day-to-day VM scheduling variance from the hypervisor.
+For **multi-attempt** (`attempts ≥ 3`, the workflow default) comparisons,
+the table also reports across-attempt stddev and min..max. Sub-15%
+signal is gradable once stddev is in single digits and min..max brackets
+the mean cleanly. A formal post-attempts threshold is deferred until
+empirical data accumulates from real PR dispatches.
+
 A pass/fail gate is deferred until a host with full `cpufreq` governor
 control is available (the virtualized CPU here does not expose
 `performance` mode). Until then, the workflow output is reviewer input,
 not a merge gate.
+
+### Host coexistence: bench vs. soak
+
+The `lancebox-cloud` host is also planned to run rustbgpd's soak suite.
+Both workloads acquire an exclusive `flock` on
+`$HOME/.local/state/rustbgpd-host.lock` before doing real work — the
+bench script via `bench/compare-criterion.sh` directly, the soak
+runners via the shared `tests/soak/host-lock.sh` helper. A bench
+dispatch refuses to start while a soak is active and a soak refuses to
+start while a bench is mid-attempt; either workload fails fast with a
+clear error rather than producing useless numbers next to a busy host.
+Local dev boxes without that XDG state directory skip the locking
+entirely so this doesn't change anything for laptop /
+Threadripper-style hosts. The sudo / `$HOME` trap (running soak as
+root moves the lock to `/root/...` and bypasses the guard) is covered
+in `tests/soak/README.md` under "Host mutex".
 
 ## Running
 

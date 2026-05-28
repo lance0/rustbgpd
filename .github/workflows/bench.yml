@@ -27,10 +27,14 @@ on:
         description: "CPU core for taskset pinning"
         required: true
         default: "0"
-      require_performance:
-        description: "Fail if the selected CPU is not using the performance governor"
+      attempts:
+        description: "A/B attempts with alternating order (≥3 recommended on this runner)"
         required: true
-        default: "true"
+        default: "3"
+      require_performance:
+        description: "Fail if the selected CPU is not using the performance governor (leave false on lancebox-cloud — virtualized CPU has no cpufreq sysfs)"
+        required: true
+        default: "false"
         type: boolean
 
 permissions:
@@ -45,18 +49,25 @@ concurrency:
 
 # Empirical noise floor on the `lancebox-cloud` runner is ~11% spread
 # across 5 pinned runs at the same SHA (`adj_rib_in_insert/10000`,
-# 2026-05-28 calibration). Treat workflow output as advisory:
+# 2026-05-28 calibration). Single-dispatch comparisons across two
+# different SHAs are wider than that — base/head cache-warming bias and
+# inter-SHA compile-cache state both contribute. Treat single-attempt
+# workflow output as advisory only:
 #
-#   delta < ~11%   →  inside noise; report as informational
-#   delta 11–15%   →  watch; worth a second run to confirm
-#   delta ≥ 15%    →  advisory regression; investigate before merge
+#   delta < ~20%   →  inside single-dispatch noise / bias band; do
+#                     not act on it without re-running with more attempts
+#   delta ≥ 20%    →  advisory regression; investigate before merge
 #
-# These thresholds are not enforced anywhere in code — the workflow
-# emits the table and the reviewer applies judgment. Hardening to a
-# pass/fail gate is deferred until the noise floor is re-measured on a
-# host with cpufreq governor control (the virtualized CPU on
-# `lancebox-cloud` has no `performance` governor available). See
-# `docs/BENCHMARKS.md` for the full secondary-environment context.
+# The `attempts` input runs the comparison N times with alternating
+# base-first / head-first ordering to dampen the bias. Default is 3;
+# even N (4, 6, ...) cancels first-vs-second bias fully. With ≥ 3
+# attempts the table also includes the across-attempt stddev and the
+# min..max spread, which are better signals than any single dispatch.
+#
+# These bands are not enforced in code — the workflow emits the table
+# and the reviewer applies judgment. Pass/fail gating is deferred until
+# the noise floor is re-measured on a host with cpufreq governor
+# control. See `docs/BENCHMARKS.md` for the full context.
 
 jobs:
   compare:
@@ -94,6 +105,7 @@ jobs:
             --package "${{ inputs.package }}"
             --bench "${{ inputs.bench }}"
             --core "${{ inputs.core }}"
+            --attempts "${{ inputs.attempts }}"
             --out-dir "target/bench-compare"
           )
           if [ -n "${{ inputs.filter }}" ]; then

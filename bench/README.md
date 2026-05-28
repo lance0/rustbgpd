@@ -36,6 +36,44 @@ bench/compare-criterion.sh \
   --bench codec
 ```
 
+## Multiple attempts (recommended on noisy hosts)
+
+`--attempts N` runs the full base+head comparison N times. Odd attempts run
+**base first**, even attempts run **head first**. Cache and codegen state
+warm during whichever ref runs first; alternating ordering lets the
+across-attempt mean cancel that bias. Even N (4, 6, ...) cancels it fully;
+odd N still leaves a half-attempt of residual bias.
+
+```bash
+bench/compare-criterion.sh \
+  --base origin/main \
+  --head perf/my-branch \
+  --core 8 \
+  --attempts 4 \
+  --filter adj_rib_in_insert/10000
+```
+
+With `--attempts ≥ 2` the summary table reports an aggregate row per
+benchmark:
+
+| Benchmark | attempts | base median (mean) | head median (mean) | mean delta | stddev | min..max | last-run 95% CI |
+
+The mean delta uses the head-vs-base sign convention (positive = head
+slower = regression) computed from each attempt's saved baseline medians,
+so it is independent of which ref ran first. The last-run 95% CI is
+conservatively propagated from the last attempt's saved median CIs:
+`(head_lo - base_hi)/base_hi .. (head_hi - base_lo)/base_lo`. It is wider
+than Criterion's own `change/estimates.json` mean CI would be, but
+computing the latter requires `--baseline` which conflicts with
+`--save-baseline` — Criterion rejects the two flags combined. The
+across-attempt stddev + min..max columns are the better signals on noisy
+hosts anyway.
+
+`--attempts 1` (the default) keeps the simpler single-row table used by
+earlier versions.
+
+## Tuning + safety
+
 Before taking numbers seriously, put the selected CPU into the
 `performance` governor where the host allows it:
 
@@ -55,11 +93,25 @@ uncommitted changes never leak into either measurement.
 debugging failed or suspicious runs. Normal runs remove them after the summary
 is written.
 
+## Host coexistence (bench vs. soak)
+
+When the bench runner shares a host with the soak runner, both
+workloads acquire an exclusive `flock` on
+`${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}` before
+doing real work — the bench script directly, the soak harnesses via
+the shared `tests/soak/host-lock.sh` helper. If the lock is already
+held the script exits with a clear error rather than producing useless
+numbers next to a busy soak (and vice versa). Local dev boxes without
+that XDG state directory skip the locking entirely. See
+`tests/soak/README.md` ("Host mutex") for the sudo / `$HOME` trap —
+running soak as root moves the lock under `/root/...` and bypasses
+the guard.
+
 The output summary is designed to be pasted into a PR comment. Keep the raw
 artifact directory when reviewing regressions; Criterion's HTML report remains
 the source for distribution details.
 
 The same entrypoint is exposed through the manual `Criterion Bench Compare`
 GitHub Actions workflow. That workflow expects a self-hosted runner labeled
-`rustbgpd-bench`; normal pull-request triggering should stay disabled until
-that runner's noise floor has been measured.
+`rustbgpd-bench` and defaults to `--attempts 3` for a usable signal on the
+current runner shape.
