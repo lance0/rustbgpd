@@ -270,6 +270,10 @@ impl RouteAttrBundle {
 /// When `mods` is empty, `apply_modifications` is skipped entirely — its
 /// next-hop action derives solely from `mods.set_next_hop`, so the result
 /// is `None`, which `resolve_import_nexthop` already handles.
+// Tiny hot-path wrapper called once per accepted NLRI — inline it so the
+// no-mods fast path is a branch + `Arc` bump with no call overhead (and so
+// the cross-crate microbench measures it faithfully).
+#[inline]
 #[must_use]
 pub fn materialize_attrs(
     canonical: &Arc<Vec<PathAttribute>>,
