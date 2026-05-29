@@ -1193,6 +1193,133 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop() {
 }
 
 #[tokio::test]
+async fn no_modification_update_shares_attribute_arc_across_nlri() {
+    // Two IPv4 NLRI in one UPDATE, no import policy → both permitted with
+    // no modifications. They must share one attribute `Arc` (the PR2 CoW
+    // win), not deep-clone per route.
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.negotiated = Some(negotiated_session(65002, false));
+
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let update = UpdateMessage::build(
+        &[
+            Ipv4NlriEntry {
+                path_id: 0,
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            },
+            Ipv4NlriEntry {
+                path_id: 0,
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+            },
+        ],
+        &[],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+
+    session.process_update(update).await;
+
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced.len(), 2);
+    assert!(
+        Arc::ptr_eq(&announced[0].attributes, &announced[1].attributes),
+        "two NLRI from one no-modification UPDATE must share one attribute Arc"
+    );
+}
+
+#[tokio::test]
+async fn modified_policy_update_owns_distinct_arc_per_nlri() {
+    // Two IPv4 NLRI in one UPDATE, import policy adds a community → both
+    // routes are modified, so each must own a distinct (mutated) Arc
+    // rather than sharing the canonical one, and the mutation must land.
+    const ADDED_COMMUNITY: u32 = 0xFDE9_0064; // 65001:100
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.negotiated = Some(negotiated_session(65002, false));
+    session.import_policy = Some(PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))),
+            ge: None,
+            le: Some(32),
+            action: PolicyAction::Permit,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: RouteModifications {
+                communities_add: vec![ADDED_COMMUNITY],
+                ..RouteModifications::default()
+            },
+        }],
+        default_action: PolicyAction::Permit,
+    }]));
+
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let update = UpdateMessage::build(
+        &[
+            Ipv4NlriEntry {
+                path_id: 0,
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            },
+            Ipv4NlriEntry {
+                path_id: 0,
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+            },
+        ],
+        &[],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+
+    session.process_update(update).await;
+
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced.len(), 2);
+    assert!(
+        !Arc::ptr_eq(&announced[0].attributes, &announced[1].attributes),
+        "policy-modified routes must each own a distinct attribute Arc"
+    );
+    for route in &announced {
+        assert!(
+            route.attributes.iter().any(|a| matches!(
+                a,
+                PathAttribute::Communities(c) if c.contains(&ADDED_COMMUNITY)
+            )),
+            "the communities_add modification must land on each modified route"
+        );
+    }
+}
+
+#[tokio::test]
 async fn otc_ingress_adds_remote_asn_for_route_from_provider_unicast() {
     for role in [BgpRole::Customer, BgpRole::Peer, BgpRole::RouteServerClient] {
         let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);

@@ -8,7 +8,9 @@ use super::{
     PathAttribute, PeerSession, Prefix, RibUpdate, Route, Safi, cease_subcode, debug, info,
     is_ipv6_link_local, resolve_import_nexthop, warn,
 };
-use rustbgpd_policy::{PolicyAction, PolicyEvaluation, RouteContext, RouteType};
+use rustbgpd_policy::{
+    NextHopAction, PolicyAction, PolicyEvaluation, RouteContext, RouteModifications, RouteType,
+};
 
 /// Increment `bgp_policy_routes_total{peer, policy, direction=import,
 /// action}` for one import-side chain evaluation. Policy falls back to
@@ -202,6 +204,87 @@ impl<'a> PolicyAttrSummary<'a> {
             local_pref,
             med,
         }
+    }
+}
+
+/// The canonical per-family attribute sets for one inbound UPDATE, each
+/// behind an `Arc` so the accepted-route loops can SHARE them instead of
+/// deep-cloning the attribute vector per NLRI.
+///
+/// Three variants, derived once from the (MP-filtered) `route_attrs`:
+/// - `unicast` — body IPv4: keeps the body `NEXT_HOP`, carries the OTC
+///   attribute when ingress policy adds one;
+/// - `mp` — `FlowSpec` / EVPN: body `NEXT_HOP` stripped (IPv4-specific; it
+///   must not contaminate non-IPv4 routes in mixed UPDATEs), no OTC;
+/// - `mp_unicast` — MP unicast (e.g. IPv6): `NEXT_HOP` stripped, OTC kept.
+///
+/// Fields are `pub` only so the (off-by-default) `bench-internals`
+/// feature can exercise the type; the enclosing `session` module is
+/// `pub(crate)`, so nothing here is reachable in a normal build.
+pub struct RouteAttrBundle {
+    pub unicast: Arc<Vec<PathAttribute>>,
+    pub mp: Arc<Vec<PathAttribute>>,
+    pub mp_unicast: Arc<Vec<PathAttribute>>,
+}
+
+impl RouteAttrBundle {
+    /// Build the three variants from the MP-filtered base attributes.
+    /// `otc_add` is `Some(asn)` when ingress OTC handling appends an
+    /// `ONLY_TO_CUSTOMER` attribute (unicast families only).
+    ///
+    /// Borrows `base` (it stays alive for the policy-summary borrows in
+    /// `process_update`); the up-front cost matches the previous code
+    /// (`mp` and `mp_unicast` are still one filtered clone each).
+    #[must_use]
+    pub fn new(base: &[PathAttribute], otc_add: Option<u32>) -> Self {
+        let strip_next_hop = |attrs: &[PathAttribute]| -> Vec<PathAttribute> {
+            attrs
+                .iter()
+                .filter(|a| !matches!(a, PathAttribute::NextHop(_)))
+                .cloned()
+                .collect()
+        };
+
+        // `mp` derives from `base` (no OTC). Build it before injecting OTC.
+        let mp = strip_next_hop(base);
+
+        let mut unicast = base.to_vec();
+        if let Some(asn) = otc_add {
+            unicast.push(PathAttribute::OnlyToCustomer(asn));
+        }
+        let mp_unicast = strip_next_hop(&unicast);
+
+        Self {
+            unicast: Arc::new(unicast),
+            mp: Arc::new(mp),
+            mp_unicast: Arc::new(mp_unicast),
+        }
+    }
+}
+
+/// Produce the stored attribute set for one accepted route, sharing the
+/// canonical `Arc` when policy made no modifications (the common case)
+/// and deep-cloning + applying only when it did. Mirrors the outbound
+/// distribution `CoW` pattern (`crates/rib/src/manager/distribution.rs`).
+///
+/// When `mods` is empty, `apply_modifications` is skipped entirely — its
+/// next-hop action derives solely from `mods.set_next_hop`, so the result
+/// is `None`, which `resolve_import_nexthop` already handles.
+// Tiny hot-path wrapper called once per accepted NLRI — inline it so the
+// no-mods fast path is a branch + `Arc` bump with no call overhead (and so
+// the cross-crate microbench measures it faithfully).
+#[inline]
+#[must_use]
+pub fn materialize_attrs(
+    canonical: &Arc<Vec<PathAttribute>>,
+    mods: &RouteModifications,
+) -> (Arc<Vec<PathAttribute>>, Option<NextHopAction>) {
+    if mods.is_empty() {
+        (Arc::clone(canonical), None)
+    } else {
+        let mut owned = (**canonical).clone();
+        let nh = rustbgpd_policy::apply_modifications(&mut owned, mods);
+        (Arc::new(owned), nh)
     }
 }
 
@@ -632,10 +715,15 @@ impl PeerSession {
             })
             .cloned()
             .collect();
-        let mut unicast_route_attrs = route_attrs.clone();
-        if let OtcIngressAction::Add(asn) = otc_action {
-            unicast_route_attrs.push(PathAttribute::OnlyToCustomer(asn));
-        }
+        // Canonical per-family attribute sets, each behind an `Arc` so the
+        // accepted-route loops below can share them (one `Arc` bump per
+        // NLRI) instead of deep-cloning per route when policy makes no
+        // modifications. See `RouteAttrBundle` / `materialize_attrs`.
+        let otc_add = match otc_action {
+            OtcIngressAction::Add(asn) => Some(asn),
+            _ => None,
+        };
+        let attr_bundle = RouteAttrBundle::new(&route_attrs, otc_add);
 
         // Single pass over the (MP-filtered) attribute vector pulls every
         // policy-context field the RouteContext sites read — replacing
@@ -768,7 +856,7 @@ impl PeerSession {
                                     matched_policy: evaluation.matched_policy.clone(),
                                     rpki: rpki_state,
                                     aspa: body_aspa_state,
-                                    pre_policy_attrs: unicast_route_attrs.clone(),
+                                    pre_policy_attrs: (*attr_bundle.unicast).clone(),
                                     modifications: result.modifications.clone(),
                                     evaluated_at: SystemTime::now(),
                                     policy_generation: self.import_policy_generation,
@@ -778,9 +866,8 @@ impl PeerSession {
                         if result.action != rustbgpd_policy::PolicyAction::Permit {
                             return None;
                         }
-                        let mut attrs = unicast_route_attrs.clone();
-                        let nh_action =
-                            rustbgpd_policy::apply_modifications(&mut attrs, &result.modifications);
+                        let (attrs, nh_action) =
+                            materialize_attrs(&attr_bundle.unicast, &result.modifications);
                         let next_hop = resolve_import_nexthop(
                             nh_action.as_ref(),
                             body_next_hop,
@@ -793,7 +880,7 @@ impl PeerSession {
                             link_local_next_hop: None,
                             next_hop_scope: self.link_local_next_hop_scope(next_hop),
                             peer: self.peer_ip,
-                            attributes: Arc::new(attrs),
+                            attributes: attrs,
                             received_at: now,
                             origin_type: route_origin,
                             peer_router_id: self
@@ -829,20 +916,10 @@ impl PeerSession {
                 .collect()
         };
 
-        // MP-BGP NLRI from attributes
-        // For IPv6 routes, also strip body NEXT_HOP — it's IPv4-specific and
-        // would contaminate IPv6 route attributes in mixed UPDATEs.
-        let mp_route_attrs: Vec<PathAttribute> = route_attrs
-            .iter()
-            .filter(|a| !matches!(a, PathAttribute::NextHop(_)))
-            .cloned()
-            .collect();
-        let mp_unicast_route_attrs: Vec<PathAttribute> = unicast_route_attrs
-            .iter()
-            .filter(|a| !matches!(a, PathAttribute::NextHop(_)))
-            .cloned()
-            .collect();
-
+        // MP-BGP NLRI from attributes. The MP families read the
+        // body-NEXT_HOP-stripped variants from `attr_bundle` (`mp` for
+        // FlowSpec / EVPN, `mp_unicast` for unicast) — the stripping
+        // happens once in `RouteAttrBundle::new`.
         let mut flowspec_announced: Vec<FlowSpecRoute> = Vec::new();
         let mut flowspec_withdrawn: Vec<FlowSpecRule> = Vec::new();
         let mut evpn_announced: Vec<EvpnRibRoute> = Vec::new();
@@ -925,11 +1002,16 @@ impl PeerSession {
                                 &mut import_policy_routes_denied,
                             );
                             if result.action == rustbgpd_policy::PolicyAction::Permit {
-                                let mut attrs = mp_route_attrs.clone();
-                                let _nh_action = rustbgpd_policy::apply_modifications(
-                                    &mut attrs,
-                                    &result.modifications,
-                                );
+                                // FlowSpec stores an owned `Vec` (not `Arc`),
+                                // so it can't share — but still skip the no-op
+                                // apply when policy made no modifications.
+                                let mut attrs = (*attr_bundle.mp).clone();
+                                if !result.modifications.is_empty() {
+                                    let _ = rustbgpd_policy::apply_modifications(
+                                        &mut attrs,
+                                        &result.modifications,
+                                    );
+                                }
                                 flowspec_announced.push(FlowSpecRoute {
                                     rule: rule.clone(),
                                     afi: mp.afi,
@@ -990,17 +1072,15 @@ impl PeerSession {
                                 &mut import_policy_routes_denied,
                             );
                             if result.action == rustbgpd_policy::PolicyAction::Permit {
-                                let mut attrs = mp_route_attrs.clone();
-                                let _nh_action = rustbgpd_policy::apply_modifications(
-                                    &mut attrs,
-                                    &result.modifications,
-                                );
+                                // EVPN uses mp.next_hop, not the policy nh_action.
+                                let (attrs, _) =
+                                    materialize_attrs(&attr_bundle.mp, &result.modifications);
                                 evpn_announced.push(EvpnRibRoute {
                                     route: route.clone(),
                                     next_hop: mp.next_hop,
                                     link_local_next_hop: mp.link_local_next_hop,
                                     peer: self.peer_ip,
-                                    attributes: Arc::new(attrs),
+                                    attributes: attrs,
                                     received_at: now,
                                     origin_type: route_origin,
                                     peer_router_id: self
@@ -1074,7 +1154,7 @@ impl PeerSession {
                                     matched_policy: evaluation.matched_policy.clone(),
                                     rpki: mp_rpki_state,
                                     aspa: mp_aspa_state,
-                                    pre_policy_attrs: mp_unicast_route_attrs.clone(),
+                                    pre_policy_attrs: (*attr_bundle.mp_unicast).clone(),
                                     modifications: result.modifications.clone(),
                                     evaluated_at: SystemTime::now(),
                                     policy_generation: self.import_policy_generation,
@@ -1082,11 +1162,8 @@ impl PeerSession {
                             );
                         }
                         if result.action == rustbgpd_policy::PolicyAction::Permit {
-                            let mut attrs = mp_unicast_route_attrs.clone();
-                            let nh_action = rustbgpd_policy::apply_modifications(
-                                &mut attrs,
-                                &result.modifications,
-                            );
+                            let (attrs, nh_action) =
+                                materialize_attrs(&attr_bundle.mp_unicast, &result.modifications);
                             let next_hop = resolve_import_nexthop(
                                 nh_action.as_ref(),
                                 mp.next_hop,
@@ -1104,7 +1181,7 @@ impl PeerSession {
                                 link_local_next_hop,
                                 next_hop_scope: self.link_local_next_hop_scope(next_hop),
                                 peer: self.peer_ip,
-                                attributes: Arc::new(attrs),
+                                attributes: attrs,
                                 received_at: now,
                                 origin_type: route_origin,
                                 peer_router_id: self
@@ -1312,5 +1389,87 @@ mod policy_attr_summary_tests {
         assert_eq!(s.origin_asn, Some(65001));
         assert_eq!(s.local_pref, Some(100), "first LOCAL_PREF wins");
         assert_eq!(s.med, Some(5), "first MED wins");
+    }
+}
+
+#[cfg(test)]
+mod route_attr_bundle_tests {
+    use super::*;
+    use rustbgpd_wire::{AsPath, AsPathSegment, Origin};
+
+    fn base_attrs() -> Vec<PathAttribute> {
+        vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65001])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::Communities(vec![100]),
+        ]
+    }
+
+    fn has_next_hop(attrs: &[PathAttribute]) -> bool {
+        attrs.iter().any(|a| matches!(a, PathAttribute::NextHop(_)))
+    }
+
+    fn has_otc(attrs: &[PathAttribute]) -> bool {
+        attrs
+            .iter()
+            .any(|a| matches!(a, PathAttribute::OnlyToCustomer(_)))
+    }
+
+    #[test]
+    fn bundle_variant_shapes_with_otc() {
+        let bundle = RouteAttrBundle::new(&base_attrs(), Some(65002));
+        // unicast: keeps body NEXT_HOP + carries OTC.
+        assert!(has_next_hop(&bundle.unicast));
+        assert!(has_otc(&bundle.unicast));
+        // mp (FlowSpec/EVPN): NEXT_HOP stripped, NO OTC.
+        assert!(!has_next_hop(&bundle.mp));
+        assert!(!has_otc(&bundle.mp));
+        // mp_unicast: NEXT_HOP stripped, OTC kept.
+        assert!(!has_next_hop(&bundle.mp_unicast));
+        assert!(has_otc(&bundle.mp_unicast));
+    }
+
+    #[test]
+    fn bundle_variant_shapes_without_otc() {
+        let bundle = RouteAttrBundle::new(&base_attrs(), None);
+        assert!(has_next_hop(&bundle.unicast) && !has_otc(&bundle.unicast));
+        assert!(!has_next_hop(&bundle.mp) && !has_otc(&bundle.mp));
+        assert!(!has_next_hop(&bundle.mp_unicast) && !has_otc(&bundle.mp_unicast));
+    }
+
+    #[test]
+    fn materialize_shares_arc_when_no_modifications() {
+        let bundle = RouteAttrBundle::new(&base_attrs(), None);
+        let mods = RouteModifications::default();
+        let (attrs, nh) = materialize_attrs(&bundle.unicast, &mods);
+        assert!(
+            Arc::ptr_eq(&attrs, &bundle.unicast),
+            "no-mods path must share the canonical Arc, not deep-clone"
+        );
+        assert!(nh.is_none(), "nh_action derives from set_next_hop only");
+    }
+
+    #[test]
+    fn materialize_clones_and_applies_when_modified() {
+        let bundle = RouteAttrBundle::new(&base_attrs(), None);
+        let mods = RouteModifications {
+            set_local_pref: Some(200),
+            ..RouteModifications::default()
+        };
+        let (attrs, nh) = materialize_attrs(&bundle.unicast, &mods);
+        assert!(
+            !Arc::ptr_eq(&attrs, &bundle.unicast),
+            "modified path must own a fresh Arc"
+        );
+        assert!(
+            attrs
+                .iter()
+                .any(|a| matches!(a, PathAttribute::LocalPref(200))),
+            "set_local_pref modification must be applied"
+        );
+        assert!(nh.is_none(), "no set_next_hop → no nh_action");
     }
 }

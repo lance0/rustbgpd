@@ -20,6 +20,11 @@ pub(crate) mod session;
 mod socket_opts;
 pub mod timer;
 
+// Inbound attribute handling exposed ONLY for the `inbound_attrs`
+// microbench (off by default). Not part of the public API.
+#[cfg(feature = "bench-internals")]
+pub use session::inbound::{RouteAttrBundle, materialize_attrs};
+
 pub use config::{RemovePrivateAs, TcpAoAlgorithm, TcpAoConfig, TransportConfig};
 pub use error::TransportError;
 pub use event_sink::{
