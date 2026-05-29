@@ -174,9 +174,14 @@ Later for what remains.
   per-UPDATE attribute-clone churn;
   have the EVPN Linux reconciler signal changed/dirty from `apply_plan` instead
   of cloning the owned-state map each reconcile pass (confirm the exact clone
-  site first); fix the `memory_profile` high-N harness non-scaling; and a fresh
-  bgperf2 cross-stack comparison on current `main` (BIRD/GoBGP columns are a
-  v0.4.2 snapshot). Shared route storage was measured and rejected — see Deferred.
+  site first); fix the `memory_profile` high-N harness non-scaling; and
+  **reconsider the default-on event-history outbox** — the v0.32.0 bgperf2
+  re-run shows it adds ~62 MB RSS and roughly doubles peak CPU at 2p/100k, so
+  evaluate making it opt-in (or lighter by default). The bgperf2 cross-stack
+  comparison was refreshed for v0.32.0 (full-daemon RSS dropped ~21% from the
+  inbound clone-churn fix, but now exceeds GoBGP's ~203 MB at 200k — daemon
+  feature growth, not RIB bloat; see `docs/BENCHMARKS.md`). Shared route storage
+  was measured and rejected — see Deferred.
 - **AIGP best-path support (RFC 7311).** Standards completeness for deployments
   that carry accumulated IGP cost in BGP — the one best-path step we don't
   implement (the chain is otherwise 11/11). Not a headline feature unless
