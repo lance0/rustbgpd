@@ -4,7 +4,7 @@ Micro-benchmarks using [Criterion](https://github.com/bheisler/criterion.rs) 0.8
 compiled with `--release` (LTO, codegen-units=1). Numbers below are meant
 for relative comparison and regression tracking, not absolute guarantees.
 
-**Last measured: 2026-05-27 (v0.30.0)**
+**Last measured: 2026-05-29 (post-v0.31.0, current `main`)**
 
 | Field | Value |
 |-------|-------|
@@ -12,17 +12,17 @@ for relative comparison and regression tracking, not absolute guarantees.
 | Kernel | Linux 6.17.0-20-generic |
 | rustc | 1.95.0 (2026-04-14) |
 | Criterion | 0.8 |
-| Measurement state | Unpinned unless noted — no `isolcpus`, no `cpufreq` governor pinning; light background load (`scaling_cur_freq` ~51% at run time) |
+| Measurement state | **RIB Operations** re-measured pinned (`performance` governor, `taskset -c 8`, 4 alternating A/B attempts) comparing the `v0.31.0` tag to current `main`; absolute numbers below are the `main` medians |
 
-Empirical run-to-run variance for the smaller benches on this box has been
-observed up to ~30% in this unpinned state — re-runs at the same commit can
-drift this much. Expect tighter results from a pinned, quiesced measurement
-state. The non-criterion **Memory Footprint**, **Optimization History**, and
-**End-to-End System Benchmarks** sections below have not been re-measured for
-v0.30.0 — they reflect the release in which they were last refreshed.
-
-The **Adj-RIB-In Insert** regression check below was re-run in a pinned state
-(`performance` governor, `taskset -c 8`) after a small route-layout fix.
+The RIB Operations numbers below are the current-`main` medians from a pinned
+`v0.31.0 → main` comparison run (the cumulative effect of the scale/memory
+sprint: the `SmallVec` prefix index, `FxHash` route maps, and multi-chunk
+distribution coalescing). Each row's per-benchmark delta versus `v0.31.0` is
+noted inline. The non-criterion **Memory Footprint** numbers were re-measured
+on current `main` via the allocator-tracking `memory_profile` test; the
+rustbgpd-target **bgperf2 2p/100k** end-to-end RSS + convergence were refreshed
+on current `main` (the BIRD/GoBGP cross-stack comparison further below remains a
+v0.4.2 snapshot — not re-run).
 
 ## Secondary measurement environment — self-hosted VPS bench runner
 
@@ -34,9 +34,9 @@ deltas on PRs without coupling them to a single machine.
 
 | Field | Value |
 |-------|-------|
-| Hardware | Virtualized x86_64 guest on bare-metal Intel host (2 vCPU, ~1.9 GiB RAM, 2 GiB swap, 30 GB disk) |
+| Hardware | Virtualized x86_64 guest on bare-metal Intel host (4 vCPU, ~3.8 GiB RAM, 2 GiB swap, 30 GB disk) |
 | Kernel | Linux 6.8.0-117-generic |
-| OS | Ubuntu 24.04.2 LTS |
+| OS | Ubuntu 24.04.4 LTS |
 | rustc | 1.95.0 (matches the primary host) |
 | Criterion | 0.8 |
 | Pinning | `taskset -c <core>` (set by the workflow input; default core 0) |
@@ -293,53 +293,55 @@ per-prefix lookup, avoiding the O(N) full-scans that dominated earlier versions.
 (stale, RPKI, LOCAL_PREF, AS_PATH len, ORIGIN, MED, eBGP pref, CLUSTER_LIST,
 ORIGINATOR_ID, peer addr) is the inner loop of best-path selection.
 
-| Scenario | Time (1000 calls) | Per-call |
-|----------|-------------------|----------|
-| Equal routes (full tiebreak) | 18.2 µs | 18.2 ns |
-| LOCAL_PREF differs (early exit) | 4.95 µs | 4.95 ns |
-| Different peers (full tiebreak) | 18.4 µs | 18.4 ns |
+| Scenario | Time (1000 calls) | Per-call | vs v0.31.0 |
+|----------|-------------------|----------|------------|
+| Equal routes (full tiebreak) | 19.8 µs | 19.8 ns | +6.1% |
+| LOCAL_PREF differs (early exit) | 5.22 µs | 5.22 ns | +0.6% (noise) |
+| Different peers (full tiebreak) | 19.7 µs | 19.7 ns | +5.8% |
 
-Early exit at LOCAL_PREF is ~3.7× faster than a full tiebreak. In typical eBGP
-deployments most comparisons resolve at LOCAL_PREF or AS_PATH length.
+Early exit at LOCAL_PREF is ~3.8× faster than a full tiebreak. In typical eBGP
+deployments most comparisons resolve at LOCAL_PREF or AS_PATH length, so the
+common path (`local_pref_diff`) is unaffected. The full-ladder paths regressed
+~6% from `v0.31.0` — small in absolute terms (~1 ns/comparison) and dwarfed by
+the −40–62% insert/pipeline wins below. It is consistent across two hosts (the
+self-hosted VPS A/B measured +1.4% / +2.3% ± noise), so it is real but minor;
+flagged for follow-up.
 
 ### Adj-RIB-In Insert
 
 Bulk insert into a fresh `AdjRibIn` (HashMap keyed by `(Prefix, path_id)` plus
 secondary prefix index).
 
-| Routes | Time | Throughput |
-|--------|------|------------|
-| 10,000 | 3.60 ms | 2.8M routes/sec |
-| 100,000 | 54.1 ms | 1.8M routes/sec |
-| 500,000 | 178 ms | 2.8M routes/sec |
+| Routes | Time | Throughput | vs v0.31.0 |
+|--------|------|------------|------------|
+| 10,000 | 2.36 ms | 4.2M routes/sec | −34.2% |
+| 100,000 | 31.6 ms | 3.2M routes/sec | −39.8% |
+| 500,000 | 89.5 ms | 5.6M routes/sec | −49.3% |
 
-Throughput is ~1.8-2.8M routes/sec across scale (vs 4.5M without the prefix
-index). The trade-off is worthwhile: insert is ~1.8× slower, but
-`iter_prefix()` goes from O(N) to O(1), making the full pipeline 25-86× faster
-at scale. A full Internet table (900k prefixes) inserts in ~350 ms.
-
-Pinned follow-up measurements confirmed the previous small-N regression was
-real, not noise: current `main` measured 3.98 ms median at 10 k versus
-3.56 ms at v0.24.0 (+11.9%). The cause was per-clone `Route` size growth from
-the RFC 8950 unnumbered `next_hop_scope` field. Boxing the rare scope payload
-reduces `Route` from 136 bytes to 120 bytes and brings the 10 k insert median
-back to 3.60 ms, within 1.2% of the v0.24.0 baseline. The 500 k insert median
-stays flat against current `main` within measurement noise.
+The scale/memory sprint roughly halved insert time at scale. The biggest
+contributors are the inlined `SmallVec<[u32; 1]>` Adj-RIB-In prefix index
+(no per-prefix `HashSet` allocation in the common no-Add-Path case) and the
+`FxHash` route maps (a faster non-cryptographic hasher for the internal,
+`max_prefixes`-bounded keys). A full Internet table (900k prefixes) now inserts
+in ~160 ms. The secondary prefix index keeps `iter_prefix()` at O(1), so the
+full pipeline below stays linear at scale.
 
 ### Loc-RIB Recompute
 
 Best-path selection for a single prefix with N candidate routes.
 
-| Candidates | Time |
-|------------|------|
-| 1 | 75 ns |
-| 2 | 85 ns |
-| 4 | 119 ns |
-| 8 | 196 ns |
+| Candidates | Time | vs v0.31.0 |
+|------------|------|------------|
+| 1 | 38 ns | −37.1% |
+| 2 | 50 ns | −30.9% |
+| 4 | 88 ns | −19.5% |
+| 8 | 167 ns | −9.5% |
 
 Linear in candidate count, as expected. With Add-Path or multiple peers
-advertising the same prefix, each additional candidate adds ~17 ns
-(one `best_path_cmp` call).
+advertising the same prefix, each additional candidate adds ~18 ns
+(one `best_path_cmp` call). The single-candidate case (the common one) is
+fastest now that the map lookup uses `FxHash`; the delta shrinks as candidate
+count grows and `best_path_cmp` (slightly slower — see above) dominates.
 
 ### Full Pipeline
 
@@ -347,19 +349,19 @@ End-to-end: insert routes from 2 peers into Adj-RIB-In, recompute best path
 for every prefix, install into Adj-RIB-Out. This exercises the real hot path
 without async/channel overhead.
 
-| Prefixes (×2 peers) | Time | Per-prefix |
-|----------------------|------|------------|
-| 1,000 | 783 µs | 783 ns |
-| 10,000 | 9.64 ms | 0.96 µs |
-| 50,000 | 80.7 ms | 1.61 µs |
+| Prefixes (×2 peers) | Time | Per-prefix | vs v0.31.0 |
+|----------------------|------|------------|------------|
+| 1,000 | 306 µs | 306 ns | −61.9% |
+| 10,000 | 3.37 ms | 0.34 µs | −61.5% |
+| 50,000 | 39.0 ms | 0.78 µs | −49.2% |
 
-Scaling is roughly linear (O(N)) thanks to the secondary prefix index.
-Previous versions used an O(N) scan per prefix in `iter_prefix()`, making the
-full pipeline O(N²) — the 50 k benchmark took 7.1 s vs 81 ms now (**~88×
-improvement**).
+Scaling is roughly linear (O(N)) thanks to the secondary prefix index. The
+scale/memory sprint roughly halved the end-to-end pipeline on top of that
+(`SmallVec` index + `FxHash` + coalesced multi-chunk distribution). Versus the
+ancient pre-index O(N²) era the 50 k pipeline took 7.1 s; it is 39 ms now.
 
 Extrapolating linearly, a full Internet table (900 k prefixes × 2 peers) would
-complete the pipeline in ~1.5 s.
+complete the pipeline in ~0.7 s.
 
 ### Bulk Initial Load
 
@@ -374,21 +376,27 @@ Run it with:
 cargo bench -p rustbgpd-rib --bench rib_ops -- "bulk_initial_load"
 ```
 
-The v0.30.0 baseline has not been pinned yet. Record numbers here only after
-running through the pinned compare workflow described above.
+| Routes | Time | vs v0.31.0 |
+|--------|------|------------|
+| 10,000 | 1.54 ms | −57.3% |
+| 100,000 | 39.2 ms | −50.5% |
+
+Cold table load benefits the most from the sprint — the `SmallVec` prefix
+index removes a per-prefix `HashSet` allocation on every insert, and the
+coalesced distribution flushes one outbound batch instead of one per chunk.
 
 ### Route Churn
 
 10,000 base routes from peer 1, then 1,000 route announcements from peer 2
 followed by 1,000 withdrawals, with best-path recomputation at each step.
 
-| Benchmark | Time |
-|-----------|------|
-| 10k base + 1k announce/withdraw cycle | 633 µs |
+| Benchmark | Time | vs v0.31.0 |
+|-----------|------|------------|
+| 10k base + 1k announce/withdraw cycle | 254 µs | −59.4% |
 
-A 1 k-prefix churn event reconverges in under 1 ms, including both the
-announce and withdraw phases. This is ~44× faster than the pre-index version
-(27.9 ms).
+A 1 k-prefix churn event reconverges in ~0.25 ms, including both the announce
+and withdraw phases — −59% from `v0.31.0` (the sprint's index + hasher wins on
+the lookup-heavy churn path).
 
 ## Memory Footprint
 
@@ -402,10 +410,16 @@ Measured using a tracking global allocator that counts every `alloc` and
 |------|------|
 | `Route` | 120 bytes |
 | `Prefix` | 18 bytes |
-| `PathAttribute` | 72 bytes |
+| `PathAttribute` | 112 bytes |
 | `AsPath` | 24 bytes |
-| `AdjRibIn` | 264 bytes |
+| `AsPathSegment` | 32 bytes |
+| `AdjRibIn` | 280 bytes |
 | `LocRib` | 96 bytes |
+
+`PathAttribute` grew from 72 to 112 bytes since the v0.30-era figures (new
+attribute variants). It is interned per peer, so the per-route impact is
+amortized to near zero (see below), but it does raise the per-unique-attribute-
+set heap cost.
 
 `Route.attributes` is `Arc<Vec<PathAttribute>>` — cloning a route between
 Adj-RIB-In, Loc-RIB, and Adj-RIB-Out shares the attribute allocation via
@@ -421,8 +435,8 @@ each having their own copy.
 
 | Attribute set | Heap | Stack | Total |
 |---------------|------|-------|-------|
-| Typical (6 attrs, 3-ASN path, 2 communities) | 524 B | 120 B | 644 B |
-| Rich (8 attrs, 5-ASN+SET path, 5 communities, ORIGINATOR_ID, CLUSTER_LIST) | 736 B | 120 B | 856 B |
+| Typical (6 attrs, 3-ASN path, 2 communities) | 764 B | 120 B | 884 B |
+| Rich (8 attrs, 5-ASN+SET path, 5 communities, ORIGINATOR_ID, CLUSTER_LIST) | 1056 B | 120 B | 1176 B |
 
 These are per-unique-attribute-set costs. With interning, routes sharing the
 same attributes pay only the 120-byte `Route` stack cost plus an 8-byte `Arc`
@@ -432,32 +446,39 @@ pointer.
 
 | Routes | Resident | Per-route |
 |--------|----------|-----------|
-| 10,000 | 3.3 MB | 340 B |
-| 100,000 | 26.7 MB | 279 B |
-| 500,000 | 203 MB | 426 B |
-| 900,000 | 217 MB | 252 B |
+| 10,000 | 3.0 MB | 318 B |
+| 100,000 | 24.3 MB | 254 B |
 
-Per-route cost is ~252-426 bytes including HashMap overhead, prefix index, and
-intern table. The dramatic reduction from pre-interning numbers (776-950 B/route)
-comes from sharing the ~524-byte attribute allocation across all routes with
-identical attributes. A typical peer's full table has only a handful of unique
-attribute sets (~50-200), so the attribute heap cost is effectively amortized
-to near zero per route.
+Per-route cost is ~250-320 bytes including HashMap overhead, prefix index, and
+intern table. At 100k the resident set is ~9% lower than the v0.30-era 26.7 MB,
+from the inlined `SmallVec` prefix index (no per-prefix `HashSet`). Attribute
+interning shares one ~764-byte allocation across all routes with identical
+attributes; a typical peer's full table has only a handful of unique attribute
+sets (~50-200), so the attribute heap cost is amortized to near zero per route.
+
+> **Harness limitation (high N):** the `memory_profile` test does not scale
+> cleanly past ~100k in its current form — its 500k and 900k cases report
+> near-identical resident (a measurement artifact, not a RIB property; the
+> v0.30-era 500k/900k figures had the same non-scaling). The 10k/100k rows are
+> the trustworthy structural numbers; fixing the harness to scale is tracked as
+> a separate perf-infra task. For real full-table memory at scale, see the
+> bgperf2 end-to-end RSS below.
 
 ### Full RIB: 2 Peers + LocRib (typical attrs)
 
 | Prefixes | Total memory | Per-prefix |
 |----------|-------------|------------|
-| 100,000 | 68 MB | 707 B |
-| 500,000 | 519 MB | 1.1 KB |
-| 900,000 | 547 MB | 637 B |
+| 100,000 | 66.6 MB | 698 B |
 
-A full Internet table (900k prefixes) with 2 peers and best-path selection uses
-**547 MB**. Each prefix stores 3 Route instances (2x Adj-RIB-In + 1x Loc-RIB)
-with `Arc` sharing across all three copies. Path attribute interning within each
-`AdjRibIn` further reduces memory by sharing attribute allocations across routes
-with identical attributes. This is **15-29x less than GoBGP** (8-16+ GB) and
-approaching BIRD (~325 MB for 30 peers).
+This is the **RIB-only, allocator-tracked** structural memory (2× Adj-RIB-In +
+Loc-RIB); each prefix stores Route instances with `Arc` sharing of attributes
+across copies, and attribute interning within each `AdjRibIn` shares one
+allocation across routes with identical attributes. It is **distinct from the
+full-process RSS** below — it excludes the daemon's operational surfaces
+(event-history, gRPC, telemetry, BFD, the tokio runtime, allocator arenas).
+500k/900k are omitted under the harness limitation noted above; this RIB-only
+profile remains the regression-tracking surface for RIB data-structure changes,
+while bgperf2 RSS (below) is the operator-facing full-daemon number.
 
 ### Optimization History
 
@@ -465,7 +486,12 @@ approaching BIRD (~325 MB for 30 peers).
 |---------|--------------------------|------------|----------|
 | Pre-Arc (`Vec<PathAttribute>`) | 1.80 GB | 2.1 KB | 4-9x less |
 | Arc sharing (v0.4.2) | 1.41 GB | 1.6 KB | 6-11x less |
-| Arc + interning (current) | 547 MB | 637 B | 15-29x less |
+| Arc + interning | 547 MB | 637 B | 15-29x less |
+
+The 900k×2 figures are the historical allocator-tracked journey; the 547 MB row
+is the last reliable one before the `memory_profile` harness stopped scaling
+past ~100k (see the limitation note above). RIB-structure regression tracking
+now uses the 100k allocator profile; full-daemon RSS at scale uses bgperf2.
 
 ### Optimization History (end-to-end, bgperf2 2p/100k)
 
@@ -473,8 +499,24 @@ approaching BIRD (~325 MB for 30 peers).
 |--------|--------|-------------|
 | Pre-AdjRibOut index | 168 MB | 71s |
 | + AdjRibOut secondary prefix index | 415 MB | 12s |
-| + Skip unnecessary Arc deep clones | 257 MB | 11s |
-| + AdjRibOut capacity hints | ~260 MB | 11s |
+| + Skip unnecessary Arc deep clones (v0.4.x-era) | 257 MB | 11s |
+| + AdjRibOut capacity hints (v0.30-era) | ~260 MB | 11s |
+| current `main` — event-history **on** (daemon default) | ~439 MB | ~11s |
+| current `main` — event-history off | ~344 MB | ~11s |
+
+**The current-`main` rows are not apples-to-apples with the v0.4.x/v0.30-era
+rows above.** They are a current *full-daemon* process RSS, not a RIB-only
+figure, and are **not a RIB memory regression** (RIB-only structural memory at
+100k actually improved ~9% — see above). Since the ~257–260 MB era the daemon
+gained substantial always-available operational surfaces (BFD, gNMI, ASPA,
+BGP roles/OTC, the explain cache) and `PathAttribute` grew 72→112 B. The single
+biggest contributor is the durable **event-history outbox** (ADR-0072,
+**default-on**), which persists every route event to SQLite: disabling it
+(`[event_history].enabled = false`) drops 2p/100k RSS from ~439 MB to ~344 MB
+(~95 MB). Convergence is unchanged at ~11s (≈2s route-flood; the outbox is not
+on the convergence-critical path). Measured across three default runs:
+425 / 443 / 449 MB. Criterion and the RIB-only `memory_profile` above remain
+the regression-tracking surfaces for RIB data-structure changes.
 
 The Arc deep-clone fix (`RouteModifications::is_empty()` guard) was the biggest
 memory win: `Arc::make_mut()` was called unconditionally on every route in
@@ -544,11 +586,15 @@ establishment.
 
 ### Results
 
-Benchmarks run at v0.4.2; the RIB hot-path has been unchanged through v0.24.0
-in ways that would invalidate these numbers, but the runs themselves have not
-been re-executed against current main. Fresh runs against the v0.24.0 main and
-under EVPN VTEP / IRB modes are tracked as follow-up work; treat the numbers
-below as directional rather than current.
+This cross-stack comparison was run at **v0.4.2** and has not been re-executed
+against BIRD/GoBGP on current `main`, so treat the columns below as a v0.4.2
+snapshot, not current. The rustbgpd target **was** re-measured on current
+`main` at 2p/100k: convergence is unchanged (~2 s monitor flood, ~11 s total),
+but **Max Memory is now ~439 MB (event-history default-on) / ~344 MB (off)**,
+up from the 257 MB shown below — this is daemon feature growth (chiefly the
+ADR-0072 durable outbox), **not** a RIB regression. See *Optimization History
+(end-to-end, bgperf2 2p/100k)* above for the full decomposition. A fresh
+cross-stack run (incl. EVPN VTEP / IRB modes) is tracked as follow-up.
 
 #### 10 peers x 1,000 prefixes (10k total)
 
