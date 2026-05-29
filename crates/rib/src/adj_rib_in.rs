@@ -1,12 +1,25 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
-// Route-bearing maps use FxHash (rustc-hash) rather than the default SipHash.
-// The keys here — `Prefix`, `(Prefix, path_id)`, `EvpnRouteKey`, and interned
-// attribute sets — are internal and not adversary-controlled in a way SipHash
-// would protect against, so the faster hasher is a pure insert/lookup win on
-// the convergence + churn hot path. Aliased to the std names so the storage
-// type declarations read unchanged.
+// Route-bearing maps use FxHash (rustc-hash) rather than the default SipHash
+// for a pure insert/lookup speedup on the convergence + churn hot path.
+//
+// HashDoS tradeoff (deliberate): these keys — `Prefix`, `(Prefix, path_id)`,
+// `EvpnRouteKey`, `FlowSpecRule`, and the interned attribute sets — ARE
+// peer-fed (decoded from received UPDATE NLRI / attributes), and FxHash is
+// deterministic, so it gives no collision resistance against an adversary who
+// crafts colliding keys. We accept that here because the BGP peer threat model
+// differs fundamentally from the anonymous-client scenario SipHash defends:
+//   1. Peers are explicitly configured + (typically) authenticated — not
+//      arbitrary internet clients.
+//   2. Per-peer prefix count is bounded by enforced `max_prefixes` (the
+//      transport session is torn down past the limit, see
+//      `transport::session::inbound`), which caps any collision chain. Set it
+//      for lower-trust neighbors.
+//   3. A peer able to mount this already has strictly higher-impact vectors
+//      (route hijack / leak / churn flood) that dominate the threat model.
+// This matches the non-DoS-resistant internal hash tables FRR and BIRD use.
+// Aliased to the std names so the storage type declarations read unchanged.
 use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, PathAttribute, Prefix, Safi};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
