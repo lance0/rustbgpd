@@ -1,7 +1,7 @@
 # rustbgpd
 
 [![Build](https://github.com/lance0/rustbgpd/actions/workflows/ci.yml/badge.svg)](https://github.com/lance0/rustbgpd/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/rust-1.92+-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.95+-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
 
 An API-first BGP daemon in Rust, built for programmable data-center fabric,
@@ -103,7 +103,7 @@ Press `q` to exit the TUI. When you're done: `docker compose down`.
 ### From source
 
 ```bash
-# Prerequisites: Rust 1.92+, protobuf-compiler
+# Prerequisites: Rust 1.95+, protobuf-compiler
 sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
 cargo build --workspace --release
 
@@ -373,7 +373,7 @@ evolving API.**
 | **Target use case** | Data-center fabric pilots, IXP route servers, programmable BGP control planes, lab/test environments |
 | **Maturity** | Public alpha (v0.31.0) |
 | **Supported OS** | Linux (primary target). Requires `CAP_NET_BIND_SERVICE` for port 179. |
-| **Runtime** | Rust 1.92+ (workspace MSRV — Tokio rolling-6-month policy), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
+| **Runtime** | Rust 1.95+ (workspace MSRV — set by the bundled SQLite build), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
 | **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design) and non-teardown mixed edits, RFC 9135 overlay-index IRB local origination, EVPN route types 6-11 / MPLS / PBB / MVPN, VPNv4/v6, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |

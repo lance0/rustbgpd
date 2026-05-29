@@ -67,7 +67,7 @@ rustbgpctl --version
 ### From source
 
 ```sh
-# Prerequisites: Rust ≥ 1.92, protobuf-compiler
+# Prerequisites: Rust ≥ 1.95, protobuf-compiler
 sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
 git clone https://github.com/lance0/rustbgpd
 cd rustbgpd

@@ -2,7 +2,7 @@
 
 ## Development Setup
 
-- Rust 1.92+ (edition 2024 — workspace MSRV tracks Tokio's rolling 6-month-behind-stable policy)
+- Rust 1.95+ (edition 2024 — workspace MSRV; raised to 1.95 because the bundled SQLite build (libsqlite3-sys) uses the `cfg_select!` macro stabilized in Rust 1.95)
 - `protobuf-compiler` (`apt-get install protobuf-compiler` on Debian/Ubuntu)
 - Linux x86_64 or aarch64 (primary targets)
 - macOS works for development but is not CI-tested

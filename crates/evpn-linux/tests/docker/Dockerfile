@@ -28,7 +28,7 @@
 # (it calls unshare(CLONE_NEWNET)); `bridge link set` needs NET_ADMIN.
 # `--cap-add` keeps the surface tighter than `--privileged`.
 
-FROM rust:1.92-bookworm
+FROM rust:1.95-bookworm
 
 # Toolchain bits that the privileged tests shell out to:
 #   - iproute2: `ip netns`, `ip link`, `bridge link`, `bridge fdb`

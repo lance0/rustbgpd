@@ -18,6 +18,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (−110 MB at 900k prefixes × 2 peers in the `memory_profile` test).
   Mirrors the existing `AdjRibOut::prefix_path_ids` layout; no behaviour
   change.
+- **MSRV 1.92 → 1.95** for the workspace. Driven by the embedded SQLite
+  build: `rusqlite` 0.32 → 0.40 pulls `libsqlite3-sys` 0.38, whose build
+  script uses the `cfg_select!` macro stabilized in Rust 1.95. Updated in
+  lockstep: `Cargo.toml` `rust-version`, the CI `msrv` toolchain
+  (`dtolnay/rust-toolchain@1.95`), and the `rust:1.95-bookworm` builder
+  images (`Dockerfile` + the EVPN-Linux test image). The event-history
+  outbox now binds `event_id` as `i64` (rusqlite 0.40 dropped the `u64`
+  `ToSql` impl) via the existing `clamp_event_id` helper; no schema or
+  behaviour change.
 
 ## [0.31.0] — 2026-05-28
 
