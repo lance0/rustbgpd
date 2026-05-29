@@ -161,6 +161,96 @@ async fn full_handshake_reaches_established() {
     handle.shutdown().await.unwrap().unwrap();
 }
 
+/// Regression: an inbound session whose peer does simultaneous-open — its OPEN
+/// (and the following KEEPALIVE) are already sitting in the socket before the
+/// session bootstraps — must still complete the handshake.
+///
+/// Before the `read_active` gate in `Session::run`, the `read_tcp` arm was live
+/// on the first `select!` iteration (an inbound session is constructed with
+/// `read_half` already set), so it could win the race against the queued
+/// `ManualStart`. The buffered OPEN was then consumed in `Idle` (ignored),
+/// `ManualStart` drove the FSM to `OpenSent` + sent our OPEN, and the buffered
+/// KEEPALIVE hit the generic "unexpected event" arm in `OpenSent` → the peer
+/// got an FSM-error NOTIFICATION (code 5) instead of a KEEPALIVE and the session
+/// never established. This is the rustbgpd↔BIRD/bgperf2 hang reproduced in a
+/// unit test. With the gate the OPEN is sent before any read, so the buffered
+/// OPEN is processed in `OpenSent` and the handshake completes.
+#[tokio::test]
+async fn inbound_session_handshakes_when_open_already_buffered() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let metrics = BgpMetrics::new();
+    let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+
+    // Peer connects; rustbgpd accepts the inbound stream.
+    let mut peer_stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (rustbgpd_stream, _) = listener.accept().await.unwrap();
+    let peer_addr = rustbgpd_stream.peer_addr().unwrap();
+
+    // Simultaneous-open: push the peer's OPEN + KEEPALIVE into the socket
+    // BEFORE the session starts, so they are already waiting in rustbgpd's
+    // receive buffer when `run()` first polls — the BIRD pattern.
+    send_bgp_message(&mut peer_stream, &Message::Open(mock_open())).await;
+    send_bgp_message(&mut peer_stream, &Message::Keepalive).await;
+
+    let mut config = transport_config(addr);
+    config.remote_addr = peer_addr;
+    let handle = PeerHandle::spawn_inbound(
+        config,
+        metrics.clone(),
+        rib_tx,
+        None,
+        None,
+        rustbgpd_stream,
+        None,
+        None,
+        None,
+        false,
+    );
+
+    // Deterministically lose the race the buggy path lost: let the session poll
+    // its `select!` once before `ManualStart` is queued. Without the gate the
+    // `read_tcp` arm is live in `Idle`, so the buffered OPEN (+ KEEPALIVE) is
+    // consumed and ignored here and the handshake can never complete. With the
+    // gate, reads stay parked until `ManualStart` leaves `Idle`, so this delay
+    // is harmless and the handshake proceeds normally.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    handle.start().await.unwrap();
+
+    // rustbgpd must send OPEN then KEEPALIVE within a bounded time. A timeout
+    // (stuck in OpenSent, peer OPEN already consumed) or a NOTIFICATION (FSM
+    // error) here is the inbound-bootstrap regression.
+    let read_to = Duration::from_secs(5);
+    let mut buf = BytesMut::with_capacity(4096);
+    let msg = tokio::time::timeout(read_to, read_bgp_message(&mut peer_stream, &mut buf))
+        .await
+        .expect("rustbgpd should send its OPEN");
+    assert!(
+        matches!(msg, Message::Open(_)),
+        "expected OPEN, got {msg:?}"
+    );
+    let msg = tokio::time::timeout(read_to, read_bgp_message(&mut peer_stream, &mut buf))
+        .await
+        .expect(
+            "rustbgpd should send KEEPALIVE (handshake complete); a timeout or \
+             NOTIFICATION here is the inbound-bootstrap race regression",
+        );
+    assert!(
+        matches!(msg, Message::Keepalive),
+        "expected KEEPALIVE, got {msg:?}"
+    );
+
+    // FSM should reach Established.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let families = metrics.registry().gather();
+    let established = families
+        .iter()
+        .find(|f| f.name() == "bgp_session_established_total");
+    assert!(established.is_some(), "session should reach Established");
+
+    handle.shutdown().await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn open_sets_gr_restart_state_during_restart_window() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

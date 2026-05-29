@@ -598,6 +598,29 @@ impl PeerSession {
     )]
     pub(crate) async fn run(&mut self) -> Result<(), TransportError> {
         loop {
+            // Gate the TCP read arm closed while the FSM is still in `Idle`.
+            // An inbound session is constructed with `read_half` already set
+            // (the peer connected to us), so without this guard the `read_tcp`
+            // arm is live on the very first `select!` iteration and can win the
+            // race against the queued `ManualStart` command. If a peer that
+            // does simultaneous-open (e.g. BIRD) has already pushed its OPEN
+            // into the socket, that OPEN would be consumed in `Idle` (ignored),
+            // the bootstrap `ManualStart` would then drive us to `OpenSent`, and
+            // the peer's following KEEPALIVE would hit the generic
+            // "unexpected event" arm → `FsmError`, leaving the session stuck.
+            // `ManualStart` drives the whole inbound bootstrap synchronously in
+            // one `drive_fsm` call: Idle → Connect, and because
+            // `InitiateTcpConnection` sees `read_half` already set it emits a
+            // `TcpConnectionConfirmed` follow-up (instead of dialing out),
+            // taking the FSM to `OpenSent` + `SendOpen`. So once the FSM has
+            // left `Idle` our OPEN has been sent and the buffered peer OPEN is
+            // processed in `OpenSent` — the handshake completes. Outbound
+            // sessions have `read_half = None` until connect completes (and that
+            // same arm immediately drives `TcpConnectionConfirmed`, so the FSM
+            // is past `Idle` before the next read), so this never gates a live
+            // outbound read.
+            let read_active = self.read_half.is_some() && self.fsm.state() != SessionState::Idle;
+
             // Destructure to split borrows for tokio::select!
             let Self {
                 read_half,
@@ -612,8 +635,8 @@ impl PeerSession {
             } = self;
 
             tokio::select! {
-                // TCP read — only when connected
-                result = read_tcp(read_half, &mut read_buf.buf), if read_half.is_some() => {
+                // TCP read — only when connected and past the Idle bootstrap
+                result = read_tcp(read_half, &mut read_buf.buf), if read_active => {
                     match result {
                         Ok(0) => {
                             self.handle_tcp_disconnect();
