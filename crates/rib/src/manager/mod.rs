@@ -147,6 +147,28 @@ pub struct RibManager {
     query_rx: mpsc::Receiver<RibUpdate>,
     /// Large route batches that are being processed in chunks.
     pending_route_batches: VecDeque<PendingRoutesReceived>,
+    /// Best-path changes accumulated across the chunks of the
+    /// currently-draining route batch and distributed in a single
+    /// `distribute_changes` call when the batch is exhausted. Deferring
+    /// only the *distribution* coalesces a multi-chunk initial-load flood
+    /// into one outbound batch per peer instead of one per 1024-route
+    /// chunk. `recompute_best` still runs per chunk, so Loc-RIB, route
+    /// events, and partial-progress Loc-RIB queries stay live mid-batch.
+    ///
+    /// Flush boundary, precisely: the run loop processes new primary-channel
+    /// *updates* (`PeerUp` / `PeerDown`, further `RoutesReceived`, `EoR` —
+    /// anything that mutates the RIB) only once all pending chunks drain (see
+    /// `process_next_route_chunk`), so the accumulator is always fully
+    /// flushed before any mutation observes Adj-RIB-Out, and is empty
+    /// between batches. Priority read-only *queries* DO still interleave
+    /// between chunks (`drain_queries`): a `QueryAdvertised*` reading
+    /// Adj-RIB-Out mid-flood correctly sees pre-flush advertised state —
+    /// those routes have not been advertised yet — even though Loc-RIB has
+    /// advanced. That is an accurate, eventually-consistent intermediate
+    /// view, not stale data: Adj-RIB-Out is "what we have sent", and we have
+    /// not sent the deferred batch yet.
+    pending_distribute_changed: HashSet<Prefix>,
+    pending_distribute_affected: HashSet<Prefix>,
 }
 
 const ROUTES_RECEIVED_CHUNK_SIZE: usize = 1024;
@@ -389,6 +411,8 @@ impl RibManager {
             rx,
             query_rx,
             pending_route_batches: VecDeque::new(),
+            pending_distribute_changed: HashSet::new(),
+            pending_distribute_affected: HashSet::new(),
         }
     }
 
