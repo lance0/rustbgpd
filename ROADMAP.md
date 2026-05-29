@@ -107,6 +107,13 @@ Later for what remains.
   `route_limit_exceeded` rows. Defer unless perf-gated or demanded: incremental
   equal-cost sibling index for wide full-table multipath; platform-diversity
   interop for weighted multipath.
+- **ORF / Outbound Route Filtering (RFC 5291)** *(route-server polish).*
+  Negotiate prefix-ORF (capability code 3) where the peer supports it, so peers
+  can suppress unwanted routes before sending them — reduces inbound churn and
+  aligns with policy-heavy IX route-server deployments. This is the one
+  IX-route-server-relevant control-plane gap vs FRR/GoBGP and the only near-term
+  parity add; it is a discrete feature and does not displace the perf/polish
+  work above.
 
 ### Later
 
@@ -161,6 +168,14 @@ Later for what remains.
   fix the `memory_profile` high-N harness non-scaling; and a fresh bgperf2
   cross-stack comparison on current `main` (BIRD/GoBGP columns are a v0.4.2
   snapshot). Shared route storage was measured and rejected — see Deferred.
+- **AIGP best-path support (RFC 7311).** Standards completeness for deployments
+  that carry accumulated IGP cost in BGP — the one best-path step we don't
+  implement (the chain is otherwise 11/11). Not a headline feature unless
+  operators ask.
+- **Conditional advertisement.** Policy feature for advertise-if-present /
+  advertise-if-absent workflows (FRR and GoBGP have it). Useful and common, but
+  less tied to the current positioning than ORF — defer until operator demand is
+  clearer.
 
 ### Maybe / demand-shaped
 
@@ -172,6 +187,14 @@ Later for what remains.
 - **Confederation (RFC 5065).** Required for service-provider deployments, but
   SPs are not the initial target market. (Unblocks several deferred RFC 9234
   confederation-scope items and the RFC 8326 confederation gating.)
+- **Out-of-niche address families.** L3VPN (VPNv4/v6, RFC 4364), labeled-unicast
+  (RFC 8277), BGP-LS (RFC 7752), SR Policy / SRv6 (RFC 9514), IPv4/v6 multicast,
+  VPLS. This is the dominant AFI-count gap vs FRR / GoBGP (~4 of ~15 families),
+  but it is entirely service-provider / traffic-engineering / full-router scope —
+  outside rustbgpd's fabric / route-server / automation niche. Demand-shaped:
+  pursuing them is a deliberate strategic pivot, not parity-chasing. (Of these,
+  BGP-LS *export* is the closest fit to the API-first / controller story if a
+  controller-integration headline ever materializes.)
 - **Route dampening (RFC 2439).** Suppress flapping routes with penalty/decay.
 - **Scriptable policy engine.** User-defined attribute-transformation functions
   (Lua, Starlark, or WASM) beyond static match/action rules. Policy evaluation
