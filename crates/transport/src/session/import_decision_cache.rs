@@ -112,9 +112,10 @@ pub struct CachedDecision {
     /// Wall-clock time of the evaluation. The cache itself doesn't read
     /// this; it's solely for the explain response.
     pub evaluated_at: SystemTime,
-    /// Policy registry generation at the time of evaluation. The
-    /// lookup path compares this to the current generation to flag
-    /// `Stale` entries.
+    /// The session's import-policy generation at the time of evaluation
+    /// (session-local, bumped only on this peer's import-chain hot-apply —
+    /// not a global policy-registry counter). The lookup path compares this
+    /// to the session's current generation to flag `Stale` entries.
     pub policy_generation: u64,
 }
 

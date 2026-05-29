@@ -630,8 +630,9 @@ message ClearNeighborExportChainResponse {}
 //                cap. The decision is gone; the eviction marker is
 //                the honest answer (rather than NOT_SEEN, which
 //                would lie).
-//   STALE      — a cached decision exists, but the policy registry
-//                generation has advanced since it was recorded.
+//   STALE      — a cached decision exists, but the session's
+//                import-policy generation (session-local, not a global
+//                registry) has advanced since it was recorded.
 //                The cached decision is still returned (operator
 //                value is "here's what was decided then, against
 //                the policy as it was then"), with the caveat that

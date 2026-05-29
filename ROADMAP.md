@@ -241,11 +241,14 @@ doc refresh, not by automation, because no per-PR bench signal exists.
 The Route boxing fix is in tree; the missing infrastructure is what
 would have caught the regression at PR time.
 
-**Prerequisite (out of code scope, on operator list):** a replacement
-self-hosted runner. The previous box was retired; CI bench tracking
-needs `taskset` + `performance`-governor pinning that GitHub-hosted
-runners cannot provide. Until the runner exists, the CI-bench-tracking
-items below are gated.
+**Prerequisite (now mostly met):** the replacement `[self-hosted,
+rustbgpd-bench]` runner is back online (virtualized, 4 vCPU / ~3.8 GiB —
+`taskset` pinning, but no `cpufreq` governor, so `--require-performance` stays
+`false` there; ~11% noise floor calibrated, documented in BENCHMARKS.md). The
+manual `Criterion Bench Compare` workflow runs on it today — it produced the
+`v0.31.0 → main` A/B for the latest BENCHMARKS.md refresh. What remains for the
+CI-bench-tracking items below is the automatic PR-trigger wiring, not the runner
+itself.
 
 #### Active
 
@@ -255,11 +258,11 @@ items below are gated.
   and a paste-ready Markdown delta table. This lets us grade perf PRs
   by hand until the CI runner lands, and becomes the prior art the
   runner workflow will port from.
-- [ ] **CI bench tracking** *(blocked on replacement runner)* —
+- [ ] **CI bench tracking** *(runner online; needs PR-trigger wiring)* —
   manual `Criterion Bench Compare` workflow exists and reuses the
-  local compare script on a `[self-hosted, rustbgpd-bench]` runner.
-  Automatic PR triggering is intentionally still disabled until that
-  runner exists and its noise floor is calibrated. Final shape:
+  local compare script on the `[self-hosted, rustbgpd-bench]` runner,
+  which is back online and calibrated. Automatic PR triggering is the
+  remaining step. Final shape:
   path-scoped PR runs for `crates/{rib,wire,transport}/src/` or
   `bench/`, paste-ready PR comment, raw Criterion artifacts, and
   advisory thresholds before any hard regression gate.
@@ -271,13 +274,51 @@ items below are gated.
   — short criterion variant of the M33 soak shape (announce + withdraw
   cycles over a pre-loaded RIB), so steady-state hot-path regressions
   surface per-PR rather than only at soak time.
-- [ ] **Shared route storage / compact indexing research.** Next
-  bigger structural perf refactor (interning beyond Arc-dedup,
-  columnar layout, prefix-tree). Research PR first; prototype grading
-  needs CI bench tracking to be useful.
+- [x] **Shared route storage / compact indexing research — measured,
+  rejected (2026-05-29).** The realistic policy-robust `RouteData` split
+  (identity shared via `Arc`; attributes + next-hop kept per-copy so per-client
+  export policy still shares identity) clears only ~5–13% of route-reflector
+  heap — well under the ≥25% gate — for the largest `&Route`-consumer blast
+  radius in the codebase. The naive `Arc<Route>` whole-shell share would reach
+  ~31–37% but is unachievable (the per-RIB-mutable stale/validation flags can't
+  be shared). Harness at `crates/rib/tests/route_data_sharing_profile.rs`; see
+  BENCHMARKS.md. The shipped scale/memory wins came from the inlined SmallVec
+  prefix index, FxHash route maps, and coalesced multi-chunk distribution
+  instead.
+- [ ] **Root-cause the `best_path_cmp` ~6% full-tiebreak regression.** The
+  `v0.31.0 → main` criterion A/B showed +6% on the full-ladder `best_path_cmp`
+  paths (the common LOCAL_PREF early-exit is unaffected; corroborated on the
+  self-hosted VPS A/B). ~1 ns/comparison and dwarfed by the −40–62%
+  insert/pipeline wins, but worth a perf/asm capture — likely a codegen / cache
+  shift from the surrounding sprint changes, not the comparison logic itself.
+- [ ] **Fix the `memory_profile` high-N harness non-scaling.** Its 500k/900k
+  cases report near-identical resident (a measurement artifact, not a RIB
+  property — pre-existing; the v0.30-era figures had it too), so only the
+  10k/100k structural numbers are trustworthy today. Fix so full-table RIB
+  memory is reliably measurable again. Perf-infra, orthogonal to RIB changes.
+- [ ] **Fresh bgperf2 cross-stack comparison on current `main`.** The
+  BIRD/GoBGP/rustbgpd table in BENCHMARKS.md is a v0.4.2 snapshot. The
+  rustbgpd-target 2p/100k RSS + convergence were refreshed (full-daemon RSS
+  ~439 MB event-history-on / ~344 MB off; convergence ~11 s), but the BIRD/GoBGP
+  columns were not re-run; re-run the full cross-stack comparison incl. EVPN
+  VTEP / IRB modes.
 
 #### Shipped (this phase)
 
+- [x] **Scale & memory sprint** (v0.31.0→`main`, #306 / #308 / #309) — inlined
+  `SmallVec<[u32; 1]>` Adj-RIB-In prefix index, `FxHash` route maps, and
+  coalesced multi-chunk initial-load distribution. Pinned `v0.31.0 → main`
+  criterion A/B (dual-host): `adj_rib_in_insert` −34…−49%, `rib_pipeline`
+  −49…−62%, `bulk_initial_load` −50…−57%, `route_churn` −59%. (The
+  `best_path_cmp` +6% cold-path regression is carried forward above.)
+- [x] **BENCHMARKS.md v0.31.0→`main` refresh** (#322) — current-`main` criterion
+  medians, re-measured `memory_profile`, and a refreshed bgperf2 2p/100k
+  full-daemon RSS (~439 MB event-history-on / ~344 MB off) with an explicit
+  not-apples-to-apples caveat; secondary-env runner spec updated.
+- [x] **Inbound-session bootstrap-race fix** (#321) — surfaced via bgperf2:
+  rustbgpd↔BIRD simultaneous-open hung on an inbound read-before-`Start` race
+  (FSM-error on the buffered OPEN). Gated the read arm until the FSM leaves
+  `Idle`; added the first inbound-path regression test.
 - [x] **BENCHMARKS.md v0.30.0 refresh + methodology stamp** (`4ad4507`)
   — corrected hardware stamp, documented the ~30% noise floor for
   unpinned runs, refreshed every criterion-tracked table.

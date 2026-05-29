@@ -97,21 +97,33 @@ jobs:
           key: bench-${{ inputs.package }}-${{ inputs.bench }}
 
       - name: Run Criterion comparison
+        # Pass workflow inputs via env rather than interpolating `${{ inputs.* }}`
+        # directly into the script — keeps user-controlled values out of the
+        # shell text (no injection surface even though dispatch is privileged).
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
+          HEAD_REF: ${{ inputs.head_ref }}
+          PACKAGE: ${{ inputs.package }}
+          BENCH: ${{ inputs.bench }}
+          CORE: ${{ inputs.core }}
+          ATTEMPTS: ${{ inputs.attempts }}
+          FILTER: ${{ inputs.filter }}
+          REQUIRE_PERFORMANCE: ${{ inputs.require_performance }}
         run: |
           set -euo pipefail
           args=(
-            --base "${{ inputs.base_ref }}"
-            --head "${{ inputs.head_ref }}"
-            --package "${{ inputs.package }}"
-            --bench "${{ inputs.bench }}"
-            --core "${{ inputs.core }}"
-            --attempts "${{ inputs.attempts }}"
+            --base "$BASE_REF"
+            --head "$HEAD_REF"
+            --package "$PACKAGE"
+            --bench "$BENCH"
+            --core "$CORE"
+            --attempts "$ATTEMPTS"
             --out-dir "target/bench-compare"
           )
-          if [ -n "${{ inputs.filter }}" ]; then
-            args+=(--filter "${{ inputs.filter }}")
+          if [ -n "$FILTER" ]; then
+            args+=(--filter "$FILTER")
           fi
-          if [ "${{ inputs.require_performance }}" = "true" ]; then
+          if [ "$REQUIRE_PERFORMANCE" = "true" ]; then
             args+=(--require-performance)
           fi
           bench/compare-criterion.sh "${args[@]}"
