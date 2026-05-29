@@ -181,6 +181,20 @@ impl ImportDecisionCache {
         }
     }
 
+    /// Drop every cached decision and the recent-eviction ring.
+    ///
+    /// Called on session reset (peer flap / `Action::SessionDown`): the
+    /// cache is **per-session** diagnostic state, so decisions recorded
+    /// on a prior session must not leak into an explain query on the
+    /// reconnected session (ADR-0073 "resets on peer session reset").
+    /// A reconnecting `PeerSession` is not reconstructed, so without this
+    /// a stale decision could answer for any prefix the peer has not yet
+    /// re-advertised.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.recently_evicted.clear();
+    }
+
     /// Insert or replace an entry. On capacity overflow the LRU victim
     /// is recorded in the recent-eviction ring so a subsequent
     /// `lookup` for it returns `Evicted` rather than `NotSeen`.

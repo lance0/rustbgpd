@@ -443,6 +443,15 @@ impl PeerSession {
                     // ::handle_peer_graceful_restart.
                     self.import_policy_routes_permitted = 0;
                     self.import_policy_routes_denied = 0;
+                    // The per-session import-decision cache (ADR-0073) is the
+                    // same kind of per-session state: a decision recorded on
+                    // the dying session must not answer an explain query on the
+                    // reconnected one. Flush it so explain honours the
+                    // "resets on peer session reset" contract rather than
+                    // leaking a stale decision for any prefix the peer hasn't
+                    // re-advertised yet. (import_policy_generation is NOT reset:
+                    // it tracks policy reloads, which outlive a session flap.)
+                    self.import_decision_cache.clear();
                     // Reset framing limit for the next session (RFC 8654 §2:
                     // extended messages are per-session, not persistent).
                     self.read_buf
