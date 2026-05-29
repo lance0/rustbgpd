@@ -725,6 +725,134 @@ mod tests {
         assert_eq!(best_path_cmp(&a, &b), Ordering::Greater);
     }
 
+    // --- direct ASPA / stale-tier ordering + reason-vs-ordering guards ---
+
+    #[test]
+    fn aspa_ordering_valid_unknown_invalid() {
+        // Direct ASPA ladder step: Valid > Unknown > Invalid. Same peer so
+        // only the ASPA state can decide.
+        let mut valid = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        valid.aspa_state = AspaValidation::Valid;
+        let unknown = base_route(Ipv4Addr::new(1, 0, 0, 1)); // Unknown (default)
+        let mut invalid = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        invalid.aspa_state = AspaValidation::Invalid;
+        assert_eq!(best_path_cmp(&valid, &unknown), Ordering::Less);
+        assert_eq!(best_path_cmp(&unknown, &invalid), Ordering::Less);
+        assert_eq!(best_path_cmp(&valid, &invalid), Ordering::Less);
+    }
+
+    #[test]
+    fn stale_tier_fresh_gr_llgr() {
+        // Three-tier stale demotion: fresh > GR-stale > LLGR-stale.
+        let fresh = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        let mut gr = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        gr.is_stale = true;
+        let mut llgr = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        llgr.is_llgr_stale = true;
+        assert_eq!(best_path_cmp(&fresh, &gr), Ordering::Less);
+        assert_eq!(best_path_cmp(&gr, &llgr), Ordering::Less);
+        assert_eq!(best_path_cmp(&fresh, &llgr), Ordering::Less);
+    }
+
+    #[test]
+    fn with_reason_ordering_matches_plain_cmp_at_every_step() {
+        // best_path_cmp_with_reason(..).0 must equal best_path_cmp(..) at
+        // every decisive ladder step, and report the right reason. Guards
+        // against the two (currently hand-maintained) ladders drifting.
+        let p1 = Ipv4Addr::new(1, 0, 0, 1);
+        let p2 = Ipv4Addr::new(1, 0, 0, 2);
+
+        let mut stale_a = base_route(p1);
+        stale_a.is_stale = true;
+        let mut rpki_a = base_route(p1);
+        rpki_a.validation_state = RpkiValidation::Invalid;
+        let mut aspa_a = base_route(p1);
+        aspa_a.aspa_state = AspaValidation::Invalid;
+        let mut ebgp_b = base_route(p2);
+        ebgp_b.origin_type = RouteOrigin::Ibgp;
+
+        // One decisive pair per ladder step.
+        let cases: Vec<(&str, Route, Route, BestPathReason)> = vec![
+            (
+                "stale",
+                stale_a,
+                base_route(p2),
+                BestPathReason::StalePreference,
+            ),
+            (
+                "rpki",
+                rpki_a,
+                base_route(p2),
+                BestPathReason::RpkiPreference,
+            ),
+            (
+                "aspa",
+                aspa_a,
+                base_route(p2),
+                BestPathReason::AspaPreference,
+            ),
+            (
+                "local_pref",
+                with_local_pref(base_route(p1), 50),
+                with_local_pref(base_route(p2), 200),
+                BestPathReason::HigherLocalPref,
+            ),
+            (
+                "as_path",
+                with_as_path(base_route(p1), vec![65001, 65002]),
+                with_as_path(base_route(p2), vec![65001]),
+                BestPathReason::ShorterAsPath,
+            ),
+            (
+                "origin",
+                with_origin(base_route(p1), Origin::Egp),
+                with_origin(base_route(p2), Origin::Igp),
+                BestPathReason::LowerOrigin,
+            ),
+            (
+                "med",
+                with_med(base_route(p1), 100),
+                with_med(base_route(p2), 50),
+                BestPathReason::LowerMed,
+            ),
+            ("ebgp", base_route(p1), ebgp_b, BestPathReason::EbgpOverIbgp),
+            (
+                "cluster",
+                with_cluster_list(
+                    base_route(p1),
+                    vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)],
+                ),
+                with_cluster_list(base_route(p2), vec![Ipv4Addr::new(10, 0, 0, 1)]),
+                BestPathReason::ShorterClusterList,
+            ),
+            (
+                "originator",
+                with_originator_id(base_route(p1), Ipv4Addr::new(10, 0, 0, 9)),
+                with_originator_id(base_route(p2), Ipv4Addr::new(10, 0, 0, 1)),
+                BestPathReason::LowerOriginatorId,
+            ),
+            (
+                "peer",
+                base_route(p1),
+                base_route(p2),
+                BestPathReason::LowerPeerAddress,
+            ),
+        ];
+
+        for (label, a, b, expected) in cases {
+            let (ord, reason) = best_path_cmp_with_reason(&a, &b);
+            assert_eq!(ord, best_path_cmp(&a, &b), "ordering drift at step {label}");
+            assert_eq!(reason, expected, "wrong decisive reason at step {label}");
+            let (rev, rev_reason) = best_path_cmp_with_reason(&b, &a);
+            assert_eq!(
+                rev,
+                best_path_cmp(&b, &a),
+                "reverse ordering drift at step {label}"
+            );
+            assert_eq!(rev_reason, expected, "reverse reason drift at step {label}");
+        }
+    }
+
     // --- ADR-0068 link_bandwidth_weights ---
 
     #[test]
