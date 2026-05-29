@@ -1,7 +1,22 @@
 # ADR-0072: Durable Event History (Local Outbox)
 
-**Status:** Accepted
+**Status:** Accepted — implementation shipped v0.24.0+; **default posture
+changed in v0.32.0** (see note below).
 **Date:** 2026-05-26
+
+> **v0.32.0 update — default flipped to off (opt-in).** The outbox shipped
+> *default-on*. v0.32.0 bgperf2 benchmarking then showed the always-on cost was
+> material — ~62 MB RSS and roughly double the peak CPU at 2p/100k — i.e. every
+> operator paid a visible memory/CPU tax before asking for replay semantics. For
+> a routing daemon the safer default is routing fast and lean by default, with
+> durable replay enabled explicitly. So `[event_history].enabled` now defaults
+> to `false`; operators who want restart-safe event replay set it `true`. **This
+> is a default-posture change, not a design reversal** — the design and
+> implementation below are unchanged, and it weakens the "operational recovery
+> for free" framing only in that recovery is now an explicit opt-in rather than
+> on by default. It is the right response to the measured cost. See
+> `docs/BENCHMARKS.md` for the numbers and `docs/OPERATIONS.md` for the two
+> deployment profiles (lean default vs. observability/replay).
 
 ## Context
 
@@ -458,8 +473,9 @@ absent.
 
 ### Retention — small, hard-capped, two dimensions
 
-Defaults are **deliberately small** so default-on keeps local
-retention pressure bounded:
+Defaults are **deliberately small** so that when an operator enables
+the outbox it keeps local retention pressure bounded (the outbox is
+opt-in / default-off as of v0.32.0 — see *Status*):
 
 - `max_events = 100_000` — hard count cap.
 - `max_bytes = 256_000_000` (~256 MB) — byte retention trigger
@@ -496,7 +512,7 @@ ADR if disk size becomes a real problem.
 
 ```toml
 [event_history]
-enabled = true                  # default-on; opt-out for minimal deployments
+enabled = false                 # default-off (opt-in since v0.32.0); set true for durable replay
 required = false                # if true, daemon fails to start when DB unavailable
 path = ""                       # relative to runtime_state_dir; "" = events.db
 max_events = 100_000            # count retention bound
@@ -516,7 +532,7 @@ the outbox is deferred to a future ADR.
 **DB-open failure** at startup (permission denied, disk full,
 corrupted file, schema downgrade fence) splits by `required`:
 
-- `enabled = true, required = false` (default): log a prominent
+- `enabled = true, required = false`: log a prominent
   `error!`, increment `bgp_event_outbox_open_failures_total`, set
   the `bgp_event_outbox_degraded` health flag, **continue** in pass-
   through mode (broadcasts work, no persistence, cursor RPCs
@@ -524,9 +540,9 @@ corrupted file, schema downgrade fence) splits by `required`:
 - `enabled = true, required = true`: daemon fails to start with
   a structured error. For operators who would rather see refusal-
   to-start than lose audit visibility.
-- `enabled = false`: outbox path never opened; EHM still spawned,
-  but in pass-through mode (broadcasts only). Minimal-deployment
-  escape hatch.
+- `enabled = false` (**default since v0.32.0**): outbox path never
+  opened; EHM still spawned, but in pass-through mode (broadcasts
+  only). The lean default — durable replay is opt-in.
 
 **Corrupted DB on load**: same quarantine pattern as
 `fib-owned.json` (`stale_owned_state_path` at
@@ -809,12 +825,12 @@ reference bridge at `examples/event-bridge/`:
 
 ### Negative
 
-- New on-disk file (`events.db` + WAL) under `runtime_state_dir`.
-  Default-on means existing deployments will see disk usage they
-  did not see before. v1 has a hard event-count cap and a byte
-  retention target, but SQLite may reuse freed pages rather than
-  shrink the main DB file immediately; `enabled = false` is the
-  escape hatch for zero-footprint deployments.
+- New on-disk file (`events.db` + WAL) under `runtime_state_dir`,
+  **only when an operator opts in** (`enabled = true`). As of v0.32.0
+  the outbox is default-off, so the common deployment has zero on-disk
+  footprint. v1 has a hard event-count cap and a byte retention target,
+  but SQLite may reuse freed pages rather than shrink the main DB file
+  immediately.
 - New crate (`rustbgpd-event-history`) and a small dependency
   footprint addition: `rusqlite` (bundled libsqlite) plus `uuid`.
   rusqlite-bundled adds ~5 MB to the release binary.

@@ -332,7 +332,8 @@ impl GnmiService {
             let _ = tx
                 .send(Err(Status::failed_precondition(
                     "gNMI Subscribe ON_CHANGE requires the durable event outbox; \
-                     enable [event_history] and restart the daemon",
+                     set [event_history].enabled = true and restart the daemon \
+                     (off by default since v0.32.0)",
                 )))
                 .await;
             return;

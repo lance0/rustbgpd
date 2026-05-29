@@ -616,9 +616,10 @@ impl proto::event_service_server::EventService for EventService {
         let req = request.into_inner();
         let handle = self.event_history.as_ref().ok_or_else(|| {
             Status::failed_precondition(
-                "event history disabled or unavailable; \
-                 see [event_history] config and \
-                 the bgp_event_outbox_degraded gauge",
+                "durable event history is disabled; \
+                 set [event_history].enabled = true and restart the daemon \
+                 for restart-safe cursor replay (off by default since v0.32.0). \
+                 If enabled, check the bgp_event_outbox_degraded gauge",
             )
         })?;
         let stream = cursor::subscribe(handle, &req, self.metrics.clone())?;

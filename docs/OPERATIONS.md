@@ -306,6 +306,28 @@ exposes a monotonic `event_id` cursor. The legacy live surfaces above
 (`WatchEvents` / `WatchRoutes` / `List*Events`) keep their existing
 ring-backed behavior and are unaffected by this section.
 
+**Opt-in — default off as of v0.32.0.** The outbox is disabled by default
+(v0.32.0 benchmarking measured ~62 MB RSS plus roughly double the peak CPU at
+2p/100k — too much to impose on operators who never consume the cursor). Enable
+it explicitly and restart:
+
+```toml
+[event_history]
+enabled = true
+max_bytes = 256_000_000   # size retention to your collector's reconnect SLA
+```
+
+**Two deployment profiles:**
+
+- **Lean / high-scale (the default):** `[event_history].enabled = false`.
+  Routing fast and lean; `SubscribeFromEvent` and gNMI `Subscribe ON_CHANGE`
+  return `FAILED_PRECONDITION`, but the live `WatchEvents` / `WatchRoutes` /
+  `List*Events` surfaces still provide real-time observability.
+- **Observability / replay:** `[event_history].enabled = true` with
+  `max_events` / `max_bytes` sized for your collector's worst-case reconnect
+  window. Gives restart-safe `event_id` cursor replay; budget the ~62 MB RSS +
+  CPU shown in `docs/BENCHMARKS.md`.
+
 Producer set: `route`, `evpn`, `session` (lifecycle + notification),
 `policy` (config-mutation `POLICY_CHANGED` events **plus**
 transport-layer `OTC_ROUTE_BLOCKED` route-leak decisions — both
