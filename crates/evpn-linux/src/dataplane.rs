@@ -15,7 +15,7 @@
 //!
 //! ## Native `async fn` in trait
 //!
-//! Workspace MSRV is Rust 1.92, so `async fn` in trait is stable. The
+//! Workspace MSRV is Rust 1.95, so `async fn` in trait is stable. The
 //! actor is generic over `D: Dataplane`, so we don't need
 //! `dyn Dataplane` and don't need the `async-trait` macro. Trait
 //! methods return RPITIT (`-> impl Future + Send`) implicitly via the

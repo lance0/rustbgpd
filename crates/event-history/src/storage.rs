@@ -638,9 +638,14 @@ fn append_batch_blocking(
         for env in &envelopes {
             let id = allocator.next()?;
             assigned_ids.push(id);
+            // SQLite INTEGER is signed 64-bit; bind the event_id as i64 because
+            // rusqlite 0.40 dropped the `u64` `ToSql` impl. `clamp_event_id` is a
+            // no-op for any real allocated id — it only caps the u64::MAX query
+            // sentinel — and is the same conversion the read/query paths use.
+            let id_sql = clamp_event_id(id);
 
             insert_event.execute(params![
-                id,
+                id_sql,
                 env.timestamp_ns,
                 env.category.as_str(),
                 &env.event_type,
@@ -659,13 +664,13 @@ fn append_batch_blocking(
             ])?;
 
             if let Some(p) = &env.peers.peer {
-                insert_peer.execute(params![id, "peer", p.to_string()])?;
+                insert_peer.execute(params![id_sql, "peer", p.to_string()])?;
             }
             if let Some(p) = &env.peers.previous_peer {
-                insert_peer.execute(params![id, "previous_peer", p.to_string()])?;
+                insert_peer.execute(params![id_sql, "previous_peer", p.to_string()])?;
             }
             if let Some(p) = &env.peers.target_peer {
-                insert_peer.execute(params![id, "target_peer", p.to_string()])?;
+                insert_peer.execute(params![id_sql, "target_peer", p.to_string()])?;
             }
         }
     }

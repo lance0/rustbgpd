@@ -23,7 +23,7 @@ resolver = "2"
 [workspace.package]
 version = "0.31.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/lance0/rustbgpd"
 keywords = ["bgp", "networking", "routing", "grpc"]
@@ -88,7 +88,7 @@ tempfile = "3"
 # Bundled libsqlite avoids per-distro packaging variance — the outbox
 # is a daemon-local file, not something operators expect to inspect
 # with a system sqlite3 CLI.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 # Daemon boot ID stamping for restart detection (ADR-0072).
 uuid = { version = "1", features = ["v4"] }
 

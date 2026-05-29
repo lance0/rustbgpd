@@ -23,7 +23,7 @@
 # kernel-dataplane.yml. If you hit a parse error on the cache mounts,
 # either upgrade Docker or set `DOCKER_BUILDKIT=1` explicitly.
 
-FROM rust:1.92-bookworm AS chef
+FROM rust:1.95-bookworm AS chef
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
     mold \
