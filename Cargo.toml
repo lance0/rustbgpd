@@ -79,7 +79,7 @@ owo-colors = { version = "4", features = ["supports-colors"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 smallvec = "1"
 rustc-hash = "2"
-lru = "0.16"
+lru = "0.18"
 tikv-jemallocator = { version = "0.7", features = ["profiling"] }
 dhat = "0.3"
 rcgen = "0.14"
