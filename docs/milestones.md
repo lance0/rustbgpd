@@ -761,3 +761,411 @@ runners can't sustain:
 | **M50** | ADR-0066 unicast multipath/ECMP FIB install. Two FRR peers in the same AS each originate the same prefix; rustbgpd with `[[fib_tables]] maximum_paths=2` installs a kernel `RTA_MULTIPATH` route with both gateways, collapses to the survivor when one path withdraws, and restores the two-way ECMP when it returns. | `kernel-dataplane` CI (GitHub-hosted). Script: `test-m50-fib-ecmp-frr.sh`. |
 | **M51** | ADR-0067 single-hop async BFD + RFC 5882 coupling against FRR `bfdd`. Validates BGP Established + BFD Up from both sides (`GetBfdSessions` + `show bfd peers`), then kills `bfdd` and asserts the coupling tears BGP down faster than the 90 s hold timer, and that BFD + BGP recover once `watchfrr` restarts `bfdd`. | `kernel-dataplane` CI (GitHub-hosted). Script: `test-m51-bfd-frr.sh`. |
 | **M52** | ADR-0066 multipath-relax. Two FRR peers in different ASes (65002 / 65003) originate the same prefix with equal `AS_PATH` length; rustbgpd with `[global] multipath_relax=true` + `maximum_paths=2` co-installs them as a kernel ECMP route (exact-`AS_PATH` grouping would not), collapses to the survivor on withdraw, and restores ECMP on re-advertise. | `kernel-dataplane` CI (GitHub-hosted). Script: `test-m52-fib-ecmp-relax-frr.sh`. |
+
+---
+
+## Post-v0.1 feature history
+
+Build-order and implementation detail for features that shipped after the
+initial v0.1.0 milestone set above. This is the historical worklog relocated
+out of `ROADMAP.md` so the roadmap stays forward-looking. For the current
+capability state see [ROADMAP.md](../ROADMAP.md); for per-release deltas see
+[CHANGELOG.md](../CHANGELOG.md). Development-phase labels have been translated
+to the plain capability they delivered.
+
+### Config reload and runtime mutation
+
+- **SIGHUP policy/peer-group reconciliation** (v0.12.0) — `reload_config`
+  applies named-policy / neighbor-set / peer-group / global-chain edits, not
+  just `[[neighbors]]` deltas. Each delta routes through the same
+  `apply_policy_change` / `apply_peer_group_change` paths the gRPC API uses,
+  so runtime effect matches the API. Order: definitions/sets/peer-groups/chains
+  add+change first, then `[[neighbors]]` reconcile, then deletes in
+  reverse-dependency order. Inline `policy.import` / `policy.export` still
+  require restart (no runtime swap surface); `--diff` flags this under
+  Restart-required.
+- **Effective neighbor diff via peer-group resolution** (v0.12.0) —
+  `rustbgpd --diff` surfaces per-neighbor "effective impact" via
+  `effective_neighbor_impact` / `ConfigDiff::effective_neighbor_impact`, so a
+  single peer-group / policy / neighbor-set edit shows every neighbor whose
+  resolved chain would move at reload, not just the raw upstream change.
+- **Auto-retry pending soft-resets and policy hot-applies across SIGHUP
+  boundaries.** `update_runtime_policies` is bail-and-retry across every
+  downstream step: `ManagedPeer.pending_refresh` covers unfired Route Refresh
+  intent; `ManagedPeer.pending_export_apply` covers unfired session-side export
+  updates with the same bail-and-carry semantics; advancing
+  `managed.import_policy` / `managed.export_policy` is deferred until the
+  session ACKs, and bails before the RIB update + Route Refresh when any
+  session-side hot-apply fails. Cross-side carry re-arms both pending flags so
+  the retry pipeline picks up every unfired step; the RIB-failure path also
+  re-arms `pending_refresh`. Closes the silent-stale-routes class across
+  import / export / RIB / refresh failure modes.
+- **Dead-letter pending flags on dynamic-peer auto-removal** (v0.13.2) —
+  `PeerManager` carries a per-IP `dead_lettered_pending` side table (bounded at
+  `dynamic_neighbor_limit`) that snapshots `pending_refresh` /
+  `pending_export_apply` before `BackToIdle`'s `peers.remove(...)` and restores
+  them when `handle_inbound` recreates a dynamic `ManagedPeer` at the same
+  address. Closes the silent-loss case for transient TCP drops on
+  `[[dynamic_neighbors]]` peers carrying unfired hot-apply intent.
+- **Post-reload sync resilience** (v0.13.2) — `apply_reload_outcome` lifts the
+  post-reload sync and reorders it: peer manager first (unbounded, can only
+  fail on receiver-drop), config bridge second. Failure surfaces as a named
+  stage (`peer_mgr_snapshot` / `config_bridge`). Same release fixed the gRPC
+  `ConfigEvent` → persister bridge holding a stale `current_config` across
+  SIGHUP (which would overwrite the persisted file with the pre-reload snapshot
+  plus one mutation); replacement now routes through the bridge so the bridge's
+  snapshot and the persister advance in lockstep.
+- **Reload on its own task** (v0.13.2) — `reload_config` runs on a dedicated
+  tokio task tracked as `Option<JoinHandle<...>>`. The main `select!` polls the
+  completion handle via the standard arm-gating pattern, so SIGINT / SIGTERM /
+  gRPC shutdown observation is no longer blocked by an in-flight reload.
+  Concurrent reloads are rejected with a warning; coordinated shutdown aborts
+  any in-flight reload before tearing down the peer manager.
+- **Native gRPC mTLS** (v0.11.0) — TCP listeners terminate TLS in-process via
+  tonic + rustls/ring. `tls_cert_file`, `tls_key_file`, and `tls_client_ca_file`
+  are required together on `[global.telemetry.grpc_tcp]`; partial config is
+  rejected at `Config::load`, and the three PEM files are read at config-load /
+  `--check` time so missing, unreadable, empty, non-PEM, or wrong-kind material
+  fails before the daemon starts. No "TLS-without-mTLS" half-mode — server
+  identity + client-cert verification land together. UDS listeners are
+  unchanged (filesystem permissions remain their auth surface).
+
+### CLI surface
+
+- **`rustbgpctl` policy / peer-group / neighbor-set commands** (#61) — three
+  subcommand trees wrap `PolicyService` (18 RPCs) and `PeerGroupService`
+  (6 RPCs): read (`policy list/get`, `peer-group list/get`,
+  `neighbor-set list/get`); write (`policy set/delete`, `peer-group set/delete`,
+  `neighbor-set set/delete`, `set` accepting `--from-file PATH` whose shape
+  mirrors the proto message, with `serde(deny_unknown_fields)` rejecting typos
+  at parse time); chain management (`policy chain
+  show|set-import|set-export|clear-import|clear-export [--neighbor ADDR]`);
+  peer-group binding (`peer-group attach ADDR --group NAME` / `detach ADDR`).
+  29 mock-server / clap-parse tests pin the dispatch path. `--explain-peer`
+  on `rib --explain` (Add-Path send view) shipped alongside. Daemon-side
+  `rustbgpd --diff` reports reload-applied policy / peer-group /
+  effective-neighbor impact, restart-required startup-only surfaces, and
+  hot-applied global honor flags. A live `rustbgpctl policy diff
+  <candidate.toml>` against an API-exported runtime snapshot remains a larger
+  config-snapshot design task if operators need it.
+
+### Graceful Shutdown and BLACKHOLE
+
+- **BGP Graceful Shutdown (RFC 8326)** (v0.13.3, ADR-0053, M35) — well-known
+  `GRACEFUL_SHUTDOWN` community (`65535:0`) end-to-end. Wire constant in
+  `crates/wire`; policy engine accepts `"GRACEFUL_SHUTDOWN"` as a community
+  alias on match and set sides. Receiver behavior: opt-in
+  `[global] honor_graceful_shutdown = true` appends an implicit chain-tail rule
+  (`match GRACEFUL_SHUTDOWN → set local_pref = 0`) to every EBGP peer's import
+  chain — chain tail (not head) so the demotion wins last-writer accumulation
+  against any operator policy that also sets `LOCAL_PREF`; iBGP exempt.
+  Initiator behavior: gRPC `NeighborService.SetGracefulShutdown { address,
+  enabled }` (empty address = all peers) + `rustbgpctl gshut [--peer X]
+  [--clear]`, stored on `ManagedPeer`, mirrored to the live session, replayed on
+  session restart, and triggering `RibUpdate::RefreshPeerOutbound` so wire state
+  updates immediately. M35 validates both legs plus the clear leg against FRR
+  10.3.1. Follow-ups that subsequently shipped: dynamic-peer GShut replay via
+  the per-peer dead-letter side table (v0.13.4); honor-knob SIGHUP hot-reload
+  with per-peer effective-chain recompute (v0.13.4); FlowSpec + EVPN
+  initiator-leg coverage (M35b injects FlowSpec, M35c injects an EVPN Type 2
+  route, both toggling GShut without route churn). Confederation gating of the
+  EBGP gate inside `effective_policy_chains_for_neighbor` remains a follow-up
+  (the current `remote_asn != self.global.asn` gate is correct for the
+  traditional EBGP/iBGP topology rustbgpd supports today and becomes load-bearing
+  only when confederations land — tracked in `KNOWN_ISSUES.md`).
+- **RFC 7999 BLACKHOLE receiver + opt-in FIB discard** (v0.21.0) — natural
+  sibling to RFC 8326. Well-known `BLACKHOLE` community (`65535:666`) signals
+  "drop traffic to this prefix" for DDoS mitigation; receiver behavior is
+  data-plane (install a discard/null route) rather than control-plane (de-pref).
+  Wire constant `COMMUNITY_BLACKHOLE` plus RFC 1997 well-known constants for
+  `NO_EXPORT` / `NO_ADVERTISE` / `NO_EXPORT_SUBCONFED`; policy alias on every
+  community-match/set site; CLI renders all of these plus `GRACEFUL_SHUTDOWN`,
+  `LLGR_STALE`, and `NO_LLGR`. Opt-in `[global] honor_blackhole = true` appends
+  an EBGP import chain-tail rule (`match BLACKHOLE → permit, add BLACKHOLE +
+  NO_ADVERTISE`) and hot-applies on SIGHUP. `[global] install_blackhole_discard
+  = true` (paired with `honor_blackhole`) starts a Linux kernel-discard
+  reconciler: installs daemon-owned `RTN_BLACKHOLE` routes for EBGP-learned
+  BLACKHOLE best routes, defaults to host routes only (`/32` and `/128`),
+  refuses to overwrite pre-existing kernel routes, cleans up on withdraw /
+  shutdown, and surfaces status through `rustbgpctl rib blackholes` + Prometheus
+  counters. M41 is CI-gated against FRR 10.3.1. Remaining BLACKHOLE work:
+  per-peer / peer-group allow-lists, active-blackhole / rate limits, startup
+  adoption or explicit stale-cleanup policy, audit trails, and an outbound
+  advertise surface (gRPC `SetBlackhole { peer, prefix, enabled }` or
+  per-prefix import-filter `set_community_add = ["BLACKHOLE"]`).
+
+### Unicast FIB integration
+
+- **Opt-in unicast Linux FIB integration** (v0.21.0, ADR-0061, M42) —
+  configured `[[fib_tables]]` blocks start a default-off reconciler that
+  projects unicast Loc-RIB best routes into explicit non-reserved Linux route
+  tables. Pure intent/diff model plus a runtime actor; conservative ownership
+  (`RTPROT_BGP` is not ownership proof, so pre-existing and externally-drifted
+  rows are preserved and reported as `foreign_route_exists`); status via
+  `RibService.ListFibRoutes`, `rustbgpctl rib fib`, and Prometheus `bgp_fib_*`
+  counters; privileged netns harness plus the M42 FRR containerlab smoke.
+  Follow-up hardening added per-peer / peer-group allow-lists, route-count caps,
+  and exact-match crash-restart recovery through persisted owned-state under
+  `runtime_state_dir`.
+
+### Dependency / audit hygiene
+
+- **`cargo audit` findings resolution** (v0.13.1 / v0.13.2 / v0.14.0) —
+  RUSTSEC-2024-0437 (protobuf 2.28.0 uncontrolled recursion, transitive via
+  `prometheus 0.13.4`) cleared in v0.13.1 by bumping `prometheus 0.13 → 0.14`
+  (protobuf 3.x; migrated four test/internal files to the proto-3 field/method
+  API split); stale ignore entry dropped in v0.13.2. RUSTSEC-2026-0097
+  (`rand` unsound with a custom logger, transitive via the ratatui-termwiz CLI
+  `top` dependency) accepted as unreachable in v0.13.2 — the workspace installs
+  no custom rand logger. RUSTSEC-2024-0436 (`paste` 1.0.15 unmaintained,
+  transitive via `netlink-packet-utils → rtnetlink`) accepted in v0.14.0 as
+  informational (pure proc-macro, no runtime behavior); revisit when upstream
+  swaps `paste` for `pastey`. v0.14.0 also granted `checks: write` to the audit
+  workflow so the rustsec/audit-check action can post findings via the GitHub
+  Checks API.
+
+### EVPN VXLAN VTEP / IRB dataplane
+
+- **EVPN Route Reflector — Phase 1** (v0.9.0, RFC 7432, ADR-0050, M29–M33) —
+  L2VPN/EVPN (AFI 25 / SAFI 70) RR role for VXLAN-EVPN DC fabrics. All five
+  RFC 7432 route types (EAD per-ES, EAD per-EVI, MAC/IP, IMET, Ethernet Segment,
+  IP Prefix per RFC 9136), MAC mobility best-path per §15.1 with sticky-flag
+  preservation, RFC 4456 reflection applied to EVPN routes, six typed
+  extended-community accessors (BGP Encapsulation for VXLAN per RFC 8365/9012,
+  MAC Mobility, ESI Label, ES-Import RT, Router MAC per RFC 9135, Default
+  Gateway). `ListEvpnRoutes` gRPC RPC + `rustbgpctl evpn` CLI. Includes review
+  correctness fixes: source-peer split horizon, same-peer attribute-change
+  detection, full RFC 4456 tie-break chain, max-prefix counting EVPN keys +
+  FlowSpec rules, EVPN withdrawals propagated through both AS_PATH and
+  CLUSTER_LIST loop branches, EVPN initial dump for late-joining peers, EVPN ERR
+  refresh tracking, Type 5 prefix in policy context. See the M29–M33 section
+  above for the build order and `docs/evpn-enablement.md` for the gate ladder.
+- **EVPN VXLAN VTEP dataplane — Linux FDB reconciler** (v0.14.0, ADR-0054, M36)
+  — new workspace crate `crates/evpn-linux` ships the level-triggered
+  `ReconcileActor<D: Dataplane>` and the pure `compute_diff` function with
+  structural foreign-entry preservation (delete pass iterates `OwnedSet`, never
+  the kernel snapshot), per-op exponential backoff (100 ms → 5 s with
+  deterministic ±25% jitter), per-op-fingerprint permanent-failure suppression,
+  and a `tokio::sync::watch<Arc<DataplaneIntent>>` input from the daemon.
+  `crates/evpn` gains `DataplaneIntent` / `RemoteMacTable` / `LocalMacObservation`
+  plus a pure `project_evpn_routes` from RIB best-paths. The daemon polls the
+  RIB's `QueryEvpnRoutes` channel every 5 s and only bumps the intent generation
+  on semantic change; empty `[[evpn_instances]]` short-circuits the spawn so
+  RR-only deployments incur zero dataplane cost. `LinuxDataplane` programs FDB
+  via a single `RTM_NEWNEIGH` with combined `NTF_SELF | NTF_MASTER |
+  NTF_EXT_LEARNED` and `ndm_state = NUD_NOARP | NUD_PERMANENT`; the dump path
+  merges the kernel's `NTF_SELF` (carries `dst`) and `NTF_MASTER` (no `dst`)
+  rows for the same `(VNI, MAC)` so `dst` survives; the errno-based classifier
+  maps `EPERM`/`EACCES`, `EOPNOTSUPP`, and `EINVAL` to permanent-class errors.
+  M36 real-VTEP containerlab smoke passes 8/8 against Linux 6.17 + FRR 10.3.1.
+- **EVPN local MAC origination — Type-2 + Type-3 IMET** (v0.15.0, ADR-0055, M37)
+  — closes the upward EVPN flow. `crates/evpn/src/origination.rs` ships the
+  deterministic `LocalMacOriginator` state machine encoding RFC 7432 §15.1
+  sequence rules (17 in-module tests including a monotonicity invariant).
+  `crates/wire/src/pmsi.rs` adds the PMSI Tunnel path attribute (RFC 6514 §5,
+  type 22) with a typed `PmsiTunnelType` encoding the label as the raw 24-bit
+  VNI per RFC 8365 §5.1.3. `src/evpn_originator.rs` mirrors the dataplane actor
+  on the upward flow; `src/evpn_imet.rs` originates one Type 3 IMET per
+  `EvpnInstance` at startup and withdraws at shutdown. The upward channel in
+  `crates/evpn-linux` subscribes to `RTNLGRP_NEIGH`, drains the unsolicited
+  multicast stream, and classifies via a pure `classify_neigh` (drops
+  `NTF_EXT_LEARNED` echoes and VXLAN-port ifindexes, resolves bridge-port → VNI).
+  Coordinated shutdown drains originator → IMET withdraws → reconciler. M37
+  containerlab smoke validates rustbgpd as a Type 2 + Type 3 originator against
+  an FRR consumer.
+- **EVPN VTEP convergence + MAC+IP** (v0.17.0) — MAC-with-IP Type 2 origination
+  under ARP/ND suppression (`AF_INET` / `AF_INET6` classifier,
+  `LocalMacIpOriginator`, FRR-style replace model per RFC 9135 §7.2.3; operator
+  prerequisite `bridge neigh_suppress on`); push-notified RIB broadcasts for
+  sub-second mobility convergence (EVPN-keyed `EvpnRouteEvent`, with the 5 s poll
+  retained as `Lagged` / cold-start backstop); `advertise_svi_mac` originating
+  the bridge's own MAC on Ready; `sticky_macs` config carrying the RFC 7432
+  §15.4 sticky bit on origination (ADR-0056); and the RFC 7432 §15.1
+  duplicate-MAC detector with detect-only default plus opt-in `suppress_local`
+  quarantine, remote-route processing suppression, receive-side intent
+  filtering, and a manual `ClearDuplicateMacQuarantine` API.
+- **EVPN runtime mutation** (ADR-0063, #210) — the daemon actor converger
+  commits single L2VNI add/delete/redefine, single IP-VRF
+  add/standalone-delete/redefine with unchanged L3VNI/device/table identity,
+  single Ethernet Segment add/delete/redefine (including ES add/redefine over a
+  member VNI added by an earlier live L2VNI add), atomic tenant teardown
+  (M47/M48), and `ip_vrf` relink. Restart-required edits: L3VNI/device/table
+  IP-VRF identity changes (a kernel VRF lifecycle operation, restart-required by
+  design) and non-teardown mixed edits (an add combined with a delete/redefine —
+  fail closed with a "split the request" error, pending a generalized
+  converge-to-candidate follow-up).
+- **EVPN multi-homing — ESI, Type-1/Type-4** (v0.17.0, ADR-0057, M38/M46/M49) —
+  observable DF election + Type 1/4 origination. Pure DF election state machine
+  (RFC 7432 §8.5 service carving + RFC 8584 §3.2 Highest Random Weight + RFC 9785
+  Highest-/Lowest-Preference, with fallback to default when candidates disagree),
+  three Type 1/4 originator state machines (Type 4 ES, Type 1 EAD-per-ES with
+  MAX_ET, Type 1 EAD-per-EVI), daemon orchestrator subscribed to the EVPN
+  best-path broadcast, Prometheus `evpn_df_role{esi,vni,role}` gauge +
+  `evpn_df_role_changes_total` counter, and an ADR-0063 runtime owner/control
+  surface keeping complete desired-ES snapshots under the segment actor. M38
+  covers default modulo, M46 covers HRW, M49 covers RFC 9785 Highest-Preference.
+  Auto-derived ES-Import RT extcomm on Type 4 ES routes and ESI Label extcomm on
+  Type 1 EAD-per-ES routes; `[[ethernet_segments]].redundancy_mode` sets the ESI
+  Label `single_active` flag (`all-active` default), and the receiver suppresses
+  all-active aliasing ECMP for remote single-active ES reachability. RFC 9785
+  local Don't-Preempt origination shipped (`df_dont_preempt`; the DP bit is
+  origination + parse only). Stateful non-revertive election + single-active
+  backup-path pre-install remain deferred.
+- **EVPN BUM-flood suppression + DF election enforcement** (v0.17.0
+  onward) — DF-election role state feeds the Linux dataplane supervisor as a
+  portable `(ESI, VNI)` BUM-enforcement table; the reconciler resolves bridge,
+  VXLAN ifindex, and CE-facing port identity and reports `allow` for DF /
+  `suppress` for Non-DF through `DataplaneReport.bum_enforcement`. The
+  enforcement primitive flips `flood off / mcast_flood off / bcast_flood off` on
+  the kernel bridge port — validated end-to-end by `evpn_bum_filter_kernel` in
+  CI under a Docker harness with `CAP_NET_ADMIN + CAP_SYS_ADMIN`. RFC 7432 §14
+  aliasing receive-side projection (`crates/evpn/src/aliasing.rs`) and §8.4
+  receive-side EAD-per-ES mass-withdraw filtering
+  (`crates/evpn/src/mass_withdraw.rs`) landed alongside. BUM-port enforcement and
+  aliasing ECMP became production defaults (`apply_bum_enforcement` /
+  `apply_aliasing_ecmp` default `true`, explicit `false` opt-out) since v0.23.0,
+  after the BUM-state 24 h MAC-churn soak and the M37 local-origination 24 h soak
+  cleared the default-flip gate. Note this is role-based DF/non-DF BUM
+  suppression + aliasing ECMP, not source-conditioned local-bias split-horizon
+  (see the deferred items in ROADMAP.md).
+- **EVPN symmetric IRB — Type-5 / L3VNI** (v0.18.0, ADR-0058, M39) —
+  `[[evpn_ip_vrfs]]` TOML schema with VRF / L3VXLAN device binding and
+  operator-supplied Router MAC, plus an L2VNI `ip_vrf` link; pure-logic
+  `IpVrf` / `IpVrfTable` domain types in `crates/evpn::ip_vrf`. Pure-logic
+  Type 5 origination + projection helpers enforce the RFC 9136 §4.4.2
+  Interface-less symmetric IRB model. `IpVrfStatus` readiness probe checks the
+  seven ADR-0058 §3 predicates (VRF device exists + UP + matches `table_id`;
+  L3 VXLAN exists + UP + matches VNI + matches local VTEP IP + enslaved to the
+  VRF + MAC matches Router MAC). `crates/evpn-linux` adds rtnetlink-backed VRF /
+  L3VXLAN dumps building an `IpVrfKernelSnapshot`; `Dataplane::probe_ip_vrfs`
+  wires it through, the reconcile actor calls it every pass, and readiness
+  transitions surface via `tracing` + `DataplaneReport.ip_vrf_status` +
+  `EvpnService.ListIpVrfs` / `GetIpVrf` + `rustbgpctl evpn vrfs`. The
+  daemon-side origination feed (#77) does a per-pass kernel-route dump per
+  IP-VRF with a conservative classifier (filters routes from other daemons,
+  non-forwardable types, and routes egressing the L3 VXLAN), a `watch`
+  observation channel, an L3 originator task with a level-triggered diff loop
+  gated on readiness, and `originated_routes_count`. The dataplane import (#78)
+  drives `project_ip_prefix_routes()` against a transactional `L3OwnedState`
+  tracking per-prefix install state plus shared `kernel_neighbors` /
+  `kernel_fdb` rows with value-aware drift detection (a Router MAC or next-hop
+  transition under the same prefix triggers an atomic `.replace()`). A four-phase
+  apply ordering (route-remove → resolution-add → route-add → resolution-remove)
+  keeps the kernel forwarding-safe across transitions; Router MAC conflicts drop
+  conflicting prefixes with `L3Drop::RouterMacConflict`; foreign state is
+  preserved by diffing only against `L3OwnedState`. 11 unit tests in
+  `l3_diff.rs` and two privileged netns integration tests validate kernel
+  programming against Linux 6.17. M39 hosted kernel-dataplane smoke validates the
+  bidirectional symmetric IRB datapath against FRR 10.3.1.
+- **EVPN aliasing dataplane ECMP via FDB nexthop groups** (v0.19.0–v0.20.0,
+  ADR-0059, M40) — multi-homed Type 2 routes on the receive path program FDB
+  nexthop groups via `NDA_NH_ID` / `NHA_FDB` (raw-netlink construction because
+  `rtnetlink 0.21` exposes no nexthop API). Portable intent
+  (`RemoteMacEntry::alias_group_key`) + projection same-AF guard; the
+  `nexthop_raw` netlink primitive with the canonical member-set encoder; state
+  types (`NhIdAllocator` with `0x3000`/`0x4000` tag bits, `GroupOwnedMap`
+  refcount) + apply primitive + CVE-2025-39851 inline guard (refuses install on
+  a VXLAN device with `learning on`); `compute_diff` Pass 1b emitting
+  `InstallFdbNhg` / `UpdateFdbNhgMembers` / `RemoveFdbNhg`, the reconcile actor
+  coordinator orchestrating ADR-0059 §5 invariant order, `NexthopOps` impls on
+  `LinuxDataplane` + `InMemoryDataplane`, startup NHID adoption with a
+  snapshot-aware retention set, partial-install rollback, a three-key-space retry
+  schedule, a `pending_deletes` retry queue, and shutdown teardown. M40
+  containerlab smoke against FRR EVPN-MH 10.3.1 passes 16/16 first-shot,
+  validating the `NHG_TAG | n` / `VTEP_NH_TAG | n` tag scheme and the clean
+  drain-to-single-dst transition when an alias withdraws. v0.20.0 hardening:
+  per-instance `apply_aliasing_ecmp` off-switch (restart-required); periodic
+  `RTM_GETNEXTHOP` drift recovery that heals missing/mis-shaped per-VTEP members,
+  drifted groups, stale tagged FDB rows, and untracked tagged NHIDs (with a
+  `(VNI, MAC)` desired-intent guard so cleanup never removes live forwarding
+  state); and homogeneous IPv6 alias members (`encode_add_fdb_member` picks
+  `AF_INET` / `AF_INET6` from the gateway form). The obsolete
+  `NexthopError::Ipv6Unsupported` variant was removed for v0.21.0.
+- **EVPN overlay-index recursion (receive side)** — auto-derived Route Targets
+  (RFC 8365 §5.1.2.1) are an explicit config opt-in for `[[evpn_instances]]` and
+  `[[evpn_ip_vrfs]]`, and receive-side RFC 9135 §9.2 recursion resolves non-zero
+  Type 5 Gateway Address routes through linked Type 2 MAC/IP state in L2VNIs
+  linked to the target IP-VRF, tie-breaking contenders by MAC mobility sequence.
+  Controller injection can synthesize non-zero Gateway Address Type 5 routes
+  (M45) while native IP-VRF origination remains Interface-less. Missing links,
+  unresolved gateways, multi-MAC gateways, self-originated rows, quarantined
+  MACs, mass-withdraw-filtered rows, RT misses, and L3VNI mismatches all stay
+  fail-closed. Remaining standards-completeness items live in ROADMAP.md
+  (native local overlay-index origination, multi-homed-gateway ECMP,
+  protected recursion-path interop smoke).
+
+### Observability and durable events
+
+- **Durable event history — local outbox** (ADR-0072, #286–#290) — daemon-local
+  SQLite WAL outbox with a monotonic `event_id` that survives restart. The new
+  `crates/event-history` crate hosts the `EventHistoryManager` actor + the
+  3-step actor-ordered cursor handoff for `SubscribeFromEvent` (replay → live
+  without gaps or duplicates). Producer wiring covers RIB route + EVPN (through a
+  `RibEventSink` trait), PeerManager session-lifecycle + notification + policy
+  (in-place enqueue), and the BFD bridge; the gRPC handler replaces the
+  `UNIMPLEMENTED` stub with the cursor handler (single-category-cursor fast path
+  + post-filter for repeated categories / `event_types` / `afi_safi` /
+  `prefix_length`, leading `StreamLagEvent` when the requested cursor is older
+  than the retention floor); CLI `rustbgpctl events watch --from-event-id <u64>`;
+  `examples/event-bridge/` reference binary. Legacy `WatchEvents` /
+  `WatchRoutes` / `List*Events` surfaces stay byte-identical. Notification events
+  are durably persisted for the first time, closing ADR-0071's
+  notification-history gap. `bgp_event_outbox_cursor_gap_total` signals
+  undersized retention vs the collector reconnect SLA.
+- **Durable-event-history downstream closeouts** (v0.30.0) — #291 wired the
+  dataplane FIB / blackhole producers through the event-history manager (closes
+  the ADR-0072 v1 dataplane deferral); #292 added the structured
+  `OtcRouteBlockedEvent` payload under `EVENT_CATEGORY_POLICY` with the next-free
+  `BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED` enum, sourced from a new `TransportEventSink`
+  trait mirroring `RibEventSink` (closes the ADR-0071 deferral); #293 wired gNMI
+  `STREAM ON_CHANGE` for `…/neighbor[neighbor-address=*]/state/session-state`,
+  sourcing live FSM transitions from `EventHistoryManager::subscribe_live()` with
+  fresh-snapshot-on-reconnect semantics (closes the ADR-0070 deferral, ships
+  M56). Each PR preserves the original ADR deferral text with a "Resolved by
+  PR #N" annotation. #291 is unit + integration tested; #292 leans on the
+  existing M55 OTC interop; #293 ships M56 (gNMI ON_CHANGE against FRR 10.3.1).
+
+### Post-v0.7.0 incremental releases
+
+- **ASPA verification** (v0.7.0, ADR-0049) — upstream path verification with
+  RTR v2 support.
+- **Config diff** (v0.7.0) — `rustbgpd --diff` previews SIGHUP changes.
+- **Looking glass REST API** (v0.7.0) — birdwatcher-compatible endpoints.
+- **Best-path explain** (v0.7.0) — `ExplainBestPath` RPC + `--explain` CLI.
+- **Writer-task split** (v0.10.0, ADR-0051) — closes the +46-min `GetHealth`
+  wedge under sustained churn; validated on 1 h + 4 h + 12 h M33 soaks. The peer
+  session task no longer owns the TCP write half; a dedicated writer task per
+  peer holds the `OwnedWriteHalf` plus a bounded bulk channel + unbounded
+  priority channel with biased select so NOTIFICATION/KEEPALIVE/OPEN preempt
+  UPDATE backlog. When the bulk channel saturates the session emits `Cease/8`
+  (Out of Resources) and tears down — silent drops become observable flaps with
+  clean BGP restart semantics. (Root cause of the original wedge was later found
+  to be a load-test bug: `bench/evpn-load`'s synthetic peers exposed
+  `PeerHandle.rx` but the tester never drained it, so RR-side reflection filled
+  the 65 536-deep channel in ~43.7 minutes. The writer split was always correct;
+  it kept Cease/8-disconnecting a broken consumer because that is its job.)
+- **BMP `bmp_*_total` Prometheus counters** (v0.10.0) — four counters cover
+  source / collector / replay / control-event drops.
+- **EVPN BMP + MRT export** (v0.11.0) — RouteMonitoring already flowed; MRT now
+  emits `RIB_GENERIC` for EVPN with `MP_REACH_NLRI` in RFC 6396 §4.3.4 reduced
+  form.
+- **`EvpnRibRoute` payload+key refactor** (v0.11.0) — drops the cached key,
+  identity derived on demand.
+- **IPv6 link-local next-hop preserved end-to-end** (v0.11.0) — 32-byte
+  `MP_REACH_NLRI` next-hops (RFC 4760 §3 / RFC 2545) round-trip through wire
+  codec, RIB, and MRT exports; closes the long-standing "link-local discarded"
+  limitation. `rustbgpd-wire` 0.7.0 → 0.8.0 (breaking — adds
+  `link_local_next_hop` to `MpReachNlri`).
+- **EVPN VTEP foundation — declarative EVI/VNI domain model** (v0.13.0,
+  ADR-0052) — new `crates/evpn` exposes the runtime `EvpnInstance` /
+  `EvpnInstanceTable` types; `[[evpn_instances]]` config block (VNI, RD, RTs,
+  local VTEP IP, optional bridge, `advertise_svi_mac`); read-only
+  `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances`; wire crate gains
+  `RouteDistinguisher::from_str`. Empty by default — RR-only deployments
+  unchanged.
+
+### RibManager split and module hygiene
+
+- **RibManager submodule split** — 8,318-line `manager.rs` split into 7
+  submodules (`mod.rs`, `distribution.rs`, `peer_lifecycle.rs`,
+  `route_refresh.rs`, `graceful_restart.rs`, `helpers.rs`, `tests.rs`).

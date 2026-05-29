@@ -30,7 +30,7 @@ This is not a full routing suite replacement. rustbgpd will not implement OSPF, 
 
 **EVPN Route Reflector (VXLAN-EVPN DC fabric).** iBGP route reflector for Type 1-5 RFC 7432 routes between VTEPs; control plane only, VTEPs handle their own DF election and data-plane encapsulation. See ADR-0050.
 
-**EVPN VTEP — bidirectional (Phase 2 Gates 7a + 7b + 7b+1 + 7b+2 + 7c).** Local EVI/VNI domain types (`crates/evpn`) and an `[[evpn_instances]]` TOML schema with a read-only `EvpnService.ListEvpnInstances` gRPC surface (Gate 7a, ADR-0052). Linux kernel reconciliation programs remote-MAC FDB entries from received Type 2 routes (Gate 7b, ADR-0054). Local-MAC origination subscribes to `RTNLGRP_NEIGH` and emits Type 2 routes per RFC 7432 §15.1 mobility sequencing, plus one Type 3 IMET per L2VNI carrying the PMSI Tunnel attribute (Gate 7b+1, ADR-0055). `advertise_svi_mac` originates a Type 2 for the bridge's own MAC (RFC 9135 §6.1) on instance-Ready by surfacing the bridge link-layer address through `InstanceDataplaneStatus.bridge_mac`; `sticky_macs` (ADR-0056) marks origination with the RFC 7432 §15.4 sticky bit. Gate 7b+2 closes the MAC+IP path: with `bridge link set ... neigh_suppress on`, ARP/ND-snooped `(IP, MAC)` bindings on the bridge's neighbour table drive MAC+IP Type 2 origination under the FRR-style replace model — one Type 2 per MAC at any time, `IpAdded` upgrades from MAC-only to MAC+IP, last `IpRemoved` downgrades back. Mobility events propagate sub-second via the EVPN-keyed `EvpnRouteEvent` broadcast in `crates/rib`; the 5 s `QueryEvpnRoutes` poll stays as a `Lagged` / cold-start backstop (Gate 7c). RR-only deployments (empty `[[evpn_instances]]`) spawn no kernel-facing tasks for either direction.
+**EVPN VTEP — bidirectional (Phase 2: declarative instance schema, FDB reconciler, local MAC + MAC+IP origination, VTEP convergence).** Local EVI/VNI domain types (`crates/evpn`) and an `[[evpn_instances]]` TOML schema with a read-only `EvpnService.ListEvpnInstances` gRPC surface (declarative EVPN instance schema, ADR-0052). The EVPN VXLAN VTEP dataplane (Linux FDB reconciler) programs remote-MAC FDB entries from received Type 2 routes (ADR-0054). EVPN local MAC origination subscribes to `RTNLGRP_NEIGH` and emits Type 2 routes per RFC 7432 §15.1 mobility sequencing, plus one Type 3 IMET per L2VNI carrying the PMSI Tunnel attribute (Type-2 + Type-3 IMET, ADR-0055). `advertise_svi_mac` originates a Type 2 for the bridge's own MAC (RFC 9135 §6.1) on instance-Ready by surfacing the bridge link-layer address through `InstanceDataplaneStatus.bridge_mac`; `sticky_macs` (ADR-0056) marks origination with the RFC 7432 §15.4 sticky bit. MAC-with-IP origination closes the MAC+IP path: with `bridge link set ... neigh_suppress on`, ARP/ND-snooped `(IP, MAC)` bindings on the bridge's neighbour table drive MAC+IP Type 2 origination under the FRR-style replace model — one Type 2 per MAC at any time, `IpAdded` upgrades from MAC-only to MAC+IP, last `IpRemoved` downgrades back. Mobility events propagate sub-second via the EVPN-keyed `EvpnRouteEvent` broadcast in `crates/rib`; the 5 s `QueryEvpnRoutes` poll stays as a `Lagged` / cold-start backstop (EVPN VTEP convergence). RR-only deployments (empty `[[evpn_instances]]`) spawn no kernel-facing tasks for either direction.
 
 **Later:** the EVPN runtime convergence remainder (L3VNI/device/table IP-VRF identity redefine — restart-required by design — and non-teardown mixed edits; the rest of the `ApplyEvpnRuntime` shape set already commits live — see [evpn-enablement.md](evpn-enablement.md) for the full live-vs-fail-closed breakdown), VPNv4/v6, MPLS-EVPN encap. (Shipped since: duplicate-MAC remote-route suppression + manual clear, production-default `apply_bum_enforcement` / `apply_aliasing_ecmp` enforcement, auto-derived Route Targets per RFC 8365 §5.1.2.1, receive-side RFC 9135 overlay-index Type 5 recursion with fail-closed unresolved / ambiguous gateways, and controller Type 5 Gateway Address injection.)
 
@@ -444,7 +444,7 @@ Added 2026-04 per ADR-0050. Extends the RIB / transport / gRPC stack with a para
 
 ### What's deferred to future phases
 
-Phase 1 hardening (Gates 0-6 in [evpn-enablement.md](evpn-enablement.md))
+Phase 1 hardening (the RR enablement ladder in [evpn-enablement.md](evpn-enablement.md))
 covers reflection of all five RFC 7432 route types, GR + LLGR + Enhanced
 Route Refresh, MAC mobility / sticky preservation, multi-homing Type 4
 ES reflection (Type 1 EAD-per-EVI is wire-codec-tested but not gated
@@ -453,34 +453,36 @@ Phase 3 scope), scale validation (50k Type 2 + churn), and
 controller-driven injection for Type 2 / Type 3. What remains:
 
 - **VTEP mode:** local EVI / VRF / VNI state and kernel FDB MAC learning are
-  shipped (Gates 7a + 7b + 7b+1 + 7b+2 + 7c); the daemon now both
+  shipped (declarative instance schema, FDB reconciler, local MAC + MAC+IP
+  origination, VTEP convergence); the daemon now both
   programs remote MACs into the kernel FDB and originates local
   Type 2 + Type 3 IMET routes from kernel-learned MACs.
   `advertise_svi_mac` originates the bridge's own MAC on
   instance-Ready, `sticky_macs` (ADR-0056) marks origination with
-  the RFC 7432 §15.4 sticky bit, Gate 7b+2 adds MAC+IP Type 2
+  the RFC 7432 §15.4 sticky bit, MAC-with-IP origination adds MAC+IP Type 2
   origination via ARP/ND suppression under the FRR replace model
-  (requires `bridge neigh_suppress on`), and Gate 7c switches the
+  (requires `bridge neigh_suppress on`), and EVPN VTEP convergence switches the
   originator from a 5 s poll to a push-notified RIB broadcast for
-  sub-second mobility convergence. Later EVPN slices added remote
+  sub-second mobility convergence. Later EVPN work added remote
   duplicate-MAC suppression + manual clear, so the remaining VTEP tail is
   native overlay-index local origination / recursion-path interop and
   standards features outside the Linux/VXLAN alpha boundary.
-- **Multi-homing execution:** Gate 8/8b covers rustbgpd-as-VTEP
+- **Multi-homing execution:** EVPN multi-homing (ESI, Type-1/Type-4) plus
+  BUM-flood suppression + DF election cover rustbgpd-as-VTEP
   DF election (RFC 7432 §8 + RFC 8584), Type 1/4 origination, opt-in
   Non-DF BUM suppression, ESI-aware Type 2 origination, aliasing
   projection, and receive-side EAD-per-ES mass-withdraw filtering.
   ADR-0059 closes the aliasing-ECMP receive-path data path via
-  FDB nexthop groups (slices 1-4 shipped on `main`, M40 hosted smoke validated against FRR EVPN-MH 10.3.1); slice 3.5
+  FDB nexthop groups (shipped on `main`, M40 hosted smoke validated against FRR EVPN-MH 10.3.1); aliasing-ECMP
   hardening (PRs #91 / #92 / #93) followed up with the
   `apply_aliasing_ecmp` per-instance off-switch, periodic
   `RTM_GETNEXTHOP` drift recovery, and homogeneous IPv6 alias
-  members. The MAC-churn variant of the Gate 8b soak passed
+  members. The MAC-churn variant of the BUM-state soak passed
   2026-05-16 ([`docs/soak-gate8b-mac-churn-24h.md`](soak-gate8b-mac-churn-24h.md)),
   which unblocks flipping the `apply_bum_enforcement` and
   `apply_aliasing_ecmp` defaults to `true`; the flip itself is a
   separate release decision.
-- **Symmetric Interface-less IRB:** Gate 9 ships end-to-end in
+- **Symmetric Interface-less IRB:** EVPN symmetric IRB (Type-5 / L3VNI) ships end-to-end in
   v0.18.0 — RFC 9136 §4.4.2 / ADR-0058. The `[[evpn_ip_vrfs]]`
   config object, `IpVrfStatus` readiness probe, Linux VRF +
   L3VXLAN dumps, per-IP-VRF kernel-route observation, Type 5

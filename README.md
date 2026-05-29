@@ -233,7 +233,7 @@ with a separate read-only `gnmi.gNMI` service for OpenConfig BGP telemetry:
 | `EventService` | `WatchEvents`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
 | `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection |
 | `ControlService` | `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
-| `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`, `GetIpVrf`, `ClearDuplicateMacQuarantine`, `ApplyEvpnRuntime` | Local EVPN VTEP instance state, ADR-0059 FDB-nexthop ownership, Gate 9 IP-VRF readiness / route counters, duplicate-MAC quarantine clear, and ADR-0063 runtime model status / apply |
+| `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`, `GetIpVrf`, `ClearDuplicateMacQuarantine`, `ApplyEvpnRuntime` | Local EVPN VTEP instance state, ADR-0059 FDB-nexthop ownership, symmetric IRB (Type-5 / L3VNI) IP-VRF readiness / route counters, duplicate-MAC quarantine clear, and ADR-0063 runtime model status / apply |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Set`, `Subscribe` | Read-only OpenConfig BGP telemetry subset; `Set` returns `UNIMPLEMENTED`; served on UDS and mTLS TCP listeners |
 
 ```bash
@@ -271,7 +271,7 @@ and more explicit internal architecture.
 | [`examples/linux-edge-fib/`](examples/linux-edge-fib/) | Linux edge host with explicit ADR-0061 `[[fib_tables]]` unicast FIB programming |
 | [`examples/route-collector/`](examples/route-collector/) | Passive collector with MRT dumps and BMP export |
 | [`examples/rr-evpn-fabric/`](examples/rr-evpn-fabric/) | EVPN Route Reflector for a VXLAN-EVPN DC fabric (RFC 7432, RR role) |
-| [`examples/evpn-vtep-leaf/`](examples/evpn-vtep-leaf/) | Leaf VTEP with local `[[evpn_instances]]` declarations (Gate 7a foundation) |
+| [`examples/evpn-vtep-leaf/`](examples/evpn-vtep-leaf/) | Leaf VTEP with local `[[evpn_instances]]` declarations (declarative EVPN instance schema) |
 | [`examples/envoy-mtls/`](examples/envoy-mtls/) | Remote gRPC access via Envoy mTLS proxy |
 | [`examples/systemd/`](examples/systemd/) | systemd unit file with security hardening |
 
@@ -360,7 +360,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
   to advertise a compatible Role, and OTC is set/checked on unicast UPDATEs
   while FlowSpec/EVPN stay untouched in v1. M55 validates FRR interop plus
   deliberate raw-BGP leak and malformed-OTC handling.
-- Published benchmarks: bgperf2 covers IPv4 unicast at 10 peers × 1k, 2 peers × 10k, and 2 peers × 100k prefixes; the in-tree `bench/evpn-load` M33 scale gate covers 50,000 reflected Type 2 routes with 60 s of 1,000-rps churn (5.1 s initial convergence, post-churn distinct-key count exact). Gate-specific 24h soak harnesses now ship in-tree under `tests/soak/`: a Gate 8b BUM-state harness and a Gate 9 slice 6 24h Type 5 churn harness, both with post-mortems under `docs/soak-*.md`. Continuous / multi-day soak automation outside those gates remains future work (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
+- Published benchmarks: bgperf2 covers IPv4 unicast at 10 peers × 1k, 2 peers × 10k, and 2 peers × 100k prefixes; the in-tree `bench/evpn-load` M33 scale gate covers 50,000 reflected Type 2 routes with 60 s of 1,000-rps churn (5.1 s initial convergence, post-churn distinct-key count exact). Capability-specific 24h soak harnesses now ship in-tree under `tests/soak/`: an EVPN BUM-flood-suppression BUM-state harness and a symmetric IRB (Type-5 / L3VNI) 24h Type 5 churn harness, both with post-mortems under `docs/soak-*.md`. Continuous / multi-day soak automation beyond those harnesses remains future work (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
 
 ## Project status
 

@@ -535,7 +535,8 @@ FRR leaves) handle local MAC learning, DF election, and VXLAN encap. You
 want a control plane that's API-first (no vtysh scraping), scales to
 thousands of VTEPs, and gives you structured observability.
 
-**What rustbgpd does for you (Phase 1 RR bundle, Gates 0-6 of
+**What rustbgpd does for you (Phase 1 RR bundle — full RFC 7432 Type 1-5
+reflection through controller injection; see
 [docs/evpn-enablement.md](evpn-enablement.md), ADR-0050):**
 
 - **RFC 7432 route reflection for all 5 route types** — EAD per-ES,
@@ -553,7 +554,7 @@ thousands of VTEPs, and gives you structured observability.
   election independently over the same inputs. Validated via M32
   (two FRR VTEPs sharing an ESI + observer). Type 1 EAD-per-EVI
   reflection is validated via M32 and the synthetic M32b sibling.
-  As a local VTEP, Gate 8/8b now originates Type 1/4 routes, runs DF
+  As a local VTEP, EVPN multi-homing now originates Type 1/4 routes, runs DF
   election, and can opt into BUM enforcement; the RR role still only
   reflects these routes.
 - **GR / LLGR for EVPN** — VTEP restart no longer flaps the rest of
@@ -582,37 +583,37 @@ thousands of VTEPs, and gives you structured observability.
 
 **What rustbgpd does for VTEP-mode operators:**
 
-- **MAC-only Type 2 origination** — Gate 7b+1 (v0.15.0):
+- **MAC-only Type 2 origination** — EVPN local MAC origination (v0.15.0):
   `RTNLGRP_NEIGH AF_BRIDGE` subscription drives Type 2 origination
   per RFC 7432 §15.1 with full mobility-sequence handling. One
   Type 3 IMET (RFC 7432 §7.3) per L2VNI carries the PMSI Tunnel
   attribute (RFC 6514 §5) for ingress-replication BUM.
-- **MAC-with-IP Type 2 origination via ARP/ND suppression** — Gate
-  7b+2 (v0.16.0): with `bridge link set dev vxlan<vni>
+- **MAC-with-IP Type 2 origination via ARP/ND suppression** —
+  v0.16.0: with `bridge link set dev vxlan<vni>
   neigh_suppress on`, ARP/ND-snooped `(IP, MAC)` bindings on the
   bridge's neighbour table drive MAC+IP Type 2 origination under
   the FRR-style replace model (one Type 2 per MAC at any time —
   `IpAdded` upgrades from MAC-only to MAC+IP, last `IpRemoved`
   downgrades back). SDN controllers can still inject MAC-with-IP
-  routes directly via `InjectionService::AddEvpnRoute` (Gate 6).
+  routes directly via `InjectionService::AddEvpnRoute` (controller injection).
 
 **What rustbgpd doesn't do yet (and which VTEPs handle for you):**
 
-- **EVPN multi-homing enforcement** — Gate 8 (v0.17.0, ADR-0057)
-  shipped the observation half: Type 4 ES + Type 1 EAD-per-ES +
+- **EVPN multi-homing enforcement** — EVPN multi-homing (ESI, Type-1/Type-4)
+  (v0.17.0, ADR-0057) shipped the observation half: Type 4 ES + Type 1 EAD-per-ES +
   Type 1 EAD-per-EVI origination, RFC 7432 §8.5 service carving +
   RFC 8584 §3 algorithm negotiation, and the Prometheus
-  `evpn_df_role` surface. Gate 8b follow-ups now add ESI Label /
+  `evpn_df_role` surface. BUM-flood-suppression + DF-election follow-ups now add ESI Label /
   ES-Import RT origination, DF-role-aware Type 2 ESI attachment,
   kernel BUM-port enforcement via `apply_bum_enforcement` (RFC 7432
-  §8.5, default `true` since v0.23.0 after both the Gate 8b 24 h
+  §8.5, default `true` since v0.23.0 after both the BUM-state 24 h
   MAC-churn soak and the M37 local-origination 24 h MAC-churn soak
   passed clean), RFC 7432 §14 aliasing receive-side projection, and
   RFC 7432 §8.4 receive-side EAD-per-ES mass-withdraw filtering.
 - **VXLAN data plane** — kernel VXLAN interfaces + bridge setup is the
   VTEP's job.
-- **IRB / L3VNI / Type 5 dataplane** — Gate 9 symmetric
-  Interface-less IRB shipped end-to-end in v0.18.0 (ADR-0058):
+- **IRB / L3VNI / Type 5 dataplane** — EVPN symmetric IRB
+  (Type-5 / L3VNI), Interface-less, shipped end-to-end in v0.18.0 (ADR-0058):
   `[[evpn_ip_vrfs]]` config schema, `IpVrfStatus` readiness probe,
   Linux IP-VRF / L3 VXLAN netlink dumps, `Dataplane::probe_ip_vrfs`,
   per-IP-VRF kernel-route observation with conservative classifier,
@@ -622,7 +623,7 @@ thousands of VTEPs, and gives you structured observability.
   `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rustbgpctl evpn vrfs` CLI +
   `ListIpVrfs`/`GetIpVrf` gRPC, M39 hosted smoke against FRR 10.3.1.
   ADR-0059 (v0.19.0) adds receive-path aliasing-ECMP via FDB
-  nexthop groups (slices 1-4 + M40 FRR-validated). Still ahead:
+  nexthop groups (M40 FRR-validated). Still ahead:
   RFC 9135 overlay-index IRB.
 
 **Why the API-first shape matters for DC fabric:**
@@ -662,38 +663,39 @@ measurement path.
 **Known gaps:**
 
 - VTEP role is now bidirectional but not feature-complete — the
-  **declarative foundation slice landed (Gate 7a, ADR-0052)** with
+  **declarative EVPN instance schema landed (ADR-0052)** with
   `[[evpn_instances]]` (vni / rd / route_targets / local_vtep_ip /
   optional bridge / advertise_svi_mac) and the read-only
-  `EvpnService.ListEvpnInstances` surface. **Kernel reconciliation
-  shipped in Gate 7b (v0.14.0, ADR-0054)** — rustbgpd programs
+  `EvpnService.ListEvpnInstances` surface. **The EVPN VXLAN VTEP
+  dataplane (Linux FDB reconciler) shipped (v0.14.0, ADR-0054)** —
+  rustbgpd programs
   remote-MAC FDB entries from received Type 2 routes via rtnetlink.
-  **Local-MAC origination shipped in Gate 7b+1 (v0.15.0,
+  **EVPN local MAC origination shipped (v0.15.0,
   ADR-0055)** — rustbgpd subscribes to `RTNLGRP_NEIGH`, classifies
   bridge FDB events, and originates Type 2 routes per RFC 7432 §15.1
   with full mobility sequencing, plus one Type 3 IMET per L2VNI
   carrying RFC 6514 §5 PMSI Tunnel. M37 validates the loop end-to-end
   (4/4 PASS, FRR 10.3.1 on Linux 6.17). **Observable DF election +
-  Type 1/4 origination shipped in Gate 8 (v0.17.0, ADR-0057)** and is
-  validated by M38. **Gate 8b multi-homing enforcement alpha**
+  Type 1/4 origination shipped with EVPN multi-homing (v0.17.0, ADR-0057)** and is
+  validated by M38. **EVPN BUM-flood suppression + DF election (alpha)**
   followed with ESI-aware Type 2 origination, RFC 7432 §14 aliasing
   receive-side projection, RFC 7432 §8.4 mass-withdraw filtering,
   and kernel BUM-port enforcement (RFC 7432 §8.5) via
   `apply_bum_enforcement` (default `true` since v0.23.0).
-  **Gate 9 symmetric Interface-less
-  IRB shipped end-to-end in v0.18.0**: `[[evpn_ip_vrfs]]` config
+  **EVPN symmetric IRB (Type-5 / L3VNI), Interface-less,
+  shipped end-to-end in v0.18.0**: `[[evpn_ip_vrfs]]` config
   schema, IP-VRF readiness probe, Type 5 origination + remote
   import + L3 FIB programming through the transactional
   `L3OwnedState` model, `RTNLGRP_IPV4/IPV6_ROUTE` multicast,
   `rustbgpctl evpn vrfs` CLI, M39 hosted smoke. **ADR-0059**
   (v0.19.0) adds receive-path aliasing-ECMP via FDB nexthop
-  groups (slices 1-4 + M40 FRR-validated). Still ahead: full
+  groups (M40 FRR-validated). Still ahead: full
   RFC 9135 overlay-index IRB. See
   [docs/evpn-enablement.md](evpn-enablement.md)
-  for the full gate ladder and
+  for the full enablement ladder and
   [docs/evpn-alpha-soak.md](evpn-alpha-soak.md) for the residual
   alpha-confidence checklist.
-- Controller injection (Gate 6) covers Type 2 MAC/IP and Type 3 IMET
+- Controller injection covers Type 2 MAC/IP and Type 3 IMET
   via `InjectionService::AddEvpnRoute`; Type 5 IP-Prefix injection is
   deferred pending use-case signal. Native Type 1/4 multi-homing
   origination ships through `[[ethernet_segments]]`, but controller
@@ -701,7 +703,7 @@ measurement path.
 - Live FRR VTEP flap with tcpdump validation of the reflected
   `LLGR_STALE` community on the wire is the one piece of GR/LLGR
   coverage still tracked as a follow-up — the unit + integration
-  pipeline is wired (Gate 2), but the lab capture isn't part of CI yet.
+  pipeline is wired (graceful restart / LLGR), but the lab capture isn't part of CI yet.
 
 ---
 
@@ -769,7 +771,8 @@ Be honest about where rustbgpd isn't the right tool:
   crash-restart FIB adoption, or mature multi-protocol forwarding features.
 - **EVPN VTEP role — partial (v0.29.0).** rustbgpd-as-RR has been
   the supported deployment since Phase 1 (ADR-0050). Phase 2
-  (Gates 7a / 7b / 7b+1 / 7b+2 / 7c, ADR-0052 / 0054 / 0055 /
+  (declarative instance schema, FDB reconciler, local MAC + MAC+IP
+  origination, and VTEP convergence; ADR-0052 / 0054 / 0055 /
   0056) added the **bidirectional VTEP loop**: kernel FDB
   programming from received Type 2 routes; local-MAC origination
   via `RTNLGRP_NEIGH` with RFC 7432 §15.1 mobility sequencing;
@@ -777,25 +780,25 @@ Be honest about where rustbgpd isn't the right tool:
   ingress-replication BUM; `advertise_svi_mac` originates the
   bridge's own MAC; `sticky_macs` (ADR-0056) marks origination
   with the RFC 7432 §15.4 sticky bit; sub-second mobility
-  convergence via the EVPN-keyed `EvpnRouteEvent` broadcast (Gate
-  7c); and MAC-with-IP Type 2 origination via ARP/ND suppression
-  under the FRR-style replace model (Gate 7b+2 — requires
+  convergence via the EVPN-keyed `EvpnRouteEvent` broadcast (EVPN VTEP
+  convergence); and MAC-with-IP Type 2 origination via ARP/ND suppression
+  under the FRR-style replace model (requires
   `bridge link set dev vxlan<vni> neigh_suppress on`). M37 and
   M37+IP smokes validate the MAC-only and MAC+IP loops against
   FRR 10.3.1. Multi-homing **foundation** (observable DF election
-  + Type 1/4 origination) shipped in Gate 8 (v0.17.0, ADR-0057),
-  validated by M38. **Gate 8b alpha enforcement** then landed:
+  + Type 1/4 origination) shipped with EVPN multi-homing (v0.17.0, ADR-0057),
+  validated by M38. **EVPN BUM-flood-suppression alpha enforcement** then landed:
   ESI-aware Type 2 origination, RFC 7432 §14 aliasing receive-side
   projection, RFC 7432 §8.4 mass-withdraw filtering, and kernel
   BUM-port enforcement (RFC 7432 §8.5) via `apply_bum_enforcement`
-  (default `true` since v0.23.0). **Gate 9 symmetric Interface-less IRB
+  (default `true` since v0.23.0). **EVPN symmetric IRB (Type-5 / L3VNI), Interface-less,
   shipped end-to-end in v0.18.0**: `[[evpn_ip_vrfs]]`, IP-VRF
   readiness probe, Type 5 origination + remote import + L3 FIB
   programming through the transactional `L3OwnedState` model,
   sub-second `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rustbgpctl evpn
   vrfs` CLI, M39 hosted smoke. **ADR-0059** (v0.19.0) adds
-	  receive-path aliasing-ECMP via FDB nexthop groups (slices 1-4 +
-	  M40 FRR-validated). Auto-derived RTs, Type 5 gRPC injection
+	  receive-path aliasing-ECMP via FDB nexthop groups (M40
+	  FRR-validated). Auto-derived RTs, Type 5 gRPC injection
 	  including non-zero Gateway Address, receive-side RFC 9135
 	  overlay-index recursion, duplicate-MAC remote suppression +
 	  manual clear, and production-default DF/non-DF BUM suppression
