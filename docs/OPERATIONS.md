@@ -323,6 +323,14 @@ max_bytes = 256_000_000   # size retention to your collector's reconnect SLA
   Routing fast and lean; `SubscribeFromEvent` and gNMI `Subscribe ON_CHANGE`
   return `FAILED_PRECONDITION`, but the live `WatchEvents` / `WatchRoutes` /
   `List*Events` surfaces still provide real-time observability.
+  **Security-signal caveat:** the structured `OTC_ROUTE_BLOCKED` event (RFC 9234
+  route-leak prevention — per-decision prefixes, AS_PATH, roles) is emitted
+  *only* through the durable outbox, so with the lean default it is **not**
+  available via `SubscribeFromEvent`. Blocks are still observable via the
+  always-on `bgp_otc_routes_blocked_total{peer,reason}` counter, the
+  `otc_routes_blocked` per-neighbor scalar, and the daemon log — but if you need
+  the rich per-decision event for incident reconstruction or a SIEM feed, enable
+  event-history (the observability/replay profile below).
 - **Observability / replay:** `[event_history].enabled = true` with
   `max_events` / `max_bytes` sized for your collector's worst-case reconnect
   window. Gives restart-safe `event_id` cursor replay; budget the ~62 MB RSS +
