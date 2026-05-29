@@ -49,13 +49,6 @@ enum OtcIngressAction {
     DropUnicastAnnouncements(&'static str),
 }
 
-fn explicit_local_pref(attrs: &[PathAttribute]) -> Option<u32> {
-    attrs.iter().find_map(|attr| match attr {
-        PathAttribute::LocalPref(value) => Some(*value),
-        _ => None,
-    })
-}
-
 fn otc_state(attrs: &[PathAttribute]) -> OtcState {
     let mut found = OtcState::Absent;
     for attr in attrs {
@@ -142,11 +135,74 @@ fn otc_ingress_action(
     }
 }
 
-fn explicit_med(attrs: &[PathAttribute]) -> Option<u32> {
-    attrs.iter().find_map(|attr| match attr {
-        PathAttribute::Med(value) => Some(*value),
-        _ => None,
-    })
+/// Policy-context fields extracted from a route's path attributes in a
+/// single pass over the attribute vector. This replaces what used to be
+/// eight independent `find_map` / `iter` scans of the same vector on the
+/// inbound UPDATE hot path.
+///
+/// Each field keeps first-match-wins semantics, mirroring the previous
+/// `find_map` short-circuit (BGP permits at most one of each well-known
+/// attribute; a duplicate is ignored rather than overwriting an earlier
+/// occurrence). The four `AS_PATH`-derived surfaces (`as_path`,
+/// `as_path_str`, `as_path_len`, `origin_asn`) all come from the same
+/// first `AS_PATH` attribute.
+struct PolicyAttrSummary<'a> {
+    extended_communities: &'a [rustbgpd_wire::ExtendedCommunity],
+    communities: &'a [u32],
+    large_communities: &'a [rustbgpd_wire::LargeCommunity],
+    as_path: Option<&'a AsPath>,
+    as_path_str: String,
+    as_path_len: usize,
+    origin_asn: Option<u32>,
+    local_pref: Option<u32>,
+    med: Option<u32>,
+}
+
+impl<'a> PolicyAttrSummary<'a> {
+    fn from_route_attrs(attrs: &'a [PathAttribute]) -> Self {
+        let mut extended_communities: Option<&'a [rustbgpd_wire::ExtendedCommunity]> = None;
+        let mut communities: Option<&'a [u32]> = None;
+        let mut large_communities: Option<&'a [rustbgpd_wire::LargeCommunity]> = None;
+        let mut as_path: Option<&'a AsPath> = None;
+        let mut local_pref: Option<u32> = None;
+        let mut med: Option<u32> = None;
+
+        // First-match-wins guards preserve the prior `find_map` behavior:
+        // once a field is set, a later attribute of the same type fails
+        // its guard and falls through to `_` rather than overwriting it.
+        // Tracking the slices as `Option<&[T]>` keeps presence
+        // unambiguous — a duplicate *empty* community must not blank out
+        // an earlier populated one (an `is_empty()` sentinel would).
+        for attr in attrs {
+            match attr {
+                PathAttribute::ExtendedCommunities(c) if extended_communities.is_none() => {
+                    extended_communities = Some(c.as_slice());
+                }
+                PathAttribute::Communities(c) if communities.is_none() => {
+                    communities = Some(c.as_slice());
+                }
+                PathAttribute::LargeCommunities(c) if large_communities.is_none() => {
+                    large_communities = Some(c.as_slice());
+                }
+                PathAttribute::AsPath(p) if as_path.is_none() => as_path = Some(p),
+                PathAttribute::LocalPref(v) if local_pref.is_none() => local_pref = Some(*v),
+                PathAttribute::Med(v) if med.is_none() => med = Some(*v),
+                _ => {}
+            }
+        }
+
+        Self {
+            extended_communities: extended_communities.unwrap_or_default(),
+            communities: communities.unwrap_or_default(),
+            large_communities: large_communities.unwrap_or_default(),
+            as_path,
+            as_path_str: as_path.map(AsPath::to_aspath_string).unwrap_or_default(),
+            as_path_len: as_path.map_or(0, AsPath::len),
+            origin_asn: as_path.and_then(AsPath::origin_asn),
+            local_pref,
+            med,
+        }
+    }
 }
 
 impl PeerSession {
@@ -581,58 +637,30 @@ impl PeerSession {
             unicast_route_attrs.push(PathAttribute::OnlyToCustomer(asn));
         }
 
-        // Extract communities for policy matching
-        let update_ecs: &[rustbgpd_wire::ExtendedCommunity] = route_attrs
-            .iter()
-            .find_map(|a| match a {
-                PathAttribute::ExtendedCommunities(c) => Some(c.as_slice()),
-                _ => None,
-            })
-            .unwrap_or(&[]);
-        let update_communities: &[u32] = route_attrs
-            .iter()
-            .find_map(|a| match a {
-                PathAttribute::Communities(c) => Some(c.as_slice()),
-                _ => None,
-            })
-            .unwrap_or(&[]);
-
-        // Compute AS_PATH string for policy matching
-        let update_large_communities: &[rustbgpd_wire::LargeCommunity] = route_attrs
-            .iter()
-            .find_map(|a| match a {
-                PathAttribute::LargeCommunities(c) => Some(c.as_slice()),
-                _ => None,
-            })
-            .unwrap_or(&[]);
-        let aspath_str: String = route_attrs
-            .iter()
-            .find_map(|a| match a {
-                PathAttribute::AsPath(p) => Some(p.to_aspath_string()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        let aspath_len: usize = route_attrs
-            .iter()
-            .find_map(|a| match a {
-                PathAttribute::AsPath(p) => Some(p.len()),
-                _ => None,
-            })
-            .unwrap_or(0);
-        let policy_local_pref = explicit_local_pref(&route_attrs);
-        let policy_med = explicit_med(&route_attrs);
+        // Single pass over the (MP-filtered) attribute vector pulls every
+        // policy-context field the RouteContext sites read — replacing
+        // what used to be eight independent attribute scans. Built from
+        // `route_attrs`, NOT `unicast_route_attrs`: the OTC attribute is
+        // appended to the unicast clone only and must not leak into the
+        // policy summary (matches pre-refactor behavior). `parsed_as_path`
+        // / `origin_asn` feed ASPA (per-family) and RPKI (per-prefix)
+        // validation below.
+        let PolicyAttrSummary {
+            extended_communities: update_ecs,
+            communities: update_communities,
+            large_communities: update_large_communities,
+            as_path_str: aspath_str,
+            as_path_len: aspath_len,
+            as_path: parsed_as_path,
+            origin_asn,
+            local_pref: policy_local_pref,
+            med: policy_med,
+        } = PolicyAttrSummary::from_route_attrs(&route_attrs);
 
         // Borrow the current RPKI/ASPA validation snapshot for import policy.
         // Cloning is cheap (two Arc::clone). Falls back to NotFound/Unknown
         // when no RPKI is configured.
         let validation = self.validation_rx.as_ref().map(|rx| rx.borrow().clone());
-
-        // Extract AS_PATH for validation (shared across all NLRI in this UPDATE).
-        let parsed_as_path: Option<&AsPath> = route_attrs.iter().find_map(|a| match a {
-            PathAttribute::AsPath(p) => Some(p),
-            _ => None,
-        });
-        let origin_asn = parsed_as_path.and_then(AsPath::origin_asn);
 
         // Compute ASPA state once per UPDATE for the IPv4-unicast body NLRI
         // surface. Other families compute their own state inside the
@@ -1204,5 +1232,85 @@ impl PeerSession {
 
         // 5. Tell FSM about the update (restarts hold timer)
         self.drive_fsm(Event::UpdateReceived).await;
+    }
+}
+
+#[cfg(test)]
+mod policy_attr_summary_tests {
+    use super::*;
+    use rustbgpd_wire::{AsPathSegment, ExtendedCommunity, LargeCommunity};
+
+    fn as_path(asns: Vec<u32>) -> AsPath {
+        AsPath {
+            segments: vec![AsPathSegment::AsSequence(asns)],
+        }
+    }
+
+    #[test]
+    fn empty_attrs_use_defaults() {
+        let attrs: Vec<PathAttribute> = Vec::new();
+        let s = PolicyAttrSummary::from_route_attrs(&attrs);
+        assert!(s.extended_communities.is_empty());
+        assert!(s.communities.is_empty());
+        assert!(s.large_communities.is_empty());
+        assert!(s.as_path.is_none());
+        assert_eq!(s.as_path_str, "");
+        assert_eq!(s.as_path_len, 0);
+        assert_eq!(s.origin_asn, None);
+        assert_eq!(s.local_pref, None);
+        assert_eq!(s.med, None);
+    }
+
+    #[test]
+    fn extracts_each_field_in_one_pass() {
+        let attrs = vec![
+            PathAttribute::Communities(vec![100, 200]),
+            PathAttribute::ExtendedCommunities(vec![ExtendedCommunity::new(1)]),
+            PathAttribute::LargeCommunities(vec![LargeCommunity::new(65001, 1, 2)]),
+            PathAttribute::AsPath(as_path(vec![65001, 65002])),
+            PathAttribute::LocalPref(150),
+            PathAttribute::Med(42),
+        ];
+        let s = PolicyAttrSummary::from_route_attrs(&attrs);
+        assert_eq!(s.communities, [100u32, 200].as_slice());
+        assert_eq!(s.extended_communities.len(), 1);
+        assert_eq!(s.large_communities.len(), 1);
+        assert!(s.as_path.is_some());
+        // The four AS_PATH-derived surfaces agree because they come from
+        // the same first AS_PATH attribute.
+        assert_eq!(s.as_path_str, "65001 65002");
+        assert_eq!(s.as_path_len, 2);
+        assert_eq!(s.origin_asn, Some(65002));
+        assert_eq!(s.local_pref, Some(150));
+        assert_eq!(s.med, Some(42));
+    }
+
+    /// The load-bearing guard for the `find_map` → single-pass change:
+    /// first match wins for every attribute type, and a *later empty*
+    /// community attribute must not blank out an earlier populated one
+    /// (an `is_empty()` presence sentinel would have regressed this).
+    #[test]
+    fn first_match_wins_and_ignores_later_duplicates() {
+        let attrs = vec![
+            PathAttribute::Communities(vec![100, 200]),
+            PathAttribute::Communities(Vec::new()), // later empty — must be ignored
+            PathAttribute::AsPath(as_path(vec![65001])),
+            PathAttribute::AsPath(as_path(vec![65002, 65003])), // later — must be ignored
+            PathAttribute::LocalPref(100),
+            PathAttribute::LocalPref(200), // later — must be ignored
+            PathAttribute::Med(5),
+            PathAttribute::Med(9), // later — must be ignored
+        ];
+        let s = PolicyAttrSummary::from_route_attrs(&attrs);
+        assert_eq!(
+            s.communities,
+            [100u32, 200].as_slice(),
+            "first populated community must survive a later empty one"
+        );
+        assert_eq!(s.as_path_str, "65001", "first AS_PATH wins");
+        assert_eq!(s.as_path_len, 1);
+        assert_eq!(s.origin_asn, Some(65001));
+        assert_eq!(s.local_pref, Some(100), "first LOCAL_PREF wins");
+        assert_eq!(s.med, Some(5), "first MED wins");
     }
 }

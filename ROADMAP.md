@@ -165,9 +165,9 @@ Later for what remains.
   churn bench (short criterion variant of the M33 soak shape); root-cause the
   `best_path_cmp` ~6% full-tiebreak regression (the common LOCAL_PREF early-exit
   is unaffected; ~1 ns/comparison, dwarfed by the −40–62% insert/pipeline wins);
-  fold the inbound UPDATE attribute extraction into a single scan (it currently
-  makes ~22 passes over the attribute vector), caching the summary on `Route` so
-  `best_path_cmp` stops re-scanning — the same lever as the regression above;
+  the inbound UPDATE policy-context extraction now folds into a single pass over
+  the attribute vector (was eight separate per-field scans; `PolicyAttrSummary`),
+  which also primes the follow-on filtered-attribute-Vec clone reduction;
   have the EVPN Linux reconciler signal changed/dirty from `apply_plan` instead
   of cloning the owned-state map each reconcile pass (confirm the exact clone
   site first); fix the `memory_profile` high-N harness non-scaling; and a fresh
