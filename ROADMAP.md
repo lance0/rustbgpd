@@ -164,7 +164,10 @@ Later for what remains.
   runner (the manual `Criterion Bench Compare` workflow exists); a continuous
   churn bench (short criterion variant of the M33 soak shape); root-cause the
   `best_path_cmp` ~6% full-tiebreak regression (the common LOCAL_PREF early-exit
-  is unaffected; ~1 ns/comparison, dwarfed by the −40–62% insert/pipeline wins);
+  is unaffected; ~1 ns/comparison, dwarfed by the −40–62% insert/pipeline wins) —
+  a single-pass attribute summary was measured flat (+0.01%), so the cost is the
+  comparison ladder itself, not repeated attribute scans; look at the added
+  RPKI/ASPA/cluster/originator steps next;
   the inbound UPDATE path now does one policy-context scan (`PolicyAttrSummary`)
   and shares the canonical attribute `Arc` across same-UPDATE NLRI when policy
   makes no modifications (`RouteAttrBundle` / `materialize_attrs`), cutting
