@@ -11,6 +11,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Event-history durable outbox is now opt-in (default `false`).** ADR-0072's
+  outbox shipped default-on in v0.31.0; v0.32.0 bgperf2 benchmarking showed the
+  always-on cost was material — ~62 MB RSS and roughly double the peak CPU at
+  2p/100k — a tax every operator paid before asking for replay semantics. The
+  safer default for a routing daemon is fast-and-lean, so operators who want
+  restart-safe event replay must now set `[event_history].enabled = true` and
+  restart. With it off, `SubscribeFromEvent` and gNMI `Subscribe ON_CHANGE`
+  return `FAILED_PRECONDITION` pointing at the knob; the live `WatchEvents` /
+  `WatchRoutes` / `List*Events` surfaces are unaffected. The ADR-0072
+  implementation is unchanged — only the default posture.
+- **Inbound UPDATE attribute hot-path optimizations.** `process_update` now does
+  a single-pass attribute-context extraction (`PolicyAttrSummary`) instead of
+  ~8 separate scans of the attribute vector, and shares the canonical attribute
+  `Arc` across same-UPDATE NLRI when policy makes no modifications
+  (`RouteAttrBundle`) instead of deep-cloning per accepted route.
+  Behaviour-identical; cuts per-UPDATE allocation churn and dropped 2p/100k
+  full-daemon RSS ~21% (lower jemalloc allocator high-water mark).
 - Inlined the per-peer Adj-RIB-In secondary prefix index
   (`HashMap<Prefix, HashSet<u32>>` → `HashMap<Prefix, SmallVec<[u32; 1]>>`),
   eliminating one heap-allocated `HashSet` per prefix for the common

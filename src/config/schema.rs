@@ -81,9 +81,9 @@ pub struct Config {
     /// the flip.
     #[serde(default = "default_enabled")]
     pub apply_bum_enforcement: bool,
-    /// Durable event-history outbox (ADR-0072). Default-on; set
-    /// `[event_history].enabled = false` to opt out for minimal
-    /// deployments. All fields are restart-required.
+    /// Durable event-history outbox (ADR-0072). **Opt-in (default off)
+    /// as of v0.32.0**; set `[event_history].enabled = true` for
+    /// restart-safe event replay. All fields are restart-required.
     #[serde(default)]
     pub event_history: EventHistoryConfig,
     /// Path of the config file (populated by `Config::load`, not serialized).
@@ -99,9 +99,11 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventHistoryConfig {
-    /// Enable the outbox. Default `true`. When `false`, EHM is
-    /// spawned but in pass-through mode (broadcasts only, no
-    /// persistence) — the minimal-deployment escape hatch.
+    /// Enable the durable outbox. **Default `false` (opt-in as of
+    /// v0.32.0).** When `false`, EHM runs in pass-through mode (live
+    /// broadcasts only, no persistence) and `SubscribeFromEvent`
+    /// returns `FAILED_PRECONDITION`. Set `true` for restart-safe event
+    /// replay — it costs memory / CPU / disk (see `docs/BENCHMARKS.md`).
     #[serde(default = "default_event_history_enabled")]
     pub enabled: bool,
     /// Fail to start if the events DB cannot be opened or recovered.
@@ -158,8 +160,14 @@ impl Default for EventHistoryConfig {
     }
 }
 
+// Default-OFF as of v0.32.0: the durable outbox is opt-in. v0.32.0 bgperf2
+// benchmarking showed the always-on cost was material — ~62 MB RSS and roughly
+// double the peak CPU at 2p/100k — a tax every operator paid before asking for
+// replay semantics. A routing daemon should be fast and lean by default;
+// operators who want restart-safe event replay set `[event_history].enabled =
+// true`. The ADR-0072 implementation is unchanged — only the default posture.
 fn default_event_history_enabled() -> bool {
-    true
+    false
 }
 fn default_event_history_path() -> String {
     String::new()

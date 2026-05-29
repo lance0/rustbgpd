@@ -503,10 +503,10 @@ now uses the 100k allocator profile; full-daemon RSS at scale uses bgperf2.
 | + AdjRibOut secondary prefix index | 415 MB | 12s |
 | + Skip unnecessary Arc deep clones (v0.4.x-era) | 257 MB | 11s |
 | + AdjRibOut capacity hints (v0.30-era) | ~260 MB | 11s |
-| v0.31.0-era — event-history **on** (daemon default) | ~439 MB | ~11s |
+| v0.31.0-era — event-history **on** (daemon default then) | ~439 MB | ~11s |
 | v0.31.0-era — event-history off | ~344 MB | ~11s |
-| **v0.32.0 — event-history on (daemon default)** | **~346 MB** | ~11s |
-| **v0.32.0 — event-history off** | **~284 MB** | ~11s |
+| **v0.32.0 — event-history off (daemon default now)** | **~284 MB** | ~11s |
+| **v0.32.0 — event-history on (opt-in)** | **~346 MB** | ~11s |
 
 **v0.32.0 cut 2p/100k full-daemon RSS ~21%** (event-history on: ~439 → ~346 MB,
 median of 337 / 346 / 369; off: ~344 → ~284 MB, of 280 / 289). The only code
@@ -522,19 +522,20 @@ above** — they are *full-daemon* process RSS, not the RIB-only figure, and are
 improved ~9% — see above). Since the ~257–260 MB era the daemon gained
 substantial always-available operational surfaces (BFD, gNMI, ASPA, BGP
 roles/OTC, the explain cache) and `PathAttribute` grew 72→112 B. The single
-biggest contributor is the durable **event-history outbox** (ADR-0072,
-**default-on**), which persists every route event to SQLite: disabling it
-(`[event_history].enabled = false`) drops 2p/100k RSS by **~62 MB**
-(~346 → ~284 MB) **and roughly halves peak CPU** (~239% → ~115%). Convergence is
-unchanged at ~11s (≈2s route-flood; the outbox is not on the
-convergence-critical path). Criterion and the RIB-only `memory_profile` above
-remain the regression-tracking surfaces for RIB data-structure changes.
+biggest contributor is the durable **event-history outbox** (ADR-0072), which
+persists every route event to SQLite: enabling it
+(`[event_history].enabled = true`) adds **~62 MB** RSS (~284 → ~346 MB) **and
+roughly doubles peak CPU** (~115% → ~239%). Convergence is unchanged at ~11s
+(≈2s route-flood; the outbox is not on the convergence-critical path). Criterion
+and the RIB-only `memory_profile` above remain the regression-tracking surfaces
+for RIB data-structure changes.
 
-> **Operator note — the event-history default carries a real cost.** At 2p/100k
-> the default-on outbox adds ~62 MB RSS and roughly doubles peak CPU during the
-> initial flood. Deployments that don't consume the durable event cursor should
-> set `[event_history].enabled = false`. Making the outbox **opt-in** (or
-> lighter by default) is tracked as follow-up — see `ROADMAP.md`.
+> **Operator note — the event-history outbox is opt-in as of v0.32.0.** That
+> always-on cost (~62 MB RSS + roughly double the peak CPU at 2p/100k) is
+> exactly why: the outbox now defaults to `[event_history].enabled = false`, so
+> the lean numbers above are the default. Deployments that want restart-safe
+> event replay set `enabled = true` and accept the cost. See ADR-0072 and the
+> two deployment profiles in `docs/OPERATIONS.md`.
 
 The Arc deep-clone fix (`RouteModifications::is_empty()` guard) was the biggest
 memory win: `Arc::make_mut()` was called unconditionally on every route in
@@ -610,16 +611,20 @@ daemons on the same host, same harness. Versions: **BIRD 2.18**
 container self-reports `0.31.0`, the pre-release-bump workspace version).
 "Convergence" is the route-flood time (monitor first-prefix → all-received);
 "Total time" includes session establishment. RSS is the max of the target
-container; 2p/100k is the median of 3 (rustbgpd) / 2 (eh-off) runs. rustbgpd
-columns are **event-history on** (the daemon default) unless noted.
+container; 2p/100k is the median of 3 (rustbgpd eh-on) / 2 (eh-off) runs. The
+rustbgpd 10k/20k columns were measured with **event-history enabled** (the
+opt-in config); at those scales the on/off difference is within noise. The
+2p/100k row shows **both** the v0.32.0 default (event-history off) and the
+opt-in (on).
 
 > **The earlier "2.3× less memory than GoBGP" framing no longer holds — and was
 > based on a stale GoBGP figure.** GoBGP 4.3.0 measures **~200 MB** at 2p/100k
 > here (and measured 198 MB in the prior March run); the old 578 MB was a much
 > older snapshot. On *full-daemon RSS*, rustbgpd (~346 MB on / ~284 MB off) now
 > uses **more** than GoBGP (~203 MB) and far more than BIRD (~30 MB) at this
-> scale — the cost of always-on operational surfaces (chiefly the default-on
-> event-history outbox). rustbgpd's **RIB-only structural memory stays lean**
+> scale — the cost of operational surfaces (chiefly the event-history outbox
+> when enabled; opt-in and default-off as of v0.32.0). rustbgpd's **RIB-only
+> structural memory stays lean**
 > (66.6 MB allocator-tracked at 2p/100k — see *Memory Footprint*); the gap is
 > operational surfaces + allocator retention, not RIB data-structure bloat.
 
@@ -646,8 +651,8 @@ columns are **event-history on** (the daemon default) unless noted.
 | | BIRD 2.18 | GoBGP 4.3.0 | rustbgpd (main / v0.32.0) |
 |---|---|---|---|
 | Convergence | 2s | 5s | 2s |
-| Max CPU | 10% | 598% | 239% (115% eh-off) |
-| Max RSS | 30 MB | 203 MB | 346 MB (284 MB eh-off) |
+| Max CPU | 10% | 598% | 115% default (239% eh-on) |
+| Max RSS | 30 MB | 203 MB | 284 MB default (346 MB eh-on) |
 | Total time | 13s | 16s | 20s |
 
 ### Understanding the Numbers
@@ -668,22 +673,22 @@ unnecessary `Arc::make_mut()` deep clones in the distribution path when no
 export policy modifications are configured.
 
 **CPU efficiency.** rustbgpd uses a single-threaded RIB (single tokio task,
-no locks). At 200k scale it peaks at ~239% CPU with the default-on
-event-history outbox and ~115% with it off (RIB + transport + the SQLite
-outbox writer) — so the durable outbox roughly doubles peak flood CPU. GoBGP
+no locks). At 200k scale it peaks at ~115% CPU by default and ~239% with the
+(opt-in) event-history outbox enabled (RIB + transport + the SQLite outbox
+writer) — so the durable outbox roughly doubles peak flood CPU when on. GoBGP
 peaks far higher (~598%, goroutine-per-peer + GC); BIRD is the most efficient
 at ~10% CPU, reflecting decades of C optimization with a radix-tree RIB.
 
 **Memory.** Two surfaces, and they tell different stories. *RIB-only
 structural memory* (allocator-tracked, the regression-tracking surface) is
 lean: 66.6 MB for 200k routes (2 peers + Loc-RIB), dominated by HashMap bucket
-arrays (~78%) and Route data (~19%). *Full-daemon RSS* at 2p/100k is ~346 MB
-(event-history on) / ~284 MB (off) — **more than GoBGP's ~203 MB** and far more
-than BIRD's ~30 MB at this scale. The difference between the 66.6 MB RIB figure
-and the ~284–346 MB RSS is the daemon's always-on operational surfaces (BFD,
-gNMI, ASPA, BGP roles/OTC, explain cache) plus the durable event-history outbox
-(the single biggest piece, ~62 MB) and jemalloc arena retention — not RIB
-bloat. BIRD's radix-tree representation remains an order of magnitude leaner on
+arrays (~78%) and Route data (~19%). *Full-daemon RSS* at 2p/100k is ~284 MB
+by default / ~346 MB with the opt-in event-history outbox — **both above GoBGP's
+~203 MB** and far more than BIRD's ~30 MB at this scale. The difference between
+the 66.6 MB RIB figure and the ~284–346 MB RSS is the daemon's always-on
+operational surfaces (BFD, gNMI, ASPA, BGP roles/OTC, explain cache), jemalloc
+arena retention, and — when enabled — the event-history outbox (the single
+biggest piece at ~62 MB) — not RIB bloat. BIRD's radix-tree representation remains an order of magnitude leaner on
 both surfaces. At full-table scale (900k prefixes, RIB-only micro-bench)
 rustbgpd's Adj-RIB-In + Loc-RIB is ~533 MB vs GoBGP's published 8–16+ GB.
 
@@ -701,7 +706,7 @@ updates.
 | Route processing (200k) | 2s | 5s | 2s |
 | CPU model | 1 core, very efficient | Multi-core, GC overhead | 1-2 cores, no GC |
 | Memory model | Radix tree, minimal overhead | Go heap, GC managed | Arc sharing, attribute interning |
-| Full-daemon RSS (200k) | 30 MB | 203 MB | 346 MB on / 284 MB off |
+| Full-daemon RSS (200k) | 30 MB | 203 MB | 284 MB default / 346 MB eh-on |
 | RIB-only memory (200k, allocator-tracked) | n/a | n/a | 66.6 MB |
 | RIB-only (900k, micro-bench) | ~325 MB (published, 30 peers) | 8-16+ GB (published) | ~533 MB (2 peers + Loc-RIB) |
 | API during load | Responsive (no RIB contention) | Responsive (concurrent) | Responsive (priority query channel) |
@@ -710,13 +715,13 @@ BIRD is the clear performance leader — 30+ years of optimization in a
 purpose-built C codebase is hard to beat. On **convergence**, rustbgpd is
 competitive: it floods 200k prefixes in ~2 seconds (monitor time), matching
 BIRD and beating GoBGP (5s). On **full-daemon memory**, rustbgpd is no longer
-the leader it was at v0.4.2 — ~346 MB (event-history on) / ~284 MB (off) at
-2p/100k is above GoBGP's ~203 MB, the cost of always-on operational surfaces
-(the default-on durable outbox most of all). Its **RIB-only structural memory**
-remains very lean (66.6 MB at 2p/100k; ~533 MB at 900k micro-bench vs GoBGP's
-8–16 GB), so the headroom for full-daemon RSS is operational-surface trimming
-(making the outbox opt-in is the first lever) rather than RIB data-structure
-work — shared route storage across RIB views was measured and rejected (below).
+the leader it was at v0.4.2 — ~284 MB by default (346 MB with the opt-in outbox)
+at 2p/100k is above GoBGP's ~203 MB, the cost of always-on operational surfaces.
+Its **RIB-only structural memory** remains very lean (66.6 MB at 2p/100k;
+~533 MB at 900k micro-bench vs GoBGP's 8–16 GB), so the headroom for full-daemon
+RSS is operational-surface trimming — making the event-history outbox opt-in
+(done in v0.32.0) was the first lever — rather than RIB data-structure work;
+shared route storage across RIB views was measured and rejected (below).
 
 ## EVPN RR Scale (M33)
 

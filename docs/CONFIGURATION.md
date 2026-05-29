@@ -2034,13 +2034,19 @@ cursor. External collectors bridge to their own bus (Kafka, NATS,
 Vector, journald, custom) over the existing gRPC event-stream
 RPCs; rustbgpd itself does not try to be an event bus.
 
-**Default-on.** Operators who want zero on-disk footprint can opt
-out via `enabled = false`. The outbox is bounded by a hard
-`max_events` count cap plus a `max_bytes` retention trigger. SQLite
-reuses freed pages after DELETE and does not guarantee that the main
-database file immediately shrinks without a future compaction pass, so
-`max_bytes` is an operational target rather than a strict filesystem
-ceiling in v1.
+**Opt-in — default off as of v0.32.0.** The outbox is disabled by
+default; operators who want restart-safe event replay set
+`enabled = true` and restart. It is off by default because v0.32.0
+benchmarking measured a material always-on cost (~62 MB RSS and roughly
+double the peak CPU at 2p/100k); a routing daemon should be lean by
+default. While disabled, `SubscribeFromEvent` and gNMI `Subscribe
+ON_CHANGE` return `FAILED_PRECONDITION`; the live `WatchEvents` /
+`WatchRoutes` / `List*Events` surfaces are unaffected. When enabled, the
+outbox is bounded by a hard `max_events` count cap plus a `max_bytes`
+retention trigger. SQLite reuses freed pages after DELETE and does not
+guarantee that the main database file immediately shrinks without a
+future compaction pass, so `max_bytes` is an operational target rather
+than a strict filesystem ceiling in v1.
 
 All fields are restart-required; see
 [reload-matrix.md](reload-matrix.md#event_history-adr-0072) for
@@ -2048,7 +2054,7 @@ the per-field classification.
 
 ```toml
 [event_history]
-enabled = true                  # default; set false for minimal deployments
+enabled = false                 # default (v0.32.0); set true for durable event replay
 required = false                # if true, daemon fails to start when DB unrecoverable
 path = ""                       # relative to runtime_state_dir; "" = events.db
 max_events = 100_000            # hard count cap
