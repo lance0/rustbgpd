@@ -165,9 +165,14 @@ Later for what remains.
   churn bench (short criterion variant of the M33 soak shape); root-cause the
   `best_path_cmp` ~6% full-tiebreak regression (the common LOCAL_PREF early-exit
   is unaffected; ~1 ns/comparison, dwarfed by the −40–62% insert/pipeline wins);
-  fix the `memory_profile` high-N harness non-scaling; and a fresh bgperf2
-  cross-stack comparison on current `main` (BIRD/GoBGP columns are a v0.4.2
-  snapshot). Shared route storage was measured and rejected — see Deferred.
+  fold the inbound UPDATE attribute extraction into a single scan (it currently
+  makes ~22 passes over the attribute vector), caching the summary on `Route` so
+  `best_path_cmp` stops re-scanning — the same lever as the regression above;
+  have the EVPN Linux reconciler signal changed/dirty from `apply_plan` instead
+  of cloning the owned-state map each reconcile pass (confirm the exact clone
+  site first); fix the `memory_profile` high-N harness non-scaling; and a fresh
+  bgperf2 cross-stack comparison on current `main` (BIRD/GoBGP columns are a
+  v0.4.2 snapshot). Shared route storage was measured and rejected — see Deferred.
 - **AIGP best-path support (RFC 7311).** Standards completeness for deployments
   that carry accumulated IGP cost in BGP — the one best-path step we don't
   implement (the chain is otherwise 11/11). Not a headline feature unless
