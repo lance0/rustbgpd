@@ -2,9 +2,13 @@
 
 A feature comparison of open-source BGP daemon implementations.
 
-Last updated: 2026-05-28. See [CHANGELOG.md](../CHANGELOG.md) for
+Last updated: 2026-05-29. See [CHANGELOG.md](../CHANGELOG.md) for
 per-release feature deltas and [evpn-enablement.md](evpn-enablement.md)
 for the EVPN gate ladder.
+
+This matrix is a broad operator-facing comparison. Cells marked `Partial` or
+with a footnote intentionally distinguish shipped subsets from a full routing-
+suite implementation.
 
 ## Overview
 
@@ -24,8 +28,8 @@ for the EVPN gate ladder.
 | IPv6 Unicast | Yes | Yes | Yes | Yes | Yes |
 | IPv4 Multicast | No | Yes | Yes | Yes | No |
 | IPv6 Multicast | No | Yes | Yes | Yes | No |
-| IPv4 Labeled Unicast | No | Yes | No | Yes | No |
-| IPv6 Labeled Unicast | No | Yes | No | Yes | No |
+| IPv4 Labeled Unicast | No | Yes | Yes | Yes | No |
+| IPv6 Labeled Unicast | No | Yes | Yes | Yes | No |
 | VPNv4 (RFC 4364) | No | Yes | Yes | Yes | Yes |
 | VPNv6 | No | Yes | Yes | Yes | Yes |
 | L2VPN EVPN (RFC 7432) | Partial[^evpn] | Yes | Yes | Yes | No |
@@ -33,7 +37,7 @@ for the EVPN gate ladder.
 | IPv4 FlowSpec (RFC 8955) | Yes | Yes | Yes | Yes | Yes |
 | IPv6 FlowSpec | Yes | Yes | Yes | Yes | Yes |
 | VPN FlowSpec | No | No | No | Yes | No |
-| BGP-LS (RFC 7752) | No | No | No | Yes | No |
+| BGP-LS (RFC 9552) | No | Yes | No | Yes | No |
 | SR Policy | No | No | No | Yes | No |
 
 [^evpn]: rustbgpd EVPN is **alpha** and Linux/VXLAN-only. Shipped and
@@ -61,7 +65,7 @@ for the EVPN gate ladder.
 | Enhanced Route Refresh (RFC 7313) | Yes | Yes | Yes | No | Yes |
 | Graceful Restart (RFC 4724) | Yes | Yes | Yes | Yes | Yes |
 | Long-Lived GR (RFC 9494) | Yes | Partial | Yes | Yes | No |
-| Notification GR (RFC 8538) | Yes | No | No | Yes | Yes |
+| Notification GR (RFC 8538) | Yes | Yes | No | Yes | Yes |
 | Add-Path (RFC 7911) | Yes | Yes | Yes | Yes | Yes |
 | Extended Messages (RFC 8654) | Yes | Yes | Yes | No | Yes |
 | Extended Nexthop (RFC 8950) | Yes | Yes | Yes | Yes | Yes |
@@ -69,7 +73,12 @@ for the EVPN gate ladder.
 | Route Reflector (RFC 4456) | Yes | Yes | Yes | Yes | Yes |
 | Confederation (RFC 5065) | No | Yes | Yes | Yes | No |
 | Admin Shutdown (RFC 8203) | Yes | Yes | Yes | Yes | Yes |
-| BGP Roles (RFC 9234) | No | No | Yes | No | Yes |
+| BGP Roles + OTC (RFC 9234) | Yes[^roles] | Yes | Yes | No | Yes |
+
+[^roles]: rustbgpd's v1 Roles + Only-to-Customer implementation covers static
+    eBGP IPv4/IPv6 unicast sessions and is FRR-interop-tested by M55. FlowSpec,
+    EVPN, iBGP roles, AS-confederation sub-AS roles, and operator overrides of
+    OTC behavior are intentionally out of scope for v1.
 
 ## Policy Engine
 
@@ -99,11 +108,16 @@ for the EVPN gate ladder.
 | TCP MD5 (RFC 2385) | Yes | Yes | Yes | Yes | Yes |
 | TCP-AO (RFC 5925) | Static startup | No | Yes | No | No |
 | GTSM / TTL Security | Yes | Yes | Yes | Yes | Yes |
-| RPKI/RTR (RFC 6810/8210) | Yes | Yes | Yes | Yes | Yes |
-| ASPA verification | Yes | No | Yes | No | Yes |
+| RPKI origin validation | Yes | Yes | Yes | Yes | Yes |
+| ASPA path verification | Upstream[^aspa] | No | Yes | No | Yes |
 | Private AS removal | Yes | Yes | Yes | Yes | Yes |
 | Privilege separation | No | No | No | No | Yes |
 | Memory-safe language | Yes | No | No | Yes | No |
+
+[^aspa]: rustbgpd ships RTR v2 ASPA input, upstream path verification, best-path
+    preference, and policy matching for IPv4/IPv6 unicast. Downstream /
+    customer-cone verification and import-policy revalidation on cache update
+    remain planned follow-ups.
 
 ## Monitoring & Observability
 
@@ -193,7 +207,7 @@ for the EVPN gate ladder.
 | ORIGINATOR_ID | Yes | Yes | Yes | Yes | Yes |
 | Stale route demotion (GR) | Yes | Yes | Yes | Yes | Yes |
 | RPKI preference | Yes | Yes | Yes | Yes | Yes |
-| AIGP | No | Yes | No | Yes | No |
+| AIGP | No | Yes | Yes | Yes | No |
 | Multipath/ECMP | Yes[^multipath] | Yes | Yes | Yes | Yes |
 
 [^multipath]: Classic unicast multipath/ECMP FIB install ships (ADR-0066):
@@ -210,7 +224,7 @@ for the EVPN gate ladder.
     multi-path *send* (RFC 7911, route-server mode) and EVPN aliasing ECMP
     (ADR-0059 FDB nexthop groups, default-on) also ship.
 
-## Memory (200k prefixes, bgperf2)
+## Historical Memory Snapshot (200k prefixes, bgperf2)
 
 | Implementation | Memory |
 |---|---|
@@ -219,7 +233,11 @@ for the EVPN gate ladder.
 | rustbgpd | ~257 MB |
 | GoBGP | ~578 MB |
 
-OpenBGPd was not tested in this benchmark.
+OpenBGPd was not tested in this benchmark. These bgperf2 numbers are retained
+for cross-implementation context, but they have not been re-run after the recent
+v0.31.x RIB memory work. See [BENCHMARKS.md](BENCHMARKS.md) for the current
+rustbgpd micro-benchmark memory profile and the latest criterion-based
+regression methodology.
 
 ## Positioning
 
