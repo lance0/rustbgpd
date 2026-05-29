@@ -2737,6 +2737,7 @@ dependencies = [
  "rustbgpd-rpki",
  "rustbgpd-telemetry",
  "rustbgpd-wire",
+ "rustc-hash",
  "smallvec",
  "thiserror 2.0.18",
  "tokio",

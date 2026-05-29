@@ -3,13 +3,20 @@
 //! Stores the single best route per prefix, selected via `best_path_cmp`.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::net::IpAddr;
 
 use rustbgpd_wire::{AsPath, EvpnRouteKey, FlowSpecRule, Prefix};
+// FxHash (rustc-hash) on the route-bearing maps — see `adj_rib_in` for the
+// rationale (internal keys, faster hasher on the convergence hot path).
+// Aliased to the std name so the storage types read unchanged.
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::best_path::best_path_cmp;
 use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
+
+// rustc-hash 1.x exposes no `FxBuildHasher` alias; name the Fx build-hasher
+// locally so the `with_capacity_and_hasher` call reads clearly.
+type FxBuildHasher = std::hash::BuildHasherDefault<rustc_hash::FxHasher>;
 
 /// The local RIB storing the best route per prefix.
 pub struct LocRib {
@@ -31,9 +38,9 @@ impl LocRib {
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            routes: HashMap::with_capacity(capacity),
-            flowspec_routes: HashMap::new(),
-            evpn_routes: HashMap::new(),
+            routes: HashMap::with_capacity_and_hasher(capacity, FxBuildHasher::default()),
+            flowspec_routes: HashMap::default(),
+            evpn_routes: HashMap::default(),
         }
     }
 
