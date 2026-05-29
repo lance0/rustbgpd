@@ -88,7 +88,7 @@ tempfile = "3"
 # Bundled libsqlite avoids per-distro packaging variance — the outbox
 # is a daemon-local file, not something operators expect to inspect
 # with a system sqlite3 CLI.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 # Daemon boot ID stamping for restart detection (ADR-0072).
 uuid = { version = "1", features = ["v4"] }
 
