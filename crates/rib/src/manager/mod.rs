@@ -147,6 +147,18 @@ pub struct RibManager {
     query_rx: mpsc::Receiver<RibUpdate>,
     /// Large route batches that are being processed in chunks.
     pending_route_batches: VecDeque<PendingRoutesReceived>,
+    /// Best-path changes accumulated across the chunks of the
+    /// currently-draining route batch and distributed in a single
+    /// `distribute_changes` call when the batch is exhausted. Deferring
+    /// only the *distribution* coalesces a multi-chunk initial-load flood
+    /// into one outbound batch per peer instead of one per 1024-route
+    /// chunk. `recompute_best` still runs per chunk, so Loc-RIB, route
+    /// events, and partial-progress queries stay live mid-batch. The run
+    /// loop processes new commands only once all pending chunks drain
+    /// (see `process_next_route_chunk`), so these sets are always empty
+    /// and fully flushed between batches.
+    pending_distribute_changed: HashSet<Prefix>,
+    pending_distribute_affected: HashSet<Prefix>,
 }
 
 const ROUTES_RECEIVED_CHUNK_SIZE: usize = 1024;
@@ -389,6 +401,8 @@ impl RibManager {
             rx,
             query_rx,
             pending_route_batches: VecDeque::new(),
+            pending_distribute_changed: HashSet::new(),
+            pending_distribute_affected: HashSet::new(),
         }
     }
 

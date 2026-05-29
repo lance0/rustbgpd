@@ -412,6 +412,9 @@ impl RibManager {
 
         let peer = pending.peer();
         let Some(chunk) = pending.next_chunk() else {
+            // Empty/exhausted batch — flush anything still accumulated
+            // (defensive; normally the has_more() branch below flushes).
+            self.flush_pending_distribute();
             return false;
         };
 
@@ -438,9 +441,30 @@ impl RibManager {
 
         if pending.has_more() {
             self.pending_route_batches.push_front(pending);
+        } else {
+            // Batch fully drained — distribute the changes accumulated
+            // across all its chunks in one coalesced outbound pass.
+            self.flush_pending_distribute();
         }
 
         true
+    }
+
+    /// Distribute the best-path changes accumulated across the chunks of a
+    /// route batch in a single pass, then clear the accumulator. Called when
+    /// a batch drains (see [`Self::process_next_route_chunk`]); a no-op when
+    /// nothing accumulated. Deferring distribution this way coalesces a
+    /// multi-chunk initial-load flood into one outbound batch per peer
+    /// instead of one per 1024-route chunk, while `recompute_best` still runs
+    /// per chunk so Loc-RIB and route events stay live mid-batch.
+    fn flush_pending_distribute(&mut self) {
+        if self.pending_distribute_changed.is_empty() && self.pending_distribute_affected.is_empty()
+        {
+            return;
+        }
+        let changed = std::mem::take(&mut self.pending_distribute_changed);
+        let affected = std::mem::take(&mut self.pending_distribute_affected);
+        self.distribute_changes(&changed, &affected);
     }
 
     fn process_withdraw_chunk(&mut self, peer: IpAddr, withdrawn: Vec<(Prefix, u32)>) {
@@ -480,8 +504,13 @@ impl RibManager {
         self.metrics
             .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
         if !affected.is_empty() {
+            // Recompute Loc-RIB now — best-path, route events, and
+            // partial-progress queries stay live mid-batch — but accumulate
+            // the distribution and flush it once when the batch drains, so a
+            // multi-chunk flood coalesces into one outbound pass per peer.
             let changed = self.recompute_best(&affected);
-            self.distribute_changes(&changed, &affected);
+            self.pending_distribute_changed.extend(changed);
+            self.pending_distribute_affected.extend(affected);
         }
     }
 
@@ -529,8 +558,13 @@ impl RibManager {
         self.metrics
             .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
         if !affected.is_empty() {
+            // Recompute Loc-RIB now — best-path, route events, and
+            // partial-progress queries stay live mid-batch — but accumulate
+            // the distribution and flush it once when the batch drains, so a
+            // multi-chunk flood coalesces into one outbound pass per peer.
             let changed = self.recompute_best(&affected);
-            self.distribute_changes(&changed, &affected);
+            self.pending_distribute_changed.extend(changed);
+            self.pending_distribute_affected.extend(affected);
         }
     }
 

@@ -432,6 +432,82 @@ async fn large_routes_received_batch_preserves_final_state() {
     handle.await.unwrap();
 }
 
+/// PR3: a multi-chunk initial-load flood (>1024 routes in one batch)
+/// distributes to each peer as ONE coalesced `OutboundRouteUpdate`, not one
+/// per 1024-route chunk. `recompute_best` still runs per chunk (see
+/// `query_channel_observes_partial_progress_during_large_batch`), so only
+/// outbound distribution is deferred to batch-end. Asserts both the
+/// coalescing (single outbound message) and correctness (every route is
+/// advertised).
+#[tokio::test]
+async fn multi_chunk_flood_coalesces_into_one_outbound_batch() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    // Register an outbound observer peer first and drain its initial EoR.
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    // Flood 2500 routes (3 chunks at the 1024 chunk size) from a source peer.
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let next_hop = Ipv4Addr::new(10, 0, 0, 1);
+    let route_count = 2500_u32;
+    let routes: Vec<Route> = (0..route_count)
+        .map(|i| make_indexed_route(i, next_hop))
+        .collect();
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: routes,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Collect outbound updates until every route is advertised, counting how
+    // many distinct OutboundRouteUpdate messages it took.
+    let mut announced = 0usize;
+    let mut messages = 0usize;
+    while announced < route_count as usize {
+        let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("outbound update should arrive")
+            .expect("outbound channel open");
+        messages += 1;
+        announced += update.announce.len();
+    }
+    assert_eq!(
+        announced, route_count as usize,
+        "every flooded route must be advertised"
+    );
+    assert_eq!(
+        messages, 1,
+        "a multi-chunk flood must coalesce into one outbound batch, got {messages}"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 #[tokio::test]
 async fn query_channel_observes_partial_progress_during_large_batch() {
     let (tx, rx) = mpsc::channel(64);
