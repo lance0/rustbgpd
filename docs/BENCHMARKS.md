@@ -489,6 +489,20 @@ structural (power-of-2 rounding), not rehash churn.
 Remaining memory is HashMap bucket arrays (~78%) and actual Route data (~19%).
 No obvious accidental overhead remains.
 
+### Shared `RouteData` — measured and rejected
+
+Splitting `Route` into a shared immutable `RouteData` (referenced from each RIB)
+plus a thin per-RIB wrapper was evaluated against a `>=25%`-of-RR-heap gate and
+**rejected**. In the route-reflector fanout shape the realistic, policy-robust
+split (identity fields shared; attributes + next-hop kept per-copy so per-client
+export policy still shares the identity) recovers only **11–13% of RIB heap
+under transparent policy and ~5% under per-client rewrite** — well below the
+gate, for the largest `&Route`-consumer blast radius in the codebase. A naive
+`Arc<Route>` whole-shell share would reach ~31–37%, but that is unachievable:
+`is_stale` / `is_llgr_stale` and `validation_state` / `aspa_state` mutate per
+RIB, so the full shell can never be shared. Reproducible harness:
+`cargo test -p rustbgpd-rib --test route_data_sharing_profile -- --ignored --nocapture`.
+
 ## Interpretation
 
 **Wire codec** — The codec is not a bottleneck. Parsing a full-size UPDATE (500
