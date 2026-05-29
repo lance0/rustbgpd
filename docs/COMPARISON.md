@@ -224,20 +224,23 @@ suite implementation.
     multi-path *send* (RFC 7911, route-server mode) and EVPN aliasing ECMP
     (ADR-0059 FDB nexthop groups, default-on) also ship.
 
-## Historical Memory Snapshot (200k prefixes, bgperf2)
+## Memory Snapshot (2 peers × 100k prefixes, bgperf2 — 2026-05-29, v0.32.0)
 
-| Implementation | Memory |
+| Implementation | Max RSS |
 |---|---|
-| BIRD | ~7 MB |
-| FRR | ~30 MB |
-| rustbgpd | ~257 MB |
-| GoBGP | ~578 MB |
+| BIRD 2.18 | ~30 MB |
+| GoBGP 4.3.0 | ~203 MB |
+| rustbgpd (v0.32.0, default) | ~284 MB |
+| rustbgpd (event-history enabled) | ~346 MB |
 
-OpenBGPd was not tested in this benchmark. These bgperf2 numbers are retained
-for cross-implementation context, but they have not been re-run after the recent
-v0.31.x RIB memory work. See [BENCHMARKS.md](BENCHMARKS.md) for the current
-rustbgpd micro-benchmark memory profile and the latest criterion-based
-regression methodology.
+Full-daemon process RSS, same host and harness. rustbgpd's full-daemon RSS sits
+above GoBGP here — the cost of always-on operational surfaces (BFD, gNMI, ASPA,
+BGP roles/OTC, the explain cache) — while its **RIB-only structural memory stays
+lean** (66.6 MB allocator-tracked at this scale). The durable event-history
+outbox is opt-in (default off) as of v0.32.0; enabling it is the ~284 → ~346 MB
+delta. FRR and OpenBGPd were not in this run. See
+[BENCHMARKS.md](BENCHMARKS.md) for the full cross-stack tables, the RIB-only
+memory profile, and methodology.
 
 ## Positioning
 
