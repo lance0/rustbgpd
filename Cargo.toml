@@ -80,7 +80,7 @@ criterion = { version = "0.8", features = ["html_reports"] }
 smallvec = "1"
 rustc-hash = "1.1"
 lru = "0.16"
-tikv-jemallocator = { version = "0.6", features = ["profiling"] }
+tikv-jemallocator = { version = "0.7", features = ["profiling"] }
 dhat = "0.3"
 rcgen = "0.14"
 tempfile = "3"
