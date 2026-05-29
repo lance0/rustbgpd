@@ -1,7 +1,7 @@
 mod commands;
 mod fsm;
 pub mod import_decision_cache;
-mod inbound;
+pub(crate) mod inbound;
 mod io;
 mod outbound;
 mod writer;

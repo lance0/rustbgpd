@@ -28,6 +28,18 @@ socket2.workspace = true
 libc.workspace = true
 lru.workspace = true
 
+[features]
+# Exposes `RouteAttrBundle` + `materialize_attrs` (inbound attribute
+# handling) to the `inbound_attrs` microbench. Off by default — nothing
+# is reachable outside the crate in a normal build.
+bench-internals = []
+
 [dev-dependencies]
 rustbgpd-rib.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+criterion.workspace = true
+
+[[bench]]
+name = "inbound_attrs"
+harness = false
+required-features = ["bench-internals"]

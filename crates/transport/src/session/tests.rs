@@ -1193,6 +1193,51 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop() {
 }
 
 #[tokio::test]
+async fn no_modification_update_shares_attribute_arc_across_nlri() {
+    // Two IPv4 NLRI in one UPDATE, no import policy → both permitted with
+    // no modifications. They must share one attribute `Arc` (the PR2 CoW
+    // win), not deep-clone per route.
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.negotiated = Some(negotiated_session(65002, false));
+
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let update = UpdateMessage::build(
+        &[
+            Ipv4NlriEntry {
+                path_id: 0,
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            },
+            Ipv4NlriEntry {
+                path_id: 0,
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+            },
+        ],
+        &[],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+
+    session.process_update(update).await;
+
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced.len(), 2);
+    assert!(
+        Arc::ptr_eq(&announced[0].attributes, &announced[1].attributes),
+        "two NLRI from one no-modification UPDATE must share one attribute Arc"
+    );
+}
+
+#[tokio::test]
 async fn otc_ingress_adds_remote_asn_for_route_from_provider_unicast() {
     for role in [BgpRole::Customer, BgpRole::Peer, BgpRole::RouteServerClient] {
         let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);

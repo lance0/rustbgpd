@@ -2792,6 +2792,7 @@ name = "rustbgpd-transport"
 version = "0.31.0"
 dependencies = [
  "bytes",
+ "criterion",
  "libc",
  "lru 0.18.0",
  "prometheus",
