@@ -45,7 +45,7 @@ suite implementation.
     a bidirectional single-homed VTEP (Type 2 local-MAC / MAC+IP
     origination from kernel FDB / neighbor events, Type 3 IMET per
     L2VNI); observable DF election + Type 1/4 origination with opt-in
-    Gate 8b multi-homing enforcement (RFC 7432 §14 aliasing, §8.4
+    EVPN BUM-flood suppression + DF election (RFC 7432 §14 aliasing, §8.4
     mass-withdraw, §8.5 kernel BUM-port enforcement, ADR-0059
     FDB-nexthop-group ECMP for multi-homed Type 2, M40 FRR-validated);
     and symmetric Interface-less IRB / L3VNI / Type 5 (RFC 9136 §4.4.2)
