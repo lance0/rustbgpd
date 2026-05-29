@@ -236,12 +236,15 @@ Competing head-to-head with GoBGP for all use cases:
 
 ## Top Gaps by Use Case
 
-### IX Route Server (~100% parity)
+### IX Route Server (~99% parity)
 
-No material control-plane gaps remain for the target route-server deployment.
-Remaining work is operator polish: CLI integration tests, bulk policy-edit
-ergonomics, and production packaging hardening rather than missing protocol
-capability.
+The one remaining IX-relevant control-plane gap is **ORF / Outbound Route
+Filtering (RFC 5291)** — FRR and GoBGP let a peer push a prefix-filter so the
+route server suppresses unwanted routes before sending them; rustbgpd does not
+negotiate ORF yet (tracked under ROADMAP "Next"). Otherwise no material
+control-plane gaps remain; remaining work is operator polish: CLI integration
+tests, bulk policy-edit ergonomics, and production packaging hardening rather
+than missing protocol capability.
 
 ### DC Fabric / Whitebox BGP Speaker (~95% parity)
 
@@ -277,6 +280,10 @@ scope:
 4. **EVPN standards tail** — native overlay-index local origination,
    recursion-path interop, single-active backup-path pre-install, EVPN over
    MPLS/PBB, and route types 6-11.
+5. **Operational policy features** — ORF / Outbound Route Filtering (RFC 5291;
+   route-server-relevant, tracked under ROADMAP "Next") and conditional
+   advertisement (advertise-if-present / advertise-if-absent; demand-shaped).
+   Both are carried by FRR and GoBGP.
 
 ## Pre-1.0 Tech Debt
 
