@@ -21,14 +21,10 @@ use std::sync::Arc;
 // This matches the non-DoS-resistant internal hash tables FRR and BIRD use.
 // Aliased to the std names so the storage type declarations read unchanged.
 use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, PathAttribute, Prefix, Safi};
-use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
 
 use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
-
-// rustc-hash 1.x exposes no `FxBuildHasher` alias; name the Fx build-hasher
-// locally so the `with_capacity_and_hasher` calls read clearly.
-type FxBuildHasher = std::hash::BuildHasherDefault<rustc_hash::FxHasher>;
 
 /// Per-peer Adj-RIB-In: stores the routes received from a single peer.
 ///
@@ -85,22 +81,16 @@ impl AdjRibIn {
         let flowspec_capacity = flowspec_capacity.max(4);
         Self {
             peer,
-            routes: HashMap::with_capacity_and_hasher(route_capacity, FxBuildHasher::default()),
-            prefix_index: HashMap::with_capacity_and_hasher(
-                route_capacity,
-                FxBuildHasher::default(),
-            ),
+            routes: HashMap::with_capacity_and_hasher(route_capacity, FxBuildHasher),
+            prefix_index: HashMap::with_capacity_and_hasher(route_capacity, FxBuildHasher),
             llgr_stale_local_tags: HashSet::default(),
-            flowspec_routes: HashMap::with_capacity_and_hasher(
-                flowspec_capacity,
-                FxBuildHasher::default(),
-            ),
+            flowspec_routes: HashMap::with_capacity_and_hasher(flowspec_capacity, FxBuildHasher),
             flowspec_llgr_stale_local_tags: HashSet::default(),
             evpn_routes: HashMap::default(),
             evpn_llgr_stale_local_tags: HashSet::default(),
             attr_intern: HashSet::with_capacity_and_hasher(
                 route_capacity.clamp(16, 64),
-                FxBuildHasher::default(),
+                FxBuildHasher,
             ),
         }
     }

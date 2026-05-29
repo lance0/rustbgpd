@@ -4,14 +4,10 @@ use rustbgpd_wire::{EvpnRouteKey, FlowSpecRule, Prefix};
 // FxHash (rustc-hash) on the route-bearing maps — see `adj_rib_in` for the
 // rationale (internal keys, faster hasher on the convergence hot path).
 // Aliased to the std name so the storage types read unchanged.
-use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap as HashMap};
 use smallvec::SmallVec;
 
 use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
-
-// rustc-hash 1.x exposes no `FxBuildHasher` alias; name the Fx build-hasher
-// locally so the `with_capacity_and_hasher` calls read clearly.
-type FxBuildHasher = std::hash::BuildHasherDefault<rustc_hash::FxHasher>;
 
 /// Per-peer Adj-RIB-Out: routes advertised to a specific peer.
 ///
@@ -45,8 +41,8 @@ impl AdjRibOut {
     pub fn with_capacity(peer: IpAddr, capacity: usize) -> Self {
         Self {
             peer,
-            routes: HashMap::with_capacity_and_hasher(capacity, FxBuildHasher::default()),
-            prefix_path_ids: HashMap::with_capacity_and_hasher(capacity, FxBuildHasher::default()),
+            routes: HashMap::with_capacity_and_hasher(capacity, FxBuildHasher),
+            prefix_path_ids: HashMap::with_capacity_and_hasher(capacity, FxBuildHasher),
             flowspec_routes: HashMap::default(),
             evpn_routes: HashMap::default(),
         }
