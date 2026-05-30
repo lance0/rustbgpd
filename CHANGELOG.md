@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Performance
 
+- **Faster cold-start BGP reconnect after TCP-level dial misses.** A peer that
+  starts before its passive neighbor no longer waits for the full 5s
+  ConnectRetry base after the first refused TCP dial. TCP connection failures
+  now retry twice at a 1s floor before returning to the configured exponential
+  curve; OPEN validation failures / NOTIFICATION fallback still use the slower
+  Idle reconnect guard so misconfigured peers do not hot-loop.
 - **Dataplane reconcile allocation-churn reductions.**
   - `fib`: the unicast FIB reconciler no longer clones the full `FibOwnedState`
     each pass to detect changes — it tracks owned-state mutations explicitly and

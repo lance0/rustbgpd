@@ -657,12 +657,13 @@ opt-in (on).
 
 ### Understanding the Numbers
 
-**Session establishment.** rustbgpd's ConnectRetryTimer defaults to 5 seconds
-(reduced from the RFC 4271 suggested 30 seconds). When BIRD tester peers start
-after rustbgpd, the first outbound connection attempt fails and the retry fires
-within 5 seconds. Total establishment overhead is ~9 seconds, compared to 1-2
-seconds for BIRD (accepts inbound immediately) and GoBGP (passive neighbor
-mode). Further improvement would require listen-mode-first startup.
+**Session establishment.** The v0.32.0 table includes boot-order overhead:
+rustbgpd starts before the passive BIRD testers, so the first outbound TCP dial
+can miss before the testers bind their listeners. Main now retries the first
+two TCP-level dial misses at a 1s floor before returning to the configured 5s
+exponential curve; OPEN validation failures / NOTIFICATION fallback still use
+the slower Idle reconnect guard. Re-run this matrix after the reconnect change
+to refresh the total-time row.
 
 **Route processing.** At 10k and below, convergence completes in 2 seconds —
 matching GoBGP and within 1 second of BIRD. At 200k prefixes, rustbgpd

@@ -14,6 +14,15 @@ use crate::state::SessionState;
 /// Maximum connect-retry backoff in seconds.
 const MAX_RETRY_SECS: u32 = 300;
 
+/// Fast TCP-level retries before returning to the configured exponential base.
+///
+/// A refused TCP dial usually means peer boot ordering, not a protocol/config
+/// error. Retry those first misses quickly so cold-start convergence is not
+/// dominated by the configured `ConnectRetry` base. OPEN validation failures and
+/// NOTIFICATION-driven Idle fallback stay on the slower daemon reconnect guard.
+const FAST_TCP_CONNECT_RETRY_SECS: u32 = 1;
+const FAST_TCP_CONNECT_RETRY_ATTEMPTS: u32 = 2;
+
 /// Initial hold timer before OPEN negotiation (RFC 4271: "large value").
 const INITIAL_HOLD_SECS: u32 = 240;
 
@@ -147,7 +156,10 @@ impl Session {
                 self.connect_retry_counter += 1;
                 let mut actions = vec![
                     Action::StopTimer(TimerType::ConnectRetry),
-                    Action::StartTimer(TimerType::ConnectRetry, self.connect_retry_duration()),
+                    Action::StartTimer(
+                        TimerType::ConnectRetry,
+                        self.tcp_connect_failure_retry_duration(),
+                    ),
                 ];
                 actions.push(self.transition_to(SessionState::Active));
                 actions
@@ -190,7 +202,10 @@ impl Session {
                 self.connect_retry_counter += 1;
                 let mut actions = vec![
                     Action::StopTimer(TimerType::ConnectRetry),
-                    Action::StartTimer(TimerType::ConnectRetry, self.connect_retry_duration()),
+                    Action::StartTimer(
+                        TimerType::ConnectRetry,
+                        self.tcp_connect_failure_retry_duration(),
+                    ),
                 ];
                 actions.push(self.transition_to(SessionState::Active));
                 actions
@@ -224,7 +239,10 @@ impl Session {
                 let mut actions = vec![
                     Action::CloseTcpConnection,
                     Action::StopTimer(TimerType::Hold),
-                    Action::StartTimer(TimerType::ConnectRetry, self.connect_retry_duration()),
+                    Action::StartTimer(
+                        TimerType::ConnectRetry,
+                        self.tcp_connect_failure_retry_duration(),
+                    ),
                 ];
                 actions.push(self.transition_to(SessionState::Active));
                 actions
@@ -509,13 +527,33 @@ impl Session {
         }
     }
 
-    /// Compute connect-retry duration with exponential backoff.
+    /// Compute the normal connect-retry duration with exponential backoff.
     /// `base * 2^counter`, capped at `MAX_RETRY_SECS`.
     fn connect_retry_duration(&self) -> u32 {
+        self.connect_retry_backoff_duration(self.connect_retry_counter)
+    }
+
+    fn connect_retry_backoff_duration(&self, counter: u32) -> u32 {
         let base = self.config.connect_retry_secs;
-        let shift = self.connect_retry_counter.min(31);
+        let shift = counter.min(31);
         base.saturating_mul(1u32.checked_shl(shift).unwrap_or(u32::MAX))
             .min(MAX_RETRY_SECS)
+    }
+
+    /// Compute the retry wait after a TCP-level connection miss.
+    ///
+    /// The first misses are usually a peer that is still booting or has not yet
+    /// bound its listener. Keep those quick, then resume the configured
+    /// exponential curve so persistent failures still back off.
+    fn tcp_connect_failure_retry_duration(&self) -> u32 {
+        if self.connect_retry_counter <= FAST_TCP_CONNECT_RETRY_ATTEMPTS {
+            return FAST_TCP_CONNECT_RETRY_SECS;
+        }
+
+        let backoff_counter = self
+            .connect_retry_counter
+            .saturating_sub(FAST_TCP_CONNECT_RETRY_ATTEMPTS + 1);
+        self.connect_retry_backoff_duration(backoff_counter)
     }
 
     /// Send a NOTIFICATION, close TCP, stop timers, transition to Idle.
@@ -599,6 +637,13 @@ mod tests {
         actions.iter().any(pred)
     }
 
+    fn connect_retry_timer_secs(actions: &[Action]) -> Option<u32> {
+        actions.iter().find_map(|action| match action {
+            Action::StartTimer(TimerType::ConnectRetry, secs) => Some(*secs),
+            _ => None,
+        })
+    }
+
     fn assert_state_changed(actions: &[Action], expected_new: SessionState) {
         assert!(
             has_action(actions, |a| matches!(
@@ -626,6 +671,7 @@ mod tests {
             a,
             Action::StartTimer(TimerType::ConnectRetry, _)
         )));
+        assert_eq!(connect_retry_timer_secs(&actions), Some(30));
     }
 
     #[test]
@@ -1238,6 +1284,49 @@ mod tests {
 
         s.connect_retry_counter = 10;
         assert_eq!(s.connect_retry_duration(), 300);
+    }
+
+    #[test]
+    fn tcp_connection_failures_retry_fast_before_backing_off() {
+        let mut cfg = test_config();
+        cfg.connect_retry_secs = 5;
+        let mut s = Session::new(cfg);
+
+        s.handle_event(Event::ManualStart);
+        let actions = s.handle_event(Event::TcpConnectionFails);
+        assert_eq!(s.state(), SessionState::Active);
+        assert_eq!(connect_retry_timer_secs(&actions), Some(1));
+
+        let actions = s.handle_event(Event::TcpConnectionFails);
+        assert_eq!(s.state(), SessionState::Active);
+        assert_eq!(connect_retry_timer_secs(&actions), Some(1));
+
+        let actions = s.handle_event(Event::TcpConnectionFails);
+        assert_eq!(s.state(), SessionState::Active);
+        assert_eq!(connect_retry_timer_secs(&actions), Some(5));
+
+        let actions = s.handle_event(Event::TcpConnectionFails);
+        assert_eq!(s.state(), SessionState::Active);
+        assert_eq!(connect_retry_timer_secs(&actions), Some(10));
+    }
+
+    #[test]
+    fn open_rejection_does_not_start_fast_tcp_retry_timer() {
+        let mut s = Session::new(test_config());
+        s.handle_event(Event::ManualStart);
+        s.handle_event(Event::TcpConnectionConfirmed);
+
+        let mut open = peer_open();
+        open.my_as = 65003;
+        open.capabilities = vec![Capability::FourOctetAs { asn: 65003 }];
+        let actions = s.handle_event(Event::OpenReceived(open));
+
+        assert_eq!(s.state(), SessionState::Idle);
+        assert_eq!(connect_retry_timer_secs(&actions), None);
+        assert!(has_action(&actions, |a| matches!(
+            a,
+            Action::SendNotification(_)
+        )));
     }
 
     #[test]

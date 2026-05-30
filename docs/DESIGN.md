@@ -617,7 +617,7 @@ If the global limit is hit, it means either the limit is configured too low or t
 | Max prefixes per neighbor | 1,000,000 | NOTIFICATION on exceed |
 | Max total routes | 10,000,000 | Backpressure, not crash |
 | Bounded channel size | 4096 | Per-session and RIB channels |
-| Connect retry interval | 5s | Reduced from RFC 4271 default of 120s |
+| Connect retry interval | 1s for the first two TCP-level dial misses, then 5s exponential backoff capped at 300s | OPEN/config failures use the slower Idle reconnect guard |
 | Hold time | 90s | Negotiated per-peer |
 
 All limits are configurable via TOML and overridable per-peer via gRPC.

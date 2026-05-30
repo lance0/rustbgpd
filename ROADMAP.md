@@ -163,7 +163,10 @@ Later for what remains.
   does one policy-context scan (`PolicyAttrSummary`) and shares the canonical
   attribute `Arc` across same-UPDATE NLRI when policy makes no modifications
   (`RouteAttrBundle` / `materialize_attrs`), cutting per-UPDATE attribute-clone
-  churn. Remaining backlog, in rough priority order:
+  churn. Cold-start BGP reconnect also retries the first TCP-level dial misses
+  quickly before returning to the slower exponential guard, reducing boot-order
+  establishment delay when rustbgpd starts before passive peers. Remaining
+  backlog, in rough priority order:
   - FIB projection: precompile configured-table policy so
     `allowed_neighbors` is parsed once, table-name strings are not cloned into
     every projected row unnecessarily, and projection avoids avoidable
