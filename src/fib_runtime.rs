@@ -569,8 +569,7 @@ where
             break;
         }
         if let FibOp::Adopt(route) = op {
-            record_fib_success(owned, op);
-            outcome.owned_changed = true;
+            outcome.owned_changed |= record_fib_success(owned, op);
             info!(
                 table = %route.table_name,
                 table_id = route.key.table_id,
@@ -582,8 +581,7 @@ where
             continue;
         }
         if let FibOp::Forget(key) = op {
-            record_fib_success(owned, op);
-            outcome.owned_changed = true;
+            outcome.owned_changed |= record_fib_success(owned, op);
             info!(
                 table_id = key.table_id,
                 metric = key.metric,
@@ -653,8 +651,7 @@ where
                         );
                     }
                 }
-                record_fib_success(owned, op);
-                outcome.owned_changed = true;
+                outcome.owned_changed |= record_fib_success(owned, op);
             }
             Err(e) => {
                 let action = op_action(op);
@@ -736,8 +733,7 @@ async fn drain_owned_with_events<F>(
                     &route,
                     "shutdown_drain",
                 );
-                record_fib_success(owned, &op);
-                owned_changed = true;
+                owned_changed |= record_fib_success(owned, &op);
             }
             Err(e) => {
                 metrics.record_fib_kernel_failure("remove");

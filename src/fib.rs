@@ -853,20 +853,24 @@ fn push_owned_route_drifted(plan: &mut FibPlan, route: &FibRoute) {
 }
 
 /// Update owned state after a successful future apply operation.
-pub(crate) fn record_fib_success(owned: &mut FibOwnedState, op: &FibOp) {
+/// Apply a successful FIB op to the owned-state map and report whether the
+/// owned content actually changed. Callers use this to decide whether the
+/// owned-state file needs re-persisting: a re-applied op that leaves the map
+/// identical (e.g. an `Add` repairing a missing kernel row for a route already
+/// owned) returns `false`, so steady-state kernel-drift repair no longer
+/// triggers a redundant persist. The per-route clone it already performs to
+/// store the route doubles as the equality check — far cheaper than cloning
+/// the whole `FibOwnedState`.
+pub(crate) fn record_fib_success(owned: &mut FibOwnedState, op: &FibOp) -> bool {
     match op {
         FibOp::Add(route) | FibOp::Adopt(route) => {
-            owned.routes.insert(route.key, route.clone());
+            owned.routes.insert(route.key, route.clone()).as_ref() != Some(route)
         }
         FibOp::Replace { desired, .. } => {
-            owned.routes.insert(desired.key, desired.clone());
+            owned.routes.insert(desired.key, desired.clone()).as_ref() != Some(desired)
         }
-        FibOp::Remove(route) => {
-            owned.routes.remove(&route.key);
-        }
-        FibOp::Forget(key) => {
-            owned.routes.remove(key);
-        }
+        FibOp::Remove(route) => owned.routes.remove(&route.key).is_some(),
+        FibOp::Forget(key) => owned.routes.remove(key).is_some(),
     }
 }
 
@@ -1874,33 +1878,57 @@ mod tests {
     }
 
     #[test]
-    fn record_success_updates_owned_state() {
+    fn record_success_updates_owned_state_and_reports_changes() {
         let route = one_route(key(v4_prefix(2, 24)), "203.0.113.1");
         let replacement = one_route(route.key, "203.0.113.2");
         let mut owned = FibOwnedState::default();
 
-        record_fib_success(&mut owned, &FibOp::Add(route.clone()));
+        // First insert changes content.
+        assert!(record_fib_success(&mut owned, &FibOp::Add(route.clone())));
         assert_eq!(owned.routes.get(&route.key), Some(&route));
 
-        record_fib_success(&mut owned, &FibOp::Adopt(route.clone()));
+        // Re-applying the identical route (e.g. repairing a missing kernel row
+        // for a route already owned) does NOT change content — the caller can
+        // then skip a redundant owned-state persist.
+        assert!(!record_fib_success(
+            &mut owned,
+            &FibOp::Adopt(route.clone())
+        ));
+        assert!(!record_fib_success(&mut owned, &FibOp::Add(route.clone())));
         assert_eq!(owned.routes.get(&route.key), Some(&route));
 
-        record_fib_success(
+        // Replacing with different content changes it; re-replacing identically does not.
+        assert!(record_fib_success(
             &mut owned,
             &FibOp::Replace {
                 previous: route.clone(),
                 desired: replacement.clone(),
             },
-        );
+        ));
         assert_eq!(owned.routes.get(&route.key), Some(&replacement));
+        assert!(!record_fib_success(
+            &mut owned,
+            &FibOp::Replace {
+                previous: route.clone(),
+                desired: replacement.clone(),
+            },
+        ));
 
-        record_fib_success(&mut owned, &FibOp::Remove(replacement.clone()));
+        // Removing a present route changes content; removing an absent one does not.
+        assert!(record_fib_success(
+            &mut owned,
+            &FibOp::Remove(replacement.clone())
+        ));
         assert!(owned.routes.is_empty());
+        assert!(!record_fib_success(
+            &mut owned,
+            &FibOp::Remove(replacement.clone())
+        ));
 
-        record_fib_success(&mut owned, &FibOp::Add(route.clone()));
-        assert_eq!(owned.routes.get(&route.key), Some(&route));
-        record_fib_success(&mut owned, &FibOp::Forget(route.key));
+        assert!(record_fib_success(&mut owned, &FibOp::Add(route.clone())));
+        assert!(record_fib_success(&mut owned, &FibOp::Forget(route.key)));
         assert!(owned.routes.is_empty());
+        assert!(!record_fib_success(&mut owned, &FibOp::Forget(route.key)));
     }
 
     #[test]
