@@ -29,6 +29,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     the published `DataplaneIntent` and reusing it on BUM-only republishes
     instead of deep-cloning the tables. (#331)
 
+### Fixed
+
+- Dynamic neighbor ranges now resolve overlaps by longest-prefix-match: a more
+  specific range (e.g. `10.0.5.0/24`) wins over a wider one (`10.0.0.0/16`)
+  regardless of TOML declaration order, matching FRR/GoBGP. Previously the first
+  matching range in config order won, so the selected peer-group depended on
+  ordering when ranges overlapped.
+
 ## [0.32.0] — 2026-05-29
 
 ### Changed
