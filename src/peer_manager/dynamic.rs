@@ -15,6 +15,51 @@ pub(super) struct DynamicRange {
     pub(super) description: Option<String>,
 }
 
+impl DynamicRange {
+    /// True when `addr` falls within this range's prefix.
+    fn covers(&self, addr: IpAddr) -> bool {
+        match (addr, self.addr) {
+            (IpAddr::V4(peer), IpAddr::V4(net)) => {
+                if self.prefix_len > 32 {
+                    return false;
+                }
+                let mask = if self.prefix_len == 0 {
+                    0u32
+                } else {
+                    u32::MAX << (32 - self.prefix_len)
+                };
+                (u32::from(peer) & mask) == (u32::from(net) & mask)
+            }
+            (IpAddr::V6(peer), IpAddr::V6(net)) => {
+                if self.prefix_len > 128 {
+                    return false;
+                }
+                let mask = if self.prefix_len == 0 {
+                    0u128
+                } else {
+                    u128::MAX << (128 - self.prefix_len)
+                };
+                (u128::from(peer) & mask) == (u128::from(net) & mask)
+            }
+            _ => false, // IPv4/IPv6 mismatch
+        }
+    }
+}
+
+/// Select the most-specific (longest-prefix) dynamic range covering `addr`.
+///
+/// Overlapping ranges resolve by prefix length, not declaration order, so a
+/// `/24` wins over a `/16` regardless of TOML order — the longest-prefix-match
+/// behavior operators expect from FRR/GoBGP. Among equal-length matches (an
+/// exact-duplicate prefix, which is a config-level concern) the last declared
+/// wins, per `Iterator::max_by_key`.
+fn select_dynamic_range(ranges: &[DynamicRange], addr: IpAddr) -> Option<&DynamicRange> {
+    ranges
+        .iter()
+        .filter(|r| r.covers(addr))
+        .max_by_key(|r| r.prefix_len)
+}
+
 /// Snapshot of a removed dynamic peer's unfired hot-apply intent. Carried
 /// across the auto-removal that fires when a dynamic peer goes back to
 /// Idle so a re-establishing peer at the same address inherits the retry.
@@ -52,35 +97,14 @@ impl PeerManager {
             .collect()
     }
 
-    /// Check whether a peer IP falls within any configured dynamic neighbor range.
+    /// Find the dynamic neighbor range covering `addr`, preferring the
+    /// **most specific** (longest-prefix) match when ranges overlap — so a
+    /// `/24` wins over a `/16` regardless of TOML declaration order. This is
+    /// the longest-prefix-match behavior operators expect from FRR/GoBGP;
+    /// first-match-by-declaration-order would make the winning peer-group
+    /// depend on config ordering, which surprises operators.
     pub(super) fn match_dynamic_range(&self, addr: IpAddr) -> Option<&DynamicRange> {
-        self.dynamic_ranges.iter().find(|r| {
-            match (addr, r.addr) {
-                (IpAddr::V4(peer), IpAddr::V4(net)) => {
-                    if r.prefix_len > 32 {
-                        return false;
-                    }
-                    let mask = if r.prefix_len == 0 {
-                        0u32
-                    } else {
-                        u32::MAX << (32 - r.prefix_len)
-                    };
-                    (u32::from(peer) & mask) == (u32::from(net) & mask)
-                }
-                (IpAddr::V6(peer), IpAddr::V6(net)) => {
-                    if r.prefix_len > 128 {
-                        return false;
-                    }
-                    let mask = if r.prefix_len == 0 {
-                        0u128
-                    } else {
-                        u128::MAX << (128 - r.prefix_len)
-                    };
-                    (u128::from(peer) & mask) == (u128::from(net) & mask)
-                }
-                _ => false, // IPv4/IPv6 mismatch
-            }
-        })
+        select_dynamic_range(&self.dynamic_ranges, addr)
     }
 
     /// Snapshot any unfired hot-apply / Route Refresh intent for a peer
@@ -147,5 +171,70 @@ impl PeerManager {
             advertise_graceful_shutdown = prev.graceful_shutdown,
             "restored dead-lettered hot-apply intent on dynamic peer re-establishment"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::IpAddr;
+
+    use super::{DynamicRange, select_dynamic_range};
+
+    fn range(prefix: &str, group: &str) -> DynamicRange {
+        let (addr, len) = prefix.split_once('/').expect("prefix has a '/'");
+        DynamicRange {
+            addr: addr.parse().expect("valid IP"),
+            prefix_len: len.parse().expect("valid prefix length"),
+            peer_group: group.to_string(),
+            remote_asn: 65000,
+            description: None,
+        }
+    }
+
+    fn matched_group(ranges: &[DynamicRange], addr: &str) -> Option<String> {
+        select_dynamic_range(ranges, addr.parse::<IpAddr>().expect("valid IP"))
+            .map(|r| r.peer_group.clone())
+    }
+
+    #[test]
+    fn most_specific_range_wins_when_wide_declared_first() {
+        // /16 declared before the more-specific /24.
+        let ranges = vec![range("10.0.0.0/16", "wide"), range("10.0.5.0/24", "narrow")];
+        assert_eq!(
+            matched_group(&ranges, "10.0.5.7").as_deref(),
+            Some("narrow")
+        );
+        // An address inside the /16 but outside the /24 falls to the wider range.
+        assert_eq!(matched_group(&ranges, "10.0.9.7").as_deref(), Some("wide"));
+    }
+
+    #[test]
+    fn most_specific_range_wins_when_narrow_declared_first() {
+        // Reversed declaration order — the result must not depend on it.
+        let ranges = vec![range("10.0.5.0/24", "narrow"), range("10.0.0.0/16", "wide")];
+        assert_eq!(
+            matched_group(&ranges, "10.0.5.7").as_deref(),
+            Some("narrow")
+        );
+        assert_eq!(matched_group(&ranges, "10.0.9.7").as_deref(), Some("wide"));
+    }
+
+    #[test]
+    fn catch_all_default_route_loses_to_a_more_specific_range() {
+        let ranges = vec![range("0.0.0.0/0", "any"), range("192.0.2.0/24", "doc")];
+        assert_eq!(matched_group(&ranges, "192.0.2.1").as_deref(), Some("doc"));
+        assert_eq!(
+            matched_group(&ranges, "203.0.113.9").as_deref(),
+            Some("any")
+        );
+    }
+
+    #[test]
+    fn no_match_returns_none_and_v4_v6_do_not_cross() {
+        let ranges = vec![range("10.0.0.0/8", "v4"), range("2001:db8::/32", "v6")];
+        assert_eq!(matched_group(&ranges, "192.168.1.1"), None);
+        // A v6 peer must not match a v4 range, and vice versa.
+        assert_eq!(matched_group(&ranges, "2001:db8::1").as_deref(), Some("v6"));
+        assert_eq!(matched_group(&ranges, "10.1.2.3").as_deref(), Some("v4"));
     }
 }
