@@ -506,13 +506,12 @@ async fn reconcile_once_with_events<F>(
     for drop in &plan.drops {
         metrics.record_fib_route_rejected(drop_reason(drop));
     }
-    let before_owned = owned.clone();
-    let (failures, failed_keys) = apply_plan(fib, metrics, owned, &plan, event_tx, shutdown).await;
-    if *owned != before_owned {
+    let outcome = apply_plan(fib, metrics, owned, &plan, event_tx, shutdown).await;
+    if outcome.owned_changed {
         persist_owned_state(config, owned);
     }
-    let mut statuses = build_statuses(config, &intent, owned, &plan, &failed_keys);
-    statuses.extend(failures);
+    let mut statuses = build_statuses(config, &intent, owned, &plan, &outcome.failed_keys);
+    statuses.extend(outcome.failures);
     status_tx.send_replace(statuses);
 }
 
@@ -542,6 +541,13 @@ async fn reconcile_once<F>(
     .await;
 }
 
+#[derive(Default)]
+struct ApplyPlanOutcome {
+    failures: Vec<FibRuntimeStatus>,
+    failed_keys: BTreeSet<FibRouteKey>,
+    owned_changed: bool,
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "keeps success/failure handling for one FIB diff plan in one place"
@@ -553,18 +559,17 @@ async fn apply_plan<F>(
     plan: &FibPlan,
     event_tx: &broadcast::Sender<FibRuntimeEvent>,
     shutdown: &CancellationToken,
-) -> (Vec<FibRuntimeStatus>, BTreeSet<FibRouteKey>)
+) -> ApplyPlanOutcome
 where
     F: UnicastFib,
 {
-    let mut failures = Vec::new();
-    let mut failed_keys = BTreeSet::new();
+    let mut outcome = ApplyPlanOutcome::default();
     for op in &plan.ops {
         if shutdown.is_cancelled() {
             break;
         }
         if let FibOp::Adopt(route) = op {
-            record_fib_success(owned, op);
+            outcome.owned_changed |= record_fib_success(owned, op);
             info!(
                 table = %route.table_name,
                 table_id = route.key.table_id,
@@ -576,7 +581,7 @@ where
             continue;
         }
         if let FibOp::Forget(key) = op {
-            record_fib_success(owned, op);
+            outcome.owned_changed |= record_fib_success(owned, op);
             info!(
                 table_id = key.table_id,
                 metric = key.metric,
@@ -646,20 +651,20 @@ where
                         );
                     }
                 }
-                record_fib_success(owned, op);
+                outcome.owned_changed |= record_fib_success(owned, op);
             }
             Err(e) => {
                 let action = op_action(op);
                 metrics.record_fib_kernel_failure(action);
                 warn!(action, error = %e, "failed to apply general FIB route op");
-                failed_keys.insert(op_route(op).key);
+                outcome.failed_keys.insert(op_route(op).key);
                 emit_fib_event(
                     event_tx,
                     FibRuntimeEventKind::Failed,
                     op_route(op),
                     format!("{action}_failed:{e}"),
                 );
-                failures.push(status_for_route(
+                outcome.failures.push(status_for_route(
                     op_route(op),
                     FibRuntimeState::Failed,
                     format!("{action}_failed:{e}"),
@@ -667,7 +672,7 @@ where
             }
         }
     }
-    (failures, failed_keys)
+    outcome
 }
 
 async fn drain_owned_with_events<F>(
@@ -680,7 +685,7 @@ async fn drain_owned_with_events<F>(
 ) where
     F: UnicastFib,
 {
-    let before_owned = owned.clone();
+    let mut owned_changed = false;
     let snapshot = match fib.dump(&config.tables).await {
         Ok(snapshot) => snapshot,
         Err(e) => {
@@ -694,7 +699,9 @@ async fn drain_owned_with_events<F>(
     for route in routes {
         match snapshot.routes.get(&route.key) {
             None => {
-                owned.routes.remove(&route.key);
+                if owned.routes.remove(&route.key).is_some() {
+                    owned_changed = true;
+                }
                 continue;
             }
             Some(kernel_route)
@@ -710,7 +717,9 @@ async fn drain_owned_with_events<F>(
                     kernel_next_hop = %kernel_route.target.primary(),
                     "preserving foreign general FIB route during shutdown drain"
                 );
-                owned.routes.remove(&route.key);
+                if owned.routes.remove(&route.key).is_some() {
+                    owned_changed = true;
+                }
                 continue;
             }
         }
@@ -724,7 +733,7 @@ async fn drain_owned_with_events<F>(
                     &route,
                     "shutdown_drain",
                 );
-                record_fib_success(owned, &op);
+                owned_changed |= record_fib_success(owned, &op);
             }
             Err(e) => {
                 metrics.record_fib_kernel_failure("remove");
@@ -739,7 +748,7 @@ async fn drain_owned_with_events<F>(
             }
         }
     }
-    if *owned != before_owned {
+    if owned_changed {
         persist_owned_state(config, owned);
     }
     status_tx.send_replace(Vec::new());
@@ -2909,6 +2918,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconcile_skips_owned_state_persist_when_plan_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let mut config = config();
+        config.owned_state_path = Some(path.clone());
+        let mut fib = FakeFib::default();
+        let mut owned = FibOwnedState::default();
+        let rib_tx = rib_with_routes(Vec::new());
+
+        let statuses = reconcile_config_for_test(config, rib_tx, &mut fib, &mut owned).await;
+
+        assert!(statuses.is_empty());
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
     async fn route_event_wakes_actor_before_periodic_interval() {
         let (rib_tx, query_count, events_tx) =
             rib_with_events(vec![route(v4(24), ip("192.0.2.1"))]);
@@ -3344,6 +3369,38 @@ mod tests {
 
         assert!(owned.routes.is_empty());
         assert!(status_rx.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_persists_owned_state_after_missing_kernel_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config();
+        config.owned_state_path = Some(dir.path().join("fib-owned.json"));
+        let prefix = v4(24);
+        let route = FibRoute {
+            table_name: "edge".to_string(),
+            key: key(prefix),
+            target: FibRouteTarget::single(ip("192.0.2.1")),
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        };
+        let mut fib = FakeFib::default();
+        let mut owned = FibOwnedState {
+            routes: BTreeMap::from([(route.key, route)]),
+        };
+        let (status_tx, _status_rx) = watch::channel(Vec::new());
+
+        drain_owned(&config, &mut fib, &metrics(), &status_tx, &mut owned).await;
+
+        assert!(owned.routes.is_empty());
+        assert!(
+            config
+                .owned_state_path
+                .as_ref()
+                .is_some_and(|path| path.exists())
+        );
+        assert!(load_owned_state(&config).routes.is_empty());
     }
 
     #[tokio::test]
