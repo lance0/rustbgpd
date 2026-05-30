@@ -558,8 +558,8 @@ struct SupervisorIntentState {
     generation: u64,
     last_instances: Arc<EvpnInstanceTable>,
     last_ip_vrfs: Arc<IpVrfTable>,
-    last_table: RemoteMacTable,
-    last_ip_prefixes: RemoteIpPrefixTable,
+    last_table: Arc<RemoteMacTable>,
+    last_ip_prefixes: Arc<RemoteIpPrefixTable>,
     last_ip_prefix_drop_counts: BTreeMap<(String, &'static str), u64>,
     last_bum_enforcement: BumEnforcementTable,
 }
@@ -570,8 +570,8 @@ impl Default for SupervisorIntentState {
             generation: 0,
             last_instances: Arc::new(EvpnInstanceTable::new()),
             last_ip_vrfs: Arc::new(IpVrfTable::new()),
-            last_table: RemoteMacTable::new(),
-            last_ip_prefixes: RemoteIpPrefixTable::new(),
+            last_table: Arc::new(RemoteMacTable::new()),
+            last_ip_prefixes: Arc::new(RemoteIpPrefixTable::new()),
             last_ip_prefix_drop_counts: BTreeMap::new(),
             last_bum_enforcement: BumEnforcementTable::new(),
         }
@@ -612,8 +612,8 @@ async fn publish_dataplane_intent(
     if state.generation > 0
         && instances.as_ref() == state.last_instances.as_ref()
         && ip_vrfs.as_ref() == state.last_ip_vrfs.as_ref()
-        && tables.remote_macs == state.last_table
-        && tables.remote_ip_prefixes == state.last_ip_prefixes
+        && tables.remote_macs == *state.last_table
+        && tables.remote_ip_prefixes == *state.last_ip_prefixes
         && bum_enforcement == state.last_bum_enforcement
     {
         // No semantic change since the last publish. Skipping the
@@ -641,17 +641,19 @@ async fn publish_dataplane_intent(
     state.generation = state.generation.saturating_add(1);
     state.last_instances = instances.clone();
     state.last_ip_vrfs = ip_vrfs.clone();
-    state.last_table = tables.remote_macs.clone();
-    state.last_ip_prefixes = tables.remote_ip_prefixes.clone();
+    let remote_macs = Arc::new(tables.remote_macs);
+    let remote_ip_prefixes = Arc::new(tables.remote_ip_prefixes);
+    state.last_table = remote_macs.clone();
+    state.last_ip_prefixes = remote_ip_prefixes.clone();
     state.last_bum_enforcement = bum_enforcement.clone();
 
     let intent = Arc::new(DataplaneIntent {
         generation: state.generation,
         instances,
-        remote_macs: Arc::new(tables.remote_macs),
+        remote_macs,
         bum_enforcement: Arc::new(bum_enforcement),
         ip_vrfs,
-        remote_ip_prefixes: Arc::new(tables.remote_ip_prefixes),
+        remote_ip_prefixes,
     });
     if intent_tx.send(intent).is_err() {
         debug!("intent receiver gone; supervisor exiting");
@@ -675,10 +677,10 @@ fn publish_cached_dataplane_intent(
     let intent = Arc::new(DataplaneIntent {
         generation: state.generation,
         instances: state.last_instances.clone(),
-        remote_macs: Arc::new(state.last_table.clone()),
+        remote_macs: state.last_table.clone(),
         bum_enforcement: Arc::new(bum_enforcement),
         ip_vrfs: state.last_ip_vrfs.clone(),
-        remote_ip_prefixes: Arc::new(state.last_ip_prefixes.clone()),
+        remote_ip_prefixes: state.last_ip_prefixes.clone(),
     });
     if intent_tx.send(intent).is_err() {
         debug!("intent receiver gone; supervisor exiting");
@@ -2231,8 +2233,8 @@ mod tests {
             generation: 1,
             last_instances: cached_instances.clone(),
             last_ip_vrfs: Arc::new(IpVrfTable::new()),
-            last_table: RemoteMacTable::new(),
-            last_ip_prefixes: RemoteIpPrefixTable::new(),
+            last_table: Arc::new(RemoteMacTable::new()),
+            last_ip_prefixes: Arc::new(RemoteIpPrefixTable::new()),
             last_ip_prefix_drop_counts: BTreeMap::new(),
             last_bum_enforcement: BumEnforcementTable::new(),
         };
@@ -2252,6 +2254,11 @@ mod tests {
         );
         assert_eq!(updated.ip_vrfs.len(), 0);
         assert_eq!(updated.generation, 2);
+        assert!(Arc::ptr_eq(&updated.remote_macs, &state.last_table));
+        assert!(Arc::ptr_eq(
+            &updated.remote_ip_prefixes,
+            &state.last_ip_prefixes
+        ));
     }
 
     #[tokio::test]
