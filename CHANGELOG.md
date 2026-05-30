@@ -9,6 +9,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Performance
+
+- **Dataplane reconcile allocation-churn reductions.**
+  - `fib`: the unicast FIB reconciler no longer clones the full `FibOwnedState`
+    each pass to detect changes — it tracks owned-state mutations explicitly and
+    persists the owned-state file only when the content actually changed
+    (`record_fib_success` reports per-op whether it mutated the map, so a
+    kernel-drift repair that re-applies a route already owned no longer triggers
+    a redundant persist). (#330)
+  - `evpn`: the EVPN supervisor caches the projected remote-MAC and IP-prefix
+    intent tables behind `Arc`s, sharing one allocation between cached state and
+    the published `DataplaneIntent` and reusing it on BUM-only republishes
+    instead of deep-cloning the tables. (#331)
+
 ## [0.32.0] — 2026-05-29
 
 ### Changed
