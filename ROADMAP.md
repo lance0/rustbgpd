@@ -124,6 +124,14 @@ Later for what remains.
   and the missing piece is manager-side wiring plus persistence / reload
   semantics. The LPM fix is a small correctness PR; live add/delete is the
   larger API-first gap.
+- **Zero-config / accept-any-ASN peering** *(route-collector & lab
+  ergonomics).* A peer-group flag to learn the remote ASN from the OPEN
+  instead of validating it against config, combined with a catch-all
+  (`0.0.0.0/0`, `::/0`) dynamic range, enables accept-any peering for
+  looking-glass / collector / lab onboarding. Gated behind explicit opt-in
+  and the existing `dynamic_neighbor_limit`; MD5 / TCP-AO still enforceable.
+  Small — the range and limit machinery already exist; the new piece is the
+  learn-ASN peer-group mode.
 
 ### Later
 
