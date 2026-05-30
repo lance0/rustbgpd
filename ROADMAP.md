@@ -159,23 +159,56 @@ Later for what remains.
 - **Performance — remaining items.** The scale & memory sprint shipped
   (inlined `SmallVec<[u32; 1]>` Adj-RIB-In prefix index, FxHash route maps,
   coalesced multi-chunk initial-load distribution; #306/#308/#309), as did the
-  bulk-initial-load and pinned-bench compare tooling. Remaining: automatic
-  per-PR CI bench triggering on the pinned `[self-hosted, rustbgpd-bench]`
-  runner (the manual `Criterion Bench Compare` workflow exists); a continuous
-  churn bench (short criterion variant of the M33 soak shape); root-cause the
-  `best_path_cmp` ~6% full-tiebreak regression (the common LOCAL_PREF early-exit
-  is unaffected; ~1 ns/comparison, dwarfed by the −40–62% insert/pipeline wins) —
-  a single-pass attribute summary was measured flat (+0.01%), so the cost is the
-  comparison ladder itself, not repeated attribute scans; look at the added
-  RPKI/ASPA/cluster/originator steps next;
-  the inbound UPDATE path now does one policy-context scan (`PolicyAttrSummary`)
-  and shares the canonical attribute `Arc` across same-UPDATE NLRI when policy
-  makes no modifications (`RouteAttrBundle` / `materialize_attrs`), cutting
-  per-UPDATE attribute-clone churn;
-  have the EVPN Linux reconciler signal changed/dirty from `apply_plan` instead
-  of cloning the owned-state map each reconcile pass (confirm the exact clone
-  site first); and fix the `memory_profile` high-N harness non-scaling. The
-  bgperf2 cross-stack comparison was refreshed for v0.32.0 (full-daemon RSS
+  bulk-initial-load and pinned-bench compare tooling. The inbound UPDATE path now
+  does one policy-context scan (`PolicyAttrSummary`) and shares the canonical
+  attribute `Arc` across same-UPDATE NLRI when policy makes no modifications
+  (`RouteAttrBundle` / `materialize_attrs`), cutting per-UPDATE attribute-clone
+  churn. Remaining backlog, in rough priority order:
+  - FIB projection: precompile configured-table policy so
+    `allowed_neighbors` is parsed once, table-name strings are not cloned into
+    every projected row unnecessarily, and projection avoids avoidable
+    per-table/per-candidate work. Measure with a pure `fib.rs` projection bench
+    across tables × candidates × ECMP width.
+  - RPKI validation: index VRP lookup instead of linearly scanning the VRP table
+    per NLRI. High payoff but correctness-sensitive around overlapping VRPs,
+    `max_len`, Invalid vs NotFound, and family handling.
+  - API route listing: collapse RIB list filtering + `route_to_proto` conversion
+    into a borrowed per-route summary so filters and proto rendering do not
+    repeatedly scan attributes or allocate large-community strings for
+    filtered-out rows.
+  - Transport max-prefix accounting: replace per-UPDATE unique-prefix
+    reconstruction with a per-prefix refcount so Add-Path multiplicity stays
+    correct without rebuilding a temporary set after every UPDATE.
+  - Policy engine matching: short-circuit cheap predicate failures before
+    regex/community-heavy checks in `PolicyStatement::matches`; verify with
+    prefix-miss, regex-heavy, and community-heavy `policy_eval` benches.
+  - General FIB runtime: investigate prefix-dirty reconcile so a single prefix
+    change does not necessarily trigger full RIB query + full kernel dump +
+    full projection. Design-gated because drift recovery, ECMP siblings,
+    peer-group allow-lists, and max-route freeze semantics are non-local.
+  - EVPN dataplane supervisor: move from periodic whole-EVPN-RIB
+    query/project/equality suppression toward generation/dirty-driven
+    projection. Design-gated because EAD mass-withdraw, aliasing, quarantine,
+    and IP-VRF config changes can invalidate more than one route key.
+  - Add-Path export: avoid sorting all candidate paths when `send_max` is small
+    if deterministic ordering and export-policy filtering can be preserved.
+  - Explain cache: store pre-policy attributes behind `Arc<Vec<PathAttribute>>`
+    when `[policy.explain]` is enabled, matching the route-storage sharing model
+    and avoiding a deep attr clone per explained NLRI.
+  - CLI/API JSON: use borrowed `Serialize` wrappers or direct serializers for
+    high-volume route/event JSON so the CLI and API do not build a second owned
+    JSON tree from already-owned proto/event data.
+  - Benchmark infrastructure: automatic per-PR CI bench triggering on the pinned
+    `[self-hosted, rustbgpd-bench]` runner (the manual `Criterion Bench Compare`
+    workflow exists); a continuous churn bench (short criterion variant of the
+    M33 soak shape); and `memory_profile` high-N harness non-scaling.
+  - `best_path_cmp`: root-cause the ~6% full-tiebreak regression. The common
+    LOCAL_PREF early-exit is unaffected (~1 ns/comparison, dwarfed by the
+    -40-62% insert/pipeline wins), and a single-pass attribute summary was
+    measured flat (+0.01%), so the cost is the comparison ladder itself, not
+    repeated attribute scans; look at the added RPKI/ASPA/cluster/originator
+    steps next.
+  The bgperf2 cross-stack comparison was refreshed for v0.32.0 (full-daemon RSS
   dropped ~21% from the inbound clone-churn fix, but now exceeds GoBGP's ~203 MB
   at 200k — daemon feature growth, not RIB bloat; see `docs/BENCHMARKS.md`), and
   that re-run drove the **v0.32.0 event-history default flip to opt-in / off**
