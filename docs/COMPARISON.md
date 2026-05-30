@@ -158,7 +158,7 @@ suite implementation.
 | Route server mode | Yes | Yes | Yes | Yes | Yes |
 | Dynamic neighbors | Yes | Yes | Yes | Yes | No |
 | Looking glass | Yes | No | Yes | No | Yes |
-| BFD integration | Yes[^bfd] | Yes | Yes | No | No |
+| BFD integration | Yes[^bfd] | Yes | Yes | Yes | No |
 
 [^bfd]: Single-hop **asynchronous** BFD ships (RFC 5880/5881, ADR-0067): an
     in-process, no-GC actor runs sessions over UDP/3784 (TTL/Hop-Limit 255,
