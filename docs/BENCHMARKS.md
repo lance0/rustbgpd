@@ -660,10 +660,10 @@ opt-in (on).
 **Session establishment.** The v0.32.0 table includes boot-order overhead:
 rustbgpd starts before the passive BIRD testers, so the first outbound TCP dial
 can miss before the testers bind their listeners. Main now retries the first
-two TCP-level dial misses at a 1s floor before returning to the configured 5s
-exponential curve; OPEN validation failures / NOTIFICATION fallback still use
-the slower Idle reconnect guard. Re-run this matrix after the reconnect change
-to refresh the total-time row.
+two refused TCP dials at a 1s floor before returning to the configured 5s
+exponential curve; unreachable peers that wait for the TCP connect timeout and
+OPEN validation failures / NOTIFICATION fallback still use the slower guards.
+Re-run this matrix after the reconnect change to refresh the total-time row.
 
 **Route processing.** At 10k and below, convergence completes in 2 seconds —
 matching GoBGP and within 1 second of BIRD. At 200k prefixes, rustbgpd
