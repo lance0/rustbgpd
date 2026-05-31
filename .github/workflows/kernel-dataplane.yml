@@ -193,6 +193,20 @@ jobs:
           topology: tests/interop/m52-fib-ecmp-relax-frr.clab.yml
           script: tests/interop/scripts/test-m52-fib-ecmp-relax-frr.sh
 
+  m58:
+    name: M58 — ADR-0061 FIB-table runtime CRUD (FRR 10.3.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-dataplane-host
+      - name: Run M58 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M58
+          topology: tests/interop/m58-fib-table-crud-frr.clab.yml
+          script: tests/interop/scripts/test-m58-fib-table-crud-frr.sh
+
   m53:
     name: M53 — ADR-0069 BGP unnumbered + scoped FIB (FRR 10.3.1)
     runs-on: ubuntu-latest

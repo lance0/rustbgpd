@@ -3,11 +3,11 @@
 //!
 //! This is the binary-owned hook behind `RibService`'s `FibTableControlFn`.
 //! It lives here, not in the API crate, because it needs the binary config
-//! types, the FIB reconciler command channel (PR1's `FibRuntimeCommand`), the
+//! types, the FIB reconciler command channel (`FibRuntimeCommand`), the
 //! peer-manager validator, and the config-persistence channel — none of which
 //! the API crate can see across the crate boundary.
 //!
-//! Safety properties (see ADR-0061 / the FIB-hardening plan):
+//! Safety properties (see ADR-0061):
 //! - **Atomic read-modify-write.** A single coordinator `Mutex`, shared with
 //!   the SIGHUP reload path, is held across read (`GetTables`) → validate →
 //!   apply (`ReplaceTables`) → persist. Concurrent CRUD calls and SIGHUP FIB
