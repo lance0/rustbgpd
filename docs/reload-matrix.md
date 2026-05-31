@@ -255,7 +255,7 @@ their own — they exist to keep the schema honest.
 
 | Constraint | What it enforces |
 |---|---|
-| Sub-section presence | E.g. `[[fib_tables]]` requires `install_blackhole_discard` only if `honor_blackhole` is set; flagged at parse, no runtime effect. |
+| Cross-section reservation | E.g. static `[[neighbors]]` cannot set `remote_asn = 0`; that sentinel is reserved for `[[dynamic_neighbors]]` accept-any matching. Flagged at parse, no runtime effect of its own. |
 | Address-family well-formedness | `families = ["ipv4_unicast"]` accepted; misspellings rejected at parse, used at session-establishment. |
 
 ## How to verify a reload before applying
