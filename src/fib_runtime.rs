@@ -72,9 +72,13 @@ pub enum FibRuntimeCommand {
     ///   reached the apply phase. Per-route kernel failures within the plan
     ///   stay best-effort + observable via statuses/metrics; they do not fail
     ///   the ack. The caller may advance its config snapshot / persist.
-    /// - `Err(_)` — the reconcile bailed before the apply phase (RIB-candidate
-    ///   or peer-group query failed, or the kernel dump failed). The desired
-    ///   table set is reverted, so the caller must NOT advance its snapshot.
+    /// - `Err(_)` — the caller must NOT advance its snapshot. Two shapes:
+    ///   (a) the reconcile bailed before the apply phase (RIB-candidate or
+    ///   peer-group query failed, or the kernel dump failed); or (b) it reached
+    ///   the apply phase but a removed table's withdraw failed, leaving an owned
+    ///   route outside the new set — the desired set is reverted to keep that
+    ///   route owned (and retried on the next reconcile). Either way the live
+    ///   table set is unchanged from the caller's perspective.
     ReplaceTables {
         tables: Vec<FibTableConfig>,
         reply: oneshot::Sender<Result<(), String>>,

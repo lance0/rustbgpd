@@ -6373,8 +6373,42 @@ bfd = {{ profile = "nope" }}
 
 #[test]
 fn fib_tables_diff_marks_reload_applied() {
+    // N→M edit: a table already exists at startup (so the reconciler is live),
+    // and the new config tweaks it. These hot-apply via SIGHUP / gRPC
+    // (`FibRuntimeCommand::ReplaceTables`), so the static diff classifies them
+    // reload-applied, not restart-required.
+    let with_table = |metric: u32| {
+        format!(
+            r#"
+{}
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = {metric}
+"#,
+            valid_toml()
+        )
+    };
+    let old = parse(&with_table(200)).unwrap();
+    let new = parse(&with_table(250)).unwrap();
+    let diff = diff_config(&old, &new);
+
+    assert!(diff.fib_tables_changed);
+    assert!(!diff.fib_tables_requires_restart);
+    assert!(diff.has_reload_applied_changes());
+    assert!(!diff.has_restart_required_changes());
+}
+
+#[test]
+fn fib_tables_diff_from_empty_marks_restart_required() {
+    // 0→N: no tables at startup means the reconciler was never spawned, so
+    // SIGHUP cannot hot-start it — `src/reload.rs` rejects this as
+    // restart-required. The static diff knows the empty-startup case (even
+    // though it can't predict a netlink spawn failure), so it must match the
+    // runtime and classify 0→N restart-required, not reload-applied.
     let old = parse(valid_toml()).unwrap();
-    let toml = format!(
+    let new_toml = format!(
         r#"
 {}
 
@@ -6385,17 +6419,13 @@ metric = 200
 "#,
         valid_toml()
     );
-    let new = parse(&toml).unwrap();
+    let new = parse(&new_toml).unwrap();
     let diff = diff_config(&old, &new);
 
-    // [[fib_tables]] edits hot-apply to the running FIB reconciler (SIGHUP /
-    // gRPC), so the static diff classifies them reload-applied, not
-    // restart-required. (Starting FIB from an empty config still needs a
-    // restart at runtime; the reload step logs that, but the static config
-    // diff cannot know whether the reconciler is live.)
     assert!(diff.fib_tables_changed);
-    assert!(diff.has_reload_applied_changes());
-    assert!(!diff.has_restart_required_changes());
+    assert!(diff.fib_tables_requires_restart);
+    assert!(diff.has_restart_required_changes());
+    assert!(!diff.has_reload_applied_changes());
 }
 
 #[test]
