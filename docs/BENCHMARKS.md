@@ -635,7 +635,7 @@ opt-in (on).
 | Convergence | 1s | 2s | 1s |
 | Max CPU | 2% | 118% | 14% |
 | Max RSS | 10 MB | 55 MB | 94 MB |
-| Total time | 9s | 10s | 17s |
+| Total time | 9s | 10s | 8s |
 
 #### 2 peers × 10,000 prefixes (20k total)
 
@@ -644,7 +644,7 @@ opt-in (on).
 | Convergence | 1s | 2s | 1s |
 | Max CPU | 1% | 78% | 13% |
 | Max RSS | 10 MB | 45 MB | 79 MB |
-| Total time | 9s | 10s | 17s |
+| Total time | 9s | 10s | 8s |
 
 #### 2 peers × 100,000 prefixes (200k total)
 
@@ -653,17 +653,24 @@ opt-in (on).
 | Convergence | 2s | 5s | 2s |
 | Max CPU | 10% | 598% | 115% default (239% eh-on) |
 | Max RSS | 30 MB | 203 MB | 284 MB default (346 MB eh-on) |
-| Total time | 13s | 16s | 20s |
+| Total time | 13s | 16s | 12s |
 
 ### Understanding the Numbers
 
-**Session establishment.** The v0.32.0 table includes boot-order overhead:
-rustbgpd starts before the passive BIRD testers, so the first outbound TCP dial
-can miss before the testers bind their listeners. Main now retries the first
-two refused TCP dials at a 1s floor before returning to the configured 5s
-exponential curve; unreachable peers that wait for the TCP connect timeout and
-OPEN validation failures / NOTIFICATION fallback still use the slower guards.
-Re-run this matrix after the reconnect change to refresh the total-time row.
+**Session establishment.** The total-time rows above reflect post-fast-retry
+`main`, re-measured 2026-05-30 on the same host. rustbgpd dials the passive
+BIRD testers, which bind their listeners ~1-2s after rustbgpd starts, so the
+first outbound TCP dial is refused. Before the fast-retry change, that first
+refusal armed a ~10s backoff timer (`connect_retry_secs` base × exponential),
+so rustbgpd sat idle until the timer fired even though the testers were ready
+within ~2s — establishment took ~10s. `main` now retries the first two refused
+dials at a 1s floor before resuming the exponential curve, catching the testers
+almost immediately; unreachable peers that wait for the TCP connect timeout, and
+OPEN-validation / NOTIFICATION failures, still use the slower guards so
+misconfigured peers do not hot-loop. A controlled same-host before/after at
+10 peers × 1,000 prefixes (both event-history off, isolating the FSM change from
+the v0.32.0 event-history default flip) measured total time **16.7s → 8.3s**
+(establishment ~10s → ~2s).
 
 **Route processing.** At 10k and below, convergence completes in 2 seconds —
 matching GoBGP and within 1 second of BIRD. At 200k prefixes, rustbgpd
