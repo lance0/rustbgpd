@@ -35,6 +35,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   subsystem from an empty config still requires a restart (the reconciler isn't
   spawned otherwise); deleting all tables leaves the actor idle and re-adding
   hot-applies. Previously any `[[fib_tables]]` edit was restart-required.
+- **`--diff --json` `[[fib_tables]]` keys moved.** Following the hot-reload
+  reclassification, the previously-released `restart_required.fib_tables_changed`
+  key is replaced by `reload_applied.fib_tables_changed` (the hot-apply cases:
+  N→M edits and deleting all tables) plus a new
+  `restart_required.fib_tables_requires_restart` (the 0→N startup-from-empty
+  case, which still needs a restart). The same split applies to the
+  `DiffRuntimeConfig` gRPC `diff_json`. Consumers keying on the old path should
+  switch to the new keys.
 
 ### Performance
 
