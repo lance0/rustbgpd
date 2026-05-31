@@ -1209,7 +1209,7 @@ pub struct FibTableConfig {
     pub maximum_paths_ibgp: Option<u32>,
 }
 
-fn default_fib_families() -> Vec<String> {
+pub(crate) fn default_fib_families() -> Vec<String> {
     vec!["ipv4_unicast".to_string(), "ipv6_unicast".to_string()]
 }
 

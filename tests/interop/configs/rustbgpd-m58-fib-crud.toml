@@ -1,0 +1,32 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# Start with one table so the ADR-0061 reconciler is running — runtime CRUD
+# (SetFibTable / DeleteFibTable) requires it. The test adds, mutates, and
+# deletes a second table at runtime, and asserts the post-CRUD set survives a
+# restart. This file is mounted as a read-only template and copied to a
+# writable container-local path at startup (see the topology header) so the
+# atomic config persist works.
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+families = ["ipv4_unicast"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr-m58"
+hold_time = 90
+
+[security.grpc]
+enforcement = "legacy"

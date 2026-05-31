@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 
 use rustbgpd_api::peer_types::{
-    PeerKey, PeerManagerNeighborConfig, ReconcileFailure, ReconcileFailureKind, ReconcileResult,
-    RuntimeConfigDiff,
+    FibTableSnapshot, PeerKey, PeerManagerNeighborConfig, ReconcileFailure, ReconcileFailureKind,
+    ReconcileResult, RuntimeConfigDiff,
 };
 use tracing::{info, warn};
 
 use crate::config::Config;
+use crate::policy_admin::fib_table_snapshot_to_config;
 
 use super::PeerManager;
 
@@ -133,5 +134,35 @@ impl PeerManager {
             human_text: crate::config::format_config_diff(&diff),
             diff_json,
         })
+    }
+
+    /// Atomically validate a candidate `[[fib_tables]]` set against the live
+    /// runtime config and, on success, commit it into `current_config`. Builds
+    /// a probe config from `current_config`'s peer groups / neighbors with the
+    /// candidate table set substituted in, runs the full validator (reserved /
+    /// duplicate table ids, families, ECMP caps, peer-group references), and
+    /// only assigns `current_config.fib_tables` if it passes. Because the peer
+    /// manager runs commands serially, validate-then-commit here cannot
+    /// interleave with a peer-group deletion — closing the TOCTOU where a delete
+    /// would check a snapshot that doesn't yet reflect the in-flight table.
+    pub(super) fn stage_fib_tables_candidate(
+        &mut self,
+        tables: &[FibTableSnapshot],
+    ) -> Result<(), String> {
+        let staged: Vec<crate::config::FibTableConfig> =
+            tables.iter().map(fib_table_snapshot_to_config).collect();
+        let mut probe = self.current_config.clone();
+        probe.fib_tables.clone_from(&staged);
+        probe.validate().map_err(|error| error.to_string())?;
+        self.current_config.fib_tables = staged;
+        Ok(())
+    }
+
+    /// Refresh the live config snapshot's `[[fib_tables]]` after a gRPC CRUD
+    /// mutation acknowledged by the FIB reconciler, so `diff_runtime_config`
+    /// (which compares against `current_config`) doesn't report the
+    /// just-applied set as pending.
+    pub(super) fn set_fib_tables_snapshot(&mut self, tables: &[FibTableSnapshot]) {
+        self.current_config.fib_tables = tables.iter().map(fib_table_snapshot_to_config).collect();
     }
 }

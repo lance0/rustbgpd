@@ -31,6 +31,7 @@ mod evpn_svi;
 mod fib;
 mod fib_common;
 mod fib_runtime;
+mod fib_table_control;
 mod looking_glass;
 mod metrics_server;
 mod peer_manager;
@@ -57,7 +58,7 @@ use crate::config::{
 };
 use crate::config_persister::{ConfigMutation, ConfigPersister};
 use crate::peer_manager::PeerManager;
-use crate::reload::{ReloadedConfig, apply_reload_outcome, reload_config, run_config_bridge};
+use crate::reload::{apply_reload_outcome, reload_config, run_config_bridge};
 use rustbgpd_api::peer_types::{PeerManagerCommand, PeerManagerNeighborConfig};
 use rustbgpd_api::server::{
     AccessMode as GrpcServerAccessMode, ListenerConfig as GrpcListenerConfig, ListenerEndpoint,
@@ -1860,6 +1861,10 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             }) as rustbgpd_api::evpn_service::DuplicateMacClearFuture
         }) as rustbgpd_api::evpn_service::DuplicateMacClearFn
     });
+    // Coordinator lock serializing runtime `[[fib_tables]]` mutations: the
+    // gRPC CRUD control path and the SIGHUP reload FIB step both hold it across
+    // their read → apply → persist sequence so they can't interleave.
+    let fib_table_control_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let serve_config = ServeConfig {
         asn: config.global.asn,
         router_id: config.global.router_id.clone(),
@@ -2005,6 +2010,15 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                     .collect()
             })
         },
+        fib_table_control: Some(fib_table_control::make_fib_table_control_fn(
+            fib_table_control::FibTableControlDeps {
+                fib_cmd_tx: fib_cmd_tx.clone(),
+                peer_mgr_tx: peer_mgr_tx.clone(),
+                config_tx: config_event_tx.clone(),
+                lock: fib_table_control_lock.clone(),
+                startup_tables: config.fib_tables.clone(),
+            },
+        )),
         dataplane_route_events: Some(fib_bgp_event_tx),
         bfd_session_snapshot: {
             let rx = bfd_status_rx.clone();
@@ -2165,7 +2179,9 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // post-reload sync. A SIGHUP that arrives while a reload is still
     // running is logged and dropped — the operator-facing back-pressure
     // surface.
-    let mut reload_in_flight: Option<tokio::task::JoinHandle<Option<ReloadedConfig>>> = None;
+    let mut reload_in_flight: Option<
+        tokio::task::JoinHandle<Option<Result<Config, &'static str>>>,
+    > = None;
     loop {
         tokio::select! {
             result = tokio::signal::ctrl_c() => {
@@ -2203,8 +2219,17 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 let live_uds = live_grpc_uds.clone();
                 let pm_tx = peer_mgr_tx.clone();
                 let fib_cmd = fib_cmd_tx.clone();
+                // Hold the FIB coordinator lock across BOTH the reload and the
+                // outcome application (peer-manager + config-bridge snapshot
+                // refresh), so a concurrent gRPC FIB-table CRUD can't slip into
+                // the gap between them and have its applied/persisted table set
+                // clobbered by the stale reload snapshot.
+                let fib_lock = fib_table_control_lock.clone();
+                let pm_internal = peer_mgr_internal_tx.clone();
+                let bridge_replace = bridge_replace_tx.clone();
                 reload_in_flight = Some(tokio::spawn(async move {
-                    reload_config(
+                    let _fib_guard = fib_lock.lock().await;
+                    let reloaded = reload_config(
                         &path,
                         &snapshot,
                         live_tcp.as_ref(),
@@ -2212,7 +2237,8 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                         &pm_tx,
                         fib_cmd.as_ref(),
                     )
-                    .await
+                    .await?;
+                    Some(apply_reload_outcome(reloaded, &pm_internal, bridge_replace.as_ref()).await)
                 }));
             }
             // Only polled when a reload is in flight. Standard tokio
@@ -2229,23 +2255,13 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             } => {
                 reload_in_flight = None;
                 match outcome {
-                    Ok(Some(new_config)) => {
-                        match apply_reload_outcome(
-                            new_config,
-                            &peer_mgr_internal_tx,
-                            bridge_replace_tx.as_ref(),
-                        )
-                        .await
-                        {
-                            Ok(advanced) => config = advanced,
-                            Err(stage) => error!(
-                                stage,
-                                "post-reload sync failed mid-flight; in-memory config not advanced — next SIGHUP will retry"
-                            ),
-                        }
-                    }
+                    Ok(Some(Ok(advanced))) => config = advanced,
+                    Ok(Some(Err(stage))) => error!(
+                        stage,
+                        "post-reload sync failed mid-flight; in-memory config not advanced — next SIGHUP will retry"
+                    ),
                     Ok(None) => {
-                        // reload_config already logged the failure.
+                        // reload_config returned None (failure) or short-circuited.
                     }
                     Err(e) => error!(error = %e, "reload task panicked"),
                 }

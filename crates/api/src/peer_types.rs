@@ -298,6 +298,34 @@ pub enum PeerManagerCommand {
         /// Reply channel returning redacted diff output only.
         reply: oneshot::Sender<Result<RuntimeConfigDiff, String>>,
     },
+    /// Atomically validate a candidate `[[fib_tables]]` set against the live
+    /// runtime config (peer-group references, reserved/duplicate table ids,
+    /// families, ECMP caps) and, on success, stage it into
+    /// `current_config.fib_tables`. Used by the gRPC FIB-table CRUD control
+    /// path before it reaches the FIB reconciler. Validating and staging in one
+    /// command (the peer manager processes commands serially) closes the TOCTOU
+    /// against a concurrent peer-group deletion that would otherwise check a
+    /// snapshot that doesn't yet reflect the in-flight table's references.
+    StageFibTables {
+        /// The full candidate table set (already merged with the upsert/delete).
+        tables: Vec<FibTableSnapshot>,
+        /// Reply: `Ok(())` if it validated and was staged, else `Err(msg)`
+        /// (nothing staged).
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Refresh the peer manager's runtime config snapshot with the accepted
+    /// `[[fib_tables]]` set after a successful gRPC CRUD mutation, so the
+    /// snapshot the live `DiffRuntimeConfig` compares against doesn't report
+    /// the just-applied set as a pending change. The control path awaits the
+    /// ack (while holding the FIB coordinator lock) so the snapshot is applied
+    /// before the mutation returns and before a concurrent SIGHUP reload can
+    /// run — keeping the two snapshot writers serialized.
+    SetFibTablesSnapshot {
+        /// The full accepted table set the FIB reconciler acknowledged.
+        tables: Vec<FibTableSnapshot>,
+        /// Acknowledgement, sent after `current_config.fib_tables` is assigned.
+        reply: oneshot::Sender<()>,
+    },
     /// Query a single peer's state by address.
     GetPeerState {
         /// Peer identity to query.
@@ -886,11 +914,45 @@ pub struct PeerManagerNeighborConfig {
     pub export_policy: Option<PolicyChain>,
 }
 
+/// Crate-boundary mirror of a binary `FibTableConfig` (`[[fib_tables]]`).
+///
+/// `ConfigEvent` lives in this API crate but the binary owns the real config
+/// types, so FIB-table persistence events carry this plain snapshot instead of
+/// the binary struct. The binary's `apply_config_event` converts it back to a
+/// `FibTableConfig`, validating the candidate config before assigning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FibTableSnapshot {
+    /// Operator-facing handle, unique across the table set.
+    pub name: String,
+    /// Linux route table id.
+    pub table_id: u32,
+    /// Kernel route metric / priority for daemon-owned rows.
+    pub metric: u32,
+    /// Address families eligible for install (empty = both unicast families).
+    pub families: Vec<String>,
+    /// Optional peer-group allow-list (empty = all peer groups).
+    pub allowed_peer_groups: Vec<String>,
+    /// Optional neighbor-address allow-list (empty = all neighbors).
+    pub allowed_neighbors: Vec<String>,
+    /// Optional hard row cap (None = no cap).
+    pub max_routes: Option<u32>,
+    /// Optional ECMP caps (ADR-0066); None = single next-hop / fallback.
+    pub maximum_paths: Option<u32>,
+    /// Per-class eBGP ECMP cap; None falls back to `maximum_paths`.
+    pub maximum_paths_ebgp: Option<u32>,
+    /// Per-class iBGP ECMP cap; None falls back to `maximum_paths`.
+    pub maximum_paths_ibgp: Option<u32>,
+}
+
 /// A config persistence event sent after successful peer add/delete.
 ///
 /// The binary crate converts these into config file mutations.
 /// Kept simple — only the data the neighbor service already has.
 pub enum ConfigEvent {
+    /// The `[[fib_tables]]` set was replaced at runtime (gRPC FIB-table CRUD).
+    /// Carries the full accepted table set the FIB reconciler acknowledged, so
+    /// persistence writes exactly what the runtime applied.
+    FibTablesReplaced(Vec<FibTableSnapshot>),
     /// A neighbor was successfully added at runtime.
     NeighborAdded(PeerManagerNeighborConfig),
     /// A neighbor was successfully deleted at runtime.

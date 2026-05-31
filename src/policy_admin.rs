@@ -3,14 +3,16 @@
 use std::net::IpAddr;
 
 use rustbgpd_api::peer_types::{
-    AddPathDefinition, ConfigEvent, NamedNeighborSetSnapshot, NamedPeerGroupSnapshot,
-    NamedPolicyDefinition, NamedPolicySnapshot, NeighborSetDefinition, PeerGroupDefinition,
-    PolicyAsPathPrependConfig, PolicyChainAssignment, PolicyStatementDefinition,
+    AddPathDefinition, ConfigEvent, FibTableSnapshot, NamedNeighborSetSnapshot,
+    NamedPeerGroupSnapshot, NamedPolicyDefinition, NamedPolicySnapshot, NeighborSetDefinition,
+    PeerGroupDefinition, PolicyAsPathPrependConfig, PolicyChainAssignment,
+    PolicyStatementDefinition,
 };
 
 use crate::config::{
-    AddPathConfig, AsPathPrependConfig, BgpRoleConfig, Config, ConfigError, NamedPolicyConfig,
-    Neighbor, NeighborSetConfig, PeerGroupConfig, PolicyStatementConfig, TcpAoConfig,
+    AddPathConfig, AsPathPrependConfig, BgpRoleConfig, Config, ConfigError, FibTableConfig,
+    NamedPolicyConfig, Neighbor, NeighborSetConfig, PeerGroupConfig, PolicyStatementConfig,
+    TcpAoConfig,
 };
 
 const fn wire_role_to_config(role: rustbgpd_wire::BgpRole) -> BgpRoleConfig {
@@ -354,7 +356,27 @@ pub fn peer_group_references(config: &Config, name: &str) -> Vec<String> {
             refs.push(format!("neighbor_set {set_name}"));
         }
     }
+    for table in &config.fib_tables {
+        if table.allowed_peer_groups.iter().any(|group| group == name) {
+            refs.push(format!("fib_table {}", table.name));
+        }
+    }
     refs
+}
+
+pub(crate) fn fib_table_snapshot_to_config(snapshot: &FibTableSnapshot) -> FibTableConfig {
+    FibTableConfig {
+        name: snapshot.name.clone(),
+        table_id: snapshot.table_id,
+        metric: snapshot.metric,
+        families: snapshot.families.clone(),
+        allowed_peer_groups: snapshot.allowed_peer_groups.clone(),
+        allowed_neighbors: snapshot.allowed_neighbors.clone(),
+        max_routes: snapshot.max_routes,
+        maximum_paths: snapshot.maximum_paths,
+        maximum_paths_ebgp: snapshot.maximum_paths_ebgp,
+        maximum_paths_ibgp: snapshot.maximum_paths_ibgp,
+    }
 }
 
 /// Apply a config event to a config snapshot and validate the result.
@@ -556,6 +578,13 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
         ConfigEvent::ClearNeighborPeerGroup { address } => {
             neighbor_mut(config, *address)?.peer_group = None;
         }
+        ConfigEvent::FibTablesReplaced(snapshots) => {
+            // The full accepted set the FIB reconciler acknowledged. The
+            // trailing `config.validate()` re-checks it (`validate_fib_tables`)
+            // before the caller commits the snapshot, so a malformed event
+            // cannot poison the persisted config.
+            config.fib_tables = snapshots.iter().map(fib_table_snapshot_to_config).collect();
+        }
     }
     config.validate()
 }
@@ -741,6 +770,26 @@ remote_asn = 65002
         let refs = policy_references(&config, "shared");
         assert!(refs.contains(&"global import_chain".to_string()));
         assert!(refs.contains(&"neighbor 10.0.0.2 export_policy_chain".to_string()));
+    }
+
+    #[test]
+    fn peer_group_references_include_fib_table_allow_lists() {
+        let mut config = minimal_config();
+        config.fib_tables.push(FibTableConfig {
+            name: "edge".to_string(),
+            table_id: 1000,
+            metric: 200,
+            families: vec!["ipv4_unicast".to_string(), "ipv6_unicast".to_string()],
+            allowed_peer_groups: vec!["fabric".to_string()],
+            allowed_neighbors: Vec::new(),
+            max_routes: None,
+            maximum_paths: None,
+            maximum_paths_ebgp: None,
+            maximum_paths_ibgp: None,
+        });
+
+        let refs = peer_group_references(&config, "fabric");
+        assert_eq!(refs, vec!["fib_table edge"]);
     }
 
     #[test]

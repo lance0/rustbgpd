@@ -83,6 +83,14 @@ pub enum FibRuntimeCommand {
         tables: Vec<FibTableConfig>,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Return the actor's current desired table set — its live source of truth.
+    /// The gRPC CRUD control path reads this, applies the upsert/delete,
+    /// validates the candidate, then issues a `ReplaceTables`, all while
+    /// holding the FIB-config coordinator lock so the read-modify-write is
+    /// atomic against concurrent CRUD and SIGHUP reloads.
+    GetTables {
+        reply: oneshot::Sender<Vec<FibTableConfig>>,
+    },
 }
 
 /// Operator-visible state for one projected FIB row.
@@ -383,6 +391,9 @@ async fn run_loop<F>(
                                     .to_string()
                             }));
                         }
+                    }
+                    Some(FibRuntimeCommand::GetTables { reply }) => {
+                        let _ = reply.send(config.tables.clone());
                     }
                     None => cmd_open = false,
                 }

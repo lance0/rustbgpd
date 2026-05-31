@@ -102,7 +102,9 @@ Later for what remains.
   operator-confidence pieces).* ADR-0061/0066/0068 cover configured-table
   install, ECMP, per-class caps, `multipath_relax`, and Link Bandwidth
   weighting; the next pain points are lifecycle and scale, not base
-  capability. In scope now: hot-swap `[[fib_tables]]` (operator confidence).
+  capability. **Done:** hot-swap `[[fib_tables]]` without a restart — SIGHUP
+  soft-reload and gRPC/`rustbgpctl fib-table` CRUD (`SetFibTable` /
+  `DeleteFibTable` / `ListFibTables`), ack-gated with no runtime/config drift.
   Decide based on signal: over-cap detail APIs beyond the sampled
   `route_limit_exceeded` rows. Defer unless perf-gated or demanded: incremental
   equal-cost sibling index for wide full-table multipath; platform-diversity

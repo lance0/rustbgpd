@@ -26,12 +26,78 @@ pub type BlackholeDiscardSnapshotFn =
 pub type FibRouteSnapshotFn =
     std::sync::Arc<dyn Fn() -> Vec<proto::FibRouteStatus> + Send + Sync + 'static>;
 
+/// One CRUD operation for the daemon FIB-table control hook (`[[fib_tables]]`).
+///
+/// The binary-owned closure behind [`FibTableControlFn`] interprets these:
+/// it reads the FIB reconciler's current table set, applies the op, validates
+/// the candidate against the live config, hot-applies it through the reconciler,
+/// and persists the accepted set — all under a coordinator lock shared with the
+/// SIGHUP reload path so concurrent edits can't interleave.
+pub enum FibTableControlRequest {
+    /// Create-or-replace a table by name (upsert); carries the full definition.
+    Set(proto::FibTableConfig),
+    /// Remove a table by name.
+    Delete { name: String },
+    /// Read the current accepted table set + runtime availability.
+    List,
+}
+
+/// Error returned by the daemon FIB-table control hook.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FibTableControlError {
+    /// Candidate validation failed (bad `table_id` / family / caps / refs).
+    InvalidArgument(String),
+    /// Delete target name does not exist in the current set.
+    NotFound(String),
+    /// The FIB reconciler is not running: either no `[[fib_tables]]` entry was
+    /// present at startup (enabling FIB is restart-required) or the runtime is
+    /// unavailable (non-Linux platform / netlink setup failure).
+    FailedPrecondition(String),
+    /// The persistence channel is saturated or closed.
+    Unavailable(String),
+    /// Coordinator lock poisoned, actor channel closed, or other internal fault.
+    Internal(String),
+}
+
+impl FibTableControlError {
+    fn into_status(self) -> Status {
+        match self {
+            Self::InvalidArgument(message) => Status::invalid_argument(message),
+            Self::NotFound(message) => Status::not_found(message),
+            Self::FailedPrecondition(message) => Status::failed_precondition(message),
+            Self::Unavailable(message) => Status::unavailable(message),
+            Self::Internal(message) => Status::internal(message),
+        }
+    }
+}
+
+/// Future returned by the FIB-table control hook.
+pub type FibTableControlFuture = Pin<
+    Box<
+        dyn std::future::Future<Output = Result<proto::ListFibTablesResponse, FibTableControlError>>
+            + Send,
+    >,
+>;
+/// Daemon-owned hook that performs `[[fib_tables]]` CRUD. Wired in `main.rs`
+/// where the binary config types, validator, FIB actor sender, and config
+/// persistence channel are all visible; injected here so this API crate never
+/// needs to reach across the crate boundary into the binary.
+pub type FibTableControlFn =
+    std::sync::Arc<dyn Fn(FibTableControlRequest) -> FibTableControlFuture + Send + Sync + 'static>;
+
 /// gRPC service for querying the RIB (received, best, advertised routes).
 pub struct RibService {
     rib_tx: mpsc::Sender<RibUpdate>,
     blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
     fib_route_snapshot: FibRouteSnapshotFn,
     metrics: BgpMetrics,
+    /// Per-listener access mode; gates the mutating FIB-table RPCs as
+    /// defense-in-depth behind the authz interceptor's `Mutating` tier.
+    access_mode: crate::server::AccessMode,
+    /// Daemon FIB-table CRUD hook. `None` when the service was built without
+    /// it (tests, or a build without FIB control) — the mutating RPCs then
+    /// return `FAILED_PRECONDITION`.
+    fib_table_control: Option<FibTableControlFn>,
 }
 
 impl RibService {
@@ -43,6 +109,9 @@ impl RibService {
             blackhole_discard_snapshot: std::sync::Arc::new(Vec::new),
             fib_route_snapshot: std::sync::Arc::new(Vec::new),
             metrics: BgpMetrics::new(),
+            // Fail closed: callers opt into mutations via `with_fib_table_control`.
+            access_mode: crate::server::AccessMode::ReadOnly,
+            fib_table_control: None,
         }
     }
 
@@ -74,7 +143,23 @@ impl RibService {
             blackhole_discard_snapshot,
             fib_route_snapshot,
             metrics,
+            access_mode: crate::server::AccessMode::ReadOnly,
+            fib_table_control: None,
         }
+    }
+
+    /// Attach the per-listener access mode and the daemon FIB-table CRUD hook,
+    /// enabling `SetFibTable` / `DeleteFibTable` / `ListFibTables`. Without this
+    /// the mutating RPCs report the runtime as unavailable.
+    #[must_use]
+    pub fn with_fib_table_control(
+        mut self,
+        access_mode: crate::server::AccessMode,
+        fib_table_control: Option<FibTableControlFn>,
+    ) -> Self {
+        self.access_mode = access_mode;
+        self.fib_table_control = fib_table_control;
+        self
     }
 
     async fn query_routes(&self, peer: Option<IpAddr>) -> Result<Vec<Route>, Status> {
@@ -1235,6 +1320,75 @@ impl proto::rib_service_server::RibService for RibService {
 
         Ok(Response::new(proto::ListEvpnResponse { routes }))
     }
+
+    async fn set_fib_table(
+        &self,
+        request: Request<proto::SetFibTableRequest>,
+    ) -> Result<Response<proto::ListFibTablesResponse>, Status> {
+        if let Some(status) = crate::server::read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        let table = request
+            .into_inner()
+            .table
+            .ok_or_else(|| Status::invalid_argument("set_fib_table: missing table definition"))?;
+        dispatch_fib_table_control(
+            self.fib_table_control.as_ref(),
+            FibTableControlRequest::Set(table),
+        )
+        .await
+    }
+
+    async fn delete_fib_table(
+        &self,
+        request: Request<proto::DeleteFibTableRequest>,
+    ) -> Result<Response<proto::ListFibTablesResponse>, Status> {
+        if let Some(status) = crate::server::read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        let name = request.into_inner().name;
+        if name.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "delete_fib_table: table name is required",
+            ));
+        }
+        dispatch_fib_table_control(
+            self.fib_table_control.as_ref(),
+            FibTableControlRequest::Delete { name },
+        )
+        .await
+    }
+
+    async fn list_fib_tables(
+        &self,
+        _request: Request<proto::ListFibTablesRequest>,
+    ) -> Result<Response<proto::ListFibTablesResponse>, Status> {
+        // Read-only: no access-mode gate. The hook reports runtime availability
+        // even when the reconciler is not running (configured-but-not-started).
+        dispatch_fib_table_control(
+            self.fib_table_control.as_ref(),
+            FibTableControlRequest::List,
+        )
+        .await
+    }
+}
+
+/// Forward a FIB-table CRUD request to the daemon control hook, mapping the
+/// hook's typed error to a gRPC `Status`. A missing hook means the daemon was
+/// built without FIB-table control (tests / non-gRPC builds).
+async fn dispatch_fib_table_control(
+    control: Option<&FibTableControlFn>,
+    request: FibTableControlRequest,
+) -> Result<Response<proto::ListFibTablesResponse>, Status> {
+    let control = control.ok_or_else(|| {
+        Status::failed_precondition(
+            "FIB-table control is unavailable (the FIB reconciler was not started)",
+        )
+    })?;
+    control(request)
+        .await
+        .map(Response::new)
+        .map_err(FibTableControlError::into_status)
 }
 
 #[expect(clippy::too_many_lines)]
@@ -1627,6 +1781,62 @@ mod tests {
     fn make_service() -> RibService {
         let (tx, _rx) = mpsc::channel(16);
         RibService::new(tx)
+    }
+
+    fn fib_table_proto(name: &str) -> proto::FibTableConfig {
+        proto::FibTableConfig {
+            name: name.to_string(),
+            table_id: 1000,
+            metric: 200,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn set_fib_table_rejected_when_read_only() {
+        // make_service() defaults to ReadOnly with no control hook.
+        let status = make_service()
+            .set_fib_table(Request::new(proto::SetFibTableRequest {
+                table: Some(fib_table_proto("edge")),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn set_fib_table_unavailable_without_control_hook() {
+        let (tx, _rx) = mpsc::channel(16);
+        let svc =
+            RibService::new(tx).with_fib_table_control(crate::server::AccessMode::ReadWrite, None);
+        let status = svc
+            .set_fib_table(Request::new(proto::SetFibTableRequest {
+                table: Some(fib_table_proto("edge")),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn set_fib_table_missing_table_is_invalid_argument() {
+        let (tx, _rx) = mpsc::channel(16);
+        let svc =
+            RibService::new(tx).with_fib_table_control(crate::server::AccessMode::ReadWrite, None);
+        let status = svc
+            .set_fib_table(Request::new(proto::SetFibTableRequest { table: None }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn list_fib_tables_unavailable_without_control_hook() {
+        let status = make_service()
+            .list_fib_tables(Request::new(proto::ListFibTablesRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
     }
 
     fn list_routes_request() -> proto::ListRoutesRequest {

@@ -40,6 +40,8 @@ pub(crate) struct MockState {
     pub(crate) last_add_dynamic_neighbor: Mutex<Option<server_proto::AddDynamicNeighborRequest>>,
     pub(crate) last_delete_dynamic_neighbor:
         Mutex<Option<server_proto::DeleteDynamicNeighborRequest>>,
+    pub(crate) last_set_fib_table: Mutex<Option<server_proto::SetFibTableRequest>>,
+    pub(crate) last_delete_fib_table: Mutex<Option<server_proto::DeleteFibTableRequest>>,
     pub(crate) last_set_global_import_chain:
         Mutex<Option<server_proto::SetGlobalImportChainRequest>>,
     pub(crate) last_set_global_export_chain:
@@ -766,6 +768,55 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
             routes.push(mock_evpn_route(3));
         }
         Ok(Response::new(server_proto::ListEvpnResponse { routes }))
+    }
+
+    async fn set_fib_table(
+        &self,
+        request: Request<server_proto::SetFibTableRequest>,
+    ) -> Result<Response<server_proto::ListFibTablesResponse>, Status> {
+        let request = request.into_inner();
+        let table = request.table.clone().unwrap_or_default();
+        *self.state.last_set_fib_table.lock().await = Some(request);
+        Ok(Response::new(server_proto::ListFibTablesResponse {
+            tables: vec![table],
+            runtime_available: true,
+        }))
+    }
+
+    async fn delete_fib_table(
+        &self,
+        request: Request<server_proto::DeleteFibTableRequest>,
+    ) -> Result<Response<server_proto::ListFibTablesResponse>, Status> {
+        *self.state.last_delete_fib_table.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::ListFibTablesResponse {
+            tables: vec![],
+            runtime_available: true,
+        }))
+    }
+
+    async fn list_fib_tables(
+        &self,
+        _request: Request<server_proto::ListFibTablesRequest>,
+    ) -> Result<Response<server_proto::ListFibTablesResponse>, Status> {
+        Ok(Response::new(server_proto::ListFibTablesResponse {
+            tables: vec![mock_fib_table()],
+            runtime_available: true,
+        }))
+    }
+}
+
+fn mock_fib_table() -> server_proto::FibTableConfig {
+    server_proto::FibTableConfig {
+        name: "edge".to_string(),
+        table_id: 1000,
+        metric: 200,
+        families: vec!["ipv4_unicast".to_string()],
+        allowed_peer_groups: vec![],
+        allowed_neighbors: vec![],
+        max_routes: None,
+        maximum_paths: None,
+        maximum_paths_ebgp: None,
+        maximum_paths_ibgp: None,
     }
 }
 

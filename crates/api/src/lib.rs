@@ -29,7 +29,7 @@ mod peer_group_service;
 pub mod peer_types;
 mod policy_helpers;
 mod policy_service;
-mod rib_service;
+pub mod rib_service;
 pub mod server;
 
 pub use evpn_service::EvpnService;

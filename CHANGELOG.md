@@ -21,6 +21,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Adding a range validates identically to config load (peer-group must exist
   and not enable BFD, valid prefix, no duplicate effective prefix); config-load
   validation now also rejects exact-duplicate effective prefixes.
+- **Runtime `[[fib_tables]]` CRUD.** `SetFibTable` (create-or-replace by name,
+  tier `mutating`), `DeleteFibTable` (tier `mutating`), and `ListFibTables`
+  (tier `sensitive_read`) on `RibService`, with `rustbgpctl fib-table
+  {list,set,delete}`. `set` carries the full table definition (not a patch);
+  changing `table_id`/`metric` for an existing name is a table-key move (old
+  kernel rows withdraw, the new table back-fills). Edits hot-apply through the
+  ADR-0061 FIB reconciler and persist to the TOML config (atomic write) when
+  started with `--config`. The candidate is validated against the live config
+  before dispatch, persisted only after the reconciler acknowledges the exact
+  accepted set, and serialized with SIGHUP FIB reloads through one coordinator
+  lock — so runtime and on-disk config cannot drift. Requires the reconciler to
+  be running (at least one `[[fib_tables]]` entry at startup) — otherwise the
+  mutating RPCs return `FAILED_PRECONDITION` (enabling FIB from an empty config
+  is still restart-required).
 
 ### Changed
 

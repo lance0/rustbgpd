@@ -1,0 +1,66 @@
+# Containerlab topology: rustbgpd ↔ FRR (M58 — ADR-0061 FIB-table runtime CRUD)
+#
+# Validates the runtime [[fib_tables]] CRUD surface (SetFibTable /
+# DeleteFibTable / ListFibTables on RibService) end-to-end against a real
+# FRR peer and a real kernel:
+#
+#   * rustbgpd starts with ONE table (edge, table_id=1000, metric=200) so the
+#     ADR-0061 reconciler is running (CRUD requires it).
+#   * FRR advertises 203.0.113.42/32 and 203.0.113.99/32.
+#   * SetFibTable adds a second table (core, table_id=2000, metric=300) at
+#     runtime → its kernel rows must appear in table 2000.
+#   * SetFibTable on `core` changing metric 300→350 is a table-key move →
+#     the old metric-300 rows withdraw and metric-350 rows install.
+#   * DeleteFibTable core → only its kernel rows withdraw; the edge table
+#     (1000) is untouched.
+#   * Persistence: the runtime CRUD writes the TOML config (atomic), so after
+#     a restart the daemon comes back with the post-CRUD table set.
+#
+# The config is mounted read-only as a template and copied to a container-local
+# writable path at startup. The daemon runs against that local copy, so the
+# atomic config persist (write `.config.toml.tmp` + rename over `config.toml`)
+# works — a single-file read-write bind mount would make the rename target a
+# mount point and fail with EBUSY. The persistence round-trip is still real: the
+# restart is a process restart inside the same container, so the container-local
+# config survives and a fresh daemon reads the post-CRUD set.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m58-fib-table-crud-frr.clab.yml
+#   bash tests/interop/scripts/test-m58-fib-table-crud-frr.sh
+#   containerlab destroy -t tests/interop/m58-fib-table-crud-frr.clab.yml --cleanup
+
+name: m58-fib-table-crud-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m58-fib-crud.toml:/etc/rustbgpd/config.template.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        # Copy the read-only template to a writable container-local path so the
+        # atomic config persist (temp + rename) works; see the header note.
+        - cp /etc/rustbgpd/config.template.toml /etc/rustbgpd/config.toml
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m58-fib-crud.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.0.0.0/24 — rustbgpd (10.0.0.1, AS 65001) ↔ FRR (10.0.0.2, AS 65002)

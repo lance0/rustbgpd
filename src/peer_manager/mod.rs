@@ -17,7 +17,7 @@ use rustbgpd_transport::{
     SessionNotificationEvent as TransportNotificationEvent, TransportConfig,
 };
 use rustbgpd_wire::{Afi, Safi};
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
@@ -69,7 +69,14 @@ const PEER_POLICY_UPDATE_TIMEOUT: Duration = Duration::from_millis(500);
 const EXPLAIN_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub(crate) enum InternalCommand {
-    ReplaceConfigSnapshot(Box<Config>),
+    ReplaceConfigSnapshot {
+        config: Box<Config>,
+        /// Optional acknowledgement, sent after `current_config` is assigned.
+        /// The SIGHUP reload path awaits this before releasing the FIB
+        /// coordinator lock so a following gRPC FIB-table CRUD can't have its
+        /// snapshot overtaken by this (stale) one on the separate channel.
+        ack: Option<oneshot::Sender<()>>,
+    },
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -549,6 +556,14 @@ impl PeerManager {
                             let result = self.diff_runtime_config(&candidate_toml);
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::StageFibTables { tables, reply } => {
+                            let result = self.stage_fib_tables_candidate(&tables);
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::SetFibTablesSnapshot { tables, reply } => {
+                            self.set_fib_tables_snapshot(&tables);
+                            let _ = reply.send(());
+                        }
                         PeerManagerCommand::GetPeerState { peer, reply } => {
                             let info = self.get_peer_info(&peer).await;
                             let _ = reply.send(info);
@@ -827,8 +842,11 @@ impl PeerManager {
                     }
                 }
                 internal = self.internal_rx.recv() => {
-                    if let Some(InternalCommand::ReplaceConfigSnapshot(config)) = internal {
+                    if let Some(InternalCommand::ReplaceConfigSnapshot { config, ack }) = internal {
                         self.current_config = *config;
+                        if let Some(ack) = ack {
+                            let _ = ack.send(());
+                        }
                     }
                 }
                 notification = self.session_notify_rx.recv() => {

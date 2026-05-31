@@ -150,7 +150,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
-| `RibService` | All RPCs | None |
+| `RibService` | All read/list/explain RPCs (incl. `ListFibTables`) | `SetFibTable`, `DeleteFibTable` |
 | `EventService` | All RPCs | None |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`, `GetIpVrf` | `ClearDuplicateMacQuarantine`, `ApplyEvpnRuntime` |
 | `BfdService` | `GetBfdSessions` | None |
@@ -283,8 +283,8 @@ added at runtime.
 | `EnableNeighbor` | Re-enable a previously disabled peer |
 | `DisableNeighbor` | Administratively disable a peer (sends NOTIFICATION) |
 | `SoftResetIn` | Request inbound route refresh (RFC 2918/7313) for one or more families |
-| `AddDynamicNeighbor` | Reserved runtime add for a `[[dynamic_neighbors]]` range; currently returns `UNIMPLEMENTED` |
-| `DeleteDynamicNeighbor` | Reserved runtime delete for a dynamic-neighbor range; currently returns `UNIMPLEMENTED` |
+| `AddDynamicNeighbor` | Add a `[[dynamic_neighbors]]` prefix range at runtime; persists to the config (atomic write) when started with `--config` |
+| `DeleteDynamicNeighbor` | Remove a dynamic-neighbor range at runtime (stops future accepts; established peers drain on Idle) |
 | `ListDynamicNeighbors` | List configured dynamic-neighbor ranges with active peer counts |
 | `SetGracefulShutdown` | RFC 8326 initiator toggle — attach the `GRACEFUL_SHUTDOWN` community to outbound updates for one peer (or all peers when `address` is empty) and clear with `clear = true` |
 
@@ -540,6 +540,9 @@ Query the routing information base and subscribe to real-time route changes.
 | `ListEvpnRoutes` | EVPN routes (RFC 7432) in Loc-RIB view, filterable by route type / peer / RD |
 | `ListBlackholeDiscards` | RFC 7999 BLACKHOLE kernel-discard install status when `[global] honor_blackhole = true` and `[global] install_blackhole_discard = true` |
 | `ListFibRoutes` | ADR-0061 general unicast Linux FIB route status for configured `[[fib_tables]]` |
+| `ListFibTables` | List the configured `[[fib_tables]]` and whether the FIB reconciler is running (`sensitive_read`) |
+| `SetFibTable` | Create-or-replace a `[[fib_tables]]` entry by name (upsert; full definition, not a patch) at runtime; hot-applies through the reconciler and persists. Requires the reconciler running (≥1 table at startup) else `FAILED_PRECONDITION` (`mutating`) |
+| `DeleteFibTable` | Remove a `[[fib_tables]]` entry by name at runtime; `NOT_FOUND` if absent (`mutating`) |
 | `ListRouteEvents` | Recent unicast route add / withdraw / best-change / export-policy-filtered event history from the bounded in-memory RIB ring |
 | `WatchRoutes` | Server-streaming: real-time route add / withdraw / best-change / export-policy-filtered events |
 | `WatchRouteEvents` | Server-streaming: real-time route add / withdraw / best-change / export-policy-filtered events wrapped as `BgpEvent`, including explicit lag warnings |

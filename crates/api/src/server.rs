@@ -108,6 +108,11 @@ pub struct ServeConfig {
     /// install state. Returns an empty list when no `[[fib_tables]]`
     /// are configured or before the actor's first reconcile pass.
     pub fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
+    /// Daemon hook for runtime `[[fib_tables]]` CRUD (gRPC `SetFibTable` /
+    /// `DeleteFibTable` / `ListFibTables`). `None` disables the mutating RPCs
+    /// (they return `FAILED_PRECONDITION`). Wired in `main.rs` where the
+    /// FIB actor sender, validator, and config persistence are visible.
+    pub fib_table_control: Option<crate::rib_service::FibTableControlFn>,
     /// Live ADR-0061 per-route FIB dataplane event source. This is
     /// separate from the aggregate dataplane poller so route events
     /// are not delayed by snapshot polling.
@@ -427,6 +432,7 @@ async fn run_listener(
     let evpn_duplicate_mac_clear = config.evpn_duplicate_mac_clear;
     let blackhole_discard_snapshot = config.blackhole_discard_snapshot;
     let fib_route_snapshot = config.fib_route_snapshot;
+    let fib_table_control = config.fib_table_control;
     let dataplane_route_events = config.dataplane_route_events;
     let bfd_session_snapshot = config.bfd_session_snapshot;
     let bfd_events = config.bfd_events;
@@ -473,6 +479,7 @@ async fn run_listener(
                 evpn_duplicate_mac_clear,
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
+                fib_table_control,
                 dataplane_route_events,
                 bfd_session_snapshot,
                 bfd_events,
@@ -514,6 +521,7 @@ async fn run_listener(
                 evpn_duplicate_mac_clear,
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
+                fib_table_control,
                 dataplane_route_events,
                 bfd_session_snapshot,
                 bfd_events,
@@ -562,6 +570,7 @@ async fn run_tcp_listener(
     evpn_duplicate_mac_clear: Option<DuplicateMacClearFn>,
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
+    fib_table_control: Option<crate::rib_service::FibTableControlFn>,
     dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
     bfd_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
@@ -615,7 +624,8 @@ async fn run_tcp_listener(
             blackhole_discard_snapshot.clone(),
             fib_route_snapshot.clone(),
             metrics.clone(),
-        ),
+        )
+        .with_fib_table_control(access_mode, fib_table_control.clone()),
         interceptor.clone(),
     ));
     routes.add_service(EventServiceServer::with_interceptor(
@@ -741,6 +751,7 @@ async fn run_uds_listener(
     evpn_duplicate_mac_clear: Option<DuplicateMacClearFn>,
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
+    fib_table_control: Option<crate::rib_service::FibTableControlFn>,
     dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
     bfd_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
@@ -774,7 +785,8 @@ async fn run_uds_listener(
             blackhole_discard_snapshot.clone(),
             fib_route_snapshot.clone(),
             metrics.clone(),
-        ),
+        )
+        .with_fib_table_control(access_mode, fib_table_control.clone()),
         interceptor.clone(),
     ));
     routes.add_service(EventServiceServer::with_interceptor(
