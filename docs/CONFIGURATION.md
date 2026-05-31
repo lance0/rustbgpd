@@ -675,8 +675,11 @@ Dynamic peers:
 
 - inherit transport and policy defaults from the referenced peer group
 - never initiate outbound TCP connections
-- are not persisted back to the config file
-- are removed automatically when the session returns to Idle
+- the ephemeral peer entry is not written back to `[[neighbors]]` (the *range*,
+  however, is persisted to `[[dynamic_neighbors]]` when added at runtime with the
+  daemon started under `--config` — see "Runtime management" below)
+- the ephemeral peer is removed automatically when its session returns to Idle
+  (the range itself persists)
 - count against `global.dynamic_neighbor_limit`
 
 | Field         | Type   | Required | Default | Description |

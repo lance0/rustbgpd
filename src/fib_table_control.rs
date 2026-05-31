@@ -160,8 +160,23 @@ async fn mutate(
         }
 
         // Persist exactly the accepted set, only after the ack. The live config
-        // snapshot already holds the candidate (staged above).
-        permit.send(ConfigEvent::FibTablesReplaced(snapshots));
+        // snapshot already holds the candidate (staged above). Await the bridge
+        // and persister acknowledgement before releasing the coordinator lock,
+        // otherwise an immediate SIGHUP can reload stale disk and overwrite the
+        // accepted runtime snapshot.
+        let (persist_ack_tx, persist_ack_rx) = oneshot::channel();
+        permit.send(ConfigEvent::FibTablesReplaced {
+            tables: snapshots,
+            ack: Some(persist_ack_tx),
+        });
+        persist_ack_rx
+            .await
+            .map_err(|_| {
+                FibTableControlError::Internal(
+                    "config bridge dropped FIB-table persistence acknowledgement".to_string(),
+                )
+            })?
+            .map_err(FibTableControlError::FailedPrecondition)?;
 
         Ok(proto::ListFibTablesResponse {
             tables: candidate.iter().map(config_to_proto).collect(),

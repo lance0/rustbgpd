@@ -285,7 +285,7 @@ added at runtime.
 | `SoftResetIn` | Request inbound route refresh (RFC 2918/7313) for one or more families |
 | `AddDynamicNeighbor` | Add a `[[dynamic_neighbors]]` prefix range at runtime; persists to the config (atomic write) when started with `--config` |
 | `DeleteDynamicNeighbor` | Remove a dynamic-neighbor range at runtime (stops future accepts; established peers drain on Idle) |
-| `ListDynamicNeighbors` | List configured dynamic-neighbor ranges with active peer counts |
+| `ListDynamicNeighbors` | List configured dynamic-neighbor ranges (prefix, peer group, remote ASN, description) |
 | `SetGracefulShutdown` | RFC 8326 initiator toggle — attach the `GRACEFUL_SHUTDOWN` community to outbound updates for one peer (or all peers when `address` is empty) and clear with `clear = true` |
 
 ### Add a neighbor

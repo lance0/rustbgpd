@@ -951,8 +951,15 @@ pub struct FibTableSnapshot {
 pub enum ConfigEvent {
     /// The `[[fib_tables]]` set was replaced at runtime (gRPC FIB-table CRUD).
     /// Carries the full accepted table set the FIB reconciler acknowledged, so
-    /// persistence writes exactly what the runtime applied.
-    FibTablesReplaced(Vec<FibTableSnapshot>),
+    /// persistence writes exactly what the runtime applied. The optional ack is
+    /// used by the FIB-table CRUD path to keep its coordinator lock held until
+    /// the config bridge and persister have absorbed the accepted set.
+    FibTablesReplaced {
+        /// Full accepted table set.
+        tables: Vec<FibTableSnapshot>,
+        /// Optional persistence acknowledgement.
+        ack: Option<oneshot::Sender<Result<(), String>>>,
+    },
     /// A neighbor was successfully added at runtime.
     NeighborAdded(PeerManagerNeighborConfig),
     /// A neighbor was successfully deleted at runtime.

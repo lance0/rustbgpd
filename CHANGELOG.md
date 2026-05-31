@@ -80,6 +80,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- FIB-table runtime CRUD now waits for the config bridge and persister to
+  acknowledge the accepted `[[fib_tables]]` set before releasing its SIGHUP/CRUD
+  coordinator lock. This prevents an immediate SIGHUP from refreshing runtime
+  snapshots from stale TOML after a successful `SetFibTable` / `DeleteFibTable`.
+- SIGHUP `[[fib_tables]]` hot-reload now refreshes the peer manager's
+  `fib_tables` snapshot before same-reload peer-group deletion checks, so
+  removing a FIB table's `allowed_peer_groups` reference and deleting that peer
+  group in one reload no longer trips a stale "still referenced" rejection.
+- Dynamic-neighbor add/delete now queue their persistence event from a durable
+  spawned task after the peer manager acknowledges the runtime mutation, so a
+  canceled RPC cannot split the live `[[dynamic_neighbors]]` change from the
+  TOML update.
 - Dynamic neighbor ranges now resolve overlaps by longest-prefix-match: a more
   specific range (e.g. `10.0.5.0/24`) wins over a wider one (`10.0.0.0/16`)
   regardless of TOML declaration order, matching FRR/GoBGP. Previously the first

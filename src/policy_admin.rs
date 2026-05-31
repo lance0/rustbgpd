@@ -578,7 +578,9 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
         ConfigEvent::ClearNeighborPeerGroup { address } => {
             neighbor_mut(config, *address)?.peer_group = None;
         }
-        ConfigEvent::FibTablesReplaced(snapshots) => {
+        ConfigEvent::FibTablesReplaced {
+            tables: snapshots, ..
+        } => {
             // The full accepted set the FIB reconciler acknowledged. The
             // trailing `config.validate()` re-checks it (`validate_fib_tables`)
             // before the caller commits the snapshot, so a malformed event

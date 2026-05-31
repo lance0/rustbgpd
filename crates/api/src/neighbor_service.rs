@@ -88,9 +88,9 @@ async fn reserve_config_event_slot(
     let permit = tokio::time::timeout(CONFIG_PERSIST_RESERVE_TIMEOUT, tx.reserve_owned())
         .await
         .map_err(|_| {
-            Status::internal("config persistence queue busy — refusing mutation to avoid drift")
+            Status::unavailable("config persistence queue busy — refusing mutation to avoid drift")
         })?
-        .map_err(|_| Status::internal("config persistence unavailable"))?;
+        .map_err(|_| Status::unavailable("config persistence unavailable"))?;
 
     Ok(Some(permit))
 }
@@ -128,6 +128,14 @@ async fn query_export_policy_stats(
     reply_rx
         .await
         .map_err(|_| Status::internal("RIB manager dropped reply"))
+}
+
+fn dynamic_range_error_status(error: DynamicRangeError) -> Status {
+    match error {
+        DynamicRangeError::AlreadyExists(message) => Status::already_exists(message),
+        DynamicRangeError::NotFound(message) => Status::not_found(message),
+        DynamicRangeError::Invalid(message) => Status::invalid_argument(message),
+    }
 }
 
 pub(crate) fn family_to_string(afi: Afi, safi: Safi) -> String {
@@ -667,36 +675,40 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         // (fail-fast when persistence is unavailable), mirroring AddNeighbor.
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::AddDynamicRange {
-                prefix: range.prefix.clone(),
-                peer_group: range.peer_group.clone(),
-                remote_asn: range.remote_asn,
-                description: description.clone(),
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
+        let peer_mgr_tx = self.peer_mgr_tx.clone();
+        let join = tokio::spawn(async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            peer_mgr_tx
+                .send(PeerManagerCommand::AddDynamicRange {
+                    prefix: range.prefix.clone(),
+                    peer_group: range.peer_group.clone(),
+                    remote_asn: range.remote_asn,
+                    description: description.clone(),
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| Status::internal("peer manager unavailable"))?;
 
-        reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(|e| match e {
-                DynamicRangeError::AlreadyExists(m) => Status::already_exists(m),
-                DynamicRangeError::NotFound(m) => Status::not_found(m),
-                DynamicRangeError::Invalid(m) => Status::invalid_argument(m),
-            })?;
+            reply_rx
+                .await
+                .map_err(|_| Status::internal("peer manager dropped reply"))?
+                .map_err(dynamic_range_error_status)?;
 
-        // Persist only after successful runtime mutation.
-        if let Some(permit) = persist_permit {
-            permit.send(ConfigEvent::DynamicNeighborAdded {
-                prefix: range.prefix,
-                peer_group: range.peer_group,
-                remote_asn: range.remote_asn,
-                description,
-            });
-        }
+            // Persist only after successful runtime mutation. This runs inside
+            // the spawned task so a canceled gRPC request cannot split runtime
+            // add from the queued config event.
+            if let Some(permit) = persist_permit {
+                permit.send(ConfigEvent::DynamicNeighborAdded {
+                    prefix: range.prefix,
+                    peer_group: range.peer_group,
+                    remote_asn: range.remote_asn,
+                    description,
+                });
+            }
+            Ok::<(), Status>(())
+        });
+        join.await
+            .map_err(|_| Status::internal("dynamic-neighbor add task did not complete"))??;
 
         Ok(Response::new(proto::AddDynamicNeighborResponse {}))
     }
@@ -715,27 +727,31 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
 
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::DeleteDynamicRange {
-                prefix: prefix.clone(),
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
+        let peer_mgr_tx = self.peer_mgr_tx.clone();
+        let join = tokio::spawn(async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            peer_mgr_tx
+                .send(PeerManagerCommand::DeleteDynamicRange {
+                    prefix: prefix.clone(),
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| Status::internal("peer manager unavailable"))?;
 
-        reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(|e| match e {
-                DynamicRangeError::NotFound(m) => Status::not_found(m),
-                DynamicRangeError::AlreadyExists(m) => Status::already_exists(m),
-                DynamicRangeError::Invalid(m) => Status::invalid_argument(m),
-            })?;
+            reply_rx
+                .await
+                .map_err(|_| Status::internal("peer manager dropped reply"))?
+                .map_err(dynamic_range_error_status)?;
 
-        if let Some(permit) = persist_permit {
-            permit.send(ConfigEvent::DynamicNeighborDeleted { prefix });
-        }
+            // Queue persistence inside the spawned task so cancellation after
+            // runtime delete cannot leave disk with the removed range.
+            if let Some(permit) = persist_permit {
+                permit.send(ConfigEvent::DynamicNeighborDeleted { prefix });
+            }
+            Ok::<(), Status>(())
+        });
+        join.await
+            .map_err(|_| Status::internal("dynamic-neighbor delete task did not complete"))??;
 
         Ok(Response::new(proto::DeleteDynamicNeighborResponse {}))
     }
@@ -950,6 +966,104 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn add_dynamic_neighbor_persists_after_runtime_success() {
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (config_tx, mut config_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(
+            65001,
+            AccessMode::ReadWrite,
+            peer_mgr_tx,
+            rib_tx,
+            Some(config_tx),
+        );
+
+        let call = tokio::spawn(async move {
+            svc.add_dynamic_neighbor(Request::new(proto::AddDynamicNeighborRequest {
+                range: Some(proto::DynamicNeighborRange {
+                    prefix: "192.0.2.0/24".to_string(),
+                    peer_group: "fabric".to_string(),
+                    remote_asn: 65002,
+                    description: "lab range".to_string(),
+                }),
+            }))
+            .await
+            .unwrap();
+        });
+
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::AddDynamicRange {
+                prefix,
+                peer_group,
+                remote_asn,
+                description,
+                reply,
+            } => {
+                assert_eq!(prefix, "192.0.2.0/24");
+                assert_eq!(peer_group, "fabric");
+                assert_eq!(remote_asn, 65002);
+                assert_eq!(description.as_deref(), Some("lab range"));
+                reply.send(Ok(())).unwrap();
+            }
+            _ => panic!("expected AddDynamicRange"),
+        }
+        call.await.unwrap();
+
+        match config_rx.recv().await.unwrap() {
+            ConfigEvent::DynamicNeighborAdded {
+                prefix,
+                peer_group,
+                remote_asn,
+                description,
+            } => {
+                assert_eq!(prefix, "192.0.2.0/24");
+                assert_eq!(peer_group, "fabric");
+                assert_eq!(remote_asn, 65002);
+                assert_eq!(description.as_deref(), Some("lab range"));
+            }
+            _ => panic!("expected DynamicNeighborAdded"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_dynamic_neighbor_persists_after_runtime_success() {
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (config_tx, mut config_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(
+            65001,
+            AccessMode::ReadWrite,
+            peer_mgr_tx,
+            rib_tx,
+            Some(config_tx),
+        );
+
+        let call = tokio::spawn(async move {
+            svc.delete_dynamic_neighbor(Request::new(proto::DeleteDynamicNeighborRequest {
+                prefix: "192.0.2.0/24".to_string(),
+            }))
+            .await
+            .unwrap();
+        });
+
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::DeleteDynamicRange { prefix, reply } => {
+                assert_eq!(prefix, "192.0.2.0/24");
+                reply.send(Ok(())).unwrap();
+            }
+            _ => panic!("expected DeleteDynamicRange"),
+        }
+        call.await.unwrap();
+
+        match config_rx.recv().await.unwrap() {
+            ConfigEvent::DynamicNeighborDeleted { prefix } => {
+                assert_eq!(prefix, "192.0.2.0/24");
+            }
+            _ => panic!("expected DynamicNeighborDeleted"),
+        }
     }
 
     #[tokio::test]
@@ -1224,7 +1338,7 @@ mod tests {
             }),
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Internal);
+        assert_eq!(err.code(), tonic::Code::Unavailable);
         assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
@@ -1247,7 +1361,7 @@ mod tests {
             interface: String::new(),
         });
         let err = svc.delete_neighbor(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Internal);
+        assert_eq!(err.code(), tonic::Code::Unavailable);
         assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
