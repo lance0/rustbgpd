@@ -794,6 +794,21 @@ impl PeerManager {
                             }).collect();
                             let _ = reply.send(ranges);
                         }
+                        PeerManagerCommand::AddDynamicRange {
+                            prefix,
+                            peer_group,
+                            remote_asn,
+                            description,
+                            reply,
+                        } => {
+                            let result = self
+                                .add_dynamic_range(prefix, peer_group, remote_asn, description);
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::DeleteDynamicRange { prefix, reply } => {
+                            let result = self.delete_dynamic_range(&prefix);
+                            let _ = reply.send(result);
+                        }
                             PeerManagerCommand::Shutdown => {
                                 info!("peer manager shutting down {} peers", self.peers.len());
                                 for (addr, mut managed) in self.peers.drain() {

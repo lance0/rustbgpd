@@ -37,6 +37,9 @@ pub(crate) struct MockState {
     pub(crate) last_explain_import: Mutex<Option<server_proto::ExplainImportPolicyRequest>>,
     pub(crate) last_set_neighbor_set: Mutex<Option<server_proto::SetNeighborSetRequest>>,
     pub(crate) last_delete_neighbor_set: Mutex<Option<server_proto::DeleteNeighborSetRequest>>,
+    pub(crate) last_add_dynamic_neighbor: Mutex<Option<server_proto::AddDynamicNeighborRequest>>,
+    pub(crate) last_delete_dynamic_neighbor:
+        Mutex<Option<server_proto::DeleteDynamicNeighborRequest>>,
     pub(crate) last_set_global_import_chain:
         Mutex<Option<server_proto::SetGlobalImportChainRequest>>,
     pub(crate) last_set_global_export_chain:
@@ -469,21 +472,27 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
         &self,
         _request: Request<server_proto::ListDynamicNeighborsRequest>,
     ) -> Result<Response<server_proto::ListDynamicNeighborsResponse>, Status> {
-        Err(Status::unimplemented("not in mock"))
+        Ok(Response::new(server_proto::ListDynamicNeighborsResponse {
+            ranges: Vec::new(),
+        }))
     }
 
     async fn add_dynamic_neighbor(
         &self,
-        _request: Request<server_proto::AddDynamicNeighborRequest>,
+        request: Request<server_proto::AddDynamicNeighborRequest>,
     ) -> Result<Response<server_proto::AddDynamicNeighborResponse>, Status> {
-        Err(Status::unimplemented("not in mock"))
+        *self.state.last_add_dynamic_neighbor.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::AddDynamicNeighborResponse {}))
     }
 
     async fn delete_dynamic_neighbor(
         &self,
-        _request: Request<server_proto::DeleteDynamicNeighborRequest>,
+        request: Request<server_proto::DeleteDynamicNeighborRequest>,
     ) -> Result<Response<server_proto::DeleteDynamicNeighborResponse>, Status> {
-        Err(Status::unimplemented("not in mock"))
+        *self.state.last_delete_dynamic_neighbor.lock().await = Some(request.into_inner());
+        Ok(Response::new(
+            server_proto::DeleteDynamicNeighborResponse {},
+        ))
     }
 
     async fn set_graceful_shutdown(

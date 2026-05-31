@@ -4554,6 +4554,63 @@ peer_group = "nonexistent"
 }
 
 #[test]
+fn dynamic_neighbor_duplicate_effective_prefix_rejected() {
+    // 10.0.0.0/24 and 10.0.0.9/24 both normalize to 10.0.0.0/24 — ambiguous.
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.g]
+families = ["ipv4_unicast"]
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "g"
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.9/24"
+peer_group = "g"
+"#;
+    let err = parse(toml).unwrap_err();
+    assert!(
+        err.to_string().contains("duplicate effective prefix"),
+        "{err}"
+    );
+}
+
+#[test]
+fn dynamic_neighbor_overlapping_different_lengths_allowed() {
+    // Overlapping ranges of DIFFERENT lengths are fine — longest-prefix-match
+    // resolves them at accept time, so this must NOT be rejected.
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.g]
+families = ["ipv4_unicast"]
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/16"
+peer_group = "g"
+
+[[dynamic_neighbors]]
+prefix = "10.0.5.0/24"
+peer_group = "g"
+"#;
+    parse(toml).expect("overlapping ranges of different lengths are allowed");
+}
+
+#[test]
 fn static_neighbor_remote_asn_zero_rejected() {
     let toml = r#"
 [global]

@@ -598,6 +598,27 @@ pub enum PeerManagerCommand {
     ListDynamicRanges {
         reply: oneshot::Sender<Vec<DynamicNeighborInfo>>,
     },
+    /// Add a dynamic neighbor range at runtime.
+    AddDynamicRange {
+        /// IP prefix range (e.g., `10.0.0.0/24`).
+        prefix: String,
+        /// Peer group whose config dynamic peers inherit.
+        peer_group: String,
+        /// Expected remote ASN (0 = accept any ASN from OPEN).
+        remote_asn: u32,
+        /// Optional description applied to dynamic peers from this range.
+        description: Option<String>,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), DynamicRangeError>>,
+    },
+    /// Remove a dynamic neighbor range at runtime. Does not tear down
+    /// already-established dynamic peers — they drain on Idle.
+    DeleteDynamicRange {
+        /// IP prefix range to remove (matched by effective prefix).
+        prefix: String,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), DynamicRangeError>>,
+    },
 }
 
 /// Information about a configured dynamic neighbor range.
@@ -607,6 +628,28 @@ pub struct DynamicNeighborInfo {
     pub peer_group: String,
     pub remote_asn: u32,
     pub description: String,
+}
+
+/// Typed failure for runtime dynamic-range mutations so the gRPC layer maps
+/// to status codes deterministically, instead of substring-matching an opaque
+/// message. Each variant carries a human-readable detail for the status body.
+#[derive(Debug, Clone)]
+pub enum DynamicRangeError {
+    /// A range with the same effective prefix already exists (→ `ALREADY_EXISTS`).
+    AlreadyExists(String),
+    /// No range with the given effective prefix exists (→ `NOT_FOUND`).
+    NotFound(String),
+    /// The request was invalid — bad prefix, or unknown / BFD-enabled peer
+    /// group (→ `INVALID_ARGUMENT`).
+    Invalid(String),
+}
+
+impl std::fmt::Display for DynamicRangeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyExists(m) | Self::NotFound(m) | Self::Invalid(m) => f.write_str(m),
+        }
+    }
 }
 
 /// `AS_PATH` prepend configuration for policy modifications.
@@ -852,6 +895,22 @@ pub enum ConfigEvent {
     NeighborAdded(PeerManagerNeighborConfig),
     /// A neighbor was successfully deleted at runtime.
     NeighborDeleted(PeerKey),
+    /// A dynamic neighbor range was successfully added at runtime.
+    DynamicNeighborAdded {
+        /// IP prefix range (e.g., `10.0.0.0/24`).
+        prefix: String,
+        /// Peer group whose config dynamic peers inherit.
+        peer_group: String,
+        /// Expected remote ASN (0 = accept any ASN from OPEN).
+        remote_asn: u32,
+        /// Optional description.
+        description: Option<String>,
+    },
+    /// A dynamic neighbor range was successfully removed at runtime.
+    DynamicNeighborDeleted {
+        /// IP prefix range that was removed (matched by effective prefix).
+        prefix: String,
+    },
     /// Create or replace a named policy definition.
     SetPolicy {
         /// Policy definition name.

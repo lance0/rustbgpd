@@ -2,6 +2,8 @@ use std::net::IpAddr;
 
 use tracing::{info, warn};
 
+use rustbgpd_api::peer_types::DynamicRangeError;
+
 use crate::config::Config;
 
 use super::PeerManager;
@@ -60,6 +62,29 @@ fn select_dynamic_range(ranges: &[DynamicRange], addr: IpAddr) -> Option<&Dynami
         .max_by_key(|r| r.prefix_len)
 }
 
+/// Parse an `addr/len` dynamic-range prefix with the same bounds as
+/// config-load validation. Returns the unmasked address + length.
+fn parse_dynamic_prefix(prefix: &str) -> Result<(IpAddr, u8), String> {
+    let (addr_s, len_s) = prefix
+        .split_once('/')
+        .ok_or_else(|| format!("invalid prefix {prefix:?}: expected addr/len"))?;
+    let addr: IpAddr = addr_s
+        .parse()
+        .map_err(|e| format!("invalid prefix {prefix:?}: {e}"))?;
+    let len: u8 = len_s
+        .parse()
+        .map_err(|e| format!("invalid prefix {prefix:?}: {e}"))?;
+    match addr {
+        IpAddr::V4(_) if len > 32 => Err(format!(
+            "invalid prefix {prefix:?}: IPv4 prefix length must be 0..=32"
+        )),
+        IpAddr::V6(_) if len > 128 => Err(format!(
+            "invalid prefix {prefix:?}: IPv6 prefix length must be 0..=128"
+        )),
+        _ => Ok((addr, len)),
+    }
+}
+
 /// Snapshot of a removed dynamic peer's unfired hot-apply intent. Carried
 /// across the auto-removal that fires when a dynamic peer goes back to
 /// Idle so a re-establishing peer at the same address inherits the retry.
@@ -105,6 +130,91 @@ impl PeerManager {
     /// depend on config ordering, which surprises operators.
     pub(super) fn match_dynamic_range(&self, addr: IpAddr) -> Option<&DynamicRange> {
         select_dynamic_range(&self.dynamic_ranges, addr)
+    }
+
+    /// Add a dynamic neighbor range at runtime. Validates identically to
+    /// config-load (peer-group exists, peer-group not BFD-enabled, prefix
+    /// bounds, no exact-duplicate effective prefix), then updates both the
+    /// live `dynamic_ranges` and the `current_config` snapshot so a later
+    /// `ConfigEvent` persists it. Overlapping ranges of different lengths are
+    /// allowed — longest-prefix-match resolves them at accept time.
+    pub(super) fn add_dynamic_range(
+        &mut self,
+        prefix: String,
+        peer_group: String,
+        remote_asn: u32,
+        description: Option<String>,
+    ) -> Result<(), DynamicRangeError> {
+        let (addr, prefix_len) =
+            parse_dynamic_prefix(&prefix).map_err(DynamicRangeError::Invalid)?;
+
+        let Some(group) = self.current_config.peer_groups.get(&peer_group) else {
+            return Err(DynamicRangeError::Invalid(format!(
+                "peer_group {peer_group:?} not defined"
+            )));
+        };
+        if group.bfd.as_ref().is_some_and(|b| b.enabled) {
+            return Err(DynamicRangeError::Invalid(format!(
+                "peer_group {peer_group:?} enables BFD, which is not supported for \
+                 dynamic neighbors (static neighbors only in v1 — see ADR-0067)"
+            )));
+        }
+
+        let key = crate::config::effective_prefix(addr, prefix_len);
+        if self
+            .dynamic_ranges
+            .iter()
+            .any(|r| crate::config::effective_prefix(r.addr, r.prefix_len) == key)
+        {
+            return Err(DynamicRangeError::AlreadyExists(format!(
+                "dynamic range {}/{} already exists",
+                key.0, key.1
+            )));
+        }
+
+        self.dynamic_ranges.push(DynamicRange {
+            addr,
+            prefix_len,
+            peer_group: peer_group.clone(),
+            remote_asn,
+            description: description.clone(),
+        });
+        self.current_config
+            .dynamic_neighbors
+            .push(crate::config::DynamicNeighborConfig {
+                prefix,
+                peer_group,
+                remote_asn,
+                description,
+            });
+        Ok(())
+    }
+
+    /// Remove a dynamic neighbor range at runtime, matched by effective prefix
+    /// (so a host-bit or formatting variant of the same network still removes
+    /// the right entry). Does **not** tear down already-established dynamic
+    /// peers — they keep running and auto-remove when they next hit Idle; the
+    /// removal only stops *future* accepts.
+    pub(super) fn delete_dynamic_range(&mut self, prefix: &str) -> Result<(), DynamicRangeError> {
+        let (addr, prefix_len) =
+            parse_dynamic_prefix(prefix).map_err(DynamicRangeError::Invalid)?;
+        let key = crate::config::effective_prefix(addr, prefix_len);
+
+        let before = self.dynamic_ranges.len();
+        self.dynamic_ranges
+            .retain(|r| crate::config::effective_prefix(r.addr, r.prefix_len) != key);
+        if self.dynamic_ranges.len() == before {
+            return Err(DynamicRangeError::NotFound(format!(
+                "dynamic range {}/{} not found",
+                key.0, key.1
+            )));
+        }
+
+        self.current_config.dynamic_neighbors.retain(|dn| {
+            parse_dynamic_prefix(&dn.prefix)
+                .map_or(true, |(a, l)| crate::config::effective_prefix(a, l) != key)
+        });
+        Ok(())
     }
 
     /// Snapshot any unfired hot-apply / Route Refresh intent for a peer

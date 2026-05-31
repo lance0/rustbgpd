@@ -9,6 +9,51 @@ use super::{
     PeerGroupConfig, SecurityConfig, TcpAoConfig,
 };
 
+/// Canonical key for a dynamic-neighbor prefix: the network address with all
+/// host bits masked off, paired with the prefix length. Two ranges with the
+/// same key cover the identical address set (e.g. `10.0.0.5/24` and
+/// `10.0.0.9/24` both normalize to `10.0.0.0/24`). Shared by config-load
+/// validation and the runtime `AddDynamicNeighbor` path so both reject the
+/// same duplicates and match deletes consistently. Callers must pass a
+/// length already bounds-checked (`<= 32` for v4, `<= 128` for v6).
+pub(crate) fn effective_prefix(addr: IpAddr, prefix_len: u8) -> (IpAddr, u8) {
+    let masked = match addr {
+        IpAddr::V4(v4) => {
+            let mask = if prefix_len == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix_len)
+            };
+            IpAddr::V4(Ipv4Addr::from(u32::from(v4) & mask))
+        }
+        IpAddr::V6(v6) => {
+            let mask = if prefix_len == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix_len)
+            };
+            IpAddr::V6(Ipv6Addr::from(u128::from(v6) & mask))
+        }
+    };
+    (masked, prefix_len)
+}
+
+/// Parse an `addr/len` prefix and return its effective key (masked network +
+/// length), or `None` if it doesn't parse or is out of bounds. Convenience
+/// over [`effective_prefix`] for callers that hold the textual form (config
+/// persistence apply, runtime delete matching).
+pub(crate) fn effective_prefix_str(prefix: &str) -> Option<(IpAddr, u8)> {
+    let (addr_s, len_s) = prefix.split_once('/')?;
+    let addr: IpAddr = addr_s.parse().ok()?;
+    let len: u8 = len_s.parse().ok()?;
+    match addr {
+        IpAddr::V4(_) if len > 32 => return None,
+        IpAddr::V6(_) if len > 128 => return None,
+        _ => {}
+    }
+    Some(effective_prefix(addr, len))
+}
+
 impl Config {
     #[expect(clippy::too_many_lines)]
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
@@ -590,6 +635,7 @@ impl Config {
         }
 
         // Validate dynamic neighbor ranges
+        let mut seen_prefixes = std::collections::HashSet::new();
         for (i, dn) in self.dynamic_neighbors.iter().enumerate() {
             // Prefix must parse as addr/len
             let parts: Vec<&str> = dn.prefix.split('/').collect();
@@ -636,6 +682,22 @@ impl Config {
                     });
                 }
                 _ => {}
+            }
+
+            // Reject exact-duplicate effective prefixes. Overlapping ranges of
+            // DIFFERENT lengths are allowed (longest-prefix-match resolves
+            // them); two ranges covering the IDENTICAL prefix are ambiguous, so
+            // fail at config time rather than letting the runtime matcher pick
+            // one by declaration order.
+            let key = effective_prefix(addr, len);
+            if !seen_prefixes.insert(key) {
+                return Err(ConfigError::InvalidDynamicNeighbor {
+                    reason: format!(
+                        "dynamic_neighbors[{i}]: duplicate effective prefix {}/{} \
+                         (another range already covers it)",
+                        key.0, key.1
+                    ),
+                });
             }
 
             // Peer group must exist

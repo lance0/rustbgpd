@@ -445,6 +445,46 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                 !(neighbor.address == addr && neighbor.interface == peer.interface)
             });
         }
+        ConfigEvent::DynamicNeighborAdded {
+            prefix,
+            peer_group,
+            remote_asn,
+            description,
+        } => {
+            // Fail fast on an unparseable prefix rather than mutating the
+            // snapshot and tripping `validate()` later — the config-event loop
+            // does not roll back a partially-applied event. (The runtime add
+            // path validates before emitting this, so this is defensive.)
+            let Some(key) = crate::config::effective_prefix_str(prefix) else {
+                return Err(ConfigError::InvalidDynamicNeighbor {
+                    reason: format!("invalid dynamic neighbor prefix {prefix:?}"),
+                });
+            };
+            let exists = config
+                .dynamic_neighbors
+                .iter()
+                .any(|dn| crate::config::effective_prefix_str(&dn.prefix) == Some(key));
+            if !exists {
+                config
+                    .dynamic_neighbors
+                    .push(crate::config::DynamicNeighborConfig {
+                        prefix: prefix.clone(),
+                        peer_group: peer_group.clone(),
+                        remote_asn: *remote_asn,
+                        description: description.clone(),
+                    });
+            }
+        }
+        ConfigEvent::DynamicNeighborDeleted { prefix } => {
+            let Some(key) = crate::config::effective_prefix_str(prefix) else {
+                return Err(ConfigError::InvalidDynamicNeighbor {
+                    reason: format!("invalid dynamic neighbor prefix {prefix:?}"),
+                });
+            };
+            config
+                .dynamic_neighbors
+                .retain(|dn| crate::config::effective_prefix_str(&dn.prefix) != Some(key));
+        }
         ConfigEvent::SetPolicy { name, definition } => {
             config
                 .policy

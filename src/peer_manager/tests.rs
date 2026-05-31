@@ -246,6 +246,112 @@ fn load_test_config(toml: &str) -> Config {
     Config::load_toml_with_diagnostics(toml, "test config").unwrap()
 }
 
+fn dynamic_test_manager() -> PeerManager {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    PeerManager::new_with_config(
+        rx,
+        mpsc::unbounded_channel().1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        make_dynamic_manager_config(),
+    )
+}
+
+#[test]
+fn add_dynamic_range_appends_and_is_matchable() {
+    let mut mgr = dynamic_test_manager();
+    let before = mgr.dynamic_ranges.len();
+    let cfg_before = mgr.current_config.dynamic_neighbors.len();
+    mgr.add_dynamic_range("10.0.0.0/24".into(), "ix-members".into(), 65002, None)
+        .expect("add should succeed");
+    assert_eq!(mgr.dynamic_ranges.len(), before + 1);
+    assert_eq!(mgr.current_config.dynamic_neighbors.len(), cfg_before + 1);
+    assert!(
+        mgr.match_dynamic_range("10.0.0.5".parse().unwrap())
+            .is_some(),
+        "newly added range should match"
+    );
+}
+
+#[test]
+fn add_dynamic_range_rejects_duplicate_effective_prefix() {
+    let mut mgr = dynamic_test_manager();
+    mgr.add_dynamic_range("10.0.0.0/24".into(), "ix-members".into(), 0, None)
+        .unwrap();
+    let count = mgr.dynamic_ranges.len();
+    // 10.0.0.9/24 normalizes to the same 10.0.0.0/24 — must be rejected.
+    let err = mgr
+        .add_dynamic_range("10.0.0.9/24".into(), "ix-members".into(), 0, None)
+        .expect_err("duplicate effective prefix should be rejected");
+    assert!(
+        matches!(
+            err,
+            rustbgpd_api::peer_types::DynamicRangeError::AlreadyExists(_)
+        ),
+        "{err}"
+    );
+    assert_eq!(
+        mgr.dynamic_ranges.len(),
+        count,
+        "no range added on duplicate"
+    );
+}
+
+#[test]
+fn add_dynamic_range_rejects_unknown_peer_group() {
+    let mut mgr = dynamic_test_manager();
+    let err = mgr
+        .add_dynamic_range("10.0.0.0/24".into(), "nonexistent".into(), 0, None)
+        .expect_err("unknown peer group should be rejected");
+    assert!(
+        matches!(err, rustbgpd_api::peer_types::DynamicRangeError::Invalid(_)),
+        "{err}"
+    );
+}
+
+#[test]
+fn delete_dynamic_range_removes_and_stops_future_match() {
+    let mut mgr = dynamic_test_manager();
+    mgr.add_dynamic_range("10.0.0.0/24".into(), "ix-members".into(), 0, None)
+        .unwrap();
+    let before = mgr.dynamic_ranges.len();
+    assert!(
+        mgr.match_dynamic_range("10.0.0.5".parse().unwrap())
+            .is_some()
+    );
+    // Delete by a host-bit variant of the same network — effective-prefix match.
+    mgr.delete_dynamic_range("10.0.0.7/24")
+        .expect("delete by effective prefix should succeed");
+    assert_eq!(mgr.dynamic_ranges.len(), before - 1);
+    assert!(
+        mgr.match_dynamic_range("10.0.0.5".parse().unwrap())
+            .is_none(),
+        "deleted range must no longer match (future accepts stop)"
+    );
+}
+
+#[test]
+fn delete_dynamic_range_unknown_returns_error() {
+    let mut mgr = dynamic_test_manager();
+    let err = mgr
+        .delete_dynamic_range("192.0.2.0/24")
+        .expect_err("deleting a missing range should error");
+    assert!(
+        matches!(
+            err,
+            rustbgpd_api::peer_types::DynamicRangeError::NotFound(_)
+        ),
+        "{err}"
+    );
+}
+
 #[test]
 fn runtime_config_diff_compares_candidate_against_live_snapshot_and_redacts_secret() {
     let (_tx, rx) = mpsc::channel(16);

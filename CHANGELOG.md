@@ -9,6 +9,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Runtime dynamic-neighbor CRUD.** `AddDynamicNeighbor` /
+  `DeleteDynamicNeighbor` (NeighborService, tier `mutating`) are now live
+  mutations instead of `UNIMPLEMENTED` — add or remove `[[dynamic_neighbors]]`
+  prefix ranges without a restart, with `rustbgpctl dynamic-neighbor
+  {list,add,delete}`. Changes persist to the TOML config (atomic write) when
+  the daemon was started with `--config`, same as `AddNeighbor`. Delete stops
+  future accepts only — already-established dynamic peers drain on Idle.
+  Adding a range validates identically to config load (peer-group must exist
+  and not enable BFD, valid prefix, no duplicate effective prefix); config-load
+  validation now also rejects exact-duplicate effective prefixes.
+
 ### Performance
 
 - **Faster cold-start BGP reconnect after refused TCP dials.** A peer that

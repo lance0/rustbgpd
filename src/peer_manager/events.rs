@@ -158,6 +158,12 @@ impl PeerManager {
                 address.to_string(),
                 Some(*address),
             ),
+            ConfigEvent::DynamicNeighborAdded { prefix, .. } => {
+                ("add", "dynamic_neighbor", prefix.clone(), None)
+            }
+            ConfigEvent::DynamicNeighborDeleted { prefix } => {
+                ("delete", "dynamic_neighbor", prefix.clone(), None)
+            }
             ConfigEvent::NeighborAdded(_) | ConfigEvent::NeighborDeleted(_) => {
                 ("change", "neighbor", String::new(), None)
             }

@@ -236,6 +236,13 @@ enum Command {
         action: PeerGroupAction,
     },
 
+    /// Manage `[[dynamic_neighbors]]` prefix ranges that auto-accept inbound
+    /// peers into a peer group. Backed by NeighborService.
+    DynamicNeighbor {
+        #[command(subcommand)]
+        action: DynamicNeighborAction,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -375,6 +382,31 @@ enum PeerGroupAction {
     Detach {
         /// Neighbor address
         address: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum DynamicNeighborAction {
+    /// List configured dynamic neighbor ranges
+    List,
+    /// Add a dynamic neighbor range
+    Add {
+        /// Prefix range (e.g. 10.0.0.0/24)
+        prefix: String,
+        /// Peer group the dynamic peers inherit
+        #[arg(long)]
+        peer_group: String,
+        /// Expected remote ASN (0 = accept any ASN from OPEN)
+        #[arg(long, default_value_t = 0)]
+        asn: u32,
+        /// Optional description
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Delete a dynamic neighbor range by prefix
+    Delete {
+        /// Prefix range to remove
+        prefix: String,
     },
 }
 
@@ -1589,6 +1621,28 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
             PeerGroupAction::Detach { address } => {
                 commands::peer_group::detach(connection, &address, json).await
+            }
+        },
+        Command::DynamicNeighbor { action } => match action {
+            DynamicNeighborAction::List => commands::dynamic_neighbor::list(connection, json).await,
+            DynamicNeighborAction::Add {
+                prefix,
+                peer_group,
+                asn,
+                description,
+            } => {
+                commands::dynamic_neighbor::add(
+                    connection,
+                    &prefix,
+                    &peer_group,
+                    asn,
+                    description,
+                    json,
+                )
+                .await
+            }
+            DynamicNeighborAction::Delete { prefix } => {
+                commands::dynamic_neighbor::delete(connection, &prefix, json).await
             }
         },
         Command::Completions { .. } => unreachable!("handled before connect"),

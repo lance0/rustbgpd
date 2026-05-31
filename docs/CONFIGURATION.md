@@ -718,6 +718,33 @@ Validation rules:
 - `peer_group` must reference an existing `[peer_groups.<name>]`
 - `prefix` must be valid CIDR with a family-appropriate prefix length
 - static `[[neighbors]]` cannot use `remote_asn = 0`; that sentinel is reserved for `[[dynamic_neighbors]]`
+- two ranges covering the **identical** effective prefix (same masked network
+  and length) are rejected; overlapping ranges of *different* lengths are
+  allowed and resolve by longest-prefix-match at accept time
+
+### Runtime management (gRPC / `rustbgpctl`)
+
+Ranges can be added and removed at runtime without a restart, in addition to
+the static TOML form above:
+
+```sh
+rustbgpctl dynamic-neighbor list
+rustbgpctl dynamic-neighbor add 10.0.0.0/24 --peer-group ix-members [--asn 65010] [--description "..."]
+rustbgpctl dynamic-neighbor delete 10.0.0.0/24
+```
+
+- Backed by `NeighborService` (`AddDynamicNeighbor` / `DeleteDynamicNeighbor` /
+  `ListDynamicNeighbors`); add/delete are tier `mutating`.
+- When the daemon was started with `--config`, runtime changes are persisted
+  back to the TOML file (atomic write) and survive a restart — the same posture
+  as `AddNeighbor`. Without `--config`, changes are in-memory only.
+- **Delete stops *future* accepts only.** Already-established dynamic peers from
+  a removed range keep running and drain naturally when they next return to
+  Idle; delete never tears down a live session.
+- Add is rejected for an unknown or BFD-enabled peer group, an invalid prefix,
+  or a duplicate effective prefix. Delete matches by effective prefix, so a
+  host-bit variant of the same network (e.g. `10.0.0.7/24`) removes the
+  `10.0.0.0/24` range.
 
 Operational note:
 

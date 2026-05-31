@@ -9,7 +9,8 @@ use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
 use crate::peer_types::{
-    ConfigEvent, PeerInfo, PeerKey, PeerManagerCommand, PeerManagerNeighborConfig,
+    ConfigEvent, DynamicRangeError, PeerInfo, PeerKey, PeerManagerCommand,
+    PeerManagerNeighborConfig,
 };
 use crate::proto;
 use crate::server::{AccessMode, read_only_rejection};
@@ -641,26 +642,102 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
 
     async fn add_dynamic_neighbor(
         &self,
-        _request: Request<proto::AddDynamicNeighborRequest>,
+        request: Request<proto::AddDynamicNeighborRequest>,
     ) -> Result<Response<proto::AddDynamicNeighborResponse>, Status> {
         if let Some(status) = read_only_rejection(self.access_mode) {
             return Err(status);
         }
-        Err(Status::unimplemented(
-            "runtime dynamic neighbor CRUD not yet implemented; configure via TOML [[dynamic_neighbors]]",
-        ))
+        let range = request
+            .into_inner()
+            .range
+            .ok_or_else(|| Status::invalid_argument("range is required"))?;
+        if range.prefix.trim().is_empty() {
+            return Err(Status::invalid_argument("range.prefix is required"));
+        }
+        if range.peer_group.trim().is_empty() {
+            return Err(Status::invalid_argument("range.peer_group is required"));
+        }
+        let description = if range.description.is_empty() {
+            None
+        } else {
+            Some(range.description.clone())
+        };
+
+        // Reserve config persistence capacity before mutating runtime state
+        // (fail-fast when persistence is unavailable), mirroring AddNeighbor.
+        let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::AddDynamicRange {
+                prefix: range.prefix.clone(),
+                peer_group: range.peer_group.clone(),
+                remote_asn: range.remote_asn,
+                description: description.clone(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("peer manager unavailable"))?;
+
+        reply_rx
+            .await
+            .map_err(|_| Status::internal("peer manager dropped reply"))?
+            .map_err(|e| match e {
+                DynamicRangeError::AlreadyExists(m) => Status::already_exists(m),
+                DynamicRangeError::NotFound(m) => Status::not_found(m),
+                DynamicRangeError::Invalid(m) => Status::invalid_argument(m),
+            })?;
+
+        // Persist only after successful runtime mutation.
+        if let Some(permit) = persist_permit {
+            permit.send(ConfigEvent::DynamicNeighborAdded {
+                prefix: range.prefix,
+                peer_group: range.peer_group,
+                remote_asn: range.remote_asn,
+                description,
+            });
+        }
+
+        Ok(Response::new(proto::AddDynamicNeighborResponse {}))
     }
 
     async fn delete_dynamic_neighbor(
         &self,
-        _request: Request<proto::DeleteDynamicNeighborRequest>,
+        request: Request<proto::DeleteDynamicNeighborRequest>,
     ) -> Result<Response<proto::DeleteDynamicNeighborResponse>, Status> {
         if let Some(status) = read_only_rejection(self.access_mode) {
             return Err(status);
         }
-        Err(Status::unimplemented(
-            "runtime dynamic neighbor CRUD not yet implemented; configure via TOML [[dynamic_neighbors]]",
-        ))
+        let prefix = request.into_inner().prefix;
+        if prefix.trim().is_empty() {
+            return Err(Status::invalid_argument("prefix is required"));
+        }
+
+        let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::DeleteDynamicRange {
+                prefix: prefix.clone(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("peer manager unavailable"))?;
+
+        reply_rx
+            .await
+            .map_err(|_| Status::internal("peer manager dropped reply"))?
+            .map_err(|e| match e {
+                DynamicRangeError::NotFound(m) => Status::not_found(m),
+                DynamicRangeError::AlreadyExists(m) => Status::already_exists(m),
+                DynamicRangeError::Invalid(m) => Status::invalid_argument(m),
+            })?;
+
+        if let Some(permit) = persist_permit {
+            permit.send(ConfigEvent::DynamicNeighborDeleted { prefix });
+        }
+
+        Ok(Response::new(proto::DeleteDynamicNeighborResponse {}))
     }
 
     async fn set_graceful_shutdown(
