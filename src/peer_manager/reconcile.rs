@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 
 use rustbgpd_api::peer_types::{
-    PeerKey, PeerManagerNeighborConfig, ReconcileFailure, ReconcileFailureKind, ReconcileResult,
-    RuntimeConfigDiff,
+    FibTableSnapshot, PeerKey, PeerManagerNeighborConfig, ReconcileFailure, ReconcileFailureKind,
+    ReconcileResult, RuntimeConfigDiff,
 };
 use tracing::{info, warn};
 
 use crate::config::Config;
+use crate::policy_admin::fib_table_snapshot_to_config;
 
 use super::PeerManager;
 
@@ -133,5 +134,20 @@ impl PeerManager {
             human_text: crate::config::format_config_diff(&diff),
             diff_json,
         })
+    }
+
+    /// Validate a candidate `[[fib_tables]]` set against the live runtime
+    /// config. Builds a config from `current_config`'s peer groups / neighbors
+    /// with the candidate table set substituted in, then runs the full
+    /// validator (reserved / duplicate table ids, families, ECMP caps, and
+    /// peer-group references). Used by the gRPC FIB-table CRUD control path to
+    /// reject bad input before it reaches the FIB reconciler.
+    pub(super) fn validate_fib_tables_candidate(
+        &self,
+        tables: &[FibTableSnapshot],
+    ) -> Result<(), String> {
+        let mut candidate = self.current_config.clone();
+        candidate.fib_tables = tables.iter().map(fib_table_snapshot_to_config).collect();
+        candidate.validate().map_err(|error| error.to_string())
     }
 }

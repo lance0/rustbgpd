@@ -171,10 +171,15 @@ pub(crate) async fn run_config_bridge(
             event = event_rx.recv(), if event_rx_open => {
                 match event {
                     Some(event) => {
-                        if let Err(error) = apply_config_event(&mut current_config, &event) {
+                        // Apply to a candidate clone and commit only on success,
+                        // so a validation failure can't leave the live snapshot
+                        // partially mutated (poisoned) for the next event.
+                        let mut candidate = current_config.clone();
+                        if let Err(error) = apply_config_event(&mut candidate, &event) {
                             error!(error = %error, "failed to apply config event before persistence");
                             continue;
                         }
+                        current_config = candidate;
                         if mutation_tx
                             .send(ConfigMutation::ReplaceConfig(Box::new(current_config.clone())))
                             .await
@@ -1995,6 +2000,7 @@ metric = 200
                     let _ = reply.send(Ok(()));
                     tables.len()
                 }
+                Some(FibRuntimeCommand::GetTables { .. }) => panic!("unexpected GetTables"),
                 None => panic!("expected ReplaceTables"),
             }
         });

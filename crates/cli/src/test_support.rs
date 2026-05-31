@@ -767,6 +767,52 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         }
         Ok(Response::new(server_proto::ListEvpnResponse { routes }))
     }
+
+    async fn set_fib_table(
+        &self,
+        request: Request<server_proto::SetFibTableRequest>,
+    ) -> Result<Response<server_proto::ListFibTablesResponse>, Status> {
+        let table = request.into_inner().table.unwrap_or_default();
+        Ok(Response::new(server_proto::ListFibTablesResponse {
+            tables: vec![table],
+            runtime_available: true,
+        }))
+    }
+
+    async fn delete_fib_table(
+        &self,
+        _request: Request<server_proto::DeleteFibTableRequest>,
+    ) -> Result<Response<server_proto::ListFibTablesResponse>, Status> {
+        Ok(Response::new(server_proto::ListFibTablesResponse {
+            tables: vec![],
+            runtime_available: true,
+        }))
+    }
+
+    async fn list_fib_tables(
+        &self,
+        _request: Request<server_proto::ListFibTablesRequest>,
+    ) -> Result<Response<server_proto::ListFibTablesResponse>, Status> {
+        Ok(Response::new(server_proto::ListFibTablesResponse {
+            tables: vec![mock_fib_table()],
+            runtime_available: true,
+        }))
+    }
+}
+
+fn mock_fib_table() -> server_proto::FibTableConfig {
+    server_proto::FibTableConfig {
+        name: "edge".to_string(),
+        table_id: 1000,
+        metric: 200,
+        families: vec!["ipv4_unicast".to_string()],
+        allowed_peer_groups: vec![],
+        allowed_neighbors: vec![],
+        max_routes: None,
+        maximum_paths: None,
+        maximum_paths_ebgp: None,
+        maximum_paths_ibgp: None,
+    }
 }
 
 fn mock_evpn_route(route_type: u32) -> server_proto::EvpnRouteEntry {

@@ -3,14 +3,16 @@
 use std::net::IpAddr;
 
 use rustbgpd_api::peer_types::{
-    AddPathDefinition, ConfigEvent, NamedNeighborSetSnapshot, NamedPeerGroupSnapshot,
-    NamedPolicyDefinition, NamedPolicySnapshot, NeighborSetDefinition, PeerGroupDefinition,
-    PolicyAsPathPrependConfig, PolicyChainAssignment, PolicyStatementDefinition,
+    AddPathDefinition, ConfigEvent, FibTableSnapshot, NamedNeighborSetSnapshot,
+    NamedPeerGroupSnapshot, NamedPolicyDefinition, NamedPolicySnapshot, NeighborSetDefinition,
+    PeerGroupDefinition, PolicyAsPathPrependConfig, PolicyChainAssignment,
+    PolicyStatementDefinition,
 };
 
 use crate::config::{
-    AddPathConfig, AsPathPrependConfig, BgpRoleConfig, Config, ConfigError, NamedPolicyConfig,
-    Neighbor, NeighborSetConfig, PeerGroupConfig, PolicyStatementConfig, TcpAoConfig,
+    AddPathConfig, AsPathPrependConfig, BgpRoleConfig, Config, ConfigError, FibTableConfig,
+    NamedPolicyConfig, Neighbor, NeighborSetConfig, PeerGroupConfig, PolicyStatementConfig,
+    TcpAoConfig,
 };
 
 const fn wire_role_to_config(role: rustbgpd_wire::BgpRole) -> BgpRoleConfig {
@@ -357,6 +359,21 @@ pub fn peer_group_references(config: &Config, name: &str) -> Vec<String> {
     refs
 }
 
+pub(crate) fn fib_table_snapshot_to_config(snapshot: &FibTableSnapshot) -> FibTableConfig {
+    FibTableConfig {
+        name: snapshot.name.clone(),
+        table_id: snapshot.table_id,
+        metric: snapshot.metric,
+        families: snapshot.families.clone(),
+        allowed_peer_groups: snapshot.allowed_peer_groups.clone(),
+        allowed_neighbors: snapshot.allowed_neighbors.clone(),
+        max_routes: snapshot.max_routes,
+        maximum_paths: snapshot.maximum_paths,
+        maximum_paths_ebgp: snapshot.maximum_paths_ebgp,
+        maximum_paths_ibgp: snapshot.maximum_paths_ibgp,
+    }
+}
+
 /// Apply a config event to a config snapshot and validate the result.
 #[expect(
     clippy::too_many_lines,
@@ -555,6 +572,13 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
         }
         ConfigEvent::ClearNeighborPeerGroup { address } => {
             neighbor_mut(config, *address)?.peer_group = None;
+        }
+        ConfigEvent::FibTablesReplaced(snapshots) => {
+            // The full accepted set the FIB reconciler acknowledged. The
+            // trailing `config.validate()` re-checks it (`validate_fib_tables`)
+            // before the caller commits the snapshot, so a malformed event
+            // cannot poison the persisted config.
+            config.fib_tables = snapshots.iter().map(fib_table_snapshot_to_config).collect();
         }
     }
     config.validate()

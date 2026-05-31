@@ -749,6 +749,14 @@ service RibService {
   rpc ExplainBestPath(ExplainBestPathRequest) returns (ExplainBestPathResponse);
   rpc ListBlackholeDiscards(ListBlackholeDiscardsRequest) returns (ListBlackholeDiscardsResponse);
   rpc ListFibRoutes(ListFibRoutesRequest) returns (ListFibRoutesResponse);
+  // Runtime CRUD for [[fib_tables]] (ADR-0061). Hot-applies through the FIB
+  // reconciler and persists to the TOML config, mirroring dynamic-neighbor
+  // CRUD. SetFibTable is a create-or-replace upsert keyed on table name;
+  // DeleteFibTable removes by name. Both require the reconciler to be running
+  // (at least one table present at startup) — otherwise FAILED_PRECONDITION.
+  rpc SetFibTable(SetFibTableRequest) returns (ListFibTablesResponse);
+  rpc DeleteFibTable(DeleteFibTableRequest) returns (ListFibTablesResponse);
+  rpc ListFibTables(ListFibTablesRequest) returns (ListFibTablesResponse);
   rpc ListRouteEvents(ListRouteEventsRequest) returns (ListRouteEventsResponse);
   rpc WatchRoutes(WatchRoutesRequest) returns (stream RouteEvent);
   rpc WatchRouteEvents(WatchRoutesRequest) returns (stream BgpEvent);
@@ -1064,6 +1072,56 @@ message ListFibRoutesResponse {
   string next_page_token = 2;
   // Number of rows after filtering and before pagination.
   uint64 total_count = 3;
+}
+
+// Full mirror of a [[fib_tables]] config block. SetFibTable carries the
+// complete definition (not a patch), so defaults and validation stay legible.
+message FibTableConfig {
+  // Operator-facing handle, unique across the table set.
+  string name = 1;
+  // Linux route table id (reserved ids are rejected at validation).
+  uint32 table_id = 2;
+  // Kernel route metric / priority for daemon-owned rows.
+  uint32 metric = 3;
+  // Address families eligible for install, e.g. "ipv4_unicast" /
+  // "ipv6_unicast". Empty defaults to both unicast families.
+  repeated string families = 4;
+  // Optional peer-group allow-list. Empty = all peer groups.
+  repeated string allowed_peer_groups = 5;
+  // Optional neighbor-address allow-list. Empty = all neighbors.
+  repeated string allowed_neighbors = 6;
+  // Optional hard row cap. Unset = no cap. Zero is rejected.
+  optional uint32 max_routes = 7;
+  // Optional ECMP caps (ADR-0066), each 1..=256. Unset/1 = single next-hop.
+  // Per-class caps override the global one for their best-path class.
+  optional uint32 maximum_paths = 8;
+  optional uint32 maximum_paths_ebgp = 9;
+  optional uint32 maximum_paths_ibgp = 10;
+}
+
+message SetFibTableRequest {
+  // Full table definition, upserted by name (create-or-replace). A change to
+  // table_id/metric for an existing name is a real table-key move: old kernel
+  // rows withdraw and the new table back-fills through the reconciler.
+  FibTableConfig table = 1;
+}
+
+message DeleteFibTableRequest {
+  // Name of the table to remove. NOT_FOUND if no table has this name.
+  string name = 1;
+}
+
+message ListFibTablesRequest {}
+
+message ListFibTablesResponse {
+  // For Set/Delete: the full accepted runtime table set after the operation.
+  // For List: the current configured set.
+  repeated FibTableConfig tables = 1;
+  // True when the FIB reconciler is running and can hot-apply table edits.
+  // False on List means edits are restart-required: either no table was
+  // present at startup (the reconciler isn't spawned) or the runtime is
+  // unavailable (non-Linux platform / netlink setup failure).
+  bool runtime_available = 2;
 }
 
 message ListRouteEventsRequest {

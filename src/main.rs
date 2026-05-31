@@ -31,6 +31,7 @@ mod evpn_svi;
 mod fib;
 mod fib_common;
 mod fib_runtime;
+mod fib_table_control;
 mod looking_glass;
 mod metrics_server;
 mod peer_manager;
@@ -1860,6 +1861,10 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             }) as rustbgpd_api::evpn_service::DuplicateMacClearFuture
         }) as rustbgpd_api::evpn_service::DuplicateMacClearFn
     });
+    // Coordinator lock serializing runtime `[[fib_tables]]` mutations: the
+    // gRPC CRUD control path and the SIGHUP reload FIB step both hold it across
+    // their read → apply → persist sequence so they can't interleave.
+    let fib_table_control_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let serve_config = ServeConfig {
         asn: config.global.asn,
         router_id: config.global.router_id.clone(),
@@ -2005,6 +2010,15 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                     .collect()
             })
         },
+        fib_table_control: Some(fib_table_control::make_fib_table_control_fn(
+            fib_table_control::FibTableControlDeps {
+                fib_cmd_tx: fib_cmd_tx.clone(),
+                peer_mgr_tx: peer_mgr_tx.clone(),
+                config_tx: config_event_tx.clone(),
+                lock: fib_table_control_lock.clone(),
+                startup_had_tables: !config.fib_tables.is_empty(),
+            },
+        )),
         dataplane_route_events: Some(fib_bgp_event_tx),
         bfd_session_snapshot: {
             let rx = bfd_status_rx.clone();
@@ -2203,7 +2217,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 let live_uds = live_grpc_uds.clone();
                 let pm_tx = peer_mgr_tx.clone();
                 let fib_cmd = fib_cmd_tx.clone();
+                // Hold the FIB coordinator lock for the whole reload so the
+                // SIGHUP [[fib_tables]] hot-apply can't interleave with a
+                // concurrent gRPC FIB-table CRUD read-modify-write.
+                let fib_lock = fib_table_control_lock.clone();
                 reload_in_flight = Some(tokio::spawn(async move {
+                    let _fib_guard = fib_lock.lock().await;
                     reload_config(
                         &path,
                         &snapshot,

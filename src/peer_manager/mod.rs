@@ -549,6 +549,10 @@ impl PeerManager {
                             let result = self.diff_runtime_config(&candidate_toml);
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::ValidateFibTables { tables, reply } => {
+                            let result = self.validate_fib_tables_candidate(&tables);
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::GetPeerState { peer, reply } => {
                             let info = self.get_peer_info(&peer).await;
                             let _ = reply.send(info);

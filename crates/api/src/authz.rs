@@ -414,6 +414,24 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
     ),
     method(
         "rustbgpd.v1.RibService",
+        "SetFibTable",
+        "/rustbgpd.v1.RibService/SetFibTable",
+        AuthTier::Mutating,
+    ),
+    method(
+        "rustbgpd.v1.RibService",
+        "DeleteFibTable",
+        "/rustbgpd.v1.RibService/DeleteFibTable",
+        AuthTier::Mutating,
+    ),
+    method(
+        "rustbgpd.v1.RibService",
+        "ListFibTables",
+        "/rustbgpd.v1.RibService/ListFibTables",
+        AuthTier::SensitiveRead,
+    ),
+    method(
+        "rustbgpd.v1.RibService",
         "ListRouteEvents",
         "/rustbgpd.v1.RibService/ListRouteEvents",
         AuthTier::SensitiveRead,
@@ -707,7 +725,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 78);
+        assert_eq!(METHODS.len(), 81);
     }
 
     #[test]
@@ -748,8 +766,8 @@ mod tests {
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 0);
-        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 42);
-        assert_eq!(method_count_by_tier(AuthTier::Mutating), 17);
+        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 43);
+        assert_eq!(method_count_by_tier(AuthTier::Mutating), 19);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 19);
     }
 
