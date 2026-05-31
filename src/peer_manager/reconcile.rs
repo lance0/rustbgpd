@@ -136,19 +136,26 @@ impl PeerManager {
         })
     }
 
-    /// Validate a candidate `[[fib_tables]]` set against the live runtime
-    /// config. Builds a config from `current_config`'s peer groups / neighbors
-    /// with the candidate table set substituted in, then runs the full
-    /// validator (reserved / duplicate table ids, families, ECMP caps, and
-    /// peer-group references). Used by the gRPC FIB-table CRUD control path to
-    /// reject bad input before it reaches the FIB reconciler.
-    pub(super) fn validate_fib_tables_candidate(
-        &self,
+    /// Atomically validate a candidate `[[fib_tables]]` set against the live
+    /// runtime config and, on success, commit it into `current_config`. Builds
+    /// a probe config from `current_config`'s peer groups / neighbors with the
+    /// candidate table set substituted in, runs the full validator (reserved /
+    /// duplicate table ids, families, ECMP caps, peer-group references), and
+    /// only assigns `current_config.fib_tables` if it passes. Because the peer
+    /// manager runs commands serially, validate-then-commit here cannot
+    /// interleave with a peer-group deletion — closing the TOCTOU where a delete
+    /// would check a snapshot that doesn't yet reflect the in-flight table.
+    pub(super) fn stage_fib_tables_candidate(
+        &mut self,
         tables: &[FibTableSnapshot],
     ) -> Result<(), String> {
-        let mut candidate = self.current_config.clone();
-        candidate.fib_tables = tables.iter().map(fib_table_snapshot_to_config).collect();
-        candidate.validate().map_err(|error| error.to_string())
+        let staged: Vec<crate::config::FibTableConfig> =
+            tables.iter().map(fib_table_snapshot_to_config).collect();
+        let mut probe = self.current_config.clone();
+        probe.fib_tables.clone_from(&staged);
+        probe.validate().map_err(|error| error.to_string())?;
+        self.current_config.fib_tables = staged;
+        Ok(())
     }
 
     /// Refresh the live config snapshot's `[[fib_tables]]` after a gRPC CRUD

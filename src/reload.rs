@@ -229,12 +229,22 @@ pub(crate) async fn apply_reload_outcome(
     peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
     bridge_replace_tx: Option<&mpsc::UnboundedSender<Box<Config>>>,
 ) -> Result<Config, &'static str> {
+    // Acknowledge the snapshot so the caller (holding the FIB coordinator lock)
+    // doesn't release the lock until the peer manager has actually assigned
+    // `current_config`. Otherwise a following gRPC FIB-table CRUD could enqueue
+    // its own snapshot on the separate peer-manager channel and have it
+    // overtaken by this one, reverting the just-applied table set.
+    let (ack_tx, ack_rx) = oneshot::channel();
     if peer_mgr_internal_tx
-        .send(InternalCommand::ReplaceConfigSnapshot(Box::new(
-            reloaded.runtime.clone(),
-        )))
+        .send(InternalCommand::ReplaceConfigSnapshot {
+            config: Box::new(reloaded.runtime.clone()),
+            ack: Some(ack_tx),
+        })
         .is_err()
     {
+        return Err("peer_mgr_snapshot");
+    }
+    if ack_rx.await.is_err() {
         return Err("peer_mgr_snapshot");
     }
     if let Some(tx) = bridge_replace_tx
@@ -2944,6 +2954,21 @@ peer_group = "secure"
         let cfg = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
         std::fs::remove_file(&path).ok();
 
+        // Stand in for the peer manager: receive the snapshot and ack it so
+        // apply_reload_outcome proceeds to the (failing) bridge send.
+        let expected_asn = cfg.global.asn;
+        let pm = tokio::spawn(async move {
+            match peer_mgr_internal_rx.recv().await {
+                Some(InternalCommand::ReplaceConfigSnapshot { config, ack }) => {
+                    if let Some(ack) = ack {
+                        let _ = ack.send(());
+                    }
+                    config.global.asn
+                }
+                None => panic!("peer manager must receive the snapshot"),
+            }
+        });
+
         let result = apply_reload_outcome(
             ReloadedConfig::new(cfg.clone(), cfg.clone()),
             &peer_mgr_internal_tx,
@@ -2956,14 +2981,11 @@ peer_group = "secure"
             Some("config_bridge"),
             "bridge failure must surface as the named stage so the caller's log line is actionable"
         );
-        let snapshot = peer_mgr_internal_rx
-            .try_recv()
-            .expect("peer manager must receive the snapshot before the bridge send is attempted");
-        match snapshot {
-            InternalCommand::ReplaceConfigSnapshot(received) => {
-                assert_eq!(received.global.asn, cfg.global.asn);
-            }
-        }
+        assert_eq!(
+            pm.await.unwrap(),
+            expected_asn,
+            "peer manager must receive the snapshot before the bridge send is attempted"
+        );
     }
 
     /// Bridge-disabled mode (no `file_path`, so no persister and no
@@ -2981,6 +3003,16 @@ peer_group = "secure"
         let cfg = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
         std::fs::remove_file(&path).ok();
 
+        // Stand in for the peer manager: receive the snapshot and ack it.
+        let pm = tokio::spawn(async move {
+            match peer_mgr_internal_rx.recv().await {
+                Some(InternalCommand::ReplaceConfigSnapshot { ack: Some(ack), .. }) => {
+                    ack.send(()).is_ok()
+                }
+                _ => false,
+            }
+        });
+
         let advanced = apply_reload_outcome(
             ReloadedConfig::new(cfg.clone(), cfg.clone()),
             &peer_mgr_internal_tx,
@@ -2989,7 +3021,7 @@ peer_group = "secure"
         .await
         .expect("no-bridge mode must succeed");
         assert_eq!(advanced.global.asn, cfg.global.asn);
-        assert!(peer_mgr_internal_rx.try_recv().is_ok());
+        assert!(pm.await.unwrap(), "peer manager must receive the snapshot");
     }
 
     /// Regression test for the bridge stale-snapshot bug. The bridge
@@ -3128,13 +3160,18 @@ peer_group = "secure"
 
         let (peer_mgr_internal_tx, mut peer_mgr_internal_rx) =
             mpsc::unbounded_channel::<InternalCommand>();
+        let pm = tokio::spawn(async move {
+            match peer_mgr_internal_rx.recv().await {
+                Some(InternalCommand::ReplaceConfigSnapshot { ack: Some(ack), .. }) => {
+                    ack.send(()).is_ok()
+                }
+                _ => false,
+            }
+        });
         let runtime = apply_reload_outcome(reloaded, &peer_mgr_internal_tx, Some(&replace_tx))
             .await
             .expect("post-reload sync should succeed");
-        assert!(
-            peer_mgr_internal_rx.try_recv().is_ok(),
-            "peer manager snapshot must be refreshed"
-        );
+        assert!(pm.await.unwrap(), "peer manager snapshot must be refreshed");
 
         event_tx
             .send(ConfigEvent::SetPolicy {

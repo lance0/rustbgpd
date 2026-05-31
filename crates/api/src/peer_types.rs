@@ -298,24 +298,33 @@ pub enum PeerManagerCommand {
         /// Reply channel returning redacted diff output only.
         reply: oneshot::Sender<Result<RuntimeConfigDiff, String>>,
     },
-    /// Validate a candidate `[[fib_tables]]` set against the live runtime
-    /// config (peer-group references, reserved/duplicate table ids, families,
-    /// ECMP caps). Used by the gRPC FIB-table CRUD control path to reject bad
-    /// input before it reaches the FIB reconciler. Does not mutate anything.
-    ValidateFibTables {
+    /// Atomically validate a candidate `[[fib_tables]]` set against the live
+    /// runtime config (peer-group references, reserved/duplicate table ids,
+    /// families, ECMP caps) and, on success, stage it into
+    /// `current_config.fib_tables`. Used by the gRPC FIB-table CRUD control
+    /// path before it reaches the FIB reconciler. Validating and staging in one
+    /// command (the peer manager processes commands serially) closes the TOCTOU
+    /// against a concurrent peer-group deletion that would otherwise check a
+    /// snapshot that doesn't yet reflect the in-flight table's references.
+    StageFibTables {
         /// The full candidate table set (already merged with the upsert/delete).
         tables: Vec<FibTableSnapshot>,
-        /// Reply channel: `Ok(())` if the candidate validates, else `Err(msg)`.
+        /// Reply: `Ok(())` if it validated and was staged, else `Err(msg)`
+        /// (nothing staged).
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Refresh the peer manager's runtime config snapshot with the accepted
     /// `[[fib_tables]]` set after a successful gRPC CRUD mutation, so the
     /// snapshot the live `DiffRuntimeConfig` compares against doesn't report
-    /// the just-applied set as a pending change. Fire-and-forget — the
-    /// authoritative apply + persistence already happened in the control path.
+    /// the just-applied set as a pending change. The control path awaits the
+    /// ack (while holding the FIB coordinator lock) so the snapshot is applied
+    /// before the mutation returns and before a concurrent SIGHUP reload can
+    /// run — keeping the two snapshot writers serialized.
     SetFibTablesSnapshot {
         /// The full accepted table set the FIB reconciler acknowledged.
         tables: Vec<FibTableSnapshot>,
+        /// Acknowledgement, sent after `current_config.fib_tables` is assigned.
+        reply: oneshot::Sender<()>,
     },
     /// Query a single peer's state by address.
     GetPeerState {

@@ -129,30 +129,39 @@ async fn mutate(
         let current = read_current_tables(Some(&fib_cmd_tx))
             .await?
             .unwrap_or_default();
+        let previous: Vec<FibTableSnapshot> = current.iter().map(config_to_snapshot).collect();
         let candidate = apply_mutation(current, mutation)?;
         let snapshots: Vec<FibTableSnapshot> = candidate.iter().map(config_to_snapshot).collect();
 
-        // Validate against the live config before touching the reconciler.
-        validate_candidate(&peer_mgr_tx, snapshots.clone()).await?;
+        // Validate AND stage the candidate into the peer manager's live config
+        // in one atomic command. This closes the TOCTOU against peer-group
+        // deletion: once staged, the candidate's `allowed_peer_groups` are
+        // visible to `peer_group_references`, so a concurrent delete is rejected
+        // (and if a delete raced ahead, the candidate fails validation here).
+        // The peer manager processes commands one at a time, so the check and
+        // the commit cannot interleave with another config mutation.
+        stage_candidate(&peer_mgr_tx, snapshots.clone()).await?;
 
-        // Reserve persistence capacity before applying, so we never apply a
-        // change we then can't record (which would drift runtime vs disk).
-        let permit = reserve_persist_permit(&config_tx).await?;
+        // From here the candidate is staged in the live config, so every early
+        // exit must roll it back to `previous` to keep the snapshot from
+        // drifting ahead of the runtime/disk state.
+        let permit = match reserve_persist_permit(&config_tx).await {
+            Ok(permit) => permit,
+            Err(error) => {
+                rollback_snapshot(&peer_mgr_tx, previous).await;
+                return Err(error);
+            }
+        };
 
         // Apply to the reconciler and wait for its acknowledgement.
-        replace_tables(&fib_cmd_tx, candidate.clone()).await?;
+        if let Err(error) = replace_tables(&fib_cmd_tx, candidate.clone()).await {
+            rollback_snapshot(&peer_mgr_tx, previous).await;
+            return Err(error);
+        }
 
-        // Persist exactly the accepted set, only after the ack.
-        permit.send(ConfigEvent::FibTablesReplaced(snapshots.clone()));
-
-        // Refresh the peer manager's runtime config snapshot so the live
-        // DiffRuntimeConfig readback reflects the just-applied set rather than
-        // reporting it as pending. Best-effort and ordered behind this command
-        // on the shared channel; the authoritative apply + persist already
-        // succeeded above, so a send failure must not fail the mutation.
-        let _ = peer_mgr_tx
-            .send(PeerManagerCommand::SetFibTablesSnapshot { tables: snapshots })
-            .await;
+        // Persist exactly the accepted set, only after the ack. The live config
+        // snapshot already holds the candidate (staged above).
+        permit.send(ConfigEvent::FibTablesReplaced(snapshots));
 
         Ok(proto::ListFibTablesResponse {
             tables: candidate.iter().map(config_to_proto).collect(),
@@ -211,13 +220,16 @@ fn apply_mutation(
     }
 }
 
-async fn validate_candidate(
+/// Atomically validate the candidate against the live config and, on success,
+/// stage it into the peer manager's `current_config.fib_tables`. Returns
+/// `InvalidArgument` if it doesn't validate (nothing is staged in that case).
+async fn stage_candidate(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     tables: Vec<FibTableSnapshot>,
 ) -> Result<(), FibTableControlError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     peer_mgr_tx
-        .send(PeerManagerCommand::ValidateFibTables {
+        .send(PeerManagerCommand::StageFibTables {
             tables,
             reply: reply_tx,
         })
@@ -229,10 +241,31 @@ async fn validate_candidate(
         .await
         .map_err(|_| {
             FibTableControlError::Internal(
-                "peer manager dropped the ValidateFibTables reply".to_string(),
+                "peer manager dropped the StageFibTables reply".to_string(),
             )
         })?
         .map_err(FibTableControlError::InvalidArgument)
+}
+
+/// Restore the peer manager's staged `current_config.fib_tables` to `previous`
+/// after a post-stage failure (reserve or reconciler apply), so the live
+/// config snapshot can't drift ahead of the runtime/disk state. Best-effort:
+/// the mutation is already failing, so a channel error can't change the outcome.
+async fn rollback_snapshot(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    previous: Vec<FibTableSnapshot>,
+) {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if peer_mgr_tx
+        .send(PeerManagerCommand::SetFibTablesSnapshot {
+            tables: previous,
+            reply: reply_tx,
+        })
+        .await
+        .is_ok()
+    {
+        let _ = reply_rx.await;
+    }
 }
 
 async fn reserve_persist_permit(
