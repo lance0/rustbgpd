@@ -650,10 +650,10 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .into_inner()
             .range
             .ok_or_else(|| Status::invalid_argument("range is required"))?;
-        if range.prefix.is_empty() {
+        if range.prefix.trim().is_empty() {
             return Err(Status::invalid_argument("range.prefix is required"));
         }
-        if range.peer_group.is_empty() {
+        if range.peer_group.trim().is_empty() {
             return Err(Status::invalid_argument("range.peer_group is required"));
         }
         let description = if range.description.is_empty() {
@@ -710,7 +710,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let prefix = request.into_inner().prefix;
-        if prefix.is_empty() {
+        if prefix.trim().is_empty() {
             return Err(Status::invalid_argument("prefix is required"));
         }
 
