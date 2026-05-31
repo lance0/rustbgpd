@@ -3,6 +3,7 @@ pub mod config;
 pub mod control;
 pub mod dynamic_neighbor;
 pub mod evpn;
+pub mod fib_table;
 pub mod flowspec;
 pub mod global;
 pub mod neighbor;

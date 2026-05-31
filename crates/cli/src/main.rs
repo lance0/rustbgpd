@@ -243,6 +243,13 @@ enum Command {
         action: DynamicNeighborAction,
     },
 
+    /// Manage `[[fib_tables]]` (ADR-0061 general unicast FIB export) at runtime.
+    /// Hot-applies through the FIB reconciler and persists to the config.
+    FibTable {
+        #[command(subcommand)]
+        action: FibTableAction,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -407,6 +414,50 @@ enum DynamicNeighborAction {
     Delete {
         /// Prefix range to remove
         prefix: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum FibTableAction {
+    /// List the configured FIB tables and runtime availability
+    List,
+    /// Create or replace a FIB table by name (full definition, not a patch)
+    Set {
+        /// Table name (unique handle)
+        name: String,
+        /// Linux route table id
+        #[arg(long)]
+        table_id: u32,
+        /// Kernel route metric / priority for daemon-owned rows
+        #[arg(long)]
+        metric: u32,
+        /// Address families (comma-separated, e.g. ipv4_unicast,ipv6_unicast).
+        /// Empty defaults to both unicast families.
+        #[arg(long, value_delimiter = ',')]
+        families: Vec<String>,
+        /// Peer-group allow-list (repeatable / comma-separated). Empty = all.
+        #[arg(long = "allowed-peer-group", value_delimiter = ',')]
+        allowed_peer_groups: Vec<String>,
+        /// Neighbor-address allow-list (repeatable / comma-separated). Empty = all.
+        #[arg(long = "allowed-neighbor", value_delimiter = ',')]
+        allowed_neighbors: Vec<String>,
+        /// Hard cap on eligible routes (rows). Unset = no cap.
+        #[arg(long)]
+        max_routes: Option<u32>,
+        /// Global ECMP cap (1..=256). Unset/1 = single next-hop.
+        #[arg(long)]
+        maximum_paths: Option<u32>,
+        /// Per-class eBGP ECMP cap (overrides maximum_paths for eBGP).
+        #[arg(long)]
+        maximum_paths_ebgp: Option<u32>,
+        /// Per-class iBGP ECMP cap (overrides maximum_paths for iBGP).
+        #[arg(long)]
+        maximum_paths_ibgp: Option<u32>,
+    },
+    /// Delete a FIB table by name
+    Delete {
+        /// Table name to remove
+        name: String,
     },
 }
 
@@ -1643,6 +1694,40 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
             DynamicNeighborAction::Delete { prefix } => {
                 commands::dynamic_neighbor::delete(connection, &prefix, json).await
+            }
+        },
+        Command::FibTable { action } => match action {
+            FibTableAction::List => commands::fib_table::list(connection, json).await,
+            FibTableAction::Set {
+                name,
+                table_id,
+                metric,
+                families,
+                allowed_peer_groups,
+                allowed_neighbors,
+                max_routes,
+                maximum_paths,
+                maximum_paths_ebgp,
+                maximum_paths_ibgp,
+            } => {
+                commands::fib_table::set(
+                    connection,
+                    &name,
+                    table_id,
+                    metric,
+                    families,
+                    allowed_peer_groups,
+                    allowed_neighbors,
+                    max_routes,
+                    maximum_paths,
+                    maximum_paths_ebgp,
+                    maximum_paths_ibgp,
+                    json,
+                )
+                .await
+            }
+            FibTableAction::Delete { name } => {
+                commands::fib_table::delete(connection, &name, json).await
             }
         },
         Command::Completions { .. } => unreachable!("handled before connect"),

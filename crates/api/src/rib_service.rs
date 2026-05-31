@@ -1783,6 +1783,62 @@ mod tests {
         RibService::new(tx)
     }
 
+    fn fib_table_proto(name: &str) -> proto::FibTableConfig {
+        proto::FibTableConfig {
+            name: name.to_string(),
+            table_id: 1000,
+            metric: 200,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn set_fib_table_rejected_when_read_only() {
+        // make_service() defaults to ReadOnly with no control hook.
+        let status = make_service()
+            .set_fib_table(Request::new(proto::SetFibTableRequest {
+                table: Some(fib_table_proto("edge")),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn set_fib_table_unavailable_without_control_hook() {
+        let (tx, _rx) = mpsc::channel(16);
+        let svc =
+            RibService::new(tx).with_fib_table_control(crate::server::AccessMode::ReadWrite, None);
+        let status = svc
+            .set_fib_table(Request::new(proto::SetFibTableRequest {
+                table: Some(fib_table_proto("edge")),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn set_fib_table_missing_table_is_invalid_argument() {
+        let (tx, _rx) = mpsc::channel(16);
+        let svc =
+            RibService::new(tx).with_fib_table_control(crate::server::AccessMode::ReadWrite, None);
+        let status = svc
+            .set_fib_table(Request::new(proto::SetFibTableRequest { table: None }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn list_fib_tables_unavailable_without_control_hook() {
+        let status = make_service()
+            .list_fib_tables(Request::new(proto::ListFibTablesRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    }
+
     fn list_routes_request() -> proto::ListRoutesRequest {
         proto::ListRoutesRequest {
             neighbor_address: String::new(),

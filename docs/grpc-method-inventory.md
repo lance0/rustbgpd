@@ -118,7 +118,7 @@ shape itself does not raise the tier.
 | `SetNeighborPeerGroup` | `mutating` | Single-neighbor reassignment. |
 | `ClearNeighborPeerGroup` | `mutating` | Single-neighbor. |
 
-### RibService (12 RPCs)
+### RibService (15 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -129,6 +129,9 @@ shape itself does not raise the tier.
 | `ExplainBestPath` | `sensitive_read` | Per-route best-path tie-break trace. |
 | `ListBlackholeDiscards` | `sensitive_read` | Per-discard reasons; exposes RFC 7999 BLACKHOLE community installations. |
 | `ListFibRoutes` | `sensitive_read` | ADR-0061 FIB status snapshot — exposes which routes are installed in the kernel. |
+| `SetFibTable` | `mutating` | Create-or-replace a `[[fib_tables]]` entry by name; hot-applies via the reconciler and persists. Programs kernel route tables. |
+| `DeleteFibTable` | `mutating` | Remove a `[[fib_tables]]` entry by name; withdraws its kernel rows. |
+| `ListFibTables` | `sensitive_read` | Configured FIB table set + runtime availability. |
 | `ListRouteEvents` | `sensitive_read` | Bounded route-event history. |
 | `WatchRoutes` (stream) | `sensitive_read` | Live route-event stream. Streaming shape; same data as `ListRouteEvents`. |
 | `WatchRouteEvents` (stream) | `sensitive_read` | Enveloped live route-event stream with explicit `stream_lagged` signals. |
@@ -197,12 +200,12 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 42 | 53.8% |
-| `mutating` | 17 | 21.8% |
-| `operator_only` | 19 | 24.4% |
-| **Total** | **78** | **100%** |
+| `sensitive_read` | 43 | 53.1% |
+| `mutating` | 19 | 23.5% |
+| `operator_only` | 19 | 23.5% |
+| **Total** | **81** | **100%** |
 
-(Counts treat `SetGracefulShutdown` as one RPC even though it appears once in `NeighborService`; the 78 total is 74 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts treat `SetGracefulShutdown` as one RPC even though it appears once in `NeighborService`; the 81 total is 77 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 
@@ -278,7 +281,7 @@ specific method if the model warrants it.
 
 ## Code matrix
 
-`crates/api/src/authz.rs` contains the same 78-method classification
+`crates/api/src/authz.rs` contains the same 81-method classification
 as a static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added

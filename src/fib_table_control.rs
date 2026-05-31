@@ -323,3 +323,67 @@ fn config_to_snapshot(table: &FibTableConfig) -> FibTableSnapshot {
         maximum_paths_ibgp: table.maximum_paths_ibgp,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table(name: &str, table_id: u32) -> FibTableConfig {
+        FibTableConfig {
+            name: name.to_string(),
+            table_id,
+            metric: 200,
+            families: vec!["ipv4_unicast".to_string()],
+            allowed_peer_groups: vec![],
+            allowed_neighbors: vec![],
+            max_routes: None,
+            maximum_paths: None,
+            maximum_paths_ebgp: None,
+            maximum_paths_ibgp: None,
+        }
+    }
+
+    #[test]
+    fn upsert_adds_a_new_table() {
+        let out = apply_mutation(
+            vec![table("edge", 1000)],
+            Mutation::Upsert(table("core", 1001)),
+        )
+        .unwrap();
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|t| t.name == "core" && t.table_id == 1001));
+    }
+
+    #[test]
+    fn upsert_replaces_in_place_by_name() {
+        // A table_id/metric change for an existing name is a full replacement,
+        // not a second entry — the reconciler treats it as a table-key move.
+        let mut replacement = table("edge", 2000);
+        replacement.metric = 250;
+        let out = apply_mutation(vec![table("edge", 1000)], Mutation::Upsert(replacement)).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].table_id, 2000);
+        assert_eq!(out[0].metric, 250);
+    }
+
+    #[test]
+    fn delete_removes_by_name() {
+        let out = apply_mutation(
+            vec![table("edge", 1000), table("core", 1001)],
+            Mutation::Delete("edge".to_string()),
+        )
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "core");
+    }
+
+    #[test]
+    fn delete_missing_name_is_not_found() {
+        let err = apply_mutation(
+            vec![table("edge", 1000)],
+            Mutation::Delete("nope".to_string()),
+        )
+        .unwrap_err();
+        assert!(matches!(err, FibTableControlError::NotFound(_)));
+    }
+}

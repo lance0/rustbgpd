@@ -1752,6 +1752,28 @@ so adding the first table needs a restart (SIGHUP logs this and leaves the
 runtime unchanged). Deleting all tables at runtime is fine — the actor stays
 alive but idle, and re-adding a table later hot-applies.
 
+**gRPC / CLI runtime CRUD** (same lifecycle rules as SIGHUP): `RibService`
+exposes `SetFibTable` (create-or-replace by name — the request carries the full
+table definition, not a patch), `DeleteFibTable`, and `ListFibTables`, surfaced
+as `rustbgpctl fib-table {list,set,delete}`. A `set` that changes `table_id` or
+`metric` for an existing name is a table-key move: the old kernel rows withdraw
+and the new table back-fills. The candidate is validated against the live config
+(reserved/duplicate ids, families, ECMP caps, peer-group references) before it
+reaches the reconciler, applied through the same hot-reload path, and persisted
+to the TOML config (atomic write) **only after** the reconciler acknowledges the
+exact accepted set — and runtime CRUD is serialized with SIGHUP reloads through
+one coordinator lock, so runtime and on-disk config cannot drift. The mutating
+RPCs require the reconciler to be running (return `FAILED_PRECONDITION`
+otherwise) and are tier `mutating`; `ListFibTables` is `sensitive_read` and also
+reports whether the reconciler is running.
+
+```console
+$ rustbgpctl fib-table set edge --table-id 1000 --metric 200 \
+    --families ipv4_unicast,ipv6_unicast --max-routes 50000
+$ rustbgpctl fib-table list
+$ rustbgpctl fib-table delete edge
+```
+
 ---
 
 ## `[[evpn_instances]]`
