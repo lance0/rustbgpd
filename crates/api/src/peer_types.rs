@@ -609,7 +609,7 @@ pub enum PeerManagerCommand {
         /// Optional description applied to dynamic peers from this range.
         description: Option<String>,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), DynamicRangeError>>,
     },
     /// Remove a dynamic neighbor range at runtime. Does not tear down
     /// already-established dynamic peers — they drain on Idle.
@@ -617,7 +617,7 @@ pub enum PeerManagerCommand {
         /// IP prefix range to remove (matched by effective prefix).
         prefix: String,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), DynamicRangeError>>,
     },
 }
 
@@ -628,6 +628,28 @@ pub struct DynamicNeighborInfo {
     pub peer_group: String,
     pub remote_asn: u32,
     pub description: String,
+}
+
+/// Typed failure for runtime dynamic-range mutations so the gRPC layer maps
+/// to status codes deterministically, instead of substring-matching an opaque
+/// message. Each variant carries a human-readable detail for the status body.
+#[derive(Debug, Clone)]
+pub enum DynamicRangeError {
+    /// A range with the same effective prefix already exists (→ `ALREADY_EXISTS`).
+    AlreadyExists(String),
+    /// No range with the given effective prefix exists (→ `NOT_FOUND`).
+    NotFound(String),
+    /// The request was invalid — bad prefix, or unknown / BFD-enabled peer
+    /// group (→ `INVALID_ARGUMENT`).
+    Invalid(String),
+}
+
+impl std::fmt::Display for DynamicRangeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyExists(m) | Self::NotFound(m) | Self::Invalid(m) => f.write_str(m),
+        }
+    }
 }
 
 /// `AS_PATH` prepend configuration for policy modifications.

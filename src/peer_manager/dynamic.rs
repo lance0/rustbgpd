@@ -2,6 +2,8 @@ use std::net::IpAddr;
 
 use tracing::{info, warn};
 
+use rustbgpd_api::peer_types::DynamicRangeError;
+
 use crate::config::Config;
 
 use super::PeerManager;
@@ -142,17 +144,20 @@ impl PeerManager {
         peer_group: String,
         remote_asn: u32,
         description: Option<String>,
-    ) -> Result<(), String> {
-        let (addr, prefix_len) = parse_dynamic_prefix(&prefix)?;
+    ) -> Result<(), DynamicRangeError> {
+        let (addr, prefix_len) =
+            parse_dynamic_prefix(&prefix).map_err(DynamicRangeError::Invalid)?;
 
         let Some(group) = self.current_config.peer_groups.get(&peer_group) else {
-            return Err(format!("peer_group {peer_group:?} not defined"));
+            return Err(DynamicRangeError::Invalid(format!(
+                "peer_group {peer_group:?} not defined"
+            )));
         };
         if group.bfd.as_ref().is_some_and(|b| b.enabled) {
-            return Err(format!(
+            return Err(DynamicRangeError::Invalid(format!(
                 "peer_group {peer_group:?} enables BFD, which is not supported for \
                  dynamic neighbors (static neighbors only in v1 — see ADR-0067)"
-            ));
+            )));
         }
 
         let key = crate::config::effective_prefix(addr, prefix_len);
@@ -161,7 +166,10 @@ impl PeerManager {
             .iter()
             .any(|r| crate::config::effective_prefix(r.addr, r.prefix_len) == key)
         {
-            return Err(format!("dynamic range {}/{} already exists", key.0, key.1));
+            return Err(DynamicRangeError::AlreadyExists(format!(
+                "dynamic range {}/{} already exists",
+                key.0, key.1
+            )));
         }
 
         self.dynamic_ranges.push(DynamicRange {
@@ -187,15 +195,19 @@ impl PeerManager {
     /// the right entry). Does **not** tear down already-established dynamic
     /// peers — they keep running and auto-remove when they next hit Idle; the
     /// removal only stops *future* accepts.
-    pub(super) fn delete_dynamic_range(&mut self, prefix: &str) -> Result<(), String> {
-        let (addr, prefix_len) = parse_dynamic_prefix(prefix)?;
+    pub(super) fn delete_dynamic_range(&mut self, prefix: &str) -> Result<(), DynamicRangeError> {
+        let (addr, prefix_len) =
+            parse_dynamic_prefix(prefix).map_err(DynamicRangeError::Invalid)?;
         let key = crate::config::effective_prefix(addr, prefix_len);
 
         let before = self.dynamic_ranges.len();
         self.dynamic_ranges
             .retain(|r| crate::config::effective_prefix(r.addr, r.prefix_len) != key);
         if self.dynamic_ranges.len() == before {
-            return Err(format!("dynamic range {}/{} not found", key.0, key.1));
+            return Err(DynamicRangeError::NotFound(format!(
+                "dynamic range {}/{} not found",
+                key.0, key.1
+            )));
         }
 
         self.current_config.dynamic_neighbors.retain(|dn| {

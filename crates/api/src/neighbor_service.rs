@@ -9,7 +9,8 @@ use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
 use crate::peer_types::{
-    ConfigEvent, PeerInfo, PeerKey, PeerManagerCommand, PeerManagerNeighborConfig,
+    ConfigEvent, DynamicRangeError, PeerInfo, PeerKey, PeerManagerCommand,
+    PeerManagerNeighborConfig,
 };
 use crate::proto;
 use crate::server::{AccessMode, read_only_rejection};
@@ -681,12 +682,10 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(|e| {
-                if e.contains("already exists") {
-                    Status::already_exists(e)
-                } else {
-                    Status::invalid_argument(e)
-                }
+            .map_err(|e| match e {
+                DynamicRangeError::AlreadyExists(m) => Status::already_exists(m),
+                DynamicRangeError::NotFound(m) => Status::not_found(m),
+                DynamicRangeError::Invalid(m) => Status::invalid_argument(m),
             })?;
 
         // Persist only after successful runtime mutation.
@@ -728,12 +727,10 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(|e| {
-                if e.contains("not found") {
-                    Status::not_found(e)
-                } else {
-                    Status::invalid_argument(e)
-                }
+            .map_err(|e| match e {
+                DynamicRangeError::NotFound(m) => Status::not_found(m),
+                DynamicRangeError::AlreadyExists(m) => Status::already_exists(m),
+                DynamicRangeError::Invalid(m) => Status::invalid_argument(m),
             })?;
 
         if let Some(permit) = persist_permit {

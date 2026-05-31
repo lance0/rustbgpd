@@ -290,7 +290,13 @@ fn add_dynamic_range_rejects_duplicate_effective_prefix() {
     let err = mgr
         .add_dynamic_range("10.0.0.9/24".into(), "ix-members".into(), 0, None)
         .expect_err("duplicate effective prefix should be rejected");
-    assert!(err.contains("already exists"), "{err}");
+    assert!(
+        matches!(
+            err,
+            rustbgpd_api::peer_types::DynamicRangeError::AlreadyExists(_)
+        ),
+        "{err}"
+    );
     assert_eq!(
         mgr.dynamic_ranges.len(),
         count,
@@ -304,7 +310,10 @@ fn add_dynamic_range_rejects_unknown_peer_group() {
     let err = mgr
         .add_dynamic_range("10.0.0.0/24".into(), "nonexistent".into(), 0, None)
         .expect_err("unknown peer group should be rejected");
-    assert!(err.contains("not defined"), "{err}");
+    assert!(
+        matches!(err, rustbgpd_api::peer_types::DynamicRangeError::Invalid(_)),
+        "{err}"
+    );
 }
 
 #[test]
@@ -334,7 +343,13 @@ fn delete_dynamic_range_unknown_returns_error() {
     let err = mgr
         .delete_dynamic_range("192.0.2.0/24")
         .expect_err("deleting a missing range should error");
-    assert!(err.contains("not found"), "{err}");
+    assert!(
+        matches!(
+            err,
+            rustbgpd_api::peer_types::DynamicRangeError::NotFound(_)
+        ),
+        "{err}"
+    );
 }
 
 #[test]
