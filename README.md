@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="rustbgpd-logo.png" alt="rustbgpd logo" width="200">
+</p>
+
 # rustbgpd
 
 [![Build](https://github.com/lance0/rustbgpd/actions/workflows/ci.yml/badge.svg)](https://github.com/lance0/rustbgpd/actions/workflows/ci.yml)
