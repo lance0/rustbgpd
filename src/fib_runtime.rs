@@ -323,12 +323,9 @@ async fn run_loop<F>(
             maybe_cmd = cmd_rx.recv(), if cmd_open => {
                 match maybe_cmd {
                     Some(FibRuntimeCommand::ReplaceTables { tables, reply }) => {
-                        // Tentatively swap, reconcile, and keep the new set only
-                        // if the reconcile reached the apply phase. On a pre-plan
-                        // bail (RIB / dump query failure) revert and report
-                        // failure so the caller does not advance its snapshot.
+                        // Tentatively swap to the new desired set and reconcile.
                         let previous = std::mem::replace(&mut config.tables, tables);
-                        let applied = reconcile_once_with_events(
+                        let reached_apply = reconcile_once_with_events(
                             &config,
                             &rib_query_tx,
                             &mut fib,
@@ -339,7 +336,26 @@ async fn run_loop<F>(
                             &shutdown,
                         )
                         .await;
-                        if applied {
+                        // Orphan guard: if any owned route is now OUTSIDE the new
+                        // table set, a withdraw for a removed table failed (its
+                        // route stays owned + in the kernel). Persisting the new
+                        // signature would make load_owned_state quarantine that
+                        // route on the next restart, stranding the kernel row.
+                        // (Per-route *install* failures within the new set are not
+                        // orphans — they stay owned + best-effort-retried.)
+                        let allowed: BTreeSet<FibTableKey> = config
+                            .tables
+                            .iter()
+                            .map(|t| FibTableKey {
+                                table_id: t.table_id,
+                                metric: t.metric,
+                            })
+                            .collect();
+                        let orphaned = owned
+                            .routes
+                            .keys()
+                            .any(|key| !allowed.contains(&key.table_key()));
+                        if reached_apply && !orphaned {
                             // Force-persist so a route-neutral table-config edit
                             // (max_routes / families / allowed_neighbors, or an
                             // empty added table) still updates the on-disk table
@@ -348,12 +364,20 @@ async fn run_loop<F>(
                             persist_owned_state(&config, &owned);
                             let _ = reply.send(Ok(()));
                         } else {
+                            // Revert and re-persist under the previous signature so
+                            // any still-owned routes stay adoptable on restart and
+                            // keep getting retried by the periodic reconcile.
                             config.tables = previous;
-                            let _ = reply.send(Err(
-                                "FIB reconcile did not reach the apply phase \
-                                 (RIB query or kernel dump failed); table set unchanged"
-                                    .to_string(),
-                            ));
+                            persist_owned_state(&config, &owned);
+                            let _ = reply.send(Err(if reached_apply {
+                                "FIB table change left owned routes outside the new \
+                                 set (a withdraw failed); reverted to keep them owned"
+                                    .to_string()
+                            } else {
+                                "FIB reconcile did not reach the apply phase (RIB \
+                                 query or kernel dump failed); table set unchanged"
+                                    .to_string()
+                            }));
                         }
                     }
                     None => cmd_open = false,
@@ -547,6 +571,16 @@ async fn reconcile_once_with_events<F>(
 where
     F: UnicastFib,
 {
+    // Nothing to reconcile: no configured tables and no owned routes — the
+    // steady state after a N→0 delete. Skip the RIB query + kernel dump so a
+    // deleted-to-empty FIB actor stays genuinely idle on timer ticks and
+    // route events. (If routes are still owned, e.g. a withdraw is pending, we
+    // must still reconcile to flush them.)
+    if config.tables.is_empty() && owned.routes.is_empty() {
+        status_tx.send_replace(Vec::new());
+        return true;
+    }
+
     let candidates = tokio::select! {
         biased;
         () = shutdown.cancelled() => return false,
@@ -2682,6 +2716,42 @@ mod tests {
         .await;
         assert_eq!(fib.kernel.routes.len(), 0, "N->0 withdraws all routes");
         assert!(owned.routes.is_empty(), "owned state cleared — no orphans");
+    }
+
+    #[tokio::test]
+    async fn failed_withdraw_on_table_removal_keeps_route_owned_outside_set() {
+        // Regression for the orphan bug: removing a table whose kernel Remove
+        // fails leaves the route owned but outside the (now-empty) configured
+        // set. The ReplaceTables command guard detects exactly this — an owned
+        // route not covered by the new table set — and reverts rather than
+        // persisting a signature that would quarantine the still-present kernel
+        // row on the next restart.
+        let routes = vec![route(v4(24), ip("198.51.100.1"))];
+        let mut fib = FakeFib::default();
+        let mut owned = FibOwnedState::default();
+
+        let one = config_with(vec![table("edge", 1000, 200, &["ipv4_unicast"])]);
+        reconcile_config_for_test(one, rib_with_routes(routes.clone()), &mut fib, &mut owned).await;
+        assert_eq!(owned.routes.len(), 1);
+
+        // Remove the table, but force the kernel Remove to fail.
+        fib.fail_apply
+            .push("simulated kernel remove failure".to_string());
+        reconcile_config_for_test(
+            config_with(vec![]),
+            rib_with_routes(routes),
+            &mut fib,
+            &mut owned,
+        )
+        .await;
+
+        // The failed withdraw leaves the route owned with an empty configured
+        // set — the orphan-risk condition the command guard reverts on.
+        assert_eq!(
+            owned.routes.len(),
+            1,
+            "failed withdraw keeps the route owned"
+        );
     }
 
     #[test]

@@ -192,7 +192,7 @@ scope for SIGHUP reload today.
 
 | Section | Class | Notes |
 |---|---|---|
-| `[[fib_tables]]` | restart-required | The unicast FIB runtime per ADR-0061 binds tables at startup. |
+| `[[fib_tables]]` | reload-applied | Hot-applies to the running ADR-0061 FIB reconciler on SIGHUP (add/remove a table; change `allowed_neighbors` / `allowed_peer_groups` / `max_routes` / ECMP caps / `families`). Snapshot advances only after the actor acks. Starting FIB from an empty config (reconciler not spawned) still requires a restart. |
 | `[global] install_blackhole_discard` (FIB-side) | restart-required | See `[global]` above. |
 
 ## `[[bfd_profiles]]`

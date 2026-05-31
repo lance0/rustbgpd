@@ -2126,6 +2126,45 @@ log_format = "json"
     }
 
     #[tokio::test]
+    async fn reload_does_not_advance_fib_tables_when_actor_reports_failure() {
+        // The actor acks Err (e.g. a removed table's withdraw failed, or a
+        // pre-plan RIB/dump bail) → reload must NOT advance the snapshot.
+        let path = unique_temp_path("reload-fib-tables-actor-err");
+        std::fs::write(&path, FIB_ONE_TABLE_TOML).unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let tcp = initial.global.telemetry.grpc_tcp.clone();
+        let uds = initial.global.telemetry.grpc_uds.clone();
+        std::fs::write(&path, FIB_TWO_TABLES_TOML).unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let (fib_tx, mut fib_rx) = mpsc::channel(8);
+        let actor = tokio::spawn(async move {
+            if let Some(FibRuntimeCommand::ReplaceTables { reply, .. }) = fib_rx.recv().await {
+                let _ = reply.send(Err("simulated reconcile failure".to_string()));
+            }
+        });
+
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            tcp.as_ref(),
+            uds.as_ref(),
+            &peer_mgr_tx,
+            Some(&fib_tx),
+        )
+        .await
+        .expect("reload returns a config even when the actor reports failure");
+
+        assert_eq!(
+            returned.fib_tables.len(),
+            1,
+            "an Err ack must not advance the snapshot"
+        );
+        let _ = actor.await;
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
     async fn reload_pins_honor_blackhole_when_fib_discard_enabled() {
         let path = unique_temp_path("reload-pins-honor-blackhole-with-fib");
 
