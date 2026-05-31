@@ -773,6 +773,26 @@ remote_asn = 65002
     }
 
     #[test]
+    fn peer_group_references_include_fib_table_allow_lists() {
+        let mut config = minimal_config();
+        config.fib_tables.push(FibTableConfig {
+            name: "edge".to_string(),
+            table_id: 1000,
+            metric: 200,
+            families: vec!["ipv4_unicast".to_string(), "ipv6_unicast".to_string()],
+            allowed_peer_groups: vec!["fabric".to_string()],
+            allowed_neighbors: Vec::new(),
+            max_routes: None,
+            maximum_paths: None,
+            maximum_paths_ebgp: None,
+            maximum_paths_ibgp: None,
+        });
+
+        let refs = peer_group_references(&config, "fabric");
+        assert_eq!(refs, vec!["fib_table edge"]);
+    }
+
+    #[test]
     fn neighbor_added_event_preserves_tcp_ao_key_material() {
         let mut config = minimal_config();
 
