@@ -150,4 +150,12 @@ impl PeerManager {
         candidate.fib_tables = tables.iter().map(fib_table_snapshot_to_config).collect();
         candidate.validate().map_err(|error| error.to_string())
     }
+
+    /// Refresh the live config snapshot's `[[fib_tables]]` after a gRPC CRUD
+    /// mutation acknowledged by the FIB reconciler, so `diff_runtime_config`
+    /// (which compares against `current_config`) doesn't report the
+    /// just-applied set as pending.
+    pub(super) fn set_fib_tables_snapshot(&mut self, tables: &[FibTableSnapshot]) {
+        self.current_config.fib_tables = tables.iter().map(fib_table_snapshot_to_config).collect();
+    }
 }

@@ -749,7 +749,7 @@ service RibService {
   rpc ExplainBestPath(ExplainBestPathRequest) returns (ExplainBestPathResponse);
   rpc ListBlackholeDiscards(ListBlackholeDiscardsRequest) returns (ListBlackholeDiscardsResponse);
   rpc ListFibRoutes(ListFibRoutesRequest) returns (ListFibRoutesResponse);
-  // Runtime CRUD for [[fib_tables]] (ADR-0061). Hot-applies through the FIB
+  // Runtime CRUD for `[[fib_tables]]` (ADR-0061). Hot-applies through the FIB
   // reconciler and persists to the TOML config, mirroring dynamic-neighbor
   // CRUD. SetFibTable is a create-or-replace upsert keyed on table name;
   // DeleteFibTable removes by name. Both require the reconciler to be running
@@ -1074,7 +1074,7 @@ message ListFibRoutesResponse {
   uint64 total_count = 3;
 }
 
-// Full mirror of a [[fib_tables]] config block. SetFibTable carries the
+// Full mirror of a `[[fib_tables]]` config block. SetFibTable carries the
 // complete definition (not a patch), so defaults and validation stay legible.
 message FibTableConfig {
   // Operator-facing handle, unique across the table set.

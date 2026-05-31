@@ -308,6 +308,15 @@ pub enum PeerManagerCommand {
         /// Reply channel: `Ok(())` if the candidate validates, else `Err(msg)`.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Refresh the peer manager's runtime config snapshot with the accepted
+    /// `[[fib_tables]]` set after a successful gRPC CRUD mutation, so the
+    /// snapshot the live `DiffRuntimeConfig` compares against doesn't report
+    /// the just-applied set as a pending change. Fire-and-forget — the
+    /// authoritative apply + persistence already happened in the control path.
+    SetFibTablesSnapshot {
+        /// The full accepted table set the FIB reconciler acknowledged.
+        tables: Vec<FibTableSnapshot>,
+    },
     /// Query a single peer's state by address.
     GetPeerState {
         /// Peer identity to query.

@@ -356,6 +356,11 @@ pub fn peer_group_references(config: &Config, name: &str) -> Vec<String> {
             refs.push(format!("neighbor_set {set_name}"));
         }
     }
+    for table in &config.fib_tables {
+        if table.allowed_peer_groups.iter().any(|group| group == name) {
+            refs.push(format!("fib_table {}", table.name));
+        }
+    }
     refs
 }
 

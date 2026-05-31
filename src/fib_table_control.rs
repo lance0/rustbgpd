@@ -51,10 +51,13 @@ pub struct FibTableControlDeps {
     pub config_tx: Option<mpsc::Sender<ConfigEvent>>,
     /// Coordinator lock shared with the SIGHUP reload FIB step.
     pub lock: Arc<Mutex<()>>,
-    /// Whether `[[fib_tables]]` were present at startup. Distinguishes the
-    /// "restart required to enable FIB" case from "runtime unavailable" when
-    /// the reconciler isn't running.
-    pub startup_had_tables: bool,
+    /// The `[[fib_tables]]` set present at startup. When the reconciler is not
+    /// running, `List` falls back to this so a non-Linux / netlink-failure
+    /// daemon still shows its configured tables, and an empty set distinguishes
+    /// "restart required to enable FIB" from "runtime unavailable". The set is
+    /// static while the reconciler is absent (mutations are rejected and SIGHUP
+    /// can't hot-apply), so it stays accurate.
+    pub startup_tables: Vec<FibTableConfig>,
 }
 
 /// Build the `FibTableControlFn` the RIB service calls for FIB-table CRUD.
@@ -74,15 +77,16 @@ async fn handle(
     match request {
         FibTableControlRequest::List => {
             let _guard = deps.lock.lock().await;
-            let current = read_current_tables(deps.fib_cmd_tx.as_ref()).await?;
-            let runtime_available = current.is_some();
-            let tables = current
-                .unwrap_or_default()
-                .iter()
-                .map(config_to_proto)
-                .collect();
+            // A running reconciler is the source of truth; otherwise fall back
+            // to the startup set so configured tables stay visible even when
+            // the actor failed to spawn (non-Linux / netlink failure).
+            let (tables, runtime_available) =
+                match read_current_tables(deps.fib_cmd_tx.as_ref()).await? {
+                    Some(current) => (current, true),
+                    None => (deps.startup_tables.clone(), false),
+                };
             Ok(proto::ListFibTablesResponse {
-                tables,
+                tables: tables.iter().map(config_to_proto).collect(),
                 runtime_available,
             })
         }
@@ -107,7 +111,7 @@ async fn mutate(
     let fib_cmd_tx = deps
         .fib_cmd_tx
         .clone()
-        .ok_or_else(|| runtime_unavailable_error(deps.startup_had_tables))?;
+        .ok_or_else(|| runtime_unavailable_error(!deps.startup_tables.is_empty()))?;
     let config_tx = deps.config_tx.clone().ok_or_else(|| {
         FibTableControlError::FailedPrecondition(
             "FIB-table CRUD requires a persisted config (start rustbgpd with --config)".to_string(),
@@ -139,7 +143,16 @@ async fn mutate(
         replace_tables(&fib_cmd_tx, candidate.clone()).await?;
 
         // Persist exactly the accepted set, only after the ack.
-        permit.send(ConfigEvent::FibTablesReplaced(snapshots));
+        permit.send(ConfigEvent::FibTablesReplaced(snapshots.clone()));
+
+        // Refresh the peer manager's runtime config snapshot so the live
+        // DiffRuntimeConfig readback reflects the just-applied set rather than
+        // reporting it as pending. Best-effort and ordered behind this command
+        // on the shared channel; the authoritative apply + persist already
+        // succeeded above, so a send failure must not fail the mutation.
+        let _ = peer_mgr_tx
+            .send(PeerManagerCommand::SetFibTablesSnapshot { tables: snapshots })
+            .await;
 
         Ok(proto::ListFibTablesResponse {
             tables: candidate.iter().map(config_to_proto).collect(),
@@ -280,11 +293,19 @@ fn runtime_unavailable_error(startup_had_tables: bool) -> FibTableControlError {
 }
 
 fn proto_to_config(table: proto::FibTableConfig) -> FibTableConfig {
+    // An empty `families` repeated field is indistinguishable from "omitted"
+    // (proto3 has no presence on repeated), so mirror the TOML default of both
+    // unicast families rather than letting validation reject an empty set.
+    let families = if table.families.is_empty() {
+        crate::config::default_fib_families()
+    } else {
+        table.families
+    };
     FibTableConfig {
         name: table.name,
         table_id: table.table_id,
         metric: table.metric,
-        families: table.families,
+        families,
         allowed_peer_groups: table.allowed_peer_groups,
         allowed_neighbors: table.allowed_neighbors,
         max_routes: table.max_routes,
@@ -385,5 +406,31 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, FibTableControlError::NotFound(_)));
+    }
+
+    #[test]
+    fn proto_empty_families_defaults_to_both_unicast() {
+        // proto3 repeated has no presence, so an empty `families` is "omitted"
+        // and must default like TOML rather than be rejected by validation.
+        let cfg = proto_to_config(proto::FibTableConfig {
+            name: "edge".to_string(),
+            table_id: 1000,
+            metric: 200,
+            families: vec![],
+            ..Default::default()
+        });
+        assert_eq!(cfg.families, vec!["ipv4_unicast", "ipv6_unicast"]);
+    }
+
+    #[test]
+    fn proto_explicit_families_are_preserved() {
+        let cfg = proto_to_config(proto::FibTableConfig {
+            name: "edge".to_string(),
+            table_id: 1000,
+            metric: 200,
+            families: vec!["ipv6_unicast".to_string()],
+            ..Default::default()
+        });
+        assert_eq!(cfg.families, vec!["ipv6_unicast"]);
     }
 }

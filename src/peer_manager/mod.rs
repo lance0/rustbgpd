@@ -553,6 +553,9 @@ impl PeerManager {
                             let result = self.validate_fib_tables_candidate(&tables);
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::SetFibTablesSnapshot { tables } => {
+                            self.set_fib_tables_snapshot(&tables);
+                        }
                         PeerManagerCommand::GetPeerState { peer, reply } => {
                             let info = self.get_peer_info(&peer).await;
                             let _ = reply.send(info);
