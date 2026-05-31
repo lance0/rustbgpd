@@ -22,6 +22,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and not enable BFD, valid prefix, no duplicate effective prefix); config-load
   validation now also rejects exact-duplicate effective prefixes.
 
+### Changed
+
+- **`[[fib_tables]]` is now SIGHUP hot-reloadable.** When the ADR-0061 FIB
+  reconciler is running (i.e. at least one `[[fib_tables]]` entry was present at
+  startup), edits — adding/removing a table or changing `allowed_neighbors`,
+  `allowed_peer_groups`, `max_routes`, ECMP caps, or `families` — are applied to
+  the live reconciler on SIGHUP without a restart: added tables back-fill from
+  current best routes, removed tables have their kernel rows withdrawn, and
+  unaffected rows don't flap. The in-memory snapshot advances only after the
+  reconciler acknowledges the new set (no best-effort drift). Starting the FIB
+  subsystem from an empty config still requires a restart (the reconciler isn't
+  spawned otherwise); deleting all tables leaves the actor idle and re-adding
+  hot-applies. Previously any `[[fib_tables]]` edit was restart-required.
+
 ### Performance
 
 - **Faster cold-start BGP reconnect after refused TCP dials.** A peer that

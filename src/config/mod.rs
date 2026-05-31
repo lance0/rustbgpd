@@ -1443,6 +1443,7 @@ impl ConfigDiff {
             || self.policy.export_chain_changed
             || self.honor_graceful_shutdown_changed
             || self.honor_blackhole_changed
+            || self.fib_tables_changed
     }
 
     /// Changes that require a full daemon restart.
@@ -1456,7 +1457,6 @@ impl ConfigDiff {
             || self.evpn_instances_changed
             || self.evpn_ip_vrfs_changed
             || self.ethernet_segments_changed
-            || self.fib_tables_changed
             || self.apply_bum_enforcement_changed
             || self.blackhole_fib_discard_changed
             || self.neighbor_tcp_ao_changed
@@ -1511,6 +1511,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "export_chain_changed": diff.policy.export_chain_changed,
             "honor_graceful_shutdown_changed": diff.honor_graceful_shutdown_changed,
             "honor_blackhole_changed": diff.honor_blackhole_changed,
+            "fib_tables_changed": diff.fib_tables_changed,
             "effective_neighbor_impact": &diff.effective_neighbor_impact,
         },
         "restart_required": {
@@ -1521,7 +1522,6 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "evpn_instances_changed": diff.evpn_instances_changed,
             "evpn_ip_vrfs_changed": diff.evpn_ip_vrfs_changed,
             "ethernet_segments_changed": diff.ethernet_segments_changed,
-            "fib_tables_changed": diff.fib_tables_changed,
             "apply_bum_enforcement_changed": diff.apply_bum_enforcement_changed,
             "blackhole_fib_discard_changed": diff.blackhole_fib_discard_changed,
             "neighbor_tcp_ao_changed": diff.neighbor_tcp_ao_changed,
@@ -1695,6 +1695,14 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
             }
             out.push('\n');
         }
+        if diff.fib_tables_changed {
+            let _ = writeln!(
+                out,
+                "  {} [[fib_tables]] hot-applied to the running FIB reconciler \
+                 (restart still required only to start FIB from an empty config)",
+                style.change_marker
+            );
+        }
     }
 
     let mut restart_sections = Vec::new();
@@ -1718,9 +1726,6 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     }
     if diff.ethernet_segments_changed {
         restart_sections.push("[[ethernet_segments]]");
-    }
-    if diff.fib_tables_changed {
-        restart_sections.push("[[fib_tables]]");
     }
     if diff.apply_bum_enforcement_changed {
         restart_sections.push("apply_bum_enforcement");

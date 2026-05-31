@@ -6372,7 +6372,7 @@ bfd = {{ profile = "nope" }}
 }
 
 #[test]
-fn fib_tables_diff_marks_restart_required() {
+fn fib_tables_diff_marks_reload_applied() {
     let old = parse(valid_toml()).unwrap();
     let toml = format!(
         r#"
@@ -6388,8 +6388,14 @@ metric = 200
     let new = parse(&toml).unwrap();
     let diff = diff_config(&old, &new);
 
+    // [[fib_tables]] edits hot-apply to the running FIB reconciler (SIGHUP /
+    // gRPC), so the static diff classifies them reload-applied, not
+    // restart-required. (Starting FIB from an empty config still needs a
+    // restart at runtime; the reload step logs that, but the static config
+    // diff cannot know whether the reconciler is live.)
     assert!(diff.fib_tables_changed);
-    assert!(diff.has_restart_required_changes());
+    assert!(diff.has_reload_applied_changes());
+    assert!(!diff.has_restart_required_changes());
 }
 
 #[test]

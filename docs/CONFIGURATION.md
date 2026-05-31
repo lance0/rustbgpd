@@ -1734,10 +1734,23 @@ kernel row.
 | `maximum_paths_ebgp` | u32 | no | unset | Per-class ECMP cap for **eBGP** groups (FRR's `maximum-paths`). Overrides `maximum_paths` for eBGP best routes; falls back to `maximum_paths` then `1`. Validated `>= 1`, capped at 256 |
 | `maximum_paths_ibgp` | u32 | no | unset | Per-class ECMP cap for **iBGP** groups (FRR's `maximum-paths ibgp`). Overrides `maximum_paths` for iBGP best routes; falls back to `maximum_paths` then `1`. Validated `>= 1`, capped at 256 |
 
-**Restart required**: `[[fib_tables]]` is resolved at startup and the
-runtime actor is spawned once. SIGHUP edits are surfaced by
-`rustbgpd --diff` and logged as restart-required, but the live table set
-is pinned back to the startup value until the daemon restarts.
+**SIGHUP hot-reload** (when the FIB runtime is running): edits to
+`[[fib_tables]]` — adding or removing a table, or changing a table's
+`allowed_neighbors`, `allowed_peer_groups`, `max_routes`, ECMP caps, or
+`families` — are applied to the running reconciler on SIGHUP **without a
+restart**, provided at least one table was present at startup (so the
+reconciler actor is alive). The reconciler swaps to the new desired set and
+reconciles: added tables back-fill from the current best routes, removed
+tables have their owned kernel rows withdrawn, and unaffected rows don't flap.
+The in-memory config snapshot advances only **after** the reconciler
+acknowledges the new set, so a missed apply never leaves the snapshot ahead of
+the kernel.
+
+**Restart still required to *start* the FIB subsystem from an empty config**:
+if no `[[fib_tables]]` were present at startup the reconciler was never spawned,
+so adding the first table needs a restart (SIGHUP logs this and leaves the
+runtime unchanged). Deleting all tables at runtime is fine — the actor stays
+alive but idle, and re-adding a table later hot-applies.
 
 ---
 
@@ -2208,7 +2221,7 @@ earlier reload steps still land at the manager and remain in effect.
 Inline `policy.import` / `policy.export` (the legacy global-fallback
 statements), `[global]` ASN/router-id/families,
 `[global.telemetry.grpc_*]` listener config, `[rpki]`, `[bmp]`,
-`[mrt]`, `[[fib_tables]]`, `[[evpn_instances]]`,
+`[mrt]`, `[[evpn_instances]]`,
 `[[ethernet_segments]]`, `[[evpn_ip_vrfs]]`, and
 `apply_bum_enforcement` are
 **restart-required** — they're surfaced under "Restart-required" in
@@ -2225,9 +2238,12 @@ across every reload. Gate 8 segment and Gate 8b enforcement settings
 follow the same pinning rule because their actors also resolve startup
 snapshots. The Gate 9 `[[evpn_ip_vrfs]]` table (ADR-0058) is pinned the
 same way for SIGHUP; the Gate 9 actors consume it for IP-VRF readiness, Type 5
-origination, and L3 FIB programming. The ADR-0061 `[[fib_tables]]`
-table is pinned for the same reason: the general FIB actor owns only the
-explicit tables resolved at startup. Runtime EVPN mutation is exposed
+origination, and L3 FIB programming. The ADR-0061 `[[fib_tables]]` table is the
+exception to the pinning rule: when the FIB reconciler is running it
+**hot-applies** table edits on SIGHUP (see the `[[fib_tables]]` section),
+advancing the snapshot only after the actor acks the new set; only *starting*
+the FIB subsystem from an empty config still requires a restart. Runtime EVPN
+mutation is exposed
 through ADR-0063's full-candidate `EvpnService.ApplyEvpnRuntime` RPC for
 the supported live shapes (single L2VNI/IP-VRF/Ethernet-Segment
 add/delete/redefine and atomic tenant teardown); direct `AddEvpnInstance` /

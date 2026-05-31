@@ -1780,6 +1780,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         fib_event_tx,
         fib_runtime_shutdown.clone(),
     );
+    // Command sender for runtime `[[fib_tables]]` hot-swap (SIGHUP reload now;
+    // gRPC CRUD later). `Some` iff the FIB reconciler actually spawned at
+    // startup (≥1 table, Linux, netlink ok).
+    let fib_cmd_tx = fib_runtime_handle
+        .as_ref()
+        .map(fib_runtime::FibRuntimeHandle::command_sender);
 
     // Spawn the BFD actor (single-hop async, ADR-0067). Runs the sessions in the
     // PeerManager-owned desired set, publishes their state, and emits state
@@ -2196,6 +2202,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 let live_tcp = live_grpc_tcp.clone();
                 let live_uds = live_grpc_uds.clone();
                 let pm_tx = peer_mgr_tx.clone();
+                let fib_cmd = fib_cmd_tx.clone();
                 reload_in_flight = Some(tokio::spawn(async move {
                     reload_config(
                         &path,
@@ -2203,6 +2210,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                         live_tcp.as_ref(),
                         live_uds.as_ref(),
                         &pm_tx,
+                        fib_cmd.as_ref(),
                     )
                     .await
                 }));
