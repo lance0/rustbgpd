@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="rustbgpd-logo.png" alt="rustbgpd logo" width="200">
+  <img src="rustbgpd-logo.png" alt="rustbgpd logo" width="250">
 </p>
 
 # rustbgpd
