@@ -114,17 +114,11 @@ Later for what remains.
   IX-route-server-relevant control-plane gap vs FRR/GoBGP and the only near-term
   parity add; it is a discrete feature and does not displace the perf/polish
   work above.
-- **Dynamic-neighbor parity polish** *(API-first fabric ergonomics).*
-  Overlapping dynamic ranges now resolve by longest-prefix-match — a `/24` wins
-  over a `/16` regardless of TOML declaration order, matching FRR/GoBGP. The
-  remaining gap is runtime mutation: the `AddDynamicNeighbor` /
-  `DeleteDynamicNeighbor` RPCs should become live mutations instead of
-  `UNIMPLEMENTED` (`ListDynamicNeighbors` already exists); the missing piece is
-  manager-side wiring plus persistence / reload semantics. A smaller adjacent
-  cleanup: reject exact-duplicate effective prefixes (same masked network +
-  length) at config-validation time rather than resolving the ambiguity at
-  match time — the runtime matcher currently last-wins on a tie, which is the
-  wrong layer to decide an ambiguous config.
+- **Dynamic-neighbor parity polish** — **shipped.** Overlapping ranges resolve
+  by longest-prefix-match (#333); `AddDynamicNeighbor` / `DeleteDynamicNeighbor`
+  are now live, TOML-persisted mutations (`rustbgpctl dynamic-neighbor
+  {list,add,delete}`), and config-load rejects exact-duplicate effective
+  prefixes. See CHANGELOG.
 - **Zero-config / accept-any-ASN peering** *(route-collector & lab
   ergonomics).* A peer-group flag to learn the remote ASN from the OPEN
   instead of validating it against config, combined with a catch-all

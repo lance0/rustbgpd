@@ -26,6 +26,7 @@ use rustbgpd_wire::{
 };
 
 pub use schema::*;
+pub(crate) use validation::{effective_prefix, effective_prefix_str};
 
 use self::parse::{parse_families, parse_policy, resolve_chain};
 use self::schema::{BGP_PORT, DEFAULT_CONNECT_RETRY_SECS, DEFAULT_HOLD_TIME};

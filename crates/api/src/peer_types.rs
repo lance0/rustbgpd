@@ -598,6 +598,27 @@ pub enum PeerManagerCommand {
     ListDynamicRanges {
         reply: oneshot::Sender<Vec<DynamicNeighborInfo>>,
     },
+    /// Add a dynamic neighbor range at runtime.
+    AddDynamicRange {
+        /// IP prefix range (e.g., `10.0.0.0/24`).
+        prefix: String,
+        /// Peer group whose config dynamic peers inherit.
+        peer_group: String,
+        /// Expected remote ASN (0 = accept any ASN from OPEN).
+        remote_asn: u32,
+        /// Optional description applied to dynamic peers from this range.
+        description: Option<String>,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Remove a dynamic neighbor range at runtime. Does not tear down
+    /// already-established dynamic peers — they drain on Idle.
+    DeleteDynamicRange {
+        /// IP prefix range to remove (matched by effective prefix).
+        prefix: String,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// Information about a configured dynamic neighbor range.
@@ -852,6 +873,22 @@ pub enum ConfigEvent {
     NeighborAdded(PeerManagerNeighborConfig),
     /// A neighbor was successfully deleted at runtime.
     NeighborDeleted(PeerKey),
+    /// A dynamic neighbor range was successfully added at runtime.
+    DynamicNeighborAdded {
+        /// IP prefix range (e.g., `10.0.0.0/24`).
+        prefix: String,
+        /// Peer group whose config dynamic peers inherit.
+        peer_group: String,
+        /// Expected remote ASN (0 = accept any ASN from OPEN).
+        remote_asn: u32,
+        /// Optional description.
+        description: Option<String>,
+    },
+    /// A dynamic neighbor range was successfully removed at runtime.
+    DynamicNeighborDeleted {
+        /// IP prefix range that was removed (matched by effective prefix).
+        prefix: String,
+    },
     /// Create or replace a named policy definition.
     SetPolicy {
         /// Policy definition name.

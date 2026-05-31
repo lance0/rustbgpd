@@ -445,6 +445,35 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                 !(neighbor.address == addr && neighbor.interface == peer.interface)
             });
         }
+        ConfigEvent::DynamicNeighborAdded {
+            prefix,
+            peer_group,
+            remote_asn,
+            description,
+        } => {
+            let key = crate::config::effective_prefix_str(prefix);
+            let exists = key.is_some()
+                && config
+                    .dynamic_neighbors
+                    .iter()
+                    .any(|dn| crate::config::effective_prefix_str(&dn.prefix) == key);
+            if !exists {
+                config
+                    .dynamic_neighbors
+                    .push(crate::config::DynamicNeighborConfig {
+                        prefix: prefix.clone(),
+                        peer_group: peer_group.clone(),
+                        remote_asn: *remote_asn,
+                        description: description.clone(),
+                    });
+            }
+        }
+        ConfigEvent::DynamicNeighborDeleted { prefix } => {
+            let key = crate::config::effective_prefix_str(prefix);
+            config.dynamic_neighbors.retain(|dn| {
+                key.is_none() || crate::config::effective_prefix_str(&dn.prefix) != key
+            });
+        }
         ConfigEvent::SetPolicy { name, definition } => {
             config
                 .policy
