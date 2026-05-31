@@ -1327,10 +1327,13 @@ pub struct ConfigDiff {
     /// at startup, so edits are restart-required until a runtime swap
     /// surface exists.
     pub ethernet_segments_changed: bool,
-    /// `[[fib_tables]]` blocks added/removed/modified between old
-    /// and new. The ADR-0061 general-FIB actor resolves the table set
-    /// once at startup, so edits are restart-required until runtime
-    /// swap semantics are deliberately implemented.
+    /// `[[fib_tables]]` blocks added/removed/modified between old and new.
+    /// Reload-applied: the ADR-0061 general-FIB actor accepts a runtime table-
+    /// set swap on SIGHUP (`FibRuntimeCommand::ReplaceTables`), so edits
+    /// hot-apply when the reconciler is running. Starting FIB from an empty
+    /// config still requires a restart (the actor is not spawned otherwise),
+    /// but the static diff cannot know the runtime spawn state and classifies
+    /// the change as reload-applied.
     pub fib_tables_changed: bool,
     /// Top-level Gate 8b kernel-enforcement opt-in changed. The
     /// dataplane actor reads this once at startup, so SIGHUP must not
