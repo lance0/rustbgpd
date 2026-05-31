@@ -164,6 +164,14 @@ ADR-0063 shapes; SIGHUP mutation and unsupported shapes still fail closed),
 inline `policy.import` / `policy.export` legacy global-fallback
 statements.
 
+`[[fib_tables]]` is the exception to those restart-required tables: when the
+ADR-0061 FIB reconciler is running (at least one table present at startup),
+table add / remove / edit **hot-applies** on SIGHUP, with the in-memory
+snapshot advancing only after the reconciler acks the new desired set. Only
+*starting* the FIB subsystem from an empty config (0→N) still requires a
+restart — surfaced under "Restart-required" in `--diff` as `[[fib_tables]]
+(start FIB from an empty config)`.
+
 Use `rustbgpd --diff` to preview changes before reloading; the diff
 buckets the changes by Reload-applied / Restart-required and surfaces
 a per-neighbor "effective impact" view for transitive references
@@ -673,6 +681,23 @@ rustbgpctl neighbor 10.0.0.5 delete
 
 Sends NOTIFICATION, tears down the session, removes from config.
 
+### Manage dynamic-neighbor ranges at runtime
+
+```bash
+rustbgpctl dynamic-neighbor list
+rustbgpctl dynamic-neighbor add 10.0.0.0/24 --peer-group ix-members
+rustbgpctl dynamic-neighbor delete 10.0.0.0/24
+```
+
+Adds or removes `[[dynamic_neighbors]]` accept-prefix ranges without a
+restart (`AddDynamicNeighbor` / `DeleteDynamicNeighbor`, tier `mutating`).
+`add` validates exactly like config load: the peer group must exist and must
+not enable BFD, the prefix must be valid, and the effective prefix must not
+duplicate an existing range. `delete` stops *future* accepts only —
+already-established dynamic peers keep running and drain when they next
+return to Idle. When the daemon was started with `--config`, changes persist
+to the TOML file (atomic write) and survive a restart.
+
 ### Soft reset (re-evaluate import policy)
 
 ```bash
@@ -952,6 +977,26 @@ rustbgpctl rib fib                                  # per-route owned / rejected
 ip route show table 1000                            # the configured table, straight from the kernel
 curl -s localhost:9179/metrics | grep '^bgp_fib_'   # install / withdraw / reject / kernel-failure counters
 ```
+
+### Manage FIB export tables at runtime (ADR-0061)
+
+```bash
+rustbgpctl fib-table list
+rustbgpctl fib-table set edge --table-id 1000 --metric 200 \
+    --families ipv4_unicast,ipv6_unicast --max-routes 50000
+rustbgpctl fib-table delete edge
+```
+
+`set` is create-or-replace by name and carries the full table definition (not
+a patch); optional ECMP caps are `--maximum-paths`, `--maximum-paths-ebgp`,
+and `--maximum-paths-ibgp`. Edits hot-apply through the running ADR-0061
+reconciler and persist to the TOML config (atomic write) when the daemon was
+started with `--config`. Changing `--table-id` / `--metric` for an existing
+name is a table-key move: the old kernel rows withdraw and the new table
+back-fills. The mutating verbs require the reconciler to be running (at least
+one `[[fib_tables]]` entry at startup, on Linux); otherwise they fail
+`FAILED_PRECONDITION` — add the first table to the config and restart. See
+[CONFIGURATION.md](CONFIGURATION.md) for the full `[[fib_tables]]` lifecycle.
 
 ### Explain a best-path decision
 

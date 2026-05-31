@@ -6,7 +6,9 @@
 
 use std::ops::Deref;
 
-use rustbgpd_api::peer_types::{ConfigEvent, PeerManagerCommand, PeerManagerNeighborConfig};
+use rustbgpd_api::peer_types::{
+    ConfigEvent, FibTableSnapshot, PeerManagerCommand, PeerManagerNeighborConfig,
+};
 use rustbgpd_policy::PolicyChain;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, warn};
@@ -108,6 +110,41 @@ async fn send_pm_step(
     }
 }
 
+fn fib_table_snapshots(tables: &[config::FibTableConfig]) -> Vec<FibTableSnapshot> {
+    tables
+        .iter()
+        .map(|table| FibTableSnapshot {
+            name: table.name.clone(),
+            table_id: table.table_id,
+            metric: table.metric,
+            families: table.families.clone(),
+            allowed_peer_groups: table.allowed_peer_groups.clone(),
+            allowed_neighbors: table.allowed_neighbors.clone(),
+            max_routes: table.max_routes,
+            maximum_paths: table.maximum_paths,
+            maximum_paths_ebgp: table.maximum_paths_ebgp,
+            maximum_paths_ibgp: table.maximum_paths_ibgp,
+        })
+        .collect()
+}
+
+async fn set_pm_fib_tables_snapshot(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    tables: &[config::FibTableConfig],
+) -> Result<(), String> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(PeerManagerCommand::SetFibTablesSnapshot {
+            tables: fib_table_snapshots(tables),
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|e| format!("send to peer manager failed: {e}"))?;
+    reply_rx
+        .await
+        .map_err(|e| format!("peer manager dropped reply: {e}"))
+}
+
 /// Bridge between gRPC config events, SIGHUP-driven snapshot
 /// replacements, and the on-disk persister. The bridge owns the
 /// authoritative pre-persist snapshot — both inputs route through
@@ -170,17 +207,41 @@ pub(crate) async fn run_config_bridge(
             }
             event = event_rx.recv(), if event_rx_open => {
                 match event {
-                    Some(event) => {
+                    Some(mut event) => {
+                        let fib_tables_ack = match &mut event {
+                            ConfigEvent::FibTablesReplaced { ack, .. } => ack.take(),
+                            _ => None,
+                        };
                         // Apply to a candidate clone and commit only on success,
                         // so a validation failure can't leave the live snapshot
                         // partially mutated (poisoned) for the next event.
                         let mut candidate = current_config.clone();
                         if let Err(error) = apply_config_event(&mut candidate, &event) {
                             error!(error = %error, "failed to apply config event before persistence");
+                            if let Some(ack) = fib_tables_ack {
+                                let _ = ack.send(Err(error.to_string()));
+                            }
                             continue;
                         }
                         current_config = candidate;
-                        if mutation_tx
+                        if let Some(ack) = fib_tables_ack {
+                            let (persist_ack_tx, persist_ack_rx) = oneshot::channel();
+                            if mutation_tx
+                                .send(ConfigMutation::ReplaceConfigAck(
+                                    Box::new(current_config.clone()),
+                                    persist_ack_tx,
+                                ))
+                                .await
+                                .is_err()
+                            {
+                                let _ = ack.send(Err("config persister unavailable".to_string()));
+                                break;
+                            }
+                            let result = persist_ack_rx.await.map_err(|_| {
+                                "config persister dropped persistence acknowledgement".to_string()
+                            }).and_then(|result| result);
+                            let _ = ack.send(result);
+                        } else if mutation_tx
                             .send(ConfigMutation::ReplaceConfig(Box::new(current_config.clone())))
                             .await
                             .is_err()
@@ -1128,6 +1189,21 @@ pub(crate) async fn reload_config(
                 {
                     Ok(()) => match reply_rx.await {
                         Ok(Ok(())) => {
+                            if let Err(error) =
+                                set_pm_fib_tables_snapshot(peer_mgr_tx, &new_config.fib_tables)
+                                    .await
+                            {
+                                working_config.fib_tables.clone_from(&new_config.fib_tables);
+                                return halt_partial(
+                                    working_config,
+                                    &desired_config,
+                                    ReloadStepFailure {
+                                        bucket: "fib_tables.snapshot",
+                                        target: "[[fib_tables]]".to_string(),
+                                        error,
+                                    },
+                                );
+                            }
                             working_config.fib_tables.clone_from(&new_config.fib_tables);
                             info!(
                                 tables = new_config.fib_tables.len(),
@@ -2002,7 +2078,17 @@ metric = 200
 
         std::fs::write(&path, FIB_TWO_TABLES_TOML).unwrap();
 
-        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+        let peer_mgr = tokio::spawn(async move {
+            match peer_mgr_rx.recv().await {
+                Some(PeerManagerCommand::SetFibTablesSnapshot { tables, reply }) => {
+                    let len = tables.len();
+                    let _ = reply.send(());
+                    len
+                }
+                _ => panic!("expected SetFibTablesSnapshot"),
+            }
+        });
         let (fib_tx, mut fib_rx) = mpsc::channel(8);
         let actor = tokio::spawn(async move {
             match fib_rx.recv().await {
@@ -2032,6 +2118,114 @@ metric = 200
             "snapshot advances only after the actor acks the new table set"
         );
         assert_eq!(actor.await.unwrap(), 2, "actor received the new table set");
+        assert_eq!(
+            peer_mgr.await.unwrap(),
+            2,
+            "peer-manager snapshot is refreshed before reload continues"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn reload_syncs_fib_snapshot_before_peer_group_delete() {
+        let initial_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.fabric]
+hold_time = 90
+
+[[fib_tables]]
+name = "edge"
+table_id = 100
+metric = 200
+allowed_peer_groups = ["fabric"]
+"#;
+        let next_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[fib_tables]]
+name = "edge"
+table_id = 100
+metric = 200
+"#;
+        let path = unique_temp_path("reload-fib-before-pg-delete");
+        std::fs::write(&path, initial_toml).unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let tcp = initial.global.telemetry.grpc_tcp.clone();
+        let uds = initial.global.telemetry.grpc_uds.clone();
+        std::fs::write(&path, next_toml).unwrap();
+
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(8);
+        let peer_mgr = tokio::spawn(async move {
+            let mut tags = Vec::new();
+            for _ in 0..2 {
+                let Some(cmd) = peer_mgr_rx.recv().await else {
+                    break;
+                };
+                tags.push(cmd_tag(&cmd));
+                match cmd {
+                    PeerManagerCommand::SetFibTablesSnapshot { reply, .. } => {
+                        let _ = reply.send(());
+                    }
+                    PeerManagerCommand::DeletePeerGroup { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => panic!("unexpected peer manager command"),
+                }
+            }
+            tags
+        });
+        let (fib_tx, mut fib_rx) = mpsc::channel(8);
+        let actor = tokio::spawn(async move {
+            match fib_rx.recv().await {
+                Some(FibRuntimeCommand::ReplaceTables { tables, reply }) => {
+                    assert!(tables[0].allowed_peer_groups.is_empty());
+                    let _ = reply.send(Ok(()));
+                }
+                _ => panic!("expected ReplaceTables"),
+            }
+        });
+
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            tcp.as_ref(),
+            uds.as_ref(),
+            &peer_mgr_tx,
+            Some(&fib_tx),
+        )
+        .await
+        .expect("reload should remove the FIB reference and then delete the peer group");
+
+        assert!(
+            !returned.peer_groups.contains_key("fabric"),
+            "peer group should be removed in the returned runtime snapshot"
+        );
+        assert!(
+            returned.fib_tables[0].allowed_peer_groups.is_empty(),
+            "FIB allow-list removal should be reflected in the returned runtime snapshot"
+        );
+        assert_eq!(
+            peer_mgr.await.unwrap(),
+            vec![
+                "SetFibTablesSnapshot(1)".to_string(),
+                "DeletePeerGroup(fabric)".to_string(),
+            ],
+            "peer manager must see the FIB reference removed before peer-group deletion"
+        );
+        actor.await.unwrap();
         std::fs::remove_file(&path).ok();
     }
 
@@ -2387,6 +2581,9 @@ hold_time = 90
             } => {
                 format!("SyncExplainConfig(enabled={enabled},cache_size={cache_size})")
             }
+            PeerManagerCommand::SetFibTablesSnapshot { tables, .. } => {
+                format!("SetFibTablesSnapshot({})", tables.len())
+            }
             _ => "Other".to_string(),
         }
     }
@@ -2431,7 +2628,8 @@ hold_time = 90
                     PeerManagerCommand::ReconcilePeers { reply, .. } => {
                         let _ = reply.send(ReconcileResult::default());
                     }
-                    PeerManagerCommand::SyncExplainConfig { reply, .. } => {
+                    PeerManagerCommand::SetFibTablesSnapshot { reply, .. }
+                    | PeerManagerCommand::SyncExplainConfig { reply, .. } => {
                         let _ = reply.send(());
                     }
                     _ => {}
@@ -3037,6 +3235,7 @@ peer_group = "secure"
     #[tokio::test]
     async fn config_bridge_replacement_makes_subsequent_events_apply_to_new_snapshot() {
         use rustbgpd_api::peer_types::{ConfigEvent, NamedPolicyDefinition};
+        use tokio::time::{Duration, timeout};
 
         let stale_path = unique_temp_path("bridge-replace-stale");
         std::fs::write(&stale_path, baseline_toml()).unwrap();
@@ -3102,7 +3301,10 @@ peer_group = "secure"
         // AND the event-applied policy. If the bridge had missed the
         // swap, peer_groups.upstream would be absent (proving the
         // event applied to stale).
-        let event_msg = mutation_rx.recv().await.expect("event forwarded");
+        let event_msg = timeout(Duration::from_secs(1), mutation_rx.recv())
+            .await
+            .expect("bridge should forward event to persister")
+            .expect("event forwarded");
         let ConfigMutation::ReplaceConfig(received_event) = event_msg else {
             panic!("bridge must forward event-derived snapshot as ReplaceConfig");
         };
@@ -3121,7 +3323,76 @@ peer_group = "secure"
 
         drop(replace_tx);
         drop(event_tx);
-        bridge.await.unwrap();
+        timeout(Duration::from_secs(1), bridge)
+            .await
+            .expect("bridge should exit after both inputs close")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn config_bridge_acks_fib_table_event_after_persister_ack() {
+        use rustbgpd_api::peer_types::{ConfigEvent, FibTableSnapshot};
+        use tokio::sync::oneshot::error::TryRecvError;
+        use tokio::time::{Duration, timeout};
+
+        let stale_path = unique_temp_path("bridge-fib-ack-stale");
+        std::fs::write(&stale_path, baseline_toml()).unwrap();
+        let stale = Config::load_with_diagnostics(stale_path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&stale_path).ok();
+
+        let (event_tx, event_rx) = mpsc::channel::<ConfigEvent>(8);
+        let (replace_tx, replace_rx) = mpsc::unbounded_channel::<Box<Config>>();
+        let (mutation_tx, mut mutation_rx) = mpsc::channel::<ConfigMutation>(8);
+        let bridge = tokio::spawn(run_config_bridge(event_rx, replace_rx, mutation_tx, stale));
+
+        let (ack_tx, mut ack_rx) = oneshot::channel();
+        event_tx
+            .send(ConfigEvent::FibTablesReplaced {
+                tables: vec![FibTableSnapshot {
+                    name: "edge".to_string(),
+                    table_id: 100,
+                    metric: 200,
+                    families: vec!["ipv4_unicast".to_string()],
+                    allowed_peer_groups: Vec::new(),
+                    allowed_neighbors: Vec::new(),
+                    max_routes: None,
+                    maximum_paths: None,
+                    maximum_paths_ebgp: None,
+                    maximum_paths_ibgp: None,
+                }],
+                ack: Some(ack_tx),
+            })
+            .await
+            .unwrap();
+
+        let event_msg = timeout(Duration::from_secs(1), mutation_rx.recv())
+            .await
+            .expect("bridge should forward FIB event to persister")
+            .expect("event forwarded");
+        let ConfigMutation::ReplaceConfigAck(received_event, persist_ack) = event_msg else {
+            panic!("fib-table events with an ack must request an acknowledged persist");
+        };
+        assert_eq!(received_event.fib_tables.len(), 1);
+        assert!(
+            matches!(ack_rx.try_recv(), Err(TryRecvError::Empty),),
+            "bridge must not acknowledge the FIB event before the persister replies"
+        );
+        persist_ack.send(Ok(())).unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(1), ack_rx)
+                .await
+                .unwrap()
+                .unwrap(),
+            Ok(()),
+            "FIB event ack should reflect the persister result"
+        );
+
+        drop(replace_tx);
+        drop(event_tx);
+        timeout(Duration::from_secs(1), bridge)
+            .await
+            .expect("bridge should exit after both inputs close")
+            .unwrap();
     }
 
     async fn reload_then_persist_policy_after_desired_refresh(new_toml: &str) -> (Config, Config) {

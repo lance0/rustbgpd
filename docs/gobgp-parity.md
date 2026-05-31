@@ -1,6 +1,6 @@
 # rustbgpd vs GoBGP Feature Parity
 
-Last updated: 2026-05-27 (v0.30.0, adding ADR-0071 RFC 9234 BGP Roles + Only-to-Customer route-leak prevention, ADR-0072 durable event history with `SubscribeFromEvent` cursor replay + gNMI `Subscribe ON_CHANGE` v1 for neighbor session-state, and PR #294 ASPA algorithm fidelity / §6.2 per-AFI/SAFI gate; on top of ADR-0067 BFD, ADR-0066/0068 unicast multipath / ECMP FIB, ADR-0069 BGP unnumbered, and ADR-0070 read-only gNMI / OpenConfig telemetry from the prior release window)
+Last updated: 2026-05-31 (post-v0.32.0 main, including runtime dynamic-neighbor CRUD, runtime `[[fib_tables]]` CRUD, ADR-0073 import-policy explain, ADR-0072 durable event history with `SubscribeFromEvent` cursor replay + gNMI `Subscribe ON_CHANGE` v1 for neighbor session-state, ADR-0071 RFC 9234 BGP Roles + Only-to-Customer route-leak prevention, and PR #294 ASPA algorithm fidelity / §6.2 per-AFI/SAFI gate)
 
 ## Address Families
 
@@ -90,10 +90,10 @@ Last updated: 2026-05-27 (v0.30.0, adding ADR-0071 RFC 9234 BGP Roles + Only-to-
 
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
-| Total RPCs | ~55 | 78 | 74 `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs |
+| Total RPCs | ~55 | 81 | 77 `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs |
 | Peer CRUD | Yes | Yes | Add/Delete/List/Enable/Disable |
 | Peer groups | Yes | Yes | `PeerGroupService` + neighbor membership RPCs |
-| Dynamic neighbors (prefix-based) | Yes | Yes | `[[dynamic_neighbors]]` config + `ListDynamicNeighbors` (M28); runtime Add/Delete RPCs defined but stubbed |
+| Dynamic neighbors (prefix-based) | Yes | Yes | `[[dynamic_neighbors]]` config plus runtime `AddDynamicNeighbor` / `DeleteDynamicNeighbor` / `ListDynamicNeighbors` (add/delete tier `mutating`, persisted to TOML when started with `--config`); overlapping ranges resolve by longest-prefix-match |
 | Path add/delete | Yes | Yes | IPv4 + IPv6 |
 | Streaming path injection | Yes | No | AddPathStream |
 | List paths (Adj-In/Loc/Adj-Out) | Yes | Yes | |

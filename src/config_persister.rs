@@ -9,7 +9,7 @@
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, warn};
 
 use crate::config::{Config, Neighbor};
@@ -21,6 +21,9 @@ pub enum ConfigMutation {
     DeleteNeighbor(IpAddr),
     /// Replace the entire config snapshot and persist it to disk.
     ReplaceConfig(Box<Config>),
+    /// Replace the entire config snapshot, persist it to disk, then acknowledge
+    /// the result to a caller that must not proceed until the write has settled.
+    ReplaceConfigAck(Box<Config>, oneshot::Sender<Result<(), String>>),
     /// Refresh the persister's base snapshot without writing to disk.
     ///
     /// SIGHUP reload uses this for operator-authored TOML that
@@ -49,6 +52,24 @@ impl ConfigPersister {
 
     pub async fn run(mut self) {
         while let Some(mutation) = self.rx.recv().await {
+            if let ConfigMutation::ReplaceConfigAck(new_config, ack) = mutation {
+                let should_persist = self.apply(ConfigMutation::ReplaceConfig(new_config));
+                let result = if should_persist {
+                    self.persist().map_err(|e| e.to_string())
+                } else {
+                    Ok(())
+                };
+                if let Err(e) = &result {
+                    error!(
+                        path = %self.config_path.display(),
+                        error = %e,
+                        "failed to persist config — in-memory state diverges from disk"
+                    );
+                }
+                let _ = ack.send(result);
+                continue;
+            }
+
             let should_persist = self.apply(mutation);
             if should_persist && let Err(e) = self.persist() {
                 error!(
@@ -89,6 +110,11 @@ impl ConfigPersister {
                 true
             }
             ConfigMutation::ReplaceConfig(new_config) => {
+                info!("replacing persister config snapshot and persisting it");
+                self.current = *new_config;
+                true
+            }
+            ConfigMutation::ReplaceConfigAck(new_config, _) => {
                 info!("replacing persister config snapshot and persisting it");
                 self.current = *new_config;
                 true

@@ -167,7 +167,7 @@ impl PeerManager {
             ConfigEvent::NeighborAdded(_) | ConfigEvent::NeighborDeleted(_) => {
                 ("change", "neighbor", String::new(), None)
             }
-            ConfigEvent::FibTablesReplaced(_) => {
+            ConfigEvent::FibTablesReplaced { .. } => {
                 ("replace", "fib_tables", "fib_tables".to_string(), None)
             }
         }
