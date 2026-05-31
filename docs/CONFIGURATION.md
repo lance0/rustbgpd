@@ -749,7 +749,6 @@ rustbgpctl dynamic-neighbor delete 10.0.0.0/24
 Operational note:
 
 - disabling a dynamic peer keeps the peer entry in memory but prevents reconnect
-- runtime gRPC CRUD for dynamic ranges is not implemented yet; TOML is the source of truth
 
 ### Graceful Restart (RFC 4724)
 

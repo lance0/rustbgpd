@@ -404,6 +404,14 @@ branch is between features.
   2^32 space makes it theoretically unreachable, but a `Result<Discriminator,
   AllocError>` removes the only `panic!()` outside tests; caller logs and refuses
   to install the new session.
+- [ ] **Stringly command errors → typed errors where API status depends on
+  class.** PR #334 introduced `DynamicRangeError` so
+  `AddDynamicNeighbor` / `DeleteDynamicNeighbor` can map duplicate, not-found,
+  and invalid-input failures to stable gRPC status codes without parsing error
+  strings. Older peer-manager / RIB commands still commonly return
+  `Result<_, String>`; keep that for one-status surfaces, but migrate to small
+  typed enums when a caller needs to distinguish `ALREADY_EXISTS`, `NOT_FOUND`,
+  `INVALID_ARGUMENT`, or similar API-visible classes.
 - [ ] **`#[expect(clippy::too_many_lines)]` reduction.** ~30 suppressions
   workspace-wide (down from 94). Concentrated in long dispatchers (FSM action
   loop, EVPN reconcilers, encode/decode match arms). Some are honest match-heavy
