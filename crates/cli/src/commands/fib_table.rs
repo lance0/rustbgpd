@@ -204,6 +204,24 @@ mod tests {
         )
         .await
         .unwrap();
+        let captured = server
+            .state
+            .last_set_fib_table
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        let table = captured.table.unwrap();
+        assert_eq!(table.name, "edge");
+        assert_eq!(table.table_id, 1000);
+        assert_eq!(table.metric, 200);
+        assert_eq!(table.families, vec!["ipv4_unicast"]);
+        assert_eq!(table.allowed_peer_groups, Vec::<String>::new());
+        assert_eq!(table.allowed_neighbors, Vec::<String>::new());
+        assert_eq!(table.max_routes, Some(50_000));
+        assert_eq!(table.maximum_paths, None);
+        assert_eq!(table.maximum_paths_ebgp, None);
+        assert_eq!(table.maximum_paths_ibgp, None);
     }
 
     #[tokio::test]
@@ -211,5 +229,13 @@ mod tests {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
         delete(connection, "edge", true).await.unwrap();
+        let captured = server
+            .state
+            .last_delete_fib_table
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        assert_eq!(captured.name, "edge");
     }
 }

@@ -40,6 +40,8 @@ pub(crate) struct MockState {
     pub(crate) last_add_dynamic_neighbor: Mutex<Option<server_proto::AddDynamicNeighborRequest>>,
     pub(crate) last_delete_dynamic_neighbor:
         Mutex<Option<server_proto::DeleteDynamicNeighborRequest>>,
+    pub(crate) last_set_fib_table: Mutex<Option<server_proto::SetFibTableRequest>>,
+    pub(crate) last_delete_fib_table: Mutex<Option<server_proto::DeleteFibTableRequest>>,
     pub(crate) last_set_global_import_chain:
         Mutex<Option<server_proto::SetGlobalImportChainRequest>>,
     pub(crate) last_set_global_export_chain:
@@ -772,7 +774,9 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         request: Request<server_proto::SetFibTableRequest>,
     ) -> Result<Response<server_proto::ListFibTablesResponse>, Status> {
-        let table = request.into_inner().table.unwrap_or_default();
+        let request = request.into_inner();
+        let table = request.table.clone().unwrap_or_default();
+        *self.state.last_set_fib_table.lock().await = Some(request);
         Ok(Response::new(server_proto::ListFibTablesResponse {
             tables: vec![table],
             runtime_available: true,
@@ -781,8 +785,9 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
 
     async fn delete_fib_table(
         &self,
-        _request: Request<server_proto::DeleteFibTableRequest>,
+        request: Request<server_proto::DeleteFibTableRequest>,
     ) -> Result<Response<server_proto::ListFibTablesResponse>, Status> {
+        *self.state.last_delete_fib_table.lock().await = Some(request.into_inner());
         Ok(Response::new(server_proto::ListFibTablesResponse {
             tables: vec![],
             runtime_available: true,
