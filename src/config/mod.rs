@@ -1327,11 +1327,22 @@ pub struct ConfigDiff {
     /// at startup, so edits are restart-required until a runtime swap
     /// surface exists.
     pub ethernet_segments_changed: bool,
-    /// `[[fib_tables]]` blocks added/removed/modified between old
-    /// and new. The ADR-0061 general-FIB actor resolves the table set
-    /// once at startup, so edits are restart-required until runtime
-    /// swap semantics are deliberately implemented.
+    /// `[[fib_tables]]` blocks added/removed/modified between old and new.
+    /// Reload-applied in the common case: the ADR-0061 general-FIB actor
+    /// accepts a runtime table-set swap on SIGHUP
+    /// (`FibRuntimeCommand::ReplaceTables`), so edits hot-apply when the
+    /// reconciler is running. The one exception the static diff *can* know is
+    /// the startup-from-empty case — see [`Self::fib_tables_requires_restart`].
     pub fib_tables_changed: bool,
+    /// The `[[fib_tables]]` change is the startup-from-empty (0→N) case: old
+    /// had no tables, new has at least one. The reconciler is spawned only
+    /// when ≥1 table is present at startup, so SIGHUP rejects this as
+    /// restart-required (`src/reload.rs` logs it; the runtime cannot hot-start
+    /// the actor). The static diff cannot predict a netlink spawn *failure*,
+    /// but it can know the empty-startup case, so it classifies 0→N as
+    /// restart-required to match the runtime. All other edits (N→M, N→0) stay
+    /// reload-applied.
+    pub fib_tables_requires_restart: bool,
     /// Top-level Gate 8b kernel-enforcement opt-in changed. The
     /// dataplane actor reads this once at startup, so SIGHUP must not
     /// silently advance the in-memory snapshot.
@@ -1443,6 +1454,7 @@ impl ConfigDiff {
             || self.policy.export_chain_changed
             || self.honor_graceful_shutdown_changed
             || self.honor_blackhole_changed
+            || (self.fib_tables_changed && !self.fib_tables_requires_restart)
     }
 
     /// Changes that require a full daemon restart.
@@ -1456,12 +1468,12 @@ impl ConfigDiff {
             || self.evpn_instances_changed
             || self.evpn_ip_vrfs_changed
             || self.ethernet_segments_changed
-            || self.fib_tables_changed
             || self.apply_bum_enforcement_changed
             || self.blackhole_fib_discard_changed
             || self.neighbor_tcp_ao_changed
             || self.bfd_changed
             || self.policy_explain_changed
+            || self.fib_tables_requires_restart
     }
 
     /// Changes detected but not applied by current SIGHUP. Empty
@@ -1511,6 +1523,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "export_chain_changed": diff.policy.export_chain_changed,
             "honor_graceful_shutdown_changed": diff.honor_graceful_shutdown_changed,
             "honor_blackhole_changed": diff.honor_blackhole_changed,
+            "fib_tables_changed": diff.fib_tables_changed && !diff.fib_tables_requires_restart,
             "effective_neighbor_impact": &diff.effective_neighbor_impact,
         },
         "restart_required": {
@@ -1521,7 +1534,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "evpn_instances_changed": diff.evpn_instances_changed,
             "evpn_ip_vrfs_changed": diff.evpn_ip_vrfs_changed,
             "ethernet_segments_changed": diff.ethernet_segments_changed,
-            "fib_tables_changed": diff.fib_tables_changed,
+            "fib_tables_requires_restart": diff.fib_tables_requires_restart,
             "apply_bum_enforcement_changed": diff.apply_bum_enforcement_changed,
             "blackhole_fib_discard_changed": diff.blackhole_fib_discard_changed,
             "neighbor_tcp_ao_changed": diff.neighbor_tcp_ao_changed,
@@ -1695,6 +1708,13 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
             }
             out.push('\n');
         }
+        if diff.fib_tables_changed && !diff.fib_tables_requires_restart {
+            let _ = writeln!(
+                out,
+                "  {} [[fib_tables]] hot-applied to the running FIB reconciler",
+                style.change_marker
+            );
+        }
     }
 
     let mut restart_sections = Vec::new();
@@ -1719,8 +1739,8 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     if diff.ethernet_segments_changed {
         restart_sections.push("[[ethernet_segments]]");
     }
-    if diff.fib_tables_changed {
-        restart_sections.push("[[fib_tables]]");
+    if diff.fib_tables_requires_restart {
+        restart_sections.push("[[fib_tables]] (start FIB from an empty config)");
     }
     if diff.apply_bum_enforcement_changed {
         restart_sections.push("apply_bum_enforcement");
@@ -1849,6 +1869,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         evpn_ip_vrfs_changed: old.evpn_ip_vrfs != new.evpn_ip_vrfs,
         ethernet_segments_changed: old.ethernet_segments != new.ethernet_segments,
         fib_tables_changed: old.fib_tables != new.fib_tables,
+        fib_tables_requires_restart: old.fib_tables.is_empty() && !new.fib_tables.is_empty(),
         apply_bum_enforcement_changed: old.apply_bum_enforcement != new.apply_bum_enforcement,
         blackhole_fib_discard_changed,
         neighbor_tcp_ao_changed,

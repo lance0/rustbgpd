@@ -13,6 +13,7 @@ use tracing::{error, info, warn};
 
 use crate::config::{self, Config};
 use crate::config_persister::ConfigMutation;
+use crate::fib_runtime::FibRuntimeCommand;
 use crate::peer_manager::InternalCommand;
 use crate::policy_admin::{self, apply_config_event};
 
@@ -271,6 +272,7 @@ pub(crate) async fn reload_config(
     live_grpc_tcp: Option<&config::GrpcTcpListenerConfig>,
     live_grpc_uds: Option<&config::GrpcUdsListenerConfig>,
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    fib_cmd_tx: Option<&mpsc::Sender<FibRuntimeCommand>>,
 ) -> Option<ReloadedConfig> {
     let desired_config = match Config::load_with_diagnostics(config_path) {
         Ok(c) => c,
@@ -389,14 +391,9 @@ pub(crate) async fn reload_config(
         );
         new_config.apply_bum_enforcement = current.apply_bum_enforcement;
     }
-    if new_config.fib_tables != current.fib_tables {
-        error!(
-            "[[fib_tables]] differs from the live config: the ADR-0061 \
-             general unicast FIB reconciler is spawned only at startup. \
-             Restart rustbgpd to apply [[fib_tables]] edits."
-        );
-        new_config.fib_tables.clone_from(&current.fib_tables);
-    }
+    // `[[fib_tables]]` is hot-applied to the running FIB reconciler below
+    // (after the honor knobs), ack-gated on the actor accepting the new set —
+    // see the FIB hot-apply step.
     if new_config.global.install_blackhole_discard != current.global.install_blackhole_discard
         || new_config.global.allow_blackhole_broad_prefixes
             != current.global.allow_blackhole_broad_prefixes
@@ -463,11 +460,13 @@ pub(crate) async fn reload_config(
     // diagnostic-retention knob, so detect it explicitly rather than
     // letting an explain-only reload report "no changes detected".
     let explain_changed = current.policy.explain != new_config.policy.explain;
+    let fib_tables_changed = new_config.fib_tables != current.fib_tables;
     if !policy_diff.has_changes()
         && peer_groups_unchanged
         && neighbors_unchanged
         && !honor_graceful_shutdown_changed
         && !honor_blackhole_changed
+        && !fib_tables_changed
     {
         if explain_changed {
             warn!(
@@ -1098,6 +1097,69 @@ pub(crate) async fn reload_config(
         }
     }
 
+    // 6b. [[fib_tables]] hot-apply. Unlike the honor knobs above, FIB programs
+    //     kernel state, so the snapshot advances ONLY after the actor
+    //     acknowledges the new desired set — no best-effort advance on failure.
+    if new_config.fib_tables != current.fib_tables {
+        match fib_cmd_tx {
+            Some(tx) => {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                match tx
+                    .send(FibRuntimeCommand::ReplaceTables {
+                        tables: new_config.fib_tables.clone(),
+                        reply: reply_tx,
+                    })
+                    .await
+                {
+                    Ok(()) => match reply_rx.await {
+                        Ok(Ok(())) => {
+                            working_config.fib_tables.clone_from(&new_config.fib_tables);
+                            info!(
+                                tables = new_config.fib_tables.len(),
+                                "reload: [[fib_tables]] hot-applied"
+                            );
+                        }
+                        Ok(Err(reason)) => {
+                            error!(
+                                %reason,
+                                "reload: FIB runtime could not apply the [[fib_tables]] update \
+                                 (reverted); runtime unchanged"
+                            );
+                        }
+                        Err(error) => {
+                            error!(
+                                %error,
+                                "reload: FIB runtime did not acknowledge the [[fib_tables]] \
+                                 update; reverting (runtime unchanged)"
+                            );
+                        }
+                    },
+                    Err(error) => {
+                        error!(
+                            %error,
+                            "reload: FIB runtime command channel closed; [[fib_tables]] not \
+                             applied, reverting (runtime unchanged)"
+                        );
+                    }
+                }
+            }
+            None if current.fib_tables.is_empty() => {
+                error!(
+                    "[[fib_tables]] added from an empty config: the FIB reconciler is not \
+                     running (it is spawned only when at least one table is present at \
+                     startup). Restart rustbgpd to start the FIB runtime."
+                );
+            }
+            None => {
+                error!(
+                    "[[fib_tables]] differs but the FIB runtime is unavailable (it did not \
+                     spawn at startup — non-Linux platform or netlink setup failure). \
+                     Restart rustbgpd to apply [[fib_tables]] edits."
+                );
+            }
+        }
+    }
+
     // 7. Removals in reverse-dependency order so `still referenced`
     //    rejections don't fire transiently. Peer-group deletes have
     //    to happen after neighbor reconcile if any obsolete neighbors
@@ -1380,6 +1442,7 @@ hold_time = 90
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            None,
         )
         .await
         .expect("reload should return a config even when grpc_tcp drifts");
@@ -1484,6 +1547,7 @@ local_vtep_ip = "10.0.0.1"
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            None,
         )
         .await
         .expect("reload should return a config even when only evpn_instances drift");
@@ -1593,6 +1657,7 @@ table_id = 5001
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            None,
         )
         .await
         .expect("reload should return a config even when only evpn_ip_vrfs drift");
@@ -1694,6 +1759,7 @@ originator_ip = "10.0.0.1"
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            None,
         )
         .await
         .expect("reload should return a config even when only Gate 8 surfaces drift");
@@ -1778,6 +1844,7 @@ hold_time = 90
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            None,
         )
         .await
         .expect("reload should hot-apply honor_graceful_shutdown");
@@ -1857,6 +1924,7 @@ hold_time = 90
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            None,
         )
         .await
         .expect("reload should hot-apply honor_blackhole");
@@ -1870,6 +1938,229 @@ hold_time = 90
             "peer manager command must carry enabled=true"
         );
 
+        std::fs::remove_file(&path).ok();
+    }
+
+    const FIB_ONE_TABLE_TOML: &str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[fib_tables]]
+name = "edge"
+table_id = 100
+metric = 200
+"#;
+
+    const FIB_TWO_TABLES_TOML: &str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[fib_tables]]
+name = "edge"
+table_id = 100
+metric = 200
+
+[[fib_tables]]
+name = "edge2"
+table_id = 101
+metric = 200
+"#;
+
+    #[tokio::test]
+    async fn reload_hot_applies_fib_tables_when_actor_present() {
+        let path = unique_temp_path("reload-fib-tables-hot-apply");
+        std::fs::write(&path, FIB_ONE_TABLE_TOML).unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let tcp = initial.global.telemetry.grpc_tcp.clone();
+        let uds = initial.global.telemetry.grpc_uds.clone();
+        assert_eq!(initial.fib_tables.len(), 1);
+
+        std::fs::write(&path, FIB_TWO_TABLES_TOML).unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let (fib_tx, mut fib_rx) = mpsc::channel(8);
+        let actor = tokio::spawn(async move {
+            match fib_rx.recv().await {
+                Some(FibRuntimeCommand::ReplaceTables { tables, reply }) => {
+                    let _ = reply.send(Ok(()));
+                    tables.len()
+                }
+                None => panic!("expected ReplaceTables"),
+            }
+        });
+
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            tcp.as_ref(),
+            uds.as_ref(),
+            &peer_mgr_tx,
+            Some(&fib_tx),
+        )
+        .await
+        .expect("reload should hot-apply fib_tables");
+
+        assert_eq!(
+            returned.fib_tables.len(),
+            2,
+            "snapshot advances only after the actor acks the new table set"
+        );
+        assert_eq!(actor.await.unwrap(), 2, "actor received the new table set");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn reload_does_not_advance_fib_tables_when_actor_unreachable() {
+        let path = unique_temp_path("reload-fib-tables-actor-gone");
+        std::fs::write(&path, FIB_ONE_TABLE_TOML).unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let tcp = initial.global.telemetry.grpc_tcp.clone();
+        let uds = initial.global.telemetry.grpc_uds.clone();
+        std::fs::write(&path, FIB_TWO_TABLES_TOML).unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let (fib_tx, fib_rx) = mpsc::channel::<FibRuntimeCommand>(8);
+        drop(fib_rx); // actor gone — the send fails, so the snapshot must not advance
+
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            tcp.as_ref(),
+            uds.as_ref(),
+            &peer_mgr_tx,
+            Some(&fib_tx),
+        )
+        .await
+        .expect("reload returns a config even when the FIB actor is unreachable");
+
+        assert_eq!(
+            returned.fib_tables.len(),
+            1,
+            "no ack ⇒ snapshot must stay on the live table set"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn reload_does_not_advance_fib_tables_when_runtime_absent() {
+        let path = unique_temp_path("reload-fib-tables-absent");
+        std::fs::write(&path, FIB_ONE_TABLE_TOML).unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let tcp = initial.global.telemetry.grpc_tcp.clone();
+        let uds = initial.global.telemetry.grpc_uds.clone();
+        std::fs::write(&path, FIB_TWO_TABLES_TOML).unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        // fib_cmd_tx = None: the FIB runtime never spawned. `current` already has
+        // tables, so this hits the "runtime unavailable; restart required" branch
+        // — it must log + revert, never advance the snapshot.
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            tcp.as_ref(),
+            uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+        )
+        .await
+        .expect("reload returns a config when the FIB runtime is absent");
+
+        assert_eq!(
+            returned.fib_tables.len(),
+            1,
+            "absent FIB runtime must not advance the snapshot"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    const FIB_NO_TABLES_TOML: &str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+"#;
+
+    #[tokio::test]
+    async fn reload_fib_tables_from_empty_config_requires_restart() {
+        // 0→N with no FIB runtime running (started empty): the explicit
+        // restart-required-to-start branch. The snapshot must not advance.
+        let path = unique_temp_path("reload-fib-tables-from-empty");
+        std::fs::write(&path, FIB_NO_TABLES_TOML).unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let tcp = initial.global.telemetry.grpc_tcp.clone();
+        let uds = initial.global.telemetry.grpc_uds.clone();
+        assert!(initial.fib_tables.is_empty());
+
+        std::fs::write(&path, FIB_ONE_TABLE_TOML).unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            tcp.as_ref(),
+            uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+        )
+        .await
+        .expect("reload returns a config when FIB must be started from empty");
+
+        assert!(
+            returned.fib_tables.is_empty(),
+            "0→N from an empty config is restart-required; snapshot must not advance"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn reload_does_not_advance_fib_tables_when_actor_reports_failure() {
+        // The actor acks Err (e.g. a removed table's withdraw failed, or a
+        // pre-plan RIB/dump bail) → reload must NOT advance the snapshot.
+        let path = unique_temp_path("reload-fib-tables-actor-err");
+        std::fs::write(&path, FIB_ONE_TABLE_TOML).unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let tcp = initial.global.telemetry.grpc_tcp.clone();
+        let uds = initial.global.telemetry.grpc_uds.clone();
+        std::fs::write(&path, FIB_TWO_TABLES_TOML).unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let (fib_tx, mut fib_rx) = mpsc::channel(8);
+        let actor = tokio::spawn(async move {
+            if let Some(FibRuntimeCommand::ReplaceTables { reply, .. }) = fib_rx.recv().await {
+                let _ = reply.send(Err("simulated reconcile failure".to_string()));
+            }
+        });
+
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            tcp.as_ref(),
+            uds.as_ref(),
+            &peer_mgr_tx,
+            Some(&fib_tx),
+        )
+        .await
+        .expect("reload returns a config even when the actor reports failure");
+
+        assert_eq!(
+            returned.fib_tables.len(),
+            1,
+            "an Err ack must not advance the snapshot"
+        );
+        let _ = actor.await;
         std::fs::remove_file(&path).ok();
     }
 
@@ -1929,6 +2220,7 @@ hold_time = 90
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            None,
         )
         .await
         .expect("reload should pin honor_blackhole to the startup FIB snapshot");
@@ -2015,6 +2307,7 @@ hold_time = 90
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            None,
         )
         .await
         .expect("reload should hot-apply both honor knobs");
@@ -2137,6 +2430,7 @@ hold_time = 90
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            None,
         )
         .await;
         drop(peer_mgr_tx);
@@ -2596,6 +2890,7 @@ peer_group = "secure"
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            None,
         )
         .await;
         drop(peer_mgr_tx);
@@ -2820,6 +3115,7 @@ peer_group = "secure"
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            None,
         )
         .await
         .expect("reload should return pinned runtime plus desired config");

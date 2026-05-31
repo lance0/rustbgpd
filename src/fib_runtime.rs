@@ -60,6 +60,31 @@ impl FibRuntimeConfig {
     }
 }
 
+/// Runtime control messages for the FIB reconciler actor. Sent by the SIGHUP
+/// reload path (and, later, the gRPC FIB-table CRUD handlers) to mutate the
+/// live `[[fib_tables]]` set without a restart.
+pub enum FibRuntimeCommand {
+    /// Replace the desired table set and run an immediate reconcile.
+    ///
+    /// The reply distinguishes "the actor applied the new set" from "it
+    /// couldn't act on it":
+    /// - `Ok(())` — the new set is in effect and the immediate reconcile
+    ///   reached the apply phase. Per-route kernel failures within the plan
+    ///   stay best-effort + observable via statuses/metrics; they do not fail
+    ///   the ack. The caller may advance its config snapshot / persist.
+    /// - `Err(_)` — the caller must NOT advance its snapshot. Two shapes:
+    ///   (a) the reconcile bailed before the apply phase (RIB-candidate or
+    ///   peer-group query failed, or the kernel dump failed); or (b) it reached
+    ///   the apply phase but a removed table's withdraw failed, leaving an owned
+    ///   route outside the new set — the desired set is reverted to keep that
+    ///   route owned (and retried on the next reconcile). Either way the live
+    ///   table set is unchanged from the caller's perspective.
+    ReplaceTables {
+        tables: Vec<FibTableConfig>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+}
+
 /// Operator-visible state for one projected FIB row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FibRuntimeStatus {
@@ -125,9 +150,17 @@ pub enum FibRuntimeEventKind {
 pub struct FibRuntimeHandle {
     shutdown: CancellationToken,
     task: tokio::task::JoinHandle<()>,
+    cmd_tx: mpsc::Sender<FibRuntimeCommand>,
 }
 
 impl FibRuntimeHandle {
+    /// Cloneable sender for runtime control messages (hot-swap `[[fib_tables]]`).
+    /// Held by the SIGHUP reload path and gRPC FIB-table CRUD handlers.
+    #[must_use]
+    pub fn command_sender(&self) -> mpsc::Sender<FibRuntimeCommand> {
+        self.cmd_tx.clone()
+    }
+
     /// Request shutdown and wait for bounded cleanup of owned routes.
     pub async fn shutdown(self) {
         self.shutdown.cancel();
@@ -211,6 +244,7 @@ where
     F: UnicastFib + Send + 'static,
 {
     let task_shutdown = shutdown.clone();
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
     let task = tokio::spawn(async move {
         run_loop(
             config,
@@ -220,25 +254,33 @@ where
             metrics,
             status_tx,
             event_tx,
+            cmd_rx,
             task_shutdown,
         )
         .await;
     });
-    FibRuntimeHandle { shutdown, task }
+    FibRuntimeHandle {
+        shutdown,
+        task,
+        cmd_tx,
+    }
 }
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "actor loop owns resolved runtime channels and shutdown handles"
+    clippy::too_many_lines,
+    reason = "actor loop owns resolved runtime channels + shutdown handles; the \
+              command arm + reconcile calls push it just over the line limit"
 )]
 async fn run_loop<F>(
-    config: FibRuntimeConfig,
+    mut config: FibRuntimeConfig,
     rib_tx: mpsc::Sender<RibUpdate>,
     rib_query_tx: mpsc::Sender<RibUpdate>,
     mut fib: F,
     metrics: BgpMetrics,
     status_tx: watch::Sender<Vec<FibRuntimeStatus>>,
     event_tx: broadcast::Sender<FibRuntimeEvent>,
+    mut cmd_rx: mpsc::Receiver<FibRuntimeCommand>,
     shutdown: CancellationToken,
 ) where
     F: UnicastFib,
@@ -249,6 +291,7 @@ async fn run_loop<F>(
     interval.tick().await;
     let mut event_debounce = Box::pin(tokio::time::sleep(ROUTE_EVENT_DEBOUNCE));
     let mut route_event_dirty = false;
+    let mut cmd_open = true;
 
     let mut route_events = subscribe_route_events(&rib_tx).await;
     reconcile_once_with_events(
@@ -277,6 +320,72 @@ async fn run_loop<F>(
                 )
                 .await;
                 return;
+            }
+            // Runtime [[fib_tables]] hot-swap, prioritized right after shutdown
+            // (biased) so a SIGHUP / gRPC table change isn't starved behind a
+            // sustained route-event stream while a caller awaits the ack.
+            maybe_cmd = cmd_rx.recv(), if cmd_open => {
+                match maybe_cmd {
+                    Some(FibRuntimeCommand::ReplaceTables { tables, reply }) => {
+                        // Tentatively swap to the new desired set and reconcile.
+                        let previous = std::mem::replace(&mut config.tables, tables);
+                        let reached_apply = reconcile_once_with_events(
+                            &config,
+                            &rib_query_tx,
+                            &mut fib,
+                            &metrics,
+                            &status_tx,
+                            &event_tx,
+                            &mut owned,
+                            &shutdown,
+                        )
+                        .await;
+                        // Orphan guard: if any owned route is now OUTSIDE the new
+                        // table set, a withdraw for a removed table failed (its
+                        // route stays owned + in the kernel). Persisting the new
+                        // signature would make load_owned_state quarantine that
+                        // route on the next restart, stranding the kernel row.
+                        // (Per-route *install* failures within the new set are not
+                        // orphans — they stay owned + best-effort-retried.)
+                        let allowed: BTreeSet<FibTableKey> = config
+                            .tables
+                            .iter()
+                            .map(|t| FibTableKey {
+                                table_id: t.table_id,
+                                metric: t.metric,
+                            })
+                            .collect();
+                        let orphaned = owned
+                            .routes
+                            .keys()
+                            .any(|key| !allowed.contains(&key.table_key()));
+                        if reached_apply && !orphaned {
+                            // Force-persist so a route-neutral table-config edit
+                            // (max_routes / families / allowed_neighbors, or an
+                            // empty added table) still updates the on-disk table
+                            // signature — otherwise a later restart sees a config
+                            // mismatch and quarantines valid owned state.
+                            persist_owned_state(&config, &owned);
+                            let _ = reply.send(Ok(()));
+                        } else {
+                            // Revert and re-persist under the previous signature so
+                            // any still-owned routes stay adoptable on restart and
+                            // keep getting retried by the periodic reconcile.
+                            config.tables = previous;
+                            persist_owned_state(&config, &owned);
+                            let _ = reply.send(Err(if reached_apply {
+                                "FIB table change left owned routes outside the new \
+                                 set (a withdraw failed); reverted to keep them owned"
+                                    .to_string()
+                            } else {
+                                "FIB reconcile did not reach the apply phase (RIB \
+                                 query or kernel dump failed); table set unchanged"
+                                    .to_string()
+                            }));
+                        }
+                    }
+                    None => cmd_open = false,
+                }
             }
             _ = interval.tick() => {
                 reconcile_once_with_events(
@@ -445,6 +554,14 @@ async fn query_peer_groups(
     clippy::too_many_arguments,
     reason = "single reconcile pass needs snapshots, metrics, status, events, and cancellation"
 )]
+/// Returns `true` when the reconcile reached the apply phase (a plan was
+/// computed against a successful RIB query + kernel dump), `false` when it
+/// bailed before that — shutdown, RIB-candidate query failure, peer-group
+/// query failure, or kernel dump failure. The `ReplaceTables` command path
+/// uses this to decide whether the new desired table set was actually
+/// applied: per-route apply failures inside the plan are best-effort and do
+/// NOT flip this to `false` (they stay observable via statuses/metrics), but a
+/// pre-plan bail means the actor could not act on the new set.
 async fn reconcile_once_with_events<F>(
     config: &FibRuntimeConfig,
     rib_query_tx: &mpsc::Sender<RibUpdate>,
@@ -454,17 +571,28 @@ async fn reconcile_once_with_events<F>(
     event_tx: &broadcast::Sender<FibRuntimeEvent>,
     owned: &mut FibOwnedState,
     shutdown: &CancellationToken,
-) where
+) -> bool
+where
     F: UnicastFib,
 {
+    // Nothing to reconcile: no configured tables and no owned routes — the
+    // steady state after a N→0 delete. Skip the RIB query + kernel dump so a
+    // deleted-to-empty FIB actor stays genuinely idle on timer ticks and
+    // route events. (If routes are still owned, e.g. a withdraw is pending, we
+    // must still reconcile to flush them.)
+    if config.tables.is_empty() && owned.routes.is_empty() {
+        status_tx.send_replace(Vec::new());
+        return true;
+    }
+
     let candidates = tokio::select! {
         biased;
-        () = shutdown.cancelled() => return,
+        () = shutdown.cancelled() => return false,
         result = query_fib_install_candidates(rib_query_tx, max_install_paths(config), config.multipath_relax, config.link_bandwidth_weighted) => match result {
             Ok(candidates) => candidates,
             Err(reason) => {
                 status_tx.send_replace(failed_rib_query_statuses(owned, reason));
-                return;
+                return false;
             }
         },
     };
@@ -475,13 +603,13 @@ async fn reconcile_once_with_events<F>(
     {
         match tokio::select! {
             biased;
-            () = shutdown.cancelled() => return,
+            () = shutdown.cancelled() => return false,
             result = query_peer_groups(rib_query_tx) => result,
         } {
             Ok(groups) => groups,
             Err(reason) => {
                 status_tx.send_replace(failed_rib_query_statuses(owned, reason));
-                return;
+                return false;
             }
         }
     } else {
@@ -490,14 +618,14 @@ async fn reconcile_once_with_events<F>(
     let intent = project_fib_intent_with_peer_groups(&config.tables, &candidates, &peer_groups);
     let kernel = tokio::select! {
         biased;
-        () = shutdown.cancelled() => return,
+        () = shutdown.cancelled() => return false,
         result = fib.dump(&config.tables) => match result {
             Ok(snapshot) => snapshot,
             Err(e) => {
                 metrics.record_fib_kernel_failure("dump");
                 warn!(error = %e, "failed to dump configured FIB tables");
                 status_tx.send_replace(failed_dump_statuses(&intent, owned, &e));
-                return;
+                return false;
             }
         }
     };
@@ -513,6 +641,7 @@ async fn reconcile_once_with_events<F>(
     let mut statuses = build_statuses(config, &intent, owned, &plan, &outcome.failed_keys);
     statuses.extend(outcome.failures);
     status_tx.send_replace(statuses);
+    true
 }
 
 #[cfg(test)]
@@ -2508,6 +2637,125 @@ mod tests {
         )
         .await;
         status_rx.borrow().clone()
+    }
+
+    fn config_with(tables: Vec<FibTableConfig>) -> FibRuntimeConfig {
+        FibRuntimeConfig {
+            tables,
+            owned_state_path: None,
+            multipath_relax: false,
+            link_bandwidth_weighted: false,
+        }
+    }
+
+    // The next three tests model the runtime `ReplaceTables` path (SIGHUP /
+    // gRPC hot-swap): the actor swaps its desired table set and reconciles
+    // against persistent owned + kernel state. Two successive
+    // `reconcile_config_for_test` calls sharing `fib` + `owned` reproduce
+    // exactly what the run_loop command arm does after `config.tables = …`.
+
+    #[tokio::test]
+    async fn replace_tables_add_back_fills_new_table_routes() {
+        let routes = vec![route(v4(24), ip("198.51.100.1"))];
+        let mut fib = FakeFib::default();
+        let mut owned = FibOwnedState::default();
+
+        let one = config_with(vec![table("edge", 1000, 200, &["ipv4_unicast"])]);
+        reconcile_config_for_test(one, rib_with_routes(routes.clone()), &mut fib, &mut owned).await;
+        assert_eq!(fib.kernel.routes.len(), 1, "edge installed at startup");
+
+        let two = config_with(vec![
+            table("edge", 1000, 200, &["ipv4_unicast"]),
+            table("edge2", 1001, 200, &["ipv4_unicast"]),
+        ]);
+        reconcile_config_for_test(two, rib_with_routes(routes), &mut fib, &mut owned).await;
+        assert_eq!(fib.kernel.routes.len(), 2, "added table back-filled");
+    }
+
+    #[tokio::test]
+    async fn replace_tables_remove_withdraws_removed_table_routes() {
+        let routes = vec![route(v4(24), ip("198.51.100.1"))];
+        let mut fib = FakeFib::default();
+        let mut owned = FibOwnedState::default();
+
+        let two = config_with(vec![
+            table("edge", 1000, 200, &["ipv4_unicast"]),
+            table("edge2", 1001, 200, &["ipv4_unicast"]),
+        ]);
+        reconcile_config_for_test(two, rib_with_routes(routes.clone()), &mut fib, &mut owned).await;
+        assert_eq!(fib.kernel.routes.len(), 2);
+
+        let one = config_with(vec![table("edge", 1000, 200, &["ipv4_unicast"])]);
+        reconcile_config_for_test(one, rib_with_routes(routes), &mut fib, &mut owned).await;
+        assert_eq!(
+            fib.kernel.routes.len(),
+            1,
+            "removed table's routes withdrawn"
+        );
+        assert!(
+            fib.applied.iter().any(|op| matches!(op, FibOp::Remove(_))),
+            "a Remove op flushed the removed table"
+        );
+    }
+
+    #[tokio::test]
+    async fn replace_tables_to_empty_withdraws_all_routes() {
+        // N->0: the actor stays alive but must flush every owned route — no
+        // orphaned kernel rows (the no-orphan guarantee the immediate
+        // reconcile provides before the command ack returns).
+        let routes = vec![route(v4(24), ip("198.51.100.1"))];
+        let mut fib = FakeFib::default();
+        let mut owned = FibOwnedState::default();
+
+        let one = config_with(vec![table("edge", 1000, 200, &["ipv4_unicast"])]);
+        reconcile_config_for_test(one, rib_with_routes(routes.clone()), &mut fib, &mut owned).await;
+        assert_eq!(fib.kernel.routes.len(), 1);
+
+        reconcile_config_for_test(
+            config_with(vec![]),
+            rib_with_routes(routes),
+            &mut fib,
+            &mut owned,
+        )
+        .await;
+        assert_eq!(fib.kernel.routes.len(), 0, "N->0 withdraws all routes");
+        assert!(owned.routes.is_empty(), "owned state cleared — no orphans");
+    }
+
+    #[tokio::test]
+    async fn failed_withdraw_on_table_removal_keeps_route_owned_outside_set() {
+        // Regression for the orphan bug: removing a table whose kernel Remove
+        // fails leaves the route owned but outside the (now-empty) configured
+        // set. The ReplaceTables command guard detects exactly this — an owned
+        // route not covered by the new table set — and reverts rather than
+        // persisting a signature that would quarantine the still-present kernel
+        // row on the next restart.
+        let routes = vec![route(v4(24), ip("198.51.100.1"))];
+        let mut fib = FakeFib::default();
+        let mut owned = FibOwnedState::default();
+
+        let one = config_with(vec![table("edge", 1000, 200, &["ipv4_unicast"])]);
+        reconcile_config_for_test(one, rib_with_routes(routes.clone()), &mut fib, &mut owned).await;
+        assert_eq!(owned.routes.len(), 1);
+
+        // Remove the table, but force the kernel Remove to fail.
+        fib.fail_apply
+            .push("simulated kernel remove failure".to_string());
+        reconcile_config_for_test(
+            config_with(vec![]),
+            rib_with_routes(routes),
+            &mut fib,
+            &mut owned,
+        )
+        .await;
+
+        // The failed withdraw leaves the route owned with an empty configured
+        // set — the orphan-risk condition the command guard reverts on.
+        assert_eq!(
+            owned.routes.len(),
+            1,
+            "failed withdraw keeps the route owned"
+        );
     }
 
     #[test]
