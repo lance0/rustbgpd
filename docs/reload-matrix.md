@@ -102,12 +102,21 @@ each reconcile.
 
 ## `[[dynamic_neighbors]]`
 
+**Direct TOML edits are restart-required.** The live inbound-accept matcher is
+built once at startup and is **not** rebuilt on SIGHUP, so adding, removing, or
+editing a `[[dynamic_neighbors]]` block in the config file and reloading does
+not change which inbound connections are accepted. The live mutation path is
+runtime gRPC CRUD — `rustbgpctl dynamic-neighbor {add,delete}`
+(`AddDynamicNeighbor` / `DeleteDynamicNeighbor`), which updates the matcher
+immediately and persists the change back to the TOML. Restoring SIGHUP reconcile
+for direct TOML edits is tracked in #338.
+
 | Field | Class | Notes |
 |---|---|---|
-| `prefix` | live | The accept-prefix is consulted on every inbound TCP accept; updated on reconcile. |
-| `peer_group` | live | Inheritance resolves at the moment a passive session promotes to a managed peer. |
-| `remote_asn` | live | Validated against the OPEN's `my_as` at promotion. |
-| `description` | live | Metadata. |
+| `prefix` | restart-required (TOML); live via gRPC CRUD | Consulted on every inbound TCP accept. |
+| `peer_group` | restart-required (TOML); live via gRPC `add` | Inheritance resolves when a passive session promotes to a managed peer. |
+| `remote_asn` | restart-required (TOML); live via gRPC `add` | Validated against the OPEN's `my_as` at promotion. |
+| `description` | restart-required (TOML); live via gRPC `add` | Metadata. |
 
 ## `[global]`
 

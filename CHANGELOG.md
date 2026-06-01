@@ -15,6 +15,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`127.0.0.1`) instead of all host interfaces. The lab keeps legacy gRPC
   authorization for zero-setup `rustbgpctl` access, but the published gRPC and
   Prometheus ports now match the documented localhost-only access pattern.
+- Documentation: `reload-matrix.md` no longer claims `[[dynamic_neighbors]]`
+  TOML fields are SIGHUP-"live". Direct TOML edits to dynamic-neighbor ranges
+  are restart-required (the live accept-matcher is not rebuilt on reload);
+  runtime gRPC CRUD (`rustbgpctl dynamic-neighbor {add,delete}`) remains the
+  live path. Restoring SIGHUP reconcile for TOML edits is tracked in #338.
 
 ## [0.33.0] — 2026-06-01
 

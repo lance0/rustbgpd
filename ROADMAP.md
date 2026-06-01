@@ -414,6 +414,16 @@ branch is between features.
   `Result<_, String>`; keep that for one-status surfaces, but migrate to small
   typed enums when a caller needs to distinguish `ALREADY_EXISTS`, `NOT_FOUND`,
   `INVALID_ARGUMENT`, or similar API-visible classes.
+- [ ] **SIGHUP reconcile for `[[dynamic_neighbors]]` TOML edits (#338).** The
+  live accept-matcher (`PeerManager::dynamic_ranges`) is built once at startup
+  and not rebuilt on `ReplaceConfigSnapshot`, so direct TOML dynamic-neighbor
+  edits are silently restart-required even though `reload-matrix.md` had
+  classified them "live." Fix: rebuild the matcher on snapshot replace (mirror
+  the fib-table SIGHUP hot-apply), serialize against the runtime gRPC CRUD
+  persist the way #337 serialized fib-table mutations, and classify the change
+  in `reload.rs`'s diff. Runtime gRPC CRUD (`rustbgpctl dynamic-neighbor`) is
+  unaffected — it already mutates the live matcher. Doc claim corrected to
+  restart-required in the interim.
 - [ ] **`#[expect(clippy::too_many_lines)]` reduction.** ~30 suppressions
   workspace-wide (down from 94). Concentrated in long dispatchers (FSM action
   loop, EVPN reconcilers, encode/decode match arms). Some are honest match-heavy
