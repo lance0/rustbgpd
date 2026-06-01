@@ -988,14 +988,19 @@ impl RibManager {
                     add_path_send_max as usize
                 };
 
+                let needs_as_path_string =
+                    export_pol.is_some_and(PolicyChain::requires_as_path_string);
                 let mut next_rank: u32 = 1;
                 for cand in &filtered {
                     if (next_rank as usize) > limit {
                         break;
                     }
-                    let aspath_str = cand
-                        .as_path()
-                        .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
+                    let aspath_str = if needs_as_path_string {
+                        cand.as_path()
+                            .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
+                    } else {
+                        String::new()
+                    };
                     let aspath_len = cand.as_path().map_or(0, rustbgpd_wire::AsPath::len);
                     let ctx = RouteContext {
                         prefix,

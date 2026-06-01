@@ -63,6 +63,40 @@ fn aspath_regex_invalid_rejected() {
     assert!(AsPathRegex::new("[invalid").is_err());
 }
 
+#[test]
+fn chain_requires_as_path_string_only_for_regex() {
+    let regex_stmt = |pat: &str| {
+        let mut s = stmt(None, PolicyAction::Permit, vec![]);
+        s.match_as_path = Some(AsPathRegex::new(pat).unwrap());
+        s
+    };
+    let policy = |entries| Policy {
+        entries,
+        default_action: PolicyAction::Deny,
+    };
+
+    // No AS_PATH criteria -> the rendered string is never read.
+    assert!(
+        !PolicyChain::new(vec![policy(vec![stmt(None, PolicyAction::Permit, vec![])])])
+            .requires_as_path_string()
+    );
+
+    // AS_PATH *length* matching uses the cheap count, not the string.
+    let mut len_only = stmt(None, PolicyAction::Permit, vec![]);
+    len_only.match_as_path_length_ge = Some(2);
+    assert!(!PolicyChain::new(vec![policy(vec![len_only])]).requires_as_path_string());
+
+    // An AS_PATH *regex* anywhere in the chain requires the string.
+    assert!(PolicyChain::new(vec![policy(vec![regex_stmt("_65000_")])]).requires_as_path_string());
+    assert!(
+        PolicyChain::new(vec![
+            policy(vec![stmt(None, PolicyAction::Permit, vec![])]),
+            policy(vec![regex_stmt("^65100")]),
+        ])
+        .requires_as_path_string()
+    );
+}
+
 // -----------------------------------------------------------------------
 // AS_PATH regex in policy evaluation
 // -----------------------------------------------------------------------

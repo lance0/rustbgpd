@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 
+use rustbgpd_policy::{PolicyChain, RouteContext, evaluate_chain};
 use rustbgpd_rib::adj_rib_in::AdjRibIn;
 use rustbgpd_rib::adj_rib_out::AdjRibOut;
 use rustbgpd_rib::best_path::best_path_cmp;
@@ -55,6 +56,34 @@ fn make_route(prefix: Prefix, peer_idx: u32) -> Route {
         path_id: 0,
         validation_state: RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+    }
+}
+
+fn route_as_path(route: &Route) -> Option<&AsPath> {
+    route.attributes.iter().find_map(|a| match a {
+        PathAttribute::AsPath(p) => Some(p),
+        _ => None,
+    })
+}
+
+fn export_ctx(prefix: Prefix, aspath_str: &str) -> RouteContext<'_> {
+    RouteContext {
+        prefix,
+        next_hop: None,
+        extended_communities: &[],
+        communities: &[],
+        large_communities: &[],
+        as_path_str: aspath_str,
+        as_path_len: 0,
+        validation_state: RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        peer_address: None,
+        peer_asn: None,
+        peer_group: None,
+        route_type: None,
+        evpn_route_type: None,
+        local_pref: None,
+        med: None,
     }
 }
 
@@ -310,6 +339,47 @@ fn bench_route_churn(c: &mut Criterion) {
     group.finish();
 }
 
+// Export-path AS_PATH-string cost: eager (always render) vs lazy (skip when the
+// export chain has no AS_PATH regex). The delta is the per-route allocation the
+// lazy gate removes — the dominant RR/route-server fanout waste. Self-contained
+// (both arms in one run) since a git A/B can't reference the new predicate on a
+// pre-change baseline.
+fn bench_export_policy_eval(c: &mut Criterion) {
+    let mut group = c.benchmark_group("export_policy_eval");
+    let routes: Vec<Route> = generate_prefixes(10_000)
+        .iter()
+        .map(|p| make_route(*p, 1))
+        .collect();
+    // Empty chain permits all and requires_as_path_string() is false.
+    let chain = PolicyChain::new(vec![]);
+
+    group.bench_function("eager_as_path_string", |b| {
+        b.iter(|| {
+            for route in &routes {
+                let aspath_str =
+                    route_as_path(route).map_or_else(String::new, AsPath::to_aspath_string);
+                let _ = evaluate_chain(Some(&chain), &export_ctx(route.prefix, &aspath_str));
+            }
+        });
+    });
+
+    group.bench_function("lazy_as_path_string", |b| {
+        let needs_as_path_string = chain.requires_as_path_string();
+        b.iter(|| {
+            for route in &routes {
+                let aspath_str = if needs_as_path_string {
+                    route_as_path(route).map_or_else(String::new, AsPath::to_aspath_string)
+                } else {
+                    String::new()
+                };
+                let _ = evaluate_chain(Some(&chain), &export_ctx(route.prefix, &aspath_str));
+            }
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_best_path_cmp,
@@ -318,5 +388,6 @@ criterion_group!(
     bench_rib_pipeline,
     bench_bulk_initial_load,
     bench_route_churn,
+    bench_export_policy_eval,
 );
 criterion_main!(benches);

@@ -832,6 +832,21 @@ impl PolicyChain {
         Self { policies }
     }
 
+    /// Whether evaluating this chain needs the rendered `AS_PATH` string.
+    ///
+    /// True iff some statement carries an `AS_PATH` **regex** criterion
+    /// (`match_as_path`) — that is the only consumer of
+    /// `RouteContext.as_path_str`. `match_as_path_length_*` uses the cheap
+    /// `as_path_len` count instead, so it does not count here. Export callers
+    /// use this to skip building the string when no policy needs it; the string
+    /// is otherwise allocated per (route × peer) for nothing.
+    #[must_use]
+    pub fn requires_as_path_string(&self) -> bool {
+        self.policies
+            .iter()
+            .any(|np| np.policy.entries.iter().any(|e| e.match_as_path.is_some()))
+    }
+
     /// Evaluate a route against this chain of policies.
     #[must_use]
     pub fn evaluate(&self, ctx: &RouteContext<'_>) -> PolicyResult {

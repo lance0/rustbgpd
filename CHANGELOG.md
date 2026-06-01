@@ -9,6 +9,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Performance
+
+- **Lazy `AS_PATH` string on the export path.** The export-policy evaluator no
+  longer renders the `AS_PATH` to a string for every advertised route unless an
+  export policy actually matches on an `AS_PATH` regex. The rendered string's
+  only consumer is that regex check, but it was built per (route × peer) in the
+  distribution path — pure waste for the common RR / route-server case with no
+  `AS_PATH`-regex policy. A no-`AS_PATH` export chain now skips the allocation
+  entirely (~3.5× faster per-route export-policy evaluation in the
+  `export_policy_eval` bench). The import path is unchanged — there the string
+  also feeds event / OTC attribution.
+
 ### Fixed
 
 - Docker Compose quick-start ports now bind to host loopback
