@@ -164,7 +164,7 @@ impl PeerManager {
             ConfigEvent::DynamicNeighborDeleted { prefix, .. } => {
                 ("delete", "dynamic_neighbor", prefix.clone(), None)
             }
-            ConfigEvent::NeighborAdded(_) | ConfigEvent::NeighborDeleted(_) => {
+            ConfigEvent::NeighborAdded { .. } | ConfigEvent::NeighborDeleted { .. } => {
                 ("change", "neighbor", String::new(), None)
             }
             ConfigEvent::FibTablesReplaced { .. } => {

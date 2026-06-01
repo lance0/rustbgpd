@@ -386,7 +386,7 @@ pub(crate) fn fib_table_snapshot_to_config(snapshot: &FibTableSnapshot) -> FibTa
 )]
 pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<(), ConfigError> {
     match event {
-        ConfigEvent::NeighborAdded(cfg) => {
+        ConfigEvent::NeighborAdded { config: cfg, .. } => {
             if !config.neighbors.iter().any(|neighbor| {
                 neighbor.address == cfg.address.to_string() && neighbor.interface == cfg.interface
             }) {
@@ -461,7 +461,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                 });
             }
         }
-        ConfigEvent::NeighborDeleted(peer) => {
+        ConfigEvent::NeighborDeleted { peer, .. } => {
             let addr = peer.address.to_string();
             config.neighbors.retain(|neighbor| {
                 !(neighbor.address == addr && neighbor.interface == peer.interface)
@@ -801,43 +801,46 @@ remote_asn = 65002
 
         apply_config_event(
             &mut config,
-            &ConfigEvent::NeighborAdded(rustbgpd_api::peer_types::PeerManagerNeighborConfig {
-                address: "10.0.0.3".parse().unwrap(),
-                interface: None,
-                scope_id: None,
-                remote_asn: 65003,
-                description: "protected".to_string(),
-                peer_group: None,
-                hold_time: None,
-                max_prefixes: None,
-                md5_password: None,
-                tcp_ao: Some(rustbgpd_transport::TcpAoConfig {
-                    key: "ao-secret".to_string(),
-                    send_id: 7,
-                    recv_id: 9,
-                    algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
-                    preferred: true,
-                    deprecated: false,
-                }),
-                ttl_security: false,
-                families: vec![(rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast)],
-                graceful_restart: true,
-                gr_restart_time: 120,
-                gr_stale_routes_time: 360,
-                llgr_stale_time: 0,
-                gr_restart_eligible: false,
-                local_ipv6_nexthop: None,
-                route_reflector_client: false,
-                route_server_client: false,
-                remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
-                add_path_receive: false,
-                add_path_send: false,
-                add_path_send_max: 0,
-                local_role: None,
-                strict_role: false,
-                import_policy: None,
-                export_policy: None,
-            }),
+            &ConfigEvent::NeighborAdded {
+                config: rustbgpd_api::peer_types::PeerManagerNeighborConfig {
+                    address: "10.0.0.3".parse().unwrap(),
+                    interface: None,
+                    scope_id: None,
+                    remote_asn: 65003,
+                    description: "protected".to_string(),
+                    peer_group: None,
+                    hold_time: None,
+                    max_prefixes: None,
+                    md5_password: None,
+                    tcp_ao: Some(rustbgpd_transport::TcpAoConfig {
+                        key: "ao-secret".to_string(),
+                        send_id: 7,
+                        recv_id: 9,
+                        algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+                        preferred: true,
+                        deprecated: false,
+                    }),
+                    ttl_security: false,
+                    families: vec![(rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast)],
+                    graceful_restart: true,
+                    gr_restart_time: 120,
+                    gr_stale_routes_time: 360,
+                    llgr_stale_time: 0,
+                    gr_restart_eligible: false,
+                    local_ipv6_nexthop: None,
+                    route_reflector_client: false,
+                    route_server_client: false,
+                    remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
+                    add_path_receive: false,
+                    add_path_send: false,
+                    add_path_send_max: 0,
+                    local_role: None,
+                    strict_role: false,
+                    import_policy: None,
+                    export_policy: None,
+                },
+                ack: None,
+            },
         )
         .unwrap();
 

@@ -1160,7 +1160,9 @@ async fn delete_peer_removes() {
     })
     .await
     .unwrap();
-    assert!(reply_rx.await.unwrap().is_ok());
+    let removed = reply_rx.await.unwrap().unwrap();
+    assert_eq!(removed.address, addr);
+    assert_eq!(removed.remote_asn, 65002);
 
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(PeerManagerCommand::ListPeers { reply: reply_tx })
@@ -1270,10 +1272,12 @@ async fn delete_tcp_ao_peer_is_restart_required() {
     })
     .await
     .unwrap();
-    let err = reply_rx
-        .await
-        .unwrap()
-        .expect_err("TCP-AO peer deletion must be restart-required");
+    let result = reply_rx.await.unwrap();
+    assert!(
+        result.is_err(),
+        "TCP-AO peer deletion must be restart-required"
+    );
+    let err = result.err().unwrap();
     assert!(err.contains("requires restart"), "{err}");
 
     let (reply_tx, reply_rx) = oneshot::channel();
