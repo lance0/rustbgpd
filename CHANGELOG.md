@@ -11,6 +11,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Performance
 
+- **Short-circuit policy predicate evaluation.** `PolicyStatement::matches` now
+  evaluates match predicates cheapest-first with early returns instead of
+  computing every predicate eagerly, so a cheap match failure (prefix, route
+  type, RPKI / ASPA state, LOCAL_PREF / MED / AS_PATH-length bounds, next hop)
+  avoids the expensive AS_PATH regex and community-list scan entirely. Matching
+  is unchanged — still a logical AND of all configured predicates — only the
+  cost ordering. The new `policy_predicate_eval` bench shows a regex-bearing
+  statement dropping from ~80 ns to ~27 ns and a 64-community statement from
+  ~51 ns to ~27 ns per route-statement when a cheaper predicate fails first;
+  statements that genuinely reach those predicates are unaffected.
 - **Lazy `AS_PATH` string on the export path.** The export-policy evaluator no
   longer renders the `AS_PATH` to a string for every advertised route unless an
   export policy actually matches on an `AS_PATH` regex. The rendered string's

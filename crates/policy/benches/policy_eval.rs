@@ -2,10 +2,25 @@
 //!
 //! `evaluate_chain_with_attribution` runs once per NLRI on every inbound
 //! UPDATE (and per route on export distribution), so its cost scales the
-//! whole control plane under churn. This bench measures the dominant
-//! shape — a community-filter chain walked statement-by-statement — at a
-//! few chain lengths, plus the early-terminate (first-statement deny)
-//! contrast that bounds the best case.
+//! whole control plane under churn.
+//!
+//! Two benchmark groups:
+//!
+//! - `policy_chain_eval` — the dominant shape, a community-filter chain
+//!   walked statement-by-statement at a few chain lengths, plus the
+//!   early-terminate (first-statement deny) contrast that bounds the best
+//!   case. This is the cross-ref regression baseline (it should stay flat).
+//! - `policy_predicate_eval` — characterizes the cost-ordered short-circuit
+//!   matcher. The `regex_heavy` and `community_heavy` arms each pair an
+//!   `evaluated` case (the expensive predicate runs) against a `skipped`
+//!   case (a cheap predicate fails first, so the short-circuit skips it);
+//!   the delta is the expensive work the short-circuit avoids, and the
+//!   relative sizes tell us whether "regex last" is the right order.
+//!   `prefix_miss` is the skipped case for a prefix that does not contain
+//!   the route while carrying a community + AS_PATH regex that *would* match.
+//!   `prefix_heavy` walks a chain whose statements all run a full prefix
+//!   evaluation (mask + ge/le bounds) — its absolute cost gates whether a
+//!   build-time prefix-mask precompute is worth pursuing.
 //!
 //! Run: `cargo bench -p rustbgpd-policy --bench policy_eval`
 //! Compare across refs: `bench/compare-criterion.sh --package
@@ -16,7 +31,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use rustbgpd_policy::{
-    CommunityMatch, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteContext,
+    AsPathRegex, CommunityMatch, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteContext,
     RouteModifications, evaluate_chain_with_attribution,
 };
 use rustbgpd_wire::{AspaValidation, Ipv4Prefix, Prefix, RpkiValidation};
@@ -85,7 +100,7 @@ fn bench_policy_eval(c: &mut Criterion) {
     // Backing data for the borrowed RouteContext fields. Built once;
     // the timed closure only re-runs evaluation.
     let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 20, 30, 0), 24));
-    let communities: Vec<u32> = vec![(65001u32 << 16) | 100];
+    let communities: Vec<u32> = vec![(65001u32 << 16) | 0x0064];
     let as_path_str = "65001 65100 65200".to_string();
     let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
 
@@ -131,5 +146,218 @@ fn bench_policy_eval(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_policy_eval);
+/// A statement with every match field unset (matches any route, Permit).
+fn blank_permit() -> PolicyStatement {
+    PolicyStatement {
+        prefix: None,
+        ge: None,
+        le: None,
+        action: PolicyAction::Permit,
+        match_community: vec![],
+        match_as_path: None,
+        match_neighbor_set: None,
+        match_route_type: None,
+        match_evpn_route_type: None,
+        match_rpki_validation: None,
+        match_aspa_validation: None,
+        match_as_path_length_ge: None,
+        match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
+        match_next_hop: None,
+        modifications: RouteModifications::default(),
+    }
+}
+
+/// Wrap a single statement in a chain that otherwise defaults to Permit.
+fn single(statement: PolicyStatement) -> PolicyChain {
+    PolicyChain::new(vec![Policy {
+        entries: vec![statement],
+        default_action: PolicyAction::Permit,
+    }])
+}
+
+fn matching_prefix() -> Prefix {
+    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 20, 30, 0), 24))
+}
+
+/// A statement that matches the route's prefix and carries an AS_PATH regex
+/// that matches the route's AS_PATH. When `cheap_fail`, a Tier-1 scalar the
+/// route fails is added so the short-circuit returns before the regex.
+fn regex_stmt(cheap_fail: bool) -> PolicyStatement {
+    let mut s = blank_permit();
+    s.prefix = Some(matching_prefix());
+    s.ge = Some(24);
+    s.le = Some(32);
+    s.match_as_path = Some(AsPathRegex::new("_65100_").unwrap());
+    if cheap_fail {
+        s.match_local_pref_ge = Some(999); // route LOCAL_PREF is 100
+    }
+    s
+}
+
+/// A statement whose community criterion is present at the end of the route's
+/// (large) community set, so the scan does real work. `cheap_fail` adds a
+/// Tier-1 scalar miss so the short-circuit returns before the scan.
+fn community_stmt(cheap_fail: bool) -> PolicyStatement {
+    let mut s = blank_permit();
+    s.prefix = Some(matching_prefix());
+    s.ge = Some(24);
+    s.le = Some(32);
+    s.match_community = vec![CommunityMatch::Standard {
+        value: (65001u32 << 16) | 0x0040,
+    }];
+    if cheap_fail {
+        s.match_local_pref_ge = Some(999);
+    }
+    s
+}
+
+/// A statement on a network the route is not part of (prefix miss at Tier 2),
+/// carrying a community filter and an AS_PATH regex that *would* match if
+/// reached — so the measured cost is purely the skipped expensive work.
+fn prefix_miss_stmt() -> PolicyStatement {
+    let mut s = blank_permit();
+    s.prefix = Some(Prefix::V4(Ipv4Prefix::new(
+        Ipv4Addr::new(192, 168, 0, 0),
+        16,
+    )));
+    s.ge = Some(16);
+    s.le = Some(32);
+    s.match_community = vec![CommunityMatch::Standard {
+        value: (65001u32 << 16) | 0x0040,
+    }];
+    s.match_as_path = Some(AsPathRegex::new("_65100_").unwrap());
+    s
+}
+
+/// A chain whose statements match the route's network but exclude its length
+/// via ge/le, so the prefix matcher runs in full (mask + bounds) and returns
+/// false — the chain walks every statement doing prefix work only.
+fn prefix_heavy_chain(len: u32) -> PolicyChain {
+    let entries = (0..len)
+        .map(|_| {
+            let mut s = blank_permit();
+            s.prefix = Some(matching_prefix());
+            s.ge = Some(32);
+            s.le = Some(32);
+            s
+        })
+        .collect();
+    PolicyChain::new(vec![Policy {
+        entries,
+        default_action: PolicyAction::Permit,
+    }])
+}
+
+fn predicate_ctx<'a>(
+    prefix: Prefix,
+    communities: &'a [u32],
+    as_path_str: &'a str,
+    peer_ip: IpAddr,
+) -> RouteContext<'a> {
+    RouteContext {
+        prefix,
+        next_hop: Some(peer_ip),
+        extended_communities: &[],
+        communities,
+        large_communities: &[],
+        as_path_str,
+        as_path_len: 3,
+        validation_state: RpkiValidation::NotFound,
+        aspa_state: AspaValidation::Unknown,
+        peer_address: Some(peer_ip),
+        peer_asn: Some(65001),
+        peer_group: None,
+        route_type: None,
+        evpn_route_type: None,
+        local_pref: Some(100),
+        med: Some(50),
+    }
+}
+
+fn bench_policy_predicate_eval(c: &mut Criterion) {
+    let prefix = matching_prefix();
+    let one_community: Vec<u32> = vec![(65001u32 << 16) | 0x0064];
+    let many_communities: Vec<u32> = (1..=64u32).map(|i| (65001u32 << 16) | i).collect();
+    let as_path_str = "65001 65100 65200".to_string();
+    let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    let ctx_one = predicate_ctx(prefix, &one_community, &as_path_str, peer_ip);
+    let ctx_many = predicate_ctx(prefix, &many_communities, &as_path_str, peer_ip);
+
+    let regex_eval = single(regex_stmt(false));
+    let regex_skip = single(regex_stmt(true));
+    let community_eval = single(community_stmt(false));
+    let community_skip = single(community_stmt(true));
+    let prefix_miss = single(prefix_miss_stmt());
+    let prefix_heavy = prefix_heavy_chain(32);
+
+    let mut group = c.benchmark_group("policy_predicate_eval");
+
+    // regex_heavy: the AS_PATH regex runs vs. a cheap miss skipping it.
+    group.bench_function("regex_heavy/evaluated", |b| {
+        b.iter(|| {
+            let r =
+                evaluate_chain_with_attribution(Some(std::hint::black_box(&regex_eval)), &ctx_one);
+            std::hint::black_box(r);
+        });
+    });
+    group.bench_function("regex_heavy/skipped", |b| {
+        b.iter(|| {
+            let r =
+                evaluate_chain_with_attribution(Some(std::hint::black_box(&regex_skip)), &ctx_one);
+            std::hint::black_box(r);
+        });
+    });
+
+    // community_heavy: a full community scan runs vs. a cheap miss skipping it.
+    group.bench_function("community_heavy/evaluated", |b| {
+        b.iter(|| {
+            let r = evaluate_chain_with_attribution(
+                Some(std::hint::black_box(&community_eval)),
+                &ctx_many,
+            );
+            std::hint::black_box(r);
+        });
+    });
+    group.bench_function("community_heavy/skipped", |b| {
+        b.iter(|| {
+            let r = evaluate_chain_with_attribution(
+                Some(std::hint::black_box(&community_skip)),
+                &ctx_many,
+            );
+            std::hint::black_box(r);
+        });
+    });
+
+    // prefix_miss: prefix miss at Tier 2 skips a would-match community + regex.
+    group.bench_function("prefix_miss", |b| {
+        b.iter(|| {
+            let r = evaluate_chain_with_attribution(
+                Some(std::hint::black_box(&prefix_miss)),
+                &ctx_many,
+            );
+            std::hint::black_box(r);
+        });
+    });
+
+    // prefix_heavy: walk a chain doing full prefix evaluation per statement
+    // (gates whether a build-time prefix-mask precompute is worth pursuing).
+    group.bench_function("prefix_heavy/32", |b| {
+        b.iter(|| {
+            let r = evaluate_chain_with_attribution(
+                Some(std::hint::black_box(&prefix_heavy)),
+                &ctx_one,
+            );
+            std::hint::black_box(r);
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_policy_eval, bench_policy_predicate_eval);
 criterion_main!(benches);

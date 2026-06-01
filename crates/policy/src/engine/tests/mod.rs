@@ -14,6 +14,7 @@ mod modifications;
 mod peer_context;
 mod prefix;
 mod rpki;
+mod short_circuit;
 
 fn v4_prefix(addr: [u8; 4], len: u8) -> Prefix {
     Prefix::V4(Ipv4Prefix::new(
