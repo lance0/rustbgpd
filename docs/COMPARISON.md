@@ -2,9 +2,8 @@
 
 A feature comparison of open-source BGP daemon implementations.
 
-Last updated: 2026-06-01. See [CHANGELOG.md](../CHANGELOG.md) for
-per-release feature deltas and [evpn-enablement.md](evpn-enablement.md)
-for the EVPN gate ladder.
+See [CHANGELOG.md](../CHANGELOG.md) for per-release feature deltas and
+[evpn-enablement.md](evpn-enablement.md) for the EVPN gate ladder.
 
 This matrix is a broad operator-facing comparison. Cells marked `Partial` or
 with a footnote intentionally distinguish shipped subsets from a full routing-

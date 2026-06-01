@@ -1,6 +1,6 @@
 # rustbgpd vs GoBGP Feature Parity
 
-Last updated: 2026-05-31 (post-v0.32.0 main, including runtime dynamic-neighbor CRUD, runtime `[[fib_tables]]` CRUD, ADR-0073 import-policy explain, ADR-0072 durable event history with `SubscribeFromEvent` cursor replay + gNMI `Subscribe ON_CHANGE` v1 for neighbor session-state, ADR-0071 RFC 9234 BGP Roles + Only-to-Customer route-leak prevention, and PR #294 ASPA algorithm fidelity / §6.2 per-AFI/SAFI gate)
+For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 
 ## Address Families
 

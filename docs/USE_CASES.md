@@ -1,6 +1,6 @@
 # Use Cases
 
-Last updated: 2026-06-01 (post-v0.32.0 main).
+For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 
 Concrete deployment scenarios for rustbgpd, with architecture, example configs,
 and API workflows.

@@ -4,7 +4,6 @@ A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "driv
 
 **Author:** lance0
 **Status:** pre-1.0 hardening — P0/P1/P2/P2.5 complete, publishing prep
-**Last updated:** 2026-05-21
 
 ---
 

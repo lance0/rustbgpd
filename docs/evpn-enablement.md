@@ -1,6 +1,6 @@
 # EVPN Enablement Roadmap
 
-Last updated: 2026-05-21
+For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 
 Gate-by-gate plan for turning rustbgpd's Phase 1 EVPN Route Reflector into a
 production-ready control plane and, eventually, a VTEP-capable daemon.
