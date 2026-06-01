@@ -168,9 +168,12 @@ impl RibManager {
             return explain;
         }
 
-        let aspath_str = best
-            .as_path()
-            .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
+        let aspath_str = if export_pol.is_some_and(PolicyChain::requires_as_path_string) {
+            best.as_path()
+                .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
+        } else {
+            String::new()
+        };
         let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
         let ctx = RouteContext {
             prefix,
@@ -993,6 +996,7 @@ impl RibManager {
         candidates.sort_by(|a, b| best_path_cmp(a, b));
 
         // Walk candidates, evaluate export policy, assign path_ids 1..N
+        let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
         let mut next_rank: u32 = 1;
         let limit = if send_max == u32::MAX {
             usize::MAX
@@ -1005,9 +1009,13 @@ impl RibManager {
             }
 
             // Export policy check per-candidate
-            let aspath_str = candidate
-                .as_path()
-                .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
+            let aspath_str = if needs_as_path_string {
+                candidate
+                    .as_path()
+                    .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
+            } else {
+                String::new()
+            };
             let aspath_len = candidate.as_path().map_or(0, rustbgpd_wire::AsPath::len);
             let ctx = RouteContext {
                 prefix: *prefix,
@@ -1142,9 +1150,12 @@ impl RibManager {
         }
 
         // Export policy check
-        let aspath_str = best
-            .as_path()
-            .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
+        let aspath_str = if export_pol.is_some_and(PolicyChain::requires_as_path_string) {
+            best.as_path()
+                .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
+        } else {
+            String::new()
+        };
         let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
         let ctx = RouteContext {
             prefix: *prefix,
@@ -1247,6 +1258,7 @@ impl RibManager {
         fs_announce: &mut Vec<crate::route::FlowSpecRoute>,
         fs_withdraw: &mut Vec<FlowSpecRule>,
     ) {
+        let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
         for rule in rules {
             if let Some(best) = loc_rib.get_flowspec(rule) {
                 let fs_family = (best.afi, Safi::FlowSpec);
@@ -1294,9 +1306,12 @@ impl RibManager {
                 let prefix_for_policy = dest_prefix.unwrap_or(Prefix::V4(
                     rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
                 ));
-                let aspath_str = best
-                    .as_path()
-                    .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
+                let aspath_str = if needs_as_path_string {
+                    best.as_path()
+                        .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
+                } else {
+                    String::new()
+                };
                 let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
                 let ctx = RouteContext {
                     prefix: prefix_for_policy,
@@ -1361,6 +1376,7 @@ impl RibManager {
         evpn_withdraw: &mut Vec<rustbgpd_wire::EvpnRouteKey>,
         force: bool,
     ) {
+        let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
         let evpn_family = (Afi::L2Vpn, Safi::Evpn);
         let peer_supports_evpn = sendable.is_some_and(|f| f.contains(&evpn_family));
 
@@ -1437,9 +1453,12 @@ impl RibManager {
                 },
                 _ => Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)),
             };
-            let aspath_str = best
-                .as_path()
-                .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
+            let aspath_str = if needs_as_path_string {
+                best.as_path()
+                    .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
+            } else {
+                String::new()
+            };
             let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
             let ctx = RouteContext {
                 prefix: policy_prefix,
