@@ -644,8 +644,9 @@ pub enum PeerManagerCommand {
     DeleteDynamicRange {
         /// IP prefix range to remove (matched by effective prefix).
         prefix: String,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), DynamicRangeError>>,
+        /// Reply channel: on success carries the removed range so a failed
+        /// persist can roll the deletion back by re-adding the exact range.
+        reply: oneshot::Sender<Result<RemovedDynamicRange, DynamicRangeError>>,
     },
 }
 
@@ -656,6 +657,17 @@ pub struct DynamicNeighborInfo {
     pub peer_group: String,
     pub remote_asn: u32,
     pub description: String,
+}
+
+/// A dynamic neighbor range removed by `DeleteDynamicRange`, returned so the
+/// gRPC handler can roll the deletion back (re-add the exact range) if config
+/// persistence fails after the runtime mutation succeeded.
+#[derive(Debug, Clone)]
+pub struct RemovedDynamicRange {
+    pub prefix: String,
+    pub peer_group: String,
+    pub remote_asn: u32,
+    pub description: Option<String>,
 }
 
 /// Typed failure for runtime dynamic-range mutations so the gRPC layer maps
@@ -975,11 +987,18 @@ pub enum ConfigEvent {
         remote_asn: u32,
         /// Optional description.
         description: Option<String>,
+        /// Optional persistence acknowledgement. The dynamic-neighbor CRUD path
+        /// holds the shared runtime-config lock until this fires, so a SIGHUP
+        /// reload cannot read a stale TOML between the runtime mutation and the
+        /// on-disk commit.
+        ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     /// A dynamic neighbor range was successfully removed at runtime.
     DynamicNeighborDeleted {
         /// IP prefix range that was removed (matched by effective prefix).
         prefix: String,
+        /// Optional persistence acknowledgement (see `DynamicNeighborAdded`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     /// Create or replace a named policy definition.
     SetPolicy {

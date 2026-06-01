@@ -184,7 +184,8 @@ chain, etc.).
 
 | State | Where | When |
 |-------|-------|------|
-| Neighbor and dynamic-neighbor add/delete via gRPC | Config file (atomic write) | Queued after the peer manager accepts the mutation; queue saturation fails before runtime mutation |
+| Neighbor add/delete via gRPC | Config file (atomic write) | Queued after the peer manager accepts the mutation; queue saturation fails before runtime mutation |
+| Dynamic-neighbor add/delete via gRPC | Config file (atomic write) | Serialized with SIGHUP reload; the RPC waits for persistence acknowledgement and rolls the matcher back if the write is rejected |
 | GR restart marker | `<runtime_state_dir>/gr-restart.toml` | On coordinated shutdown |
 | General FIB owned-state | `<runtime_state_dir>/fib-owned.json` | After successful ADR-0061 FIB apply/drain |
 | MRT dump files | `[mrt] output_dir` | On periodic timer or `TriggerMrtDump` |
@@ -696,7 +697,9 @@ not enable BFD, the prefix must be valid, and the effective prefix must not
 duplicate an existing range. `delete` stops *future* accepts only —
 already-established dynamic peers keep running and drain when they next
 return to Idle. When the daemon was started with `--config`, changes persist
-to the TOML file (atomic write) and survive a restart.
+to the TOML file (atomic write) before the RPC returns and survive a restart.
+The live mutation path is serialized with SIGHUP reload, so a reload cannot
+drop an accepted-but-not-yet-persisted range.
 
 ### Soft reset (re-evaluate import policy)
 

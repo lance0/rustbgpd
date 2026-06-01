@@ -1,16 +1,17 @@
 //! gRPC neighbor service — add, remove, enable, disable, and list BGP peers.
 
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use rustbgpd_transport::RemovePrivateAs;
 use rustbgpd_wire::{Afi, BgpRole, Safi};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
 use crate::peer_types::{
     ConfigEvent, DynamicRangeError, PeerInfo, PeerKey, PeerManagerCommand,
-    PeerManagerNeighborConfig,
+    PeerManagerNeighborConfig, RemovedDynamicRange,
 };
 use crate::proto;
 use crate::server::{AccessMode, read_only_rejection};
@@ -57,10 +58,12 @@ pub struct NeighborService {
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     rib_tx: mpsc::Sender<RibUpdate>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
+    runtime_config_lock: Arc<Mutex<()>>,
 }
 
 impl NeighborService {
     /// Create a new neighbor service with the given channels.
+    #[cfg(test)]
     pub fn new(
         local_asn: u32,
         access_mode: AccessMode,
@@ -68,12 +71,35 @@ impl NeighborService {
         rib_tx: mpsc::Sender<RibUpdate>,
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
     ) -> Self {
+        Self::with_runtime_config_lock(
+            local_asn,
+            access_mode,
+            peer_mgr_tx,
+            rib_tx,
+            config_tx,
+            Arc::new(Mutex::new(())),
+        )
+    }
+
+    /// Create a new neighbor service using the shared runtime config lock.
+    ///
+    /// The daemon wires the same lock into SIGHUP reload and FIB-table CRUD so
+    /// persisted runtime mutations cannot interleave with a TOML reload.
+    pub fn with_runtime_config_lock(
+        local_asn: u32,
+        access_mode: AccessMode,
+        peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        config_tx: Option<mpsc::Sender<ConfigEvent>>,
+        runtime_config_lock: Arc<Mutex<()>>,
+    ) -> Self {
         Self {
             local_asn,
             access_mode,
             peer_mgr_tx,
             rib_tx,
             config_tx,
+            runtime_config_lock,
         }
     }
 }
@@ -136,6 +162,62 @@ fn dynamic_range_error_status(error: DynamicRangeError) -> Status {
         DynamicRangeError::NotFound(message) => Status::not_found(message),
         DynamicRangeError::Invalid(message) => Status::invalid_argument(message),
     }
+}
+
+async fn add_dynamic_range(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    prefix: String,
+    peer_group: String,
+    remote_asn: u32,
+    description: Option<String>,
+) -> Result<(), Status> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(PeerManagerCommand::AddDynamicRange {
+            prefix,
+            peer_group,
+            remote_asn,
+            description,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| Status::internal("peer manager unavailable"))?;
+
+    reply_rx
+        .await
+        .map_err(|_| Status::internal("peer manager dropped reply"))?
+        .map_err(dynamic_range_error_status)
+}
+
+async fn delete_dynamic_range(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    prefix: String,
+) -> Result<RemovedDynamicRange, Status> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(PeerManagerCommand::DeleteDynamicRange {
+            prefix,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| Status::internal("peer manager unavailable"))?;
+
+    reply_rx
+        .await
+        .map_err(|_| Status::internal("peer manager dropped reply"))?
+        .map_err(dynamic_range_error_status)
+}
+
+async fn persist_dynamic_neighbor_event(
+    permit: mpsc::OwnedPermit<ConfigEvent>,
+    build_event: impl FnOnce(oneshot::Sender<Result<(), String>>) -> ConfigEvent,
+) -> Result<(), Status> {
+    let (ack_tx, ack_rx) = oneshot::channel();
+    permit.send(build_event(ack_tx));
+    ack_rx
+        .await
+        .map_err(|_| Status::internal("config bridge dropped persistence acknowledgement"))?
+        .map_err(|error| Status::failed_precondition(format!("config persistence failed: {error}")))
 }
 
 pub(crate) fn family_to_string(afi: Afi, safi: Safi) -> String {
@@ -676,34 +758,43 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
 
         let peer_mgr_tx = self.peer_mgr_tx.clone();
+        let runtime_config_lock = self.runtime_config_lock.clone();
         let join = tokio::spawn(async move {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            peer_mgr_tx
-                .send(PeerManagerCommand::AddDynamicRange {
-                    prefix: range.prefix.clone(),
-                    peer_group: range.peer_group.clone(),
-                    remote_asn: range.remote_asn,
-                    description: description.clone(),
-                    reply: reply_tx,
-                })
-                .await
-                .map_err(|_| Status::internal("peer manager unavailable"))?;
-
-            reply_rx
-                .await
-                .map_err(|_| Status::internal("peer manager dropped reply"))?
-                .map_err(dynamic_range_error_status)?;
+            let _guard = runtime_config_lock.lock().await;
+            add_dynamic_range(
+                &peer_mgr_tx,
+                range.prefix.clone(),
+                range.peer_group.clone(),
+                range.remote_asn,
+                description.clone(),
+            )
+            .await?;
 
             // Persist only after successful runtime mutation. This runs inside
             // the spawned task so a canceled gRPC request cannot split runtime
-            // add from the queued config event.
-            if let Some(permit) = persist_permit {
-                permit.send(ConfigEvent::DynamicNeighborAdded {
-                    prefix: range.prefix,
-                    peer_group: range.peer_group,
-                    remote_asn: range.remote_asn,
-                    description,
-                });
+            // add from the queued config event. When persistence is configured,
+            // keep the shared runtime-config lock held until the TOML write is
+            // acknowledged; otherwise a concurrent SIGHUP could reload stale
+            // disk and drop the accepted runtime add from the rebuilt matcher.
+            if let Some(permit) = persist_permit
+                && let Err(error) = persist_dynamic_neighbor_event(permit, |ack| {
+                    ConfigEvent::DynamicNeighborAdded {
+                        prefix: range.prefix.clone(),
+                        peer_group: range.peer_group.clone(),
+                        remote_asn: range.remote_asn,
+                        description: description.clone(),
+                        ack: Some(ack),
+                    }
+                })
+                .await
+            {
+                let rollback = delete_dynamic_range(&peer_mgr_tx, range.prefix.clone()).await;
+                if let Err(rollback_error) = rollback {
+                    return Err(Status::internal(format!(
+                        "{error}; rollback of dynamic-neighbor add failed: {rollback_error}"
+                    )));
+                }
+                return Err(error);
             }
             Ok::<(), Status>(())
         });
@@ -728,25 +819,38 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
 
         let peer_mgr_tx = self.peer_mgr_tx.clone();
+        let runtime_config_lock = self.runtime_config_lock.clone();
         let join = tokio::spawn(async move {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            peer_mgr_tx
-                .send(PeerManagerCommand::DeleteDynamicRange {
-                    prefix: prefix.clone(),
-                    reply: reply_tx,
-                })
-                .await
-                .map_err(|_| Status::internal("peer manager unavailable"))?;
-
-            reply_rx
-                .await
-                .map_err(|_| Status::internal("peer manager dropped reply"))?
-                .map_err(dynamic_range_error_status)?;
+            let _guard = runtime_config_lock.lock().await;
+            let removed = delete_dynamic_range(&peer_mgr_tx, prefix.clone()).await?;
 
             // Queue persistence inside the spawned task so cancellation after
-            // runtime delete cannot leave disk with the removed range.
-            if let Some(permit) = persist_permit {
-                permit.send(ConfigEvent::DynamicNeighborDeleted { prefix });
+            // runtime delete cannot leave disk with the removed range. Hold the
+            // shared runtime-config lock until the write is acknowledged so
+            // SIGHUP cannot rebuild from stale TOML in the middle.
+            if let Some(permit) = persist_permit
+                && let Err(error) = persist_dynamic_neighbor_event(permit, |ack| {
+                    ConfigEvent::DynamicNeighborDeleted {
+                        prefix: prefix.clone(),
+                        ack: Some(ack),
+                    }
+                })
+                .await
+            {
+                let rollback = add_dynamic_range(
+                    &peer_mgr_tx,
+                    removed.prefix,
+                    removed.peer_group,
+                    removed.remote_asn,
+                    removed.description,
+                )
+                .await;
+                if let Err(rollback_error) = rollback {
+                    return Err(Status::internal(format!(
+                        "{error}; rollback of dynamic-neighbor delete failed: {rollback_error}"
+                    )));
+                }
+                return Err(error);
             }
             Ok::<(), Status>(())
         });
@@ -981,7 +1085,7 @@ mod tests {
             Some(config_tx),
         );
 
-        let call = tokio::spawn(async move {
+        let mut call = tokio::spawn(async move {
             svc.add_dynamic_neighbor(Request::new(proto::AddDynamicNeighborRequest {
                 range: Some(proto::DynamicNeighborRange {
                     prefix: "192.0.2.0/24".to_string(),
@@ -1010,7 +1114,6 @@ mod tests {
             }
             _ => panic!("expected AddDynamicRange"),
         }
-        call.await.unwrap();
 
         match config_rx.recv().await.unwrap() {
             ConfigEvent::DynamicNeighborAdded {
@@ -1018,14 +1121,83 @@ mod tests {
                 peer_group,
                 remote_asn,
                 description,
+                ack,
             } => {
                 assert_eq!(prefix, "192.0.2.0/24");
                 assert_eq!(peer_group, "fabric");
                 assert_eq!(remote_asn, 65002);
                 assert_eq!(description.as_deref(), Some("lab range"));
+                let ack = ack.unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(20), &mut call)
+                        .await
+                        .is_err(),
+                    "call must wait for config persistence acknowledgement"
+                );
+                ack.send(Ok(())).unwrap();
             }
             _ => panic!("expected DynamicNeighborAdded"),
         }
+        call.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn add_dynamic_neighbor_rolls_back_when_persist_fails() {
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (config_tx, mut config_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(
+            65001,
+            AccessMode::ReadWrite,
+            peer_mgr_tx,
+            rib_tx,
+            Some(config_tx),
+        );
+
+        let call = tokio::spawn(async move {
+            svc.add_dynamic_neighbor(Request::new(proto::AddDynamicNeighborRequest {
+                range: Some(proto::DynamicNeighborRange {
+                    prefix: "192.0.2.0/24".to_string(),
+                    peer_group: "fabric".to_string(),
+                    remote_asn: 65002,
+                    description: "lab range".to_string(),
+                }),
+            }))
+            .await
+        });
+
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::AddDynamicRange { reply, .. } => {
+                reply.send(Ok(())).unwrap();
+            }
+            _ => panic!("expected AddDynamicRange"),
+        }
+        match config_rx.recv().await.unwrap() {
+            ConfigEvent::DynamicNeighborAdded { ack, .. } => {
+                ack.unwrap()
+                    .send(Err("disk full".to_string()))
+                    .expect("send persist failure");
+            }
+            _ => panic!("expected DynamicNeighborAdded"),
+        }
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::DeleteDynamicRange { prefix, reply } => {
+                assert_eq!(prefix, "192.0.2.0/24");
+                reply
+                    .send(Ok(RemovedDynamicRange {
+                        prefix,
+                        peer_group: "fabric".to_string(),
+                        remote_asn: 65002,
+                        description: Some("lab range".to_string()),
+                    }))
+                    .unwrap();
+            }
+            _ => panic!("expected DeleteDynamicRange rollback"),
+        }
+
+        let err = call.await.unwrap().unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(err.message().contains("config persistence failed"));
     }
 
     #[tokio::test]
@@ -1074,7 +1246,7 @@ mod tests {
             Some(config_tx),
         );
 
-        let call = tokio::spawn(async move {
+        let mut call = tokio::spawn(async move {
             svc.delete_dynamic_neighbor(Request::new(proto::DeleteDynamicNeighborRequest {
                 prefix: "192.0.2.0/24".to_string(),
             }))
@@ -1085,18 +1257,96 @@ mod tests {
         match peer_mgr_rx.recv().await.unwrap() {
             PeerManagerCommand::DeleteDynamicRange { prefix, reply } => {
                 assert_eq!(prefix, "192.0.2.0/24");
-                reply.send(Ok(())).unwrap();
+                reply
+                    .send(Ok(RemovedDynamicRange {
+                        prefix,
+                        peer_group: "fabric".to_string(),
+                        remote_asn: 65002,
+                        description: Some("lab range".to_string()),
+                    }))
+                    .unwrap();
             }
             _ => panic!("expected DeleteDynamicRange"),
         }
-        call.await.unwrap();
 
         match config_rx.recv().await.unwrap() {
-            ConfigEvent::DynamicNeighborDeleted { prefix } => {
+            ConfigEvent::DynamicNeighborDeleted { prefix, ack } => {
                 assert_eq!(prefix, "192.0.2.0/24");
+                let ack = ack.unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(20), &mut call)
+                        .await
+                        .is_err(),
+                    "call must wait for config persistence acknowledgement"
+                );
+                ack.send(Ok(())).unwrap();
             }
             _ => panic!("expected DynamicNeighborDeleted"),
         }
+        call.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_dynamic_neighbor_rolls_back_when_persist_fails() {
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (config_tx, mut config_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(
+            65001,
+            AccessMode::ReadWrite,
+            peer_mgr_tx,
+            rib_tx,
+            Some(config_tx),
+        );
+
+        let call = tokio::spawn(async move {
+            svc.delete_dynamic_neighbor(Request::new(proto::DeleteDynamicNeighborRequest {
+                prefix: "192.0.2.0/24".to_string(),
+            }))
+            .await
+        });
+
+        let removed = RemovedDynamicRange {
+            prefix: "192.0.2.0/24".to_string(),
+            peer_group: "fabric".to_string(),
+            remote_asn: 65002,
+            description: Some("lab range".to_string()),
+        };
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::DeleteDynamicRange { prefix, reply } => {
+                assert_eq!(prefix, "192.0.2.0/24");
+                reply.send(Ok(removed.clone())).unwrap();
+            }
+            _ => panic!("expected DeleteDynamicRange"),
+        }
+        match config_rx.recv().await.unwrap() {
+            ConfigEvent::DynamicNeighborDeleted { ack, .. } => {
+                ack.unwrap()
+                    .send(Err("disk full".to_string()))
+                    .expect("send persist failure");
+            }
+            _ => panic!("expected DynamicNeighborDeleted"),
+        }
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::AddDynamicRange {
+                prefix,
+                peer_group,
+                remote_asn,
+                description,
+                reply,
+            } => {
+                assert_eq!(prefix, removed.prefix);
+                assert_eq!(peer_group, removed.peer_group);
+                assert_eq!(remote_asn, removed.remote_asn);
+                assert_eq!(description, removed.description);
+                reply.send(Ok(())).unwrap();
+            }
+            _ => panic!("expected AddDynamicRange rollback"),
+        }
+
+        let err = call.await.unwrap().unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(err.message().contains("config persistence failed"));
     }
 
     #[tokio::test]

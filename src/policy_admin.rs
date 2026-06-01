@@ -472,6 +472,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
             peer_group,
             remote_asn,
             description,
+            ..
         } => {
             // Fail fast on an unparseable prefix rather than mutating the
             // snapshot and tripping `validate()` later — the config-event loop
@@ -497,7 +498,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     });
             }
         }
-        ConfigEvent::DynamicNeighborDeleted { prefix } => {
+        ConfigEvent::DynamicNeighborDeleted { prefix, .. } => {
             let Some(key) = crate::config::effective_prefix_str(prefix) else {
                 return Err(ConfigError::InvalidDynamicNeighbor {
                     reason: format!("invalid dynamic neighbor prefix {prefix:?}"),

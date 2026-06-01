@@ -128,6 +128,15 @@ fn fib_table_snapshots(tables: &[config::FibTableConfig]) -> Vec<FibTableSnapsho
         .collect()
 }
 
+fn take_config_event_ack(event: &mut ConfigEvent) -> Option<oneshot::Sender<Result<(), String>>> {
+    match event {
+        ConfigEvent::FibTablesReplaced { ack, .. }
+        | ConfigEvent::DynamicNeighborAdded { ack, .. }
+        | ConfigEvent::DynamicNeighborDeleted { ack, .. } => ack.take(),
+        _ => None,
+    }
+}
+
 async fn set_pm_fib_tables_snapshot(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     tables: &[config::FibTableConfig],
@@ -208,27 +217,23 @@ pub(crate) async fn run_config_bridge(
             event = event_rx.recv(), if event_rx_open => {
                 match event {
                     Some(mut event) => {
-                        let fib_tables_ack = match &mut event {
-                            ConfigEvent::FibTablesReplaced { ack, .. } => ack.take(),
-                            _ => None,
-                        };
+                        let event_ack = take_config_event_ack(&mut event);
                         // Apply to a candidate clone and commit only on success,
                         // so a validation failure can't leave the live snapshot
                         // partially mutated (poisoned) for the next event.
                         let mut candidate = current_config.clone();
                         if let Err(error) = apply_config_event(&mut candidate, &event) {
                             error!(error = %error, "failed to apply config event before persistence");
-                            if let Some(ack) = fib_tables_ack {
+                            if let Some(ack) = event_ack {
                                 let _ = ack.send(Err(error.to_string()));
                             }
                             continue;
                         }
-                        current_config = candidate;
-                        if let Some(ack) = fib_tables_ack {
+                        if let Some(ack) = event_ack {
                             let (persist_ack_tx, persist_ack_rx) = oneshot::channel();
                             if mutation_tx
                                 .send(ConfigMutation::ReplaceConfigAck(
-                                    Box::new(current_config.clone()),
+                                    Box::new(candidate.clone()),
                                     persist_ack_tx,
                                 ))
                                 .await
@@ -240,13 +245,19 @@ pub(crate) async fn run_config_bridge(
                             let result = persist_ack_rx.await.map_err(|_| {
                                 "config persister dropped persistence acknowledgement".to_string()
                             }).and_then(|result| result);
+                            if result.is_ok() {
+                                current_config = candidate;
+                            }
                             let _ = ack.send(result);
-                        } else if mutation_tx
-                            .send(ConfigMutation::ReplaceConfig(Box::new(current_config.clone())))
-                            .await
-                            .is_err()
-                        {
-                            break;
+                        } else {
+                            current_config = candidate;
+                            if mutation_tx
+                                .send(ConfigMutation::ReplaceConfig(Box::new(current_config.clone())))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
                         }
                     }
                     None => event_rx_open = false,
@@ -537,11 +548,13 @@ pub(crate) async fn reload_config(
     // letting an explain-only reload report "no changes detected".
     let explain_changed = current.policy.explain != new_config.policy.explain;
     let fib_tables_changed = new_config.fib_tables != current.fib_tables;
+    let dynamic_neighbors_changed = new_config.dynamic_neighbors != current.dynamic_neighbors;
     if !policy_diff.has_changes()
         && peer_groups_unchanged
         && neighbors_unchanged
         && !honor_graceful_shutdown_changed
         && !honor_blackhole_changed
+        && !dynamic_neighbors_changed
         && !fib_tables_changed
     {
         if explain_changed {
@@ -3386,6 +3399,155 @@ peer_group = "secure"
             Ok(()),
             "FIB event ack should reflect the persister result"
         );
+
+        drop(replace_tx);
+        drop(event_tx);
+        timeout(Duration::from_secs(1), bridge)
+            .await
+            .expect("bridge should exit after both inputs close")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn config_bridge_acks_dynamic_neighbor_event_after_persister_ack() {
+        use rustbgpd_api::peer_types::ConfigEvent;
+        use tokio::sync::oneshot::error::TryRecvError;
+        use tokio::time::{Duration, timeout};
+
+        let stale_path = unique_temp_path("bridge-dynamic-ack-stale");
+        let stale_toml = format!(
+            r"
+{}
+
+[peer_groups.fabric]
+",
+            baseline_toml()
+        );
+        std::fs::write(&stale_path, stale_toml).unwrap();
+        let stale = Config::load_with_diagnostics(stale_path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&stale_path).ok();
+
+        let (event_tx, event_rx) = mpsc::channel::<ConfigEvent>(8);
+        let (replace_tx, replace_rx) = mpsc::unbounded_channel::<Box<Config>>();
+        let (mutation_tx, mut mutation_rx) = mpsc::channel::<ConfigMutation>(8);
+        let bridge = tokio::spawn(run_config_bridge(event_rx, replace_rx, mutation_tx, stale));
+
+        let (ack_tx, mut ack_rx) = oneshot::channel();
+        event_tx
+            .send(ConfigEvent::DynamicNeighborAdded {
+                prefix: "192.0.2.0/24".to_string(),
+                peer_group: "fabric".to_string(),
+                remote_asn: 65002,
+                description: Some("lab range".to_string()),
+                ack: Some(ack_tx),
+            })
+            .await
+            .unwrap();
+
+        let event_msg = timeout(Duration::from_secs(1), mutation_rx.recv())
+            .await
+            .expect("bridge should forward dynamic-neighbor event to persister")
+            .expect("event forwarded");
+        let ConfigMutation::ReplaceConfigAck(received_event, persist_ack) = event_msg else {
+            panic!("dynamic-neighbor events with an ack must request an acknowledged persist");
+        };
+        assert_eq!(received_event.dynamic_neighbors.len(), 1);
+        assert!(
+            matches!(ack_rx.try_recv(), Err(TryRecvError::Empty),),
+            "bridge must not acknowledge the dynamic-neighbor event before the persister replies"
+        );
+        persist_ack.send(Ok(())).unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(1), ack_rx)
+                .await
+                .unwrap()
+                .unwrap(),
+            Ok(()),
+            "dynamic-neighbor event ack should reflect the persister result"
+        );
+
+        drop(replace_tx);
+        drop(event_tx);
+        timeout(Duration::from_secs(1), bridge)
+            .await
+            .expect("bridge should exit after both inputs close")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn config_bridge_does_not_advance_snapshot_on_acked_persist_failure() {
+        use rustbgpd_api::peer_types::ConfigEvent;
+        use tokio::time::{Duration, timeout};
+
+        let stale_path = unique_temp_path("bridge-dynamic-ack-failure");
+        let stale_toml = format!(
+            r"
+{}
+
+[peer_groups.fabric]
+",
+            baseline_toml()
+        );
+        std::fs::write(&stale_path, stale_toml).unwrap();
+        let stale = Config::load_with_diagnostics(stale_path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&stale_path).ok();
+
+        let (event_tx, event_rx) = mpsc::channel::<ConfigEvent>(8);
+        let (replace_tx, replace_rx) = mpsc::unbounded_channel::<Box<Config>>();
+        let (mutation_tx, mut mutation_rx) = mpsc::channel::<ConfigMutation>(8);
+        let bridge = tokio::spawn(run_config_bridge(event_rx, replace_rx, mutation_tx, stale));
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        event_tx
+            .send(ConfigEvent::DynamicNeighborAdded {
+                prefix: "192.0.2.0/24".to_string(),
+                peer_group: "fabric".to_string(),
+                remote_asn: 65002,
+                description: None,
+                ack: Some(ack_tx),
+            })
+            .await
+            .unwrap();
+        let first_msg = timeout(Duration::from_secs(1), mutation_rx.recv())
+            .await
+            .expect("bridge should forward acked event")
+            .expect("event forwarded");
+        let ConfigMutation::ReplaceConfigAck(first_candidate, persist_ack) = first_msg else {
+            panic!("acked event must request acknowledged persist");
+        };
+        assert_eq!(first_candidate.dynamic_neighbors.len(), 1);
+        persist_ack.send(Err("disk full".to_string())).unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(1), ack_rx)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err("disk full".to_string())
+        );
+
+        event_tx
+            .send(ConfigEvent::DynamicNeighborAdded {
+                prefix: "192.0.3.0/24".to_string(),
+                peer_group: "fabric".to_string(),
+                remote_asn: 65003,
+                description: None,
+                ack: None,
+            })
+            .await
+            .unwrap();
+        let second_msg = timeout(Duration::from_secs(1), mutation_rx.recv())
+            .await
+            .expect("bridge should forward second event")
+            .expect("event forwarded");
+        let ConfigMutation::ReplaceConfig(second_candidate) = second_msg else {
+            panic!("non-acked event should request normal persist");
+        };
+        assert_eq!(
+            second_candidate.dynamic_neighbors.len(),
+            1,
+            "failed acked event must not remain in bridge snapshot"
+        );
+        assert_eq!(second_candidate.dynamic_neighbors[0].prefix, "192.0.3.0/24");
 
         drop(replace_tx);
         drop(event_tx);

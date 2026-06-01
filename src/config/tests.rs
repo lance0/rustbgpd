@@ -6436,6 +6436,48 @@ metric = 200
 }
 
 #[test]
+fn dynamic_neighbors_diff_marks_reload_applied() {
+    let old_toml = format!(
+        r#"
+{}
+
+[peer_groups.ix-members]
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix-members"
+"#,
+        valid_toml()
+    );
+    let new_toml = format!(
+        r#"
+{}
+
+[peer_groups.ix-members]
+
+[[dynamic_neighbors]]
+prefix = "192.0.3.0/24"
+peer_group = "ix-members"
+"#,
+        valid_toml()
+    );
+    let old = parse(&old_toml).unwrap();
+    let new = parse(&new_toml).unwrap();
+    let diff = diff_config(&old, &new);
+    let json = config_diff_json_value(&diff);
+    let text = format_config_diff(&diff);
+
+    assert!(diff.dynamic_neighbors_changed);
+    assert!(diff.has_reload_applied_changes());
+    assert!(!diff.has_restart_required_changes());
+    assert_eq!(
+        json["reload_applied"]["dynamic_neighbors_changed"],
+        serde_json::Value::Bool(true)
+    );
+    assert!(text.contains("[[dynamic_neighbors]] matcher rebuilt"));
+}
+
+#[test]
 fn bfd_rejects_ipv6_link_local_neighbor() {
     // v1 ships IPv4 + IPv6 global only; link-local BFD is deferred to v1.1
     // even though BGP link-local peers now carry interface scope.

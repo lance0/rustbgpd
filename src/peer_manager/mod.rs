@@ -821,7 +821,14 @@ impl PeerManager {
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::DeleteDynamicRange { prefix, reply } => {
-                            let result = self.delete_dynamic_range(&prefix);
+                            let result = self.delete_dynamic_range(&prefix).map(|cfg| {
+                                rustbgpd_api::peer_types::RemovedDynamicRange {
+                                    prefix: cfg.prefix,
+                                    peer_group: cfg.peer_group,
+                                    remote_asn: cfg.remote_asn,
+                                    description: cfg.description,
+                                }
+                            });
                             let _ = reply.send(result);
                         }
                             PeerManagerCommand::Shutdown => {
@@ -844,6 +851,13 @@ impl PeerManager {
                 internal = self.internal_rx.recv() => {
                     if let Some(InternalCommand::ReplaceConfigSnapshot { config, ack }) = internal {
                         self.current_config = *config;
+                        // #338: rebuild the live dynamic-neighbor accept-matcher so
+                        // [[dynamic_neighbors]] edits applied via SIGHUP take effect
+                        // (previously only `current_config` was swapped). The shared
+                        // runtime-config lock guarantees the reloaded config already
+                        // reflects any accepted runtime CRUD, so a plain re-parse is
+                        // correct — no merge/provenance needed.
+                        self.dynamic_ranges = Self::parse_dynamic_ranges(&self.current_config);
                         if let Some(ack) = ack {
                             let _ = ack.send(());
                         }

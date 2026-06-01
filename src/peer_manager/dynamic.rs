@@ -195,10 +195,32 @@ impl PeerManager {
     /// the right entry). Does **not** tear down already-established dynamic
     /// peers — they keep running and auto-remove when they next hit Idle; the
     /// removal only stops *future* accepts.
-    pub(super) fn delete_dynamic_range(&mut self, prefix: &str) -> Result<(), DynamicRangeError> {
+    /// Returns the removed range's config so a failed persist can roll the
+    /// mutation back by re-adding the exact range.
+    pub(super) fn delete_dynamic_range(
+        &mut self,
+        prefix: &str,
+    ) -> Result<crate::config::DynamicNeighborConfig, DynamicRangeError> {
         let (addr, prefix_len) =
             parse_dynamic_prefix(prefix).map_err(DynamicRangeError::Invalid)?;
         let key = crate::config::effective_prefix(addr, prefix_len);
+
+        // Snapshot the config entry being removed (owned) before mutating, so
+        // rollback can restore the exact range. dynamic_ranges and
+        // current_config.dynamic_neighbors are kept in lockstep by add/delete,
+        // so this is Some whenever the matcher held the range.
+        let removed = self
+            .current_config
+            .dynamic_neighbors
+            .iter()
+            .find(|dn| {
+                parse_dynamic_prefix(&dn.prefix)
+                    .is_ok_and(|(a, l)| crate::config::effective_prefix(a, l) == key)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                DynamicRangeError::NotFound(format!("dynamic range {}/{} not found", key.0, key.1))
+            })?;
 
         let before = self.dynamic_ranges.len();
         self.dynamic_ranges
@@ -214,7 +236,7 @@ impl PeerManager {
             parse_dynamic_prefix(&dn.prefix)
                 .map_or(true, |(a, l)| crate::config::effective_prefix(a, l) != key)
         });
-        Ok(())
+        Ok(removed)
     }
 
     /// Snapshot any unfired hot-apply / Route Refresh intent for a peer

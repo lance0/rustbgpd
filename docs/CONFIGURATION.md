@@ -739,11 +739,12 @@ rustbgpctl dynamic-neighbor delete 10.0.0.0/24
 - Backed by `NeighborService` (`AddDynamicNeighbor` / `DeleteDynamicNeighbor` /
   `ListDynamicNeighbors`); add/delete are tier `mutating`.
 - When the daemon was started with `--config`, runtime changes reserve config
-  persistence capacity before mutating and then queue an atomic TOML write after
-  the peer manager accepts the change — the same posture as `AddNeighbor`.
-  Without `--config`, changes are in-memory only. If the asynchronous write
-  later fails, the daemon logs the error and the runtime change remains active
-  until the next restart / reload.
+  persistence capacity before mutating and then wait for the atomic TOML write
+  to be acknowledged after the peer manager accepts the change. Runtime
+  dynamic-neighbor CRUD is serialized with SIGHUP reload, so a reload sees
+  either the pre-mutation TOML or the committed post-mutation TOML. If the write
+  is rejected after the runtime mutation, the matcher is rolled back and the RPC
+  reports failure. Without `--config`, changes are in-memory only.
 - **Delete stops *future* accepts only.** Already-established dynamic peers from
   a removed range keep running and drain naturally when they next return to
   Idle; delete never tears down a live session.
@@ -2211,12 +2212,13 @@ live through `WatchEvents`, and are also replayable through
 ## Config Persistence
 
 Neighbor mutations made through the gRPC API (`AddNeighbor`, `DeleteNeighbor`)
-and dynamic-neighbor range mutations (`AddDynamicNeighbor`,
-`DeleteDynamicNeighbor`) reserve config-persistence queue capacity before
-mutating runtime state, then queue an atomic config-file write (temp file +
-rename) after the peer manager accepts the change. If the async write later
-fails, the daemon logs the error and the runtime change remains active until the
-next restart / reload.
+reserve config-persistence queue capacity before mutating runtime state, then
+queue an atomic config-file write (temp file + rename) after the peer manager
+accepts the change. Dynamic-neighbor range mutations (`AddDynamicNeighbor`,
+`DeleteDynamicNeighbor`) also reserve capacity first, then wait for the
+config-file write acknowledgement while holding the runtime-config coordinator
+lock shared with SIGHUP. If the dynamic-neighbor write is rejected after runtime
+apply, the matcher is rolled back and the RPC reports failure.
 
 ### SIGHUP Reload
 

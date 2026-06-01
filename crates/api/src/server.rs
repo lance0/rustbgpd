@@ -113,6 +113,11 @@ pub struct ServeConfig {
     /// (they return `FAILED_PRECONDITION`). Wired in `main.rs` where the
     /// FIB actor sender, validator, and config persistence are visible.
     pub fib_table_control: Option<crate::rib_service::FibTableControlFn>,
+    /// Shared serialization lock for persisted runtime config mutations and
+    /// SIGHUP reload. The daemon wires this to dynamic-neighbor CRUD and
+    /// FIB-table CRUD so accepted runtime mutations cannot be clobbered by a
+    /// reload that read stale TOML before the persistence acknowledgement.
+    pub runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
     /// Live ADR-0061 per-route FIB dataplane event source. This is
     /// separate from the aggregate dataplane poller so route events
     /// are not delayed by snapshot polling.
@@ -433,6 +438,7 @@ async fn run_listener(
     let blackhole_discard_snapshot = config.blackhole_discard_snapshot;
     let fib_route_snapshot = config.fib_route_snapshot;
     let fib_table_control = config.fib_table_control;
+    let runtime_config_lock = config.runtime_config_lock;
     let dataplane_route_events = config.dataplane_route_events;
     let bfd_session_snapshot = config.bfd_session_snapshot;
     let bfd_events = config.bfd_events;
@@ -480,6 +486,7 @@ async fn run_listener(
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
                 fib_table_control,
+                runtime_config_lock,
                 dataplane_route_events,
                 bfd_session_snapshot,
                 bfd_events,
@@ -522,6 +529,7 @@ async fn run_listener(
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
                 fib_table_control,
+                runtime_config_lock,
                 dataplane_route_events,
                 bfd_session_snapshot,
                 bfd_events,
@@ -571,6 +579,7 @@ async fn run_tcp_listener(
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
     fib_table_control: Option<crate::rib_service::FibTableControlFn>,
+    runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
     dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
     bfd_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
@@ -651,12 +660,13 @@ async fn run_tcp_listener(
         interceptor.clone(),
     ));
     routes.add_service(NeighborServiceServer::with_interceptor(
-        NeighborService::new(
+        NeighborService::with_runtime_config_lock(
             asn,
             access_mode,
             peer_mgr_tx.clone(),
             rib_query_tx.clone(),
             config_tx.clone(),
+            runtime_config_lock,
         ),
         interceptor.clone(),
     ));
@@ -752,6 +762,7 @@ async fn run_uds_listener(
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
     fib_table_control: Option<crate::rib_service::FibTableControlFn>,
+    runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
     dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
     bfd_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
@@ -812,12 +823,13 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(NeighborServiceServer::with_interceptor(
-        NeighborService::new(
+        NeighborService::with_runtime_config_lock(
             asn,
             access_mode,
             peer_mgr_tx.clone(),
             rib_query_tx.clone(),
             config_tx.clone(),
+            runtime_config_lock,
         ),
         interceptor.clone(),
     ));

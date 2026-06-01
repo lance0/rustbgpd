@@ -53,17 +53,16 @@ impl ConfigPersister {
     pub async fn run(mut self) {
         while let Some(mutation) = self.rx.recv().await {
             if let ConfigMutation::ReplaceConfigAck(new_config, ack) = mutation {
-                let should_persist = self.apply(ConfigMutation::ReplaceConfig(new_config));
-                let result = if should_persist {
-                    self.persist().map_err(|e| e.to_string())
-                } else {
-                    Ok(())
-                };
+                let previous = self.current.clone();
+                info!("replacing persister config snapshot and persisting it");
+                self.current = *new_config;
+                let result = self.persist().map_err(|e| e.to_string());
                 if let Err(e) = &result {
+                    self.current = previous;
                     error!(
                         path = %self.config_path.display(),
                         error = %e,
-                        "failed to persist config — in-memory state diverges from disk"
+                        "failed to persist config — persister snapshot rolled back to previous state"
                     );
                 }
                 let _ = ack.send(result);
