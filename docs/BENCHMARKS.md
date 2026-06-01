@@ -567,26 +567,28 @@ RIB, so the full shell can never be shared. Reproducible harness:
 ## Interpretation
 
 **Wire codec** — The codec is not a bottleneck. Parsing a full-size UPDATE (500
-prefixes, typical attributes) takes 3.3us. At 1 Gbps line rate, BGP UPDATE
+prefixes, typical attributes) takes 3.1us. At 1 Gbps line rate, BGP UPDATE
 arrival rate is far lower than decode capacity. The two-phase decode/parse
 design means sessions that only need header inspection (keepalives, most
 notifications) pay no attribute decode cost.
 
-**RIB insert** — Bulk insert at 2.6M routes/sec means a full Internet table
-loads in ~350ms. This is well within acceptable convergence time for
+**RIB insert** — Bulk insert now ranges from ~3.2M routes/sec at 100k rows to
+~5.6M routes/sec at 500k rows. A 900k-prefix Internet table extrapolates to
+~160ms for the insert step, well within acceptable convergence time for
 route-server deployments.
 
-**Best-path selection** — At 18.5ns per comparison, even 8-candidate Add-Path
-selection completes in 213ns per prefix. Best-path is not a bottleneck.
+**Best-path selection** — Full-ladder comparisons are ~19.8ns each. Even an
+8-candidate Add-Path selection completes in ~167ns per prefix, and the common
+early-exit path is much cheaper. Best-path is not a bottleneck.
 
 **Pipeline scaling** — With the secondary prefix index, the pipeline scales
-linearly. 50k prefixes x 2 peers completes in 82ms. Extrapolated full-table
-(900k) would take ~1.5s for a complete 2-peer recomputation — well within
+linearly. 50k prefixes x 2 peers completes in 39ms. Extrapolated full-table
+(900k) would take ~0.7s for a complete 2-peer recomputation — well within
 operational requirements.
 
-**Route churn** — Sub-millisecond reconvergence for 1k-prefix flap events.
-Real-world churn involves far fewer prefixes per UPDATE (typically 1-50),
-so per-event reconvergence is effectively instant.
+**Route churn** — A 1k-prefix announce/withdraw cycle completes in ~254us.
+Real-world churn involves far fewer prefixes per UPDATE (typically 1-50), so
+per-event reconvergence is effectively instant.
 
 ## End-to-End System Benchmarks
 

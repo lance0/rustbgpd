@@ -9,7 +9,8 @@ Each script:
 - runs against an already-deployed containerlab topology (the script
   states which one in its header)
 - writes a per-run dir under `tests/chaos/runs/<UTC-timestamp>/` with
-  the chaos driver log, a samples CSV, and a final `report.json`
+  the chaos driver log, script-specific sample/probe CSV or log output,
+  and a final `report.json`
 - exits 0 on clean pass, 1 on a gate failure, 2 on harness setup error
 
 ## Available harnesses
