@@ -194,12 +194,32 @@ Later for what remains.
     into a borrowed per-route summary so filters and proto rendering do not
     repeatedly scan attributes or allocate large-community strings for
     filtered-out rows.
+  - Export-policy AS_PATH formatting: avoid calling
+    `AsPath::to_aspath_string()` for every export candidate unless the effective
+    export policy actually contains an AS_PATH regex match. Gate with
+    export-distribution benches covering no policy, non-AS_PATH policy, and
+    AS_PATH-regex policy, and preserve exact `AS_SET` / empty-path formatting
+    when the string is needed.
   - Transport max-prefix accounting: replace per-UPDATE unique-prefix
     reconstruction with a per-prefix refcount so Add-Path multiplicity stays
     correct without rebuilding a temporary set after every UPDATE.
   - Policy engine matching: short-circuit cheap predicate failures before
-    regex/community-heavy checks in `PolicyStatement::matches`; verify with
-    prefix-miss, regex-heavy, and community-heavy `policy_eval` benches.
+    regex/community-heavy checks in `PolicyStatement::matches`; precompute
+    prefix masks and `ge`/`le` bounds at policy/config build time instead of
+    per route per statement. Verify with prefix-miss, prefix-heavy, regex-heavy,
+    and community-heavy `policy_eval` benches plus `/0`, `/32`, `/128`, `ge`,
+    and `le` edge-case tests.
+  - Export-policy fanout batching: investigate whether peers with identical
+    effective export policy/context can share evaluation results during full
+    dirty resyncs or route-server fanout. Design-gated: peer address/ASN/group,
+    negotiated family, route type, RPKI/ASPA state, policy counters,
+    `policy_filtered_routes`, and export modifications all affect correctness.
+    Add a RIB export-distribution bench before implementation.
+  - Adj-RIB-In attribute interning: explore storing a stable fingerprint beside
+    interned `Arc<Vec<PathAttribute>>` sets to avoid hashing every attribute on
+    each insert, with full equality fallback. Gate on `adj_rib_in_insert`,
+    `bulk_initial_load`, and churn benches across typical, rich, and
+    many-unique attribute sets; do not regress the memory win from interning.
   - General FIB runtime: investigate prefix-dirty reconcile so a single prefix
     change does not necessarily trigger full RIB query + full kernel dump +
     full projection. Design-gated because drift recovery, ECMP siblings,
@@ -219,6 +239,15 @@ Later for what remains.
   - Explain cache: store pre-policy attributes behind `Arc<Vec<PathAttribute>>`
     when `[policy.explain]` is enabled, matching the route-storage sharing model
     and avoiding a deep attr clone per explained NLRI.
+  - Wire codec NLRI allocation cleanup: remove the non-AddPath IPv4 body-NLRI
+    decode-then-map temporary `Vec` in `Update::parse` / build paths if codec
+    benches show a clear win at bulk sizes. Low blast radius, but gate on
+    `update_parse` / `update_build` and decode/proptest coverage.
+  - Wire community storage: investigate `SmallVec` for standard / extended /
+    large community attribute payloads only if `size_of::<PathAttribute>` does
+    not grow and codec / `memory_profile` runs show a real transient-allocation
+    or unique-attribute win. Public `rustbgpd-wire` API churn makes this
+    measurement-gated.
   - CLI/API JSON: use borrowed `Serialize` wrappers or direct serializers for
     high-volume route/event JSON so the CLI and API do not build a second owned
     JSON tree from already-owned proto/event data.
@@ -229,9 +258,14 @@ Later for what remains.
   - `best_path_cmp`: root-cause the ~6% full-tiebreak regression. The common
     LOCAL_PREF early-exit is unaffected (~1 ns/comparison, dwarfed by the
     -40-62% insert/pipeline wins), and a single-pass attribute summary was
-    measured flat (+0.01%), so the cost is the comparison ladder itself, not
-    repeated attribute scans; look at the added RPKI/ASPA/cluster/originator
-    steps next.
+    measured flat (+0.01%), so route accessor rescans are not currently a
+    proven lever. Reopen only with profile evidence, long-AS_PATH benches, or a
+    clear ladder-level culprit (RPKI/ASPA/cluster/originator steps).
+  - Do-not-chase-until-proven list: reshaping `MP_REACH_NLRI` / `MP_UNREACH_NLRI`
+    to avoid unused empty `Vec` fields is public wire-API churn and `vec![]`
+    itself does not allocate; a general policy evaluation-result cache carries
+    high invalidation risk and should wait until AS_PATH laziness and predicate
+    short-circuiting have been measured.
   The bgperf2 cross-stack comparison was refreshed for v0.32.0 (full-daemon RSS
   dropped ~21% from the inbound clone-churn fix, but now exceeds GoBGP's ~203 MB
   at 200k — daemon feature growth, not RIB bloat; see `docs/BENCHMARKS.md`), and
