@@ -28,14 +28,30 @@ honor_blackhole = true
 prometheus_addr = "127.0.0.1:9179"
 log_format = "json"
 
-# gRPC TCP listener for mitigation platform access.
-# Secure with a bearer token. For remote access, use an mTLS proxy
+# Local gRPC over a filesystem-gated Unix socket — the working default under
+# the tier authorization mode.
+[global.telemetry.grpc_uds]
+path = "/var/lib/rustbgpd/grpc.sock"
+# Audit principal for this socket; mapped to a role in [security.grpc.roles].
+principal = "operator"
+
+[security.grpc]
+# Per-principal gRPC authorization (ADR-0064; default since v0.24.0).
+# Roles: observer (sensitive_read) | automation (mutating) | operator (operator_only)
+enforcement = "tier"
+
+[security.grpc.roles]
+operator = "operator"
+
+# Remote mitigation-platform access over TCP. Under tier a TCP listener needs a
+# bearer token + matching principal (or native mTLS); create the token file
+# first, then uncomment. For remote access prefer an mTLS proxy
 # (see examples/envoy-mtls/).
-[global.telemetry.grpc_tcp]
-enabled = true
-address = "127.0.0.1:50051"
-# Uncomment and create the token file for bearer-token auth:
+# [global.telemetry.grpc_tcp]
+# enabled = true
+# address = "127.0.0.1:50051"
 # token_file = "/etc/rustbgpd/grpc-token"
+# principal = "operator"
 
 # BMP export for audit trail — stream every rule change to your collector
 [bmp]

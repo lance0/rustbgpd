@@ -11,8 +11,18 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
+# Quick-start lab access: gRPC over TCP so `rustbgpctl` can reach the daemon
+# from the host via the published port. Like `rustbgpd --init-config lab`, this
+# throwaway lab uses legacy gRPC authorization for zero-setup access.
+# Production deployments should use tier enforcement + [security.grpc.roles]
+# (see examples/route-server, examples/rr-evpn-fabric) and an mTLS proxy or
+# bearer token for any non-loopback listener.
 [global.telemetry.grpc_tcp]
+enabled = true
 address = "0.0.0.0:50051"
+
+[security.grpc]
+enforcement = "legacy"
 
 [[neighbors]]
 address = "10.99.0.20"

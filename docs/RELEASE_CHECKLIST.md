@@ -186,6 +186,12 @@ log_format = "json"
 [global.telemetry.grpc_uds]
 path = "/tmp/rustbgpd-auth/grpc.sock"
 token_file = "/tmp/rustbgpd-token"
+
+# This smoke isolates bearer-token authn; legacy enforcement keeps it
+# independent of tier role config (tier additionally needs grpc_uds.principal
+# plus a matching [security.grpc.roles] entry).
+[security.grpc]
+enforcement = "legacy"
 EOF
 
 ./target/release/rustbgpd /tmp/rustbgpd-auth-test.toml &

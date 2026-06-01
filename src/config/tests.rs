@@ -115,8 +115,15 @@ fn config_examples_parse() {
         let source = fs::read_to_string(&path).unwrap_or_else(|err| {
             panic!("failed to read example config {label}: {err}");
         });
-        parse(&source).unwrap_or_else(|err| {
-            panic!("example config {label} failed validation: {err}");
+        // parse_strict (not parse) so every shipped example is validated under
+        // the production v0.24.0 `enforcement = "tier"` default. parse() would
+        // auto-inject `enforcement = "legacy"` for configs lacking a
+        // [security.grpc] block, masking examples that cannot actually start
+        // under defaults — the gap that shipped all examples unstartable until
+        // the v0.33.0 fixup. This guard fails closed if a new example omits the
+        // gRPC authorization config.
+        parse_strict(&source).unwrap_or_else(|err| {
+            panic!("example config {label} failed validation under the tier default: {err}");
         });
     }
 }

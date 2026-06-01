@@ -17,6 +17,20 @@ runtime_state_dir = "/tmp/rustbgpd"
 prometheus_addr = "127.0.0.1:9179"
 log_format = "json"
 
+[global.telemetry.grpc_uds]
+path = "/tmp/rustbgpd/grpc.sock"
+# Audit principal for this local socket (UDS access is gated by file perms);
+# mapped to a role in [security.grpc.roles] below.
+principal = "operator"
+
+[security.grpc]
+# Per-principal gRPC authorization (ADR-0064; default since v0.24.0).
+# Roles: observer (sensitive_read) | automation (mutating) | operator (operator_only)
+enforcement = "tier"
+
+[security.grpc.roles]
+operator = "operator"
+
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002

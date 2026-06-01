@@ -18,10 +18,29 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-# gRPC TCP listener for looking glass queries
-[global.telemetry.grpc_tcp]
-enabled = true
-address = "0.0.0.0:50051"
+# Local gRPC over a filesystem-gated Unix socket — the working default under
+# the tier authorization mode. The collector is read-only, so its principal
+# maps to the observer role (a sensitive_read ceiling).
+[global.telemetry.grpc_uds]
+path = "/var/lib/rustbgpd/grpc.sock"
+principal = "looking-glass"
+
+[security.grpc]
+# Per-principal gRPC authorization (ADR-0064; default since v0.24.0).
+# Roles: observer (sensitive_read) | automation (mutating) | operator (operator_only)
+enforcement = "tier"
+
+[security.grpc.roles]
+looking-glass = "observer"
+
+# Public looking-glass over TCP. A 0.0.0.0 listener must not be unauthenticated
+# under tier — provide a bearer token + matching principal (or native mTLS),
+# create the token file, then uncomment. Prefer an mTLS proxy for exposure.
+# [global.telemetry.grpc_tcp]
+# enabled = true
+# address = "0.0.0.0:50051"
+# token_file = "/etc/rustbgpd/grpc-token"
+# principal = "looking-glass"
 
 # RPKI — annotate every route with validation state
 [rpki]

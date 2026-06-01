@@ -81,6 +81,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- All bundled example configs now validate under the default tier gRPC
+  authorization model. Production-style examples use local UDS listeners with
+  explicit principals and `[security.grpc.roles]`; the Docker Compose
+  quick-start opts into legacy enforcement intentionally for zero-setup lab
+  access over its published TCP port. The `config_examples_parse` regression
+  test now uses strict production-default parsing so missing gRPC auth config
+  cannot be masked by the test helper's legacy compatibility shim.
 - FIB-table runtime CRUD now rolls the reconciler and peer-manager snapshot back
   if the config bridge / persister rejects the accepted `[[fib_tables]]` set
   after runtime apply. The RPC reports failure without leaving runtime ahead of
