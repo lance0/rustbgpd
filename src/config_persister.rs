@@ -62,7 +62,7 @@ impl ConfigPersister {
                     error!(
                         path = %self.config_path.display(),
                         error = %e,
-                        "failed to persist config — persister snapshot rolled back to disk state"
+                        "failed to persist config — persister snapshot rolled back to previous state"
                     );
                 }
                 let _ = ack.send(result);
