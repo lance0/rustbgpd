@@ -87,16 +87,6 @@ resolved.
 
 ## Limitations (by design, not bugs)
 
-- **Direct `[[dynamic_neighbors]]` TOML edits are restart-required.** The live
-  inbound-accept matcher is built once at startup and is not rebuilt on SIGHUP,
-  so editing a `[[dynamic_neighbors]]` block in the config file and reloading
-  does not change which inbound connections are accepted. Use runtime gRPC CRUD
-  (`rustbgpctl dynamic-neighbor {add,delete}`) for live changes — it updates the
-  matcher immediately and persists to the TOML — or restart to pick up direct
-  file edits. This is a current limitation with a fix tracked in #338 (and
-  `ROADMAP.md`), not a permanent design choice; `docs/reload-matrix.md`
-  previously over-claimed these fields as "live."
-
 - **RFC 8326 receiver gating doesn't yet know about confederations.**
   When `[global] honor_graceful_shutdown = true`, the implicit chain-
   tail demotion rule fires only on EBGP peers. The current EBGP gate

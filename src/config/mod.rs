@@ -1343,6 +1343,10 @@ pub struct ConfigDiff {
     /// restart-required to match the runtime. All other edits (N→M, N→0) stay
     /// reload-applied.
     pub fib_tables_requires_restart: bool,
+    /// `[[dynamic_neighbors]]` blocks added/removed/modified between old and
+    /// new. Reload-applied by replacing the peer-manager config snapshot and
+    /// rebuilding the live longest-prefix matcher.
+    pub dynamic_neighbors_changed: bool,
     /// Top-level Gate 8b kernel-enforcement opt-in changed. The
     /// dataplane actor reads this once at startup, so SIGHUP must not
     /// silently advance the in-memory snapshot.
@@ -1454,6 +1458,7 @@ impl ConfigDiff {
             || self.policy.export_chain_changed
             || self.honor_graceful_shutdown_changed
             || self.honor_blackhole_changed
+            || self.dynamic_neighbors_changed
             || (self.fib_tables_changed && !self.fib_tables_requires_restart)
     }
 
@@ -1523,6 +1528,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "export_chain_changed": diff.policy.export_chain_changed,
             "honor_graceful_shutdown_changed": diff.honor_graceful_shutdown_changed,
             "honor_blackhole_changed": diff.honor_blackhole_changed,
+            "dynamic_neighbors_changed": diff.dynamic_neighbors_changed,
             "fib_tables_changed": diff.fib_tables_changed && !diff.fib_tables_requires_restart,
             "effective_neighbor_impact": &diff.effective_neighbor_impact,
         },
@@ -1715,6 +1721,13 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
                 style.change_marker
             );
         }
+        if diff.dynamic_neighbors_changed {
+            let _ = writeln!(
+                out,
+                "  {} [[dynamic_neighbors]] matcher rebuilt",
+                style.change_marker
+            );
+        }
     }
 
     let mut restart_sections = Vec::new();
@@ -1870,6 +1883,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         ethernet_segments_changed: old.ethernet_segments != new.ethernet_segments,
         fib_tables_changed: old.fib_tables != new.fib_tables,
         fib_tables_requires_restart: old.fib_tables.is_empty() && !new.fib_tables.is_empty(),
+        dynamic_neighbors_changed: old.dynamic_neighbors != new.dynamic_neighbors,
         apply_bum_enforcement_changed: old.apply_bum_enforcement != new.apply_bum_enforcement,
         blackhole_fib_discard_changed,
         neighbor_tcp_ao_changed,

@@ -330,7 +330,8 @@ fn delete_dynamic_range_removes_and_stops_future_match() {
             .is_some()
     );
     // Delete by a host-bit variant of the same network — effective-prefix match.
-    mgr.delete_dynamic_range("10.0.0.7/24")
+    let removed = mgr
+        .delete_dynamic_range("10.0.0.7/24")
         .expect("delete by effective prefix should succeed");
     assert_eq!(mgr.dynamic_ranges.len(), before - 1);
     assert!(
@@ -338,6 +339,8 @@ fn delete_dynamic_range_removes_and_stops_future_match() {
             .is_none(),
         "deleted range must no longer match (future accepts stop)"
     );
+    assert_eq!(removed.prefix, "10.0.0.0/24");
+    assert_eq!(removed.peer_group, "ix-members");
 }
 
 #[test]
@@ -353,6 +356,58 @@ fn delete_dynamic_range_unknown_returns_error() {
         ),
         "{err}"
     );
+}
+
+#[tokio::test]
+async fn replace_config_snapshot_rebuilds_dynamic_range_matcher() {
+    let (tx, rx) = mpsc::channel(16);
+    let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let config = make_dynamic_manager_config();
+    let mut replacement = config.clone();
+    replacement.dynamic_neighbors = vec![crate::config::DynamicNeighborConfig {
+        prefix: "10.10.0.0/16".to_string(),
+        peer_group: "ix-members".to_string(),
+        remote_asn: 65010,
+        description: Some("reload range".to_string()),
+    }];
+
+    let manager = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+    let handle = tokio::spawn(manager.run());
+
+    let (ack_tx, ack_rx) = oneshot::channel();
+    internal_tx
+        .send(InternalCommand::ReplaceConfigSnapshot {
+            config: Box::new(replacement),
+            ack: Some(ack_tx),
+        })
+        .unwrap();
+    ack_rx.await.unwrap();
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::ListDynamicRanges { reply: reply_tx })
+        .await
+        .unwrap();
+    let ranges = reply_rx.await.unwrap();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].prefix, "10.10.0.0/16");
+    assert_eq!(ranges[0].peer_group, "ix-members");
+    assert_eq!(ranges[0].remote_asn, 65010);
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
 }
 
 #[test]

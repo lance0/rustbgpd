@@ -1864,7 +1864,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // Coordinator lock serializing runtime `[[fib_tables]]` mutations: the
     // gRPC CRUD control path and the SIGHUP reload FIB step both hold it across
     // their read → apply → persist sequence so they can't interleave.
-    let fib_table_control_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let runtime_config_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let serve_config = ServeConfig {
         asn: config.global.asn,
         router_id: config.global.router_id.clone(),
@@ -2015,10 +2015,11 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 fib_cmd_tx: fib_cmd_tx.clone(),
                 peer_mgr_tx: peer_mgr_tx.clone(),
                 config_tx: config_event_tx.clone(),
-                lock: fib_table_control_lock.clone(),
+                lock: runtime_config_lock.clone(),
                 startup_tables: config.fib_tables.clone(),
             },
         )),
+        runtime_config_lock: runtime_config_lock.clone(),
         dataplane_route_events: Some(fib_bgp_event_tx),
         bfd_session_snapshot: {
             let rx = bfd_status_rx.clone();
@@ -2219,16 +2220,16 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 let live_uds = live_grpc_uds.clone();
                 let pm_tx = peer_mgr_tx.clone();
                 let fib_cmd = fib_cmd_tx.clone();
-                // Hold the FIB coordinator lock across BOTH the reload and the
-                // outcome application (peer-manager + config-bridge snapshot
-                // refresh), so a concurrent gRPC FIB-table CRUD can't slip into
-                // the gap between them and have its applied/persisted table set
-                // clobbered by the stale reload snapshot.
-                let fib_lock = fib_table_control_lock.clone();
+                // Hold the runtime-config coordinator lock across BOTH the
+                // reload and the outcome application (peer-manager +
+                // config-bridge snapshot refresh), so concurrent persisted
+                // runtime CRUD can't slip into the gap and have its
+                // applied/persisted state clobbered by a stale reload snapshot.
+                let runtime_config_lock = runtime_config_lock.clone();
                 let pm_internal = peer_mgr_internal_tx.clone();
                 let bridge_replace = bridge_replace_tx.clone();
                 reload_in_flight = Some(tokio::spawn(async move {
-                    let _fib_guard = fib_lock.lock().await;
+                    let _runtime_config_guard = runtime_config_lock.lock().await;
                     let reloaded = reload_config(
                         &path,
                         &snapshot,

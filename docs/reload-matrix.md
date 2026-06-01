@@ -16,7 +16,7 @@ bug — file an issue.
 | Class | Meaning |
 |---|---|
 | **live** | Change applies on SIGHUP or a supported runtime CRUD RPC without bouncing the BGP session. The diff routes through `neighbor_runtime_equal()` / `diff_neighbors()` / `diff_policy()` and the daemon reconciles in place. |
-| **reload-applied** | Change hot-applies to a running subsystem reconciler on SIGHUP or a supported runtime CRUD RPC, but unlike per-session `live` the in-memory config snapshot advances only after the subsystem **acks** the new desired set. Used by `[[fib_tables]]` (ADR-0061 FIB reconciler). Surfaced under the `reload_applied.*` keys in `rustbgpd --diff --json`. |
+| **reload-applied** | Change hot-applies to a running subsystem reconciler or derived matcher on SIGHUP / supported runtime CRUD, but unlike per-session `live` the in-memory config snapshot advances only after the subsystem or snapshot consumer **acks** the new desired set. Used by `[[fib_tables]]` (ADR-0061 FIB reconciler) and `[[dynamic_neighbors]]` matcher rebuilds. Surfaced under the `reload_applied.*` keys in `rustbgpd --diff --json`. |
 | **restart-required** | Change is accepted at parse time but **pinned back to the live value** for the duration of this reload — the new value won't take effect until the next daemon restart. Surfaced as an `ERROR`-level log line during reload and visible in `rustbgpd --diff` until restart. |
 | **rejected** | Validation refuses the change at parse time with a typed `ConfigError`. The daemon keeps running with the old value; no state mutates. |
 | **unsupported** | Field is accepted at parse time but currently has no runtime effect. Documented so operators don't mistake it for live. Future PRs may promote unsupported fields to live; the matrix tracks the current daemon. |
@@ -102,21 +102,23 @@ each reconcile.
 
 ## `[[dynamic_neighbors]]`
 
-**Direct TOML edits are restart-required.** The live inbound-accept matcher is
-built once at startup and is **not** rebuilt on SIGHUP, so adding, removing, or
-editing a `[[dynamic_neighbors]]` block in the config file and reloading does
-not change which inbound connections are accepted. The live mutation path is
-runtime gRPC CRUD — `rustbgpctl dynamic-neighbor {add,delete}`
-(`AddDynamicNeighbor` / `DeleteDynamicNeighbor`), which updates the matcher
-immediately and persists the change back to the TOML. Restoring SIGHUP reconcile
-for direct TOML edits is tracked in #338.
+Direct TOML edits are **reload-applied**: on SIGHUP the peer manager swaps the
+runtime config snapshot and rebuilds the live inbound-accept matcher, so adding,
+removing, or editing a `[[dynamic_neighbors]]` block changes which future
+inbound connections are accepted without bouncing existing sessions. Runtime
+gRPC CRUD — `rustbgpctl dynamic-neighbor {add,delete}`
+(`AddDynamicNeighbor` / `DeleteDynamicNeighbor`) — takes the same live path and
+persists the accepted change back to the TOML when the daemon was started with
+`--config`. Runtime CRUD and SIGHUP reload share a coordinator lock, held through
+the persistence acknowledgement, so reload sees either the pre-mutation TOML or
+the committed post-mutation TOML.
 
 | Field | Class | Notes |
 |---|---|---|
-| `prefix` | restart-required (TOML); live via gRPC CRUD | Consulted on every inbound TCP accept. |
-| `peer_group` | restart-required (TOML); live via gRPC `add` | Inheritance resolves when a passive session promotes to a managed peer. |
-| `remote_asn` | restart-required (TOML); live via gRPC `add` | Validated against the OPEN's `my_as` at promotion. |
-| `description` | restart-required (TOML); live via gRPC `add` | Metadata. |
+| `prefix` | reload-applied | Consulted on every inbound TCP accept. |
+| `peer_group` | reload-applied | Inheritance resolves when a passive session promotes to a managed peer. |
+| `remote_asn` | reload-applied | Validated against the OPEN's `my_as` at promotion. |
+| `description` | reload-applied | Metadata. |
 
 ## `[global]`
 

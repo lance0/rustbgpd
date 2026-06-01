@@ -284,8 +284,8 @@ added at runtime.
 | `EnableNeighbor` | Re-enable a previously disabled peer |
 | `DisableNeighbor` | Administratively disable a peer (sends NOTIFICATION) |
 | `SoftResetIn` | Request inbound route refresh (RFC 2918/7313) for one or more families |
-| `AddDynamicNeighbor` | Add a `[[dynamic_neighbors]]` prefix range at runtime; queues an atomic config-file update when started with `--config` |
-| `DeleteDynamicNeighbor` | Remove a dynamic-neighbor range at runtime (stops future accepts; established peers drain on Idle) |
+| `AddDynamicNeighbor` | Add a `[[dynamic_neighbors]]` prefix range at runtime; when started with `--config`, persists the accepted change atomically before returning and rolls back runtime on persistence failure |
+| `DeleteDynamicNeighbor` | Remove a dynamic-neighbor range at runtime (stops future accepts; established peers drain on Idle); persisted mode waits for the atomic config-file update and rolls runtime back on persistence failure |
 | `ListDynamicNeighbors` | List configured dynamic-neighbor ranges (prefix, peer group, remote ASN, description) |
 | `SetGracefulShutdown` | RFC 8326 initiator toggle — attach the `GRACEFUL_SHUTDOWN` community to outbound updates for one peer (or all peers when `address` is empty) and clear with `clear = true` |
 
