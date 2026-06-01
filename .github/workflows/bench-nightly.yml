@@ -1,0 +1,145 @@
+name: Criterion Bench Nightly
+
+# Nightly perf TRIPWIRE — not a source of published benchmark truth.
+#
+# Runs the same pinned A/B harness as `bench.yml` (bench/compare-criterion.sh)
+# on the dedicated self-hosted runner, comparing the current default-branch tip
+# against the **latest release tag**. A release-anchored baseline is the right
+# fit for this virtualized VPS: a single-commit delta lives inside the ~11%
+# noise floor and is meaningless, but a real regression accumulates past the
+# advisory band over a release cycle instead of hiding in per-commit noise.
+#
+# ADVISORY / NON-GATING — this workflow does NOT fail on a regression today.
+# `compare-criterion.sh` emits mean delta + stddev + min..max + a propagated
+# 95% CI, but has no verdict logic, and the noise floor is not yet re-measured
+# on a governor-controlled host (see bench.yml's header + docs/BENCHMARKS.md).
+# A naive ">=20% single row → fail" gate would false-fire whenever the
+# attempt range straddles zero. Until compare-criterion.sh grows an honest,
+# straddle-zero/stddev-aware classifier, nightly only publishes the summary
+# and uploads artifacts; flip the "Flag regressions" step to a hard failure
+# once that classifier lands. bgperf2 stays release-time `/bench` only — it is
+# too stateful (Docker, one-at-a-time, shared container names) for unattended
+# runs.
+
+on:
+  schedule:
+    - cron: "0 5 * * *" # nightly at 05:00 UTC (between fuzz@04:00 and audit@06:00)
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: "Baseline ref (blank = latest release tag)"
+        required: false
+        default: ""
+      package:
+        description: "Cargo package"
+        required: false
+        default: "rustbgpd-rib"
+      bench:
+        description: "Criterion bench target"
+        required: false
+        default: "rib_ops"
+      core:
+        description: "CPU core for taskset pinning"
+        required: false
+        default: "0"
+      attempts:
+        description: "A/B attempts with alternating order (even N cancels order bias)"
+        required: false
+        default: "4"
+
+permissions:
+  contents: read
+
+# Share bench.yml's group so a nightly run and a manual A/B dispatch never run
+# at the same time on the single pinned runner (overlap corrupts both).
+concurrency:
+  group: criterion-bench-compare
+  cancel-in-progress: false
+
+jobs:
+  nightly:
+    # Defensive: never run on a fork that inherits the runner registration.
+    if: github.repository == 'lance0/rustbgpd'
+    runs-on: [self-hosted, rustbgpd-bench]
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # full history + tags for `git describe` and the A/B worktrees
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench-nightly-${{ inputs.package || 'rustbgpd-rib' }}-${{ inputs.bench || 'rib_ops' }}
+
+      - name: Resolve baseline ref
+        env:
+          BASE_INPUT: ${{ inputs.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ -n "$BASE_INPUT" ]; then
+            base="$BASE_INPUT"
+          else
+            base="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
+          fi
+          if [ -z "$base" ]; then
+            echo "::error::no release tag found (git describe --match 'v[0-9]*') and no base_ref override given" >&2
+            exit 1
+          fi
+          echo "BASE_REF=$base" >> "$GITHUB_ENV"
+          echo "Nightly baseline: $base  (head: HEAD = $(git rev-parse --short=12 HEAD))"
+
+      - name: Run Criterion comparison (HEAD vs latest release tag)
+        # Inputs via env, never interpolated into shell text (injection-safe even
+        # though this trigger is privileged).
+        env:
+          PACKAGE: ${{ inputs.package || 'rustbgpd-rib' }}
+          BENCH: ${{ inputs.bench || 'rib_ops' }}
+          CORE: ${{ inputs.core || '0' }}
+          ATTEMPTS: ${{ inputs.attempts || '4' }}
+        run: |
+          set -euo pipefail
+          bench/compare-criterion.sh \
+            --base "$BASE_REF" \
+            --head "HEAD" \
+            --package "$PACKAGE" \
+            --bench "$BENCH" \
+            --core "$CORE" \
+            --attempts "$ATTEMPTS" \
+            --out-dir "target/bench-compare"
+          # require_performance is intentionally NOT set — the VPS CPU is
+          # virtualized and exposes no cpufreq governor (see bench.yml).
+
+      - name: Publish summary
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "## Nightly criterion tripwire — advisory only (non-gating)"
+            echo
+            echo "HEAD vs latest release tag (\`${BASE_REF:-?}\`). Read \`stddev\` and"
+            echo "\`min..max\` alongside \`mean delta\`: a delta whose range straddles"
+            echo "zero is noise, not a regression. See docs/BENCHMARKS.md."
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          summary="$(find target/bench-compare -name summary.md -print 2>/dev/null | sort | tail -n 1 || true)"
+          if [ -n "$summary" ]; then
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No benchmark summary found." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload Criterion artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: criterion-bench-nightly
+          path: target/bench-compare/
+          if-no-files-found: warn
+
+      # TODO(perf): once compare-criterion.sh exposes a straddle-zero/stddev-aware
+      # regression verdict (e.g. --fail-on with min..max not crossing zero AND
+      # mean delta beyond the re-measured band), add a "Flag regressions" step
+      # here that exits non-zero so the nightly goes red for human review.
