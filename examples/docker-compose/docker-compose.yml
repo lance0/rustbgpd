@@ -22,8 +22,8 @@ services:
         ipv4_address: 10.99.0.10
         ipv6_address: fd99::10
     ports:
-      - "50051:50051"   # gRPC
-      - "9179:9179"     # Prometheus metrics
+      - "127.0.0.1:50051:50051"   # gRPC (host loopback only)
+      - "127.0.0.1:9179:9179"     # Prometheus metrics
     cap_add:
       - NET_BIND_SERVICE
 

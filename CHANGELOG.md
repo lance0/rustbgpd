@@ -9,6 +9,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Docker Compose quick-start ports now bind to host loopback
+  (`127.0.0.1`) instead of all host interfaces. The lab keeps legacy gRPC
+  authorization for zero-setup `rustbgpctl` access, but the published gRPC and
+  Prometheus ports now match the documented localhost-only access pattern.
+
 ## [0.33.0] — 2026-06-01
 
 ### Added
