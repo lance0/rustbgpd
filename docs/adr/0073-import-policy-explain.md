@@ -8,15 +8,17 @@
 `rustbgpctl` already explains *export* decisions cleanly: RIB owns
 both the candidate route and the export-policy chain
 (`crates/rib/src/manager/distribution.rs:75`), and the RPC surface
-hangs off the route-explain group at `proto/rustbgpd.proto:745`.
+hangs off the route-explain group at `proto/rustbgpd.proto:748`
+(`RibService.ExplainAdvertisedRoute`).
 
 There is no equivalent for **import**. The operator question
 "why didn't this route come in?" cannot be answered today, because:
 
 - Import policy is evaluated in the transport layer at
-  `crates/transport/src/session/inbound.rs:711`. A denied route
-  drops at that point and never reaches RIB. Existing tests pin
-  this behaviour.
+  the `evaluate_chain_with_attribution` call sites in
+  `crates/transport/src/session/inbound.rs` (for example the IPv4
+  unicast body path around line 827). A denied route drops at that
+  point and never reaches RIB. Existing tests pin this behaviour.
 - Adj-RIB-In holds only **accepted, post-policy** routes; a
   re-evaluation against it can answer "what would current policy
   do to this prefix" but cannot reconstruct what happened to a
@@ -85,12 +87,12 @@ flag on this one.
   announce/withdraw peer therefore can't fill the LRU with
   full-payload dead entries crowding out live decisions.
 - **Write triggers:** every return from
-  `evaluate_chain_with_attribution` at
-  `crates/transport/src/session/inbound.rs:711`, **gated on
-  `[policy.explain].enabled`** (see below). Insert or replace under
-  the key. When explain is disabled the gate is checked *before* the
-  decision snapshot is built, so a disabled deployment pays one
-  boolean per UPDATE and clones nothing.
+  `evaluate_chain_with_attribution` in
+  `crates/transport/src/session/inbound.rs`, **gated on
+  `[policy.explain].enabled`** (see below). Insert or replace under the key.
+  When explain is disabled the gate is checked *before* the decision snapshot
+  is built, so a disabled deployment pays one boolean per UPDATE and clones
+  nothing.
 - **Clear / replace triggers:**
   - newer UPDATE for the same key → replace
   - withdraw for the key → mark as `WITHDRAWN` (not `NOT_SEEN` —
@@ -194,7 +196,6 @@ peer to re-advertise.
 
 ```
 rustbgpctl policy explain --neighbor X --prefix Y [--path-id N]
-                          [--afi ipv4|ipv6] [--safi unicast]
                           [--json]
 ```
 
@@ -205,6 +206,9 @@ JSON render: every response field, machine-stable.
 Add-Path semantics: when the peer negotiated Add-Path and
 `--path-id` is omitted, the CLI returns all matching entries (JSON
 array; text renderer flags the disambiguation).
+
+The CLI infers AFI from the CIDR prefix; v1 supports IPv4 and IPv6 unicast
+only, so there are no `--afi` / `--safi` flags.
 
 ### AFI/SAFI scope
 
@@ -295,10 +299,12 @@ built in stages but is not split across PRs:
 
 ## Anchors
 
-- Eval call site: `crates/transport/src/session/inbound.rs:711`
+- Eval call sites: `evaluate_chain_with_attribution` in
+  `crates/transport/src/session/inbound.rs` (body IPv4, FlowSpec, EVPN,
+  and MP-unicast paths)
 - `PolicyEvaluation`: `crates/policy/src/engine.rs:797`
 - Export-explain reference: `crates/rib/src/manager/distribution.rs:75`,
-  RPC at `proto/rustbgpd.proto:745`
+  RPC at `proto/rustbgpd.proto:748`
 - Existing import counters: `record_import_policy_eval` at
-  `crates/transport/src/session/inbound.rs:17`
+  `crates/transport/src/session/inbound.rs:19`
 - Authz tier reference: `crates/api/src/authz.rs`

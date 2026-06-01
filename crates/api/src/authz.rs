@@ -412,6 +412,13 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
         "/rustbgpd.v1.RibService/ListFibRoutes",
         AuthTier::SensitiveRead,
     ),
+    // ADR-0074: SetFibTable/DeleteFibTable program the kernel FIB via the
+    // ADR-0061 reconciler, but stay `Mutating` on purpose — they are
+    // validated, coordinator-serialized, persisted config-surface mutations
+    // (the unicast sibling of dynamic-neighbor CRUD), not operator-authored
+    // route injection. The decision is pinned in
+    // method_lookup_returns_expected_tiers below; do not flip it to "fix" the
+    // kernel-dataplane guardrail.
     method(
         "rustbgpd.v1.RibService",
         "SetFibTable",
@@ -800,19 +807,44 @@ mod tests {
             method_authz("/rustbgpd.v1.EvpnService/ClearDuplicateMacQuarantine").map(|m| m.tier),
             Some(AuthTier::Mutating)
         );
-        // DELIBERATE PIN (ADR-0073 audit, WS2): ApplyEvpnRuntime is the
-        // only `Mutating` method that programs the kernel dataplane. It
-        // stays `Mutating` on purpose — ADR-0063 v1 is a single
-        // validated, additive L2VNI/IP-VRF apply (the EVPN sibling of
-        // AddNeighbor), and moving it to `operator_only` would force
-        // EVPN automation to over-grant Operator credentials. Do not
-        // flip this to "fix" it; if its scope widens past single-add
-        // (issue #210), change the tier via a deliberate ADR update —
-        // not by editing this assertion. See the dataplane-programming
-        // RPC guardrail in docs/RELEASE_CHECKLIST.md.
+        // DELIBERATE PIN (ADR-0073 audit, WS2): ApplyEvpnRuntime was the
+        // first `Mutating` method that programs the kernel dataplane. It stays
+        // `Mutating` on purpose — ADR-0063 v1 is a single validated, additive
+        // L2VNI/IP-VRF apply (the EVPN sibling of AddNeighbor), and moving it
+        // to `operator_only` would force EVPN automation to over-grant
+        // Operator credentials. Do not flip this to "fix" it; if its scope
+        // widens past single-add (issue #210), change the tier via a
+        // deliberate ADR update — not by editing this assertion. See the
+        // dataplane-programming RPC guardrail in docs/RELEASE_CHECKLIST.md.
         assert_eq!(
             method_authz("/rustbgpd.v1.EvpnService/ApplyEvpnRuntime").map(|m| m.tier),
             Some(AuthTier::Mutating)
+        );
+        // DELIBERATE PIN (ADR-0074): SetFibTable/DeleteFibTable program the
+        // kernel FIB via the ADR-0061 reconciler — the second and third
+        // `Mutating` methods that touch the kernel dataplane after
+        // ApplyEvpnRuntime. They stay `Mutating` on purpose: validated,
+        // coordinator-serialized, persisted config-surface mutations (the
+        // unicast sibling of dynamic-neighbor CRUD) that back-fill
+        // already-learned routes, not operator-authored injection.
+        // `operator_only` would force FIB automation to over-grant Operator
+        // credentials. A dedicated `dataplane_mutating` tier was considered and
+        // rejected (no ADR-0064 role maps to it). If scope widens past
+        // back-filling learned routes, change the tier via an ADR-0074 update
+        // — not by editing these assertions. See the dataplane-programming
+        // guardrail in
+        // docs/RELEASE_CHECKLIST.md.
+        assert_eq!(
+            method_authz("/rustbgpd.v1.RibService/SetFibTable").map(|m| m.tier),
+            Some(AuthTier::Mutating)
+        );
+        assert_eq!(
+            method_authz("/rustbgpd.v1.RibService/DeleteFibTable").map(|m| m.tier),
+            Some(AuthTier::Mutating)
+        );
+        assert_eq!(
+            method_authz("/rustbgpd.v1.RibService/ListFibTables").map(|m| m.tier),
+            Some(AuthTier::SensitiveRead)
         );
         assert_eq!(
             method_authz("/rustbgpd.v1.ControlService/Shutdown").map(|m| m.tier),

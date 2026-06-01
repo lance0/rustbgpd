@@ -23,9 +23,10 @@ management are implemented. Default-off Linux FIB integration exists for RFC
 weighted multipath; broader routing-suite features remain future work.
 Validated with a workspace test suite, fuzz targets, and an automated interop
 suite — primarily against FRR 10.3.1, plus GoBGP 4.3.0 and StayRTR-backed RTR
-coverage; BIRD 2.0.12 has documented M0 containerlab validation. A foundation
-tier runs on every PR; the remaining scripts and privileged kernel dataplane
-smokes are local / manual gates for runtime or kernel reasons. See
+coverage; BIRD 2.0.12 has documented M0 validation and BIRD 3.2.1 backs the
+TCP-AO smoke. A foundation tier runs on every PR, and the privileged Linux
+dataplane smokes run in hosted kernel-dataplane CI; longer soaks and platform
+diversity scripts remain local / manual gates. See
 `docs/INTEROP.md` for the full matrix.
 
 > **Alpha expectations:** The config format and gRPC API are not yet frozen.
@@ -298,7 +299,7 @@ and more explicit internal architecture.
 |----------|---------|
 | Workspace tests | Unit, integration, and property tests (`cargo test --workspace`) |
 | Wire fuzzing | libFuzzer harnesses on message and attribute decoders, CI smoke + nightly extended |
-| Interop suites | Automated interop suite (see `docs/INTEROP.md` for the full matrix), primarily against FRR 10.3.1 plus GoBGP 4.3.0 and StayRTR-backed RTR coverage; BIRD 2.0.12 has documented M0 containerlab validation. A foundation tier is gated on every PR; privileged / longer kernel smokes run locally. |
+| Interop suites | Automated interop suite (see `docs/INTEROP.md` for the full matrix), primarily against FRR 10.3.1 plus GoBGP 4.3.0 and StayRTR-backed RTR coverage; BIRD 2.0.12 covers M0 and BIRD 3.2.1 covers the TCP-AO smoke. A foundation tier is gated on every PR, privileged Linux dataplane smokes run in hosted kernel-dataplane CI, and longer soaks / platform-diversity scripts remain local. |
 | Protocol coverage | RFC 4271 FSM + UPDATE validation, MP-BGP, GR/LLGR, Add-Path, FlowSpec, RPKI, ASPA, Extended Messages, Extended Next Hop, Route Refresh/ERR, RFC 7999 BLACKHOLE receiver scoping + opt-in FIB discard, ADR-0061/0066/0068 configured-table unicast Linux FIB programming with ECMP / weighted multipath, RFC 5880/5881/5882 BFD, RFC 8326 Graceful Shutdown |
 | Architecture decisions | ADRs documenting every protocol and design choice ([docs/adr/](docs/adr/)) |
 

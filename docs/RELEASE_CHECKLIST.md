@@ -63,17 +63,30 @@ release:
 - [ ] **Dataplane-programming guardrail.** Any *new* RPC that programs
       the kernel dataplane (FIB / VXLAN / FDB / L3VNI / nexthop groups)
       must have its tier **explicitly justified in review** — it must
-      not land in `mutating` by inattention. The standing exception is
-      `EvpnService/ApplyEvpnRuntime`, deliberately `Mutating` because
-      ADR-0063 v1 is a single validated, additive L2VNI/IP-VRF apply
-      (the EVPN sibling of `AddNeighbor`); a tier-pin test in
-      `crates/api/src/authz.rs` guards it against accidental drift, and
-      it is today the *only* `Mutating` method touching the kernel
-      dataplane. If a second one appears, prefer a dedicated
-      `dataplane_mutating` tier over stretching `mutating` or
-      `operator_only`, captured in an ADR. If `ApplyEvpnRuntime`'s scope
-      widens past single-add (issue #210), re-evaluate its tier via an
-      ADR update — not by editing the pin.
+      not land in `mutating` by inattention. Three methods deliberately
+      sit at `Mutating` despite touching the kernel dataplane, each
+      guarded by a tier-pin test in `crates/api/src/authz.rs`:
+      - `EvpnService/ApplyEvpnRuntime` — ADR-0063 v1 is a single
+        validated, additive L2VNI/IP-VRF apply (the EVPN sibling of
+        `AddNeighbor`). If its scope widens past single-add (issue
+        #210), re-evaluate its tier via an ADR update — not the pin.
+      - `RibService/SetFibTable` and `RibService/DeleteFibTable` —
+        validated, SIGHUP-serialized, reconciler-acked, persisted
+        config-surface mutations that back-fill already-learned routes
+        (the unicast sibling of dynamic-neighbor CRUD), *not*
+        operator-authored injection.
+        **ADR-0074** records this decision and explicitly considered and
+        rejected a dedicated `dataplane_mutating` tier (no ADR-0064 role
+        maps to it; `operator_only` would over-grant FIB automation). If
+        their scope widens past back-filling learned routes, re-evaluate
+        via an ADR-0074 update — not the pin.
+
+      For any *fourth* such method, start from ADR-0074's split: a
+      validated, persisted config surface that directs already-learned
+      routes may still fit `mutating`; operator-authored injection is
+      `operator_only`. Reach for a dedicated `dataplane_mutating` tier
+      (captured in an ADR) only if a real case falls cleanly between
+      those two.
 - [ ] **Tier ↔ role boundary is intentional** — recall
       `Observer ≤ sensitive_read`, `Automation ≤ mutating`,
       `Operator ≤ operator_only`. Ask: should the Automation role be

@@ -60,6 +60,9 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 - M49: EVPN preference-DF election (rustbgpd ×2).
 - M40: EVPN aliasing dataplane ECMP via FDB nexthop groups against FRR EVPN-MH.
 - M42: ADR-0061 configured-table unicast FIB runtime against FRR.
+- M58: ADR-0061 runtime `[[fib_tables]]` CRUD against FRR and the real kernel
+  (`SetFibTable` / `DeleteFibTable` / `ListFibTables`, persistence, and
+  key-move withdraw/install).
 - M50: ADR-0066 unicast multipath/ECMP FIB install against two FRR peers.
 - M52: ADR-0066 multipath-relax against two FRR peers in different ASes.
 - M53: ADR-0069 BGP unnumbered / IPv6 link-local peering with scoped FIB ECMP

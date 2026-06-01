@@ -2,7 +2,7 @@
 
 A feature comparison of open-source BGP daemon implementations.
 
-Last updated: 2026-05-29. See [CHANGELOG.md](../CHANGELOG.md) for
+Last updated: 2026-06-01. See [CHANGELOG.md](../CHANGELOG.md) for
 per-release feature deltas and [evpn-enablement.md](evpn-enablement.md)
 for the EVPN gate ladder.
 
@@ -154,7 +154,7 @@ suite implementation.
 | Docker image | Yes | Yes | Yes | Yes | No |
 | Fuzz testing | Yes | No | No | No | No |
 | Interop test suite | Yes | No | No | No | No |
-| FIB/kernel integration | Partial | Yes | Yes | Yes | Yes |
+| FIB/kernel integration | Partial[^fib] | Yes | Yes | Yes | Yes |
 | Route server mode | Yes | Yes | Yes | Yes | Yes |
 | Dynamic neighbors | Yes | Yes | Yes | Yes | No |
 | Looking glass | Yes | No | Yes | No | Yes |
@@ -173,6 +173,12 @@ suite implementation.
     BFD tracking, dynamic-neighbor BFD, hardware / offload, and BFD over
     IPv6 link-local / unnumbered peers → v1.1 (BGP unnumbered itself shipped —
     ADR-0069 / M53).
+
+[^fib]: rustbgpd's FIB integration is intentionally opt-in and scoped: RFC 7999
+    BLACKHOLE discard install plus explicit `[[fib_tables]]` unicast table
+    export through the ADR-0061 reconciler, including ECMP / weighted multipath
+    and runtime `SetFibTable` / `DeleteFibTable` / `ListFibTables` CRUD. It is
+    not a default-on full routing-suite FIB manager or Zebra replacement.
 
 [^unnum]: Interface-scoped BGP over IPv6 link-local carrying IPv4 unicast via
     RFC 8950. rustbgpd ships static interface-bound neighbors (operator supplies

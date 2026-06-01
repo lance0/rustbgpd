@@ -120,8 +120,8 @@ service InjectionService {
   rpc DeleteFlowSpec(DeleteFlowSpecRequest) returns (DeleteFlowSpecResponse);
 }
 
-// Policy CRUD and chain assignment
-service PolicyService { /* 14 RPCs: List/Get/Set/Delete for policies, neighbor sets, chains */ }
+// Policy CRUD, chain assignment, and import-policy explain
+service PolicyService { /* 19 RPCs: policies, neighbor sets, chains, ExplainImportPolicy */ }
 
 // Peer group CRUD
 service PeerGroupService { /* 6 RPCs: List/Get/Set/Delete groups, Set/Clear neighbor membership */ }
