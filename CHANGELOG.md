@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.33.0] — 2026-06-01
+
 ### Added
 
 - **Runtime dynamic-neighbor CRUD.** `AddDynamicNeighbor` /
