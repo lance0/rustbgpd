@@ -147,7 +147,20 @@ async fn live_only_when_cursor_absent() {
     for i in 1..=3_u64 {
         sender.try_send(make_envelope(i)).unwrap();
     }
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    // Deterministically wait until events 1-3 have committed rather than a fixed
+    // sleep, which flakes on a slow CI runner. The live-only subscription's
+    // high-watermark is `latest_event_id()` (see cursor.rs), so events 1-3 are
+    // excluded only once committed; a too-short sleep lets subscribe capture a
+    // watermark below 3 and replay them.
+    let state = manager.state();
+    let commit_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while state.latest_event_id() < 3 && tokio::time::Instant::now() < commit_deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        state.latest_event_id() >= 3,
+        "events 1-3 should have committed before the live-only subscribe"
+    );
 
     // Cursor absent → live-only. The 3 events already committed
     // should NOT be replayed; only events arriving after this call
