@@ -35,6 +35,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runtime-config coordinator lock with SIGHUP and wait for config-persistence
   acknowledgement before returning; if persistence rejects an accepted mutation,
   the runtime matcher is rolled back instead of drifting ahead of disk.
+- Runtime static-neighbor CRUD (`AddNeighbor` / `DeleteNeighbor`) now uses the
+  same runtime-config coordinator lock and config-persistence acknowledgement as
+  dynamic-neighbor CRUD. If the TOML write is rejected after the peer manager
+  accepts the mutation, the API rolls the runtime change back and reports
+  failure instead of letting a later SIGHUP reload stale disk.
 
 ## [0.33.0] — 2026-06-01
 

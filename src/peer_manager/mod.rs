@@ -22,7 +22,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::policy_admin::{
-    global_policy_chains_from_config, named_neighbor_set_from_config,
+    apply_config_event, global_policy_chains_from_config, named_neighbor_set_from_config,
     named_neighbor_sets_from_config, named_peer_group_from_config, named_peer_groups_from_config,
     named_policies_from_config, named_policy_from_config, neighbor_policy_chains_from_config,
 };
@@ -563,6 +563,11 @@ impl PeerManager {
                         PeerManagerCommand::SetFibTablesSnapshot { tables, reply } => {
                             self.set_fib_tables_snapshot(&tables);
                             let _ = reply.send(());
+                        }
+                        PeerManagerCommand::ApplyConfigEvent { event, reply } => {
+                            let result = apply_config_event(&mut self.current_config, &event)
+                                .map_err(|error| error.to_string());
+                            let _ = reply.send(result);
                         }
                         PeerManagerCommand::GetPeerState { peer, reply } => {
                             let info = self.get_peer_info(&peer).await;

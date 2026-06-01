@@ -454,13 +454,11 @@ branch is between features.
   the runtime-config coordinator lock with SIGHUP through config-persistence
   acknowledgement. Persistence rejection rolls the runtime matcher back instead
   of letting it drift ahead of disk.
-- [ ] **Static neighbor CRUD persistence/SIGHUP serialization.**
-  `AddNeighbor` / `DeleteNeighbor` already fail fast when the persistence queue
-  is unavailable, but unlike dynamic-neighbor CRUD they do not yet hold the
-  shared runtime-config coordinator lock through the TOML persistence
-  acknowledgement. Bring the static-neighbor runtime mutation path under the
-  same lock/ack/rollback invariant so a SIGHUP cannot reload stale disk between
-  an accepted RPC mutation and its persisted commit.
+- [x] **Static neighbor CRUD persistence/SIGHUP serialization.**
+  `AddNeighbor` / `DeleteNeighbor` now share the runtime-config coordinator
+  lock with SIGHUP through config-persistence acknowledgement. Persistence
+  rejection rolls the accepted runtime mutation back, completing the same
+  lock/ack/rollback invariant used by FIB-table and dynamic-neighbor CRUD.
 - [ ] **`#[expect(clippy::too_many_lines)]` reduction.** ~30 suppressions
   workspace-wide (down from 94). Concentrated in long dispatchers (FSM action
   loop, EVPN reconcilers, encode/decode match arms). Some are honest match-heavy

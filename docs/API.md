@@ -277,8 +277,8 @@ added at runtime.
 
 | RPC | Description |
 |-----|-------------|
-| `AddNeighbor` | Add a peer dynamically (starts session immediately) |
-| `DeleteNeighbor` | Remove a peer and tear down its session |
+| `AddNeighbor` | Add a peer dynamically (starts session immediately); persisted mode waits for the atomic config-file update and rolls runtime back on persistence failure |
+| `DeleteNeighbor` | Remove a peer and tear down its session; persisted mode waits for the atomic config-file update and rolls runtime back on persistence failure |
 | `ListNeighbors` | List all peers with session state and counters |
 | `GetNeighborState` | Get detailed state for a single peer |
 | `EnableNeighbor` | Re-enable a previously disabled peer |

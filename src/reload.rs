@@ -131,6 +131,8 @@ fn fib_table_snapshots(tables: &[config::FibTableConfig]) -> Vec<FibTableSnapsho
 fn take_config_event_ack(event: &mut ConfigEvent) -> Option<oneshot::Sender<Result<(), String>>> {
     match event {
         ConfigEvent::FibTablesReplaced { ack, .. }
+        | ConfigEvent::NeighborAdded { ack, .. }
+        | ConfigEvent::NeighborDeleted { ack, .. }
         | ConfigEvent::DynamicNeighborAdded { ack, .. }
         | ConfigEvent::DynamicNeighborDeleted { ack, .. } => ack.take(),
         _ => None,
@@ -3398,6 +3400,206 @@ peer_group = "secure"
                 .unwrap(),
             Ok(()),
             "FIB event ack should reflect the persister result"
+        );
+
+        drop(replace_tx);
+        drop(event_tx);
+        timeout(Duration::from_secs(1), bridge)
+            .await
+            .expect("bridge should exit after both inputs close")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn config_bridge_acks_static_neighbor_event_after_persister_ack() {
+        use rustbgpd_api::peer_types::{ConfigEvent, PeerManagerNeighborConfig};
+        use rustbgpd_transport::RemovePrivateAs;
+        use rustbgpd_wire::{Afi, Safi};
+        use tokio::sync::oneshot::error::TryRecvError;
+        use tokio::time::{Duration, timeout};
+
+        let stale_path = unique_temp_path("bridge-static-ack-stale");
+        std::fs::write(&stale_path, baseline_toml()).unwrap();
+        let stale = Config::load_with_diagnostics(stale_path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&stale_path).ok();
+
+        let (event_tx, event_rx) = mpsc::channel::<ConfigEvent>(8);
+        let (replace_tx, replace_rx) = mpsc::unbounded_channel::<Box<Config>>();
+        let (mutation_tx, mut mutation_rx) = mpsc::channel::<ConfigMutation>(8);
+        let bridge = tokio::spawn(run_config_bridge(event_rx, replace_rx, mutation_tx, stale));
+
+        let (ack_tx, mut ack_rx) = oneshot::channel();
+        event_tx
+            .send(ConfigEvent::NeighborAdded {
+                config: PeerManagerNeighborConfig {
+                    address: "10.0.0.9".parse().unwrap(),
+                    interface: None,
+                    scope_id: None,
+                    remote_asn: 65009,
+                    description: "runtime peer".to_string(),
+                    peer_group: None,
+                    hold_time: Some(90),
+                    max_prefixes: None,
+                    md5_password: None,
+                    tcp_ao: None,
+                    ttl_security: false,
+                    families: vec![(Afi::Ipv4, Safi::Unicast)],
+                    graceful_restart: true,
+                    gr_restart_time: 120,
+                    gr_stale_routes_time: 360,
+                    llgr_stale_time: 0,
+                    gr_restart_eligible: false,
+                    local_ipv6_nexthop: None,
+                    route_reflector_client: false,
+                    route_server_client: false,
+                    remove_private_as: RemovePrivateAs::Disabled,
+                    add_path_receive: false,
+                    add_path_send: false,
+                    add_path_send_max: 0,
+                    local_role: None,
+                    strict_role: false,
+                    import_policy: None,
+                    export_policy: None,
+                },
+                ack: Some(ack_tx),
+            })
+            .await
+            .unwrap();
+
+        let event_msg = timeout(Duration::from_secs(1), mutation_rx.recv())
+            .await
+            .expect("bridge should forward static-neighbor event to persister")
+            .expect("event forwarded");
+        let ConfigMutation::ReplaceConfigAck(received_event, persist_ack) = event_msg else {
+            panic!("static-neighbor events with an ack must request an acknowledged persist");
+        };
+        assert!(
+            received_event
+                .neighbors
+                .iter()
+                .any(|neighbor| neighbor.address == "10.0.0.9")
+        );
+        assert!(
+            matches!(ack_rx.try_recv(), Err(TryRecvError::Empty),),
+            "bridge must not acknowledge the static-neighbor event before the persister replies"
+        );
+        persist_ack.send(Ok(())).unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(1), ack_rx)
+                .await
+                .unwrap()
+                .unwrap(),
+            Ok(()),
+            "static-neighbor event ack should reflect the persister result"
+        );
+
+        drop(replace_tx);
+        drop(event_tx);
+        timeout(Duration::from_secs(1), bridge)
+            .await
+            .expect("bridge should exit after both inputs close")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn config_bridge_does_not_advance_snapshot_on_acked_static_neighbor_persist_failure() {
+        use rustbgpd_api::peer_types::{ConfigEvent, PeerManagerNeighborConfig};
+        use rustbgpd_transport::RemovePrivateAs;
+        use rustbgpd_wire::{Afi, Safi};
+        use tokio::time::{Duration, timeout};
+
+        let stale_path = unique_temp_path("bridge-static-ack-failure");
+        std::fs::write(&stale_path, baseline_toml()).unwrap();
+        let stale = Config::load_with_diagnostics(stale_path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&stale_path).ok();
+
+        let (event_tx, event_rx) = mpsc::channel::<ConfigEvent>(8);
+        let (replace_tx, replace_rx) = mpsc::unbounded_channel::<Box<Config>>();
+        let (mutation_tx, mut mutation_rx) = mpsc::channel::<ConfigMutation>(8);
+        let bridge = tokio::spawn(run_config_bridge(event_rx, replace_rx, mutation_tx, stale));
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        event_tx
+            .send(ConfigEvent::NeighborAdded {
+                config: PeerManagerNeighborConfig {
+                    address: "10.0.0.9".parse().unwrap(),
+                    interface: None,
+                    scope_id: None,
+                    remote_asn: 65009,
+                    description: "runtime peer".to_string(),
+                    peer_group: None,
+                    hold_time: Some(90),
+                    max_prefixes: None,
+                    md5_password: None,
+                    tcp_ao: None,
+                    ttl_security: false,
+                    families: vec![(Afi::Ipv4, Safi::Unicast)],
+                    graceful_restart: true,
+                    gr_restart_time: 120,
+                    gr_stale_routes_time: 360,
+                    llgr_stale_time: 0,
+                    gr_restart_eligible: false,
+                    local_ipv6_nexthop: None,
+                    route_reflector_client: false,
+                    route_server_client: false,
+                    remove_private_as: RemovePrivateAs::Disabled,
+                    add_path_receive: false,
+                    add_path_send: false,
+                    add_path_send_max: 0,
+                    local_role: None,
+                    strict_role: false,
+                    import_policy: None,
+                    export_policy: None,
+                },
+                ack: Some(ack_tx),
+            })
+            .await
+            .unwrap();
+        let first_msg = timeout(Duration::from_secs(1), mutation_rx.recv())
+            .await
+            .expect("bridge should forward acked event")
+            .expect("event forwarded");
+        let ConfigMutation::ReplaceConfigAck(first_candidate, persist_ack) = first_msg else {
+            panic!("acked event must request acknowledged persist");
+        };
+        assert!(
+            first_candidate
+                .neighbors
+                .iter()
+                .any(|neighbor| neighbor.address == "10.0.0.9")
+        );
+        persist_ack.send(Err("disk full".to_string())).unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(1), ack_rx)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err("disk full".to_string())
+        );
+
+        event_tx
+            .send(ConfigEvent::NeighborDeleted {
+                peer: rustbgpd_api::peer_types::PeerKey {
+                    address: "10.0.0.2".parse().unwrap(),
+                    interface: None,
+                },
+                ack: None,
+            })
+            .await
+            .unwrap();
+        let second_msg = timeout(Duration::from_secs(1), mutation_rx.recv())
+            .await
+            .expect("bridge should forward second event")
+            .expect("event forwarded");
+        let ConfigMutation::ReplaceConfig(second_candidate) = second_msg else {
+            panic!("non-acked event should request normal persist");
+        };
+        assert!(
+            second_candidate
+                .neighbors
+                .iter()
+                .all(|neighbor| neighbor.address != "10.0.0.9"),
+            "failed acked event must not remain in bridge snapshot"
         );
 
         drop(replace_tx);

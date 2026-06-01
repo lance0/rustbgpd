@@ -253,8 +253,8 @@ pub enum PeerManagerCommand {
         peer: PeerKey,
         /// Whether to update the live config snapshot.
         sync_config_snapshot: bool,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        /// Reply channel returning the removed config on success.
+        reply: oneshot::Sender<Result<PeerManagerNeighborConfig, String>>,
     },
     /// List all configured peers and their state.
     ListPeers {
@@ -325,6 +325,14 @@ pub enum PeerManagerCommand {
         tables: Vec<FibTableSnapshot>,
         /// Acknowledgement, sent after `current_config.fib_tables` is assigned.
         reply: oneshot::Sender<()>,
+    },
+    /// Apply a persisted runtime config event to the peer manager's runtime
+    /// config snapshot without changing live peer/session state.
+    ApplyConfigEvent {
+        /// Event that has already been accepted by the config persister.
+        event: ConfigEvent,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// Query a single peer's state by address.
     GetPeerState {
@@ -974,9 +982,21 @@ pub enum ConfigEvent {
         ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     /// A neighbor was successfully added at runtime.
-    NeighborAdded(PeerManagerNeighborConfig),
+    NeighborAdded {
+        /// Neighbor configuration that was added.
+        config: PeerManagerNeighborConfig,
+        /// Optional persistence acknowledgement. Runtime CRUD paths hold the
+        /// shared runtime-config lock until this fires, so SIGHUP cannot read a
+        /// stale TOML between runtime mutation and on-disk commit.
+        ack: Option<oneshot::Sender<Result<(), String>>>,
+    },
     /// A neighbor was successfully deleted at runtime.
-    NeighborDeleted(PeerKey),
+    NeighborDeleted {
+        /// Peer identity that was deleted.
+        peer: PeerKey,
+        /// Optional persistence acknowledgement (see `NeighborAdded`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
+    },
     /// A dynamic neighbor range was successfully added at runtime.
     DynamicNeighborAdded {
         /// IP prefix range (e.g., `10.0.0.0/24`).

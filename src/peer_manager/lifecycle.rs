@@ -12,6 +12,43 @@ use crate::policy_admin::apply_config_event;
 use super::{ManagedPeer, PEER_POLICY_UPDATE_TIMEOUT, PeerManager};
 
 impl PeerManager {
+    fn removed_peer_config(peer: &PeerKey, managed: &ManagedPeer) -> PeerManagerNeighborConfig {
+        let tc = &managed.transport_config;
+        PeerManagerNeighborConfig {
+            address: peer.address,
+            interface: peer.interface.clone(),
+            scope_id: tc.peer_scope_id,
+            remote_asn: managed.remote_asn,
+            description: managed.description.clone(),
+            peer_group: managed.peer_group.clone(),
+            hold_time: managed.hold_time,
+            max_prefixes: managed.max_prefixes,
+            md5_password: tc.md5_password.clone(),
+            tcp_ao: tc.tcp_ao.clone(),
+            ttl_security: tc.ttl_security,
+            families: tc.peer.families.clone(),
+            graceful_restart: tc.peer.graceful_restart,
+            gr_restart_time: tc.peer.gr_restart_time,
+            gr_stale_routes_time: tc.gr_stale_routes_time,
+            llgr_stale_time: tc.llgr_stale_time,
+            // Runtime delete rollback re-adds through the still-original
+            // config snapshot, so startup-only GR eligibility is re-resolved
+            // there rather than reconstructed from the removed live peer.
+            gr_restart_eligible: false,
+            local_ipv6_nexthop: tc.local_ipv6_nexthop,
+            route_reflector_client: tc.route_reflector_client,
+            route_server_client: tc.route_server_client,
+            remove_private_as: tc.remove_private_as,
+            add_path_receive: tc.peer.add_path_receive,
+            add_path_send: tc.peer.add_path_send,
+            add_path_send_max: tc.peer.add_path_send_max,
+            local_role: tc.peer.local_role,
+            strict_role: tc.peer.strict_role,
+            import_policy: managed.import_policy.clone(),
+            export_policy: managed.export_policy.clone(),
+        }
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "peer add wires transport, policy, BFD desired state, persistence, and events"
@@ -53,7 +90,10 @@ impl PeerManager {
                 let mut next_config = self.current_config.clone();
                 apply_config_event(
                     &mut next_config,
-                    &ConfigEvent::NeighborAdded(config.clone()),
+                    &ConfigEvent::NeighborAdded {
+                        config: config.clone(),
+                        ack: None,
+                    },
                 )
                 .map_err(|e| e.to_string())?;
                 let neighbor = next_config
@@ -170,7 +210,7 @@ impl PeerManager {
         &mut self,
         peer: PeerKey,
         sync_config_snapshot: bool,
-    ) -> Result<(), String> {
+    ) -> Result<PeerManagerNeighborConfig, String> {
         self.delete_peer_checked(peer, sync_config_snapshot, None)
             .await
     }
@@ -180,7 +220,9 @@ impl PeerManager {
         peer: PeerKey,
         next_tcp_ao: Option<&TcpAoConfig>,
     ) -> Result<(), String> {
-        self.delete_peer_checked(peer, false, next_tcp_ao).await
+        self.delete_peer_checked(peer, false, next_tcp_ao)
+            .await
+            .map(|_| ())
     }
 
     pub(super) async fn delete_peer_checked(
@@ -188,7 +230,7 @@ impl PeerManager {
         peer: PeerKey,
         sync_config_snapshot: bool,
         next_tcp_ao: Option<&TcpAoConfig>,
-    ) -> Result<(), String> {
+    ) -> Result<PeerManagerNeighborConfig, String> {
         let address = peer.address;
         let current_tcp_ao = self
             .peers
@@ -208,6 +250,7 @@ impl PeerManager {
             .peers
             .remove(&peer)
             .ok_or_else(|| format!("peer {peer} not found"))?;
+        let removed_config = Self::removed_peer_config(&peer, &managed);
         self.unregister_session(managed.session_id);
         if let Some(pending) = managed.pending_inbound.take() {
             self.unregister_session(pending.session_id);
@@ -223,14 +266,14 @@ impl PeerManager {
         if sync_config_snapshot {
             apply_config_event(
                 &mut self.current_config,
-                &ConfigEvent::NeighborDeleted(peer),
+                &ConfigEvent::NeighborDeleted { peer, ack: None },
             )
             .map_err(|e| e.to_string())?;
         }
 
         // ADR-0067 step 4: drain the deleted peer's BFD session.
         self.set_bfd_peer_disabled(address, true);
-        Ok(())
+        Ok(removed_config)
     }
 
     pub(super) async fn enable_peer(&mut self, peer: PeerKey) -> Result<(), String> {

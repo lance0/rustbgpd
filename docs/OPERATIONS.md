@@ -184,7 +184,7 @@ chain, etc.).
 
 | State | Where | When |
 |-------|-------|------|
-| Neighbor add/delete via gRPC | Config file (atomic write) | Queued after the peer manager accepts the mutation; queue saturation fails before runtime mutation |
+| Neighbor add/delete via gRPC | Config file (atomic write) | Serialized with SIGHUP reload; the RPC waits for persistence acknowledgement and rolls runtime back if the write is rejected |
 | Dynamic-neighbor add/delete via gRPC | Config file (atomic write) | Serialized with SIGHUP reload; the RPC waits for persistence acknowledgement and rolls the matcher back if the write is rejected |
 | GR restart marker | `<runtime_state_dir>/gr-restart.toml` | On coordinated shutdown |
 | General FIB owned-state | `<runtime_state_dir>/fib-owned.json` | After successful ADR-0061 FIB apply/drain |

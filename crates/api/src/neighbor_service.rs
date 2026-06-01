@@ -189,6 +189,66 @@ async fn add_dynamic_range(
         .map_err(dynamic_range_error_status)
 }
 
+async fn add_static_peer(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    config: PeerManagerNeighborConfig,
+) -> Result<(), Status> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(PeerManagerCommand::AddPeer {
+            config,
+            sync_config_snapshot: true,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| Status::internal("peer manager unavailable"))?;
+
+    reply_rx
+        .await
+        .map_err(|_| Status::internal("peer manager dropped reply"))?
+        .map_err(Status::already_exists)
+}
+
+async fn delete_static_peer(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    peer: PeerKey,
+    sync_config_snapshot: bool,
+) -> Result<PeerManagerNeighborConfig, Status> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(PeerManagerCommand::DeletePeer {
+            peer,
+            sync_config_snapshot,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| Status::internal("peer manager unavailable"))?;
+
+    reply_rx
+        .await
+        .map_err(|_| Status::internal("peer manager dropped reply"))?
+        .map_err(Status::not_found)
+}
+
+async fn apply_peer_manager_config_event(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    event: ConfigEvent,
+) -> Result<(), Status> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(PeerManagerCommand::ApplyConfigEvent {
+            event,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| Status::internal("peer manager unavailable"))?;
+
+    reply_rx
+        .await
+        .map_err(|_| Status::internal("peer manager dropped reply"))?
+        .map_err(Status::internal)
+}
+
 async fn delete_dynamic_range(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     prefix: String,
@@ -208,7 +268,7 @@ async fn delete_dynamic_range(
         .map_err(dynamic_range_error_status)
 }
 
-async fn persist_dynamic_neighbor_event(
+async fn persist_runtime_config_event(
     permit: mpsc::OwnedPermit<ConfigEvent>,
     build_event: impl FnOnce(oneshot::Sender<Result<(), String>>) -> ConfigEvent,
 ) -> Result<(), Status> {
@@ -477,27 +537,36 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         // Reserve config persistence capacity before mutating runtime state.
         // This makes AddNeighbor fail-fast when persistence is unavailable.
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let persisted_config = persist_permit.as_ref().map(|_| peer_config.clone());
+        let peer_key = PeerKey::new(peer_config.address, peer_config.interface.clone());
+        let peer_mgr_tx = self.peer_mgr_tx.clone();
+        let runtime_config_lock = self.runtime_config_lock.clone();
+        let join = tokio::spawn(async move {
+            let _guard = runtime_config_lock.lock().await;
+            add_static_peer(&peer_mgr_tx, peer_config.clone()).await?;
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::AddPeer {
-                config: peer_config,
-                sync_config_snapshot: true,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-
-        reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(Status::already_exists)?;
-
-        // Persist only after successful runtime mutation.
-        if let (Some(permit), Some(cfg)) = (persist_permit, persisted_config) {
-            permit.send(ConfigEvent::NeighborAdded(cfg));
-        }
+            // Keep the shared runtime-config lock held until the TOML write is
+            // acknowledged; otherwise a concurrent SIGHUP could reload stale
+            // disk and drop the accepted runtime neighbor from the snapshot.
+            if let Some(permit) = persist_permit
+                && let Err(error) =
+                    persist_runtime_config_event(permit, |ack| ConfigEvent::NeighborAdded {
+                        config: peer_config.clone(),
+                        ack: Some(ack),
+                    })
+                    .await
+            {
+                let rollback = delete_static_peer(&peer_mgr_tx, peer_key, true).await;
+                if let Err(rollback_error) = rollback {
+                    return Err(Status::internal(format!(
+                        "{error}; rollback of neighbor add failed: {rollback_error}"
+                    )));
+                }
+                return Err(error);
+            }
+            Ok::<(), Status>(())
+        });
+        join.await
+            .map_err(|_| Status::internal("neighbor add task did not complete"))??;
 
         Ok(Response::new(proto::AddNeighborResponse {}))
     }
@@ -516,24 +585,54 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         // This makes DeleteNeighbor fail-fast when persistence is unavailable.
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::DeletePeer {
-                peer: peer.clone(),
-                sync_config_snapshot: true,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
+        let peer_mgr_tx = self.peer_mgr_tx.clone();
+        let runtime_config_lock = self.runtime_config_lock.clone();
+        let join = tokio::spawn(async move {
+            let _guard = runtime_config_lock.lock().await;
+            let removed = delete_static_peer(&peer_mgr_tx, peer.clone(), false).await?;
 
-        reply_rx
+            // Hold the shared runtime-config lock until persistence completes
+            // so SIGHUP cannot rebuild from stale TOML in the middle.
+            if let Some(permit) = persist_permit
+                && let Err(error) =
+                    persist_runtime_config_event(permit, |ack| ConfigEvent::NeighborDeleted {
+                        peer: peer.clone(),
+                        ack: Some(ack),
+                    })
+                    .await
+            {
+                let rollback = add_static_peer(&peer_mgr_tx, removed).await;
+                if let Err(rollback_error) = rollback {
+                    return Err(Status::internal(format!(
+                        "{error}; rollback of neighbor delete failed: {rollback_error}"
+                    )));
+                }
+                return Err(error);
+            }
+            // Delete differs from add on purpose: the live peer is removed
+            // before persistence, but the peer-manager config snapshot is only
+            // updated after the TOML write succeeds. That keeps the original
+            // config row available for rollback instead of reconstructing it
+            // from a lossy runtime snapshot.
+            if let Err(error) = apply_peer_manager_config_event(
+                &peer_mgr_tx,
+                ConfigEvent::NeighborDeleted {
+                    peer: peer.clone(),
+                    ack: None,
+                },
+            )
             .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(Status::not_found)?;
-
-        if let Some(permit) = persist_permit {
-            permit.send(ConfigEvent::NeighborDeleted(peer));
-        }
+            {
+                tracing::warn!(
+                    %peer,
+                    error = %error,
+                    "neighbor delete persisted but peer-manager snapshot update failed"
+                );
+            }
+            Ok::<(), Status>(())
+        });
+        join.await
+            .map_err(|_| Status::internal("neighbor delete task did not complete"))??;
 
         Ok(Response::new(proto::DeleteNeighborResponse {}))
     }
@@ -777,16 +876,15 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             // acknowledged; otherwise a concurrent SIGHUP could reload stale
             // disk and drop the accepted runtime add from the rebuilt matcher.
             if let Some(permit) = persist_permit
-                && let Err(error) = persist_dynamic_neighbor_event(permit, |ack| {
-                    ConfigEvent::DynamicNeighborAdded {
+                && let Err(error) =
+                    persist_runtime_config_event(permit, |ack| ConfigEvent::DynamicNeighborAdded {
                         prefix: range.prefix.clone(),
                         peer_group: range.peer_group.clone(),
                         remote_asn: range.remote_asn,
                         description: description.clone(),
                         ack: Some(ack),
-                    }
-                })
-                .await
+                    })
+                    .await
             {
                 let rollback = delete_dynamic_range(&peer_mgr_tx, range.prefix.clone()).await;
                 if let Err(rollback_error) = rollback {
@@ -829,7 +927,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             // shared runtime-config lock until the write is acknowledged so
             // SIGHUP cannot rebuild from stale TOML in the middle.
             if let Some(permit) = persist_permit
-                && let Err(error) = persist_dynamic_neighbor_event(permit, |ack| {
+                && let Err(error) = persist_runtime_config_event(permit, |ack| {
                     ConfigEvent::DynamicNeighborDeleted {
                         prefix: prefix.clone(),
                         ack: Some(ack),
@@ -913,6 +1011,39 @@ mod tests {
         let (tx, _rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         NeighborService::new(65001, AccessMode::ReadWrite, tx, rib_tx, None)
+    }
+
+    fn test_static_peer_config() -> PeerManagerNeighborConfig {
+        PeerManagerNeighborConfig {
+            address: "10.0.0.2".parse().unwrap(),
+            interface: None,
+            scope_id: None,
+            remote_asn: 65002,
+            description: "static peer".to_string(),
+            peer_group: None,
+            hold_time: Some(90),
+            max_prefixes: None,
+            md5_password: None,
+            tcp_ao: None,
+            ttl_security: false,
+            families: vec![(Afi::Ipv4, Safi::Unicast)],
+            graceful_restart: true,
+            gr_restart_time: 120,
+            gr_stale_routes_time: 360,
+            llgr_stale_time: 0,
+            gr_restart_eligible: false,
+            local_ipv6_nexthop: None,
+            route_reflector_client: false,
+            route_server_client: false,
+            remove_private_as: RemovePrivateAs::Disabled,
+            add_path_receive: false,
+            add_path_send: false,
+            add_path_send_max: 0,
+            local_role: None,
+            strict_role: false,
+            import_policy: None,
+            export_policy: None,
+        }
     }
 
     #[test]
@@ -1590,6 +1721,300 @@ mod tests {
         assert_eq!(state.import_policy_routes_denied, 12);
         assert_eq!(state.export_policy_routes_permitted, 13);
         assert_eq!(state.export_policy_routes_denied, 14);
+    }
+
+    #[tokio::test]
+    async fn add_neighbor_persists_after_runtime_success() {
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (config_tx, mut config_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(
+            65001,
+            AccessMode::ReadWrite,
+            peer_mgr_tx,
+            rib_tx,
+            Some(config_tx),
+        );
+
+        let mut call = tokio::spawn(async move {
+            svc.add_neighbor(Request::new(proto::AddNeighborRequest {
+                config: Some(proto::NeighborConfig {
+                    address: "10.0.0.2".into(),
+                    interface: String::new(),
+                    remote_asn: 65002,
+                    description: "static peer".into(),
+                    hold_time: 90,
+                    max_prefixes: 0,
+                    families: vec!["ipv4_unicast".into()],
+                    peer_group: String::new(),
+                    remove_private_as: String::new(),
+                    ..Default::default()
+                }),
+            }))
+            .await
+        });
+
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::AddPeer {
+                config,
+                sync_config_snapshot,
+                reply,
+            } => {
+                assert_eq!(config.address.to_string(), "10.0.0.2");
+                assert!(sync_config_snapshot);
+                reply.send(Ok(())).unwrap();
+            }
+            _ => panic!("expected AddPeer"),
+        }
+
+        match config_rx.recv().await.unwrap() {
+            ConfigEvent::NeighborAdded { config, ack } => {
+                assert_eq!(config.address.to_string(), "10.0.0.2");
+                let ack = ack.unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(20), &mut call)
+                        .await
+                        .is_err(),
+                    "call must wait for config persistence acknowledgement"
+                );
+                ack.send(Ok(())).unwrap();
+            }
+            _ => panic!("expected NeighborAdded"),
+        }
+        call.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn add_neighbor_rolls_back_when_persist_fails() {
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (config_tx, mut config_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(
+            65001,
+            AccessMode::ReadWrite,
+            peer_mgr_tx,
+            rib_tx,
+            Some(config_tx),
+        );
+
+        let call = tokio::spawn(async move {
+            svc.add_neighbor(Request::new(proto::AddNeighborRequest {
+                config: Some(proto::NeighborConfig {
+                    address: "10.0.0.2".into(),
+                    interface: String::new(),
+                    remote_asn: 65002,
+                    description: "static peer".into(),
+                    hold_time: 90,
+                    max_prefixes: 0,
+                    families: vec!["ipv4_unicast".into()],
+                    peer_group: String::new(),
+                    remove_private_as: String::new(),
+                    ..Default::default()
+                }),
+            }))
+            .await
+        });
+
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::AddPeer { reply, .. } => {
+                reply.send(Ok(())).unwrap();
+            }
+            _ => panic!("expected AddPeer"),
+        }
+        match config_rx.recv().await.unwrap() {
+            ConfigEvent::NeighborAdded { ack, .. } => {
+                ack.unwrap()
+                    .send(Err("disk full".to_string()))
+                    .expect("send persist failure");
+            }
+            _ => panic!("expected NeighborAdded"),
+        }
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::DeletePeer {
+                peer,
+                sync_config_snapshot,
+                reply,
+            } => {
+                assert_eq!(peer.address.to_string(), "10.0.0.2");
+                assert!(sync_config_snapshot);
+                assert!(reply.send(Ok(test_static_peer_config())).is_ok());
+            }
+            _ => panic!("expected DeletePeer rollback"),
+        }
+
+        let err = call.await.unwrap().unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(err.message().contains("config persistence failed"));
+    }
+
+    #[tokio::test]
+    async fn delete_neighbor_persists_after_runtime_success() {
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (config_tx, mut config_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(
+            65001,
+            AccessMode::ReadWrite,
+            peer_mgr_tx,
+            rib_tx,
+            Some(config_tx),
+        );
+
+        let mut call = tokio::spawn(async move {
+            svc.delete_neighbor(Request::new(proto::DeleteNeighborRequest {
+                address: "10.0.0.2".into(),
+                interface: String::new(),
+            }))
+            .await
+        });
+
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::DeletePeer {
+                peer,
+                sync_config_snapshot,
+                reply,
+            } => {
+                assert_eq!(peer.address.to_string(), "10.0.0.2");
+                assert!(!sync_config_snapshot);
+                assert!(reply.send(Ok(test_static_peer_config())).is_ok());
+            }
+            _ => panic!("expected DeletePeer"),
+        }
+
+        match config_rx.recv().await.unwrap() {
+            ConfigEvent::NeighborDeleted { peer, ack } => {
+                assert_eq!(peer.address.to_string(), "10.0.0.2");
+                let ack = ack.unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(20), &mut call)
+                        .await
+                        .is_err(),
+                    "call must wait for config persistence acknowledgement"
+                );
+                ack.send(Ok(())).unwrap();
+            }
+            _ => panic!("expected NeighborDeleted"),
+        }
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::ApplyConfigEvent { event, reply } => {
+                assert!(matches!(event, ConfigEvent::NeighborDeleted { .. }));
+                reply.send(Ok(())).unwrap();
+            }
+            _ => panic!("expected ApplyConfigEvent"),
+        }
+        call.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_neighbor_succeeds_when_snapshot_update_fails_after_persist() {
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (config_tx, mut config_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(
+            65001,
+            AccessMode::ReadWrite,
+            peer_mgr_tx,
+            rib_tx,
+            Some(config_tx),
+        );
+
+        let call = tokio::spawn(async move {
+            svc.delete_neighbor(Request::new(proto::DeleteNeighborRequest {
+                address: "10.0.0.2".into(),
+                interface: String::new(),
+            }))
+            .await
+        });
+
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::DeletePeer {
+                sync_config_snapshot,
+                reply,
+                ..
+            } => {
+                assert!(!sync_config_snapshot);
+                assert!(reply.send(Ok(test_static_peer_config())).is_ok());
+            }
+            _ => panic!("expected DeletePeer"),
+        }
+        match config_rx.recv().await.unwrap() {
+            ConfigEvent::NeighborDeleted { ack, .. } => {
+                ack.unwrap()
+                    .send(Ok(()))
+                    .expect("send persist acknowledgement");
+            }
+            _ => panic!("expected NeighborDeleted"),
+        }
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::ApplyConfigEvent { reply, .. } => {
+                reply
+                    .send(Err("peer manager shutting down".to_string()))
+                    .unwrap();
+            }
+            _ => panic!("expected ApplyConfigEvent"),
+        }
+
+        call.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_neighbor_rolls_back_when_persist_fails() {
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (config_tx, mut config_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(
+            65001,
+            AccessMode::ReadWrite,
+            peer_mgr_tx,
+            rib_tx,
+            Some(config_tx),
+        );
+
+        let removed = test_static_peer_config();
+        let call = tokio::spawn(async move {
+            svc.delete_neighbor(Request::new(proto::DeleteNeighborRequest {
+                address: "10.0.0.2".into(),
+                interface: String::new(),
+            }))
+            .await
+        });
+
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::DeletePeer {
+                sync_config_snapshot,
+                reply,
+                ..
+            } => {
+                assert!(!sync_config_snapshot);
+                assert!(reply.send(Ok(removed.clone())).is_ok());
+            }
+            _ => panic!("expected DeletePeer"),
+        }
+        match config_rx.recv().await.unwrap() {
+            ConfigEvent::NeighborDeleted { ack, .. } => {
+                ack.unwrap()
+                    .send(Err("disk full".to_string()))
+                    .expect("send persist failure");
+            }
+            _ => panic!("expected NeighborDeleted"),
+        }
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::AddPeer {
+                config,
+                sync_config_snapshot,
+                reply,
+            } => {
+                assert_eq!(config.address, removed.address);
+                assert_eq!(config.remote_asn, removed.remote_asn);
+                assert!(sync_config_snapshot);
+                reply.send(Ok(())).unwrap();
+            }
+            _ => panic!("expected AddPeer rollback"),
+        }
+
+        let err = call.await.unwrap().unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(err.message().contains("config persistence failed"));
     }
 
     #[tokio::test]

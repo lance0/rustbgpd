@@ -2213,12 +2213,12 @@ live through `WatchEvents`, and are also replayable through
 
 Neighbor mutations made through the gRPC API (`AddNeighbor`, `DeleteNeighbor`)
 reserve config-persistence queue capacity before mutating runtime state, then
-queue an atomic config-file write (temp file + rename) after the peer manager
-accepts the change. Dynamic-neighbor range mutations (`AddDynamicNeighbor`,
-`DeleteDynamicNeighbor`) also reserve capacity first, then wait for the
-config-file write acknowledgement while holding the runtime-config coordinator
-lock shared with SIGHUP. If the dynamic-neighbor write is rejected after runtime
-apply, the matcher is rolled back and the RPC reports failure.
+wait for the atomic config-file write (temp file + rename) to be acknowledged
+after the peer manager accepts the change. Static-neighbor and dynamic-neighbor
+runtime CRUD share the runtime-config coordinator lock with SIGHUP, so reload
+sees either the pre-mutation TOML or the committed post-mutation TOML. If the
+write is rejected after runtime apply, the accepted runtime mutation is rolled
+back and the RPC reports failure.
 
 ### SIGHUP Reload
 
