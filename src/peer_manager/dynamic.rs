@@ -149,7 +149,7 @@ impl PeerManager {
             parse_dynamic_prefix(&prefix).map_err(DynamicRangeError::Invalid)?;
 
         let Some(group) = self.current_config.peer_groups.get(&peer_group) else {
-            return Err(DynamicRangeError::Invalid(format!(
+            return Err(DynamicRangeError::NotFound(format!(
                 "peer_group {peer_group:?} not defined"
             )));
         };

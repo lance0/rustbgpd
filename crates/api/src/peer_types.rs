@@ -665,10 +665,11 @@ pub struct DynamicNeighborInfo {
 pub enum DynamicRangeError {
     /// A range with the same effective prefix already exists (→ `ALREADY_EXISTS`).
     AlreadyExists(String),
-    /// No range with the given effective prefix exists (→ `NOT_FOUND`).
+    /// No range with the given effective prefix exists, or an add references a
+    /// peer group that does not exist (→ `NOT_FOUND`).
     NotFound(String),
-    /// The request was invalid — bad prefix, or unknown / BFD-enabled peer
-    /// group (→ `INVALID_ARGUMENT`).
+    /// The request was invalid — bad prefix or BFD-enabled peer group
+    /// (→ `INVALID_ARGUMENT`).
     Invalid(String),
 }
 

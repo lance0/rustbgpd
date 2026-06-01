@@ -738,9 +738,12 @@ rustbgpctl dynamic-neighbor delete 10.0.0.0/24
 
 - Backed by `NeighborService` (`AddDynamicNeighbor` / `DeleteDynamicNeighbor` /
   `ListDynamicNeighbors`); add/delete are tier `mutating`.
-- When the daemon was started with `--config`, runtime changes are persisted
-  back to the TOML file (atomic write) and survive a restart — the same posture
-  as `AddNeighbor`. Without `--config`, changes are in-memory only.
+- When the daemon was started with `--config`, runtime changes reserve config
+  persistence capacity before mutating and then queue an atomic TOML write after
+  the peer manager accepts the change — the same posture as `AddNeighbor`.
+  Without `--config`, changes are in-memory only. If the asynchronous write
+  later fails, the daemon logs the error and the runtime change remains active
+  until the next restart / reload.
 - **Delete stops *future* accepts only.** Already-established dynamic peers from
   a removed range keep running and drain naturally when they next return to
   Idle; delete never tears down a live session.
@@ -2199,15 +2202,21 @@ mode at runtime, `SubscribeFromEvent` returns
 to pre-ADR-0072 behavior in all three cases — they're
 backed by the existing in-memory rings.
 
-**v1 producer set:** route, EVPN, session-lifecycle,
-session-notification, policy, BFD. Dataplane events stay
-live-only in v1; their durable outbox wiring is a follow-up.
+**Producer set:** route, EVPN, session-lifecycle,
+session-notification, policy, dataplane, and BFD. Dataplane
+summary rollups and per-route FIB apply outcomes stay available
+live through `WatchEvents`, and are also replayable through
+`SubscribeFromEvent` when event history is enabled.
 
 ## Config Persistence
 
 Neighbor mutations made through the gRPC API (`AddNeighbor`, `DeleteNeighbor`)
-are automatically persisted back to the config file via atomic write (temp file
-+ rename). This ensures the on-disk config stays in sync with the running state.
+and dynamic-neighbor range mutations (`AddDynamicNeighbor`,
+`DeleteDynamicNeighbor`) reserve config-persistence queue capacity before
+mutating runtime state, then queue an atomic config-file write (temp file +
+rename) after the peer manager accepts the change. If the async write later
+fails, the daemon logs the error and the runtime change remains active until the
+next restart / reload.
 
 ### SIGHUP Reload
 

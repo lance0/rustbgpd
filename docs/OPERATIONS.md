@@ -184,7 +184,7 @@ chain, etc.).
 
 | State | Where | When |
 |-------|-------|------|
-| Neighbor add/delete via gRPC | Config file (atomic write) | Immediately on mutation |
+| Neighbor and dynamic-neighbor add/delete via gRPC | Config file (atomic write) | Queued after the peer manager accepts the mutation; queue saturation fails before runtime mutation |
 | GR restart marker | `<runtime_state_dir>/gr-restart.toml` | On coordinated shutdown |
 | General FIB owned-state | `<runtime_state_dir>/fib-owned.json` | After successful ADR-0061 FIB apply/drain |
 | MRT dump files | `[mrt] output_dir` | On periodic timer or `TriggerMrtDump` |
@@ -867,7 +867,7 @@ Use the narrowest surface for the question you are asking:
 | "What is changing right now?" | `rustbgpctl events watch` / `EventService.WatchEvents` | Default live route + session stream. Policy, EVPN, dataplane, and BFD streams are opt-in with `--category` or matching `--type`. No replay after reconnect. |
 | "What just changed for this prefix?" | `rustbgpctl events --prefix 203.0.113.0/24` / `ListRouteEvents` | Exact-prefix route history from the bounded in-memory RIB ring. |
 | "Why did this prefix not reach a peer?" | `rustbgpctl events watch --address 10.0.0.2 --type policy_filtered --prefix 203.0.113.0/24` / `ListRouteEvents` | Export-policy denials where the peer is the denied outbound target. |
-| "Did FIB apply fail for this prefix?" | `rustbgpctl events watch --category dataplane --type dataplane_route_failed --prefix 203.0.113.0/24` / `EventService.WatchEvents` | Live ADR-0061 route apply outcome; no history API. |
+| "Did FIB apply fail for this prefix?" | `rustbgpctl events watch --category dataplane --type dataplane_route_failed --prefix 203.0.113.0/24` / `EventService.WatchEvents` | Live ADR-0061 route apply outcome; replayable through `SubscribeFromEvent` when `[event_history].enabled = true`. |
 | "What policy changed recently?" | `rustbgpctl events policy` / `ListPolicyEvents` | Recent policy / neighbor-set / peer-group / chain mutation summaries from the bounded peer-manager ring. |
 | "What EVPN route changed recently?" | `rustbgpctl events evpn --route-type 2 --rd 65000:100` / `ListEvpnEvents` | Recent EVPN route add / withdraw / best-change history from the bounded RIB ring. |
 | "Are BFD sessions up?" | `rustbgpctl bfd`, `rustbgpctl bfd show 10.0.0.2` / `BfdService.GetBfdSessions` | Snapshot of configured single-hop BFD sessions, strict flag, state, and diagnostic. |

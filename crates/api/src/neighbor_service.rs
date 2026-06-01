@@ -1029,6 +1029,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_dynamic_neighbor_unknown_peer_group_maps_not_found() {
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_mgr_tx, rib_tx, None);
+
+        let call = tokio::spawn(async move {
+            svc.add_dynamic_neighbor(Request::new(proto::AddDynamicNeighborRequest {
+                range: Some(proto::DynamicNeighborRange {
+                    prefix: "192.0.2.0/24".to_string(),
+                    peer_group: "missing".to_string(),
+                    remote_asn: 65002,
+                    description: String::new(),
+                }),
+            }))
+            .await
+        });
+
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::AddDynamicRange { reply, .. } => {
+                reply
+                    .send(Err(DynamicRangeError::NotFound(
+                        "peer_group \"missing\" not defined".to_string(),
+                    )))
+                    .unwrap();
+            }
+            _ => panic!("expected AddDynamicRange"),
+        }
+
+        let err = call.await.unwrap().unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
     async fn delete_dynamic_neighbor_persists_after_runtime_success() {
         let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);

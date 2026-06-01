@@ -15,8 +15,8 @@ bug — file an issue.
 
 | Class | Meaning |
 |---|---|
-| **live** | Change applies on SIGHUP / gRPC `Reload` without bouncing the BGP session. The diff routes through `neighbor_runtime_equal()` / `diff_neighbors()` / `diff_policy()` and the daemon reconciles in place. |
-| **reload-applied** | Change hot-applies to a running subsystem reconciler on SIGHUP / gRPC, but unlike per-session `live` the in-memory config snapshot advances only after the subsystem **acks** the new desired set. Used by `[[fib_tables]]` (ADR-0061 FIB reconciler). Surfaced under the `reload_applied.*` keys in `rustbgpd --diff --json`. |
+| **live** | Change applies on SIGHUP or a supported runtime CRUD RPC without bouncing the BGP session. The diff routes through `neighbor_runtime_equal()` / `diff_neighbors()` / `diff_policy()` and the daemon reconciles in place. |
+| **reload-applied** | Change hot-applies to a running subsystem reconciler on SIGHUP or a supported runtime CRUD RPC, but unlike per-session `live` the in-memory config snapshot advances only after the subsystem **acks** the new desired set. Used by `[[fib_tables]]` (ADR-0061 FIB reconciler). Surfaced under the `reload_applied.*` keys in `rustbgpd --diff --json`. |
 | **restart-required** | Change is accepted at parse time but **pinned back to the live value** for the duration of this reload — the new value won't take effect until the next daemon restart. Surfaced as an `ERROR`-level log line during reload and visible in `rustbgpd --diff` until restart. |
 | **rejected** | Validation refuses the change at parse time with a typed `ConfigError`. The daemon keeps running with the old value; no state mutates. |
 | **unsupported** | Field is accepted at parse time but currently has no runtime effect. Documented so operators don't mistake it for live. Future PRs may promote unsupported fields to live; the matrix tracks the current daemon. |
@@ -146,7 +146,7 @@ rebind on reload.
 
 | Field | Class | Notes |
 |---|---|---|
-| `addr` | restart-required | Listener address. |
+| `address` | restart-required | Listener address. |
 | `tls.*` (mTLS material) | restart-required | All TLS/mTLS fields pinned. |
 | `path` (`grpc_uds`) | restart-required | UDS path bound at startup. |
 | `mode` (`grpc_uds`) | restart-required | Permissions set at bind time. |

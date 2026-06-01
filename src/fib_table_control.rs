@@ -16,7 +16,8 @@
 //!   live config (peer-group references, reserved/duplicate ids, families, ECMP
 //!   caps) by the peer manager before it ever reaches the reconciler.
 //! - **Persist only after the actor acknowledges**, and only the exact accepted
-//!   set — so runtime and on-disk config can't drift.
+//!   set. If persistence rejects the accepted set, the control path rolls the
+//!   reconciler and peer-manager snapshot back before reporting failure.
 //! - **Durable after dispatch.** The mutation runs in a detached task whose
 //!   join handle the request future awaits; a canceled gRPC call cannot split a
 //!   successful apply from its persistence.
@@ -129,7 +130,9 @@ async fn mutate(
         let current = read_current_tables(Some(&fib_cmd_tx))
             .await?
             .unwrap_or_default();
-        let previous: Vec<FibTableSnapshot> = current.iter().map(config_to_snapshot).collect();
+        let previous_tables = current.clone();
+        let previous_snapshots: Vec<FibTableSnapshot> =
+            current.iter().map(config_to_snapshot).collect();
         let candidate = apply_mutation(current, mutation)?;
         let snapshots: Vec<FibTableSnapshot> = candidate.iter().map(config_to_snapshot).collect();
 
@@ -148,14 +151,14 @@ async fn mutate(
         let permit = match reserve_persist_permit(&config_tx).await {
             Ok(permit) => permit,
             Err(error) => {
-                rollback_snapshot(&peer_mgr_tx, previous).await;
+                rollback_snapshot(&peer_mgr_tx, previous_snapshots).await;
                 return Err(error);
             }
         };
 
         // Apply to the reconciler and wait for its acknowledgement.
         if let Err(error) = replace_tables(&fib_cmd_tx, candidate.clone()).await {
-            rollback_snapshot(&peer_mgr_tx, previous).await;
+            rollback_snapshot(&peer_mgr_tx, previous_snapshots).await;
             return Err(error);
         }
 
@@ -169,14 +172,27 @@ async fn mutate(
             tables: snapshots,
             ack: Some(persist_ack_tx),
         });
-        persist_ack_rx
+        let persist_result = persist_ack_rx.await.map_err(|_| {
+            FibTableControlError::Internal(
+                "config bridge dropped FIB-table persistence acknowledgement".to_string(),
+            )
+        })?;
+        if let Err(error) = persist_result {
+            if let Err(rollback_error) = rollback_applied_tables(
+                &fib_cmd_tx,
+                &peer_mgr_tx,
+                previous_tables,
+                previous_snapshots,
+            )
             .await
-            .map_err(|_| {
-                FibTableControlError::Internal(
-                    "config bridge dropped FIB-table persistence acknowledgement".to_string(),
-                )
-            })?
-            .map_err(FibTableControlError::FailedPrecondition)?;
+            {
+                return Err(FibTableControlError::Internal(format!(
+                    "FIB-table persistence failed ({error}); runtime rollback failed: \
+                     {rollback_error}"
+                )));
+            }
+            return Err(FibTableControlError::FailedPrecondition(error));
+        }
 
         Ok(proto::ListFibTablesResponse {
             tables: candidate.iter().map(config_to_proto).collect(),
@@ -280,6 +296,29 @@ async fn rollback_snapshot(
         .is_ok()
     {
         let _ = reply_rx.await;
+    }
+}
+
+async fn rollback_applied_tables(
+    fib_cmd_tx: &mpsc::Sender<FibRuntimeCommand>,
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    previous_tables: Vec<FibTableConfig>,
+    previous_snapshots: Vec<FibTableSnapshot>,
+) -> Result<(), String> {
+    replace_tables(fib_cmd_tx, previous_tables)
+        .await
+        .map_err(fib_table_error_message)?;
+    rollback_snapshot(peer_mgr_tx, previous_snapshots).await;
+    Ok(())
+}
+
+fn fib_table_error_message(error: FibTableControlError) -> String {
+    match error {
+        FibTableControlError::InvalidArgument(message)
+        | FibTableControlError::NotFound(message)
+        | FibTableControlError::FailedPrecondition(message)
+        | FibTableControlError::Unavailable(message)
+        | FibTableControlError::Internal(message) => message,
     }
 }
 
@@ -396,6 +435,7 @@ fn config_to_snapshot(table: &FibTableConfig) -> FibTableSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustbgpd_api::peer_types::PeerManagerCommand;
 
     fn table(name: &str, table_id: u32) -> FibTableConfig {
         FibTableConfig {
@@ -410,6 +450,74 @@ mod tests {
             maximum_paths_ebgp: None,
             maximum_paths_ibgp: None,
         }
+    }
+
+    #[tokio::test]
+    async fn persistence_rejection_rolls_back_runtime_and_snapshot() {
+        let original = table("edge", 1000);
+        let original_snapshot = config_to_snapshot(&original);
+
+        let fib_state = Arc::new(Mutex::new(vec![original.clone()]));
+        let fib_state_for_task = fib_state.clone();
+        let (fib_tx, mut fib_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(cmd) = fib_rx.recv().await {
+                match cmd {
+                    FibRuntimeCommand::GetTables { reply } => {
+                        let _ = reply.send(fib_state_for_task.lock().await.clone());
+                    }
+                    FibRuntimeCommand::ReplaceTables { tables, reply } => {
+                        *fib_state_for_task.lock().await = tables;
+                        let _ = reply.send(Ok(()));
+                    }
+                }
+            }
+        });
+
+        let peer_snapshot = Arc::new(Mutex::new(vec![original_snapshot.clone()]));
+        let peer_snapshot_for_task = peer_snapshot.clone();
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(cmd) = peer_rx.recv().await {
+                match cmd {
+                    PeerManagerCommand::StageFibTables { tables, reply } => {
+                        *peer_snapshot_for_task.lock().await = tables;
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerManagerCommand::SetFibTablesSnapshot { tables, reply } => {
+                        *peer_snapshot_for_task.lock().await = tables;
+                        let _ = reply.send(());
+                    }
+                    _ => panic!("unexpected peer-manager command in FIB control test"),
+                }
+            }
+        });
+
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::FibTablesReplaced { ack: Some(ack), .. }) =
+                config_rx.recv().await
+            {
+                let _ = ack.send(Err("desired config validation failed".to_string()));
+            }
+        });
+
+        let deps = Arc::new(FibTableControlDeps {
+            fib_cmd_tx: Some(fib_tx),
+            peer_mgr_tx: peer_tx,
+            config_tx: Some(config_tx),
+            lock: Arc::new(Mutex::new(())),
+            startup_tables: vec![original.clone()],
+        });
+        let err = mutate(deps, Mutation::Upsert(table("core", 1001)))
+            .await
+            .expect_err("persistence rejection must fail the mutation");
+        assert!(
+            matches!(err, FibTableControlError::FailedPrecondition(ref message) if message == "desired config validation failed"),
+            "{err:?}"
+        );
+        assert_eq!(*fib_state.lock().await, vec![original]);
+        assert_eq!(*peer_snapshot.lock().await, vec![original_snapshot]);
     }
 
     #[test]

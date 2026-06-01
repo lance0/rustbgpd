@@ -179,7 +179,7 @@ Last updated: 2026-05-31 (post-v0.32.0 main, including runtime dynamic-neighbor 
 | Core protocol | 14 | 14 | 100% |
 | Path attributes | 13 | 9 | ~69% |
 | Policy engine | 18 | 18 | 100% |
-| gRPC RPCs | ~55 | 78 | 100%+ (broader surface, including read-only gNMI) |
+| gRPC RPCs | ~55 | 81 | 100%+ (77 `rustbgpd.v1` RPCs plus read-only gNMI) |
 | Monitoring | 5 | 6 | 100%+ |
 | Security | 4 | 5 | 100%+ |
 | Best-path steps | 11 | 11 | 100% except AIGP |

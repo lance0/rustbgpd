@@ -168,10 +168,11 @@ The API uses gRPC status codes consistently across services:
 | `PERMISSION_DENIED` | The request reached a read-only listener but called a mutating RPC, the RPC method tier exceeds the listener `max_tier` ceiling, the principal is unmapped in tier mode, or the principal's role is below the method tier |
 | `INVALID_ARGUMENT` | Client-supplied request data is malformed, missing, out of range, uses an unsupported enum value, or combines incompatible filters |
 | `NOT_FOUND` | A named or targeted resource does not exist: peer, policy, neighbor set, peer group, IP-VRF, route-event target, or injected route |
-| `ALREADY_EXISTS` | A create request targets an existing resource, currently duplicate neighbor creation |
+| `ALREADY_EXISTS` | A create request targets an existing resource, such as duplicate neighbor creation or an exact-duplicate dynamic-neighbor range |
 | `FAILED_PRECONDITION` | The request is valid but the daemon is not in a state where it can complete it, such as MRT export being disabled or a policy object still being referenced |
+| `UNAVAILABLE` | Runtime state was not changed because a required actor, command channel, or persistence queue is unavailable or back-pressured |
 | `UNIMPLEMENTED` | The RPC is reserved in the protobuf but runtime support has not shipped yet |
-| `INTERNAL` | An internal daemon actor, persistence queue, metrics encoder, or RIB boundary failed unexpectedly |
+| `INTERNAL` | An internal daemon actor, metrics encoder, or RIB boundary failed unexpectedly after the request passed validation |
 
 ---
 
@@ -283,7 +284,7 @@ added at runtime.
 | `EnableNeighbor` | Re-enable a previously disabled peer |
 | `DisableNeighbor` | Administratively disable a peer (sends NOTIFICATION) |
 | `SoftResetIn` | Request inbound route refresh (RFC 2918/7313) for one or more families |
-| `AddDynamicNeighbor` | Add a `[[dynamic_neighbors]]` prefix range at runtime; persists to the config (atomic write) when started with `--config` |
+| `AddDynamicNeighbor` | Add a `[[dynamic_neighbors]]` prefix range at runtime; queues an atomic config-file update when started with `--config` |
 | `DeleteDynamicNeighbor` | Remove a dynamic-neighbor range at runtime (stops future accepts; established peers drain on Idle) |
 | `ListDynamicNeighbors` | List configured dynamic-neighbor ranges (prefix, peer group, remote ASN, description) |
 | `SetGracefulShutdown` | RFC 8326 initiator toggle — attach the `GRACEFUL_SHUTDOWN` community to outbound updates for one peer (or all peers when `address` is empty) and clear with `clear = true` |
@@ -564,7 +565,7 @@ through one RPC shape.
 | Recent EVPN route timeline | `EventService.ListEvpnEvents` / `rustbgpctl events evpn` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
 | RFC 7999 discard programming | `ListBlackholeDiscards` / `rustbgpctl rib blackholes` | Snapshot | Current reconcile snapshot only |
 | ADR-0061 general Linux FIB programming | `ListFibRoutes` / `rustbgpctl rib fib` | Snapshot | Current reconcile snapshot plus persisted owned-state semantics |
-| ADR-0061 FIB route apply outcomes | `EventService.WatchEvents` with `EVENT_CATEGORY_DATAPLANE` and `BGP_EVENT_TYPE_DATAPLANE_ROUTE_*` / `rustbgpctl events watch --category dataplane` | Streaming event feed | Live-only; no history API |
+| ADR-0061 FIB route apply outcomes | `EventService.WatchEvents` with `EVENT_CATEGORY_DATAPLANE` and `BGP_EVENT_TYPE_DATAPLANE_ROUTE_*` / `rustbgpctl events watch --category dataplane` | Streaming event feed | Live via `WatchEvents`; durable replay via `SubscribeFromEvent` when `[event_history].enabled = true`; no bounded `List*` history API |
 | EVPN L2/L3 dataplane readiness | `EvpnService` (`ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`) / `rustbgpctl evpn ...` | Snapshot | Latest daemon or dataplane report snapshot |
 | ADR-0067 BFD session state | `BfdService.GetBfdSessions` / `rustbgpctl bfd` | Snapshot | Current BFD actor snapshot |
 | Live BFD session state changes | `EventService.WatchEvents` with `EVENT_CATEGORY_BFD` and `BGP_EVENT_TYPE_BFD_SESSION_*` / `rustbgpctl events watch --category bfd` | Streaming event feed | Live-only; opt-in (not in the default route+session set); slow subscribers can lag |
@@ -946,10 +947,11 @@ live. If `N` is older than the retention floor, the first response is a
 `BGP_EVENT_TYPE_STREAM_LAGGED` event whose `missed_count` describes the global
 outbox gap; the stream then continues from the earliest retained event. Empty
 category and type filters select every EHM-fed category on this RPC: route,
-EVPN, session lifecycle, session notifications, policy, and BFD. Dataplane
-events remain live-only on `WatchEvents` in this release. When event history is
-disabled or unavailable, the RPC returns `FAILED_PRECONDITION`; legacy live and
-`List*Events` RPCs are unaffected.
+EVPN, session lifecycle, session notifications, policy, dataplane, and BFD.
+Dataplane summary and per-route FIB apply events remain live on `WatchEvents`
+and are also replayable through `SubscribeFromEvent` when event history is
+enabled. When event history is disabled or unavailable, the RPC returns
+`FAILED_PRECONDITION`; legacy live and `List*Events` RPCs are unaffected.
 
 Filters compose
 AND-wise across category, type, peer, family, and exact prefix. Repeated
@@ -965,8 +967,9 @@ in the bounded `ListPolicyEvents` process-local history ring; dataplane summary
 events are status-row count changes from the existing `ListFibRoutes` and
 `ListBlackholeDiscards` snapshots. ADR-0061 per-route FIB dataplane events are
 emitted directly by the FIB runtime when a route is installed, withdrawn, or
-fails to apply, and are live-only and not replayed by `ListFibRoutes`. EVPN
-events are sourced from the RIB's EVPN best-path broadcast and are also
+fails to apply, and are replayable through `SubscribeFromEvent` when
+`[event_history].enabled = true` (they are not replayed by `ListFibRoutes`).
+EVPN events are sourced from the RIB's EVPN best-path broadcast and are also
 retained in a bounded `ListEvpnEvents` process-local history ring.
 The FIB `rejected` count reflects surfaced status rows; high-cardinality
 `route_limit_exceeded` rows carry `ListFibRoutes` sampling metadata with

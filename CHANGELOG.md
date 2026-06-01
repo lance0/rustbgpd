@@ -15,9 +15,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `DeleteDynamicNeighbor` (NeighborService, tier `mutating`) are now live
   mutations instead of `UNIMPLEMENTED` — add or remove `[[dynamic_neighbors]]`
   prefix ranges without a restart, with `rustbgpctl dynamic-neighbor
-  {list,add,delete}`. Changes persist to the TOML config (atomic write) when
-  the daemon was started with `--config`, same as `AddNeighbor`. Delete stops
-  future accepts only — already-established dynamic peers drain on Idle.
+  {list,add,delete}`. Changes reserve config-persistence capacity before
+  mutating runtime state and queue an atomic TOML write when the daemon was
+  started with `--config`, same as `AddNeighbor`. Delete stops future accepts
+  only — already-established dynamic peers drain on Idle.
   Adding a range validates identically to config load (peer-group must exist
   and not enable BFD, valid prefix, no duplicate effective prefix); config-load
   validation now also rejects exact-duplicate effective prefixes.
@@ -80,6 +81,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- FIB-table runtime CRUD now rolls the reconciler and peer-manager snapshot back
+  if the config bridge / persister rejects the accepted `[[fib_tables]]` set
+  after runtime apply. The RPC reports failure without leaving runtime ahead of
+  the persisted config.
 - FIB-table runtime CRUD now waits for the config bridge and persister to
   acknowledge the accepted `[[fib_tables]]` set before releasing its SIGHUP/CRUD
   coordinator lock. This prevents an immediate SIGHUP from refreshing runtime
@@ -92,6 +97,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   spawned task after the peer manager acknowledges the runtime mutation, so a
   canceled RPC cannot split the live `[[dynamic_neighbors]]` change from the
   TOML update.
+- `AddDynamicNeighbor` now maps a missing referenced peer group to gRPC
+  `NOT_FOUND` (matching the public API taxonomy for missing named resources)
+  instead of `INVALID_ARGUMENT`; malformed prefixes and BFD-enabled peer groups
+  remain `INVALID_ARGUMENT`.
 - Dynamic neighbor ranges now resolve overlaps by longest-prefix-match: a more
   specific range (e.g. `10.0.5.0/24`) wins over a wider one (`10.0.0.0/16`)
   regardless of TOML declaration order, matching FRR/GoBGP. Previously the first
@@ -382,10 +391,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rustbgpd_api::json_format::bgp_event_to_json_line` helper —
   operators replace the stdout writer with Kafka / NATS / Vector
   / journald and persist `last_seen_event_id` after their
-  downstream sink confirms durable receipt. **Dataplane events
-  stay live-only in v1**: their existing
-  `dataplane_events` / `dataplane_route_events` broadcasts are
-  not wired through EHM; documented as a follow-up.
+  downstream sink confirms durable receipt. In this PR5 slice,
+  dataplane events stayed live-only; the follow-up dataplane wiring
+  listed above superseded that initial caveat.
 
 - **Operator Confidence Polish Sprint 1.**
   - **Reload matrix** (`docs/reload-matrix.md`). Per-field classification —

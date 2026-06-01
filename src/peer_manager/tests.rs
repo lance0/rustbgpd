@@ -311,7 +311,10 @@ fn add_dynamic_range_rejects_unknown_peer_group() {
         .add_dynamic_range("10.0.0.0/24".into(), "nonexistent".into(), 0, None)
         .expect_err("unknown peer group should be rejected");
     assert!(
-        matches!(err, rustbgpd_api::peer_types::DynamicRangeError::Invalid(_)),
+        matches!(
+            err,
+            rustbgpd_api::peer_types::DynamicRangeError::NotFound(_)
+        ),
         "{err}"
     );
 }
