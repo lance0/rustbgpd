@@ -356,9 +356,14 @@ fn bench_export_policy_eval(c: &mut Criterion) {
     group.bench_function("eager_as_path_string", |b| {
         b.iter(|| {
             for route in &routes {
-                let aspath_str =
-                    route_as_path(route).map_or_else(String::new, AsPath::to_aspath_string);
-                let _ = evaluate_chain(Some(&chain), &export_ctx(route.prefix, &aspath_str));
+                // black_box the rendered string so the eager arm genuinely pays
+                // the allocation even though the empty chain never reads it, and
+                // black_box the chain + result so neither is constant-folded away.
+                let aspath_str = std::hint::black_box(
+                    route_as_path(route).map_or_else(String::new, AsPath::to_aspath_string),
+                );
+                let ctx = export_ctx(route.prefix, &aspath_str);
+                std::hint::black_box(evaluate_chain(Some(std::hint::black_box(&chain)), &ctx));
             }
         });
     });
@@ -367,12 +372,13 @@ fn bench_export_policy_eval(c: &mut Criterion) {
         let needs_as_path_string = chain.requires_as_path_string();
         b.iter(|| {
             for route in &routes {
-                let aspath_str = if needs_as_path_string {
+                let aspath_str = std::hint::black_box(if needs_as_path_string {
                     route_as_path(route).map_or_else(String::new, AsPath::to_aspath_string)
                 } else {
                     String::new()
-                };
-                let _ = evaluate_chain(Some(&chain), &export_ctx(route.prefix, &aspath_str));
+                });
+                let ctx = export_ctx(route.prefix, &aspath_str);
+                std::hint::black_box(evaluate_chain(Some(std::hint::black_box(&chain)), &ctx));
             }
         });
     });

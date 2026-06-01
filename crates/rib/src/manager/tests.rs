@@ -2463,6 +2463,116 @@ async fn explain_advertised_route_reports_policy_deny_without_mutation() {
 }
 
 #[tokio::test]
+async fn export_as_path_regex_still_filters_through_distribution() {
+    // Pins the lazy-AS_PATH-string gate on the RIB distribution path: an export
+    // policy that denies on a `match_as_path` regex must still filter a matching
+    // route (the gate has to render the string and run the regex) while permitting
+    // a non-matching one. A broken gate that skipped the string when needed would
+    // run the regex against "" and wrongly permit the matching route.
+    use rustbgpd_policy::{
+        AsPathRegex, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
+    };
+    use rustbgpd_wire::{AsPath, AsPathSegment, PathAttribute};
+
+    let deny_65200 = PolicyStatement {
+        prefix: None,
+        ge: None,
+        le: None,
+        action: PolicyAction::Deny,
+        match_community: vec![],
+        match_as_path: Some(AsPathRegex::new("_65200_").unwrap()),
+        match_neighbor_set: None,
+        match_route_type: None,
+        match_evpn_route_type: None,
+        match_rpki_validation: None,
+        match_aspa_validation: None,
+        match_as_path_length_ge: None,
+        match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
+        match_next_hop: None,
+        modifications: RouteModifications::default(),
+    };
+    let export_policy = PolicyChain::new(vec![Policy {
+        entries: vec![deny_65200],
+        default_action: PolicyAction::Permit,
+    }]);
+
+    let with_as_path = |prefix: Ipv4Prefix, asns: Vec<u32>| Route {
+        attributes: Arc::new(vec![PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(asns)],
+        })]),
+        ..make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))
+    };
+    let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let permitted_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let denied = with_as_path(denied_prefix, vec![65100, 65200]);
+    let permitted = with_as_path(permitted_prefix, vec![65100, 65300]);
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(8);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65002,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: out_tx,
+        export_policy: Some(export_policy),
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![denied, permitted],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let advertised = {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryAdvertisedRoutes {
+            peer: target,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        reply_rx.await.unwrap()
+    };
+    let prefixes: Vec<_> = advertised.iter().map(|r| r.prefix).collect();
+
+    assert!(
+        prefixes.contains(&Prefix::V4(permitted_prefix)),
+        "AS_PATH not matching the deny regex must be advertised; saw {prefixes:?}"
+    );
+    assert!(
+        !prefixes.contains(&Prefix::V4(denied_prefix)),
+        "AS_PATH matching the deny regex must be filtered (string rendered + regex \
+         applied through the gated export path); saw {prefixes:?}"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn explain_advertised_route_reports_modifications() {
     let (tx, rx) = mpsc::channel(64);
     let export_policy = rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {

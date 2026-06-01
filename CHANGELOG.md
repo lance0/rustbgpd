@@ -17,8 +17,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   only consumer is that regex check, but it was built per (route × peer) in the
   distribution path — pure waste for the common RR / route-server case with no
   `AS_PATH`-regex policy. A no-`AS_PATH` export chain now skips the allocation
-  entirely (~3.5× faster per-route export-policy evaluation in the
-  `export_policy_eval` bench). The import path is unchanged — there the string
+  entirely — the `export_policy_eval` bench's eager-vs-lazy arms differ by
+  ~45 ns/route (the removed `AS_PATH`-string allocation), multiplied by peer
+  fanout in real deployments. The import path is unchanged — there the string
   also feeds event / OTC attribution.
 
 ### Fixed
