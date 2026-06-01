@@ -560,98 +560,123 @@ pub struct PolicyStatement {
 impl PolicyStatement {
     /// Check whether a route matches this statement.
     fn matches(&self, ctx: &RouteContext<'_>) -> bool {
-        let prefix_ok = match self.prefix {
-            Some(p) => self.matches_prefix(p, ctx.prefix),
-            None => true,
-        };
+        // A statement matches when every configured predicate matches (logical
+        // AND). The checks are pure, side-effect-free reads, so evaluation order
+        // does not change the result — only the cost. We evaluate cheapest-first
+        // with early returns so that a cheap match failure skips the expensive
+        // community scan and AS_PATH regex entirely. Ordering tiers (cheap →
+        // expensive): O(1) scalar comparisons, then prefix masking, then the
+        // neighbor-set, then the community scan, then the AS_PATH regex last.
 
-        let community_ok = if self.match_community.is_empty() {
-            true
-        } else {
-            self.match_community.iter().any(|cm| {
-                ctx.extended_communities.iter().any(|ec| cm.matches_ec(ec))
-                    || ctx.communities.iter().any(|c| cm.matches_standard(*c))
-                    || ctx.large_communities.iter().any(|lc| cm.matches_large(lc))
-            })
-        };
+        // --- Tier 1: O(1) scalar comparisons (near-free when the field is unset).
+        if let Some(route_type) = self.match_route_type
+            && ctx.route_type != Some(route_type)
+        {
+            return false;
+        }
+        if let Some(expected) = self.match_evpn_route_type
+            && ctx.evpn_route_type != Some(expected)
+        {
+            return false;
+        }
+        if let Some(expected) = self.match_rpki_validation
+            && expected != ctx.validation_state
+        {
+            return false;
+        }
+        if let Some(expected) = self.match_aspa_validation
+            && expected != ctx.aspa_state
+        {
+            return false;
+        }
+        if let Some(v) = self.match_as_path_length_ge
+            && ctx.as_path_len < v as usize
+        {
+            return false;
+        }
+        if let Some(v) = self.match_as_path_length_le
+            && ctx.as_path_len > v as usize
+        {
+            return false;
+        }
 
-        let aspath_ok = match &self.match_as_path {
-            Some(regex) => regex.is_match(ctx.as_path_str),
-            None => true,
-        };
-
-        let neighbor_set_ok = self
-            .match_neighbor_set
-            .as_ref()
-            .is_none_or(|set| set.matches(ctx.peer_address, ctx.peer_asn, ctx.peer_group));
-
-        let route_type_ok = self.match_route_type.is_none_or(|route_type| {
-            ctx.route_type
-                .is_some_and(|candidate| candidate == route_type)
-        });
-
-        let evpn_route_type_ok = self.match_evpn_route_type.is_none_or(|expected| {
-            ctx.evpn_route_type
-                .is_some_and(|candidate| candidate == expected)
-        });
-
-        let rpki_ok = self
-            .match_rpki_validation
-            .is_none_or(|v| v == ctx.validation_state);
-
-        let aspa_ok = self
-            .match_aspa_validation
-            .is_none_or(|v| v == ctx.aspa_state);
-
-        let aspath_len_ok = self
-            .match_as_path_length_ge
-            .is_none_or(|v| ctx.as_path_len >= v as usize)
-            && self
-                .match_as_path_length_le
-                .is_none_or(|v| ctx.as_path_len <= v as usize);
-
-        // RFC 4271: when LOCAL_PREF is absent (e.g. an eBGP-received
-        // route with no LOCAL_PREF on the wire), the implicit value
-        // for best-path purposes is 100. RFC 4271 §5.1.5 doesn't
-        // mandate the same default for policy *matching* — it leaves
-        // the question implementation-defined — but FRR / BIRD /
-        // GoBGP all use the implicit default in their match
-        // semantics so an operator's `match local-preference >= 100`
-        // works against routes the engine itself treats as having
-        // LP=100. Matching that convention here means a single
-        // policy reads identically against routes that arrive with
-        // an explicit LOCAL_PREF (iBGP) and routes that don't
-        // (eBGP) — the previous behavior silently failed to match
-        // eBGP routes against any LP threshold.
+        // RFC 4271: when LOCAL_PREF is absent (e.g. an eBGP-received route with
+        // no LOCAL_PREF on the wire), the implicit value for best-path purposes
+        // is 100. RFC 4271 §5.1.5 doesn't mandate the same default for policy
+        // *matching* — it leaves the question implementation-defined — but FRR /
+        // BIRD / GoBGP all use the implicit default in their match semantics so
+        // an operator's `match local-preference >= 100` works against routes the
+        // engine itself treats as having LP=100. Matching that convention here
+        // means a single policy reads identically against routes that arrive
+        // with an explicit LOCAL_PREF (iBGP) and routes that don't (eBGP) — the
+        // previous behavior silently failed to match eBGP routes against any LP
+        // threshold.
         let candidate_local_pref = ctx.local_pref.unwrap_or(IMPLICIT_LOCAL_PREF);
-        let local_pref_ok = self
-            .match_local_pref_ge
-            .is_none_or(|v| candidate_local_pref >= v)
-            && self
-                .match_local_pref_le
-                .is_none_or(|v| candidate_local_pref <= v);
+        if let Some(v) = self.match_local_pref_ge
+            && candidate_local_pref < v
+        {
+            return false;
+        }
+        if let Some(v) = self.match_local_pref_le
+            && candidate_local_pref > v
+        {
+            return false;
+        }
 
         // RFC 4271 §5.1.4: MED defaults to 0 when absent.
         let candidate_med = ctx.med.unwrap_or(IMPLICIT_MED);
-        let med_ok = self.match_med_ge.is_none_or(|v| candidate_med >= v)
-            && self.match_med_le.is_none_or(|v| candidate_med <= v);
+        if let Some(v) = self.match_med_ge
+            && candidate_med < v
+        {
+            return false;
+        }
+        if let Some(v) = self.match_med_le
+            && candidate_med > v
+        {
+            return false;
+        }
 
-        let next_hop_ok = self
-            .match_next_hop
-            .is_none_or(|next_hop| ctx.next_hop.is_some_and(|candidate| candidate == next_hop));
+        if let Some(next_hop) = self.match_next_hop
+            && ctx.next_hop != Some(next_hop)
+        {
+            return false;
+        }
 
-        prefix_ok
-            && community_ok
-            && aspath_ok
-            && neighbor_set_ok
-            && route_type_ok
-            && evpn_route_type_ok
-            && rpki_ok
-            && aspa_ok
-            && aspath_len_ok
-            && local_pref_ok
-            && med_ok
-            && next_hop_ok
+        // --- Tier 2: prefix match (O(1) masking; cheap and usually selective).
+        if let Some(p) = self.prefix
+            && !self.matches_prefix(p, ctx.prefix)
+        {
+            return false;
+        }
+
+        // --- Tier 3: neighbor-set (peer address/ASN/group; O(1)-ish for a small
+        // configured set).
+        if let Some(set) = self.match_neighbor_set.as_ref()
+            && !set.matches(ctx.peer_address, ctx.peer_asn, ctx.peer_group)
+        {
+            return false;
+        }
+
+        // --- Tier 4: community scan (O(criteria × route communities)).
+        if !self.match_community.is_empty() {
+            let community_ok = self.match_community.iter().any(|cm| {
+                ctx.extended_communities.iter().any(|ec| cm.matches_ec(ec))
+                    || ctx.communities.iter().any(|c| cm.matches_standard(*c))
+                    || ctx.large_communities.iter().any(|lc| cm.matches_large(lc))
+            });
+            if !community_ok {
+                return false;
+            }
+        }
+
+        // --- Tier 5: AS_PATH regex (most expensive). Evaluated last.
+        if let Some(regex) = self.match_as_path.as_ref()
+            && !regex.is_match(ctx.as_path_str)
+        {
+            return false;
+        }
+
+        true
     }
 
     fn matches_prefix(&self, entry_prefix: Prefix, candidate: Prefix) -> bool {

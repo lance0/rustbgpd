@@ -203,12 +203,18 @@ Later for what remains.
   - Transport max-prefix accounting: replace per-UPDATE unique-prefix
     reconstruction with a per-prefix refcount so Add-Path multiplicity stays
     correct without rebuilding a temporary set after every UPDATE.
-  - Policy engine matching: short-circuit cheap predicate failures before
-    regex/community-heavy checks in `PolicyStatement::matches`; precompute
-    prefix masks and `ge`/`le` bounds at policy/config build time instead of
-    per route per statement. Verify with prefix-miss, prefix-heavy, regex-heavy,
-    and community-heavy `policy_eval` benches plus `/0`, `/32`, `/128`, `ge`,
-    and `le` edge-case tests.
+  - Policy engine matching: the cheap-predicate short-circuit landed —
+    `PolicyStatement::matches` now evaluates predicates cheapest-first with early
+    returns, so a cheap match failure skips the AS_PATH regex and community scan
+    entirely (`policy_predicate_eval` bench: a regex-bearing statement drops from
+    ~80 ns to ~27 ns and a 64-community statement from ~51 ns to ~27 ns per
+    route-statement when a cheaper predicate fails first; the regex is confirmed
+    the costliest predicate, so "regex last" is the right order). The bundled
+    prefix-mask / `ge`-`le` precompute is **deferred**: the `prefix_heavy` bench
+    measures full prefix evaluation at ~4.4 ns per statement, so a build-time
+    precompute would shave ~1-2 ns — below the bench noise floor and not worth
+    the ~66-site `PolicyStatement` construction churn. Revisit only if a future
+    `prefix_heavy` run shows prefix matching as a real bottleneck.
   - Export-policy fanout batching: investigate whether peers with identical
     effective export policy/context can share evaluation results during full
     dirty resyncs or route-server fanout. Design-gated: peer address/ASN/group,
