@@ -475,7 +475,9 @@ docker run --rm --entrypoint rustbgpctl rustbgpd:dev --help
    - `ghcr.io/lance0/rustbgpd:X.Y` (rolls forward within the minor)
    - `ghcr.io/lance0/rustbgpd:latest` (auto-published for non-prerelease
      tags via the action's default `latest=auto` flavor)
-   Tags are emitted **without** the `v` prefix — `0.30.0`, not `v0.30.0`.
+   These **container-image** tags are emitted **without** the `v` prefix —
+   `0.30.0`, not `v0.30.0` (`docker/metadata-action` strips it). The **git tag
+   stays `vX.Y.Z`** (step 6); only the image tag drops the `v`.
 10. **Verify release tarballs** under
     [GitHub Releases](https://github.com/lance0/rustbgpd/releases) — each
     tag should publish version-less `rustbgpd-linux-amd64.tar.gz` and

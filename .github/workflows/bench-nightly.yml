@@ -82,7 +82,11 @@ jobs:
           if [ -n "$BASE_INPUT" ]; then
             base="$BASE_INPUT"
           else
-            base="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
+            # Match both the vX.Y.Z git-tag convention (RELEASE_CHECKLIST.md step 6)
+            # and a bare X.Y.Z form, defensively. The checklist's "no v prefix"
+            # note is about the GHCR *image* tag, not the git tag — matching both
+            # keeps nightly robust if a git tag ever drops the v.
+            base="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --match '[0-9]*' 2>/dev/null || true)"
           fi
           if [ -z "$base" ]; then
             echo "::error::no release tag found (git describe --match 'v[0-9]*') and no base_ref override given" >&2
