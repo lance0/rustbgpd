@@ -181,25 +181,30 @@ Later for what remains.
   churn. Cold-start BGP reconnect also retries the first TCP-level dial misses
   quickly before returning to the slower exponential guard, reducing boot-order
   establishment delay when rustbgpd starts before passive peers. Remaining
-  backlog, in rough priority order:
+  backlog, in rough priority order. Near-term performance/polish targets are:
+  FIB projection precompile first, API route-listing / high-volume JSON cleanup
+  second, and RPKI VRP lookup indexing third once there is room for the
+  correctness-heavy validation pass.
   - FIB projection: precompile configured-table policy so
     `allowed_neighbors` is parsed once, table-name strings are not cloned into
     every projected row unnecessarily, and projection avoids avoidable
     per-table/per-candidate work. Measure with a pure `fib.rs` projection bench
     across tables × candidates × ECMP width.
+  - API route listing: collapse RIB list filtering + `route_to_proto` conversion
+    into a borrowed per-route summary and pair it with borrowed JSON serializers
+    for high-volume CLI/API output. Goal: filters, proto rendering, and JSON do
+    not repeatedly scan attributes, allocate large-community strings, or build a
+    second owned JSON tree for filtered-out rows.
   - RPKI validation: index VRP lookup instead of linearly scanning the VRP table
     per NLRI. High payoff but correctness-sensitive around overlapping VRPs,
     `max_len`, Invalid vs NotFound, and family handling.
-  - API route listing: collapse RIB list filtering + `route_to_proto` conversion
-    into a borrowed per-route summary so filters and proto rendering do not
-    repeatedly scan attributes or allocate large-community strings for
-    filtered-out rows.
-  - Export-policy AS_PATH formatting: avoid calling
-    `AsPath::to_aspath_string()` for every export candidate unless the effective
-    export policy actually contains an AS_PATH regex match. Gate with
-    export-distribution benches covering no policy, non-AS_PATH policy, and
-    AS_PATH-regex policy, and preserve exact `AS_SET` / empty-path formatting
-    when the string is needed.
+  - Export-policy AS_PATH formatting: shipped in #340 — the export-policy
+    evaluator no longer calls `AsPath::to_aspath_string()` for every export
+    candidate unless the effective export policy contains an AS_PATH-regex match,
+    gated by the `export_policy_eval` bench's eager-vs-lazy arms (~45 ns/route
+    saved on a no-AS_PATH-regex chain). `AS_SET` / empty-path formatting is
+    preserved when the string is needed; the import path still renders it
+    (event / OTC attribution).
   - Transport max-prefix accounting: replace per-UPDATE unique-prefix
     reconstruction with a per-prefix refcount so Add-Path multiplicity stays
     correct without rebuilding a temporary set after every UPDATE.
@@ -254,9 +259,10 @@ Later for what remains.
     not grow and codec / `memory_profile` runs show a real transient-allocation
     or unique-attribute win. Public `rustbgpd-wire` API churn makes this
     measurement-gated.
-  - CLI/API JSON: use borrowed `Serialize` wrappers or direct serializers for
-    high-volume route/event JSON so the CLI and API do not build a second owned
-    JSON tree from already-owned proto/event data.
+  - CLI/API JSON outside route listing: after the route-listing cleanup, apply
+    the same borrowed `Serialize` wrapper / direct serializer pattern to
+    high-volume event and telemetry JSON so the CLI and API do not build a
+    second owned JSON tree from already-owned proto/event data.
   - Benchmark infrastructure: automatic per-PR CI bench triggering on the pinned
     `[self-hosted, rustbgpd-bench]` runner (the manual `Criterion Bench Compare`
     workflow exists); a continuous churn bench (short criterion variant of the
@@ -270,8 +276,10 @@ Later for what remains.
   - Do-not-chase-until-proven list: reshaping `MP_REACH_NLRI` / `MP_UNREACH_NLRI`
     to avoid unused empty `Vec` fields is public wire-API churn and `vec![]`
     itself does not allocate; a general policy evaluation-result cache carries
-    high invalidation risk and should wait until AS_PATH laziness and predicate
-    short-circuiting have been measured.
+    high invalidation risk — with AS_PATH laziness (#340) and predicate
+    short-circuiting (#343) now landed and measured, the cheap policy wins are
+    already captured, so a result cache stays deferred on invalidation-risk
+    grounds unless a profile shows policy evaluation is still hot.
   The bgperf2 cross-stack comparison was refreshed for v0.32.0 (full-daemon RSS
   dropped ~21% from the inbound clone-churn fix, but now exceeds GoBGP's ~203 MB
   at 200k — daemon feature growth, not RIB bloat; see `docs/BENCHMARKS.md`), and
