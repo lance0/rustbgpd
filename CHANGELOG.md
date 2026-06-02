@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Performance
 
+- **Precompiled FIB projection table policy.** The ADR-0061 FIB projection
+  path now parses each table's `allowed_neighbors` once per projection pass and
+  uses precomputed peer / peer-group membership sets for candidate filtering,
+  instead of reparsing and rescanning table policy during every route and ECMP
+  next-hop check. A new `fib_projection` Criterion bench covers configured
+  tables x candidates x ECMP width behind the `bench-internals` feature.
 - **Short-circuit policy predicate evaluation.** `PolicyStatement::matches` now
   evaluates match predicates cheapest-first with early returns instead of
   computing every predicate eagerly, so a cheap match failure (prefix, route

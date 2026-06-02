@@ -520,13 +520,64 @@ fn per_class_max_paths(table: &FibTableConfig, is_ebgp: bool) -> usize {
     .max(1) as usize
 }
 
+struct FibProjectionTable<'a> {
+    table: &'a FibTableConfig,
+    key: FibTableKey,
+    name: &'a str,
+    allowed_neighbors: BTreeSet<IpAddr>,
+    allowed_peer_groups: BTreeSet<&'a str>,
+    allows_all_peers: bool,
+}
+
+impl<'a> FibProjectionTable<'a> {
+    fn new(table: &'a FibTableConfig) -> Self {
+        let allowed_neighbors = table
+            .allowed_neighbors
+            .iter()
+            .filter_map(|neighbor| neighbor.parse::<IpAddr>().ok())
+            .collect::<BTreeSet<_>>();
+        let allowed_peer_groups = table
+            .allowed_peer_groups
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let allows_all_peers =
+            table.allowed_neighbors.is_empty() && table.allowed_peer_groups.is_empty();
+        Self {
+            table,
+            key: FibTableKey {
+                table_id: table.table_id,
+                metric: table.metric,
+            },
+            name: table.name.as_str(),
+            allowed_neighbors,
+            allowed_peer_groups,
+            allows_all_peers,
+        }
+    }
+
+    fn allows_prefix(&self, prefix: Prefix) -> bool {
+        table_allows_prefix(self.table, prefix)
+    }
+
+    fn allows_peer(&self, peer: IpAddr, peer_groups: &BTreeMap<IpAddr, String>) -> bool {
+        if self.allows_all_peers {
+            return true;
+        }
+        self.allowed_neighbors.contains(&peer)
+            || peer_groups
+                .get(&peer)
+                .is_some_and(|group| self.allowed_peer_groups.contains(group.as_str()))
+    }
+
+    fn max_paths(&self, is_ebgp: bool) -> usize {
+        per_class_max_paths(self.table, is_ebgp)
+    }
+}
+
 /// Project configured FIB tables and Loc-RIB install candidates using the
 /// current RIB peer-group map for table allow-list checks.
 #[must_use]
-#[expect(
-    clippy::too_many_lines,
-    reason = "keeps per-table projection, route-limit, and fail-closed next-hop handling together"
-)]
 pub(crate) fn project_fib_intent_with_peer_groups(
     tables: &[FibTableConfig],
     candidates: &[FibInstallCandidate],
@@ -535,23 +586,19 @@ pub(crate) fn project_fib_intent_with_peer_groups(
     let mut intent = FibIntent::default();
 
     for table in tables {
+        let table = FibProjectionTable::new(table);
         let mut table_routes: BTreeMap<FibRouteKey, FibRoute> = BTreeMap::new();
         let mut table_frozen = false;
         let mut route_limit_drops = RouteLimitDropCounters::default();
         let route_limit_drop_start = intent.drops.len();
-        let allowed_neighbors = table
-            .allowed_neighbors
-            .iter()
-            .filter_map(|neighbor| neighbor.parse::<IpAddr>().ok())
-            .collect::<Vec<_>>();
         for candidate in candidates {
             let route = &candidate.best;
-            if !table_allows_prefix(table, route.prefix) {
+            if !table.allows_prefix(route.prefix) {
                 continue;
             }
-            if !table_allows_peer(table, &allowed_neighbors, route.peer, peer_groups) {
+            if !table.allows_peer(route.peer, peer_groups) {
                 intent.drops.push(FibDrop::PeerNotAllowed {
-                    table_name: table.name.clone(),
+                    table_name: table.name.to_string(),
                     prefix: route.prefix,
                     peer: route.peer,
                 });
@@ -560,16 +607,16 @@ pub(crate) fn project_fib_intent_with_peer_groups(
             // Per-class ECMP width for this candidate (homogeneous group ⇒ the
             // best route's class picks the cap). The RIB already gathered
             // siblings at the widest of these, so this re-caps the best-first set.
-            let max_paths = per_class_max_paths(table, route.is_ebgp());
+            let max_paths = table.max_paths(route.is_ebgp());
             // Keep only equal-cost next-hops from allowed peers whose family
             // matches the prefix, best-first, capped at the per-class width.
             let eligible = eligible_next_hops(candidate, route.prefix, max_paths, |peer| {
-                table_allows_peer(table, &allowed_neighbors, peer, peer_groups)
+                table.allows_peer(peer, peer_groups)
             });
             let best_next_hop = match best_fib_next_hop(candidate, route.prefix) {
                 Ok(next_hop) => next_hop,
                 Err(reason) => {
-                    push_next_hop_ineligible_drop(&mut intent, &table.name, route, reason);
+                    push_next_hop_ineligible_drop(&mut intent, table.name, route, reason);
                     continue;
                 }
             };
@@ -582,7 +629,7 @@ pub(crate) fn project_fib_intent_with_peer_groups(
             // wrong-family best outright.
             if !eligible.contains(&best_next_hop) {
                 intent.drops.push(FibDrop::NextHopFamilyUnsupported {
-                    table_name: table.name.clone(),
+                    table_name: table.name.to_string(),
                     prefix: route.prefix,
                     next_hop: route.next_hop,
                 });
@@ -590,25 +637,22 @@ pub(crate) fn project_fib_intent_with_peer_groups(
             }
 
             let key = FibRouteKey {
-                table_id: table.table_id,
-                metric: table.metric,
+                table_id: table.key.table_id,
+                metric: table.key.metric,
                 prefix: route.prefix,
             };
-            if let Some(limit) = table.max_routes {
+            if let Some(limit) = table.table.max_routes {
                 let projected_len =
                     table_routes.len() + usize::from(!table_routes.contains_key(&key));
                 if table_frozen || projected_len > limit as usize {
                     if !table_frozen {
                         table_frozen = true;
-                        intent.frozen_tables.insert(FibTableKey {
-                            table_id: table.table_id,
-                            metric: table.metric,
-                        });
+                        intent.frozen_tables.insert(table.key);
                         for projected in table_routes.values() {
                             intent.frozen_eligible_keys.insert(projected.key);
                             push_route_limit_drop(
                                 &mut intent,
-                                &table.name,
+                                table.name,
                                 projected,
                                 limit,
                                 &mut route_limit_drops,
@@ -619,7 +663,7 @@ pub(crate) fn project_fib_intent_with_peer_groups(
                     intent.frozen_eligible_keys.insert(key);
                     push_route_limit_drop_for_route(
                         &mut intent,
-                        &table.name,
+                        table.name,
                         key,
                         route.next_hop,
                         route.peer,
@@ -630,7 +674,7 @@ pub(crate) fn project_fib_intent_with_peer_groups(
                 }
             }
             let projected = FibRoute {
-                table_name: table.name.clone(),
+                table_name: table.name.to_string(),
                 key,
                 // Pin `best` to the selected best route's next-hop (guaranteed
                 // present by the check above) so the scalar surface stays
@@ -872,24 +916,6 @@ pub(crate) fn record_fib_success(owned: &mut FibOwnedState, op: &FibOp) -> bool 
         FibOp::Remove(route) => owned.routes.remove(&route.key).is_some(),
         FibOp::Forget(key) => owned.routes.remove(key).is_some(),
     }
-}
-
-fn table_allows_peer(
-    table: &FibTableConfig,
-    allowed_neighbors: &[IpAddr],
-    peer: IpAddr,
-    peer_groups: &BTreeMap<IpAddr, String>,
-) -> bool {
-    if table.allowed_neighbors.is_empty() && table.allowed_peer_groups.is_empty() {
-        return true;
-    }
-    allowed_neighbors.contains(&peer)
-        || peer_groups.get(&peer).is_some_and(|group| {
-            table
-                .allowed_peer_groups
-                .iter()
-                .any(|allowed| allowed == group)
-        })
 }
 
 fn cmp_prefix(left: Prefix, right: Prefix) -> Ordering {
