@@ -46,6 +46,7 @@ impl PeerSession {
                 let state = PeerSessionState {
                     fsm_state: self.fsm.state(),
                     peer_ip: self.peer_ip,
+                    peer_asn: neg.map(|n| n.peer_asn),
                     prefix_count: self.known_prefix_count(),
                     negotiated_hold_time: neg.map(|n| n.hold_time),
                     four_octet_as: neg.map(|n| n.four_octet_as),

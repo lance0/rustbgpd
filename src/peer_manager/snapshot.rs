@@ -20,10 +20,11 @@ fn build_peer_info(
     session_state: Option<&PeerSessionState>,
 ) -> PeerInfo {
     let stale = session_state.is_none();
+    let remote_asn = effective_remote_asn(managed, session_state);
     PeerInfo {
         address: peer.address,
         interface: peer.interface.clone(),
-        remote_asn: managed.remote_asn,
+        remote_asn,
         description: managed.description.clone(),
         peer_group: managed.peer_group.clone(),
         state: session_state.map_or(SessionState::Idle, |s| s.fsm_state),
@@ -57,6 +58,13 @@ fn build_peer_info(
         is_dynamic: managed.is_dynamic,
         stale,
     }
+}
+
+fn effective_remote_asn(managed: &ManagedPeer, session_state: Option<&PeerSessionState>) -> u32 {
+    session_state
+        .and_then(|s| s.peer_asn)
+        .filter(|asn| *asn != 0)
+        .unwrap_or(managed.remote_asn)
 }
 
 /// Run a bounded `query_state` against every peer concurrently.
@@ -156,10 +164,11 @@ impl PeerManager {
             }
 
             let prefix_count = u64::try_from(state.prefix_count).unwrap_or(u64::MAX);
+            let remote_asn = effective_remote_asn(managed, Some(state));
             let event = BmpEvent::StatsReport {
                 peer_info: Self::bmp_peer_info(
                     peer_addr,
-                    managed.remote_asn,
+                    remote_asn,
                     state.remote_router_id,
                     state.four_octet_as,
                 ),

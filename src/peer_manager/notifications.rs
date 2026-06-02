@@ -20,7 +20,7 @@ impl PeerManager {
                 old,
                 new,
             } => {
-                self.handle_state_changed_notification(session_id, role, peer_addr, old, new);
+                self.handle_state_changed_notification(session_id, role, peer_addr, None, old, new);
             }
             SessionNotification::OpenReceived {
                 session_id,
@@ -139,9 +139,17 @@ impl PeerManager {
                 session_id,
                 role,
                 peer_addr,
+                peer_asn,
                 old,
                 new,
-            } => self.handle_state_changed_notification(*session_id, *role, *peer_addr, *old, *new),
+            } => self.handle_state_changed_notification(
+                *session_id,
+                *role,
+                *peer_addr,
+                *peer_asn,
+                *old,
+                *new,
+            ),
         }
     }
 
@@ -156,6 +164,7 @@ impl PeerManager {
         session_id: u64,
         role: rustbgpd_transport::SessionRole,
         peer_addr: IpAddr,
+        peer_asn: Option<u32>,
         old: SessionState,
         new: SessionState,
     ) {
@@ -172,6 +181,14 @@ impl PeerManager {
         if !matches_current {
             debug!(%peer_addr, session_id, ?role, "ignoring stale StateChanged lifecycle notification");
             return;
+        }
+        if let Some(peer_asn) = peer_asn.filter(|asn| *asn != 0)
+            && let Some(managed) = self.peers.get_mut(&peer_key)
+            && managed.is_dynamic
+            && managed.remote_asn == 0
+        {
+            managed.remote_asn = peer_asn;
+            managed.transport_config.peer.remote_asn = peer_asn;
         }
         self.publish_state_lifecycle_event(&peer_key, role, old, new);
     }

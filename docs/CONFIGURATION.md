@@ -689,6 +689,11 @@ Dynamic peers:
 | `remote_asn`  | u32    | no       | `0`     | Expected remote ASN. `0` means accept any ASN from the peer's OPEN |
 | `description` | string | no       | --      | Optional description applied to accepted dynamic peers |
 
+When `remote_asn = 0`, the accepted peer keeps the configured range as
+accept-any, but the ephemeral peer's session state uses the ASN learned from the
+peer's OPEN. Peer snapshots, gRPC state, BMP peer state, and RIB peer-up
+metadata therefore report the learned ASN rather than the sentinel `0`.
+
 ```toml
 [global]
 asn = 65001
