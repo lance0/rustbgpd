@@ -373,6 +373,50 @@ ancient pre-index O(N²) era the 50 k pipeline took 7.1 s; it is 39 ms now.
 Extrapolating linearly, a full Internet table (900 k prefixes × 2 peers) would
 complete the pipeline in ~0.7 s.
 
+### Distribution Fanout (route-reflector / route-server scale)
+
+The stage *after* the pipeline: when best paths change, the `RibManager` must
+re-advertise them to every peer. Unlike the bench above (bare structs), the
+`fanout` bench drives the real manager `distribute_changes` hot path — per-peer
+export-policy evaluation + Adj-RIB-Out staging + bounded-channel send — fanning a
+batch of **64 changed best paths** out to N peers. It is gated behind the
+`bench-internals` feature (a synthetic peer-registration + Loc-RIB-seed driver,
+not reachable in a normal build). Each measured pass is a *first* advertise
+(empty Adj-RIB-Out, so the equality-suppression fast path never fires) — the
+conservative upper bound on per-peer cost.
+
+Run it with:
+
+```bash
+cargo bench -p rustbgpd-rib --features bench-internals --bench fanout
+```
+
+| Peers (N) | No export policy | With export policy | Per (peer × prefix) |
+|-----------|------------------|--------------------|---------------------|
+| 1   | 12.4 µs | 14.8 µs | ~194 / ~231 ns |
+| 8   | 93.2 µs | 110 µs  | ~182 / ~215 ns |
+| 64  | 719 µs  | 847 µs  | ~176 / ~207 ns |
+| 256 | 2.92 ms | 3.46 ms | ~178 / ~211 ns |
+
+Fanout is cleanly **O(peers × changed prefixes)** — the per-advertisement cost
+holds at **~178 ns** across the whole range. The representative export chain
+(an eight-statement scalar-guard chain — seven `LOCAL_PREF`-range misses then a
+catch-all permit, so every route is evaluated against all eight) adds a flat
+**~18%** (~33 ns/advertisement) — real but *not* dominant: the fanout machinery
+(Loc-RIB lookup, route clone, Adj-RIB-Out insert, `OutboundRouteUpdate` build,
+channel send) is the other ~84%. Export-policy eval only dominates for *heavy*
+chains (AS_PATH regex / large-community scans), not the cheap scalar-guard
+filter measured here.
+
+For sizing: a route server with 256 clients absorbing a 64-prefix churn burst
+spends ~3 ms of single-threaded fanout; a full-table resync (≈100 k prefixes ×
+256 peers) extrapolates to ~4.5 s. Reducing that is a per-advertisement-cost or
+coalescing problem, not a parallelism one — distribution is single-task by design
+(`RibManager` owns all RIB state in one tokio task). These are a
+same-host (7970X) quick criterion run (reduced sampling); a pinned re-measure is
+deferred to the next quiet-runner pass, and any future fanout optimization is
+gated on this baseline.
+
 ### Bulk Initial Load
 
 Cold single-peer table load into pre-sized Adj-RIB-In / Loc-RIB /

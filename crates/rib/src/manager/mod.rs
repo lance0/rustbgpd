@@ -1,3 +1,5 @@
+#[cfg(feature = "bench-internals")]
+mod bench_support;
 mod distribution;
 mod graceful_restart;
 mod helpers;
