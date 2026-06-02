@@ -1240,7 +1240,8 @@ impl PeerSession {
             }
         }
 
-        // 4. Max-prefix enforcement — track via HashSet for accuracy.
+        // 4. Max-prefix enforcement — maintain the per-prefix refcount
+        //    (`known_prefix_refcounts`) alongside the Add-Path identity set.
         //    Counts unicast unique prefixes + FlowSpec rules + EVPN keys
         //    so a peer can't bypass the cap by flooding a non-unicast
         //    family.
