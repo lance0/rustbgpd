@@ -485,6 +485,22 @@ full-process RSS** below — it excludes the daemon's operational surfaces
 profile remains the regression-tracking surface for RIB data-structure changes,
 while bgperf2 RSS (below) is the operator-facing full-daemon number.
 
+> **Correction (whole-daemon dhat profile, 2026-06-02).** A full-daemon dhat
+> heap profile at 2 peers × 100k (`profile='dhat'` bgperf2 build, SIGTERM at the
+> flood peak) shows the live-at-peak heap (~308 MB tracked, dhat build) is
+> **~76% RIB map/index bucket storage**, broken down by allocation site as:
+> Adj-RIB-Out route map **~86 MB** + its prefix index ~29 MB, Loc-RIB best-path
+> map ~57 MB, Adj-RIB-In route map ~48 MB + its prefix index ~16 MB. API / event
+> / metrics operational surfaces were **negligible (<1 MB)**. **This corrects the
+> framing below:** the `memory_profile` micro-bench above (66.6 MB) is
+> **Adj-RIB-In + Loc-RIB only, on synthetic routes — it excludes Adj-RIB-Out**,
+> which the profile shows is the *single largest* component. So the gap between
+> that 66.6 MB and full-daemon RSS is mostly **more RIB storage** (the
+> advertised-route maps plus real per-route data), not operational surfaces. The
+> durable memory cost is the three-layer route-storage model (Adj-RIB-In +
+> Loc-RIB + Adj-RIB-Out) and its prefix-keyed `hashbrown` bucket arrays — the
+> target for any future memory work, not the runtime or operational surfaces.
+
 ### Optimization History
 
 | Version | Full RIB (900k x 2 peers) | Per-prefix | vs GoBGP |
@@ -643,11 +659,14 @@ of headline numbers:
 > here (and measured 198 MB in the prior March run); the old 578 MB was a much
 > older snapshot. On *full-daemon RSS*, rustbgpd (~346 MB on / ~284 MB off) now
 > uses **more** than GoBGP (~203 MB) and far more than BIRD (~30 MB) at this
-> scale — the cost of operational surfaces (chiefly the event-history outbox
-> when enabled; opt-in and default-off as of v0.32.0). rustbgpd's **RIB-only
-> structural memory stays lean**
-> (66.6 MB allocator-tracked at 2p/100k — see *Memory Footprint*); the gap is
-> operational surfaces + allocator retention, not RIB data-structure bloat.
+> scale. The whole-daemon dhat profile (see the *Memory Footprint* correction)
+> attributes that to **RIB route-storage map/index bucket arrays** — the
+> three-layer Adj-RIB-In + Loc-RIB + Adj-RIB-Out model, with Adj-RIB-Out the
+> largest single piece — **not** operational surfaces, which the profile shows
+> are negligible (<1 MB). The event-history outbox adds the on-vs-off RSS delta
+> when enabled (opt-in, default-off), but the structural cost is the route maps.
+> BIRD's radix-tree RIB with global attribute deduplication is what makes it an
+> order of magnitude leaner on this same data.
 
 #### 10 peers × 1,000 prefixes (10k total)
 
@@ -708,18 +727,22 @@ writer) — so the durable outbox roughly doubles peak flood CPU when on. GoBGP
 peaks far higher (~598%, goroutine-per-peer + GC); BIRD is the most efficient
 at ~10% CPU, reflecting decades of C optimization with a radix-tree RIB.
 
-**Memory.** Two surfaces, and they tell different stories. *RIB-only
-structural memory* (allocator-tracked, the regression-tracking surface) is
-lean: 66.6 MB for 200k routes (2 peers + Loc-RIB), dominated by HashMap bucket
-arrays (~78%) and Route data (~19%). *Full-daemon RSS* at 2p/100k is ~284 MB
-by default / ~346 MB with the opt-in event-history outbox — **both above GoBGP's
-~203 MB** and far more than BIRD's ~30 MB at this scale. The difference between
-the 66.6 MB RIB figure and the ~284–346 MB RSS is the daemon's always-on
-operational surfaces (BFD, gNMI, ASPA, BGP roles/OTC, explain cache), jemalloc
-arena retention, and — when enabled — the event-history outbox (the single
-biggest piece at ~62 MB) — not RIB bloat. BIRD's radix-tree representation remains an order of magnitude leaner on
-both surfaces. At full-table scale (900k prefixes, RIB-only micro-bench)
-rustbgpd's Adj-RIB-In + Loc-RIB is ~533 MB vs GoBGP's published 8–16+ GB.
+**Memory.** *Full-daemon RSS* at 2p/100k is ~284 MB by default / ~346 MB with
+the opt-in event-history outbox — **both above GoBGP's ~203 MB** and far more
+than BIRD's ~30 MB at this scale. A whole-daemon dhat heap profile
+(2026-06-02; see the *Memory Footprint* correction) attributes that RSS to
+**RIB route-storage map/index bucket arrays — ~76% of the live-at-peak heap** —
+across the three-layer Adj-RIB-In + Loc-RIB + Adj-RIB-Out model, with Adj-RIB-Out
+the single largest piece (~115 MB across its route map + prefix index). API /
+event / metrics operational surfaces were **negligible (<1 MB)**. The opt-in
+event-history outbox adds the on-vs-off RSS delta when enabled (~62 MB), but the
+default-off structural cost is the route maps, **not** operational surfaces. The
+earlier 66.6 MB "RIB-only is lean" figure is a synthetic Adj-RIB-In + Loc-RIB
+micro-bench that excludes Adj-RIB-Out and so undercounts full-daemon route
+storage. BIRD's radix-tree RIB with global attribute deduplication is what makes
+it an order of magnitude leaner on this same data. At full-table scale (900k
+prefixes, RIB-only micro-bench) rustbgpd's Adj-RIB-In + Loc-RIB is ~533 MB vs
+GoBGP's published 8–16+ GB.
 
 **gRPC under load.** A priority query channel separates read-only gRPC queries
 from the route-processing pipeline, ensuring management API requests are
@@ -745,12 +768,19 @@ purpose-built C codebase is hard to beat. On **convergence**, rustbgpd is
 competitive: it floods 200k prefixes in ~2 seconds (monitor time), matching
 BIRD and beating GoBGP (5s). On **full-daemon memory**, rustbgpd is no longer
 the leader it was at v0.4.2 — ~284 MB by default (346 MB with the opt-in outbox)
-at 2p/100k is above GoBGP's ~203 MB, the cost of always-on operational surfaces.
-Its **RIB-only structural memory** remains very lean (66.6 MB at 2p/100k;
-~533 MB at 900k micro-bench vs GoBGP's 8–16 GB), so the headroom for full-daemon
-RSS is operational-surface trimming — making the event-history outbox opt-in
-(done in v0.32.0) was the first lever — rather than RIB data-structure work;
-shared route storage across RIB views was measured and rejected (below).
+at 2p/100k is above GoBGP's ~203 MB. The whole-daemon dhat profile (2026-06-02;
+see the *Memory Footprint* correction) attributes this to **RIB route-storage
+map/index bucket arrays** (~76% of the live-at-peak heap) across the three-layer
+Adj-RIB-In + Loc-RIB + Adj-RIB-Out model — **not** operational surfaces
+(negligible) or runtime threads (a worker-thread cap measured RSS-neutral). So
+the headroom for full-daemon RSS is **compact prefix-keyed RIB storage** —
+reducing `hashbrown` bucket overhead across those maps and prefix indexes — not
+operational-surface trimming. Note this does not contradict the rejected
+shared-`RouteData` refactor (below): that shared the Route *payload*, which is
+the minority cost; the dominant cost is the maps' bucket arrays, so the open
+lever is the map/index *data structure*, not payload sharing. BIRD's radix-tree
+RIB with global attribute deduplication stays an order of magnitude leaner on
+the same data.
 
 ## EVPN RR Scale (M33)
 
