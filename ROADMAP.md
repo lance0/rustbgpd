@@ -480,6 +480,14 @@ branch is between features.
   6 suppressions for a large `Result<_, RibServiceError>` enum. Box the error
   variant only if it shows up in a benchmark or RIB query hot-path; cosmetic
   until then.
+- [ ] **Measurement-gated hash-map hasher audit.** The durable unicast RIB
+  storage now uses `FxHashMap` / trie-backed prefix indexes, but manager,
+  route-refresh, EVPN, RPKI, config, and API support paths still contain
+  ordinary `std::collections::HashMap` / `HashSet` sites. Do **not** bulk-convert
+  them: keep std's randomized hasher for config/API/user-keyed surfaces unless a
+  benchmark or heap profile identifies a hot, bounded, internal map. Candidate
+  follow-ups are RIB-manager temporary prefix/peer sets and other
+  non-adversarial control-plane maps that show up in `dhat` or Criterion.
 - [ ] **CI gate: `#[allow(clippy::*)]` requires `reason = "..."`.** ~171
   escape-hatches workspace-wide (~40 are `cast_possible_truncation` in the wire
   codec, intentional after a length check). A CI lint that rejects new

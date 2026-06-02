@@ -24,6 +24,7 @@ use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, PathAttribute, Prefix, Safi
 use rustc_hash::{FxBuildHasher, FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
 
+use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
 
 /// Per-peer Adj-RIB-In: stores the routes received from a single peer.
@@ -42,11 +43,12 @@ use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
 pub struct AdjRibIn {
     peer: IpAddr,
     routes: HashMap<(Prefix, u32), Route>,
-    /// Secondary index: prefix → path IDs stored for that prefix.
-    /// `SmallVec<[u32; 1]>` inlines the single-path case (`path_id=0`, no
-    /// Add-Path) without a per-prefix heap allocation; Add-Path multi-path
-    /// spills to the heap transparently. Mirrors `AdjRibOut::prefix_path_ids`.
-    prefix_index: HashMap<Prefix, SmallVec<[u32; 1]>>,
+    /// Secondary index: prefix → path IDs stored for that prefix, backed by a
+    /// family-split prefix trie. `SmallVec<[u32; 1]>` inlines the single-path
+    /// case (`path_id=0`, no Add-Path) without a per-prefix heap allocation;
+    /// Add-Path multi-path spills to the heap transparently. Mirrors
+    /// `AdjRibOut::prefix_path_ids`.
+    prefix_index: FamilyPrefixMap<SmallVec<[u32; 1]>>,
     /// Route keys where `LLGR_STALE` was injected locally by this daemon.
     llgr_stale_local_tags: HashSet<(Prefix, u32)>,
     /// `FlowSpec` routes keyed by `(rule, path_id)`.
@@ -82,7 +84,7 @@ impl AdjRibIn {
         Self {
             peer,
             routes: HashMap::with_capacity_and_hasher(route_capacity, FxBuildHasher),
-            prefix_index: HashMap::with_capacity_and_hasher(route_capacity, FxBuildHasher),
+            prefix_index: FamilyPrefixMap::default(),
             llgr_stale_local_tags: HashSet::default(),
             flowspec_routes: HashMap::with_capacity_and_hasher(flowspec_capacity, FxBuildHasher),
             flowspec_llgr_stale_local_tags: HashSet::default(),
@@ -108,7 +110,7 @@ impl AdjRibIn {
     /// instead of keeping a separate allocation.
     pub fn insert(&mut self, mut route: Route) {
         let key = (route.prefix, route.path_id);
-        let ids = self.prefix_index.entry(route.prefix).or_default();
+        let ids = self.prefix_index.entry_or_default(route.prefix);
         if !ids.contains(&route.path_id) {
             ids.push(route.path_id);
         }

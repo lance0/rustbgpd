@@ -23,6 +23,8 @@ pub mod event_sink;
 pub mod loc_rib;
 /// RIB manager task and submodules.
 pub mod manager;
+/// Family-split prefix-trie map backing the compact prefix-keyed RIB indexes.
+mod prefix_map;
 /// Route and `FlowSpec` route data types.
 pub mod route;
 /// RIB update messages and outbound route structures.

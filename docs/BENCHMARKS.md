@@ -289,8 +289,9 @@ At 500 prefixes, parse throughput is ~161M prefixes/sec. The fixed cost
 
 The RIB data structures (`rustbgpd-rib`) are pure synchronous structs with no
 async or locking overhead. `RibManager` owns them in a single tokio task.
-Both `AdjRibIn` and `AdjRibOut` use secondary prefix indexes for O(1)
-per-prefix lookup, avoiding the O(N) full-scans that dominated earlier versions.
+Both `AdjRibIn` and `AdjRibOut` use trie-backed secondary prefix indexes
+(`prefix_trie::PrefixMap`) for fast per-prefix lookup, avoiding the O(N)
+full-scans that dominated earlier versions.
 
 ### Best-Path Comparison
 
@@ -314,8 +315,8 @@ flagged for follow-up.
 
 ### Adj-RIB-In Insert
 
-Bulk insert into a fresh `AdjRibIn` (HashMap keyed by `(Prefix, path_id)` plus
-secondary prefix index).
+Bulk insert into a fresh `AdjRibIn` (HashMap keyed by `(Prefix, path_id)` plus a
+trie-backed secondary prefix index).
 
 | Routes | Time | Throughput | vs v0.31.0 |
 |--------|------|------------|------------|
@@ -328,8 +329,12 @@ contributors are the inlined `SmallVec<[u32; 1]>` Adj-RIB-In prefix index
 (no per-prefix `HashSet` allocation in the common no-Add-Path case) and the
 `FxHash` route maps (a faster non-cryptographic hasher for the internal,
 `max_prefixes`-bounded keys). A full Internet table (900k prefixes) now inserts
-in ~160 ms. The secondary prefix index keeps `iter_prefix()` at O(1), so the
-full pipeline below stays linear at scale.
+in ~160 ms. The secondary prefix index keeps `iter_prefix()` at bounded depth, so
+the full pipeline below stays linear at scale. The prefix index has since moved
+from `HashMap` to a trie (`prefix_trie::PrefixMap`) — this trims RIB index memory
+(see *Memory Footprint*) and improved insert a further ~8% in a quick A/B; the
+table above is the pre-trie pinned baseline, with a pinned re-measure of the trie
+delta deferred to the next quiet-runner bench pass.
 
 ### Loc-RIB Recompute
 
@@ -473,9 +478,11 @@ sets (~50-200), so the attribute heap cost is amortized to near zero per route.
 
 | Prefixes | Total memory | Per-prefix |
 |----------|-------------|------------|
-| 100,000 | 66.6 MB | 698 B |
+| 100,000 | 60.6 MB | 635 B |
 
-This is the **RIB-only, allocator-tracked** structural memory (2× Adj-RIB-In +
+(Was 66.6 MB / 698 B before the trie-backed prefix indexes landed — see the
+*prefix-index migration* note below.) This is the **RIB-only, allocator-tracked**
+structural memory (2× Adj-RIB-In +
 Loc-RIB); each prefix stores Route instances with `Arc` sharing of attributes
 across copies, and attribute interning within each `AdjRibIn` shares one
 allocation across routes with identical attributes. It is **distinct from the
@@ -492,14 +499,30 @@ while bgperf2 RSS (below) is the operator-facing full-daemon number.
 > Adj-RIB-Out route map **~86 MB** + its prefix index ~29 MB, Loc-RIB best-path
 > map ~57 MB, Adj-RIB-In route map ~48 MB + its prefix index ~16 MB. API / event
 > / metrics operational surfaces were **negligible (<1 MB)**. **This corrects the
-> framing below:** the `memory_profile` micro-bench above (66.6 MB) is
+> framing below:** the `memory_profile` micro-bench above (60.6 MB) is
 > **Adj-RIB-In + Loc-RIB only, on synthetic routes — it excludes Adj-RIB-Out**,
 > which the profile shows is the *single largest* component. So the gap between
-> that 66.6 MB and full-daemon RSS is mostly **more RIB storage** (the
+> that 60.6 MB and full-daemon RSS is mostly **more RIB storage** (the
 > advertised-route maps plus real per-route data), not operational surfaces. The
 > durable memory cost is the three-layer route-storage model (Adj-RIB-In +
 > Loc-RIB + Adj-RIB-Out) and its prefix-keyed `hashbrown` bucket arrays — the
 > target for any future memory work, not the runtime or operational surfaces.
+
+> **Prefix-index migration (trie-backed indexes).** The first measured fix
+> targeting the bucket-array overhead above: the two prefix-keyed *indexes* —
+> `AdjRibIn::prefix_index` and `AdjRibOut::prefix_path_ids` (each `Prefix →
+> SmallVec<[path_id]>`) — moved from `hashbrown::HashMap` to a family-split
+> `prefix_trie::PrefixMap`. In the dhat breakdown above these are the ~16 MB
+> Adj-RIB-In + ~29 MB Adj-RIB-Out index components (that profile predates the
+> change). Measured impact (`memory_profile`, allocator-tracked): Full-RIB
+> 100k **66.6 → 60.6 MB (−9%)**, 500k **−14%**; Adj-RIB-In alone **−12% / −19%**
+> at 100k / 500k; and `adj_rib_in_insert` got **~8% faster** (compact trie nodes
+> vs hash buckets, no rehash) with best-path comparison unchanged — a clean win,
+> no read-path regression. The **Loc-RIB best-path map** (~57 MB above) was also
+> prototyped on the trie and gave a larger memory win, but it **regressed the
+> lookup-hot `loc_rib_recompute` ~2.6× (36 → 95 ns)** — Loc-RIB lookups dominate
+> best-path recompute, so that swap was **deferred**. Loc-RIB-specific compaction
+> that avoids the per-lookup trie-descent tax is tracked as follow-up.
 
 ### Optimization History
 
@@ -737,7 +760,7 @@ the single largest piece (~115 MB across its route map + prefix index). API /
 event / metrics operational surfaces were **negligible (<1 MB)**. The opt-in
 event-history outbox adds the on-vs-off RSS delta when enabled (~62 MB), but the
 default-off structural cost is the route maps, **not** operational surfaces. The
-earlier 66.6 MB "RIB-only is lean" figure is a synthetic Adj-RIB-In + Loc-RIB
+earlier 60.6 MB "RIB-only is lean" figure is a synthetic Adj-RIB-In + Loc-RIB
 micro-bench that excludes Adj-RIB-Out and so undercounts full-daemon route
 storage. BIRD's radix-tree RIB with global attribute deduplication is what makes
 it an order of magnitude leaner on this same data. At full-table scale (900k
@@ -759,7 +782,7 @@ updates.
 | CPU model | 1 core, very efficient | Multi-core, GC overhead | 1-2 cores, no GC |
 | Memory model | Radix tree, minimal overhead | Go heap, GC managed | Arc sharing, attribute interning |
 | Full-daemon RSS (200k) | 30 MB | 203 MB | 284 MB default / 346 MB eh-on |
-| RIB-only memory (200k, allocator-tracked) | n/a | n/a | 66.6 MB |
+| RIB-only memory (200k, allocator-tracked) | n/a | n/a | 60.6 MB |
 | RIB-only (900k, micro-bench) | ~325 MB (published, 30 peers) | 8-16+ GB (published) | ~533 MB (2 peers + Loc-RIB) |
 | API during load | Responsive (no RIB contention) | Responsive (concurrent) | Responsive (priority query channel) |
 
