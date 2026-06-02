@@ -85,13 +85,18 @@ impl VrpTable {
         }
     }
 
-    /// Validate a route prefix + origin ASN per RFC 6811.
+    /// Validate a route prefix + origin ASN per RFC 6811 §2.
     ///
-    /// 1. Find all VRPs that *cover* the prefix: the VRP's prefix contains the
-    ///    route's prefix, and the route's prefix length ≤ VRP's `max_len`.
-    /// 2. If no covering VRPs → `NotFound`
-    /// 3. If any covering VRP has matching `origin_asn` → `Valid`
-    /// 4. Covering VRPs exist but none match → `Invalid`
+    /// A VRP *covers* the route when its prefix contains the route prefix
+    /// (network containment, `vrp.prefix_len <= route_len`). `max_len` does
+    /// **not** affect coverage — it only gates the `Valid` decision.
+    ///
+    /// 1. No covering VRP → `NotFound`.
+    /// 2. A covering VRP with matching `origin_asn` and `route_len <= max_len`
+    ///    → `Valid`.
+    /// 3. Covering VRP(s) exist but none yields `Valid` — wrong `origin_asn`, or
+    ///    the route is more specific than every covering VRP's `max_len`
+    ///    → `Invalid` (NOT `NotFound`).
     #[must_use]
     pub fn validate(&self, prefix: &Prefix, origin_asn: u32) -> RpkiValidation {
         let (route_addr, route_len) = match prefix {
@@ -110,17 +115,14 @@ impl VrpTable {
             if vrp.prefix_len > route_len {
                 continue;
             }
-            // Route prefix length must be ≤ VRP max_len
-            if route_len > vrp.max_len {
-                continue;
-            }
-            // Check containment: VRP prefix must contain the route prefix
+            // Coverage is network containment only — `max_len` is checked below,
+            // not here (RFC 6811 §2): a covered route that exceeds every covering
+            // VRP's `max_len` is Invalid, not NotFound.
             if !prefix_contains(vrp.prefix, vrp.prefix_len, route_addr, route_len) {
                 continue;
             }
-            // This VRP covers the route
             has_covering = true;
-            if vrp.origin_asn == origin_asn {
+            if vrp.origin_asn == origin_asn && route_len <= vrp.max_len {
                 return RpkiValidation::Valid;
             }
         }
@@ -280,13 +282,38 @@ mod tests {
     }
 
     #[test]
-    fn max_len_exceeded_not_found() {
+    fn max_len_exceeded_invalid() {
         // VRP: 10.0.0.0/16 max_len=24 AS65001
         let table = VrpTable::new(vec![v4_vrp(Ipv4Addr::new(10, 0, 0, 0), 16, 24, 65001)]);
-        // /25 exceeds max_len=24 → NotFound (no covering VRP)
+        // /25 exceeds max_len=24 but IS covered by 10.0.0.0/16 → Invalid, not
+        // NotFound (RFC 6811 §2: a covering VRP exists, none yields Valid). Even
+        // the authorized origin AS65001 may not announce more specific than
+        // max_len.
         assert_eq!(
             table.validate(&v4_prefix(Ipv4Addr::new(10, 0, 1, 0), 25), 65001),
-            RpkiValidation::NotFound
+            RpkiValidation::Invalid
+        );
+        // A different origin on the same over-specific covered route is likewise
+        // Invalid (covered, no Valid).
+        assert_eq!(
+            table.validate(&v4_prefix(Ipv4Addr::new(10, 0, 1, 0), 25), 65999),
+            RpkiValidation::Invalid
+        );
+    }
+
+    #[test]
+    fn ancestor_valid_beats_specific_mismatch() {
+        // The most-specific covering VRP fails (wrong ASN), but a less-specific
+        // covering VRP authorizes the route → Valid. RFC 6811: ANY covering VRP
+        // that matches makes the route Valid, not only the most specific — this
+        // is why origin validation needs every covering ancestor, not LPM.
+        let table = VrpTable::new(vec![
+            v4_vrp(Ipv4Addr::new(10, 0, 0, 0), 24, 24, 65002), // specific, wrong ASN
+            v4_vrp(Ipv4Addr::new(10, 0, 0, 0), 8, 24, 65001),  // general, right ASN
+        ]);
+        assert_eq!(
+            table.validate(&v4_prefix(Ipv4Addr::new(10, 0, 0, 0), 24), 65001),
+            RpkiValidation::Valid
         );
     }
 
@@ -377,6 +404,32 @@ mod tests {
         assert_eq!(
             table.validate(&v6_prefix("2001:db9::".parse().unwrap(), 32), 65001),
             RpkiValidation::NotFound
+        );
+    }
+
+    #[test]
+    fn ipv6_host_route_max_len() {
+        // VRP covers /48 with max_len=128 — a /128 host route matches (the v6
+        // shift-by-128 boundary in the masking helper must not misbehave).
+        let table = VrpTable::new(vec![v6_vrp(
+            "2001:db8:1::".parse().unwrap(),
+            48,
+            128,
+            65001,
+        )]);
+        assert_eq!(
+            table.validate(&v6_prefix("2001:db8:1::1".parse().unwrap(), 128), 65001),
+            RpkiValidation::Valid
+        );
+    }
+
+    #[test]
+    fn ipv6_max_len_exceeded_invalid() {
+        // Mirror of the v4 max-len fix on v6: /64 covered by /32 max_len=48 → Invalid.
+        let table = VrpTable::new(vec![v6_vrp("2001:db8::".parse().unwrap(), 32, 48, 65001)]);
+        assert_eq!(
+            table.validate(&v6_prefix("2001:db8:1::".parse().unwrap(), 64), 65001),
+            RpkiValidation::Invalid
         );
     }
 
