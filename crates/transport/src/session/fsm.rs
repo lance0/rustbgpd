@@ -201,9 +201,10 @@ impl PeerSession {
                     }
                 }
                 Action::SessionEstablished(neg) => {
+                    let peer_asn = neg.peer_asn;
                     info!(
                         peer = %self.peer_label,
-                        peer_asn = neg.peer_asn,
+                        peer_asn,
                         hold_time = neg.hold_time,
                         keepalive_interval = neg.keepalive_interval,
                         four_octet_as = neg.four_octet_as,
@@ -313,7 +314,7 @@ impl PeerSession {
                         .rib_tx
                         .send(RibUpdate::PeerUp {
                             peer: self.peer_ip,
-                            peer_asn: self.config.peer.remote_asn,
+                            peer_asn,
                             peer_router_id: self
                                 .negotiated
                                 .as_ref()
@@ -494,10 +495,12 @@ impl PeerSession {
 
     fn try_send_lifecycle_state_changed(&self, old: SessionState, new: SessionState) {
         if let Some(ref lifecycle_tx) = self.session_lifecycle_tx {
+            let negotiated = self.fsm.negotiated().or(self.negotiated.as_ref());
             match lifecycle_tx.try_send(SessionLifecycleNotification::StateChanged {
                 session_id: self.session_identity.id,
                 role: self.session_identity.role,
                 peer_addr: self.peer_ip,
+                peer_asn: negotiated.map(|n| n.peer_asn),
                 old,
                 new,
             }) {

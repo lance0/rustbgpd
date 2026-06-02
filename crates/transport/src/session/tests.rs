@@ -305,6 +305,33 @@ async fn session_established_emits_bmp_peer_up() {
 }
 
 #[tokio::test]
+async fn accept_any_session_established_uses_learned_asn_for_bmp_and_rib() {
+    let (mut session, mut rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 0);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+
+    session
+        .execute_actions(vec![Action::SessionEstablished(negotiated_session(
+            65099, false,
+        ))])
+        .await;
+
+    match bmp_rx.recv().await.unwrap() {
+        BmpEvent::PeerUp { peer_info, .. } => {
+            assert_eq!(peer_info.peer_asn, 65099);
+        }
+        other => panic!("expected BMP PeerUp, got {other:?}"),
+    }
+
+    match rib_rx.recv().await.unwrap() {
+        RibUpdate::PeerUp { peer_asn, .. } => {
+            assert_eq!(peer_asn, 65099);
+        }
+        _ => panic!("expected RIB PeerUp"),
+    }
+}
+
+#[tokio::test]
 async fn session_down_emits_bmp_peer_down() {
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
     session.negotiated = Some(negotiated_session(65002, false));

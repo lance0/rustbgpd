@@ -589,6 +589,7 @@ fn fake_peer_handle(
                     let _ = reply.send(PeerSessionState {
                         fsm_state: state,
                         peer_ip: peer_addr,
+                        peer_asn: None,
                         prefix_count: 0,
                         negotiated_hold_time: None,
                         four_octet_as: None,
@@ -805,6 +806,7 @@ async fn collision_notifications_flush_ready_lifecycle_events_first() {
             session_id: 1,
             role: rustbgpd_transport::SessionRole::Primary,
             peer_addr: addr,
+            peer_asn: None,
             old: SessionState::Established,
             new: SessionState::Idle,
         })
@@ -825,6 +827,55 @@ async fn collision_notifications_flush_ready_lifecycle_events_first() {
 
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn dynamic_accept_any_peer_snapshot_learns_negotiated_asn() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        addr,
+        0,
+        fake_peer_handle(
+            addr,
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+    mgr.peers.get_mut(&key(addr)).unwrap().is_dynamic = true;
+
+    mgr.handle_session_lifecycle_notification(&SessionLifecycleNotification::StateChanged {
+        session_id: 1,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr: addr,
+        peer_asn: Some(65099),
+        old: SessionState::OpenConfirm,
+        new: SessionState::Established,
+    });
+
+    let managed = mgr.peers.get(&key(addr)).unwrap();
+    assert_eq!(managed.remote_asn, 65099);
+    assert_eq!(managed.transport_config.peer.remote_asn, 65099);
+    assert_eq!(
+        mgr.get_peer_info(&key(addr)).await.unwrap().remote_asn,
+        65099
+    );
 }
 
 #[tokio::test]
@@ -876,6 +927,7 @@ async fn lifecycle_notification_matches_scoped_static_peer_by_session_id() {
         session_id: 2,
         role: rustbgpd_transport::SessionRole::Primary,
         peer_addr: peer,
+        peer_asn: None,
         old: SessionState::OpenConfirm,
         new: SessionState::Established,
     });
@@ -1992,6 +2044,7 @@ async fn back_to_back_updates_do_not_lose_pending_refresh() {
                     let _ = reply.send(PeerSessionState {
                         fsm_state: state,
                         peer_ip: addr,
+                        peer_asn: None,
                         prefix_count: 0,
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
@@ -2099,6 +2152,7 @@ async fn peer_deletion_after_failed_update_drops_pending_retry_cleanly() {
                     let _ = reply.send(PeerSessionState {
                         fsm_state: SessionState::Established,
                         peer_ip: addr,
+                        peer_asn: None,
                         prefix_count: 0,
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
@@ -2222,6 +2276,7 @@ async fn honor_graceful_shutdown_hot_apply_targets_ebgp_only() {
                         let _ = reply.send(PeerSessionState {
                             fsm_state: SessionState::Established,
                             peer_ip: addr,
+                            peer_asn: None,
                             prefix_count: 0,
                             negotiated_hold_time: Some(90),
                             four_octet_as: Some(true),
@@ -2392,6 +2447,7 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
                     let _ = reply.send(PeerSessionState {
                         fsm_state: SessionState::Established,
                         peer_ip: task_addr,
+                        peer_asn: None,
                         prefix_count: 0,
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
@@ -2561,6 +2617,7 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
                     let _ = reply.send(PeerSessionState {
                         fsm_state: SessionState::Idle,
                         peer_ip: task_addr,
+                        peer_asn: None,
                         prefix_count: 0,
                         negotiated_hold_time: None,
                         four_octet_as: None,
@@ -2724,6 +2781,7 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
                     let _ = reply.send(PeerSessionState {
                         fsm_state: SessionState::Idle,
                         peer_ip: task_addr,
+                        peer_asn: None,
                         prefix_count: 0,
                         negotiated_hold_time: None,
                         four_octet_as: None,
@@ -2918,6 +2976,7 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
                     let _ = reply.send(PeerSessionState {
                         fsm_state: SessionState::Established,
                         peer_ip: task_addr,
+                        peer_asn: None,
                         prefix_count: 0,
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
@@ -3135,6 +3194,7 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
                     let _ = reply.send(PeerSessionState {
                         fsm_state: SessionState::Established,
                         peer_ip: task_addr,
+                        peer_asn: None,
                         prefix_count: 0,
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
@@ -3461,6 +3521,7 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
                     let _ = reply.send(PeerSessionState {
                         fsm_state: SessionState::OpenSent,
                         peer_ip: peer_addr,
+                        peer_asn: None,
                         prefix_count: 0,
                         negotiated_hold_time: None,
                         four_octet_as: None,

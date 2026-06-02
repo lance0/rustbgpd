@@ -116,19 +116,17 @@ Later for what remains.
   IX-route-server-relevant control-plane gap vs FRR/GoBGP and the only near-term
   parity add; it is a discrete feature and does not displace the perf/polish
   work above.
-- **Dynamic-neighbor parity polish** — **shipped.** Overlapping ranges resolve
-  by longest-prefix-match (#333); `AddDynamicNeighbor` / `DeleteDynamicNeighbor`
-  are now live, TOML-persisted mutations (`rustbgpctl dynamic-neighbor
-  {list,add,delete}`), and config-load rejects exact-duplicate effective
-  prefixes. See CHANGELOG.
-- **Zero-config / accept-any-ASN peering** *(route-collector & lab
-  ergonomics).* A peer-group flag to learn the remote ASN from the OPEN
-  instead of validating it against config, combined with a catch-all
-  (`0.0.0.0/0`, `::/0`) dynamic range, enables accept-any peering for
-  looking-glass / collector / lab onboarding. Gated behind explicit opt-in
-  and the existing `dynamic_neighbor_limit`; MD5 / TCP-AO still enforceable.
-  Small — the range and limit machinery already exist; the new piece is the
-  learn-ASN peer-group mode.
+- **Dynamic-neighbor parity / accept-any peering** — **shipped.** Overlapping
+  ranges resolve by longest-prefix-match (#333); `AddDynamicNeighbor` /
+  `DeleteDynamicNeighbor` are now live, TOML-persisted mutations
+  (`rustbgpctl dynamic-neighbor {list,add,delete}`); config-load rejects
+  exact-duplicate effective prefixes; and `remote_asn = 0` on
+  `[[dynamic_neighbors]]` accepts any ASN from the peer OPEN. Catch-all ranges
+  (`0.0.0.0/0`, `::/0`) plus the existing `dynamic_neighbor_limit` cover the
+  route-collector / lab zero-config shape, with MD5 / TCP-AO still enforceable
+  through the inherited peer group. The learned ASN is surfaced through peer
+  snapshots, API state, BMP state, and RIB peer-up metadata instead of exposing
+  the sentinel `0`. See CHANGELOG.
 
 ### Later
 

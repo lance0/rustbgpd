@@ -69,6 +69,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dynamic-neighbor CRUD. If the TOML write is rejected after the peer manager
   accepts the mutation, the API rolls the runtime change back and reports
   failure instead of letting a later SIGHUP reload stale disk.
+- Dynamic peers created from `remote_asn = 0` accept-any ranges now surface the
+  learned ASN from OPEN negotiation in peer snapshots, API state, BMP peer
+  state, and RIB peer-up metadata instead of leaking the sentinel `0`.
 
 ## [0.33.0] — 2026-06-01
 

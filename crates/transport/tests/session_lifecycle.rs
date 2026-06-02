@@ -875,6 +875,11 @@ async fn query_state_returns_router_id_at_open_confirm() {
         Some(Ipv4Addr::new(10, 0, 0, 2)),
         "remote_router_id should be available at OpenConfirm, not just Established"
     );
+    assert_eq!(
+        state.peer_asn,
+        Some(REMOTE_ASN),
+        "peer_asn should be available at OpenConfirm, not just Established"
+    );
 
     // Clean shutdown
     handle.shutdown().await.unwrap().unwrap();

@@ -556,7 +556,10 @@ impl PeerSession {
             .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id);
         BmpPeerInfo {
             peer_addr: self.peer_ip,
-            peer_asn: self.config.peer.remote_asn,
+            peer_asn: self
+                .negotiated
+                .as_ref()
+                .map_or(self.config.peer.remote_asn, |n| n.peer_asn),
             peer_bgp_id,
             peer_type: BmpPeerType::Global,
             is_ipv6: self.peer_ip.is_ipv6(),

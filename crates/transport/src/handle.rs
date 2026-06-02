@@ -162,6 +162,8 @@ pub enum SessionLifecycleNotification {
         role: SessionRole,
         /// IP address of the remote peer.
         peer_addr: IpAddr,
+        /// Peer's ASN learned from OPEN negotiation, if available.
+        peer_asn: Option<u32>,
         /// Previous FSM state.
         old: SessionState,
         /// New FSM state.
@@ -249,6 +251,8 @@ pub struct PeerSessionState {
     pub fsm_state: SessionState,
     /// Remote peer IP address.
     pub peer_ip: IpAddr,
+    /// Peer's ASN learned from OPEN negotiation, if available.
+    pub peer_asn: Option<u32>,
     /// Number of accepted prefixes from this peer.
     pub prefix_count: usize,
     /// Negotiated hold time (seconds), if session reached `OpenConfirm`.

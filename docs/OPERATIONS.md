@@ -696,8 +696,10 @@ restart (`AddDynamicNeighbor` / `DeleteDynamicNeighbor`, tier `mutating`).
 not enable BFD, the prefix must be valid, and the effective prefix must not
 duplicate an existing range. `delete` stops *future* accepts only —
 already-established dynamic peers keep running and drain when they next
-return to Idle. When the daemon was started with `--config`, changes persist
-to the TOML file (atomic write) before the RPC returns and survive a restart.
+return to Idle. Omitting `--asn` uses the accept-any sentinel (`remote_asn = 0`);
+once a peer is accepted, operational state surfaces the ASN learned from the
+peer's OPEN. When the daemon was started with `--config`, changes persist to the
+TOML file (atomic write) before the RPC returns and survive a restart.
 The live mutation path is serialized with SIGHUP reload, so a reload cannot
 drop an accepted-but-not-yet-persisted range.
 
