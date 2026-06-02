@@ -596,14 +596,48 @@ fn known_prefix_count_deduplicates_multiple_paths() {
     let mut session = make_test_session(65001, 65002);
     let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
 
-    session.known_paths.insert((prefix, 1));
-    session.known_paths.insert((prefix, 2));
+    assert!(session.remember_known_path(prefix, 1));
+    assert!(session.remember_known_path(prefix, 2));
+    assert!(
+        !session.remember_known_path(prefix, 2),
+        "duplicate path announcements must not bump the refcount"
+    );
 
     assert_eq!(session.known_prefix_count(), 1);
 }
 
+#[test]
+fn known_prefix_refcount_tracks_add_path_withdrawals() {
+    let mut session = make_test_session(65001, 65002);
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+
+    session.remember_known_path(prefix, 1);
+    session.remember_known_path(prefix, 2);
+    assert_eq!(session.known_prefix_count(), 1);
+
+    assert!(session.forget_known_path(prefix, 1));
+    assert_eq!(
+        session.known_prefix_count(),
+        1,
+        "withdrawing one Add-Path path keeps the prefix counted"
+    );
+
+    assert!(
+        !session.forget_known_path(prefix, 1),
+        "duplicate withdrawals must not decrement the refcount"
+    );
+    assert_eq!(session.known_prefix_count(), 1);
+
+    assert!(session.forget_known_path(prefix, 2));
+    assert_eq!(
+        session.known_prefix_count(),
+        0,
+        "the last path withdrawal removes the unique prefix"
+    );
+}
+
 /// Regression: `Action::SessionDown` must clear `known_flowspec` and
-/// `known_evpn` alongside `known_paths`. Reconnects previously inherited
+/// `known_evpn` alongside unicast path accounting. Reconnects previously inherited
 /// stale accounting, which could trip false max-prefix violations on the
 /// next session because `known_prefix_count` sums all three sets.
 #[tokio::test]
@@ -613,7 +647,7 @@ async fn session_down_clears_all_known_sets() {
     session.established_at = Some(Instant::now());
 
     let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
-    session.known_paths.insert((prefix, 1));
+    session.remember_known_path(prefix, 1);
     let fs_prefix =
         rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
     session.known_flowspec.insert(rustbgpd_wire::FlowSpecRule {
@@ -632,6 +666,10 @@ async fn session_down_clears_all_known_sets() {
     session.execute_actions(vec![Action::SessionDown]).await;
 
     assert!(session.known_paths.is_empty(), "known_paths must clear");
+    assert!(
+        session.known_prefix_refcounts.is_empty(),
+        "known_prefix_refcounts must clear"
+    );
     assert!(
         session.known_flowspec.is_empty(),
         "known_flowspec must clear"
@@ -3615,6 +3653,72 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop_and_add_path() {
         IpAddr::V6("2001:db8::1".parse().unwrap())
     );
     assert_eq!(announced[0].path_id, 42);
+}
+
+#[tokio::test]
+async fn add_path_multiplicity_counts_one_prefix_for_max_prefix() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.max_prefixes = Some(1);
+    let mut negotiated = negotiated_session(65002, true);
+    negotiated
+        .add_path_families
+        .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Both);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let update = UpdateMessage::build(
+        &[
+            Ipv4NlriEntry { path_id: 1, prefix },
+            Ipv4NlriEntry { path_id: 2, prefix },
+        ],
+        &[],
+        &attrs,
+        true,
+        true,
+        Ipv4UnicastMode::Body,
+    );
+
+    session.process_update(update).await;
+
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected same-prefix Add-Path routes to pass max-prefix");
+    };
+    assert_eq!(announced.len(), 2);
+    assert_eq!(
+        session.known_prefix_count(),
+        1,
+        "two Add-Path IDs for one prefix count as one unique prefix"
+    );
+
+    let second_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry {
+            path_id: 3,
+            prefix: second_prefix,
+        }],
+        &[],
+        &attrs,
+        true,
+        true,
+        Ipv4UnicastMode::Body,
+    );
+
+    session.process_update(update).await;
+
+    assert!(
+        session.known_prefix_count() > 1,
+        "a distinct prefix must exceed max_prefixes=1"
+    );
 }
 
 #[test]

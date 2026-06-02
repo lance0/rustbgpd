@@ -599,7 +599,7 @@ impl PeerSession {
                 }
             }
             for &(prefix, path_id) in &loop_withdrawn {
-                self.known_paths.remove(&(prefix, path_id));
+                self.forget_known_path(prefix, path_id);
             }
             for rule in &loop_fs_withdrawn {
                 self.known_flowspec.remove(rule);
@@ -676,7 +676,7 @@ impl PeerSession {
                 }
             }
             for &(prefix, path_id) in &loop_withdrawn {
-                self.known_paths.remove(&(prefix, path_id));
+                self.forget_known_path(prefix, path_id);
             }
             for rule in &loop_fs_withdrawn {
                 self.known_flowspec.remove(rule);
@@ -1240,15 +1240,16 @@ impl PeerSession {
             }
         }
 
-        // 4. Max-prefix enforcement — track via HashSet for accuracy.
+        // 4. Max-prefix enforcement — maintain the per-prefix refcount
+        //    (`known_prefix_refcounts`) alongside the Add-Path identity set.
         //    Counts unicast unique prefixes + FlowSpec rules + EVPN keys
         //    so a peer can't bypass the cap by flooding a non-unicast
         //    family.
         for &(prefix, path_id) in &withdrawn {
-            self.known_paths.remove(&(prefix, path_id));
+            self.forget_known_path(prefix, path_id);
         }
         for route in &announced {
-            self.known_paths.insert((route.prefix, route.path_id));
+            self.remember_known_path(route.prefix, route.path_id);
         }
         for rule in &flowspec_withdrawn {
             self.known_flowspec.remove(rule);
