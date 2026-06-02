@@ -17,6 +17,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   instead of reparsing and rescanning table policy during every route and ECMP
   next-hop check. A new `fib_projection` Criterion bench covers configured
   tables x candidates x ECMP width behind the `bench-internals` feature.
+- **One-pass API route listing.** `ListBestRoutes`, `ListReceivedRoutes`, and
+  `ListAdvertisedRoutes` now fuse family filtering, route filters, pagination,
+  and response construction into one pass over the RIB snapshot. High-volume
+  list calls no longer allocate intermediate filtered `Vec<Route>` buffers, and
+  large-community filters compare canonical typed values instead of allocating a
+  per-route `Vec<String>`. Pagination, `total_count`, and invalid/non-canonical
+  large-community filter behavior are unchanged.
 - **Short-circuit policy predicate evaluation.** `PolicyStatement::matches` now
   evaluates match predicates cheapest-first with early returns instead of
   computing every predicate eagerly, so a cheap match failure (prefix, route

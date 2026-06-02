@@ -182,9 +182,9 @@ Later for what remains.
   quickly before returning to the slower exponential guard, reducing boot-order
   establishment delay when rustbgpd starts before passive peers. Remaining
   backlog, in rough priority order. Near-term performance/polish targets are:
-  API route-listing / high-volume JSON cleanup first, RPKI VRP lookup indexing
-  second once there is room for the correctness-heavy validation pass, and the
-  remaining FIB projection ownership cleanup third.
+  RPKI VRP lookup indexing first once there is room for the correctness-heavy
+  validation pass, then the remaining FIB projection table-name ownership and
+  high-volume CLI / JSON serializer cleanups.
   - FIB projection: shipped the configured-table policy precompile so
     `allowed_neighbors` is parsed once per projection pass and peer /
     peer-group membership checks reuse prebuilt sets. The new root
@@ -192,11 +192,14 @@ Later for what remains.
     behind the `bench-internals` feature. Remaining possible cleanup:
     table-name ownership in projected status/drop rows, if a future profile
     shows those allocations matter enough to justify changing the data shape.
-  - API route listing: collapse RIB list filtering + `route_to_proto` conversion
-    into a borrowed per-route summary and pair it with borrowed JSON serializers
-    for high-volume CLI/API output. Goal: filters, proto rendering, and JSON do
-    not repeatedly scan attributes, allocate large-community strings, or build a
-    second owned JSON tree for filtered-out rows.
+  - API route listing: shipped the API-service cleanup that fuses family
+    filtering, route filters, pagination, and `route_to_proto` response
+    construction into one pass over the RIB snapshot; canonical large-community
+    filters now compare typed values instead of allocating a per-route
+    `Vec<String>`. Remaining: CLI route JSON still maps proto routes into a
+    second owned `JsonRoute` tree before serialization; replace that with
+    borrowed/streaming serializers if route-list JSON output shows up in
+    profiles.
   - RPKI validation: index VRP lookup instead of linearly scanning the VRP table
     per NLRI. High payoff but correctness-sensitive around overlapping VRPs,
     `max_len`, Invalid vs NotFound, and family handling.
