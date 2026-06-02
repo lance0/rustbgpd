@@ -7,8 +7,9 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
 ## Features
 
-- **VRP table** with sorted-Vec binary search for prefix containment
-  lookups; `Arc<VrpTable>` snapshot pattern for lock-free reads
+- **VRP table** with a family-split, prefix-length-bucketed index (one binary
+  search per ancestor length over masked networks) for ~constant-time RFC 6811
+  origin validation; `Arc<VrpTable>` snapshot pattern for lock-free reads
 - **RTR client** (RFC 8210 v1) — persistent TCP sessions, Serial Query /
   Reset Query, Serial Notify handling, expire_interval enforcement
 - **Multi-cache merge** — `VrpManager` combines VRPs from multiple cache
@@ -20,7 +21,7 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 ## Key types
 
 - **`VrpEntry`** — prefix, max_length, origin ASN
-- **`VrpTable`** — sorted VRP store with `validate(prefix, origin_asn)` lookup
+- **`VrpTable`** — prefix-length-indexed VRP store with `validate(prefix, origin_asn)` lookup
 - **`RtrClient`** — async per-cache RTR session
 - **`VrpManager`** — multi-cache merge and distribution to RIB
 

@@ -134,8 +134,8 @@ fn compress_auths(sorted: &[(u32, u8)]) -> SmallVec<[VrpAuth; 1]> {
 }
 
 /// Build one family's buckets from `(prefix_len, network, asn, max_len)` items.
-/// `items` is sorted ascending, so each `(len, network)` run is contiguous and
-/// already network-ordered within its bucket.
+/// Sorts `items` ascending so each `(len, network)` run is contiguous (and
+/// network-ordered within its bucket), then groups and compresses each run.
 fn build_buckets<N: Copy + PartialEq>(
     n_buckets: usize,
     mut items: Vec<(u8, N, u32, u8)>,
@@ -474,13 +474,15 @@ mod tests {
             v4_vrp(Ipv4Addr::new(10, 0, 0, 0), 16, 20, 65001),
             v4_vrp(Ipv4Addr::new(10, 0, 0, 0), 16, 24, 65002),
         ]);
-        // /24 route: only VRP2 covers (max_len=24 >= 24), AS65002 matches
+        // /24 route: both VRPs cover it by network containment. VRP2 authorizes
+        // AS65002 up to max_len=24, so the /24 is within scope → Valid.
         assert_eq!(
             table.validate(&v4_prefix(Ipv4Addr::new(10, 0, 1, 0), 24), 65002),
             RpkiValidation::Valid
         );
-        // /24 route: AS65001 has VRP with max_len=20, doesn't cover /24
-        // But VRP2 covers it with different origin → Invalid
+        // Same /24 for AS65001: VRP1 covers and matches the ASN but only
+        // authorizes up to max_len=20, so the /24 exceeds its scope; VRP2 covers
+        // but is a different origin. Covered, none authorizes → Invalid.
         assert_eq!(
             table.validate(&v4_prefix(Ipv4Addr::new(10, 0, 1, 0), 24), 65001),
             RpkiValidation::Invalid
