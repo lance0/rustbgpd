@@ -922,10 +922,19 @@ const DEFAULT_WORKER_THREAD_CAP: usize = 8;
 /// positive integer) overrides the `[global] worker_threads` config field,
 /// which in turn overrides the default of `min(available parallelism, 8)`.
 /// A zero or unparseable value is ignored in favor of the next source. The
-/// cap keeps an I/O-bound daemon from spawning one worker (stack + allocator
-/// arena) per core on high-core-count hosts, which inflates RSS.
+/// cap right-sizes the async runtime for an I/O-bound daemon — reducing
+/// virtual-address reservation and scheduler footprint (it is RSS-neutral)
+/// rather than spawning one worker per core on high-core-count hosts.
 fn resolve_worker_threads(configured: Option<usize>) -> usize {
-    resolve_worker_threads_from(std::env::var("RUSTBGPD_WORKER_THREADS").ok(), configured)
+    let env = match std::env::var("RUSTBGPD_WORKER_THREADS") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            warn!("ignoring non-unicode RUSTBGPD_WORKER_THREADS");
+            None
+        }
+    };
+    resolve_worker_threads_from(env, configured)
 }
 
 /// Pure core of [`resolve_worker_threads`] with the environment value injected,

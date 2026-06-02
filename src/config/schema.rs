@@ -351,8 +351,8 @@ pub struct Global {
     /// high-core-count host over-provisions the async runtime (each worker
     /// reserves a stack and a scheduler slot) for what is an I/O-bound daemon,
     /// not a CPU-bound one. Capping reduces virtual-address reservation and
-    /// scheduler footprint — same-host benchmarks showed it RSS-neutral, so this
-    /// is runtime right-sizing, not a memory optimization. A value of `0` is
+    /// scheduler footprint — same-host benchmarks showed it to be RSS-neutral,
+    /// so this is runtime right-sizing, not a memory optimization. A value of `0` is
     /// treated as unset. The `RUSTBGPD_WORKER_THREADS` environment variable
     /// overrides this field. **Restart-required:** the runtime is built once at
     /// startup, so a change only takes effect on the next restart, not on SIGHUP.
