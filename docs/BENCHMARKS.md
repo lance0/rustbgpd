@@ -112,6 +112,9 @@ cargo bench -p rustbgpd-wire --bench codec
 # RIB only
 cargo bench -p rustbgpd-rib --bench rib_ops
 
+# Root-daemon FIB projection internals
+cargo bench --features bench-internals --bench fib_projection
+
 # Policy chain eval + the explain-snapshot clone cost
 cargo bench -p rustbgpd-policy --bench policy_eval
 cargo bench -p rustbgpd-policy --bench explain_snapshot
