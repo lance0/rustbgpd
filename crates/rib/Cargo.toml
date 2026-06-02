@@ -26,6 +26,12 @@ tracing.workspace = true
 
 tokio-stream.workspace = true
 
+[features]
+# Exposes RibManager fanout-driver helpers (synthetic peer registration +
+# Loc-RIB seed + distribute_changes) to the `fanout` distribution microbench.
+# Off by default — none of it is reachable outside the crate in a normal build.
+bench-internals = []
+
 [dev-dependencies]
 proptest = "1"
 tokio = { workspace = true, features = ["test-util"] }
@@ -34,3 +40,8 @@ criterion.workspace = true
 [[bench]]
 name = "rib_ops"
 harness = false
+
+[[bench]]
+name = "fanout"
+harness = false
+required-features = ["bench-internals"]
