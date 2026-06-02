@@ -16,7 +16,7 @@ use rustbgpd_rib::{
     RibUpdate, Route, RouteEventType,
 };
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::{Afi, AsPath, AsPathSegment, EvpnRoute, PathAttribute, Prefix};
+use rustbgpd_wire::{Afi, AsPathSegment, EvpnRoute, LargeCommunity, PathAttribute, Prefix};
 
 /// Live snapshot provider for daemon-owned BLACKHOLE discard status.
 pub type BlackholeDiscardSnapshotFn =
@@ -260,19 +260,17 @@ fn validate_flowspec_afi_safi(value: i32) -> Result<(), Status> {
     Ok(())
 }
 
-/// Filter routes by the requested address family.
-/// `afi_safi == 0` (UNSPECIFIED) returns all routes.
-fn filter_routes_by_family(routes: Vec<Route>, afi_safi: i32) -> Vec<Route> {
+/// Whether a route matches the requested address family.
+/// `afi_safi == 0` (UNSPECIFIED) matches all routes.
+fn route_matches_family(route: &Route, afi_safi: i32) -> bool {
     match afi_safi {
-        x if x == proto::AddressFamily::Ipv4Unicast as i32 => routes
-            .into_iter()
-            .filter(|r| matches!(r.prefix, Prefix::V4(_)))
-            .collect(),
-        x if x == proto::AddressFamily::Ipv6Unicast as i32 => routes
-            .into_iter()
-            .filter(|r| matches!(r.prefix, Prefix::V6(_)))
-            .collect(),
-        _ => routes, // 0 (unspecified) = all
+        x if x == proto::AddressFamily::Ipv4Unicast as i32 => {
+            matches!(route.prefix, Prefix::V4(_))
+        }
+        x if x == proto::AddressFamily::Ipv6Unicast as i32 => {
+            matches!(route.prefix, Prefix::V6(_))
+        }
+        _ => true,
     }
 }
 
@@ -286,8 +284,47 @@ struct RouteFilters {
     origin_asn: u32,
     /// Community values to match (OR logic).
     communities: Vec<u32>,
-    /// Large community strings to match (OR logic).
-    large_communities: Vec<String>,
+    /// Whether a large-community filter was requested.
+    large_community_filter_active: bool,
+    /// Canonical large community values to match (OR logic).
+    large_communities: Vec<LargeCommunity>,
+}
+
+struct RouteFilterAttrs<'a> {
+    origin_asn: Option<u32>,
+    communities: &'a [u32],
+    large_communities: &'a [LargeCommunity],
+}
+
+impl<'a> RouteFilterAttrs<'a> {
+    fn from_route(route: &'a Route) -> Self {
+        let mut origin_asn = None;
+        let mut as_path_seen = false;
+        let mut communities = None;
+        let mut large_communities = None;
+
+        for attr in route.attributes.iter() {
+            match attr {
+                PathAttribute::AsPath(path) if !as_path_seen => {
+                    origin_asn = path.origin_asn();
+                    as_path_seen = true;
+                }
+                PathAttribute::Communities(values) if communities.is_none() => {
+                    communities = Some(values.as_slice());
+                }
+                PathAttribute::LargeCommunities(values) if large_communities.is_none() => {
+                    large_communities = Some(values.as_slice());
+                }
+                _ => {}
+            }
+        }
+
+        Self {
+            origin_asn,
+            communities: communities.unwrap_or(&[]),
+            large_communities: large_communities.unwrap_or(&[]),
+        }
+    }
 }
 
 impl RouteFilters {
@@ -325,12 +362,19 @@ impl RouteFilters {
             })
         };
 
+        let large_communities = req
+            .large_community_filter
+            .iter()
+            .filter_map(|value| parse_canonical_large_community(value))
+            .collect();
+
         Ok(Self {
             prefix,
             longer: req.longer_prefixes,
             origin_asn: req.origin_asn,
             communities: req.community_filter.clone(),
-            large_communities: req.large_community_filter.clone(),
+            large_community_filter_active: !req.large_community_filter.is_empty(),
+            large_communities,
         })
     }
 
@@ -338,7 +382,7 @@ impl RouteFilters {
         self.prefix.is_none()
             && self.origin_asn == 0
             && self.communities.is_empty()
-            && self.large_communities.is_empty()
+            && !self.large_community_filter_active
     }
 
     fn matches(&self, route: &Route) -> bool {
@@ -352,32 +396,31 @@ impl RouteFilters {
             }
         }
 
-        if self.origin_asn != 0 {
-            let origin_asn = route.as_path().and_then(AsPath::origin_asn);
-            if origin_asn != Some(self.origin_asn) {
+        if self.origin_asn != 0
+            || !self.communities.is_empty()
+            || self.large_community_filter_active
+        {
+            let attrs = RouteFilterAttrs::from_route(route);
+
+            if self.origin_asn != 0 && attrs.origin_asn != Some(self.origin_asn) {
                 return false;
             }
-        }
 
-        if !self.communities.is_empty()
-            && !self
-                .communities
-                .iter()
-                .any(|c| route.communities().contains(c))
-        {
-            return false;
-        }
+            if !self.communities.is_empty()
+                && !self
+                    .communities
+                    .iter()
+                    .any(|c| attrs.communities.contains(c))
+            {
+                return false;
+            }
 
-        if !self.large_communities.is_empty() {
-            let route_lcs: Vec<String> = route
-                .large_communities()
-                .iter()
-                .map(ToString::to_string)
-                .collect();
-            if !self
-                .large_communities
-                .iter()
-                .any(|lc| route_lcs.contains(lc))
+            if self.large_community_filter_active
+                && (self.large_communities.is_empty()
+                    || !self
+                        .large_communities
+                        .iter()
+                        .any(|lc| attrs.large_communities.contains(lc)))
             {
                 return false;
             }
@@ -385,6 +428,18 @@ impl RouteFilters {
 
         true
     }
+}
+
+fn parse_canonical_large_community(value: &str) -> Option<LargeCommunity> {
+    let mut parts = value.split(':');
+    let global_admin = parts.next()?.parse::<u32>().ok()?;
+    let local_data1 = parts.next()?.parse::<u32>().ok()?;
+    let local_data2 = parts.next()?.parse::<u32>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let parsed = LargeCommunity::new(global_admin, local_data1, local_data2);
+    (parsed.to_string() == value).then_some(parsed)
 }
 
 /// Check if `container` prefix contains `candidate` (candidate is equal or more specific).
@@ -414,14 +469,6 @@ fn prefix_contains(container: &Prefix, candidate: &Prefix) -> bool {
         }
         _ => false, // V4 vs V6 never matches
     }
-}
-
-/// Apply route filters to a list of routes.
-fn apply_route_filters(routes: Vec<Route>, filters: &RouteFilters) -> Vec<Route> {
-    if filters.is_empty() {
-        return routes;
-    }
-    routes.into_iter().filter(|r| filters.matches(r)).collect()
 }
 
 struct FibRouteFilters {
@@ -602,22 +649,35 @@ fn parse_page_params(req: &proto::ListRoutesRequest) -> Result<(usize, usize), &
     Ok((offset, page_size))
 }
 
-fn build_response(
-    routes: &[Route],
+fn build_filtered_response(
+    routes: Vec<Route>,
+    afi_safi: i32,
+    filters: &RouteFilters,
     offset: usize,
     page_size: usize,
     best: bool,
 ) -> proto::ListRoutesResponse {
-    let total_count = u64::try_from(routes.len()).unwrap_or(u64::MAX);
-    let page: Vec<proto::Route> = routes
-        .iter()
-        .skip(offset)
-        .take(page_size)
-        .map(|r| route_to_proto(r, best))
-        .collect();
+    let mut total_count = 0usize;
+    let mut page = Vec::new();
+    let filters_active = !filters.is_empty();
 
-    let next_offset = offset + page.len();
-    let next_page_token = if next_offset < routes.len() {
+    for route in routes {
+        if !route_matches_family(&route, afi_safi) {
+            continue;
+        }
+        if filters_active && !filters.matches(&route) {
+            continue;
+        }
+
+        let row_index = total_count;
+        total_count = total_count.saturating_add(1);
+        if row_index >= offset && page.len() < page_size {
+            page.push(route_to_proto(&route, best));
+        }
+    }
+
+    let next_offset = offset.saturating_add(page.len());
+    let next_page_token = if next_offset < total_count {
         next_offset.to_string()
     } else {
         String::new()
@@ -626,7 +686,7 @@ fn build_response(
     proto::ListRoutesResponse {
         routes: page,
         next_page_token,
-        total_count,
+        total_count: u64::try_from(total_count).unwrap_or(u64::MAX),
     }
 }
 
@@ -944,11 +1004,11 @@ impl proto::rib_service_server::RibService for RibService {
 
         let filters = RouteFilters::from_request(&req)?;
         let all_routes = self.query_routes(peer).await?;
-        let all_routes = filter_routes_by_family(all_routes, req.afi_safi);
-        let all_routes = apply_route_filters(all_routes, &filters);
         let (offset, page_size) = parse_page_params(&req).map_err(Status::invalid_argument)?;
-        Ok(Response::new(build_response(
-            &all_routes,
+        Ok(Response::new(build_filtered_response(
+            all_routes,
+            req.afi_safi,
+            &filters,
             offset,
             page_size,
             false,
@@ -963,11 +1023,11 @@ impl proto::rib_service_server::RibService for RibService {
         validate_unicast_afi_safi(req.afi_safi)?;
         let filters = RouteFilters::from_request(&req)?;
         let all_routes = self.query_best_routes().await?;
-        let all_routes = filter_routes_by_family(all_routes, req.afi_safi);
-        let all_routes = apply_route_filters(all_routes, &filters);
         let (offset, page_size) = parse_page_params(&req).map_err(Status::invalid_argument)?;
-        Ok(Response::new(build_response(
-            &all_routes,
+        Ok(Response::new(build_filtered_response(
+            all_routes,
+            req.afi_safi,
+            &filters,
             offset,
             page_size,
             true,
@@ -1005,12 +1065,12 @@ impl proto::rib_service_server::RibService for RibService {
         let all_routes = reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?;
-        let all_routes = filter_routes_by_family(all_routes, req.afi_safi);
-        let all_routes = apply_route_filters(all_routes, &filters);
 
         let (offset, page_size) = parse_page_params(&req).map_err(Status::invalid_argument)?;
-        Ok(Response::new(build_response(
-            &all_routes,
+        Ok(Response::new(build_filtered_response(
+            all_routes,
+            req.afi_safi,
+            &filters,
             offset,
             page_size,
             false,
@@ -1765,7 +1825,7 @@ mod tests {
     use tokio::sync::broadcast;
     use tokio_stream::StreamExt;
 
-    use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix};
+    use rustbgpd_wire::{AsPath, Ipv4Prefix, Ipv6Prefix};
 
     use super::*;
     use proto::rib_service_server::RibService as _;
@@ -2213,23 +2273,29 @@ mod tests {
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         };
 
-        // Unspecified returns all
-        let all = filter_routes_by_family(vec![v4.clone(), v6.clone()], 0);
-        assert_eq!(all.len(), 2);
+        // Unspecified matches all.
+        assert!(route_matches_family(&v4, 0));
+        assert!(route_matches_family(&v6, 0));
 
-        // IPv4 filter
-        let v4_only = filter_routes_by_family(
-            vec![v4.clone(), v6.clone()],
+        // IPv4 filter.
+        assert!(route_matches_family(
+            &v4,
             proto::AddressFamily::Ipv4Unicast as i32,
-        );
-        assert_eq!(v4_only.len(), 1);
-        assert!(matches!(v4_only[0].prefix, Prefix::V4(_)));
+        ));
+        assert!(!route_matches_family(
+            &v6,
+            proto::AddressFamily::Ipv4Unicast as i32,
+        ));
 
-        // IPv6 filter
-        let v6_only =
-            filter_routes_by_family(vec![v4, v6], proto::AddressFamily::Ipv6Unicast as i32);
-        assert_eq!(v6_only.len(), 1);
-        assert!(matches!(v6_only[0].prefix, Prefix::V6(_)));
+        // IPv6 filter.
+        assert!(route_matches_family(
+            &v6,
+            proto::AddressFamily::Ipv6Unicast as i32,
+        ));
+        assert!(!route_matches_family(
+            &v4,
+            proto::AddressFamily::Ipv6Unicast as i32,
+        ));
     }
 
     #[tokio::test]
@@ -2786,6 +2852,36 @@ mod tests {
         assert!(err.message().contains("0-32 for IPv4"));
     }
 
+    fn test_route(prefix: Prefix, attributes: Vec<PathAttribute>) -> Route {
+        Route {
+            prefix,
+            next_hop: "10.0.0.1".parse().unwrap(),
+            link_local_next_hop: None,
+            next_hop_scope: None,
+            peer: "10.0.0.1".parse().unwrap(),
+            attributes: Arc::new(attributes),
+            received_at: std::time::Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        }
+    }
+
+    fn empty_route_filters() -> RouteFilters {
+        RouteFilters {
+            prefix: None,
+            longer: false,
+            origin_asn: 0,
+            communities: vec![],
+            large_community_filter_active: false,
+            large_communities: vec![],
+        }
+    }
+
     #[test]
     fn route_filters_exact_prefix() {
         let route = Route {
@@ -2810,6 +2906,7 @@ mod tests {
             longer: false,
             origin_asn: 0,
             communities: vec![],
+            large_community_filter_active: false,
             large_communities: vec![],
         };
         assert!(filters.matches(&route));
@@ -2819,6 +2916,7 @@ mod tests {
             longer: false,
             origin_asn: 0,
             communities: vec![],
+            large_community_filter_active: false,
             large_communities: vec![],
         };
         assert!(!wrong_prefix.matches(&route));
@@ -2849,6 +2947,7 @@ mod tests {
             longer: false,
             origin_asn: 0,
             communities: vec![community_val],
+            large_community_filter_active: false,
             large_communities: vec![],
         };
         assert!(filters.matches(&route));
@@ -2858,6 +2957,7 @@ mod tests {
             longer: false,
             origin_asn: 0,
             communities: vec![65002u32 * 65536 + 200],
+            large_community_filter_active: false,
             large_communities: vec![],
         };
         assert!(!wrong_community.matches(&route));
@@ -2889,6 +2989,7 @@ mod tests {
             longer: false,
             origin_asn: 65003,
             communities: vec![],
+            large_community_filter_active: false,
             large_communities: vec![],
         };
         assert!(filters.matches(&route));
@@ -2898,8 +2999,109 @@ mod tests {
             longer: false,
             origin_asn: 65001,
             communities: vec![],
+            large_community_filter_active: false,
             large_communities: vec![],
         };
         assert!(!wrong_asn.matches(&route));
+    }
+
+    #[test]
+    fn route_filter_attr_summary_preserves_first_as_path_semantics() {
+        let route = test_route(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            vec![
+                PathAttribute::AsPath(AsPath { segments: vec![] }),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65001, 65002])],
+                }),
+            ],
+        );
+
+        let filters = RouteFilters {
+            prefix: None,
+            longer: false,
+            origin_asn: 65002,
+            communities: vec![],
+            large_community_filter_active: false,
+            large_communities: vec![],
+        };
+
+        assert!(!filters.matches(&route));
+    }
+
+    #[test]
+    fn route_filters_large_community_match_preserves_no_match_for_invalid_values() {
+        let route = test_route(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            vec![PathAttribute::LargeCommunities(vec![LargeCommunity::new(
+                65001, 100, 200,
+            )])],
+        );
+
+        let req = proto::ListRoutesRequest {
+            large_community_filter: vec!["65001:100:200".to_string()],
+            ..list_routes_request()
+        };
+        let filters = RouteFilters::from_request(&req).unwrap();
+        assert!(filters.matches(&route));
+
+        let noncanonical = proto::ListRoutesRequest {
+            large_community_filter: vec!["065001:100:200".to_string()],
+            ..list_routes_request()
+        };
+        let filters = RouteFilters::from_request(&noncanonical).unwrap();
+        assert!(!filters.matches(&route));
+
+        let invalid = proto::ListRoutesRequest {
+            large_community_filter: vec!["not-a-large-community".to_string()],
+            ..list_routes_request()
+        };
+        let filters = RouteFilters::from_request(&invalid).unwrap();
+        assert!(!filters.matches(&route));
+    }
+
+    #[test]
+    fn build_filtered_response_counts_and_paginates_after_family_filtering() {
+        let routes = vec![
+            test_route(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+                vec![],
+            ),
+            test_route(
+                Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
+                vec![],
+            ),
+            test_route(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24)),
+                vec![],
+            ),
+        ];
+
+        let first = build_filtered_response(
+            routes.clone(),
+            proto::AddressFamily::Ipv4Unicast as i32,
+            &empty_route_filters(),
+            0,
+            1,
+            true,
+        );
+        assert_eq!(first.total_count, 2);
+        assert_eq!(first.routes.len(), 1);
+        assert_eq!(first.routes[0].prefix, "10.0.0.0");
+        assert!(first.routes[0].best);
+        assert_eq!(first.next_page_token, "1");
+
+        let second = build_filtered_response(
+            routes,
+            proto::AddressFamily::Ipv4Unicast as i32,
+            &empty_route_filters(),
+            1,
+            1,
+            true,
+        );
+        assert_eq!(second.total_count, 2);
+        assert_eq!(second.routes.len(), 1);
+        assert_eq!(second.routes[0].prefix, "10.0.1.0");
+        assert!(second.next_page_token.is_empty());
     }
 }

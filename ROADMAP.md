@@ -190,11 +190,14 @@ Later for what remains.
     every projected row unnecessarily, and projection avoids avoidable
     per-table/per-candidate work. Measure with a pure `fib.rs` projection bench
     across tables × candidates × ECMP width.
-  - API route listing: collapse RIB list filtering + `route_to_proto` conversion
-    into a borrowed per-route summary and pair it with borrowed JSON serializers
-    for high-volume CLI/API output. Goal: filters, proto rendering, and JSON do
-    not repeatedly scan attributes, allocate large-community strings, or build a
-    second owned JSON tree for filtered-out rows.
+  - API route listing: shipped the API-service cleanup that fuses family
+    filtering, route filters, pagination, and `route_to_proto` response
+    construction into one pass over the RIB snapshot; canonical large-community
+    filters now compare typed values instead of allocating a per-route
+    `Vec<String>`. Remaining: CLI route JSON still maps proto routes into a
+    second owned `JsonRoute` tree before serialization; replace that with
+    borrowed/streaming serializers if route-list JSON output shows up in
+    profiles.
   - RPKI validation: index VRP lookup instead of linearly scanning the VRP table
     per NLRI. High payoff but correctness-sensitive around overlapping VRPs,
     `max_len`, Invalid vs NotFound, and family handling.
