@@ -7,6 +7,7 @@ use rustbgpd_wire::{EvpnRouteKey, FlowSpecRule, Prefix};
 use rustc_hash::{FxBuildHasher, FxHashMap as HashMap};
 use smallvec::SmallVec;
 
+use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
 
 /// Per-peer Adj-RIB-Out: routes advertised to a specific peer.
@@ -16,10 +17,11 @@ use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
 pub struct AdjRibOut {
     peer: IpAddr,
     routes: HashMap<(Prefix, u32), Route>,
-    /// Secondary index: prefix → path IDs for O(1) per-prefix lookup.
-    /// `SmallVec<[u32; 1]>` inlines the single-best case (`path_id=0`) without
-    /// heap allocation; Add-Path multi-path spills to heap transparently.
-    prefix_path_ids: HashMap<Prefix, SmallVec<[u32; 1]>>,
+    /// Secondary index: prefix → path IDs for fast per-prefix lookup, backed by
+    /// a family-split prefix trie. `SmallVec<[u32; 1]>` inlines the single-best
+    /// case (`path_id=0`) without heap allocation; Add-Path multi-path spills to
+    /// heap transparently.
+    prefix_path_ids: FamilyPrefixMap<SmallVec<[u32; 1]>>,
     /// `FlowSpec` routes advertised to this peer (always single-best, `path_id=0`).
     flowspec_routes: HashMap<FlowSpecRule, FlowSpecRoute>,
     /// EVPN routes advertised to this peer, keyed by RFC 7432 route identity.
@@ -42,7 +44,7 @@ impl AdjRibOut {
         Self {
             peer,
             routes: HashMap::with_capacity_and_hasher(capacity, FxBuildHasher),
-            prefix_path_ids: HashMap::with_capacity_and_hasher(capacity, FxBuildHasher),
+            prefix_path_ids: FamilyPrefixMap::default(),
             flowspec_routes: HashMap::default(),
             evpn_routes: HashMap::default(),
         }
@@ -59,7 +61,7 @@ impl AdjRibOut {
         let prefix = route.prefix;
         let path_id = route.path_id;
         self.routes.insert((prefix, path_id), route);
-        let ids = self.prefix_path_ids.entry(prefix).or_default();
+        let ids = self.prefix_path_ids.entry_or_default(prefix);
         if !ids.contains(&path_id) {
             ids.push(path_id);
         }

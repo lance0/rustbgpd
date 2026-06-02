@@ -23,6 +23,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   RSS change and no performance regression** at 8 workers. No change on hosts
   with ≤ 8 cores.
 
+- **Compact trie-backed RIB prefix indexes.** The two prefix-keyed secondary
+  indexes — `AdjRibIn::prefix_index` and `AdjRibOut::prefix_path_ids`, each
+  mapping `Prefix → SmallVec<[path_id]>` — now use a family-split
+  `prefix_trie::PrefixMap` instead of `hashbrown::HashMap`. This removes the
+  per-prefix hash-bucket overhead that dominated RIB index memory: the
+  allocator-tracked `memory_profile` drops the Adj-RIB-In-only footprint
+  ~12% / ~19% at 100k / 500k prefixes and the full 2-peer + Loc-RIB profile
+  ~9% / ~14%, while `adj_rib_in_insert` gets ~8% faster (compact trie nodes,
+  no rehash) with best-path comparison and lookup unchanged. The Loc-RIB
+  best-path map was evaluated for the same migration but kept on `HashMap`: the
+  trie regressed the lookup-hot best-path recompute ~2.6×, not worth the extra
+  memory on a read-dominated structure.
+
 - **Precompiled FIB projection table policy.** The ADR-0061 FIB projection
   path now parses each table's `allowed_neighbors` once per projection pass and
   uses precomputed peer / peer-group membership sets for candidate filtering,

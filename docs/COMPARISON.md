@@ -239,13 +239,16 @@ suite implementation.
 | rustbgpd (event-history enabled) | ~346 MB |
 
 Full-daemon process RSS, same host and harness. rustbgpd's full-daemon RSS sits
-above GoBGP here — the cost of always-on operational surfaces (BFD, gNMI, ASPA,
-BGP roles/OTC, the explain cache) — while its **RIB-only structural memory stays
-lean** (66.6 MB allocator-tracked at this scale). The durable event-history
-outbox is opt-in (default off) as of v0.32.0; enabling it is the ~284 → ~346 MB
-delta. FRR and OpenBGPd were not in this run. See
-[BENCHMARKS.md](BENCHMARKS.md) for the full cross-stack tables, the RIB-only
-memory profile, and methodology.
+above GoBGP here because route storage is less compact: a 2026-06-02
+whole-daemon dhat profile attributes the live-at-peak heap primarily to the
+three-layer RIB model (Adj-RIB-In + Loc-RIB + Adj-RIB-Out) and its route-map /
+prefix-index storage, not operational surfaces. The first measured fix moved
+the Adj-RIB-In / Adj-RIB-Out prefix indexes to trie-backed storage, lowering the
+allocator-tracked RIB profile at this scale from 66.6 MB to 60.6 MB; the durable
+event-history outbox is opt-in (default off) as of v0.32.0, and enabling it is
+the ~284 → ~346 MB delta. FRR and OpenBGPd were not in this run. See
+[BENCHMARKS.md](BENCHMARKS.md) for the full cross-stack tables, the RIB memory
+profile, and methodology.
 
 ## Positioning
 
