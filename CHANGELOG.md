@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Performance
 
+- **Allocation-free max-prefix accounting.** Transport sessions now maintain a
+  unicast prefix refcount beside the Add-Path `(prefix, path_id)` set, so
+  max-prefix enforcement and `QueryState` no longer rebuild a temporary
+  `HashSet<Prefix>` after every UPDATE just to count unique prefixes. Add-Path
+  multiplicity remains correct — multiple path IDs for the same prefix still
+  count as one prefix — and `FlowSpec` / EVPN accounting is unchanged.
 - **Short-circuit policy predicate evaluation.** `PolicyStatement::matches` now
   evaluates match predicates cheapest-first with early returns instead of
   computing every predicate eagerly, so a cheap match failure (prefix, route

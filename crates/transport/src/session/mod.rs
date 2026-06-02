@@ -6,7 +6,7 @@ mod io;
 mod outbound;
 mod writer;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::ops::ControlFlow;
 use std::pin::Pin;
@@ -174,9 +174,14 @@ pub(crate) struct PeerSession {
     last_down_reason: Option<PeerDownReason>,
     /// Accepted unicast paths keyed by `(prefix, path_id)`.
     ///
-    /// Max-prefix enforcement still counts unique prefixes, so callers must
-    /// derive that count from this set instead of using `len()` directly.
+    /// This remains the authoritative Add-Path identity set; the unique-prefix
+    /// max-prefix count is maintained in `known_prefix_refcounts`.
     known_paths: HashSet<(Prefix, u32)>,
+    /// Reference count of accepted unicast paths per prefix.
+    ///
+    /// Kept in sync with `known_paths` so max-prefix enforcement can count
+    /// unique prefixes without rebuilding a temporary set on every UPDATE.
+    known_prefix_refcounts: HashMap<Prefix, usize>,
     /// Accepted `FlowSpec` rules from this peer. Counted toward
     /// max-prefix enforcement so a peer can't bypass the cap by
     /// flooding `FlowSpec` rules.
@@ -288,8 +293,36 @@ impl PeerSession {
     /// and EVPN keys. Used by max-prefix enforcement so a peer can't slip
     /// past the cap by flooding non-unicast NLRI.
     pub(super) fn known_prefix_count(&self) -> usize {
-        let unicast: HashSet<Prefix> = self.known_paths.iter().map(|(p, _)| *p).collect();
-        unicast.len() + self.known_flowspec.len() + self.known_evpn.len()
+        self.known_prefix_refcounts.len() + self.known_flowspec.len() + self.known_evpn.len()
+    }
+
+    fn remember_known_path(&mut self, prefix: Prefix, path_id: u32) -> bool {
+        if !self.known_paths.insert((prefix, path_id)) {
+            return false;
+        }
+        *self.known_prefix_refcounts.entry(prefix).or_insert(0) += 1;
+        true
+    }
+
+    fn forget_known_path(&mut self, prefix: Prefix, path_id: u32) -> bool {
+        if !self.known_paths.remove(&(prefix, path_id)) {
+            return false;
+        }
+        if let Some(count) = self.known_prefix_refcounts.get_mut(&prefix) {
+            if *count > 1 {
+                *count -= 1;
+            } else {
+                self.known_prefix_refcounts.remove(&prefix);
+            }
+        }
+        true
+    }
+
+    fn clear_known_routes(&mut self) {
+        self.known_paths.clear();
+        self.known_prefix_refcounts.clear();
+        self.known_flowspec.clear();
+        self.known_evpn.clear();
     }
 
     fn link_local_next_hop_scope_from_config(config: &TransportConfig) -> Option<NextHopScope> {
@@ -388,6 +421,7 @@ impl PeerSession {
             remote_open_pdu: None,
             last_down_reason: None,
             known_paths: HashSet::new(),
+            known_prefix_refcounts: HashMap::new(),
             known_flowspec: HashSet::new(),
             known_evpn: HashSet::new(),
             updates_received: 0,
@@ -477,6 +511,7 @@ impl PeerSession {
             remote_open_pdu: None,
             last_down_reason: None,
             known_paths: HashSet::new(),
+            known_prefix_refcounts: HashMap::new(),
             known_flowspec: HashSet::new(),
             known_evpn: HashSet::new(),
             updates_received: 0,

@@ -205,9 +205,11 @@ Later for what remains.
     saved on a no-AS_PATH-regex chain). `AS_SET` / empty-path formatting is
     preserved when the string is needed; the import path still renders it
     (event / OTC attribution).
-  - Transport max-prefix accounting: replace per-UPDATE unique-prefix
-    reconstruction with a per-prefix refcount so Add-Path multiplicity stays
-    correct without rebuilding a temporary set after every UPDATE.
+  - Transport max-prefix accounting: shipped — sessions keep a per-prefix
+    refcount beside the Add-Path `(prefix, path_id)` set, so max-prefix
+    enforcement and state queries count unique unicast prefixes without
+    rebuilding a temporary set after every UPDATE. Add-Path multiplicity remains
+    correct: multiple path IDs for one prefix still count as one prefix.
   - Policy engine matching: the cheap-predicate short-circuit landed —
     `PolicyStatement::matches` now evaluates predicates cheapest-first with early
     returns, so a cheap match failure skips the AS_PATH regex and community scan
