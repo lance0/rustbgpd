@@ -182,14 +182,16 @@ Later for what remains.
   quickly before returning to the slower exponential guard, reducing boot-order
   establishment delay when rustbgpd starts before passive peers. Remaining
   backlog, in rough priority order. Near-term performance/polish targets are:
-  FIB projection precompile first, API route-listing / high-volume JSON cleanup
-  second, and RPKI VRP lookup indexing third once there is room for the
-  correctness-heavy validation pass.
-  - FIB projection: precompile configured-table policy so
-    `allowed_neighbors` is parsed once, table-name strings are not cloned into
-    every projected row unnecessarily, and projection avoids avoidable
-    per-table/per-candidate work. Measure with a pure `fib.rs` projection bench
-    across tables × candidates × ECMP width.
+  RPKI VRP lookup indexing first once there is room for the correctness-heavy
+  validation pass, then the remaining FIB projection table-name ownership and
+  high-volume CLI / JSON serializer cleanups.
+  - FIB projection: shipped the configured-table policy precompile so
+    `allowed_neighbors` is parsed once per projection pass and peer /
+    peer-group membership checks reuse prebuilt sets. The new root
+    `fib_projection` Criterion bench covers tables × candidates × ECMP width
+    behind the `bench-internals` feature. Remaining possible cleanup:
+    table-name ownership in projected status/drop rows, if a future profile
+    shows those allocations matter enough to justify changing the data shape.
   - API route listing: shipped the API-service cleanup that fuses family
     filtering, route filters, pagination, and `route_to_proto` response
     construction into one pass over the RIB snapshot; canonical large-community
