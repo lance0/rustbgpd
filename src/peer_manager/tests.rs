@@ -211,6 +211,7 @@ fn make_dynamic_manager_config() -> Config {
                 looking_glass: None,
             },
             dynamic_neighbor_limit: Some(100),
+            worker_threads: None,
             honor_graceful_shutdown: false,
             honor_blackhole: false,
             multipath_relax: false,

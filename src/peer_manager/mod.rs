@@ -257,6 +257,7 @@ impl PeerManager {
                         looking_glass: None,
                     },
                     dynamic_neighbor_limit: None,
+                    worker_threads: None,
                     honor_graceful_shutdown: false,
                     honor_blackhole: false,
                     multipath_relax: false,

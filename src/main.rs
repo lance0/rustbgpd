@@ -905,9 +905,59 @@ fn main() {
     #[cfg(not(feature = "dhat-heap"))]
     let profiler: Option<()> = None;
 
-    let rt = tokio::runtime::Runtime::new()
+    let worker_threads = resolve_worker_threads(config.global.worker_threads);
+    info!(worker_threads, "initializing tokio runtime");
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .build()
         .unwrap_or_else(|e| fatal_startup_error("failed to create tokio runtime", e));
     rt.block_on(run(config, profiler));
+}
+
+/// Default tokio worker-thread cap when neither env nor config specifies one.
+const DEFAULT_WORKER_THREAD_CAP: usize = 8;
+
+/// Resolve the tokio worker-thread count: `RUSTBGPD_WORKER_THREADS` (if a
+/// positive integer) overrides the `[global] worker_threads` config field,
+/// which in turn overrides the default of `min(available parallelism, 8)`.
+/// A zero or unparseable value is ignored in favor of the next source. The
+/// cap right-sizes the async runtime for an I/O-bound daemon — reducing
+/// virtual-address reservation and scheduler footprint (it is RSS-neutral)
+/// rather than spawning one worker per core on high-core-count hosts.
+fn resolve_worker_threads(configured: Option<usize>) -> usize {
+    let env = match std::env::var("RUSTBGPD_WORKER_THREADS") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            warn!("ignoring non-unicode RUSTBGPD_WORKER_THREADS");
+            None
+        }
+    };
+    resolve_worker_threads_from(env, configured)
+}
+
+/// Pure core of [`resolve_worker_threads`] with the environment value injected,
+/// so the precedence (env > config > capped default) is unit-testable without
+/// touching process-global env state.
+fn resolve_worker_threads_from(env: Option<String>, configured: Option<usize>) -> usize {
+    if let Some(raw) = env {
+        match raw.trim().parse::<usize>() {
+            Ok(n) if n > 0 => return n,
+            // An explicit `0` means "unset" — fall through silently.
+            Ok(_) => {}
+            Err(_) => warn!(
+                value = %raw,
+                "ignoring invalid RUSTBGPD_WORKER_THREADS (expected a positive integer)"
+            ),
+        }
+    }
+    if let Some(n) = configured.filter(|n| *n > 0) {
+        return n;
+    }
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(DEFAULT_WORKER_THREAD_CAP)
 }
 
 #[expect(clippy::too_many_lines)]
@@ -2499,6 +2549,32 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
     }
 
     #[test]
+    fn worker_thread_resolution_precedence() {
+        // env (positive) wins over config and default.
+        assert_eq!(
+            resolve_worker_threads_from(Some("4".to_string()), Some(2)),
+            4
+        );
+        // config wins when env is absent; an explicit value is NOT capped.
+        assert_eq!(resolve_worker_threads_from(None, Some(16)), 16);
+        // zero / unparseable env is ignored, falling through to config.
+        assert_eq!(
+            resolve_worker_threads_from(Some("0".to_string()), Some(3)),
+            3
+        );
+        assert_eq!(
+            resolve_worker_threads_from(Some("nope".to_string()), Some(3)),
+            3
+        );
+        // zero config is ignored, falling through to the capped default.
+        let default_zero = resolve_worker_threads_from(None, Some(0));
+        assert!((1..=DEFAULT_WORKER_THREAD_CAP).contains(&default_zero));
+        // no env, no config → capped default in [1, 8].
+        let default = resolve_worker_threads_from(None, None);
+        assert!((1..=DEFAULT_WORKER_THREAD_CAP).contains(&default));
+    }
+
+    #[test]
     fn gr_restart_marker_round_trip() {
         let path = unique_temp_path("gr-restart-marker");
         let expires_at = SystemTime::now() + Duration::from_mins(2);
@@ -2557,6 +2633,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
                     looking_glass: None,
                 },
                 dynamic_neighbor_limit: None,
+                worker_threads: None,
                 honor_graceful_shutdown: false,
                 honor_blackhole: false,
                 multipath_relax: false,
