@@ -105,6 +105,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
+bench-internals = []
 jemalloc = ["tikv-jemallocator"]
 dhat-heap = ["dhat"]
 
@@ -147,9 +148,20 @@ libc.workspace = true
 nix.workspace = true
 futures = "0.3"
 
+[[bin]]
+name = "rustbgpd"
+path = "src/main.rs"
+bench = false
+
 [dev-dependencies]
 tempfile.workspace = true
 tower.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "fib_projection"
+harness = false
+required-features = ["bench-internals"]
 
 [profile.release]
 lto = true

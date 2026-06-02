@@ -11,6 +11,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Performance
 
+- **Precompiled FIB projection table policy.** The ADR-0061 FIB projection
+  path now parses each table's `allowed_neighbors` once per projection pass and
+  uses precomputed peer / peer-group membership sets for candidate filtering,
+  instead of reparsing and rescanning table policy during every route and ECMP
+  next-hop check. A new `fib_projection` Criterion bench covers configured
+  tables x candidates x ECMP width behind the `bench-internals` feature.
+- **One-pass API route listing.** `ListBestRoutes`, `ListReceivedRoutes`, and
+  `ListAdvertisedRoutes` now fuse family filtering, route filters, pagination,
+  and response construction into one pass over the RIB snapshot. High-volume
+  list calls no longer allocate intermediate filtered `Vec<Route>` buffers, and
+  large-community filters compare canonical typed values instead of allocating a
+  per-route `Vec<String>`. Pagination, `total_count`, and invalid/non-canonical
+  large-community filter behavior are unchanged.
 - **Allocation-free max-prefix accounting.** Transport sessions now maintain a
   unicast prefix refcount beside the Add-Path `(prefix, path_id)` set, so
   max-prefix enforcement and `QueryState` no longer rebuild a temporary
