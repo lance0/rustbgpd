@@ -622,6 +622,22 @@ opt-in config); at those scales the on/off difference is within noise. The
 2p/100k row shows **both** the v0.32.0 default (event-history off) and the
 opt-in (on).
 
+**Re-confirmed 2026-06-02** on current `main` (post-v0.33.0, default
+**event-history off**), same host — this is a no-regression check, not a new set
+of headline numbers:
+
+- **Total time is flat** vs the v0.32.0 figures (8.3s / 8.3s / 12.2s across
+  10p×1k / 2p×10k / 2p×100k).
+- **2p×100k event-history-off RSS holds within noise** — ~291 MB vs the ~284 MB
+  below.
+- **Max-CPU peaks trended lower** across all three configs, but bgperf2 samples
+  peak CPU coarsely (one reading per second), so treat that as advisory, not a
+  measured improvement.
+- The small-scale **10k/20k RSS cells below were measured event-history-*on***
+  and are left unchanged here — they are not apples-to-apples with a default
+  eh-off run, so refreshing them would require converting the whole table to a
+  single eh-off mode.
+
 > **The earlier "2.3× less memory than GoBGP" framing no longer holds — and was
 > based on a stale GoBGP figure.** GoBGP 4.3.0 measures **~200 MB** at 2p/100k
 > here (and measured 198 MB in the prior March run); the old 578 MB was a much
