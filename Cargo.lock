@@ -2798,7 +2798,9 @@ dependencies = [
 name = "rustbgpd-rpki"
 version = "0.33.0"
 dependencies = [
+ "criterion",
  "rustbgpd-wire",
+ "smallvec",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

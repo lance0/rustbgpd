@@ -43,6 +43,16 @@ ASN matching.
 This is simpler than a trie and sufficient for typical VRP table sizes
 (~400K entries). The immutable design allows `Arc<VrpTable>` sharing.
 
+> **Update — superseded by a bucketed index.** The storage was later replaced
+> by a family-split, prefix-length-bucketed index: 33 IPv4 / 129 IPv6 buckets,
+> each a list of `(network, auths)` groups sorted by masked network. Validation
+> walks the route's ancestor prefix lengths `0..=route_len` with one binary
+> search per length, giving ~constant-time validation (tens of ns) independent
+> of table size, versus the original O(n) scan. The same change corrected RFC
+> 6811 §2 coverage semantics — a route more specific than a covering ROA's
+> maxLength is `Invalid`, not `NotFound`. `VrpEntry`, the public `VrpTable` API,
+> and the `Arc<VrpTable>` snapshot are unchanged. See `crates/rpki/src/vrp.rs`.
+
 ### Arc<VrpTable> snapshot pattern
 
 VRP tables are shared between the VrpManager and RibManager via

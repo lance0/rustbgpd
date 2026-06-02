@@ -6,7 +6,7 @@
 //!
 //! # Components
 //!
-//! - [`VrpTable`] — immutable, sorted VRP table with origin validation
+//! - [`VrpTable`] — immutable, prefix-length-indexed VRP table with origin validation
 //! - [`VrpEntry`] — a single Validated ROA Payload
 //! - [`AspaTable`] — immutable ASPA lookup table
 //! - [`AspaRecord`] — a single ASPA record (customer → providers)
