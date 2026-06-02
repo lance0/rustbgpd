@@ -935,8 +935,11 @@ fn resolve_worker_threads_from(env: Option<String>, configured: Option<usize>) -
     if let Some(raw) = env {
         match raw.trim().parse::<usize>() {
             Ok(n) if n > 0 => return n,
-            _ => eprintln!(
-                "warning: ignoring invalid RUSTBGPD_WORKER_THREADS={raw:?} (expected a positive integer)"
+            // An explicit `0` means "unset" — fall through silently.
+            Ok(_) => {}
+            Err(_) => warn!(
+                value = %raw,
+                "ignoring invalid RUSTBGPD_WORKER_THREADS (expected a positive integer)"
             ),
         }
     }

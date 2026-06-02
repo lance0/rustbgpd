@@ -348,12 +348,14 @@ pub struct Global {
     pub dynamic_neighbor_limit: Option<u32>,
     /// Number of tokio runtime worker threads. Unset (the default) caps to
     /// `min(available CPU parallelism, 8)`: spawning one worker per core on a
-    /// high-core-count host wastes memory, because each worker carries its own
-    /// stack and allocator arena and this is an I/O-bound daemon, not a
-    /// CPU-bound one. A value of `0` is treated as unset. The
-    /// `RUSTBGPD_WORKER_THREADS` environment variable overrides this field.
-    /// **Restart-required:** the runtime is built once at startup, so a change
-    /// only takes effect on the next restart, not on SIGHUP.
+    /// high-core-count host over-provisions the async runtime (each worker
+    /// reserves a stack and a scheduler slot) for what is an I/O-bound daemon,
+    /// not a CPU-bound one. Capping reduces virtual-address reservation and
+    /// scheduler footprint — same-host benchmarks showed it RSS-neutral, so this
+    /// is runtime right-sizing, not a memory optimization. A value of `0` is
+    /// treated as unset. The `RUSTBGPD_WORKER_THREADS` environment variable
+    /// overrides this field. **Restart-required:** the runtime is built once at
+    /// startup, so a change only takes effect on the next restart, not on SIGHUP.
     #[serde(default)]
     pub worker_threads: Option<usize>,
     /// Honor RFC 8326 `GRACEFUL_SHUTDOWN` community on inbound EBGP routes

@@ -34,7 +34,7 @@ Required. Defines the local BGP speaker identity.
 | `router_id`         | string | yes      | --                   | BGP router ID (must be valid IPv4) |
 | `listen_port`       | u16    | yes      | --                   | TCP port to listen on (typically 179) |
 | `dynamic_neighbor_limit` | u32 | no     | `100`                | Maximum number of auto-accepted dynamic peers (1--5000) |
-| `worker_threads`    | usize  | no       | `min(cores, 8)`      | Tokio runtime worker threads. Unset caps to `min(CPU parallelism, 8)` so a high-core host doesn't spawn one worker (stack + allocator arena) per core for this I/O-bound daemon. `0` means unset. `RUSTBGPD_WORKER_THREADS` overrides. **Restart-required** (runtime built once at startup). |
+| `worker_threads`    | usize  | no       | `min(cores, 8)`      | Tokio runtime worker threads. Unset caps to `min(CPU parallelism, 8)` to avoid over-provisioning the async runtime (one worker + stack reservation per core) on a high-core host for this I/O-bound daemon — reduces virtual-address reservation and scheduler footprint (RSS-neutral in benchmarks). `0` means unset. `RUSTBGPD_WORKER_THREADS` overrides. **Restart-required** (runtime built once at startup). |
 | `runtime_state_dir` | string | no       | `"/var/lib/rustbgpd"` | Directory for daemon-owned runtime state (GR restart marker today) |
 | `cluster_id`        | string | no       | --                    | Route reflector cluster ID (must be valid IPv4; enables RR mode) |
 | `honor_graceful_shutdown` | bool | no  | `false`              | Enable RFC 8326 §4 receiver behavior on EBGP imports — see below |
