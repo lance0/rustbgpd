@@ -308,12 +308,24 @@ impl PeerSession {
         if !self.known_paths.remove(&(prefix, path_id)) {
             return false;
         }
+        // Invariant: every `(prefix, path_id)` in `known_paths` added a refcount
+        // via `remember_known_path`, so once the remove above succeeds a matching
+        // refcount entry must exist. The `else` is therefore unreachable; assert
+        // it in debug builds so a future refactor that desyncs the two structures
+        // (which would undercount unique prefixes and could weaken max-prefix
+        // enforcement) is caught by the test suite instead of failing silently.
         if let Some(count) = self.known_prefix_refcounts.get_mut(&prefix) {
             if *count > 1 {
                 *count -= 1;
             } else {
                 self.known_prefix_refcounts.remove(&prefix);
             }
+        } else {
+            debug_assert!(
+                false,
+                "known_prefix_refcounts missing an entry for a prefix still in known_paths — \
+                 max-prefix accounting desync"
+            );
         }
         true
     }
