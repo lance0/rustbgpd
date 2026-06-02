@@ -13,7 +13,7 @@ These run on every push and PR (`.github/workflows/ci.yml`,
 - [ ] `cargo fmt --check`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo test --workspace`
-- [ ] `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"`
+- [ ] `cargo doc --workspace --lib --no-deps` with `RUSTDOCFLAGS="-D warnings"`
 - [ ] **MSRV gate** — `cargo check --workspace --all-targets` at the
       declared `rust-version` (kept in lockstep with the Dockerfile
       builder version)
