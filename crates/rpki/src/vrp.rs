@@ -1,12 +1,39 @@
 //! VRP (Validated ROA Payload) table and origin validation.
 //!
-//! The [`VrpTable`] stores a sorted, deduplicated set of [`VrpEntry`] values
-//! and implements RFC 6811 origin validation: given a route's prefix and
-//! origin ASN, it classifies the route as `Valid`, `Invalid`, or `NotFound`.
+//! The [`VrpTable`] ingests a set of [`VrpEntry`] values and implements RFC 6811
+//! origin validation: given a route's prefix and origin ASN, it classifies the
+//! route as `Valid`, `Invalid`, or `NotFound`.
+//!
+//! Internally the table is a **family-split, prefix-length-bucketed index**: one
+//! bucket per possible prefix length (33 for IPv4, 129 for IPv6), each a list of
+//! `(network, auths)` groups sorted by masked network address. Validation walks
+//! the route's ancestor lengths `0..=route_len`, binary-searching one bucket per
+//! length — at most 33 (v4) / 129 (v6) searches, versus an O(n) scan of the
+//! whole table. Origin validation needs *every* covering ancestor (a
+//! less-specific Valid VRP must win even when a more-specific covering VRP fails
+//! ASN or maxLength), so an all-ancestors walk is required — a longest-prefix
+//! match alone would misclassify.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use rustbgpd_wire::{Prefix, RpkiValidation};
+use smallvec::SmallVec;
+
+/// One authorization within a `(prefix_len, network)` group: an origin ASN and
+/// the maximum prefix length it may announce.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VrpAuth {
+    origin_asn: u32,
+    max_len: u8,
+}
+
+/// VRPs sharing one masked network at a given prefix length. The common case is
+/// a single authorization, inlined by `SmallVec`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VrpGroup<N> {
+    network: N,
+    auths: SmallVec<[VrpAuth; 1]>,
+}
 
 /// A single Validated ROA Payload entry from an RPKI cache.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -50,38 +77,132 @@ impl Ord for VrpEntry {
     }
 }
 
-/// Immutable, sorted table of VRP entries for fast origin validation.
+/// Mask an IPv4 address to its leading `len` bits (`len <= 32`).
+fn mask_v4(addr: Ipv4Addr, len: u8) -> u32 {
+    let bits = u32::from(addr);
+    if len == 0 {
+        0
+    } else {
+        bits & (u32::MAX << (32 - len))
+    }
+}
+
+/// Mask an IPv6 address to its leading `len` bits (`len <= 128`).
+fn mask_v6(addr: Ipv6Addr, len: u8) -> u128 {
+    let bits = u128::from(addr);
+    if len == 0 {
+        0
+    } else {
+        bits & (u128::MAX << (128 - len))
+    }
+}
+
+/// Immutable VRP table for fast RFC 6811 origin validation.
 ///
-/// Built once from a set of entries (deduplicating), then shared via `Arc`.
-/// Validation is O(n) scan over entries of the same address family — sufficient
-/// for typical VRP table sizes (hundreds of thousands of entries). A more
-/// sophisticated index can be added later if needed.
+/// Built once from a set of entries, then shared via `Arc`. Storage is a
+/// family-split, prefix-length-bucketed index (see the module docs); `v4` has 33
+/// buckets (lengths `0..=32`), `v6` has 129 (`0..=128`), each sorted by network.
+/// `v4_count`/`v6_count` are the exact-deduped *input* counts (the source for the
+/// `rpki_vrp_count` metric); they are tracked separately from the index, which
+/// compresses duplicate authorizations.
 #[derive(PartialEq, Eq)]
 pub struct VrpTable {
-    /// Sorted and deduplicated entries.
-    v4_entries: Vec<VrpEntry>,
-    v6_entries: Vec<VrpEntry>,
+    v4_count: usize,
+    v6_count: usize,
+    v4: Vec<Vec<VrpGroup<u32>>>,
+    v6: Vec<Vec<VrpGroup<u128>>>,
+}
+
+/// Compress sorted `(asn, max_len)` pairs for one network into `VrpAuth`s,
+/// collapsing duplicate origin ASNs to the largest `max_len` (RFC 6482: a
+/// shorter duplicate maxLength grants no additional authorization).
+fn compress_auths(sorted: &[(u32, u8)]) -> SmallVec<[VrpAuth; 1]> {
+    let mut auths: SmallVec<[VrpAuth; 1]> = SmallVec::new();
+    for &(origin_asn, max_len) in sorted {
+        if let Some(last) = auths.last_mut()
+            && last.origin_asn == origin_asn
+        {
+            last.max_len = last.max_len.max(max_len);
+        } else {
+            auths.push(VrpAuth {
+                origin_asn,
+                max_len,
+            });
+        }
+    }
+    auths
+}
+
+/// Build one family's buckets from `(prefix_len, network, asn, max_len)` items.
+/// `items` is sorted ascending, so each `(len, network)` run is contiguous and
+/// already network-ordered within its bucket.
+fn build_buckets<N: Copy + PartialEq>(
+    n_buckets: usize,
+    mut items: Vec<(u8, N, u32, u8)>,
+) -> Vec<Vec<VrpGroup<N>>>
+where
+    (u8, N, u32, u8): Ord,
+{
+    items.sort_unstable();
+    let mut buckets: Vec<Vec<VrpGroup<N>>> = vec![Vec::new(); n_buckets];
+    let mut i = 0;
+    while i < items.len() {
+        let (len, network, ..) = items[i];
+        let start = i;
+        while i < items.len() && items[i].0 == len && items[i].1 == network {
+            i += 1;
+        }
+        let pairs: SmallVec<[(u32, u8); 1]> =
+            items[start..i].iter().map(|&(_, _, a, m)| (a, m)).collect();
+        buckets[len as usize].push(VrpGroup {
+            network,
+            auths: compress_auths(&pairs),
+        });
+    }
+    buckets
 }
 
 impl VrpTable {
     /// Build a new VRP table from a set of entries.
     ///
-    /// Entries are sorted and deduplicated.
+    /// Entries are exact-deduplicated for the count metrics; malformed entries
+    /// (`prefix_len > 32` for IPv4 / `> 128` for IPv6) are skipped so bucket
+    /// indexing cannot panic. The index then compresses duplicate origin ASNs
+    /// per network to the largest `max_len`.
     #[must_use]
     pub fn new(mut entries: Vec<VrpEntry>) -> Self {
         entries.sort();
         entries.dedup();
-        let mut v4_entries = Vec::new();
-        let mut v6_entries = Vec::new();
+
+        let mut v4_items: Vec<(u8, u32, u32, u8)> = Vec::new();
+        let mut v6_items: Vec<(u8, u128, u32, u8)> = Vec::new();
         for e in entries {
             match e.prefix {
-                IpAddr::V4(_) => v4_entries.push(e),
-                IpAddr::V6(_) => v6_entries.push(e),
+                IpAddr::V4(addr) if e.prefix_len <= 32 => {
+                    v4_items.push((
+                        e.prefix_len,
+                        mask_v4(addr, e.prefix_len),
+                        e.origin_asn,
+                        e.max_len,
+                    ));
+                }
+                IpAddr::V6(addr) if e.prefix_len <= 128 => {
+                    v6_items.push((
+                        e.prefix_len,
+                        mask_v6(addr, e.prefix_len),
+                        e.origin_asn,
+                        e.max_len,
+                    ));
+                }
+                _ => {} // malformed prefix length — skip
             }
         }
+
         Self {
-            v4_entries,
-            v6_entries,
+            v4_count: v4_items.len(),
+            v6_count: v6_items.len(),
+            v4: build_buckets(33, v4_items),
+            v6: build_buckets(129, v6_items),
         }
     }
 
@@ -97,33 +218,49 @@ impl VrpTable {
     /// 3. Covering VRP(s) exist but none yields `Valid` — wrong `origin_asn`, or
     ///    the route is more specific than every covering VRP's `max_len`
     ///    → `Invalid` (NOT `NotFound`).
+    ///
+    /// Walks ancestor lengths `0..=route_len`, binary-searching one bucket per
+    /// length; a bucket hit is itself the containment proof (mask + exact network
+    /// match).
     #[must_use]
     pub fn validate(&self, prefix: &Prefix, origin_asn: u32) -> RpkiValidation {
-        let (route_addr, route_len) = match prefix {
-            Prefix::V4(v4) => (IpAddr::V4(v4.addr), v4.len),
-            Prefix::V6(v6) => (IpAddr::V6(v6.addr), v6.len),
-        };
-
-        let entries = match route_addr {
-            IpAddr::V4(_) => &self.v4_entries,
-            IpAddr::V6(_) => &self.v6_entries,
-        };
-
         let mut has_covering = false;
-        for vrp in entries {
-            // VRP prefix length must be ≤ route prefix length (VRP covers route)
-            if vrp.prefix_len > route_len {
-                continue;
+        match prefix {
+            Prefix::V4(v4) => {
+                let addr = v4.addr;
+                let route_len = v4.len.min(32);
+                for len in 0..=route_len {
+                    let network = mask_v4(addr, len);
+                    let bucket = &self.v4[len as usize];
+                    if let Ok(idx) = bucket.binary_search_by_key(&network, |g| g.network) {
+                        has_covering = true;
+                        if bucket[idx]
+                            .auths
+                            .iter()
+                            .any(|a| a.origin_asn == origin_asn && v4.len <= a.max_len)
+                        {
+                            return RpkiValidation::Valid;
+                        }
+                    }
+                }
             }
-            // Coverage is network containment only — `max_len` is checked below,
-            // not here (RFC 6811 §2): a covered route that exceeds every covering
-            // VRP's `max_len` is Invalid, not NotFound.
-            if !prefix_contains(vrp.prefix, vrp.prefix_len, route_addr, route_len) {
-                continue;
-            }
-            has_covering = true;
-            if vrp.origin_asn == origin_asn && route_len <= vrp.max_len {
-                return RpkiValidation::Valid;
+            Prefix::V6(v6) => {
+                let addr = v6.addr;
+                let route_len = v6.len.min(128);
+                for len in 0..=route_len {
+                    let network = mask_v6(addr, len);
+                    let bucket = &self.v6[len as usize];
+                    if let Ok(idx) = bucket.binary_search_by_key(&network, |g| g.network) {
+                        has_covering = true;
+                        if bucket[idx]
+                            .auths
+                            .iter()
+                            .any(|a| a.origin_asn == origin_asn && v6.len <= a.max_len)
+                        {
+                            return RpkiValidation::Valid;
+                        }
+                    }
+                }
             }
         }
 
@@ -134,65 +271,37 @@ impl VrpTable {
         }
     }
 
-    /// Total number of VRP entries.
+    /// Total number of VRP entries (exact-deduped input count).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.v4_entries.len() + self.v6_entries.len()
+        self.v4_count + self.v6_count
     }
 
     /// Whether the table has no entries.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.v4_entries.is_empty() && self.v6_entries.is_empty()
+        self.v4_count == 0 && self.v6_count == 0
     }
 
     /// Number of IPv4 VRP entries.
     #[must_use]
     pub fn v4_count(&self) -> usize {
-        self.v4_entries.len()
+        self.v4_count
     }
 
     /// Number of IPv6 VRP entries.
     #[must_use]
     pub fn v6_count(&self) -> usize {
-        self.v6_entries.len()
+        self.v6_count
     }
 }
 
 impl std::fmt::Debug for VrpTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VrpTable")
-            .field("v4_entries", &self.v4_entries.len())
-            .field("v6_entries", &self.v6_entries.len())
-            .finish()
-    }
-}
-
-/// Check whether `outer` (with `outer_len`) contains `inner` (with `inner_len`).
-///
-/// Both addresses must be the same address family.
-fn prefix_contains(outer: IpAddr, outer_len: u8, inner: IpAddr, inner_len: u8) -> bool {
-    if outer_len > inner_len {
-        return false;
-    }
-    match (outer, inner) {
-        (IpAddr::V4(o), IpAddr::V4(i)) => {
-            if outer_len == 0 {
-                return true;
-            }
-            let mask = u32::MAX << (32 - outer_len);
-            (u32::from(o) & mask) == (u32::from(i) & mask)
-        }
-        (IpAddr::V6(o), IpAddr::V6(i)) => {
-            if outer_len == 0 {
-                return true;
-            }
-            let o_bits = u128::from(o);
-            let i_bits = u128::from(i);
-            let mask = u128::MAX << (128 - outer_len);
-            (o_bits & mask) == (i_bits & mask)
-        }
-        _ => false, // different address families
+            .field("v4_count", &self.v4_count)
+            .field("v6_count", &self.v6_count)
+            .finish_non_exhaustive()
     }
 }
 
@@ -522,57 +631,69 @@ mod tests {
         );
     }
 
-    // ── prefix_contains helper ───────────────────────────────────
+    // ── Address masking helper ───────────────────────────────────
 
     #[test]
-    fn prefix_contains_v4() {
-        assert!(prefix_contains(
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)),
-            16,
-            IpAddr::V4(Ipv4Addr::new(10, 0, 1, 0)),
-            24,
-        ));
-        assert!(!prefix_contains(
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)),
-            16,
-            IpAddr::V4(Ipv4Addr::new(10, 1, 0, 0)),
-            24,
-        ));
+    fn mask_v4_truncates_host_bits() {
+        assert_eq!(
+            mask_v4(Ipv4Addr::new(10, 0, 1, 5), 16),
+            u32::from(Ipv4Addr::new(10, 0, 0, 0))
+        );
+        assert_eq!(
+            mask_v4(Ipv4Addr::new(10, 0, 1, 0), 24),
+            u32::from(Ipv4Addr::new(10, 0, 1, 0))
+        );
+        // /0 masks to 0; /32 keeps every bit (shift-boundary guards).
+        assert_eq!(mask_v4(Ipv4Addr::new(192, 168, 1, 1), 0), 0);
+        assert_eq!(
+            mask_v4(Ipv4Addr::new(192, 168, 1, 1), 32),
+            u32::from(Ipv4Addr::new(192, 168, 1, 1))
+        );
     }
 
     #[test]
-    fn prefix_contains_v6() {
-        assert!(prefix_contains(
-            IpAddr::V6("2001:db8::".parse().unwrap()),
-            32,
-            IpAddr::V6("2001:db8:1::".parse().unwrap()),
-            48,
-        ));
-        assert!(!prefix_contains(
-            IpAddr::V6("2001:db8::".parse().unwrap()),
-            32,
-            IpAddr::V6("2001:db9::".parse().unwrap()),
-            48,
-        ));
+    fn mask_v6_truncates_host_bits() {
+        let a: Ipv6Addr = "2001:db8:1::1".parse().unwrap();
+        assert_eq!(
+            mask_v6(a, 32),
+            u128::from("2001:db8::".parse::<Ipv6Addr>().unwrap())
+        );
+        assert_eq!(mask_v6(a, 0), 0);
+        assert_eq!(mask_v6(a, 128), u128::from(a));
+    }
+
+    // ── Index build behavior ─────────────────────────────────────
+
+    #[test]
+    fn maxlen_compression_keeps_largest() {
+        // Two distinct deduped VRPs for the same network + origin differ only in
+        // max_len. The index compresses them to the largest max_len, but the
+        // count metric still reflects the deduped *input* (2), not the 1 auth.
+        let table = VrpTable::new(vec![
+            v4_vrp(Ipv4Addr::new(10, 0, 0, 0), 16, 24, 65001),
+            v4_vrp(Ipv4Addr::new(10, 0, 0, 0), 16, 20, 65001),
+        ]);
+        assert_eq!(table.v4_count(), 2);
+        // /24 is within the largest (24) max_len → Valid.
+        assert_eq!(
+            table.validate(&v4_prefix(Ipv4Addr::new(10, 0, 1, 0), 24), 65001),
+            RpkiValidation::Valid
+        );
     }
 
     #[test]
-    fn prefix_contains_zero_len() {
-        assert!(prefix_contains(
-            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            0,
-            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
-            32,
-        ));
-    }
-
-    #[test]
-    fn prefix_contains_cross_family_false() {
-        assert!(!prefix_contains(
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)),
-            8,
-            IpAddr::V6("::ffff:10.0.0.0".parse().unwrap()),
-            128,
-        ));
+    fn malformed_prefix_len_skipped() {
+        // prefix_len beyond the family width is dropped (no panic) and not counted.
+        let table = VrpTable::new(vec![
+            v4_vrp(Ipv4Addr::new(10, 0, 0, 0), 33, 33, 65001),
+            v6_vrp("2001:db8::".parse().unwrap(), 129, 129, 65002),
+            v4_vrp(Ipv4Addr::new(10, 0, 0, 0), 24, 24, 65003), // valid, kept
+        ]);
+        assert_eq!(table.v4_count(), 1);
+        assert_eq!(table.v6_count(), 0);
+        assert_eq!(
+            table.validate(&v4_prefix(Ipv4Addr::new(10, 0, 0, 0), 24), 65003),
+            RpkiValidation::Valid
+        );
     }
 }

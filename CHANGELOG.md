@@ -11,6 +11,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Performance
 
+- **Constant-time RPKI origin validation (bucketed VRP index).** `VrpTable`
+  replaced its O(n) per-route linear scan with a family-split,
+  prefix-length-bucketed index (33 IPv4 / 129 IPv6 buckets, each sorted by
+  network); `validate` walks the route's ancestor prefix lengths with one binary
+  search per length. At an 800k-VRP table a validation drops from ~460 µs to
+  ~50 ns (>4 orders of magnitude) and is now roughly constant-time across table
+  sizes (1k → 800k). Validation runs on every inbound NLRI and every RTR
+  cache-update revalidation, so this also shortens cache-update reconvergence at
+  scale. A new `validate` Criterion bench covers 1k/100k/800k VRPs across the
+  five RFC 6811 outcomes.
+
 - **Manager-level distribution fanout benchmark.** Added a feature-gated
   `rustbgpd-rib` Criterion bench that drives the real
   `RibManager::distribute_changes` path — per-peer export-policy evaluation,
@@ -86,6 +97,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **RFC 6811: a route exceeding a covering ROA's maxLength is now `Invalid`,
+  not `NotFound`.** `VrpTable::validate` previously folded the maxLength check
+  into the coverage test, so a route more specific than an otherwise-covering
+  ROA (e.g. a `/25` under `10.0.0.0/16-24`) was misclassified `NotFound`.
+  Per RFC 6811 §2 coverage is network containment only — maxLength gates the
+  `Valid` decision — so such a route is `Invalid` (covered, no covering VRP
+  authorizes it). **Behavior change:** these routes now carry `Invalid`, so the
+  existing default best-path RPKI preference deprioritizes them (Valid > NotFound
+  > Invalid) and operator `match rpki-validation = invalid` policies match them.
+  No new automatic action is introduced; routes with no determinable origin ASN
+  are unaffected (still `NotFound`).
 - Docker Compose quick-start ports now bind to host loopback
   (`127.0.0.1`) instead of all host interfaces. The lab keeps legacy gRPC
   authorization for zero-setup `rustbgpctl` access, but the published gRPC and
