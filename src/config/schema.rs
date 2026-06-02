@@ -346,6 +346,16 @@ pub struct Global {
     /// Maximum number of dynamic (prefix-based) neighbors. Default 100.
     #[serde(default)]
     pub dynamic_neighbor_limit: Option<u32>,
+    /// Number of tokio runtime worker threads. Unset (the default) caps to
+    /// `min(available CPU parallelism, 8)`: spawning one worker per core on a
+    /// high-core-count host wastes memory, because each worker carries its own
+    /// stack and allocator arena and this is an I/O-bound daemon, not a
+    /// CPU-bound one. A value of `0` is treated as unset. The
+    /// `RUSTBGPD_WORKER_THREADS` environment variable overrides this field.
+    /// **Restart-required:** the runtime is built once at startup, so a change
+    /// only takes effect on the next restart, not on SIGHUP.
+    #[serde(default)]
+    pub worker_threads: Option<usize>,
     /// Honor RFC 8326 `GRACEFUL_SHUTDOWN` community on inbound EBGP routes
     /// by appending an implicit chain-tail rule that sets `local_pref = 0`
     /// on tagged routes. Off by default. Per RFC 8326 §4 receivers

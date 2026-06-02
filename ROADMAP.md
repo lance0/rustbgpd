@@ -116,17 +116,6 @@ Later for what remains.
   IX-route-server-relevant control-plane gap vs FRR/GoBGP and the only near-term
   parity add; it is a discrete feature and does not displace the perf/polish
   work above.
-- **Dynamic-neighbor parity / accept-any peering** — **shipped.** Overlapping
-  ranges resolve by longest-prefix-match (#333); `AddDynamicNeighbor` /
-  `DeleteDynamicNeighbor` are now live, TOML-persisted mutations
-  (`rustbgpctl dynamic-neighbor {list,add,delete}`); config-load rejects
-  exact-duplicate effective prefixes; and `remote_asn = 0` on
-  `[[dynamic_neighbors]]` accepts any ASN from the peer OPEN. Catch-all ranges
-  (`0.0.0.0/0`, `::/0`) plus the existing `dynamic_neighbor_limit` cover the
-  route-collector / lab zero-config shape, with MD5 / TCP-AO still enforceable
-  through the inherited peer group. The learned ASN is surfaced through peer
-  snapshots, API state, BMP state, and RIB peer-up metadata instead of exposing
-  the sentinel `0`. See CHANGELOG.
 
 ### Later
 

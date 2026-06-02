@@ -11,6 +11,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Performance
 
+- **Cap tokio runtime worker threads.** The runtime previously span one worker
+  per CPU core (`Runtime::new()`), so on a high-core host it created dozens of
+  workers — each with its own stack and allocator arena — for an I/O-bound
+  daemon that never needs them, inflating RSS. The worker count now defaults to
+  `min(CPU parallelism, 8)` and is configurable via `[global] worker_threads`
+  or the `RUSTBGPD_WORKER_THREADS` environment variable (env > config >
+  default; restart-required, as the runtime is built once at startup). No
+  change on hosts with ≤ 8 cores.
+
 - **Precompiled FIB projection table policy.** The ADR-0061 FIB projection
   path now parses each table's `allowed_neighbors` once per projection pass and
   uses precomputed peer / peer-group membership sets for candidate filtering,
