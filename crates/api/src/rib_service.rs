@@ -274,6 +274,13 @@ fn route_matches_family(route: &Route, afi_safi: i32) -> bool {
     }
 }
 
+/// Whether `afi_safi` leaves every route matching — i.e. `route_matches_family`
+/// is `true` for all routes, so the family filter does not narrow the snapshot.
+fn family_filter_is_noop(afi_safi: i32) -> bool {
+    afi_safi != proto::AddressFamily::Ipv4Unicast as i32
+        && afi_safi != proto::AddressFamily::Ipv6Unicast as i32
+}
+
 /// Parsed route filters extracted from a `ListRoutesRequest`.
 struct RouteFilters {
     /// Exact or covering prefix to match against.
@@ -657,9 +664,36 @@ fn build_filtered_response(
     page_size: usize,
     best: bool,
 ) -> proto::ListRoutesResponse {
+    let filters_active = !filters.is_empty();
+
+    // Fast path: when neither the family filter nor the route filters narrow the
+    // snapshot, `total_count` is just the snapshot length and the page is a
+    // plain offset/limit slice — no full scan to count. This preserves the
+    // pre-fusion O(offset + page_size) cost for the common "list, first page"
+    // call instead of walking the whole RIB just to recompute `routes.len()`.
+    if !filters_active && family_filter_is_noop(afi_safi) {
+        let total_count = routes.len();
+        let page: Vec<proto::Route> = routes
+            .iter()
+            .skip(offset)
+            .take(page_size)
+            .map(|r| route_to_proto(r, best))
+            .collect();
+        let next_offset = offset.saturating_add(page.len());
+        let next_page_token = if next_offset < total_count {
+            next_offset.to_string()
+        } else {
+            String::new()
+        };
+        return proto::ListRoutesResponse {
+            routes: page,
+            next_page_token,
+            total_count: u64::try_from(total_count).unwrap_or(u64::MAX),
+        };
+    }
+
     let mut total_count = 0usize;
     let mut page = Vec::new();
-    let filters_active = !filters.is_empty();
 
     for route in routes {
         if !route_matches_family(&route, afi_safi) {
@@ -3103,5 +3137,37 @@ mod tests {
         assert_eq!(second.routes.len(), 1);
         assert_eq!(second.routes[0].prefix, "10.0.1.0");
         assert!(second.next_page_token.is_empty());
+    }
+
+    #[test]
+    fn build_filtered_response_fast_path_counts_full_snapshot_without_filters() {
+        // No family filter (afi_safi = 0) and no route filters → the fast path
+        // counts the whole snapshot via len() and slices the page, with the
+        // same total_count / pagination as the fused path.
+        let routes = vec![
+            test_route(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+                vec![],
+            ),
+            test_route(
+                Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
+                vec![],
+            ),
+            test_route(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24)),
+                vec![],
+            ),
+        ];
+
+        let first = build_filtered_response(routes.clone(), 0, &empty_route_filters(), 0, 2, false);
+        assert_eq!(first.total_count, 3, "fast path counts every family");
+        assert_eq!(first.routes.len(), 2);
+        assert_eq!(first.routes[0].prefix, "10.0.0.0");
+        assert_eq!(first.next_page_token, "2");
+
+        let last = build_filtered_response(routes, 0, &empty_route_filters(), 2, 2, false);
+        assert_eq!(last.total_count, 3);
+        assert_eq!(last.routes.len(), 1);
+        assert!(last.next_page_token.is_empty());
     }
 }
