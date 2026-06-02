@@ -4,7 +4,9 @@ Micro-benchmarks using [Criterion](https://github.com/bheisler/criterion.rs) 0.8
 compiled with `--release` (LTO, codegen-units=1). Numbers below are meant
 for relative comparison and regression tracking, not absolute guarantees.
 
-**Last measured: 2026-05-29 (current `main`, shipping as v0.32.0)**
+**Last measured:** RIB Operations pinned A/B: 2026-05-29; same-host
+current-main reconfirmation, distribution-fanout baseline, and memory
+attribution correction: 2026-06-02.
 
 | Field | Value |
 |-------|-------|

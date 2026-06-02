@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Performance
 
+- **Manager-level distribution fanout benchmark.** Added a feature-gated
+  `rustbgpd-rib` Criterion bench that drives the real
+  `RibManager::distribute_changes` path — per-peer export-policy evaluation,
+  Adj-RIB-Out staging, and bounded-channel send — instead of only the bare RIB
+  structs. The baseline is now documented in `BENCHMARKS.md`: first-advertise
+  route-server fanout scales linearly at ~178 ns per (peer × prefix), and an
+  eight-statement scalar-guard export chain adds ~18%.
+
 - **Cap/configure tokio runtime worker threads.** The runtime previously
   spawned one worker per CPU core (`Runtime::new()`), so on a high-core host it
   over-provisioned the async runtime — dozens of workers for an I/O-bound

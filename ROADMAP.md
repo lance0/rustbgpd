@@ -219,7 +219,11 @@ Later for what remains.
     dirty resyncs or route-server fanout. Design-gated: peer address/ASN/group,
     negotiated family, route type, RPKI/ASPA state, policy counters,
     `policy_filtered_routes`, and export modifications all affect correctness.
-    Add a RIB export-distribution bench before implementation.
+    The manager-level `fanout` Criterion bench shipped in #350 and is the
+    baseline: first-advertise distribution is ~178 ns per advertisement with no
+    policy, and a cheap scalar-guard export chain adds ~18%. Use that harness
+    for any batching/coalescing PR, adding heavy-policy variants if the proposed
+    optimization targets AS_PATH-regex or large-community chains.
   - Adj-RIB-In attribute interning: explore storing a stable fingerprint beside
     interned `Arc<Vec<PathAttribute>>` sets to avoid hashing every attribute on
     each insert, with full equality fallback. Gate on `adj_rib_in_insert`,

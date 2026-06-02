@@ -771,7 +771,7 @@ Be honest about where rustbgpd isn't the right tool:
   not a full FRR/BIRD replacement. Use a full routing suite when you need
   default-on main-table ownership, IGPs, broad policy-driven redistribution,
   crash-restart FIB adoption, or mature multi-protocol forwarding features.
-- **EVPN VTEP role — alpha (post-v0.32.0).** rustbgpd-as-RR has been
+- **EVPN VTEP role — alpha.** rustbgpd-as-RR has been
   the supported deployment since Phase 1 (ADR-0050). Phase 2
   (declarative instance schema, FDB reconciler, local MAC + MAC+IP
   origination, and VTEP convergence; ADR-0052 / 0054 / 0055 /
