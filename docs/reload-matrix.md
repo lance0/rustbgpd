@@ -107,11 +107,12 @@ runtime config snapshot and rebuilds the live inbound-accept matcher, so adding,
 removing, or editing a `[[dynamic_neighbors]]` block changes which future
 inbound connections are accepted without bouncing existing sessions. Runtime
 gRPC CRUD — `rustbgpctl dynamic-neighbor {add,delete}`
-(`AddDynamicNeighbor` / `DeleteDynamicNeighbor`) — takes the same live path and
-persists the accepted change back to the TOML when the daemon was started with
-`--config`. Runtime CRUD and SIGHUP reload share a coordinator lock, held through
-the persistence acknowledgement, so reload sees either the pre-mutation TOML or
-the committed post-mutation TOML.
+(`AddDynamicNeighbor` / `DeleteDynamicNeighbor`) — uses the same reload-applied
+matcher-update path: it updates the runtime config snapshot and inbound-accept
+matcher, then persists the accepted change back to the TOML when the daemon was
+started with `--config`. Runtime CRUD and SIGHUP reload share a coordinator
+lock, held through the persistence acknowledgement, so reload sees either the
+pre-mutation TOML or the committed post-mutation TOML.
 
 | Field | Class | Notes |
 |---|---|---|
