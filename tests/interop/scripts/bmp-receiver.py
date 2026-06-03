@@ -15,7 +15,6 @@ BMP message format (RFC 7854):
 import json
 import socket
 import struct
-import sys
 import time
 
 BMP_HDR_LEN = 6  # version(1) + length(4) + type(1)

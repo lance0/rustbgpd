@@ -11,7 +11,6 @@ ASPA PDU type 11 is v2-only.
 import json
 import socket
 import struct
-import sys
 import time
 
 LISTEN_PORT = 3323
@@ -132,7 +131,7 @@ def handle_client(conn, addr):
                 print("RTR: client disconnected", flush=True)
                 break
 
-            version, pdu_type, session_field = struct.unpack("!BBH", hdr[:4])
+            version, pdu_type, _ = struct.unpack("!BBH", hdr[:4])
             length = struct.unpack("!I", hdr[4:8])[0]
 
             # Read remaining body if any
