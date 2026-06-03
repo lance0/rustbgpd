@@ -130,17 +130,6 @@ Later for what remains.
   (deferred, not blocking): draft v25 §5.4 step 2 first-AS precondition (no
   `enforce-first-as`-equivalent today); NIST-BRIO test vector import;
   `match_aspa_validation` import/export policy-match unit coverage.
-- **Convergent import validation on cache update.** Import
-  `match_rpki_validation` / `match_aspa_validation` is best-effort at ingress;
-  later VRP/ASPA cache updates do not re-run import policy. Fix: on cache
-  update, trigger `SoftResetIn` for peers whose resolved import policy uses
-  validation-state matches (infrastructure exists). Scope notes from the
-  research pass: hook from the VRP/ASPA cache-update forwarding path, not the
-  RIB revalidation path, so routes previously denied by import policy can be
-  resurrected; pin Enhanced Route Refresh / non-ERR sweep behavior before
-  claiming full convergence; invalidate or generation-key `ExplainImportPolicy`
-  cache entries whose decision used validation state. Not urgent — current
-  semantics match FRR/BIRD and are documented in `docs/CONFIGURATION.md`.
 - **EVPN standards tail.** Native overlay-index Type-5 local origination +
   protected recursion-path interop smoke; multi-homed-gateway ECMP; single-active
   backup-path pre-install (proactive receive-side backup VTEP next-hop so
@@ -194,16 +183,23 @@ Later for what remains.
     profiles.
   - RPKI validation: shipped the bucketed VRP lookup index and RFC 6811
     `maxLength` correctness fix, replacing the linear VRP scan with an
-    ancestor-bucket lookup while preserving overlapping-VRP semantics. Remaining
-    RPKI/ASPA correctness polish is the convergent import-policy revalidation on
-    cache update item above.
+    ancestor-bucket lookup while preserving overlapping-VRP semantics. Cache
+    updates now also trigger targeted inbound refresh for established peers
+    whose resolved import policy matches RPKI/ASPA state, so previously denied
+    routes can be reconsidered after VRP/ASPA changes. Follow-ups, only if
+    operator scale or observability needs justify them: add a
+    cache-triggered-refresh counter and parallelize or otherwise de-block the
+    per-peer refresh loop for very large validation-dependent peer sets.
   - Export-policy AS_PATH formatting: shipped in #340 — the export-policy
     evaluator no longer calls `AsPath::to_aspath_string()` for every export
     candidate unless the effective export policy contains an AS_PATH-regex match,
     gated by the `export_policy_eval` bench's eager-vs-lazy arms (~45 ns/route
     saved on a no-AS_PATH-regex chain). `AS_SET` / empty-path formatting is
     preserved when the string is needed; the import path still renders it
-    (event / OTC attribution).
+    (event / OTC attribution). A cached `requires_as_path_string` flag is
+    deferred until `PolicyChain` stops exposing directly mutable `policies`;
+    constructor-only caching would otherwise risk stale derived state when
+    implicit import policies are appended.
   - Transport max-prefix accounting: shipped — sessions keep a per-prefix
     refcount beside the Add-Path `(prefix, path_id)` set, so max-prefix
     enforcement and state queries count unique unicast prefixes without
@@ -511,12 +507,13 @@ branch is between features.
   stale `chore/dependabot-and-cargo-audit` branch, modernize to `cargo deny check
   advisories bans licenses sources`, and wire into CI. Pairs with the next
   dependency audit.
-- [ ] **Workspace `cargo doc` warning posture.** CI already runs
-  `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --lib --no-deps --jobs 1`;
-  make that the standing local pre-flight expectation too, surfacing broken
-  intra-doc-links on the developer machine rather than at PR time. The `--jobs 1`
-  cap deliberately serializes rustdoc for deterministic `target/doc` generation
-  in the workspace.
+- [ ] **Workspace `cargo doc` warning posture.** CI runs
+  `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --lib --no-deps`; keep that
+  as the standing local pre-flight expectation so broken intra-doc links surface
+  on the developer machine rather than at PR time. `--lib` keeps the root
+  daemon bin out of the doc target set (avoiding the lib/bin same-name collision);
+  Cargo's default job parallelism is intentionally left enabled so rustdoc does
+  not serialize the whole workspace.
 - [ ] **Mega-module splits.** The large `src/` modules have been split, but
   `crates/api/src/event_service.rs` remains borderline. Keep splitting only where
   it reduces real conflict or review cost.

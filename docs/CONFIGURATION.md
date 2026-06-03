@@ -1130,8 +1130,11 @@ Every route receives a validation state based on RPKI data:
 
 Use `match_rpki_validation` in import or export policy statements to filter
 routes by RPKI state. Import validation evaluates against the current VRP
-snapshot at ingress time; the validation-rules table below documents the
-current best-effort import semantics on later cache updates.
+snapshot at ingress time. Later VRP/ASPA cache updates trigger inbound Route
+Refresh for established peers whose resolved import policy matches validation
+state, so previously denied routes can be reconsidered against the fresh
+snapshot. Peers that are not established evaluate against the fresh snapshot
+when they next receive routes.
 
 Drop RPKI-invalid routes (recommended):
 
@@ -2352,7 +2355,7 @@ starting:
 | `gr_stale_routes_time` must be > 0 and <= 3600 | `invalid gr_stale_routes_time` |
 | Policy prefix length must not exceed AFI max (32 for IPv4, 128 for IPv6) | `invalid prefix length` |
 | Policy entry must have at least one match condition (`prefix`, `match_community`, `match_as_path`, `match_as_path_length_ge`, `match_as_path_length_le`, `match_rpki_validation`, or `match_aspa_validation`) | `must have at least one match condition` |
-| Import `match_rpki_validation`/`match_aspa_validation` evaluates against the current snapshot — routes arriving before the first VRP/ASPA table loads see `not_found`/`unknown`; later cache updates do not retroactively re-filter admitted routes (use best-path demotion for convergent behavior) | *(informational — no error)* |
+| Import `match_rpki_validation`/`match_aspa_validation` evaluates against the current snapshot — routes arriving before the first VRP/ASPA table loads see `not_found`/`unknown`; later cache updates trigger inbound Route Refresh for established peers whose import policy depends on validation state | *(informational — no error)* |
 | `match_as_path_length_ge` must not exceed `match_as_path_length_le` | `match_as_path_length_ge (...) exceeds match_as_path_length_le (...)` |
 | `set_*` fields cannot be used with `action = "deny"` | `set_* fields cannot be used with action = "deny"` |
 | `set_as_path_prepend.count` must be 1--10 | `count must be 1-10` |

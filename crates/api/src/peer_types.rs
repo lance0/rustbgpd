@@ -237,6 +237,16 @@ pub struct RuntimeConfigDiff {
     pub diff_json: String,
 }
 
+/// Import-policy validation state that can change route admissibility after an
+/// external cache update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportValidationDependency {
+    /// RPKI origin-validation state (`match_rpki_validation`).
+    Rpki,
+    /// ASPA path-validation state (`match_aspa_validation`).
+    Aspa,
+}
+
 pub enum PeerManagerCommand {
     /// Add a new peer with the given configuration.
     AddPeer {
@@ -363,6 +373,14 @@ pub enum PeerManagerCommand {
         peer: PeerKey,
         /// Families to refresh (empty = all configured).
         families: Vec<(Afi, Safi)>,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Trigger soft inbound reset for established peers whose resolved import
+    /// policy depends on an external validation cache.
+    SoftResetImportValidationDependents {
+        /// Validation cache that changed.
+        dependency: ImportValidationDependency,
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },

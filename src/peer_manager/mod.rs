@@ -587,6 +587,14 @@ impl PeerManager {
                             let result = self.soft_reset_in(peer, families).await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::SoftResetImportValidationDependents {
+                            dependency,
+                            reply,
+                        } => {
+                            let result =
+                                self.soft_reset_import_validation_dependents(dependency).await;
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::SetGracefulShutdown { peer, enabled, reply } => {
                             let result = self.set_graceful_shutdown(peer, enabled).await;
                             let _ = reply.send(result);

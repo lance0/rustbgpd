@@ -275,15 +275,6 @@ resolved.
   per wire semantics (the AFI comes from the MP_REACH attribute, not the
   rule itself) but worth noting — the AFI is always set correctly from
   the MP_REACH/MP_UNREACH framing.
-- **Import `match_rpki_validation` / `match_aspa_validation` is best-effort.**
-  Transport sessions evaluate import policy against the current validation
-  snapshot (delivered via `tokio::sync::watch`). Routes arriving before the
-  first VRP/ASPA table loads see `not_found`/`unknown`. Later cache updates
-  revalidate routes in the RIB and recompute best-path, but do not
-  retroactively re-run import policy or trigger route refresh. For
-  convergent filtering, prefer best-path demotion (steps 0.5/0.7) and
-  export policy. Use import validation matches as an early discard
-  optimization, not as a sole defense.
 - **ASPA missing draft v25 §5.4 step 2 first-AS check.**
   `ValidationSnapshot::validate_aspa` implements the pairwise bounds-
   checker walk per draft v25 §5.3-5.4 (equivalence proven against the

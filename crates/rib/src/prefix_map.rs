@@ -35,15 +35,18 @@ impl<V> Default for FamilyPrefixMap<V> {
 
 // rustbgpd's `Prefix` is canonical by construction: `Ipv4Prefix::new` /
 // `Ipv6Prefix::new` clamp the length and zero host bits. The fields are public,
-// so this relies on callers preserving that constructor invariant. `Ipv?Net::new`
-// only validates the length (it preserves host bits rather than rejecting them),
-// so this conversion is infallible for canonical `Prefix` values that reached
-// the RIB.
+// so this debug-asserts that callers preserved the constructor invariant, then
+// canonicalizes defensively before building the trie key. `Ipv?Net::new` only
+// validates the length; it preserves host bits rather than rejecting them.
 fn v4_net(p: Ipv4Prefix) -> Ipv4Net {
-    Ipv4Net::new(p.addr, p.len).expect("valid IPv4 prefix length")
+    let canonical = Ipv4Prefix::new(p.addr, p.len);
+    debug_assert_eq!(p, canonical, "non-canonical IPv4 prefix reached RIB map");
+    Ipv4Net::new(canonical.addr, canonical.len).expect("Ipv4Prefix::new clamps IPv4 prefix length")
 }
 fn v6_net(p: Ipv6Prefix) -> Ipv6Net {
-    Ipv6Net::new(p.addr, p.len).expect("valid IPv6 prefix length")
+    let canonical = Ipv6Prefix::new(p.addr, p.len);
+    debug_assert_eq!(p, canonical, "non-canonical IPv6 prefix reached RIB map");
+    Ipv6Net::new(canonical.addr, canonical.len).expect("Ipv6Prefix::new clamps IPv6 prefix length")
 }
 
 impl<V> FamilyPrefixMap<V> {

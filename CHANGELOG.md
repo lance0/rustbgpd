@@ -25,6 +25,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ADR-0075. (`rustbgpd-wire` gains an `orf` module and an optional ORF section on
   `RouteRefreshMessage` — a breaking change for that crate.)
 
+### Fixed
+
+- **Validation-cache updates now converge import policy matches.** When a fresh
+  VRP or ASPA table arrives, rustbgpd still revalidates admitted RIB routes
+  directly, and now also triggers inbound Route Refresh for established peers
+  whose resolved import policy uses `match_rpki_validation` or
+  `match_aspa_validation`. Routes that were previously denied because they
+  evaluated against `not_found` / `unknown` can be reconsidered after the cache
+  loads or changes; peers without validation-state import predicates are not
+  refreshed.
+
 ## [0.34.0] — 2026-06-02
 
 ### Performance

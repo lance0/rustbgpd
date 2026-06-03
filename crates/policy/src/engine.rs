@@ -872,6 +872,39 @@ impl PolicyChain {
             .any(|np| np.policy.entries.iter().any(|e| e.match_as_path.is_some()))
     }
 
+    /// Whether evaluating this chain depends on RPKI origin-validation state.
+    ///
+    /// Import-policy callers use this to decide whether a later VRP cache
+    /// update must trigger Route Refresh for this peer. Chains that do not
+    /// match on validation state are unaffected by cache churn and should not
+    /// be refreshed.
+    #[must_use]
+    pub fn requires_rpki_validation(&self) -> bool {
+        self.policies.iter().any(|np| {
+            np.policy
+                .entries
+                .iter()
+                .any(|e| e.match_rpki_validation.is_some())
+        })
+    }
+
+    /// Whether evaluating this chain depends on ASPA path-validation state.
+    #[must_use]
+    pub fn requires_aspa_validation(&self) -> bool {
+        self.policies.iter().any(|np| {
+            np.policy
+                .entries
+                .iter()
+                .any(|e| e.match_aspa_validation.is_some())
+        })
+    }
+
+    /// Whether evaluating this chain depends on any external validation cache.
+    #[must_use]
+    pub fn requires_validation_state(&self) -> bool {
+        self.requires_rpki_validation() || self.requires_aspa_validation()
+    }
+
     /// Evaluate a route against this chain of policies.
     #[must_use]
     pub fn evaluate(&self, ctx: &RouteContext<'_>) -> PolicyResult {

@@ -145,14 +145,11 @@ the exact `match_rpki_validation` pattern. Enables:
 **Import policy note:** `match_aspa_validation` (and `match_rpki_validation`)
 work in both import and export policy. Transport sessions receive the
 current validation snapshot via `tokio::sync::watch` and evaluate import
-policy against real validation states. However, import validation is
-**best-effort against the current snapshot**: routes arriving before the
-first ASPA table loads will have `aspa_state = Unknown`, and later cache
-updates do not retroactively re-filter already-admitted routes — the RIB
-revalidates and recomputes best-path but does not re-run import policy.
-For convergent behavior, prefer best-path demotion (step 0.7) over import
-policy filtering. Use `match_aspa_validation = "invalid"` + `action =
-"deny"` on import as an early discard optimization, not as a sole defense.
+policy against real validation states. Routes arriving before the first ASPA
+table loads have `aspa_state = Unknown`; later ASPA cache updates revalidate
+admitted routes in the RIB and trigger inbound Route Refresh for established
+peers whose resolved import policy matches ASPA state, so previously denied
+routes can be reconsidered against the fresh snapshot.
 
 ### RIB re-validation on ASPA table update
 
@@ -177,7 +174,8 @@ ingress and updated on ASPA table changes.
   published)
 - `match_aspa_validation` (and `match_rpki_validation`) work in both import
   and export policy — import evaluation uses the current validation snapshot
-  (best-effort, see KNOWN_ISSUES.md)
+  and validation-cache updates trigger targeted import-policy refresh for
+  dependent established peers
 - Downstream verification is not supported — requires future per-peer
   relationship config
 - RTR v2 version negotiation is implemented with automatic fallback to v1;
@@ -226,9 +224,6 @@ upstream walk's verdict. IPv4 / IPv6 unicast routes are unchanged.
   Requires per-peer relationship configuration; remains deferred —
   see "Upstream-only verification (initial scope)" above for the
   original rationale.
-- Automatic import-policy re-validation on validation-cache update.
-  Best-path demotion still provides convergent semantics; the sharp
-  edge documented in KNOWN_ISSUES.md and CONFIGURATION.md remains.
 - Draft v25 §5.4 step 2 first-AS precondition: the most-recent AS in
   the `AS_PATH` MUST equal the negotiated neighbor ASN, with a
   transparent-route-server-client exception. rustbgpd has no

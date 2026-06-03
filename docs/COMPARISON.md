@@ -115,9 +115,9 @@ suite implementation.
 | Memory-safe language | Yes | No | No | Yes | No |
 
 [^aspa]: rustbgpd ships RTR v2 ASPA input, upstream path verification, best-path
-    preference, and policy matching for IPv4/IPv6 unicast. Downstream /
-    customer-cone verification and import-policy revalidation on cache update
-    remain planned follow-ups.
+    preference, policy matching for IPv4/IPv6 unicast, and targeted
+    import-policy refresh when validation caches update. Downstream /
+    customer-cone verification remains a planned follow-up.
 
 ## Monitoring & Observability
 
