@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.34.0] — 2026-06-02
+
 ### Performance
 
 - **Constant-time RPKI origin validation (bucketed VRP index).** `VrpTable`
