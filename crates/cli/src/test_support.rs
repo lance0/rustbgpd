@@ -26,7 +26,11 @@ pub(crate) struct MockState {
     pub(crate) health_calls: AtomicUsize,
     pub(crate) global_calls: AtomicUsize,
     pub(crate) config_diff_calls: AtomicUsize,
+    pub(crate) config_plan_calls: AtomicUsize,
+    pub(crate) config_apply_calls: AtomicUsize,
     pub(crate) last_config_diff: Mutex<Option<String>>,
+    pub(crate) last_config_plan: Mutex<Option<server_proto::PlanConfigTransactionRequest>>,
+    pub(crate) last_config_apply: Mutex<Option<server_proto::ApplyConfigTransactionRequest>>,
     pub(crate) last_add_neighbor: Mutex<Option<server_proto::NeighborConfig>>,
     pub(crate) last_softreset: Mutex<Option<server_proto::SoftResetInRequest>>,
     pub(crate) last_explain_advertised: Mutex<Option<server_proto::ExplainAdvertisedRouteRequest>>,
@@ -297,19 +301,42 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
 
     async fn plan_config_transaction(
         &self,
-        _request: Request<server_proto::PlanConfigTransactionRequest>,
+        request: Request<server_proto::PlanConfigTransactionRequest>,
     ) -> Result<Response<server_proto::ConfigTransactionPlanResponse>, Status> {
-        Err(Status::unimplemented(
-            "mock ConfigService does not implement PlanConfigTransaction",
-        ))
+        self.state.config_plan_calls.fetch_add(1, Ordering::SeqCst);
+        *self.state.last_config_plan.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::ConfigTransactionPlanResponse {
+            status: server_proto::ConfigTransactionPlanStatus::Committable as i32,
+            runtime_snapshot_token: "kv1:planned:1".to_string(),
+            diff: Some(server_proto::DiffRuntimeConfigResponse {
+                has_actionable_changes: true,
+                has_reload_applied_changes: true,
+                has_restart_required_changes: false,
+                has_informational_changes: false,
+                has_any_changes: true,
+                human_text: "Reload-applied changes:\n".to_string(),
+                diff_json: "{\"has_any_changes\":true}".to_string(),
+            }),
+            supported_sections: vec!["[[fib_tables]]".to_string()],
+            unsupported_sections: Vec::new(),
+            restart_required_sections: Vec::new(),
+            human_text: "Config transaction is committable by v1.\n".to_string(),
+        }))
     }
 
     async fn apply_config_transaction(
         &self,
-        _request: Request<server_proto::ApplyConfigTransactionRequest>,
+        request: Request<server_proto::ApplyConfigTransactionRequest>,
     ) -> Result<Response<server_proto::ConfigTransactionApplyResponse>, Status> {
-        Err(Status::unimplemented(
-            "mock ConfigService does not implement ApplyConfigTransaction",
+        self.state.config_apply_calls.fetch_add(1, Ordering::SeqCst);
+        *self.state.last_config_apply.lock().await = Some(request.into_inner());
+        Ok(Response::new(
+            server_proto::ConfigTransactionApplyResponse {
+                status: server_proto::ConfigTransactionPlanStatus::Committable as i32,
+                runtime_snapshot_token: "kv1:committed:2".to_string(),
+                committed_sections: vec!["[[fib_tables]]".to_string()],
+                human_text: "Committed [[fib_tables]] transaction.\n".to_string(),
+            },
         ))
     }
 }

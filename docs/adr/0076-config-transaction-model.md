@@ -82,6 +82,9 @@ section executors behind that public contract.
 - Candidate TOML remains credential-bearing input. Audit summaries for both new
   RPCs redact the TOML body; apply summaries also avoid logging free-form
   comments verbatim.
+- `rustbgpctl config plan` and `rustbgpctl config apply` are thin clients over
+  the same RPCs. They print redacted daemon summaries by default and stable JSON
+  when `--json` is set.
 - The transaction planner is stricter than SIGHUP. Some sections that SIGHUP can
   hot-apply are still rejected because no atomic transaction executor exists yet.
   That is intentional: transaction support means validate/commit/rollback under

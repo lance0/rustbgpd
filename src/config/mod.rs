@@ -1520,8 +1520,7 @@ impl ConfigDiff {
     reason = "field names mirror ConfigTransactionPlanResponse proto repeated fields"
 )]
 pub struct ConfigTransactionSectionClassification {
-    /// Sections the v1 transaction model can commit once their executor slice
-    /// is present.
+    /// Sections the v1 transaction model can commit atomically.
     pub supported_sections: Vec<String>,
     /// Hot-reloadable sections that are intentionally outside v1's commit
     /// executor set.

@@ -330,6 +330,9 @@ CLI equivalent:
 ```bash
 rustbgpctl config diff --from-file /tmp/new-config.toml
 rustbgpctl --json config diff --from-file /tmp/new-config.toml
+rustbgpctl config plan --from-file /tmp/new-config.toml
+rustbgpctl config apply --from-file /tmp/new-config.toml \
+  --expected-runtime-snapshot-token fnv1a64:...
 ```
 
 ---
