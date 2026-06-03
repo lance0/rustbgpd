@@ -33,10 +33,12 @@ impl<V> Default for FamilyPrefixMap<V> {
     }
 }
 
-// rustbgpd's `Prefix` is canonical by construction — the wire parser bounds the
-// length (<= 32 / <= 128) and zeroes host bits. `Ipv?Net::new` only validates
-// the length (it preserves host bits rather than rejecting them), so this
-// conversion is infallible for any `Prefix` that reached the RIB.
+// rustbgpd's `Prefix` is canonical by construction: `Ipv4Prefix::new` /
+// `Ipv6Prefix::new` clamp the length and zero host bits. The fields are public,
+// so this relies on callers preserving that constructor invariant. `Ipv?Net::new`
+// only validates the length (it preserves host bits rather than rejecting them),
+// so this conversion is infallible for canonical `Prefix` values that reached
+// the RIB.
 fn v4_net(p: Ipv4Prefix) -> Ipv4Net {
     Ipv4Net::new(p.addr, p.len).expect("valid IPv4 prefix length")
 }

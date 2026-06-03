@@ -246,6 +246,27 @@ async fn connected_stream_pair() -> (TcpStream, TcpStream) {
     (client.unwrap(), server.unwrap().0)
 }
 
+async fn establish_test_session(session: &mut PeerSession, remote_asn: u32) {
+    session.drive_fsm(Event::ManualStart).await;
+    session
+        .drive_fsm(Event::OpenReceived(rustbgpd_wire::OpenMessage {
+            version: 4,
+            my_as: u16::try_from(remote_asn).unwrap_or(23_456),
+            hold_time: 90,
+            bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+            capabilities: vec![
+                Capability::MultiProtocol {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                },
+                Capability::FourOctetAs { asn: remote_asn },
+            ],
+        }))
+        .await;
+    session.drive_fsm(Event::KeepaliveReceived).await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+}
+
 async fn read_single_bgp_message(stream: &mut TcpStream) -> Message {
     let mut header = [0_u8; 19];
     stream.read_exact(&mut header).await.unwrap();
@@ -3685,6 +3706,10 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop_and_add_path() {
 #[tokio::test]
 async fn add_path_multiplicity_counts_one_prefix_for_max_prefix() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
     session.config.max_prefixes = Some(1);
     let mut negotiated = negotiated_session(65002, true);
     negotiated
@@ -3727,6 +3752,10 @@ async fn add_path_multiplicity_counts_one_prefix_for_max_prefix() {
         "two Add-Path IDs for one prefix count as one unique prefix"
     );
 
+    assert!(
+        session.read_half.is_some(),
+        "fixture must be connected before the over-limit update"
+    );
     let second_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let update = UpdateMessage::build(
         &[Ipv4NlriEntry {
@@ -3743,8 +3772,13 @@ async fn add_path_multiplicity_counts_one_prefix_for_max_prefix() {
     session.process_update(update).await;
 
     assert!(
-        session.known_prefix_count() > 1,
-        "a distinct prefix must exceed max_prefixes=1"
+        session.read_half.is_none(),
+        "max-prefix overflow must drive the FSM teardown path"
+    );
+    assert_eq!(
+        session.known_prefix_count(),
+        0,
+        "teardown must clear max-prefix accounting"
     );
 }
 
@@ -4505,6 +4539,9 @@ async fn evpn_routes_counted_toward_max_prefix() {
     };
 
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65001).await;
     session.config.max_prefixes = Some(2);
     let negotiated = NegotiatedSession {
         peer_asn: 65001,
@@ -4575,14 +4612,23 @@ async fn evpn_routes_counted_toward_max_prefix() {
         "EVPN routes must contribute to the prefix count"
     );
 
+    assert!(
+        session.read_half.is_some(),
+        "fixture must be connected before the over-limit update"
+    );
     // Push a 3rd — must exceed max_prefixes = 2.
     session
         .process_update(send_announces(vec![make_route(0x03)]))
         .await;
 
     assert!(
-        session.known_prefix_count() > 2,
-        "EVPN floods must visibly exceed the cap so enforcement fires"
+        session.read_half.is_none(),
+        "max-prefix overflow must drive the FSM teardown path"
+    );
+    assert_eq!(
+        session.known_prefix_count(),
+        0,
+        "teardown must clear max-prefix accounting"
     );
 }
 
