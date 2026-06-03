@@ -44,7 +44,7 @@ those.
 | FIB / dataplane: unicast Linux FIB install, ECMP, weighted multipath, BLACKHOLE discard | Shipped | Opt-in `[[fib_tables]]` (ADR-0061/0066/0068) |
 | Security: TCP MD5, GTSM, static TCP-AO, native gRPC mTLS + tier authz | Shipped | TCP-AO BIRD-interop (M43); ADR-0064 authz |
 | RPKI origin validation (6811 + 8210) | Shipped | RTR client, VRP table, policy match |
-| ASPA verification | Partial | Upstream-path verification (RTR v2); downstream/customer-cone planned |
+| ASPA verification | Shipped | RTR v2, role-aware upstream/downstream verification, policy match |
 | Policy: prefix lists, named chains, actions, community/AS_PATH/validation match | Shipped | GoBGP-style chain evaluation |
 | BFD single-hop async + RFC 5882 coupling | Shipped | M51 |
 | Observability & API: gRPC (11 services), Prometheus, structured logs, durable event history | Shipped | ADR-0072 outbox + `SubscribeFromEvent` |
@@ -120,16 +120,13 @@ Later for what remains.
 
 ### Later
 
-- **ASPA verification — full scope.** Upstream-path verification ships
-  (`ValidationSnapshot`, `match_aspa_validation` import policy, draft-v25 §5.4
-  algorithm fidelity + §6.2 per-AFI/SAFI gate, #294). Extend toward the full
-  draft-ietf-sidrops-aspa-verification scope (downstream / customer-cone) as
-  ASPA reaches GA across RIRs (ARIN Jan 2026, RIPE production, APNIC Q2 2026),
-  matching BIRD / OpenBGPD router-side verification; pairs with BGP Roles as the
-  2026 route-leak-prevention bundle for the MANRS / IXP audience. Remaining gaps
-  (deferred, not blocking): draft v25 §5.4 step 2 first-AS precondition (no
-  `enforce-first-as`-equivalent today); NIST-BRIO test vector import;
-  `match_aspa_validation` import/export policy-match unit coverage.
+- **ASPA verification — test hardening.** Role-aware upstream/downstream
+  verification now ships with the draft-v25 first-AS precondition, §6.2
+  IPv4/IPv6-unicast family gate, best-path preference, and
+  `match_aspa_validation` import/export policy. Remaining hardening is test
+  breadth rather than feature scope: import NIST-BRIO ASPA vectors when they are
+  easy to automate, and expand policy-match unit coverage around
+  `match_aspa_validation`.
 - **EVPN standards tail.** Native overlay-index Type-5 local origination +
   protected recursion-path interop smoke; multi-homed-gateway ECMP; single-active
   backup-path pre-install (proactive receive-side backup VTEP next-hop so

@@ -223,6 +223,7 @@ mod tests {
             is_llgr_stale: false,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
             path_id,
         }
     }

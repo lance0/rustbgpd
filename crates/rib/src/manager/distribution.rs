@@ -1362,6 +1362,7 @@ impl RibManager {
                         path_id: 0,
                         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+                        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
                     },
                     target_is_ebgp,
                     target_is_rr_client,
@@ -1497,6 +1498,7 @@ impl RibManager {
                 path_id: 0,
                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                 aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+                aspa_context: rustbgpd_wire::AspaValidationContext::default(),
             };
             if should_suppress_ibgp_inner(
                 &probe,

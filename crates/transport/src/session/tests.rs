@@ -160,6 +160,34 @@ fn negotiated_session(remote_asn: u32, extended_nexthop: bool) -> NegotiatedSess
     }
 }
 
+#[test]
+fn aspa_validation_context_uses_negotiated_asn_and_local_role() {
+    let mut session = make_test_session(65001, 65002);
+    session.config.peer.local_role = Some(rustbgpd_wire::BgpRole::RouteServerClient);
+    session.negotiated = Some(negotiated_session(65099, false));
+
+    let context = session.aspa_validation_context();
+
+    assert_eq!(context.neighbor_asn, Some(65099));
+    assert_eq!(
+        context.local_role,
+        Some(rustbgpd_wire::BgpRole::RouteServerClient)
+    );
+    assert!(context.first_as_check_exempt);
+}
+
+#[test]
+fn aspa_validation_context_preserves_roleless_legacy_behavior() {
+    let mut session = make_test_session(65001, 65002);
+    session.negotiated = Some(negotiated_session(65099, false));
+
+    let context = session.aspa_validation_context();
+
+    assert_eq!(context.neighbor_asn, None);
+    assert_eq!(context.local_role, None);
+    assert!(!context.first_as_check_exempt);
+}
+
 fn configure_scoped_link_local_peer(session: &mut PeerSession) {
     session.peer_ip = IpAddr::V6("fe80::2".parse().unwrap());
     session.config.peer_interface = Some("eth1".to_string());
@@ -191,6 +219,7 @@ fn make_route(local_pref: u32) -> Route {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }
 
@@ -222,6 +251,7 @@ fn make_v6_unicast_route(next_hop: Ipv6Addr) -> Route {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }
 
@@ -559,6 +589,7 @@ fn route_server_client_ebgp_does_not_synthesize_as_path() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
 
@@ -854,6 +885,7 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let route2 = Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24)),
@@ -914,6 +946,7 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let route2 = Route {
         prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:2::".parse().unwrap(), 64)),
@@ -1105,6 +1138,7 @@ fn ibgp_default_local_pref_when_missing() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let attrs =
         session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
@@ -1136,6 +1170,7 @@ fn rr_does_not_add_originator_or_cluster_for_local_route() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
 
     let attrs =
@@ -1187,6 +1222,7 @@ fn rr_adds_originator_and_cluster_for_ibgp_route() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
 
     let attrs =
@@ -2126,6 +2162,7 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         }],
         withdraw: vec![],
         end_of_rib: vec![],
@@ -2383,6 +2420,7 @@ async fn route_server_client_ipv6_preserves_next_hop() {
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         }],
         withdraw: vec![],
         end_of_rib: vec![],
@@ -3438,6 +3476,7 @@ async fn err_denied_replacement_is_swept_at_eorr() {
                 path_id: 0,
                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                 aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+                aspa_context: rustbgpd_wire::AspaValidationContext::default(),
             }],
             withdrawn: vec![],
             flowspec_announced: vec![],

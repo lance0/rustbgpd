@@ -447,7 +447,7 @@ pub enum RibUpdate {
         /// The new VRP table snapshot.
         table: Arc<VrpTable>,
     },
-    /// ASPA cache update — new ASPA table for upstream path verification.
+    /// ASPA cache update — new ASPA table for path verification.
     AspaTableUpdate {
         /// The new ASPA table snapshot.
         table: Arc<AspaTable>,

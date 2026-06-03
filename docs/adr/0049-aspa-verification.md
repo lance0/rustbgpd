@@ -1,4 +1,4 @@
-# ADR-0049: ASPA Upstream Path Verification
+# ADR-0049: ASPA Path Verification
 
 **Status:** Accepted
 **Date:** 2026-03-13
@@ -59,28 +59,38 @@ multiple CAs may issue ASPAs for the same customer.
 
 `Arc<AspaTable>` follows the same immutable snapshot pattern as `Arc<VrpTable>`.
 
-### Upstream-only verification (initial scope)
+### Role-aware verification
 
-Only upstream path verification is implemented. This covers routes from
-customers and peers — the common case and the IX route server use case.
+ASPA verification is selected from the configured BGP Role (RFC 9234), matching
+draft-ietf-sidrops-aspa-verification-25 §6.3:
 
-Downstream verification (routes from providers) requires a per-peer
-`relationship` config field (customer/provider/peer) and a second algorithm
-variant. Deferred to a follow-up.
+- local role `customer` (routes received from a provider) uses downstream
+  verification (§5.5);
+- local roles `provider`, `peer`, `rs`, and `rs-client` use upstream
+  verification (§5.4);
+- no configured role preserves the original upstream-only behavior.
+
+The role-selected context is stored on each unicast route so ASPA cache updates
+can revalidate with the same direction used at import time.
 
 ### Verification algorithm
 
 Per draft-ietf-sidrops-aspa-verification:
 
 1. Compress AS_PATH: flatten segments, remove consecutive duplicates
-2. AS_SET present -> Invalid (path is unverifiable)
-3. Empty AS_PATH -> Invalid (per spec step 1)
-4. Single-hop -> Valid (no pairs to verify)
-5. Walk from origin toward neighbor, checking each hop:
+2. Empty AS_PATH -> Invalid (per spec step 1)
+3. The most recently added AS must match the neighbor ASN, with the
+   transparent route-server-client exception for upstream verification
+4. AS_SET present -> Invalid (path is unverifiable)
+5. Single-hop -> Valid (no pairs to verify)
+6. Upstream verification walks from origin toward neighbor, checking each hop:
    - ProviderPlus -> authorized, continue
    - NotProviderPlus -> Invalid (proven route leak)
    - NoAttestation -> mark incomplete, continue
-6. If any hop was NoAttestation -> Unknown; otherwise -> Valid
+7. Downstream verification computes the §5.3 up-ramp and down-ramp bounds:
+   - `max_up_ramp + max_down_ramp < N` -> Invalid
+   - `min_up_ramp + min_down_ramp < N` -> Unknown
+   - otherwise -> Valid
 
 Invalid trumps Unknown: a single proven non-provider hop makes the entire
 path Invalid regardless of missing attestations elsewhere.
@@ -154,15 +164,16 @@ routes can be reconsidered against the fresh snapshot.
 ### RIB re-validation on ASPA table update
 
 When a new ASPA table arrives, the RibManager re-validates all routes
-by running the upstream verification algorithm on each route's AS_PATH.
+by running the role-aware verification algorithm on each route's AS_PATH.
 Routes whose ASPA state changes are added to the recompute set and
 best-path re-runs for affected prefixes. Same pattern as RPKI
 re-validation.
 
 ### Route.aspa_state field
 
-Routes carry `aspa_state: AspaValidation` (default: Unknown). Set on
-ingress and updated on ASPA table changes.
+Routes carry `aspa_state: AspaValidation` (default: Unknown) and the compact
+`AspaValidationContext` needed to replay the same role-aware verification on
+ASPA table changes. Set on ingress and updated on ASPA table changes.
 
 ## Consequences
 
@@ -170,18 +181,16 @@ ingress and updated on ASPA table changes.
   and best-path step 0.7 is a no-op tie
 - ASPA table updates trigger full re-validation — acceptable since cache
   updates are infrequent
-- The wire crate gains one new public enum (minor semver bump when
-  published)
+- The wire crate gains public ASPA validation state/context types (minor semver
+  bump when published)
 - `match_aspa_validation` (and `match_rpki_validation`) work in both import
   and export policy — import evaluation uses the current validation snapshot
   and validation-cache updates trigger targeted import-policy refresh for
   dependent established peers
-- Downstream verification is not supported — requires future per-peer
-  relationship config
 - RTR v2 version negotiation is implemented with automatic fallback to v1;
   ASPA is only available when the cache supports RTR v2
-- No new config is needed for ASPA — it uses the same RTR cache servers
-  as RPKI ROV
+- No new ASPA-specific config is needed — it uses the same RTR cache servers
+  as RPKI ROV and the existing BGP Roles configuration to select direction
 
 ## Amendments
 
@@ -218,15 +227,24 @@ using `match_aspa_validation` import policy against non-unicast
 families will now see `Unknown` instead of unsafely inheriting the
 upstream walk's verdict. IPv4 / IPv6 unicast routes are unchanged.
 
-**Still deferred (not closed by this PR):**
+### 2026-06-03 — Role-aware full-scope verification
 
-- Downstream verification (routes from providers) per §5.5.
-  Requires per-peer relationship configuration; remains deferred —
-  see "Upstream-only verification (initial scope)" above for the
-  original rationale.
-- Draft v25 §5.4 step 2 first-AS precondition: the most-recent AS in
-  the `AS_PATH` MUST equal the negotiated neighbor ASN, with a
-  transparent-route-server-client exception. rustbgpd has no
-  `enforce-first-as`-equivalent today; tracked as a follow-up. ASPA
-  verdicts against peers that strip or rewrite the leftmost AS may
-  be misleading until this lands.
+The original upstream-only scope is extended to the full draft-v25 verifier:
+
+- `AspaValidationContext` records neighbor ASN, local BGP Role, and the
+  transparent-IX first-AS exception needed to replay ASPA validation later.
+- `ValidationSnapshot::validate_aspa` selects upstream or downstream
+  verification from the local BGP Role. A local `customer` role means routes are
+  received from a provider and use downstream verification; all other roles use
+  upstream verification. If no role is configured, rustbgpd preserves the
+  original upstream-only behavior.
+- The draft-v25 first-AS precondition is enforced for role-aware validation.
+  The upstream route-server-client exception is represented by
+  `first_as_check_exempt`.
+- RIB cache-update revalidation now uses each route's stored ASPA context, so
+  downstream routes do not silently fall back to upstream verification when a
+  fresh RTR table arrives.
+
+Remaining ASPA work is test hardening, not feature scope: import NIST-BRIO
+vectors when practical and keep expanding focused `match_aspa_validation`
+policy coverage.

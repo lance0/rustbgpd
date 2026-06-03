@@ -72,6 +72,7 @@ fn make_route(prefix: Prefix) -> Route {
         path_id: 0,
         validation_state: RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }
 

@@ -118,7 +118,7 @@ pub struct RibManager {
     peer_orf_pending: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
     /// Current RPKI VRP table for origin validation. `None` = no RPKI data.
     vrp_table: Option<Arc<VrpTable>>,
-    /// Current ASPA table for upstream path verification. `None` = no ASPA data.
+    /// Current ASPA table for path verification. `None` = no ASPA data.
     aspa_table: Option<Arc<rustbgpd_rpki::AspaTable>>,
     route_events_tx: broadcast::Sender<RouteEvent>,
     /// Currently surfaced unicast export-policy denials. This keeps

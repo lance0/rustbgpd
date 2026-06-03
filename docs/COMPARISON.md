@@ -109,15 +109,15 @@ suite implementation.
 | TCP-AO (RFC 5925) | Static startup | No | Yes | No | No |
 | GTSM / TTL Security | Yes | Yes | Yes | Yes | Yes |
 | RPKI origin validation | Yes | Yes | Yes | Yes | Yes |
-| ASPA path verification | Upstream[^aspa] | No | Yes | No | Yes |
+| ASPA path verification | Yes[^aspa] | No | Yes | No | Yes |
 | Private AS removal | Yes | Yes | Yes | Yes | Yes |
 | Privilege separation | No | No | No | No | Yes |
 | Memory-safe language | Yes | No | No | Yes | No |
 
-[^aspa]: rustbgpd ships RTR v2 ASPA input, upstream path verification, best-path
-    preference, policy matching for IPv4/IPv6 unicast, and targeted
-    import-policy refresh when validation caches update. Downstream /
-    customer-cone verification remains a planned follow-up.
+[^aspa]: rustbgpd ships RTR v2 ASPA input, role-aware upstream/downstream path
+    verification selected by BGP Roles, best-path preference, policy matching
+    for IPv4/IPv6 unicast, and targeted import-policy refresh when validation
+    caches update.
 
 ## Monitoring & Observability
 

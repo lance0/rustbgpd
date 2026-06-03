@@ -99,7 +99,7 @@ pub struct CachedDecision {
     pub matched_policy: Option<String>,
     /// RPKI origin-validation state at evaluation time.
     pub rpki: RpkiValidation,
-    /// ASPA upstream-path-verification state at evaluation time.
+    /// ASPA path-verification state at evaluation time.
     pub aspa: AspaValidation,
     /// Path attributes exactly as received before policy applied them.
     /// Cloned at the eval site; the original UPDATE-path is unchanged.

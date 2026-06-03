@@ -77,7 +77,7 @@ pub struct RouteContext<'a> {
     pub as_path_len: usize,
     /// RPKI origin validation state (RFC 6811).
     pub validation_state: RpkiValidation,
-    /// ASPA upstream path verification state.
+    /// ASPA path verification state.
     pub aspa_state: AspaValidation,
     /// Evaluation peer IP address.
     pub peer_address: Option<IpAddr>,

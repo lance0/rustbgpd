@@ -1,10 +1,9 @@
-//! ASPA upstream path verification per draft-ietf-sidrops-aspa-verification.
+//! ASPA path verification per draft-ietf-sidrops-aspa-verification.
 //!
-//! Implements the upstream verification algorithm only. Downstream verification
-//! (for routes from providers) requires per-peer relationship configuration and
-//! is deferred.
+//! Implements upstream and downstream verification, with the verification
+//! direction selected from the locally configured BGP Role when available.
 
-use rustbgpd_wire::{AsPath, AsPathSegment, AspaValidation};
+use rustbgpd_wire::{AsPath, AsPathSegment, AspaValidation, AspaValidationContext, BgpRole};
 
 use crate::aspa::{AspaTable, ProviderAuth};
 
@@ -28,6 +27,43 @@ fn compress_as_path(path: &AsPath) -> Option<Vec<u32>> {
         }
     }
     Some(result)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerificationDirection {
+    Upstream,
+    Downstream,
+}
+
+fn direction_for_role(role: Option<BgpRole>) -> VerificationDirection {
+    match role {
+        Some(BgpRole::Customer) => VerificationDirection::Downstream,
+        Some(
+            BgpRole::Provider | BgpRole::RouteServer | BgpRole::RouteServerClient | BgpRole::Peer,
+        )
+        | None => VerificationDirection::Upstream,
+    }
+}
+
+fn leftmost_as_matches_neighbor(hops: &[u32], neighbor_asn: Option<u32>) -> bool {
+    match neighbor_asn {
+        Some(asn) => hops.first().is_some_and(|leftmost| *leftmost == asn),
+        None => true,
+    }
+}
+
+/// Verify an `AS_PATH` using the role-aware ASPA procedures from
+/// `draft-ietf-sidrops-aspa-verification-25` §5.4 and §5.5.
+///
+/// With no configured role, this preserves rustbgpd's legacy upstream-only
+/// behavior. When the local role is [`BgpRole::Customer`], routes are treated
+/// as received from a provider and downstream verification is applied.
+#[must_use]
+pub fn verify(path: &AsPath, table: &AspaTable, context: AspaValidationContext) -> AspaValidation {
+    match direction_for_role(context.local_role) {
+        VerificationDirection::Upstream => verify_upstream_with_context(path, table, context),
+        VerificationDirection::Downstream => verify_downstream(path, table, context),
+    }
 }
 
 /// Verify an `AS_PATH` using upstream ASPA verification per
@@ -70,12 +106,26 @@ fn compress_as_path(path: &AsPath) -> Option<Vec<u32>> {
 /// that introduces a non-zero `max_down_ramp`) fires the corpus test.
 #[must_use]
 pub fn verify_upstream(path: &AsPath, table: &AspaTable) -> AspaValidation {
+    verify_upstream_with_context(path, table, AspaValidationContext::default())
+}
+
+fn verify_upstream_with_context(
+    path: &AsPath,
+    table: &AspaTable,
+    context: AspaValidationContext,
+) -> AspaValidation {
     let Some(compressed) = compress_as_path(path) else {
         return AspaValidation::Invalid; // AS_SET present
     };
 
     // Empty AS_PATH is Invalid per spec step 1.
     if compressed.is_empty() {
+        return AspaValidation::Invalid;
+    }
+
+    if !context.first_as_check_exempt
+        && !leftmost_as_matches_neighbor(&compressed, context.neighbor_asn)
+    {
         return AspaValidation::Invalid;
     }
 
@@ -117,11 +167,85 @@ pub fn verify_upstream(path: &AsPath, table: &AspaTable) -> AspaValidation {
     }
 }
 
+fn verify_downstream(
+    path: &AsPath,
+    table: &AspaTable,
+    context: AspaValidationContext,
+) -> AspaValidation {
+    let Some(compressed) = compress_as_path(path) else {
+        return AspaValidation::Invalid; // AS_SET present
+    };
+
+    if compressed.is_empty() {
+        return AspaValidation::Invalid;
+    }
+
+    if !leftmost_as_matches_neighbor(&compressed, context.neighbor_asn) {
+        return AspaValidation::Invalid;
+    }
+
+    if compressed.len() == 1 {
+        return AspaValidation::Valid;
+    }
+
+    let origin_to_neighbor: Vec<u32> = compressed.iter().rev().copied().collect();
+    let n = origin_to_neighbor.len();
+    let max_up = ramp_up_bound(&origin_to_neighbor, table, BoundMode::Max);
+    let min_up = ramp_up_bound(&origin_to_neighbor, table, BoundMode::Min);
+    let max_down = ramp_down_bound(&origin_to_neighbor, table, BoundMode::Max);
+    let min_down = ramp_down_bound(&origin_to_neighbor, table, BoundMode::Min);
+
+    if max_up + max_down < n {
+        AspaValidation::Invalid
+    } else if min_up + min_down < n {
+        AspaValidation::Unknown
+    } else {
+        AspaValidation::Valid
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundMode {
+    Max,
+    Min,
+}
+
+fn ramp_up_bound(origin_to_neighbor: &[u32], table: &AspaTable, mode: BoundMode) -> usize {
+    let n = origin_to_neighbor.len();
+    for i in 0..n.saturating_sub(1) {
+        let customer = origin_to_neighbor[i];
+        let provider = origin_to_neighbor[i + 1];
+        if stops_ramp(table.authorized(customer, provider), mode) {
+            return i + 1;
+        }
+    }
+    n
+}
+
+fn ramp_down_bound(origin_to_neighbor: &[u32], table: &AspaTable, mode: BoundMode) -> usize {
+    let n = origin_to_neighbor.len();
+    for j in (1..n).rev() {
+        let customer = origin_to_neighbor[j];
+        let provider = origin_to_neighbor[j - 1];
+        if stops_ramp(table.authorized(customer, provider), mode) {
+            return n - j;
+        }
+    }
+    n
+}
+
+fn stops_ramp(auth: ProviderAuth, mode: BoundMode) -> bool {
+    match mode {
+        BoundMode::Max => auth == ProviderAuth::NotProviderPlus,
+        BoundMode::Min => auth != ProviderAuth::ProviderPlus,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::aspa::AspaRecord;
-    use rustbgpd_wire::AsPathSegment;
+    use rustbgpd_wire::{AsPathSegment, AspaValidationContext, BgpRole};
 
     fn make_path(asns: &[u32]) -> AsPath {
         AsPath {
@@ -139,6 +263,14 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    fn context(local_role: Option<BgpRole>, neighbor_asn: u32) -> AspaValidationContext {
+        AspaValidationContext {
+            neighbor_asn: Some(neighbor_asn),
+            local_role,
+            first_as_check_exempt: matches!(local_role, Some(BgpRole::RouteServerClient)),
+        }
     }
 
     #[test]
@@ -174,6 +306,88 @@ mod tests {
         let table = make_table(vec![(65001, vec![65002])]);
         let path = make_path(&[65002, 65001]);
         assert_eq!(verify_upstream(&path, &table), AspaValidation::Valid);
+    }
+
+    #[test]
+    fn roleless_context_preserves_upstream_behavior() {
+        let table = make_table(vec![(65001, vec![65002])]);
+        let path = make_path(&[65002, 65001]);
+        assert_eq!(
+            verify(&path, &table, AspaValidationContext::default()),
+            AspaValidation::Valid
+        );
+    }
+
+    #[test]
+    fn upstream_first_as_mismatch_is_invalid() {
+        let table = make_table(vec![(65001, vec![65002])]);
+        let path = make_path(&[65002, 65001]);
+        assert_eq!(
+            verify(
+                &path,
+                &table,
+                AspaValidationContext {
+                    neighbor_asn: Some(65099),
+                    local_role: Some(BgpRole::Provider),
+                    first_as_check_exempt: false,
+                },
+            ),
+            AspaValidation::Invalid
+        );
+    }
+
+    #[test]
+    fn upstream_route_server_client_exempts_first_as_check() {
+        let table = make_table(vec![(65001, vec![65002])]);
+        let path = make_path(&[65002, 65001]);
+        assert_eq!(
+            verify(
+                &path,
+                &table,
+                context(Some(BgpRole::RouteServerClient), 65099)
+            ),
+            AspaValidation::Valid
+        );
+    }
+
+    #[test]
+    fn downstream_valid_when_ramps_cover_path() {
+        let table = make_table(vec![(65001, vec![65002]), (65002, vec![65003])]);
+        let path = make_path(&[65003, 65002, 65001]);
+        assert_eq!(
+            verify(&path, &table, context(Some(BgpRole::Customer), 65003)),
+            AspaValidation::Valid
+        );
+    }
+
+    #[test]
+    fn downstream_unknown_when_only_min_bounds_fail() {
+        let table = make_table(vec![(65001, vec![65002])]);
+        let path = make_path(&[65004, 65003, 65002, 65001]);
+        assert_eq!(
+            verify(&path, &table, context(Some(BgpRole::Customer), 65004)),
+            AspaValidation::Unknown
+        );
+    }
+
+    #[test]
+    fn downstream_invalid_when_max_bounds_do_not_cover_path() {
+        let table = make_table(vec![(65001, vec![65099]), (65004, vec![65099])]);
+        let path = make_path(&[65004, 65003, 65002, 65001]);
+        assert_eq!(
+            verify(&path, &table, context(Some(BgpRole::Customer), 65004)),
+            AspaValidation::Invalid
+        );
+    }
+
+    #[test]
+    fn downstream_first_as_mismatch_is_invalid() {
+        let table = make_table(vec![(65001, vec![65002]), (65002, vec![65003])]);
+        let path = make_path(&[65003, 65002, 65001]);
+        assert_eq!(
+            verify(&path, &table, context(Some(BgpRole::Customer), 65099)),
+            AspaValidation::Invalid
+        );
     }
 
     #[test]

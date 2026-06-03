@@ -223,7 +223,9 @@ Competing head-to-head with GoBGP for all use cases:
 - **Interop test suite** — Containerlab + FRR/BIRD shipped; GoBGP doesn't ship one
 - **Structured logging** — tracing-subscriber JSON vs GoBGP's unstructured logs
 - **RPKI integrated into best-path** — clean architecture vs GoBGP's bolt-on
-- **ASPA upstream path verification** — RTR v2, best-path step 0.7, export policy matching; GoBGP has no ASPA support
+- **ASPA path verification** — RTR v2, BGP-Role-selected upstream/downstream
+  verification, best-path step 0.7, and import/export policy matching; GoBGP has
+  no ASPA support
 - **Unicast FIB ECMP beyond Add-Path** — rustbgpd installs kernel `RTA_MULTIPATH` routes with `maximum_paths`, per-class eBGP/iBGP caps, `multipath_relax`, and Link Bandwidth weighted multipath
 - **Read-only gNMI / OpenConfig telemetry** — rustbgpd exposes a native `gnmi.gNMI` service for OpenConfig BGP operational state (`Capabilities`, `Get`, `Subscribe` SAMPLE/POLL/ONCE, plus STREAM ON_CHANGE v1 for neighbor `session-state`), verified with `gnmic`; GoBGP exposes its own gRPC API but not an OpenConfig/gNMI target
 - **Import-policy explain** — `ExplainImportPolicy` RPC + `rustbgpctl policy explain` answer "why didn't this prefix come in?" from a per-session import-decision cache that records both permits and denies at the transport eval site (ADR-0073); GoBGP has no per-prefix import-decision diagnostic
