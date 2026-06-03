@@ -1,6 +1,8 @@
 use std::net::IpAddr;
 
-use rustbgpd_api::peer_types::{ConfigEvent, PeerKey, PeerManagerNeighborConfig};
+use rustbgpd_api::peer_types::{
+    ConfigEvent, ImportValidationDependency, PeerKey, PeerManagerNeighborConfig,
+};
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::RibUpdate;
@@ -27,6 +29,94 @@ impl PeerManager {
         };
         self.update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy)
             .await
+    }
+
+    pub(super) async fn soft_reset_import_validation_dependents(
+        &self,
+        dependency: ImportValidationDependency,
+    ) -> Result<(), String> {
+        let candidates: Vec<PeerKey> = self
+            .peers
+            .iter()
+            .filter_map(|(peer_key, managed)| {
+                let depends_on_cache =
+                    managed
+                        .import_policy
+                        .as_ref()
+                        .is_some_and(|chain| match dependency {
+                            ImportValidationDependency::Rpki => chain.requires_rpki_validation(),
+                            ImportValidationDependency::Aspa => chain.requires_aspa_validation(),
+                        });
+                depends_on_cache.then(|| peer_key.clone())
+            })
+            .collect();
+
+        let mut refreshed = 0usize;
+        let mut skipped_not_established = 0usize;
+        let mut failures = Vec::new();
+
+        for peer_key in &candidates {
+            let Some(managed) = self.peers.get(peer_key) else {
+                continue;
+            };
+            let state = managed.handle.query_state_timeout(PEER_QUERY_TIMEOUT).await;
+            if !state
+                .as_ref()
+                .is_some_and(|s| s.fsm_state == SessionState::Established)
+            {
+                skipped_not_established += 1;
+                continue;
+            }
+
+            let refresh_result = tokio::time::timeout(
+                PEER_POLICY_UPDATE_TIMEOUT,
+                self.soft_reset_in(peer_key.clone(), Vec::new()),
+            )
+            .await;
+            match refresh_result {
+                Ok(Ok(())) => refreshed += 1,
+                Ok(Err(error)) => {
+                    warn!(
+                        peer = %peer_key,
+                        ?dependency,
+                        error = %error,
+                        "failed to refresh validation-dependent import policy after cache update"
+                    );
+                    failures.push(format!("{peer_key}: {error}"));
+                }
+                Err(_) => {
+                    let error =
+                        format!("route refresh timed out after {PEER_POLICY_UPDATE_TIMEOUT:?}");
+                    warn!(
+                        peer = %peer_key,
+                        ?dependency,
+                        error = %error,
+                        "timed out refreshing validation-dependent import policy after cache update"
+                    );
+                    failures.push(format!("{peer_key}: {error}"));
+                }
+            }
+        }
+
+        info!(
+            ?dependency,
+            eligible = candidates.len(),
+            refreshed,
+            skipped_not_established,
+            failures = failures.len(),
+            "processed validation-cache import-policy refresh"
+        );
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "validation-cache import refresh failed for {} of {} eligible peers: {}",
+                failures.len(),
+                candidates.len(),
+                failures.join("; ")
+            ))
+        }
     }
 
     #[allow(clippy::too_many_lines)]

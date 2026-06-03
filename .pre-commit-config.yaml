@@ -2,10 +2,11 @@
 # Mirror lance0/prefixd and lance0/ttl, with the clippy / test
 # invocations adapted to this workspace's CI flags from
 # `.github/workflows/ci.yml` (cargo clippy --workspace --all-targets
-# -- -D warnings; cargo test --workspace).
+# -- -D warnings; cargo test --workspace; cargo doc --workspace --lib
+# --no-deps with RUSTDOCFLAGS=-D warnings).
 #
-# `cargo test --lib` is at pre-push (not pre-commit) so commits stay
-# fast; cargo fmt + clippy run on every commit.
+# `cargo test --lib` + rustdoc are at pre-push (not pre-commit) so commits
+# stay fast; cargo fmt + clippy run on every commit.
 #
 # Setup: see CONTRIBUTING.md "Pre-commit hooks".
 repos:
@@ -30,5 +31,13 @@ repos:
         entry: cargo test --workspace --lib
         language: system
         types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: cargo-doc
+        name: cargo doc
+        entry: sh -c 'RUSTDOCFLAGS="-D warnings" cargo doc --workspace --lib --no-deps'
+        language: system
+        always_run: true
         pass_filenames: false
         stages: [pre-push]

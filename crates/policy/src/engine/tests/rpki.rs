@@ -3,6 +3,52 @@ use super::*;
 // --- RPKI validation matching ---
 
 #[test]
+fn chain_reports_validation_state_dependencies() {
+    let policy = |entries| Policy {
+        entries,
+        default_action: PolicyAction::Deny,
+    };
+
+    assert!(
+        !PolicyChain::new(vec![policy(vec![stmt(None, PolicyAction::Permit, vec![])])])
+            .requires_validation_state(),
+        "ordinary policy predicates do not depend on external validation caches"
+    );
+
+    let mut as_path_len_only = stmt(None, PolicyAction::Permit, vec![]);
+    as_path_len_only.match_as_path_length_ge = Some(2);
+    assert!(
+        !PolicyChain::new(vec![policy(vec![as_path_len_only])]).requires_validation_state(),
+        "AS_PATH length matching is unrelated to RPKI/ASPA cache state"
+    );
+
+    let mut rpki = stmt(None, PolicyAction::Permit, vec![]);
+    rpki.match_rpki_validation = Some(RpkiValidation::Invalid);
+    let rpki_chain = PolicyChain::new(vec![policy(vec![rpki])]);
+    assert!(rpki_chain.requires_rpki_validation());
+    assert!(!rpki_chain.requires_aspa_validation());
+    assert!(rpki_chain.requires_validation_state());
+
+    let mut aspa = stmt(None, PolicyAction::Permit, vec![]);
+    aspa.match_aspa_validation = Some(AspaValidation::Invalid);
+    let aspa_chain = PolicyChain::new(vec![policy(vec![aspa])]);
+    assert!(!aspa_chain.requires_rpki_validation());
+    assert!(aspa_chain.requires_aspa_validation());
+    assert!(aspa_chain.requires_validation_state());
+
+    let mut second_policy_rpki = stmt(None, PolicyAction::Permit, vec![]);
+    second_policy_rpki.match_rpki_validation = Some(RpkiValidation::Valid);
+    assert!(
+        PolicyChain::new(vec![
+            policy(vec![stmt(None, PolicyAction::Permit, vec![])]),
+            policy(vec![second_policy_rpki]),
+        ])
+        .requires_rpki_validation(),
+        "dependency detection must scan every policy in the chain"
+    );
+}
+
+#[test]
 fn rpki_match_invalid_deny() {
     let pl = Policy {
         entries: vec![PolicyStatement {

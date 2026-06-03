@@ -59,7 +59,9 @@ use crate::config::{
 use crate::config_persister::{ConfigMutation, ConfigPersister};
 use crate::peer_manager::PeerManager;
 use crate::reload::{apply_reload_outcome, reload_config, run_config_bridge};
-use rustbgpd_api::peer_types::{PeerManagerCommand, PeerManagerNeighborConfig};
+use rustbgpd_api::peer_types::{
+    ImportValidationDependency, PeerManagerCommand, PeerManagerNeighborConfig,
+};
 use rustbgpd_api::server::{
     AccessMode as GrpcServerAccessMode, ListenerConfig as GrpcListenerConfig, ListenerEndpoint,
     ServeConfig,
@@ -574,6 +576,41 @@ fn print_config_diff(diff: &config::ConfigDiff) {
         no_changes: "No changes.".into(),
     };
     print!("{}", config::format_config_diff_with_style(diff, &style));
+}
+
+async fn trigger_import_validation_refresh(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    dependency: ImportValidationDependency,
+) {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if peer_mgr_tx
+        .send(PeerManagerCommand::SoftResetImportValidationDependents {
+            dependency,
+            reply: reply_tx,
+        })
+        .await
+        .is_err()
+    {
+        warn!(
+            ?dependency,
+            "peer manager unavailable while forwarding validation-cache update"
+        );
+        return;
+    }
+
+    match reply_rx.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => warn!(
+            ?dependency,
+            error = %error,
+            "validation-cache import refresh reported failures"
+        ),
+        Err(error) => warn!(
+            ?dependency,
+            error = %error,
+            "validation-cache import refresh reply dropped"
+        ),
+    }
 }
 
 fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) {
@@ -1143,6 +1180,9 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     let (validation_watch_tx, validation_watch_rx) =
         tokio::sync::watch::channel(rustbgpd_rpki::ValidationSnapshot::default());
 
+    let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
+    let (peer_mgr_internal_tx, peer_mgr_internal_rx) = mpsc::unbounded_channel();
+
     // Spawn RPKI subsystem (VRP manager + per-cache RTR clients)
     if let Some(ref rpki_config) = config.rpki
         && !rpki_config.cache_servers.is_empty()
@@ -1160,6 +1200,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
 
         // Forward VRP table updates to RIB manager + validation watch
         let rpki_rib_tx = rib_tx.clone();
+        let rpki_peer_mgr_tx = peer_mgr_tx.clone();
         let validation_tx_vrp = validation_watch_tx.clone();
         tokio::spawn(async move {
             while let Some(update) = rpki_table_rx.recv().await {
@@ -1171,11 +1212,17 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                         table: update.table,
                     })
                     .await;
+                trigger_import_validation_refresh(
+                    &rpki_peer_mgr_tx,
+                    ImportValidationDependency::Rpki,
+                )
+                .await;
             }
         });
 
         // Forward ASPA table updates to RIB manager + validation watch
         let aspa_rib_tx = rib_tx.clone();
+        let aspa_peer_mgr_tx = peer_mgr_tx.clone();
         let validation_tx_aspa = validation_watch_tx.clone();
         tokio::spawn(async move {
             while let Some(update) = aspa_table_rx.recv().await {
@@ -1187,6 +1234,11 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                         table: update.table,
                     })
                     .await;
+                trigger_import_validation_refresh(
+                    &aspa_peer_mgr_tx,
+                    ImportValidationDependency::Aspa,
+                )
+                .await;
             }
         });
 
@@ -1304,8 +1356,6 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         };
 
     // Spawn PeerManager (keep JoinHandle for coordinated shutdown)
-    let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
-    let (peer_mgr_internal_tx, peer_mgr_internal_rx) = mpsc::unbounded_channel();
     // ADR-0067 step 4 — BFD/BGP coupling channels. Created here so PeerManager
     // (the desired-set owner) can take the sender + state-change receiver; the
     // BFD actor takes the matching receiver + sender when it spawns below.

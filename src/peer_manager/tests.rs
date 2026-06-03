@@ -1,6 +1,6 @@
 use super::*;
 use bytes::BytesMut;
-use rustbgpd_api::peer_types::{PeerKey, SessionLifecycleEventType};
+use rustbgpd_api::peer_types::{ImportValidationDependency, PeerKey, SessionLifecycleEventType};
 use rustbgpd_fsm::SessionState;
 use rustbgpd_transport::PeerSessionState;
 use rustbgpd_wire::{
@@ -484,6 +484,46 @@ fn deny_policy_chain() -> PolicyChain {
     }])
 }
 
+fn validation_policy_chain(dependency: ImportValidationDependency) -> PolicyChain {
+    use rustbgpd_policy::{Policy, PolicyAction, PolicyStatement, RouteModifications};
+    use rustbgpd_wire::{AspaValidation, RpkiValidation};
+
+    let mut statement = PolicyStatement {
+        prefix: None,
+        ge: None,
+        le: None,
+        action: PolicyAction::Deny,
+        match_community: vec![],
+        match_as_path: None,
+        match_neighbor_set: None,
+        match_route_type: None,
+        match_evpn_route_type: None,
+        match_rpki_validation: None,
+        match_aspa_validation: None,
+        match_as_path_length_ge: None,
+        match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
+        match_next_hop: None,
+        modifications: RouteModifications::default(),
+    };
+    match dependency {
+        ImportValidationDependency::Rpki => {
+            statement.match_rpki_validation = Some(RpkiValidation::Invalid);
+        }
+        ImportValidationDependency::Aspa => {
+            statement.match_aspa_validation = Some(AspaValidation::Invalid);
+        }
+    }
+
+    PolicyChain::new(vec![Policy {
+        entries: vec![statement],
+        default_action: PolicyAction::Permit,
+    }])
+}
+
 fn insert_test_managed_peer(
     mgr: &mut PeerManager,
     addr: IpAddr,
@@ -570,6 +610,7 @@ fn insert_test_scoped_managed_peer(
 struct FakePeerCounters {
     collision_dump: AtomicU32,
     query_state: AtomicU32,
+    route_refresh: AtomicU32,
     shutdown: AtomicU32,
     stop: AtomicU32,
 }
@@ -580,10 +621,21 @@ fn fake_peer_handle(
     remote_router_id: Option<Ipv4Addr>,
     counters: Arc<FakePeerCounters>,
 ) -> PeerHandle {
+    fake_peer_handle_with_route_refresh_reply(peer_addr, state, remote_router_id, counters, true)
+}
+
+fn fake_peer_handle_with_route_refresh_reply(
+    peer_addr: IpAddr,
+    state: SessionState,
+    remote_router_id: Option<Ipv4Addr>,
+    counters: Arc<FakePeerCounters>,
+    reply_to_route_refresh: bool,
+) -> PeerHandle {
     use rustbgpd_transport::PeerCommand;
 
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
     let task = tokio::spawn(async move {
+        let mut pending_route_refresh_replies = Vec::new();
         while let Some(cmd) = session_rx.recv().await {
             match cmd {
                 PeerCommand::QueryState { reply } => {
@@ -610,6 +662,14 @@ fn fake_peer_handle(
                         uptime_secs: 0,
                         last_error: String::new(),
                     });
+                }
+                PeerCommand::SendRouteRefresh { reply, .. } => {
+                    counters.route_refresh.fetch_add(1, Ordering::SeqCst);
+                    if reply_to_route_refresh {
+                        let _ = reply.send(Ok(()));
+                    } else {
+                        pending_route_refresh_replies.push(reply);
+                    }
                 }
                 PeerCommand::CollisionDump => {
                     counters.collision_dump.fetch_add(1, Ordering::SeqCst);
@@ -1754,6 +1814,136 @@ async fn apply_policy_change_fans_out_to_scoped_peers() {
     assert_eq!(eth1.query_state.load(Ordering::SeqCst), 1);
     drop(mgr);
     rib_drainer.await.unwrap();
+}
+
+#[tokio::test]
+async fn validation_cache_refresh_targets_matching_established_import_policies() {
+    let mut mgr = test_peer_manager();
+    let rpki_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 11));
+    let aspa_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 12));
+    let no_validation_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 13));
+    let idle_rpki_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 14));
+
+    let rpki = Arc::new(FakePeerCounters::default());
+    let aspa = Arc::new(FakePeerCounters::default());
+    let no_validation = Arc::new(FakePeerCounters::default());
+    let idle_rpki = Arc::new(FakePeerCounters::default());
+
+    insert_test_managed_peer(
+        &mut mgr,
+        rpki_peer,
+        fake_peer_handle(rpki_peer, SessionState::Established, None, rpki.clone()),
+        false,
+    );
+    insert_test_managed_peer(
+        &mut mgr,
+        aspa_peer,
+        fake_peer_handle(aspa_peer, SessionState::Established, None, aspa.clone()),
+        false,
+    );
+    insert_test_managed_peer(
+        &mut mgr,
+        no_validation_peer,
+        fake_peer_handle(
+            no_validation_peer,
+            SessionState::Established,
+            None,
+            no_validation.clone(),
+        ),
+        false,
+    );
+    insert_test_managed_peer(
+        &mut mgr,
+        idle_rpki_peer,
+        fake_peer_handle(idle_rpki_peer, SessionState::Idle, None, idle_rpki.clone()),
+        false,
+    );
+
+    mgr.peers.get_mut(&key(rpki_peer)).unwrap().import_policy =
+        Some(validation_policy_chain(ImportValidationDependency::Rpki));
+    mgr.peers.get_mut(&key(aspa_peer)).unwrap().import_policy =
+        Some(validation_policy_chain(ImportValidationDependency::Aspa));
+    mgr.peers
+        .get_mut(&key(no_validation_peer))
+        .unwrap()
+        .import_policy = Some(deny_policy_chain());
+    mgr.peers
+        .get_mut(&key(idle_rpki_peer))
+        .unwrap()
+        .import_policy = Some(validation_policy_chain(ImportValidationDependency::Rpki));
+
+    mgr.soft_reset_import_validation_dependents(ImportValidationDependency::Rpki)
+        .await
+        .unwrap();
+
+    assert_eq!(rpki.query_state.load(Ordering::SeqCst), 1);
+    assert_eq!(rpki.route_refresh.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        idle_rpki.query_state.load(Ordering::SeqCst),
+        1,
+        "RPKI-dependent idle peers are considered but not refreshed"
+    );
+    assert_eq!(idle_rpki.route_refresh.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        aspa.query_state.load(Ordering::SeqCst),
+        0,
+        "ASPA-only peers must not be touched by an RPKI cache update"
+    );
+    assert_eq!(aspa.route_refresh.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        no_validation.query_state.load(Ordering::SeqCst),
+        0,
+        "peers without validation-state import predicates are not queried"
+    );
+
+    mgr.soft_reset_import_validation_dependents(ImportValidationDependency::Aspa)
+        .await
+        .unwrap();
+
+    assert_eq!(aspa.query_state.load(Ordering::SeqCst), 1);
+    assert_eq!(aspa.route_refresh.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        rpki.route_refresh.load(Ordering::SeqCst),
+        1,
+        "RPKI peer must not receive a second refresh from an ASPA-only update"
+    );
+}
+
+#[tokio::test]
+async fn validation_cache_refresh_times_out_unresponsive_route_refresh() {
+    let mut mgr = test_peer_manager();
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 15));
+    let counters = Arc::new(FakePeerCounters::default());
+
+    insert_test_managed_peer(
+        &mut mgr,
+        peer,
+        fake_peer_handle_with_route_refresh_reply(
+            peer,
+            SessionState::Established,
+            None,
+            counters.clone(),
+            false,
+        ),
+        false,
+    );
+    mgr.peers.get_mut(&key(peer)).unwrap().import_policy =
+        Some(validation_policy_chain(ImportValidationDependency::Rpki));
+
+    let result = tokio::time::timeout(
+        PEER_POLICY_UPDATE_TIMEOUT * 3,
+        mgr.soft_reset_import_validation_dependents(ImportValidationDependency::Rpki),
+    )
+    .await
+    .expect("outer timeout: cache refresh helper should return after its per-peer timeout");
+
+    let error = result.expect_err("unresponsive route-refresh reply should be reported");
+    assert!(
+        error.contains("timed out"),
+        "timeout failure should be visible in the aggregate error: {error}"
+    );
+    assert_eq!(counters.query_state.load(Ordering::SeqCst), 1);
+    assert_eq!(counters.route_refresh.load(Ordering::SeqCst), 1);
 }
 
 /// Regression: when a policy mutation actually changes the
