@@ -450,6 +450,9 @@ implemented per ADR-0040.
 - The initial advertisement for an ORF-negotiated family is gated until the
   peer's first ROUTE-REFRESH; `DEFER` installs state and waits for a later
   immediate or plain refresh to sweep advertisements and withdrawals.
+- Address-Prefix ORF entries are decoded only for IPv4/IPv6 unicast. L2VPN and
+  unknown future SAFIs are preserved as raw ORF groups until their family-specific
+  prefix encodings and export semantics are implemented.
 - See ADR-0075.
 
 ---

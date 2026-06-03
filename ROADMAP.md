@@ -317,7 +317,10 @@ Later for what remains.
   outside rustbgpd's fabric / route-server / automation niche. Demand-shaped:
   pursuing them is a deliberate strategic pivot, not parity-chasing. (Of these,
   BGP-LS *export* is the closest fit to the API-first / controller story if a
-  controller-integration headline ever materializes.)
+  controller-integration headline ever materializes.) When adding VPN/MPLS-family
+  support, extend the ORF Address-Prefix decoder deliberately: it currently
+  parses only IPv4/IPv6 unicast and preserves L2VPN / unknown SAFIs as raw ORF
+  groups to avoid silently applying plain-IP prefix semantics to future families.
 - **Route dampening (RFC 2439).** Suppress flapping routes with penalty/decay.
 - **Scriptable policy engine.** User-defined attribute-transformation functions
   (Lua, Starlark, or WASM) beyond static match/action rules. Policy evaluation

@@ -68,6 +68,14 @@ an inbound Route Refresh handler that installs it.
    is opt-in and off by default. It is configured via the static TOML surface
    only; the dynamic-neighbor gRPC surface is unchanged (no new method or field),
    so gRPC-added neighbors default to off.
+10. **Only IPv4/IPv6 unicast Address-Prefix entries are parsed today.** The
+    Route Refresh ORF codec keys Address-Prefix decoding on the resolved
+    `(AFI, SAFI)` pair and only parses `(IPv4, Unicast)` / `(IPv6, Unicast)`.
+    Known non-IP families (for example L2VPN/EVPN) and unknown future SAFIs
+    remain `Raw` ORF groups, not malformed Address-Prefix entries. This avoids
+    baking plain-IP prefix semantics into future L2VPN, VPNv4/v6, labeled-unicast,
+    or MPLS-family work before those prefix encodings and policy semantics are
+    implemented.
 
 ## Consequences
 

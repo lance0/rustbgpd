@@ -310,8 +310,9 @@ pub fn decode_capability_value(mut raw: &[u8]) -> Option<Vec<OrfCapEntry>> {
 // ── ROUTE-REFRESH ORF payload codec (RFC 5291 §5.2) ──────────────────────
 
 /// Decode the ORF section of a ROUTE-REFRESH body, after the AFI/Reserved/SAFI
-/// header. `family` is the resolved AFI of the message (needed to size
-/// Address-Prefix entries); if `None`, all groups are kept as raw bytes.
+/// header. `family` is the resolved AFI/SAFI pair of the message. Address-
+/// Prefix entries are parsed only for IPv4/IPv6 unicast, where their prefix
+/// encoding is defined here; other families are kept as raw bytes.
 ///
 /// # Errors
 ///
@@ -322,7 +323,7 @@ pub fn decode_capability_value(mut raw: &[u8]) -> Option<Vec<OrfCapEntry>> {
 /// reset (RFC 5291 §5.2).
 pub fn decode_route_refresh_orf(
     buf: &mut impl Buf,
-    family: Option<Afi>,
+    family: Option<(Afi, Safi)>,
 ) -> Result<OrfPayload, DecodeError> {
     if buf.remaining() < 1 {
         return Err(DecodeError::Incomplete {
@@ -349,10 +350,18 @@ pub fn decode_route_refresh_orf(
             });
         }
         let group_bytes = buf.copy_to_bytes(len);
-        let entries = if orf_type.is_address_prefix() && family.is_some() {
+        let parse_family = match family {
+            Some((afi @ (Afi::Ipv4 | Afi::Ipv6), Safi::Unicast))
+                if orf_type.is_address_prefix() =>
+            {
+                Some(afi)
+            }
+            _ => None,
+        };
+        let entries = if let Some(afi) = parse_family {
             // A parse failure here is a malformed-but-framed group: surface it
             // as data (RFC 5291 §5.2 reset semantics), not a session error.
-            match decode_address_prefix_entries(&group_bytes, family) {
+            match decode_address_prefix_entries(&group_bytes, afi) {
                 Ok(parsed) => OrfEntries::AddressPrefix(parsed),
                 Err(_) => OrfEntries::Malformed(group_bytes),
             }
@@ -436,7 +445,7 @@ fn address_prefix_entry_len(entry: &AddressPrefixOrf) -> usize {
 
 fn decode_address_prefix_entries(
     mut raw: &[u8],
-    family: Option<Afi>,
+    family: Afi,
 ) -> Result<Vec<AddressPrefixOrf>, DecodeError> {
     let mut entries = Vec::new();
     while !raw.is_empty() {
@@ -497,20 +506,11 @@ fn decode_address_prefix_entries(
     Ok(entries)
 }
 
-fn decode_orf_prefix(
-    raw: &mut &[u8],
-    family: Option<Afi>,
-    prefix_len: u8,
-) -> Result<Prefix, DecodeError> {
+fn decode_orf_prefix(raw: &mut &[u8], family: Afi, prefix_len: u8) -> Result<Prefix, DecodeError> {
     let max_len = match family {
-        Some(Afi::Ipv4) => 32,
-        Some(Afi::Ipv6) => 128,
-        _ => {
-            return Err(DecodeError::InvalidNetworkField {
-                detail: "ORF Address-Prefix entry on a non-IP address family".into(),
-                data: vec![],
-            });
-        }
+        Afi::Ipv4 => 32,
+        Afi::Ipv6 => 128,
+        Afi::L2Vpn => unreachable!("Address-Prefix ORF parser is gated to IP unicast families"),
     };
     if prefix_len > max_len {
         return Err(DecodeError::InvalidNetworkField {
@@ -526,17 +526,17 @@ fn decode_orf_prefix(
         });
     }
     let prefix = match family {
-        Some(Afi::Ipv4) => {
+        Afi::Ipv4 => {
             let mut octets = [0u8; 4];
             octets[..byte_count].copy_from_slice(&raw[..byte_count]);
             Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(octets), prefix_len))
         }
-        Some(Afi::Ipv6) => {
+        Afi::Ipv6 => {
             let mut octets = [0u8; 16];
             octets[..byte_count].copy_from_slice(&raw[..byte_count]);
             Prefix::V6(Ipv6Prefix::new(Ipv6Addr::from(octets), prefix_len))
         }
-        _ => unreachable!("family checked above"),
+        Afi::L2Vpn => unreachable!("Address-Prefix ORF parser is gated to IP unicast families"),
     };
     *raw = &raw[byte_count..];
     Ok(prefix)
@@ -694,7 +694,8 @@ mod tests {
         encode_route_refresh_orf(&payload, &mut buf).unwrap();
         assert_eq!(buf.len(), route_refresh_orf_len(&payload));
         let mut cursor = buf.freeze();
-        let decoded = decode_route_refresh_orf(&mut cursor, Some(Afi::Ipv4)).unwrap();
+        let decoded =
+            decode_route_refresh_orf(&mut cursor, Some((Afi::Ipv4, Safi::Unicast))).unwrap();
         assert_eq!(decoded, payload);
     }
 
@@ -720,7 +721,8 @@ mod tests {
         let mut buf = BytesMut::new();
         encode_route_refresh_orf(&payload, &mut buf).unwrap();
         let mut cursor = buf.freeze();
-        let decoded = decode_route_refresh_orf(&mut cursor, Some(Afi::Ipv4)).unwrap();
+        let decoded =
+            decode_route_refresh_orf(&mut cursor, Some((Afi::Ipv4, Safi::Unicast))).unwrap();
         assert_eq!(decoded, payload);
     }
 
@@ -753,7 +755,8 @@ mod tests {
         let mut buf = BytesMut::new();
         encode_route_refresh_orf(&payload, &mut buf).unwrap();
         let mut cursor = buf.freeze();
-        let decoded = decode_route_refresh_orf(&mut cursor, Some(Afi::Ipv4)).unwrap();
+        let decoded =
+            decode_route_refresh_orf(&mut cursor, Some((Afi::Ipv4, Safi::Unicast))).unwrap();
         assert_eq!(decoded, payload);
     }
 
@@ -777,7 +780,8 @@ mod tests {
         let mut buf = BytesMut::new();
         encode_route_refresh_orf(&payload, &mut buf).unwrap();
         let mut cursor = buf.freeze();
-        let decoded = decode_route_refresh_orf(&mut cursor, Some(Afi::Ipv6)).unwrap();
+        let decoded =
+            decode_route_refresh_orf(&mut cursor, Some((Afi::Ipv6, Safi::Unicast))).unwrap();
         assert_eq!(decoded, payload);
     }
 
@@ -800,7 +804,8 @@ mod tests {
         let mut buf = BytesMut::new();
         encode_route_refresh_orf(&payload, &mut buf).unwrap();
         let mut cursor = buf.freeze();
-        let decoded = decode_route_refresh_orf(&mut cursor, Some(Afi::Ipv4)).unwrap();
+        let decoded =
+            decode_route_refresh_orf(&mut cursor, Some((Afi::Ipv4, Safi::Unicast))).unwrap();
         assert_eq!(decoded, payload);
     }
 
@@ -813,7 +818,8 @@ mod tests {
         buf.put_u16(3);
         buf.put_slice(&[0xAA, 0xBB, 0xCC]);
         let mut cursor = buf.freeze();
-        let decoded = decode_route_refresh_orf(&mut cursor, Some(Afi::Ipv4)).unwrap();
+        let decoded =
+            decode_route_refresh_orf(&mut cursor, Some((Afi::Ipv4, Safi::Unicast))).unwrap();
         assert_eq!(decoded.groups.len(), 1);
         assert_eq!(decoded.groups[0].orf_type, OrfType::Unknown(9));
         assert_eq!(
@@ -842,6 +848,46 @@ mod tests {
     }
 
     #[test]
+    fn rr_orf_address_prefix_non_ip_family_preserved_as_raw() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(WhenToRefresh::Immediate.as_u8());
+        buf.put_u8(OrfType::AddressPrefix.as_u8());
+        buf.put_u16(8);
+        buf.put_u8(orf::ACTION_ADD);
+        buf.put_u32(1);
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(40);
+        let mut cursor = buf.freeze();
+        let decoded =
+            decode_route_refresh_orf(&mut cursor, Some((Afi::L2Vpn, Safi::Evpn))).unwrap();
+        assert_eq!(
+            decoded.groups[0].entries,
+            OrfEntries::Raw(Bytes::from_static(&[orf::ACTION_ADD, 0, 0, 0, 1, 0, 0, 40]))
+        );
+    }
+
+    #[test]
+    fn rr_orf_address_prefix_non_unicast_family_preserved_as_raw() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(WhenToRefresh::Immediate.as_u8());
+        buf.put_u8(OrfType::AddressPrefix.as_u8());
+        buf.put_u16(8);
+        buf.put_u8(orf::ACTION_ADD);
+        buf.put_u32(1);
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(40);
+        let mut cursor = buf.freeze();
+        let decoded =
+            decode_route_refresh_orf(&mut cursor, Some((Afi::Ipv4, Safi::FlowSpec))).unwrap();
+        assert_eq!(
+            decoded.groups[0].entries,
+            OrfEntries::Raw(Bytes::from_static(&[orf::ACTION_ADD, 0, 0, 0, 1, 0, 0, 40]))
+        );
+    }
+
+    #[test]
     fn rr_orf_prefix_len_over_family_max_is_malformed_not_error() {
         // prefixlen 40 for IPv4 is a malformed-but-framed group: it decodes
         // into Malformed (RFC 5291 §5.2 reset semantics), not a session error.
@@ -855,7 +901,8 @@ mod tests {
         buf.put_u8(0);
         buf.put_u8(40); // prefixlen > 32
         let mut cursor = buf.freeze();
-        let decoded = decode_route_refresh_orf(&mut cursor, Some(Afi::Ipv4)).unwrap();
+        let decoded =
+            decode_route_refresh_orf(&mut cursor, Some((Afi::Ipv4, Safi::Unicast))).unwrap();
         assert!(matches!(
             decoded.groups[0].entries,
             OrfEntries::Malformed(_)
@@ -870,7 +917,8 @@ mod tests {
         buf.put_u16(1);
         buf.put_u8(0x40); // undefined Action bit pattern
         let mut cursor = buf.freeze();
-        let decoded = decode_route_refresh_orf(&mut cursor, Some(Afi::Ipv4)).unwrap();
+        let decoded =
+            decode_route_refresh_orf(&mut cursor, Some((Afi::Ipv4, Safi::Unicast))).unwrap();
         assert!(matches!(
             decoded.groups[0].entries,
             OrfEntries::Malformed(_)
@@ -884,6 +932,6 @@ mod tests {
         buf.put_u8(OrfType::AddressPrefix.as_u8());
         buf.put_u16(20); // claims 20 bytes but none follow
         let mut cursor = buf.freeze();
-        assert!(decode_route_refresh_orf(&mut cursor, Some(Afi::Ipv4)).is_err());
+        assert!(decode_route_refresh_orf(&mut cursor, Some((Afi::Ipv4, Safi::Unicast))).is_err());
     }
 }

@@ -162,7 +162,7 @@ impl RouteRefreshMessage {
             // Bound the ORF parse to the declared body so a buffer carrying
             // more than one message cannot over-read.
             let mut orf_buf = buf.copy_to_bytes(body_len - BODY_LEN);
-            let family = Afi::from_u16(afi_raw);
+            let family = Afi::from_u16(afi_raw).zip(Safi::from_u8(safi_raw));
             Some(decode_route_refresh_orf(&mut orf_buf, family)?)
         } else {
             None
@@ -391,6 +391,40 @@ mod tests {
         assert_eq!(msg.safi(), None);
         assert_eq!(msg.afi(), Some(Afi::Ipv4));
         assert_eq!(msg.subtype(), RouteRefreshSubtype::Normal);
+    }
+
+    #[test]
+    fn decode_orf_unknown_safi_preserves_address_prefix_group_as_raw() {
+        use crate::constants::orf;
+        use crate::orf::{OrfEntries, OrfType, WhenToRefresh};
+
+        let data: &[u8] = &[
+            0,
+            1,
+            0,
+            128, // AFI IPv4, Reserved, future/unknown SAFI.
+            orf::WHEN_IMMEDIATE,
+            orf::TYPE_ADDRESS_PREFIX,
+            0,
+            8,
+            orf::ACTION_ADD,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            40,
+        ];
+        let mut buf = Bytes::copy_from_slice(data);
+        let msg = RouteRefreshMessage::decode(&mut buf, data.len()).unwrap();
+        let payload = msg.orf.unwrap();
+        assert_eq!(payload.when_to_refresh, WhenToRefresh::Immediate);
+        assert_eq!(payload.groups[0].orf_type, OrfType::AddressPrefix);
+        assert_eq!(
+            payload.groups[0].entries,
+            OrfEntries::Raw(Bytes::from_static(&[orf::ACTION_ADD, 0, 0, 0, 1, 0, 0, 40]))
+        );
     }
 
     #[test]
