@@ -771,13 +771,12 @@ impl PeerSession {
         // and `ValidationSnapshot::validate_aspa` returns `Unknown` for
         // every other family.
         //
-        // NOTE: draft v25 §5.4 step 2 also requires that the most-recent
-        // AS in `AS_PATH` equals the negotiated neighbor ASN, with a
-        // transparent-route-server-client exception. rustbgpd does not
-        // yet enforce this precondition (no `enforce-first-as`-equivalent
-        // exists today); operators relying on ASPA against peers that
-        // strip or rewrite the leftmost AS may see misleading verdicts.
-        // Tracked as a follow-up.
+        // draft v25 §5.4 step 2 also requires the most-recent AS in `AS_PATH`
+        // to equal the negotiated neighbor ASN, with a transparent-route-
+        // server-client exception. That leftmost-AS precondition is enforced
+        // here whenever a local BGP Role is configured (the role-aware
+        // context carries the neighbor ASN and the RS-client exemption); the
+        // roleless case keeps the legacy behavior and skips it.
         let aspa_context = self.aspa_validation_context();
         let body_aspa_state = validation
             .as_ref()

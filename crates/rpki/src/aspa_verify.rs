@@ -180,6 +180,11 @@ fn verify_downstream(
         return AspaValidation::Invalid;
     }
 
+    // Downstream verification always enforces the leftmost-AS precondition:
+    // the only role that reaches this path is `Customer` (route received from
+    // a provider, which prepends its ASN), and the route-server-client
+    // exemption never applies downstream — an RS-client uses upstream
+    // verification. `direction_for_role` is the single source of that mapping.
     if !leftmost_as_matches_neighbor(&compressed, context.neighbor_asn) {
         return AspaValidation::Invalid;
     }
