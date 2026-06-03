@@ -33,25 +33,27 @@ pub enum RpkiValidation {
 Defined in `rustbgpd-wire` (the shared types crate) so Route, policy,
 API, and the rpki crate can all reference it without circular deps.
 
-### VrpTable: sorted Vec with binary search
+### VrpTable: prefix-length-bucketed index
 
-`VrpTable` stores VRP entries in a sorted `Vec<VrpEntry>`, deduplicated
-at construction time. Validation uses binary search to find covering
-prefixes, then linear scan within the range for containment and origin
-ASN matching.
+`VrpTable` exact-deduplicates `VrpEntry` input at construction time, then stores
+authorizations in a family-split, prefix-length-bucketed index: 33 IPv4 / 129
+IPv6 buckets, each a list of `(network, auths)` groups sorted by masked network.
+Validation walks the route's ancestor prefix lengths `0..=route_len` with one
+binary search per length, giving ~constant-time validation (tens of ns)
+independent of table size.
 
-This is simpler than a trie and sufficient for typical VRP table sizes
-(~400K entries). The immutable design allows `Arc<VrpTable>` sharing.
+Origin validation needs every covering ancestor, not only the longest-prefix
+match: a less-specific valid VRP must still make the route `Valid` even when a
+more-specific covering VRP fails ASN or maxLength. RFC 6811 §2 coverage is
+network containment only; maxLength gates the `Valid` decision. A route more
+specific than a covering ROA's maxLength is therefore `Invalid`, not `NotFound`.
 
-> **Update — superseded by a bucketed index.** The storage was later replaced
-> by a family-split, prefix-length-bucketed index: 33 IPv4 / 129 IPv6 buckets,
-> each a list of `(network, auths)` groups sorted by masked network. Validation
-> walks the route's ancestor prefix lengths `0..=route_len` with one binary
-> search per length, giving ~constant-time validation (tens of ns) independent
-> of table size, versus the original O(n) scan. The same change corrected RFC
-> 6811 §2 coverage semantics — a route more specific than a covering ROA's
-> maxLength is `Invalid`, not `NotFound`. `VrpEntry`, the public `VrpTable` API,
-> and the `Arc<VrpTable>` snapshot are unchanged. See `crates/rpki/src/vrp.rs`.
+The immutable design allows `Arc<VrpTable>` sharing. `VrpEntry`, the public
+`VrpTable` API, and the `Arc<VrpTable>` snapshot shape are unchanged.
+
+> **Historical note:** the original ADR accepted a sorted-`Vec` table with
+> linear coverage scanning as the simplest starting point. That design was
+> superseded after full RTR-scale validation became a measured hot path.
 
 ### Arc<VrpTable> snapshot pattern
 
