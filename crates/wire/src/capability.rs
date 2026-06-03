@@ -208,6 +208,8 @@ pub enum Capability {
     LongLivedGracefulRestart(Vec<LlgrFamily>),
     /// RFC 7911: Add-Path — advertise/receive multiple paths per prefix.
     AddPath(Vec<AddPathFamily>),
+    /// RFC 5291: Outbound Route Filtering — per-family ORF-Type/role blocks.
+    OutboundRouteFilter(Vec<crate::orf::OrfCapEntry>),
     /// RFC 6793: 4-Byte AS Number.
     FourOctetAs {
         /// The 4-byte autonomous system number.
@@ -460,6 +462,16 @@ impl Capability {
                     })
                 }
             }
+            capability_code::OUTBOUND_ROUTE_FILTERING => {
+                // RFC 5291 §4: per-family blocks. Preserve as Unknown on a
+                // structural error or unrecognized AFI/SAFI (lossless
+                // round-trip, mirroring Add-Path).
+                let raw = buf.copy_to_bytes(usize::from(length));
+                match crate::orf::decode_capability_value(&raw) {
+                    Some(entries) => Ok(Capability::OutboundRouteFilter(entries)),
+                    None => Ok(Capability::Unknown { code, data: raw }),
+                }
+            }
             capability_code::FOUR_OCTET_AS => {
                 if length != 4 {
                     let data = buf.copy_to_bytes(usize::from(length));
@@ -613,6 +625,19 @@ impl Capability {
                     buf.put_u8(fam.send_receive as u8);
                 }
             }
+            Capability::OutboundRouteFilter(entries) => {
+                let value_len = crate::orf::capability_value_len(entries);
+                if value_len > 255 {
+                    return Err(EncodeError::ValueOutOfRange {
+                        field: "outbound_route_filter_capability_length",
+                        value: value_len.to_string(),
+                    });
+                }
+                buf.put_u8(capability_code::OUTBOUND_ROUTE_FILTERING);
+                #[expect(clippy::cast_possible_truncation)]
+                buf.put_u8(value_len as u8);
+                crate::orf::encode_capability_value(entries, buf);
+            }
             Capability::FourOctetAs { asn } => {
                 buf.put_u8(capability_code::FOUR_OCTET_AS);
                 buf.put_u8(4); // length
@@ -650,6 +675,7 @@ impl Capability {
             Self::ExtendedMessage => capability_code::EXTENDED_MESSAGE,
             Self::LongLivedGracefulRestart(_) => capability_code::LONG_LIVED_GRACEFUL_RESTART,
             Self::AddPath(_) => capability_code::ADD_PATH,
+            Self::OutboundRouteFilter(_) => capability_code::OUTBOUND_ROUTE_FILTERING,
             Self::GracefulRestart { .. } => capability_code::GRACEFUL_RESTART,
             Self::FourOctetAs { .. } => capability_code::FOUR_OCTET_AS,
             Self::Role { .. } => capability_code::BGP_ROLE,
@@ -667,6 +693,7 @@ impl Capability {
             Self::ExtendedNextHop(families) => families.len() * 6,
             Self::LongLivedGracefulRestart(families) => families.len() * 7,
             Self::AddPath(families) => families.len() * 4,
+            Self::OutboundRouteFilter(entries) => crate::orf::capability_value_len(entries),
             Self::GracefulRestart { families, .. } => 2 + families.len() * 4,
             Self::Unknown { data, .. } => data.len(),
         }
@@ -1574,5 +1601,37 @@ mod tests {
         for invalid in [5u8, 9, 99, 255] {
             assert_eq!(BgpRole::from_u8(invalid), None);
         }
+    }
+
+    // --- Outbound Route Filtering capability (RFC 5291 §4) tests ---
+
+    #[test]
+    fn roundtrip_outbound_route_filter() {
+        use crate::orf::{OrfCapEntry, OrfCapType, OrfSendReceive, OrfType};
+        let original = Capability::OutboundRouteFilter(vec![OrfCapEntry {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            orf_types: vec![OrfCapType {
+                orf_type: OrfType::AddressPrefix,
+                send_receive: OrfSendReceive::Receive,
+            }],
+        }]);
+        let mut encoded = bytes::BytesMut::new();
+        original.encode(&mut encoded).unwrap();
+        // code(1) + len(1) + AFI(2)+res(1)+SAFI(1)+count(1) + type/sr(2) = 9
+        assert_eq!(encoded.len(), original.encoded_len());
+        assert_eq!(original.code(), 3);
+        let mut buf = encoded.freeze();
+        let decoded = Capability::decode(&mut buf).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn outbound_route_filter_unknown_afi_preserved_as_unknown() {
+        // code=3, len=7, AFI=99(unknown), SAFI=1, count=1, type=64, sr=1
+        let data: &[u8] = &[3, 7, 0, 99, 0, 1, 1, 64, 1];
+        let mut buf = Bytes::copy_from_slice(data);
+        let cap = Capability::decode(&mut buf).unwrap();
+        assert!(matches!(cap, Capability::Unknown { code: 3, .. }));
     }
 }

@@ -109,13 +109,14 @@ Later for what remains.
   `route_limit_exceeded` rows. Defer unless perf-gated or demanded: incremental
   equal-cost sibling index for wide full-table multipath; platform-diversity
   interop for weighted multipath.
-- **ORF / Outbound Route Filtering (RFC 5291)** *(route-server polish).*
-  Negotiate prefix-ORF (capability code 3) where the peer supports it, so peers
-  can suppress unwanted routes before sending them — reduces inbound churn and
-  aligns with policy-heavy IX route-server deployments. This is the one
-  IX-route-server-relevant control-plane gap vs FRR/GoBGP and the only near-term
-  parity add; it is a discrete feature and does not displace the perf/polish
-  work above.
+- **ORF / Outbound Route Filtering (RFC 5291)** — *receive side shipped*
+  (capability code 3, Address-Prefix ORF-Type 64; ADR-0075). rustbgpd advertises
+  willingness to receive ORF and applies a peer-pushed prefix filter to its
+  outbound advertisements, so route-server clients can suppress unwanted routes
+  before they are sent — the one IX-route-server control-plane gap vs FRR/GoBGP,
+  now closed for the receive direction. Possible follow-ups: send-side ORF
+  (rustbgpd pushing filters to its upstreams) and negotiating the legacy Cisco
+  type 128 — deferred pending operator demand.
 
 ### Later
 

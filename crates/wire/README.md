@@ -3,8 +3,8 @@
 BGP message codec for Rust. Encode and decode OPEN, UPDATE, KEEPALIVE,
 NOTIFICATION, and ROUTE-REFRESH messages per RFC 4271, with extensions for
 MP-BGP, EVPN (including PMSI Tunnel for ingress-replication BUM), FlowSpec,
-Add-Path, Extended Messages, BGP Roles + Only-to-Customer (RFC 9234), and
-more.
+Add-Path, Extended Messages, Outbound Route Filtering (RFC 5291/5292), BGP
+Roles + Only-to-Customer (RFC 9234), and more.
 
 This crate is the wire-protocol foundation of
 [rustbgpd](https://github.com/lance0/rustbgpd) but is designed for standalone
@@ -27,6 +27,8 @@ analyzers, test harnesses, MRT readers, etc.
 | 4724 | Graceful restart capability |
 | 4760 | MP-BGP: `MP_REACH_NLRI` / `MP_UNREACH_NLRI` |
 | 4761 §3.2.5 | Default Gateway extended community (decode) |
+| 5291 | Outbound Route Filtering (ORF) capability (code 3) + ORF-carrying Route Refresh |
+| 5292 | Address-Prefix ORF-Type (64), with the legacy pre-standard type (128) decoded for interoperability |
 | 5492 | BGP capabilities |
 | 5512 | Tunnel Encapsulation extended-community layout (4-byte reserved + 2-byte value) used by the EVPN VXLAN encap sub-type |
 | 6514 §5 | PMSI Tunnel attribute (path attribute type 22): all 8 tunnel types from the IANA registry, with the EVPN-VXLAN ingress-replication form encoding the label field as the raw 24-bit VNI per RFC 8365 §5.1.3 |
@@ -116,7 +118,8 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
 - **`UpdateMessage`** / **`ParsedUpdate`** — raw wire form and parsed routes + attributes
 - **`PathAttribute`** — 14 typed variants plus `Unknown` pass-through, including `AsPath`, `NextHop`, `Communities`, `MpReachNlri`, `LargeCommunities`, `PmsiTunnel` (RFC 6514), and `OnlyToCustomer` (RFC 9234)
 - **`Prefix`** — `V4(Ipv4Prefix)` / `V6(Ipv6Prefix)` enum
-- **`Capability`** — OPEN capabilities: multi-protocol, 4-octet AS, Add-Path, graceful restart, etc.
+- **`Capability`** — OPEN capabilities: multi-protocol, 4-octet AS, Add-Path, graceful restart, Outbound Route Filtering, etc.
+- **ORF types** (`orf` module, RFC 5291/5292) — `OrfCapEntry` (capability blocks), `OrfPayload` / `OrfEntryGroup` / `OrfEntries` (the Route Refresh ORF section), and `AddressPrefixOrf` (one Address-Prefix entry: action, match, sequence, min/max length, prefix). `RouteRefreshMessage::orf` carries the decoded section; a malformed Address-Prefix group decodes to `OrfEntries::Malformed` (RFC 5291 §5.2 reset) rather than failing the message
 - **`FlowSpecRule`** / **`FlowSpecComponent`** — FlowSpec NLRI with all 13 match types
 - **`EvpnRoute`** / **`EvpnRouteKey`** — typed EVPN routes (Types 1–5) with full payloads (RFC 7432, RFC 9136)
 - **`PmsiTunnel`** / **`PmsiTunnelType`** / **`PmsiTunnelIdentifier`** — PMSI Tunnel attribute (RFC 6514 §5) carried on EVPN Type 3 IMET routes for ingress-replication BUM. Constructor `PmsiTunnel::for_evpn_ingress_replication(vni, ip)` emits the RFC 8365 §5.1.3 wire shape (raw 24-bit VNI in the label field, originator IP as the tunnel identifier).

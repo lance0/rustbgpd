@@ -208,6 +208,17 @@ impl RibManager {
     #[expect(clippy::too_many_lines)]
     pub(super) fn send_route_refresh_response(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
         let family = (afi, safi);
+        // RFC 5291 §6: a ROUTE-REFRESH (plain or ORF-carrying) for this family
+        // lifts the initial-advertisement gate, so this response is the first
+        // advertisement of the family — filtered through any installed ORF.
+        if let Some(pending) = self.peer_orf_pending.get_mut(&peer) {
+            pending.remove(&family);
+        }
+        let orf_filter = self
+            .peer_orf_filters
+            .get(&peer)
+            .and_then(|m| m.get(&family))
+            .cloned();
         let mut announce = Vec::new();
         let mut withdraw = Vec::new();
         let mut nh_override_flags: Vec<Option<rustbgpd_policy::NextHopAction>> = Vec::new();
@@ -334,6 +345,7 @@ impl RibManager {
                         cluster_id,
                         sendable.as_ref(),
                         export_pol.as_ref(),
+                        orf_filter.as_ref(),
                         &metrics,
                         policy_stats,
                         &target_peer_label,
@@ -359,6 +371,7 @@ impl RibManager {
                         cluster_id,
                         sendable.as_ref(),
                         export_pol.as_ref(),
+                        orf_filter.as_ref(),
                         &metrics,
                         policy_stats,
                         &target_peer_label,

@@ -108,6 +108,14 @@ pub struct RibManager {
     peer_bgp_id: HashMap<IpAddr, Ipv4Addr>,
     /// Families for which Add-Path Send/Both was negotiated per peer.
     peer_add_path_send_families: HashMap<IpAddr, Vec<(Afi, Safi)>>,
+    /// Per-peer Address-Prefix ORF filters (RFC 5291/5292), keyed by
+    /// `(AFI, SAFI)`. Consulted as an additional outbound filter before export
+    /// policy when distributing to the peer. Absent ⇒ no ORF constraint.
+    peer_orf_filters: HashMap<IpAddr, HashMap<(Afi, Safi), crate::orf::OrfFilterSet>>,
+    /// Families whose initial advertisement is gated pending the peer's first
+    /// ROUTE-REFRESH (RFC 5291 §6). While a `(peer, AFI, SAFI)` is here, the
+    /// initial table dump skips it; the gate is lifted on the first refresh.
+    peer_orf_pending: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
     /// Current RPKI VRP table for origin validation. `None` = no RPKI data.
     vrp_table: Option<Arc<VrpTable>>,
     /// Current ASPA table for upstream path verification. `None` = no ASPA data.
@@ -396,6 +404,8 @@ impl RibManager {
             llgr_peer_config: HashMap::new(),
             peer_add_path_send_max: HashMap::new(),
             peer_add_path_send_families: HashMap::new(),
+            peer_orf_filters: HashMap::new(),
+            peer_orf_pending: HashMap::new(),
             peer_asn: HashMap::new(),
             peer_group: HashMap::new(),
             peer_bgp_id: HashMap::new(),
@@ -534,6 +544,7 @@ impl RibManager {
                 route_reflector_client,
                 add_path_send_families,
                 add_path_send_max,
+                negotiated_orf_recv,
             } => self.handle_peer_up(
                 peer,
                 peer_asn,
@@ -545,7 +556,16 @@ impl RibManager {
                 route_reflector_client,
                 add_path_send_families,
                 add_path_send_max,
+                negotiated_orf_recv,
             ),
+            RibUpdate::PeerOrfUpdate {
+                peer,
+                afi,
+                safi,
+                when,
+                entries,
+                reply,
+            } => self.handle_peer_orf_update(peer, afi, safi, when, &entries, reply),
             RibUpdate::SetPeerPolicyContext { peer, peer_group } => {
                 self.handle_set_peer_policy_context(peer, peer_group);
             }

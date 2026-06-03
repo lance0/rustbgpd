@@ -395,6 +395,7 @@ impl PeerManager {
                 route_server_client: None,
                 role: None,
                 strict_role: None,
+                prefix_orf_receive: None,
                 remove_private_as: None,
                 add_path: None,
                 log_level: None,
@@ -604,6 +605,7 @@ impl PeerManager {
             add_path_send_max: tc.peer.add_path_send_max,
             local_role: tc.peer.local_role,
             strict_role: tc.peer.strict_role,
+            prefix_orf_receive: tc.peer.prefix_orf_receive,
             import_policy: resolved.import_policy,
             export_policy: resolved.export_policy,
         }

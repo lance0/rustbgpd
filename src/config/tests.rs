@@ -2394,6 +2394,60 @@ fn add_path_config_send_defaults_to_disabled() {
 }
 
 #[test]
+fn prefix_orf_receive_enabled_on_neighbor() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+prefix_orf_receive = true
+"#;
+    let config = parse(toml_str).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert!(peers[0].0.peer.prefix_orf_receive);
+}
+
+#[test]
+fn prefix_orf_receive_defaults_to_disabled() {
+    let config = parse(valid_toml()).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert!(!peers[0].0.peer.prefix_orf_receive);
+}
+
+#[test]
+fn prefix_orf_receive_inherited_from_peer_group() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.clients]
+prefix_orf_receive = true
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "clients"
+"#;
+    let config = parse(toml_str).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert!(peers[0].0.peer.prefix_orf_receive);
+}
+
+#[test]
 fn to_peer_configs_maps_route_server_client() {
     let toml_str = r#"
 [global]
@@ -3285,6 +3339,7 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         route_server_client: Some(false),
         role: None,
         strict_role: None,
+        prefix_orf_receive: None,
         remove_private_as: None,
         add_path: None,
         import_policy: Vec::new(),
@@ -3837,6 +3892,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             route_server_client: None,
             role: None,
             strict_role: None,
+            prefix_orf_receive: None,
             remove_private_as: None,
             add_path: None,
             log_level: None,
@@ -3875,6 +3931,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         route_server_client: None,
         role: None,
         strict_role: None,
+        prefix_orf_receive: None,
         remove_private_as: None,
         add_path: None,
         import_policy: Vec::new(),
@@ -3905,6 +3962,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         route_server_client: None,
         role: None,
         strict_role: None,
+        prefix_orf_receive: None,
         remove_private_as: None,
         add_path: None,
         import_policy: Vec::new(),
@@ -3961,6 +4019,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         route_server_client: None,
         role: None,
         strict_role: None,
+        prefix_orf_receive: None,
         remove_private_as: None,
         add_path: None,
         import_policy: Vec::new(),

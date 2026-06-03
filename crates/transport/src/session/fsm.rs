@@ -282,7 +282,7 @@ impl PeerSession {
                             0
                         };
 
-                    self.negotiated = Some(neg);
+                    self.negotiated = Some(*neg);
                     self.established_at = Some(Instant::now());
 
                     // Emit BMP Peer Up event
@@ -326,6 +326,11 @@ impl PeerSession {
                             route_reflector_client: self.config.route_reflector_client,
                             add_path_send_families,
                             add_path_send_max,
+                            negotiated_orf_recv: self
+                                .negotiated
+                                .as_ref()
+                                .map(|n| n.negotiated_orf_recv.clone())
+                                .unwrap_or_default(),
                         })
                         .await;
                     let _ = self

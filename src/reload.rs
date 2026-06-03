@@ -54,6 +54,7 @@ fn build_peer_mgr_config(
         add_path_send_max: tc.peer.add_path_send_max,
         local_role: tc.peer.local_role,
         strict_role: tc.peer.strict_role,
+        prefix_orf_receive: tc.peer.prefix_orf_receive,
         import_policy: import.cloned(),
         export_policy: export.cloned(),
     }
@@ -3458,6 +3459,7 @@ peer_group = "secure"
                     add_path_send_max: 0,
                     local_role: None,
                     strict_role: false,
+                    prefix_orf_receive: false,
                     import_policy: None,
                     export_policy: None,
                 },
@@ -3502,6 +3504,7 @@ peer_group = "secure"
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines)]
     async fn config_bridge_does_not_advance_snapshot_on_acked_static_neighbor_persist_failure() {
         use rustbgpd_api::peer_types::{ConfigEvent, PeerManagerNeighborConfig};
         use rustbgpd_transport::RemovePrivateAs;
@@ -3548,6 +3551,7 @@ peer_group = "secure"
                     add_path_send_max: 0,
                     local_role: None,
                     strict_role: false,
+                    prefix_orf_receive: false,
                     import_policy: None,
                     export_policy: None,
                 },

@@ -79,6 +79,43 @@ pub mod capability_code {
     pub const FOUR_OCTET_AS: u8 = 65;
     /// RFC 9234: BGP Role.
     pub const BGP_ROLE: u8 = 9;
+    /// RFC 5291: Outbound Route Filtering (ORF).
+    pub const OUTBOUND_ROUTE_FILTERING: u8 = 3;
+}
+
+/// Outbound Route Filtering (ORF) wire constants (RFC 5291 + RFC 5292).
+pub mod orf {
+    /// Address-Prefix ORF-Type (RFC 5292, IANA-assigned). The standard value
+    /// advertised and applied by rustbgpd.
+    pub const TYPE_ADDRESS_PREFIX: u8 = 64;
+    /// Legacy (pre-standard Cisco) Address-Prefix ORF-Type. Decoded for
+    /// interoperability; never advertised. Applied only if negotiated.
+    pub const TYPE_ADDRESS_PREFIX_LEGACY: u8 = 128;
+
+    /// Capability Send/Receive (RFC 5291 §4): willing to receive ORF entries.
+    pub const SEND_RECEIVE_RECEIVE: u8 = 1;
+    /// Capability Send/Receive: willing to send ORF entries.
+    pub const SEND_RECEIVE_SEND: u8 = 2;
+    /// Capability Send/Receive: willing to both send and receive.
+    pub const SEND_RECEIVE_BOTH: u8 = 3;
+
+    /// ROUTE-REFRESH When-to-refresh (RFC 5291 §5.2): refresh immediately.
+    pub const WHEN_IMMEDIATE: u8 = 1;
+    /// ROUTE-REFRESH When-to-refresh: defer the re-advertisement sweep.
+    pub const WHEN_DEFER: u8 = 2;
+
+    /// Common ORF entry header — Action field mask (top 2 bits, RFC 5291 §5.1.1).
+    pub const ACTION_MASK: u8 = 0xC0;
+    /// Common ORF entry Action: ADD.
+    pub const ACTION_ADD: u8 = 0x00;
+    /// Common ORF entry Action: REMOVE.
+    pub const ACTION_REMOVE: u8 = 0x80;
+    /// Common ORF entry Action: REMOVE-ALL (entry carries only the header byte).
+    pub const ACTION_REMOVE_ALL: u8 = 0xC0;
+    /// Common ORF entry header — Match field mask (bit 5, RFC 5291 §5.1.1).
+    pub const MATCH_MASK: u8 = 0x20;
+    /// Common ORF entry Match: DENY (PERMIT is the mask cleared).
+    pub const MATCH_DENY: u8 = 0x20;
 }
 
 /// Path attribute type codes (RFC 4271 §5).

@@ -629,6 +629,9 @@ pub struct Neighbor {
     pub role: Option<BgpRoleConfig>,
     /// Require the peer to advertise a compatible BGP Role capability.
     pub strict_role: Option<bool>,
+    /// Advertise willingness to receive Address-Prefix ORF entries from this
+    /// peer (RFC 5291/5292) and apply them to its outbound advertisements.
+    pub prefix_orf_receive: Option<bool>,
     /// Remove private ASNs from `AS_PATH` before eBGP advertisement.
     ///
     /// - `"remove"` — only if the entire path consists of private ASNs
@@ -710,6 +713,9 @@ pub struct PeerGroupConfig {
     pub route_server_client: Option<bool>,
     pub role: Option<BgpRoleConfig>,
     pub strict_role: Option<bool>,
+    /// Advertise willingness to receive Address-Prefix ORF entries (RFC
+    /// 5291/5292) from peers in this group.
+    pub prefix_orf_receive: Option<bool>,
     pub remove_private_as: Option<String>,
     pub add_path: Option<AddPathConfig>,
     /// Override log level for peers in this group.

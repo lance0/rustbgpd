@@ -4,10 +4,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustbgpd_wire::{
-    Afi, AsPath, AsPathSegment, EthernetSegmentIdentifier, EthernetTagId, EvpnImet, EvpnMacIp,
-    EvpnRoute, ExtendedCommunity, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule, Ipv4Prefix,
-    Ipv6Prefix, MacAddress, MplsLabel, Origin, PathAttribute, Prefix, RouteDistinguisher,
-    RpkiValidation, Safi,
+    AddressPrefixOrf, Afi, AsPath, AsPathSegment, EthernetSegmentIdentifier, EthernetTagId,
+    EvpnImet, EvpnMacIp, EvpnRoute, ExtendedCommunity, FlowSpecComponent, FlowSpecPrefix,
+    FlowSpecRule, Ipv4Prefix, Ipv6Prefix, MacAddress, MplsLabel, OrfAction, OrfMatch, Origin,
+    PathAttribute, Prefix, RouteDistinguisher, RpkiValidation, Safi, WhenToRefresh,
 };
 use tokio::sync::oneshot;
 
@@ -459,6 +459,7 @@ async fn multi_chunk_flood_coalesces_into_one_outbound_batch() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -967,6 +968,7 @@ async fn peer_up_triggers_initial_table_dump() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -1000,6 +1002,7 @@ async fn route_change_distributes_to_peer() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -1046,6 +1049,7 @@ async fn single_best_send_normalizes_path_id_to_zero() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -1095,6 +1099,7 @@ async fn split_horizon_prevents_echo() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -1208,6 +1213,7 @@ async fn ibgp_route_not_sent_to_ibgp_peer() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -1255,6 +1261,7 @@ async fn ibgp_route_sent_to_ebgp_peer() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -1306,6 +1313,7 @@ async fn ebgp_route_sent_to_ibgp_peer() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -1346,6 +1354,7 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -1423,6 +1432,7 @@ async fn local_route_sent_to_ibgp_peer() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -1511,6 +1521,7 @@ async fn local_route_in_initial_table_to_ibgp_peer() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -1546,6 +1557,7 @@ async fn peer_down_cleans_up_outbound() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -1587,6 +1599,7 @@ async fn inject_route_enters_loc_rib_and_distributes() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -1658,6 +1671,7 @@ async fn withdraw_injected_removes_and_distributes() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -1748,6 +1762,7 @@ async fn export_policy_counter_records_single_best_permit() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -1822,6 +1837,7 @@ async fn graceful_restart_clears_export_policy_stats() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -1888,6 +1904,7 @@ async fn explain_advertised_route_does_not_increment_export_policy_counter() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -1957,6 +1974,7 @@ async fn export_policy_blocks_denied() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -2016,6 +2034,7 @@ async fn query_advertised_routes() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -2103,6 +2122,7 @@ async fn per_peer_export_policy() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -2120,6 +2140,7 @@ async fn per_peer_export_policy() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -2203,6 +2224,7 @@ async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filt
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -2332,6 +2354,7 @@ async fn export_policy_match_next_hop_filters_route() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -2379,6 +2402,7 @@ async fn explain_advertised_route_reports_no_best_route() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -2420,6 +2444,7 @@ async fn explain_advertised_route_reports_policy_deny_without_mutation() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -2529,6 +2554,7 @@ async fn export_as_path_regex_still_filters_through_distribution() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -2619,6 +2645,7 @@ async fn explain_advertised_route_reports_modifications() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -2705,6 +2732,7 @@ async fn explain_advertised_route_reports_ipv6_next_hop_override() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -2780,6 +2808,7 @@ async fn peer_down_cleans_up_export_policy() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -2828,6 +2857,7 @@ async fn channel_full_marks_dirty_and_resyncs() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -2977,6 +3007,7 @@ async fn dirty_resync_not_starved_by_query_traffic() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -3114,6 +3145,7 @@ async fn initial_dump_failure_leaves_adjribout_empty() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -3191,6 +3223,7 @@ async fn initial_dump_failure_resyncs_via_timer() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -4259,6 +4292,7 @@ async fn adj_rib_out_gauge_tracks_advertised() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -4352,6 +4386,7 @@ async fn query_advertised_count() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -4425,6 +4460,7 @@ async fn distribute_changes_filters_unsendable_families() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -4545,6 +4581,7 @@ async fn send_initial_table_filters_unsendable_families() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -4628,6 +4665,7 @@ async fn dual_stack_peer_receives_both_families() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -4675,6 +4713,7 @@ async fn send_initial_table_includes_flowspec_routes() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -4728,6 +4767,7 @@ async fn route_refresh_flowspec_re_advertises_routes() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -5136,6 +5176,7 @@ async fn dirty_resync_retries_flowspec_updates() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -5198,6 +5239,7 @@ async fn gr_marks_stale_and_demotes_routes() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -5263,6 +5305,7 @@ async fn gr_flowspec_eor_recomputes_and_redistributes() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -5537,6 +5580,7 @@ async fn gr_peer_up_defers_stale_to_eor() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -5628,6 +5672,7 @@ async fn gr_peer_up_timer_expires_sweeps_stale() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -5978,6 +6023,7 @@ async fn llgr_eor_clears_llgr_stale() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -6150,6 +6196,7 @@ async fn rr_client_route_reflected_to_all_ibgp() {
         route_reflector_client: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -6167,6 +6214,7 @@ async fn rr_client_route_reflected_to_all_ibgp() {
         route_reflector_client: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -6185,6 +6233,7 @@ async fn rr_client_route_reflected_to_all_ibgp() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -6246,6 +6295,7 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -6263,6 +6313,7 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
         route_reflector_client: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -6281,6 +6332,7 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -6341,6 +6393,7 @@ async fn non_rr_ibgp_split_horizon_unchanged() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -6395,6 +6448,7 @@ async fn rr_ebgp_route_to_all_ibgp() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -6448,6 +6502,7 @@ async fn rr_local_route_to_all_ibgp() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -6939,6 +6994,7 @@ async fn rpki_cache_update_no_change_no_redistribution() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -7114,6 +7170,7 @@ async fn multipath_send_advertises_multiple_routes() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -7181,6 +7238,7 @@ async fn multipath_send_respects_send_max() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 2,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -7257,6 +7315,7 @@ async fn multipath_send_split_horizon() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -7300,6 +7359,7 @@ async fn multipath_withdrawal_on_candidate_removal() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -7426,6 +7486,7 @@ async fn single_best_peer_unaffected_by_multipath_config() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -7471,6 +7532,7 @@ async fn multipath_peer_down_cleans_up_state() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -7511,6 +7573,7 @@ async fn multipath_peer_down_cleans_up_state() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -7547,6 +7610,7 @@ async fn multipath_send_incremental_route_addition() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -7665,6 +7729,7 @@ async fn multipath_send_mixed_peers_single_and_multi() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -7682,6 +7747,7 @@ async fn multipath_send_mixed_peers_single_and_multi() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -7768,6 +7834,7 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
         route_reflector_client: false,
         add_path_send_families: vec![(Afi::Ipv6, Safi::Unicast)],
         add_path_send_max: 5,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -7851,6 +7918,7 @@ async fn multipath_send_partial_negotiation_ipv4_only() {
         route_reflector_client: false,
         add_path_send_families: vec![(Afi::Ipv4, Safi::Unicast)],
         add_path_send_max: 5,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -7943,6 +8011,7 @@ async fn multipath_send_partial_negotiation_ipv6_only() {
         route_reflector_client: false,
         add_path_send_families: vec![(Afi::Ipv6, Safi::Unicast)],
         add_path_send_max: 5,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -8039,6 +8108,7 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
         route_reflector_client: false,
         add_path_send_families: vec![(Afi::Ipv4, Safi::Unicast)],
         add_path_send_max: 5,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -8142,6 +8212,7 @@ async fn multipath_send_max_one_uses_path_id_one() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 1,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -8223,6 +8294,7 @@ async fn multipath_policy_filtered_events_for_denied_candidates() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -8348,6 +8420,7 @@ async fn mrt_peer_metadata_retained_during_gr() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -8517,6 +8590,7 @@ async fn explain_best_path_for_addpath_peer_marks_top_n_with_path_id() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 2,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -8607,6 +8681,7 @@ async fn explain_best_path_single_best_does_not_fall_back_when_winner_is_target(
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -8673,6 +8748,7 @@ async fn explain_best_path_for_single_best_peer_marks_only_winner_path_id_zero()
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -8743,6 +8819,7 @@ async fn explain_best_path_effective_send_max_zero_on_family_mismatch() {
         route_reflector_client: false,
         add_path_send_families: vec![(Afi::Ipv6, Safi::Unicast)],
         add_path_send_max: 4,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -8861,6 +8938,7 @@ async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
         route_reflector_client: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -8882,6 +8960,7 @@ async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
         route_reflector_client: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -8965,6 +9044,7 @@ async fn evpn_is_not_reflected_back_to_source_peer() {
         route_reflector_client: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -8983,6 +9063,7 @@ async fn evpn_is_not_reflected_back_to_source_peer() {
         route_reflector_client: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -9061,6 +9142,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
         route_reflector_client: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -9079,6 +9161,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
         route_reflector_client: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -9616,6 +9699,7 @@ async fn inject_evpn_reflects_to_peer() {
         route_reflector_client: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -9724,6 +9808,7 @@ async fn late_joining_peer_receives_existing_evpn_routes_in_initial_dump() {
         route_reflector_client: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -9763,6 +9848,7 @@ async fn late_joining_peer_receives_existing_evpn_routes_in_initial_dump() {
         route_reflector_client: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -9926,6 +10012,7 @@ async fn evpn_export_policy_applies_modifications() {
         route_reflector_client: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -9943,6 +10030,7 @@ async fn evpn_export_policy_applies_modifications() {
         route_reflector_client: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
     })
     .await
     .unwrap();
@@ -10905,6 +10993,290 @@ async fn fib_install_candidates_excludes_non_equal_cost() {
         "lower-LP path is not co-installed"
     );
     assert_eq!(cands[0].best.peer, IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2)));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+// ── Outbound Route Filtering (ORF) — RFC 5291/5292 ──────────────────────
+
+fn orf_permit(seq: u32, min: u8, max: u8, p: Ipv4Prefix) -> AddressPrefixOrf {
+    AddressPrefixOrf {
+        action: OrfAction::Add,
+        match_: OrfMatch::Permit,
+        sequence: seq,
+        min_len: min,
+        max_len: max,
+        prefix: Some(Prefix::V4(p)),
+    }
+}
+
+fn orf_deny(seq: u32, min: u8, max: u8, p: Ipv4Prefix) -> AddressPrefixOrf {
+    AddressPrefixOrf {
+        action: OrfAction::Add,
+        match_: OrfMatch::Deny,
+        sequence: seq,
+        min_len: min,
+        max_len: max,
+        prefix: Some(Prefix::V4(p)),
+    }
+}
+
+async fn send_peer_orf(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    when: WhenToRefresh,
+    entries: Vec<AddressPrefixOrf>,
+) {
+    let (rtx, rrx) = oneshot::channel();
+    tx.send(RibUpdate::PeerOrfUpdate {
+        peer,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        when,
+        entries,
+        reply: rtx,
+    })
+    .await
+    .unwrap();
+    rrx.await.unwrap().unwrap();
+}
+
+/// Drain outbound updates until `count` prefixes have been announced.
+async fn collect_announced(
+    out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    count: usize,
+) -> Vec<Prefix> {
+    let mut prefixes = Vec::new();
+    while prefixes.len() < count {
+        let u = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("outbound update should arrive")
+            .expect("outbound channel open");
+        prefixes.extend(u.announce.iter().map(|r| r.prefix));
+    }
+    prefixes
+}
+
+/// Set up a manager with two routes (10/8, 192.168/16) in the Loc-RIB and a
+/// gated ORF-receive target peer; returns the tx, the target peer, and the
+/// target's outbound receiver after draining the (route-less) initial `EoR`.
+async fn orf_setup() -> (
+    mpsc::Sender<RibUpdate>,
+    tokio::task::JoinHandle<()>,
+    IpAddr,
+    mpsc::Receiver<OutboundRouteUpdate>,
+) {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![
+            make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8),
+                Ipv4Addr::new(10, 0, 0, 1),
+            ),
+            make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(192, 168, 0, 0), 16),
+                Ipv4Addr::new(10, 0, 0, 1),
+            ),
+        ],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![(Afi::Ipv4, Safi::Unicast)],
+    })
+    .await
+    .unwrap();
+
+    // RFC 5291 §6 gate: the initial dump must advertise no routes for the
+    // gated family — only the EoR marker.
+    let initial = out_rx.recv().await.unwrap();
+    assert!(
+        initial.announce.is_empty(),
+        "gated family must not advertise routes initially, got {}",
+        initial.announce.len()
+    );
+    assert!(
+        !initial.end_of_rib.is_empty(),
+        "EoR still sent for gated family"
+    );
+
+    (tx, handle, target, out_rx)
+}
+
+#[tokio::test]
+async fn orf_gate_lifts_and_floods_filtered_table() {
+    let (tx, handle, target, mut out_rx) = orf_setup().await;
+
+    // Permit everything (0/0 le 32) ⇒ gate lifts, both routes flood.
+    send_peer_orf(
+        &tx,
+        target,
+        WhenToRefresh::Immediate,
+        vec![orf_permit(
+            1,
+            0,
+            32,
+            Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
+        )],
+    )
+    .await;
+    let announced = collect_announced(&mut out_rx, 2).await;
+    assert!(announced.contains(&Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))));
+    assert!(announced.contains(&Prefix::V4(Ipv4Prefix::new(
+        Ipv4Addr::new(192, 168, 0, 0),
+        16
+    ))));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn orf_filter_constrains_advertised_set() {
+    let (tx, handle, target, mut out_rx) = orf_setup().await;
+
+    // Permit only 10/8 (le 32); 192.168/16 is not covered ⇒ implicit deny.
+    send_peer_orf(
+        &tx,
+        target,
+        WhenToRefresh::Immediate,
+        vec![orf_permit(
+            1,
+            0,
+            32,
+            Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8),
+        )],
+    )
+    .await;
+    let announced = collect_announced(&mut out_rx, 1).await;
+    assert_eq!(
+        announced,
+        vec![Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))]
+    );
+    // No further announce: 192.168/16 must stay filtered out.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+            .await
+            .is_err(),
+        "192.168/16 must not be advertised under a 10/8-only ORF"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn orf_immediate_withdraws_now_denied_prefix() {
+    let (tx, handle, target, mut out_rx) = orf_setup().await;
+
+    // Gate-lift with permit-all → both advertised.
+    send_peer_orf(
+        &tx,
+        target,
+        WhenToRefresh::Immediate,
+        vec![orf_permit(
+            1,
+            0,
+            32,
+            Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
+        )],
+    )
+    .await;
+    let _ = collect_announced(&mut out_rx, 2).await;
+
+    // Now tighten: permit only 10/8 (IMMEDIATE) → 192.168/16 must be withdrawn.
+    send_peer_orf(
+        &tx,
+        target,
+        WhenToRefresh::Immediate,
+        vec![orf_permit(
+            1,
+            0,
+            32,
+            Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8),
+        )],
+    )
+    .await;
+    let mut withdrawn = Vec::new();
+    while withdrawn.is_empty() {
+        let u = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("withdraw should arrive")
+            .unwrap();
+        withdrawn.extend(u.withdraw.iter().map(|(p, _)| *p));
+    }
+    assert!(withdrawn.contains(&Prefix::V4(Ipv4Prefix::new(
+        Ipv4Addr::new(192, 168, 0, 0),
+        16
+    ))));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn orf_defer_does_not_sweep_existing_routes() {
+    let (tx, handle, target, mut out_rx) = orf_setup().await;
+
+    // Gate-lift with permit-all → both advertised.
+    send_peer_orf(
+        &tx,
+        target,
+        WhenToRefresh::Immediate,
+        vec![orf_permit(
+            1,
+            0,
+            32,
+            Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
+        )],
+    )
+    .await;
+    let _ = collect_announced(&mut out_rx, 2).await;
+
+    // DEFER deny-all: filter installs, but the existing advertised routes are
+    // NOT swept (RFC 5291 When-to-refresh). No outbound update should arrive.
+    send_peer_orf(
+        &tx,
+        target,
+        WhenToRefresh::Defer,
+        vec![orf_deny(
+            1,
+            0,
+            32,
+            Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
+        )],
+    )
+    .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+            .await
+            .is_err(),
+        "DEFER must not sweep already-advertised routes"
+    );
 
     drop(tx);
     handle.await.unwrap();

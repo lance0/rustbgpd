@@ -53,6 +53,8 @@ pub mod notification;
 pub mod notification_msg;
 /// OPEN message struct and codec.
 pub mod open;
+/// Outbound Route Filtering (ORF) types and codec (RFC 5291 + RFC 5292).
+pub mod orf;
 /// PMSI Tunnel path attribute (RFC 6514 §5) — used by EVPN Type 3 IMET
 /// for ingress-replication BUM.
 pub mod pmsi;
@@ -166,6 +168,10 @@ pub use attribute::{
     PathAttribute, RawAttribute, is_private_asn,
 };
 pub use nlri::{Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, NlriEntry, Prefix};
+pub use orf::{
+    AddressPrefixOrf, OrfAction, OrfCapEntry, OrfCapType, OrfEntries, OrfEntryGroup, OrfMatch,
+    OrfPayload, OrfSendReceive, OrfType, WhenToRefresh,
+};
 pub use pmsi::{PmsiTunnel, PmsiTunnelIdentifier, PmsiTunnelType};
 pub use update::ParsedUpdate;
 pub use validate::{UpdateError, UpdateValidationOptions, is_valid_ipv6_nexthop};

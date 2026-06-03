@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rpki::{AspaTable, VrpTable};
-use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
+use rustbgpd_wire::{
+    AddressPrefixOrf, Afi, EvpnRouteKey, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi,
+    WhenToRefresh,
+};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::best_path::BestPathReason;
@@ -179,6 +182,27 @@ pub enum RibUpdate {
         add_path_send_families: Vec<(Afi, Safi)>,
         /// Maximum paths per prefix to send via Add-Path (0 = single-best only).
         add_path_send_max: u32,
+        /// Families for which the peer negotiated sending us Address-Prefix ORF
+        /// entries (RFC 5291/5292). Initial advertisement for these families is
+        /// gated until the peer sends a ROUTE-REFRESH (RFC 5291 §6).
+        negotiated_orf_recv: Vec<(Afi, Safi)>,
+    },
+    /// Peer pushed Address-Prefix ORF entries via ROUTE-REFRESH (RFC 5291).
+    /// Install/update the per-peer outbound prefix filter for `(afi, safi)` and
+    /// re-evaluate this peer's Adj-RIB-Out.
+    PeerOrfUpdate {
+        /// The peer that sent the ORF entries.
+        peer: IpAddr,
+        /// Address family of the ORF section.
+        afi: Afi,
+        /// Sub-address family of the ORF section.
+        safi: Safi,
+        /// When-to-refresh directive: IMMEDIATE sweeps now, DEFER installs only.
+        when: WhenToRefresh,
+        /// The ORF entries, in wire order (mix of ADD/REMOVE/REMOVE-ALL).
+        entries: Vec<AddressPrefixOrf>,
+        /// Completion reply.
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// Update per-peer policy identity metadata used during export policy evaluation.
     SetPeerPolicyContext {

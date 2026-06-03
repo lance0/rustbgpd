@@ -66,6 +66,8 @@ impl RibManager {
         self.peer_is_rr_client.remove(&peer);
         self.peer_add_path_send_max.remove(&peer);
         self.peer_add_path_send_families.remove(&peer);
+        self.peer_orf_filters.remove(&peer);
+        self.peer_orf_pending.remove(&peer);
         self.peer_asn.remove(&peer);
         self.peer_group.remove(&peer);
         self.peer_bgp_id.remove(&peer);
@@ -100,9 +102,19 @@ impl RibManager {
         route_reflector_client: bool,
         add_path_send_families: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
         add_path_send_max: u32,
+        negotiated_orf_recv: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
     ) {
         self.peer_asn.insert(peer, peer_asn);
         self.peer_bgp_id.insert(peer, peer_router_id);
+
+        // RFC 5291 §6: gate the initial advertisement for ORF-receive families
+        // until the peer sends a ROUTE-REFRESH, so we don't flood the full
+        // table before its filter arrives. The gate is lifted in
+        // `handle_route_refresh_request` / `handle_peer_orf_update`.
+        if !negotiated_orf_recv.is_empty() {
+            self.peer_orf_pending
+                .insert(peer, negotiated_orf_recv.into_iter().collect());
+        }
 
         if self.gr_peers.contains_key(&peer) {
             if let Some(&srt) = self.gr_stale_routes_time.get(&peer) {
@@ -170,6 +182,15 @@ impl RibManager {
         let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> = HashSet::new();
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
+        // RFC 5291 §6 initial-advertisement gate: suppress route advertisement
+        // for families still awaiting the peer's first ROUTE-REFRESH. The EoR is
+        // still emitted (an honest "empty table so far"); the filtered flood
+        // follows once the gate is lifted.
+        let orf_gated = self
+            .peer_orf_pending
+            .get(&peer)
+            .cloned()
+            .unwrap_or_default();
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
         let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
         let target_peer_asn = self.peer_asn.get(&peer).copied();
@@ -196,6 +217,9 @@ impl RibManager {
         let initial_view = AdjRibOut::new(peer);
 
         for prefix in &all_prefixes {
+            if orf_gated.contains(&prefix_family(prefix)) {
+                continue;
+            }
             let prefix_send_max = if peer_add_path_send_max > 0
                 && peer_add_path_send_families.contains(&prefix_family(prefix))
             {
@@ -219,6 +243,9 @@ impl RibManager {
                     cluster_id,
                     sendable.as_ref(),
                     export_pol.as_ref(),
+                    // ORF: gated families are skipped above; a non-gated family
+                    // has no installed filter during the initial dump.
+                    None,
                     &metrics,
                     policy_stats,
                     &target_peer_label,
@@ -244,6 +271,9 @@ impl RibManager {
                     cluster_id,
                     sendable.as_ref(),
                     export_pol.as_ref(),
+                    // ORF: gated families are skipped above; a non-gated family
+                    // has no installed filter during the initial dump.
+                    None,
                     &metrics,
                     policy_stats,
                     &target_peer_label,

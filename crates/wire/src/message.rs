@@ -285,6 +285,43 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_orf_route_refresh() {
+        use crate::nlri::{Ipv4Prefix, Prefix};
+        use crate::orf::{
+            AddressPrefixOrf, OrfAction, OrfEntries, OrfEntryGroup, OrfMatch, OrfPayload, OrfType,
+            WhenToRefresh,
+        };
+        use crate::route_refresh::RouteRefreshMessage;
+
+        let payload = OrfPayload {
+            when_to_refresh: WhenToRefresh::Immediate,
+            groups: vec![OrfEntryGroup {
+                orf_type: OrfType::AddressPrefix,
+                entries: OrfEntries::AddressPrefix(vec![AddressPrefixOrf {
+                    action: OrfAction::Add,
+                    match_: OrfMatch::Deny,
+                    sequence: 5,
+                    min_len: 0,
+                    max_len: 0,
+                    prefix: Some(Prefix::V4(Ipv4Prefix::new(
+                        Ipv4Addr::new(192, 168, 0, 0),
+                        16,
+                    ))),
+                }]),
+            }],
+        };
+        let msg = Message::RouteRefresh(RouteRefreshMessage::new_with_orf(
+            Afi::Ipv4,
+            Safi::Unicast,
+            payload,
+        ));
+        let encoded = encode_message(&msg).unwrap();
+        let mut bytes = encoded.freeze();
+        let decoded = decode_message(&mut bytes, MAX_MESSAGE_LEN).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
     fn decode_rejects_garbage() {
         let mut buf = Bytes::from_static(&[0x00; 19]);
         assert!(decode_message(&mut buf, MAX_MESSAGE_LEN).is_err());
