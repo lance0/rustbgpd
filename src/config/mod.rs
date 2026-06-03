@@ -630,6 +630,10 @@ impl Config {
                 .strict_role
                 .or_else(|| group.and_then(|g| g.strict_role))
                 .unwrap_or(false),
+            prefix_orf_receive: neighbor
+                .prefix_orf_receive
+                .or_else(|| group.and_then(|g| g.prefix_orf_receive))
+                .unwrap_or(false),
         };
 
         let (remote_addr, peer_interface, peer_scope_id) =
@@ -752,6 +756,7 @@ impl Config {
             route_server_client: None,
             role: None,
             strict_role: None,
+            prefix_orf_receive: None,
             remove_private_as: None,
             add_path: None,
             log_level: None,

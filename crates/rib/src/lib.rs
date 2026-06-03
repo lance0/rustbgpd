@@ -23,6 +23,8 @@ pub mod event_sink;
 pub mod loc_rib;
 /// RIB manager task and submodules.
 pub mod manager;
+/// Per-peer Outbound Route Filtering (ORF) state (RFC 5291 + RFC 5292).
+mod orf;
 /// Family-split prefix-trie map backing the compact prefix-keyed RIB indexes.
 mod prefix_map;
 /// Route and `FlowSpec` route data types.

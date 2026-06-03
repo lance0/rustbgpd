@@ -82,6 +82,8 @@ consequences so future contributors understand *why*, not just *what*.
 | [0071](0071-bgp-roles-otc.md) | BGP Roles and Only-to-Customer (RFC 9234) | Accepted | 2026-05-26 |
 | [0072](0072-durable-event-history.md) | Durable event history (local outbox) | Accepted | 2026-05-26 |
 | [0073](0073-import-policy-explain.md) | Import policy explain via per-session decision cache | Accepted | 2026-05-28 |
+| [0074](0074-fib-table-crud-authz-tier.md) | Runtime FIB-table CRUD authorization tier | Accepted | 2026-06-01 |
+| [0075](0075-outbound-route-filtering.md) | Receive-side Address-Prefix Outbound Route Filtering (ORF) | Accepted | 2026-06-03 |
 
 ## Template
 

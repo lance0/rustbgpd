@@ -109,13 +109,14 @@ Later for what remains.
   `route_limit_exceeded` rows. Defer unless perf-gated or demanded: incremental
   equal-cost sibling index for wide full-table multipath; platform-diversity
   interop for weighted multipath.
-- **ORF / Outbound Route Filtering (RFC 5291)** *(route-server polish).*
-  Negotiate prefix-ORF (capability code 3) where the peer supports it, so peers
-  can suppress unwanted routes before sending them — reduces inbound churn and
-  aligns with policy-heavy IX route-server deployments. This is the one
-  IX-route-server-relevant control-plane gap vs FRR/GoBGP and the only near-term
-  parity add; it is a discrete feature and does not displace the perf/polish
-  work above.
+- **ORF / Outbound Route Filtering (RFC 5291)** — *receive side shipped*
+  (capability code 3, Address-Prefix ORF-Type 64; ADR-0075). rustbgpd advertises
+  willingness to receive ORF and applies a peer-pushed prefix filter to its
+  outbound advertisements, so route-server clients can suppress unwanted routes
+  before they are sent — the one IX-route-server control-plane gap vs FRR/GoBGP,
+  now closed for the receive direction. Possible follow-ups: send-side ORF
+  (rustbgpd pushing filters to its upstreams) and negotiating the legacy Cisco
+  type 128 — deferred pending operator demand.
 
 ### Later
 
@@ -316,7 +317,10 @@ Later for what remains.
   outside rustbgpd's fabric / route-server / automation niche. Demand-shaped:
   pursuing them is a deliberate strategic pivot, not parity-chasing. (Of these,
   BGP-LS *export* is the closest fit to the API-first / controller story if a
-  controller-integration headline ever materializes.)
+  controller-integration headline ever materializes.) When adding VPN/MPLS-family
+  support, extend the ORF Address-Prefix decoder deliberately: it currently
+  parses only IPv4/IPv6 unicast and preserves L2VPN / unknown SAFIs as raw ORF
+  groups to avoid silently applying plain-IP prefix semantics to future families.
 - **Route dampening (RFC 2439).** Suppress flapping routes with penalty/decay.
 - **Scriptable policy engine.** User-defined attribute-transformation functions
   (Lua, Starlark, or WASM) beyond static match/action rules. Policy evaluation
@@ -508,9 +512,11 @@ branch is between features.
   advisories bans licenses sources`, and wire into CI. Pairs with the next
   dependency audit.
 - [ ] **Workspace `cargo doc` warning posture.** CI already runs
-  `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --lib --no-deps`; make that
-  the standing local pre-flight expectation too, surfacing broken intra-doc-links
-  on the developer machine rather than at PR time.
+  `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --lib --no-deps --jobs 1`;
+  make that the standing local pre-flight expectation too, surfacing broken
+  intra-doc-links on the developer machine rather than at PR time. The `--jobs 1`
+  cap deliberately serializes rustdoc for deterministic `target/doc` generation
+  in the workspace.
 - [ ] **Mega-module splits.** The large `src/` modules have been split, but
   `crates/api/src/event_service.rs` remains borderline. Keep splitting only where
   it reduces real conflict or review cost.

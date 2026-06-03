@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 use rustbgpd_wire::{
-    AsPath, AsPathSegment, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule, Ipv4NlriEntry,
-    Ipv4Prefix, Ipv6Prefix, LlgrFamily, Message, Origin, PathAttribute,
+    AddressPrefixOrf, AsPath, AsPathSegment, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule,
+    Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, LlgrFamily, Message, OrfAction, OrfEntries,
+    OrfEntryGroup, OrfMatch, OrfPayload, OrfType, Origin, PathAttribute, WhenToRefresh,
 };
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
@@ -32,6 +33,7 @@ fn make_test_session(local_asn: u32, remote_asn: u32) -> PeerSession {
         add_path_send_max: 0,
         local_role: None,
         strict_role: false,
+        prefix_orf_receive: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -62,6 +64,7 @@ fn make_test_session_with_rib(
         add_path_send_max: 0,
         local_role: None,
         strict_role: false,
+        prefix_orf_receive: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -99,6 +102,7 @@ fn make_test_session_with_rib_and_bmp(
         add_path_send_max: 0,
         local_role: None,
         strict_role: false,
+        prefix_orf_receive: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -152,6 +156,7 @@ fn negotiated_session(remote_asn: u32, extended_nexthop: bool) -> NegotiatedSess
         role_negotiated: false,
         extended_nexthop_families,
         add_path_families: HashMap::new(),
+        negotiated_orf_recv: Vec::new(),
     }
 }
 
@@ -304,8 +309,8 @@ async fn session_established_emits_bmp_peer_up() {
     session.remote_open_pdu = Some(Bytes::from_static(&[4, 5, 6]));
 
     session
-        .execute_actions(vec![Action::SessionEstablished(negotiated_session(
-            65002, false,
+        .execute_actions(vec![Action::SessionEstablished(Box::new(
+            negotiated_session(65002, false),
         ))])
         .await;
 
@@ -332,8 +337,8 @@ async fn accept_any_session_established_uses_learned_asn_for_bmp_and_rib() {
     session.test_install_stream(client);
 
     session
-        .execute_actions(vec![Action::SessionEstablished(negotiated_session(
-            65099, false,
+        .execute_actions(vec![Action::SessionEstablished(Box::new(
+            negotiated_session(65099, false),
         ))])
         .await;
 
@@ -2538,6 +2543,7 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
         add_path_send_max: 0,
         local_role: None,
         strict_role: false,
+        prefix_orf_receive: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -2665,6 +2671,7 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
         add_path_send_max: 0,
         local_role: None,
         strict_role: false,
+        prefix_orf_receive: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -2828,6 +2835,7 @@ async fn session_down_flushes_import_decision_cache() {
         add_path_send_max: 0,
         local_role: None,
         strict_role: false,
+        prefix_orf_receive: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -3092,6 +3100,7 @@ async fn explain_disabled_stores_no_decisions() {
         add_path_send_max: 0,
         local_role: None,
         strict_role: false,
+        prefix_orf_receive: false,
     };
     let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     config.explain_enabled = false;
@@ -3166,6 +3175,7 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
         add_path_send_max: 0,
         local_role: None,
         strict_role: false,
+        prefix_orf_receive: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -3313,6 +3323,7 @@ async fn update_import_policy_applies_to_future_updates() {
         add_path_send_max: 0,
         local_role: None,
         strict_role: false,
+        prefix_orf_receive: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -3463,6 +3474,7 @@ async fn err_denied_replacement_is_swept_at_eorr() {
         add_path_send_max: 0,
         local_role: None,
         strict_role: false,
+        prefix_orf_receive: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -3586,6 +3598,7 @@ async fn import_policy_match_next_hop_filters_route() {
         add_path_send_max: 0,
         local_role: None,
         strict_role: false,
+        prefix_orf_receive: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -4123,6 +4136,7 @@ async fn import_policy_filters_rpki_invalid_with_snapshot() {
         add_path_send_max: 0,
         local_role: None,
         strict_role: false,
+        prefix_orf_receive: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -4265,6 +4279,7 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
         add_path_send_max: 0,
         local_role: None,
         strict_role: false,
+        prefix_orf_receive: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -4454,6 +4469,7 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
         role_negotiated: false,
         extended_nexthop_families: HashMap::new(),
         add_path_families: HashMap::new(),
+        negotiated_orf_recv: Vec::new(),
     };
     session
         .negotiated_families
@@ -4566,6 +4582,7 @@ async fn evpn_routes_counted_toward_max_prefix() {
         role_negotiated: false,
         extended_nexthop_families: HashMap::new(),
         add_path_families: HashMap::new(),
+        negotiated_orf_recv: Vec::new(),
     };
     session
         .negotiated_families
@@ -4670,6 +4687,7 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
         role_negotiated: false,
         extended_nexthop_families: HashMap::new(),
         add_path_families: HashMap::new(),
+        negotiated_orf_recv: Vec::new(),
     };
     session
         .negotiated_families
@@ -4804,4 +4822,117 @@ async fn outbound_saturation_teardown_emits_cease_out_of_resources() {
         result.is_ok(),
         "writer should exit Ok after clean shutdown, got: {result:?}"
     );
+}
+
+// ── Inbound ORF ROUTE-REFRESH handling (RFC 5291/5292) ──────────────────
+
+fn orf_rr(orf_type: OrfType, entries: OrfEntries) -> RouteRefreshMessage {
+    RouteRefreshMessage::new_with_orf(
+        Afi::Ipv4,
+        Safi::Unicast,
+        OrfPayload {
+            when_to_refresh: WhenToRefresh::Immediate,
+            groups: vec![OrfEntryGroup { orf_type, entries }],
+        },
+    )
+}
+
+fn one_permit_entry() -> OrfEntries {
+    OrfEntries::AddressPrefix(vec![AddressPrefixOrf {
+        action: OrfAction::Add,
+        match_: OrfMatch::Permit,
+        sequence: 1,
+        min_len: 0,
+        max_len: 0,
+        prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))),
+    }])
+}
+
+#[tokio::test]
+async fn inbound_orf_emits_peer_orf_update_when_negotiated() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut neg = negotiated_session(65002, false);
+    neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
+    session.negotiated = Some(neg);
+
+    let rr = orf_rr(OrfType::AddressPrefix, one_permit_entry());
+    let handled = session
+        .process_inbound_orf(Afi::Ipv4, Safi::Unicast, &rr)
+        .await;
+    assert!(handled, "negotiated ORF must be forwarded to the RIB");
+
+    let msg = rib_rx.try_recv().expect("PeerOrfUpdate should be emitted");
+    match msg {
+        RibUpdate::PeerOrfUpdate {
+            afi,
+            safi,
+            when,
+            entries,
+            ..
+        } => {
+            assert_eq!((afi, safi), (Afi::Ipv4, Safi::Unicast));
+            assert_eq!(when, WhenToRefresh::Immediate);
+            assert_eq!(entries.len(), 1);
+        }
+        _ => panic!("expected RibUpdate::PeerOrfUpdate"),
+    }
+}
+
+#[tokio::test]
+async fn inbound_orf_ignored_when_family_not_negotiated() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    // negotiated_session() leaves negotiated_orf_recv empty.
+    session.negotiated = Some(negotiated_session(65002, false));
+
+    let rr = orf_rr(OrfType::AddressPrefix, one_permit_entry());
+    let handled = session
+        .process_inbound_orf(Afi::Ipv4, Safi::Unicast, &rr)
+        .await;
+    assert!(!handled, "ORF for an un-negotiated family is ignored");
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "no PeerOrfUpdate should be emitted"
+    );
+}
+
+#[tokio::test]
+async fn inbound_orf_ignores_legacy_type_128() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut neg = negotiated_session(65002, false);
+    neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
+    session.negotiated = Some(neg);
+
+    // Family negotiated, but the legacy type 128 is never negotiated by us.
+    let rr = orf_rr(OrfType::AddressPrefixLegacy, one_permit_entry());
+    let handled = session
+        .process_inbound_orf(Afi::Ipv4, Safi::Unicast, &rr)
+        .await;
+    assert!(!handled, "legacy type 128 is not a negotiated type");
+    assert!(rib_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn inbound_orf_malformed_group_resets_via_remove_all() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut neg = negotiated_session(65002, false);
+    neg.negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
+    session.negotiated = Some(neg);
+
+    // A malformed Address-Prefix group → RFC 5291 §5.2 reset (REMOVE-ALL).
+    let rr = orf_rr(
+        OrfType::AddressPrefix,
+        OrfEntries::Malformed(Bytes::from_static(&[0x40])),
+    );
+    let handled = session
+        .process_inbound_orf(Afi::Ipv4, Safi::Unicast, &rr)
+        .await;
+    assert!(handled);
+    let msg = rib_rx.try_recv().expect("PeerOrfUpdate should be emitted");
+    match msg {
+        RibUpdate::PeerOrfUpdate { entries, .. } => {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].action, OrfAction::RemoveAll);
+        }
+        _ => panic!("expected RibUpdate::PeerOrfUpdate"),
+    }
 }

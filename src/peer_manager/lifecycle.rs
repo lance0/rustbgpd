@@ -44,6 +44,7 @@ impl PeerManager {
             add_path_send_max: tc.peer.add_path_send_max,
             local_role: tc.peer.local_role,
             strict_role: tc.peer.strict_role,
+            prefix_orf_receive: tc.peer.prefix_orf_receive,
             import_policy: managed.import_policy.clone(),
             export_policy: managed.export_policy.clone(),
         }

@@ -4,10 +4,82 @@ use super::{
     cease_subcode, debug, error, info, warn,
 };
 use crate::config::TransportConfig;
-use tokio::sync::mpsc;
+use rustbgpd_wire::{AddressPrefixOrf, OrfAction, OrfEntries, OrfMatch, OrfType};
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
 
 impl PeerSession {
+    /// Handle the ORF section of an inbound ROUTE-REFRESH (RFC 5291/5292).
+    ///
+    /// Returns `true` if at least one Address-Prefix ORF group of a negotiated
+    /// type was forwarded to the RIB — its `PeerOrfUpdate` handler installs the
+    /// filter, lifts the §6 initial-advertisement gate, and re-floods. Returns
+    /// `false` for a plain refresh, or an ORF whose groups are all
+    /// un-negotiated types (incl. the legacy type 128, which rustbgpd never
+    /// advertises); the caller then takes the normal re-advertise path.
+    pub(super) async fn process_inbound_orf(
+        &mut self,
+        afi: rustbgpd_wire::Afi,
+        safi: rustbgpd_wire::Safi,
+        rr: &rustbgpd_wire::RouteRefreshMessage,
+    ) -> bool {
+        let Some(orf) = &rr.orf else {
+            return false;
+        };
+        let negotiated = self
+            .negotiated
+            .as_ref()
+            .is_some_and(|n| n.negotiated_orf_recv.contains(&(afi, safi)));
+        if !negotiated {
+            warn!(
+                peer = %self.peer_label,
+                ?afi, ?safi,
+                "ignoring ORF entries — ORF not negotiated for this family"
+            );
+            return false;
+        }
+        let mut handled = false;
+        for group in &orf.groups {
+            // rustbgpd only negotiates/advertises the standard type 64.
+            if group.orf_type != OrfType::AddressPrefix {
+                continue;
+            }
+            let entries = match &group.entries {
+                OrfEntries::AddressPrefix(entries) => entries.clone(),
+                // RFC 5291 §5.2: a malformed entry of a negotiated type removes
+                // the previously installed list of that type — emit a reset.
+                OrfEntries::Malformed(_) => vec![AddressPrefixOrf {
+                    action: OrfAction::RemoveAll,
+                    match_: OrfMatch::Permit,
+                    sequence: 0,
+                    min_len: 0,
+                    max_len: 0,
+                    prefix: None,
+                }],
+                OrfEntries::Raw(_) => continue,
+            };
+            let (reply, _rx) = oneshot::channel();
+            if self
+                .rib_tx
+                .send(RibUpdate::PeerOrfUpdate {
+                    peer: self.peer_ip,
+                    afi,
+                    safi,
+                    when: orf.when_to_refresh,
+                    entries,
+                    reply,
+                })
+                .await
+                .is_err()
+            {
+                warn!(peer = %self.peer_label, "RIB manager unavailable — ORF update dropped");
+            } else {
+                handled = true;
+            }
+        }
+        handled
+    }
+
     /// Encode `msg` and enqueue it on the writer's **priority** channel
     /// (OPEN, KEEPALIVE, NOTIFICATION, operator ROUTE-REFRESH command,
     /// collision-dump Cease, saturation Cease/8). The priority channel
@@ -301,17 +373,27 @@ impl PeerSession {
                                     info!(
                                         peer = %self.peer_label,
                                         ?afi, ?safi,
+                                        has_orf = rr.orf.is_some(),
                                         "received ROUTE-REFRESH"
                                     );
-                                    if self
-                                        .rib_tx
-                                        .send(RibUpdate::RouteRefreshRequest {
-                                            peer: self.peer_ip,
-                                            afi,
-                                            safi,
-                                        })
-                                        .await
-                                        .is_err()
+                                    // RFC 5291: an ORF-carrying refresh installs
+                                    // the peer's prefix filter (which also lifts
+                                    // the §6 initial-advert gate and re-floods).
+                                    // A plain refresh, or an ORF for an
+                                    // un-negotiated family/type, falls through to
+                                    // the normal re-advertise path.
+                                    let handled_orf =
+                                        self.process_inbound_orf(afi, safi, &rr).await;
+                                    if !handled_orf
+                                        && self
+                                            .rib_tx
+                                            .send(RibUpdate::RouteRefreshRequest {
+                                                peer: self.peer_ip,
+                                                afi,
+                                                safi,
+                                            })
+                                            .await
+                                            .is_err()
                                     {
                                         warn!(
                                             peer = %self.peer_label,

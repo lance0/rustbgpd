@@ -366,6 +366,56 @@ impl RibManager {
         let _ = reply.send(Ok(()));
     }
 
+    /// Apply Address-Prefix ORF entries pushed by a peer (RFC 5291/5292).
+    ///
+    /// Installs/updates the per-`(peer, AFI, SAFI)` filter and lifts the
+    /// initial-advertisement gate. The re-advertisement sweep runs for
+    /// `IMMEDIATE` (or after a malformed-field reset, RFC 5291 §5.2); `DEFER`
+    /// installs the filter only — it stays live for subsequent outbound churn
+    /// and is swept on a later IMMEDIATE/plain ROUTE-REFRESH.
+    pub(super) fn handle_peer_orf_update(
+        &mut self,
+        peer: IpAddr,
+        afi: Afi,
+        safi: Safi,
+        when: rustbgpd_wire::WhenToRefresh,
+        entries: &[rustbgpd_wire::AddressPrefixOrf],
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) {
+        if !self.outbound_peers.contains_key(&peer) {
+            let _ = reply.send(Err(format!(
+                "peer {peer} not registered for outbound updates"
+            )));
+            return;
+        }
+        let family = (afi, safi);
+        // The ORF message is itself a ROUTE-REFRESH (RFC 5291 §6) — lift the gate.
+        if let Some(pending) = self.peer_orf_pending.get_mut(&peer) {
+            pending.remove(&family);
+        }
+        let filter = self
+            .peer_orf_filters
+            .entry(peer)
+            .or_default()
+            .entry(family)
+            .or_default();
+        let reset = filter.apply(entries).is_err();
+        let now_empty = filter.is_empty();
+        if reset {
+            warn!(%peer, ?family, "malformed ORF entry — installed ORF list for this type reset");
+        }
+        // An emptied filter (REMOVE-ALL or a reset) means permit-all again —
+        // drop the entry so the absent-filter fast path applies.
+        if now_empty && let Some(by_family) = self.peer_orf_filters.get_mut(&peer) {
+            by_family.remove(&family);
+        }
+        if reset || when == rustbgpd_wire::WhenToRefresh::Immediate {
+            self.force_outbound_peers.insert(peer);
+            self.distribute_changes(&HashSet::new(), &HashSet::new());
+        }
+        let _ = reply.send(Ok(()));
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub(super) fn enqueue_routes_received(
         &mut self,
@@ -945,6 +995,7 @@ impl RibManager {
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
+        orf_filter: Option<&crate::orf::OrfFilterSet>,
         metrics: &BgpMetrics,
         policy_stats: &mut NeighborPolicyStats,
         target_peer_label: &str,
@@ -963,6 +1014,15 @@ impl RibManager {
         };
         if !sendable.is_some_and(|f| f.contains(&family)) {
             // Withdraw all previously advertised paths for this prefix
+            for &path_id in rib_out.path_ids_for_prefix(prefix) {
+                withdraw.push((*prefix, path_id));
+            }
+            return;
+        }
+
+        // ORF check (RFC 5291): filters the prefix, not individual Add-Path
+        // path-ids — gate the whole prefix once, before collecting candidates.
+        if orf_filter.is_some_and(|f| !f.permits(prefix)) {
             for &path_id in rib_out.path_ids_for_prefix(prefix) {
                 withdraw.push((*prefix, path_id));
             }
@@ -1086,7 +1146,7 @@ impl RibManager {
         }
     }
 
-    #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(super) fn distribute_single_best_prefix(
         loc_rib: &LocRib,
         rib_out: &AdjRibOut,
@@ -1100,6 +1160,7 @@ impl RibManager {
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
+        orf_filter: Option<&crate::orf::OrfFilterSet>,
         metrics: &BgpMetrics,
         policy_stats: &mut NeighborPolicyStats,
         target_peer_label: &str,
@@ -1143,6 +1204,17 @@ impl RibManager {
         // Sendable family check
         let family = prefix_family(prefix);
         if !sendable.is_some_and(|f| f.contains(&family)) {
+            for &path_id in existing_path_ids {
+                withdraw.push((*prefix, path_id));
+            }
+            return;
+        }
+
+        // Outbound Route Filter check (RFC 5291): a peer-pushed prefix filter
+        // applied *before* export policy. ORF denial is a silent withdraw —
+        // not a policy denial — so it is deliberately not recorded in the
+        // `policy_filtered` set or the export-policy counters.
+        if orf_filter.is_some_and(|f| !f.permits(prefix)) {
             for &path_id in existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
@@ -1654,6 +1726,15 @@ impl RibManager {
                 .get(&peer)
                 .cloned()
                 .unwrap_or_default();
+            // ORF state, resolved before the &mut rib_out borrow below. Cloning
+            // is cheap: ORF filters are small and present only for peers that
+            // negotiated ORF (None for everyone else).
+            let orf_filters = self.peer_orf_filters.get(&peer).cloned();
+            let orf_gated = self
+                .peer_orf_pending
+                .get(&peer)
+                .cloned()
+                .unwrap_or_default();
             let loc_rib = &self.loc_rib;
             let loc_rib_len = loc_rib.len();
             let target_peer_label = peer.to_string();
@@ -1667,8 +1748,15 @@ impl RibManager {
 
             // Stage: compute delta without mutating AdjRibOut
             for prefix in &effective_prefixes {
+                let family = prefix_family(prefix);
+                // RFC 5291 §6 gate: suppress this family's advertisement (incl.
+                // ongoing churn) until the peer's first ROUTE-REFRESH lifts it.
+                if orf_gated.contains(&family) {
+                    continue;
+                }
+                let orf = orf_filters.as_ref().and_then(|m| m.get(&family));
                 let prefix_send_max = if peer_add_path_send_max > 0
-                    && peer_add_path_send_families.contains(&prefix_family(prefix))
+                    && peer_add_path_send_families.contains(&family)
                 {
                     peer_add_path_send_max
                 } else {
@@ -1691,6 +1779,7 @@ impl RibManager {
                         cluster_id,
                         sendable.as_ref(),
                         export_pol.as_ref(),
+                        orf,
                         &metrics,
                         policy_stats,
                         &target_peer_label,
@@ -1716,6 +1805,7 @@ impl RibManager {
                         cluster_id,
                         sendable.as_ref(),
                         export_pol.as_ref(),
+                        orf,
                         &metrics,
                         policy_stats,
                         &target_peer_label,

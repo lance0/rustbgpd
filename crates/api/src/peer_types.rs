@@ -929,6 +929,9 @@ pub struct PeerManagerNeighborConfig {
     pub local_role: Option<BgpRole>,
     /// Require the peer to advertise a compatible BGP Role.
     pub strict_role: bool,
+    /// Advertise willingness to receive Address-Prefix ORF entries and apply
+    /// them to this peer's outbound advertisements (RFC 5291/5292).
+    pub prefix_orf_receive: bool,
     /// Import policy chain applied to inbound routes.
     pub import_policy: Option<PolicyChain>,
     /// Export policy chain applied to outbound routes.

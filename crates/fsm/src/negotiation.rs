@@ -7,7 +7,7 @@ use bytes::Bytes;
 use rustbgpd_wire::notification::{NotificationCode, open_subcode};
 use rustbgpd_wire::{
     AddPathFamily, AddPathMode, Afi, BgpRole, Capability, ExtendedNextHopFamily,
-    NotificationMessage, OpenMessage, Safi,
+    NotificationMessage, OpenMessage, OrfCapEntry, OrfType, Safi,
 };
 
 use crate::action::NegotiatedSession;
@@ -174,6 +174,21 @@ pub fn validate_open(
         .collect();
     let add_path_families = negotiate_add_path(&our_add_path_caps, &peer_add_path_caps);
 
+    // Negotiate Outbound Route Filtering receive (RFC 5291). We advertise the
+    // Receive role for Address-Prefix ORF (type 64); ORF-receive is active for
+    // a family only if the peer advertised the Send (or Both) role for it.
+    let our_orf_caps = config.orf_capabilities();
+    let peer_orf_caps: Vec<OrfCapEntry> = open
+        .capabilities
+        .iter()
+        .filter_map(|c| match c {
+            Capability::OutboundRouteFilter(entries) => Some(entries.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let negotiated_orf_recv = negotiate_orf_receive(&our_orf_caps, &peer_orf_caps);
+
     Ok(NegotiatedSession {
         peer_asn,
         peer_router_id: open.bgp_identifier,
@@ -197,7 +212,33 @@ pub fn validate_open(
         peer_extended_message,
         extended_nexthop_families,
         add_path_families,
+        negotiated_orf_recv,
     })
+}
+
+/// Compute the (AFI,SAFI) families where rustbgpd will receive Address-Prefix
+/// ORF entries from the peer (RFC 5291 §4 capability intersection): we
+/// advertised the Receive role for ORF-Type 64 and the peer advertised the
+/// Send (or Both) role for the same family. Only the standard type 64 is
+/// considered — rustbgpd never advertises the legacy type 128.
+fn negotiate_orf_receive(ours: &[OrfCapEntry], peer: &[OrfCapEntry]) -> Vec<(Afi, Safi)> {
+    ours.iter()
+        .filter(|our| {
+            our.orf_types
+                .iter()
+                .any(|t| t.orf_type == OrfType::AddressPrefix && t.send_receive.can_receive())
+        })
+        .filter(|our| {
+            peer.iter().any(|p| {
+                p.afi == our.afi
+                    && p.safi == our.safi
+                    && p.orf_types
+                        .iter()
+                        .any(|t| t.orf_type == OrfType::AddressPrefix && t.send_receive.can_send())
+            })
+        })
+        .map(|e| (e.afi, e.safi))
+        .collect()
 }
 
 fn validate_role_capability(
@@ -410,6 +451,7 @@ mod tests {
             add_path_send_max: 0,
             local_role: None,
             strict_role: false,
+            prefix_orf_receive: false,
         }
     }
 
@@ -902,6 +944,65 @@ mod tests {
             }]));
         let neg = validate_open(&open, &cfg).unwrap();
         assert!(neg.add_path_families.is_empty());
+    }
+
+    use rustbgpd_wire::{OrfCapType, OrfSendReceive};
+
+    fn orf_cap(send_receive: OrfSendReceive, orf_type: OrfType) -> Capability {
+        Capability::OutboundRouteFilter(vec![OrfCapEntry {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            orf_types: vec![OrfCapType {
+                orf_type,
+                send_receive,
+            }],
+        }])
+    }
+
+    #[test]
+    fn validate_open_negotiates_orf_receive_when_peer_sends() {
+        let mut cfg = test_config();
+        cfg.prefix_orf_receive = true;
+        let mut open = peer_open();
+        open.capabilities
+            .push(orf_cap(OrfSendReceive::Send, OrfType::AddressPrefix));
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert_eq!(neg.negotiated_orf_recv, vec![(Afi::Ipv4, Safi::Unicast)]);
+    }
+
+    #[test]
+    fn validate_open_no_orf_when_peer_only_receives() {
+        // Intersection requires the peer to advertise Send; Receive alone fails.
+        let mut cfg = test_config();
+        cfg.prefix_orf_receive = true;
+        let mut open = peer_open();
+        open.capabilities
+            .push(orf_cap(OrfSendReceive::Receive, OrfType::AddressPrefix));
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert!(neg.negotiated_orf_recv.is_empty());
+    }
+
+    #[test]
+    fn validate_open_no_orf_when_local_disabled() {
+        let cfg = test_config(); // prefix_orf_receive = false
+        let mut open = peer_open();
+        open.capabilities
+            .push(orf_cap(OrfSendReceive::Both, OrfType::AddressPrefix));
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert!(neg.negotiated_orf_recv.is_empty());
+    }
+
+    #[test]
+    fn validate_open_no_orf_for_legacy_type_128() {
+        // rustbgpd advertises only type 64; a peer offering Send for the legacy
+        // type 128 does not intersect, so ORF stays un-negotiated.
+        let mut cfg = test_config();
+        cfg.prefix_orf_receive = true;
+        let mut open = peer_open();
+        open.capabilities
+            .push(orf_cap(OrfSendReceive::Send, OrfType::AddressPrefixLegacy));
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert!(neg.negotiated_orf_recv.is_empty());
     }
 
     #[test]

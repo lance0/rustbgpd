@@ -179,6 +179,7 @@ log_format = "json"
             route_server_client: Some(false),
             role: None,
             strict_role: None,
+            prefix_orf_receive: None,
             remove_private_as: None,
             add_path: None,
             import_policy: Vec::new(),

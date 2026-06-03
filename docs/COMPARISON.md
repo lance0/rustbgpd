@@ -62,6 +62,7 @@ suite implementation.
 | Capability negotiation | Yes | Yes | Yes | Yes | Yes |
 | Route Refresh (RFC 2918) | Yes | Yes | Yes | Yes | Yes |
 | Enhanced Route Refresh (RFC 7313) | Yes | Yes | Yes | No | Yes |
+| Prefix ORF (RFC 5291/5292) | Receive | Yes | No | No | No |
 | Graceful Restart (RFC 4724) | Yes | Yes | Yes | Yes | Yes |
 | Long-Lived GR (RFC 9494) | Yes | Partial | Yes | Yes | No |
 | Notification GR (RFC 8538) | Yes | Yes | No | Yes | Yes |

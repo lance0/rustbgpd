@@ -424,6 +424,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `route_server_client`  | bool     | no       | false   | Transparent route-server mode for eBGP peers (see below) |
 | `role`                 | string   | no       | --      | Local BGP Role for RFC 9234 route-leak protection: `"provider"`, `"rs"`, `"rs-client"`, `"customer"`, or `"peer"` (eBGP only) |
 | `strict_role`          | bool     | no       | false   | Require the peer to advertise a compatible BGP Role capability; only valid when `role` is set |
+| `prefix_orf_receive`   | bool     | no       | false   | Advertise receive-side Address-Prefix ORF (RFC 5291/5292); peer-pushed prefix filters constrain outbound advertisements |
 | `remove_private_as`   | string   | no       | --      | Remove private ASNs from AS_PATH: `"remove"`, `"all"`, or `"replace"` (eBGP only) |
 | `route_reflector_client` | bool   | no       | false   | Mark this iBGP peer as a route reflector client (RFC 4456) |
 | `local_ipv6_nexthop`   | string   | no       | --      | Override IPv6 next-hop for eBGP exports (must be valid non-link-local IPv6) |
@@ -631,9 +632,9 @@ hold_time = 45  # neighbor override beats peer-group default
 
 Peer-group fields mirror inheritable neighbor settings: timers, families,
 GR/LLGR, Add-Path, route-server / RR flags, BGP Role / strict-role defaults,
-private-AS handling, MD5/GTSM, `local_ipv6_nexthop`, `log_level`, and
-import/export inline policy or named chains. TCP-AO is intentionally not
-inherited through peer groups because
+receive-side Prefix ORF, private-AS handling, MD5/GTSM,
+`local_ipv6_nexthop`, `log_level`, and import/export inline policy or named
+chains. TCP-AO is intentionally not inherited through peer groups because
 dynamic-neighbor TCP-AO needs a separate wildcard-MKT design.
 
 ```toml
@@ -898,6 +899,26 @@ This applies to:
 
 `route_server_client` is only valid for eBGP neighbors. Config validation
 rejects it on iBGP peers.
+
+### Receive-side Prefix ORF (RFC 5291/5292)
+
+Set `prefix_orf_receive = true` on a neighbor or peer group to advertise that
+rustbgpd can receive Address-Prefix ORF entries from that peer. When negotiated,
+rustbgpd applies the peer-pushed prefix filter before export policy for that
+peer. This is route-server oriented: a client can suppress routes it does not
+want to receive without the server pre-configuring a dedicated export policy for
+that client.
+
+For an ORF-negotiated family, rustbgpd gates the initial table dump until the
+peer sends its first ROUTE-REFRESH for that family, then floods the filtered
+view. ORF entries use prefix-list semantics: sequence order, first match wins,
+implicit deny on a non-empty list, and permit-all when the list is empty or
+removed. `DEFER` installs the filter state but waits for a later immediate or
+plain ROUTE-REFRESH to sweep advertisements and withdrawals.
+
+rustbgpd implements the receive side only: it does not send ORF entries to its
+own upstreams. The knob is static TOML state, inherited through peer groups, and
+is off by default.
 
 ### BGP Roles and Only-to-Customer (RFC 9234)
 
@@ -2379,6 +2400,7 @@ starting:
 | `llgr_stale_time` | 0 (disabled) |
 | `description` | peer address used as label |
 | `route_server_client` | `false` |
+| `prefix_orf_receive` | `false` |
 | `role` / `strict_role` | disabled / `false` |
 | `remove_private_as` | disabled (absent) |
 | Policy default action | permit (when no entry matches) |

@@ -9,6 +9,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Outbound Route Filtering (ORF, RFC 5291 + RFC 5292) — receive side.**
+  rustbgpd can now advertise willingness to receive Address-Prefix ORF entries
+  (capability code 3, ORF-Type 64) and apply a peer-pushed prefix filter to the
+  routes it advertises *to that peer* — an additional outbound filter on top of
+  export policy, for route-server clients that want to constrain what they
+  receive. Enable per neighbor or peer-group with `prefix_orf_receive = true`.
+  Filtering follows prefix-list semantics (sequence-ordered, first match wins,
+  implicit deny, `ge`/`le` length windows). Initial advertisement for an
+  ORF-negotiated family is gated until the peer's first ROUTE-REFRESH (RFC 5291
+  §6). The legacy Cisco ORF-Type 128 is decoded for interoperability but never
+  advertised or applied. No new gRPC surface; configured via TOML only. See
+  ADR-0075. (`rustbgpd-wire` gains an `orf` module and an optional ORF section on
+  `RouteRefreshMessage` — a breaking change for that crate.)
+
 ## [0.34.0] — 2026-06-02
 
 ### Performance

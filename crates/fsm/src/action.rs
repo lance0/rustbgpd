@@ -76,6 +76,11 @@ pub struct NegotiatedSession {
     /// indicates what *we* can do: `Receive` means we accept Add-Path
     /// from the peer, `Send` means we can send Add-Path, `Both` means both.
     pub add_path_families: HashMap<(Afi, Safi), AddPathMode>,
+    /// Families for which we negotiated receiving Address-Prefix ORF entries
+    /// from the peer (RFC 5291/5292): we advertised Receive and the peer
+    /// advertised Send. Outbound advertisement for these families is gated
+    /// until the peer sends a Route Refresh (RFC 5291 §6).
+    pub negotiated_orf_recv: Vec<(Afi, Safi)>,
 }
 
 /// Output actions produced by the FSM on each transition.
@@ -103,7 +108,9 @@ pub enum Action {
         new: SessionState,
     },
     /// The session is fully established — negotiated parameters enclosed.
-    SessionEstablished(NegotiatedSession),
+    /// Boxed: `NegotiatedSession` is by far the largest `Action` variant, so
+    /// inlining it would bloat every `Action` (clippy `large_enum_variant`).
+    SessionEstablished(Box<NegotiatedSession>),
     /// The session left the Established state.
     SessionDown,
     /// A timer-expired event arrived for a timer that should not be

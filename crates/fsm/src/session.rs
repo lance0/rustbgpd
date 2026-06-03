@@ -350,7 +350,7 @@ impl Session {
                         actions.push(Action::StartTimer(TimerType::Hold, hold));
                     }
                     actions.push(self.transition_to(SessionState::Established));
-                    actions.push(Action::SessionEstablished(neg));
+                    actions.push(Action::SessionEstablished(Box::new(neg)));
                     actions
                 } else {
                     // Should not happen — negotiated is set in OpenSent
@@ -614,6 +614,7 @@ mod tests {
             add_path_send_max: 0,
             local_role: None,
             strict_role: false,
+            prefix_orf_receive: false,
         }
     }
 

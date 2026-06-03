@@ -423,6 +423,7 @@ impl PeerManager {
             add_path_send_max: config.add_path_send_max,
             local_role: config.local_role,
             strict_role: config.strict_role,
+            prefix_orf_receive: config.prefix_orf_receive,
         };
         let scope_id = config.scope_id.or_else(|| {
             config

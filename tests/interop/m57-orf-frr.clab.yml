@@ -1,0 +1,56 @@
+# Containerlab topology: rustbgpd ↔ FRR (M57 — Outbound Route Filtering)
+#
+# Validates receive-side Address-Prefix ORF (RFC 5291/5292):
+#
+#   rustbgpd (AS 65001) is the route server, configured with
+#   `prefix_orf_receive = true` for the FRR neighbor. Three prefixes are
+#   injected into its Loc-RIB (10.10.1.0/24, 10.10.2.0/24, 192.168.50.0/24).
+#
+#   FRR (AS 65002) is the client. It negotiates `capability orf prefix-list
+#   both` and has an inbound `prefix-list ORF-IN in` that permits only
+#   10.10.1.0/24. FRR pushes that prefix-list to rustbgpd as an ORF; rustbgpd
+#   applies it to the routes it advertises to FRR.
+#
+#   Phase 1: FRR receives only 10.10.1.0/24 (ORF honored; the other two are
+#            filtered out before they are sent).
+#   Phase 2: the prefix-list is widened to permit-all and the ORF re-sent
+#            (`clear bgp ... in prefix-filter`); FRR then receives all three
+#            (re-expansion / REMOVE-ALL + ADD).
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m57-orf-frr.clab.yml
+#   bash tests/interop/scripts/test-m57-orf-frr.sh
+#   containerlab destroy -t tests/interop/m57-orf-frr.clab.yml --cleanup
+
+name: m57-orf-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m57-orf.toml:/etc/rustbgpd/config.initial.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - cp /etc/rustbgpd/config.initial.toml /etc/rustbgpd/config.toml
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m57-orf.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.0.0.0/24 — rustbgpd (10.0.0.1, AS 65001) ↔ FRR (10.0.0.2, AS 65002)

@@ -168,8 +168,8 @@ point-in-time snapshots for post-incident analysis.
 ## 2. IXP Route Server
 
 **The problem:** You operate an Internet exchange and need a route server that
-distributes member routes with Add-Path, RPKI validation, and per-member policy
-— all manageable via API as members join and leave.
+distributes member routes with Add-Path, RPKI validation, Prefix ORF, and
+per-member policy — all manageable via API as members join and leave.
 
 **The architecture:**
 
@@ -189,6 +189,8 @@ IXP member C (AS 64503) ──┘
 - **Add-Path send** — members see all candidate paths, not just the best,
   enabling their own best-path selection
 - **RPKI validation** — drop RPKI-invalid routes, prefer valid over not-found
+- **Receive-side Prefix ORF** — let members push prefix filters that constrain
+  what the route server advertises back to them
 - **Policy chains** — per-member import/export filtering via named policies
 - **Peer groups** — share config across members with the same policy profile
 - **Dynamic member management** — add/remove members via gRPC without restart

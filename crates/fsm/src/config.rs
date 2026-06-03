@@ -5,7 +5,7 @@ use std::net::Ipv4Addr;
 use rustbgpd_wire::constants::AS_TRANS;
 use rustbgpd_wire::{
     AddPathFamily, AddPathMode, Afi, BgpRole, Capability, ExtendedNextHopFamily,
-    GracefulRestartFamily, LlgrFamily, Safi,
+    GracefulRestartFamily, LlgrFamily, OrfCapEntry, OrfCapType, OrfSendReceive, OrfType, Safi,
 };
 
 /// Configuration for a single BGP peer session.
@@ -43,6 +43,9 @@ pub struct PeerConfig {
     pub local_role: Option<BgpRole>,
     /// Require the peer to advertise a compatible BGP Role.
     pub strict_role: bool,
+    /// Advertise willingness to receive Address-Prefix ORF entries from this
+    /// peer and apply them to our outbound advertisements (RFC 5291/5292).
+    pub prefix_orf_receive: bool,
 }
 
 impl PeerConfig {
@@ -87,6 +90,10 @@ impl PeerConfig {
         if !add_path_caps.is_empty() {
             caps.push(Capability::AddPath(add_path_caps));
         }
+        let orf_caps = self.orf_capabilities();
+        if !orf_caps.is_empty() {
+            caps.push(Capability::OutboundRouteFilter(orf_caps));
+        }
         caps.push(Capability::RouteRefresh);
         caps.push(Capability::EnhancedRouteRefresh);
         caps.push(Capability::ExtendedMessage);
@@ -129,6 +136,33 @@ impl PeerConfig {
                 afi,
                 safi,
                 send_receive: mode,
+            })
+            .collect()
+    }
+
+    /// Build Outbound Route Filtering capability entries for our outgoing
+    /// OPEN message (RFC 5291/5292).
+    ///
+    /// rustbgpd advertises the **Receive** role for the standard Address-Prefix
+    /// ORF-Type (64) on each configured unicast family: it is willing to
+    /// receive ORF entries from the peer and apply them to its outbound
+    /// advertisements. It never advertises the Send role or the legacy
+    /// type 128. Non-unicast families are omitted.
+    #[must_use]
+    pub fn orf_capabilities(&self) -> Vec<OrfCapEntry> {
+        if !self.prefix_orf_receive {
+            return Vec::new();
+        }
+        self.families
+            .iter()
+            .filter(|(_, safi)| *safi == Safi::Unicast)
+            .map(|&(afi, safi)| OrfCapEntry {
+                afi,
+                safi,
+                orf_types: vec![OrfCapType {
+                    orf_type: OrfType::AddressPrefix,
+                    send_receive: OrfSendReceive::Receive,
+                }],
             })
             .collect()
     }
@@ -188,6 +222,7 @@ mod tests {
             add_path_send_max: 0,
             local_role: None,
             strict_role: false,
+            prefix_orf_receive: false,
         }
     }
 
@@ -374,6 +409,50 @@ mod tests {
         assert_eq!(caps.len(), 2);
         assert_eq!(caps[0].afi, Afi::Ipv4);
         assert_eq!(caps[1].afi, Afi::Ipv6);
+    }
+
+    #[test]
+    fn local_capabilities_includes_orf_when_enabled() {
+        let mut cfg = test_config();
+        cfg.prefix_orf_receive = true;
+        let caps = cfg.local_capabilities();
+        let orf = caps
+            .iter()
+            .find_map(|c| match c {
+                Capability::OutboundRouteFilter(entries) => Some(entries),
+                _ => None,
+            })
+            .expect("ORF capability advertised");
+        assert_eq!(orf.len(), 1);
+        assert_eq!(orf[0].afi, Afi::Ipv4);
+        assert_eq!(orf[0].safi, Safi::Unicast);
+        assert_eq!(orf[0].orf_types.len(), 1);
+        assert_eq!(orf[0].orf_types[0].orf_type, OrfType::AddressPrefix);
+        assert_eq!(orf[0].orf_types[0].send_receive, OrfSendReceive::Receive);
+    }
+
+    #[test]
+    fn local_capabilities_omits_orf_when_disabled() {
+        let cfg = test_config(); // prefix_orf_receive = false
+        assert!(
+            !cfg.local_capabilities()
+                .iter()
+                .any(|c| matches!(c, Capability::OutboundRouteFilter(_)))
+        );
+    }
+
+    #[test]
+    fn orf_capabilities_omit_non_unicast_families() {
+        let mut cfg = test_config();
+        cfg.prefix_orf_receive = true;
+        cfg.families = vec![
+            (Afi::Ipv4, Safi::Unicast),
+            (Afi::Ipv6, Safi::Unicast),
+            (Afi::Ipv4, Safi::FlowSpec),
+        ];
+        let orf = cfg.orf_capabilities();
+        assert_eq!(orf.len(), 2, "only unicast families advertise ORF");
+        assert!(orf.iter().all(|e| e.safi == Safi::Unicast));
     }
 
     #[test]

@@ -3,11 +3,15 @@ use bytes::{Buf, BufMut};
 use crate::capability::{Afi, Safi};
 use crate::constants::{HEADER_LEN, MARKER, message_type};
 use crate::error::{DecodeError, EncodeError};
+use crate::orf::{
+    OrfPayload, decode_route_refresh_orf, encode_route_refresh_orf, route_refresh_orf_len,
+};
 
-/// ROUTE-REFRESH message body length (AFI u16 + subtype u8 + SAFI u8).
+/// ROUTE-REFRESH base body length (AFI u16 + subtype u8 + SAFI u8). An ORF
+/// message (RFC 5291 §5.2) extends the body beyond this with ORF entries.
 const BODY_LEN: usize = 4;
 
-/// Total wire length of a ROUTE-REFRESH message (header + body).
+/// Total wire length of a plain ROUTE-REFRESH message (header + base body).
 const TOTAL_LEN: usize = HEADER_LEN + BODY_LEN;
 
 /// ROUTE-REFRESH demarcation subtype (RFC 7313).
@@ -50,14 +54,20 @@ impl RouteRefreshSubtype {
     }
 }
 
-/// BGP ROUTE-REFRESH message (RFC 2918 + RFC 7313).
+/// BGP ROUTE-REFRESH message (RFC 2918 + RFC 7313 + RFC 5291 ORF).
 ///
 /// Requests a peer to re-advertise its Adj-RIB-Out for the specified
 /// address family. RFC 7313 reuses the third octet as a demarcation subtype
 /// (BoRR/EoRR). Raw wire values are stored so that unknown AFI/SAFI or
 /// subtype values can be decoded without error — the transport layer decides
 /// whether to act on or ignore them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// When the message body extends beyond the 4-byte AFI/Reserved/SAFI header,
+/// the trailing bytes are an RFC 5291 ORF section, decoded into [`orf`]. A
+/// plain or Enhanced Route Refresh has [`orf`] set to `None`.
+///
+/// [`orf`]: RouteRefreshMessage::orf
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteRefreshMessage {
     /// Raw AFI value from the wire.
     pub afi_raw: u16,
@@ -65,6 +75,9 @@ pub struct RouteRefreshMessage {
     pub subtype_raw: u8,
     /// Raw SAFI value from the wire.
     pub safi_raw: u8,
+    /// RFC 5291 ORF section, present when the body extends past the 4-byte
+    /// header. `None` for a plain (RFC 2918) or Enhanced (RFC 7313) refresh.
+    pub orf: Option<OrfPayload>,
 }
 
 impl RouteRefreshMessage {
@@ -81,6 +94,19 @@ impl RouteRefreshMessage {
             afi_raw: afi as u16,
             subtype_raw: subtype.as_u8(),
             safi_raw: safi as u8,
+            orf: None,
+        }
+    }
+
+    /// Create an ORF-carrying ROUTE-REFRESH (RFC 5291 §5.2). The third octet
+    /// is Reserved (subtype 0) for an ORF message.
+    #[must_use]
+    pub fn new_with_orf(afi: Afi, safi: Safi, orf: OrfPayload) -> Self {
+        Self {
+            afi_raw: afi as u16,
+            subtype_raw: 0,
+            safi_raw: safi as u8,
+            orf: Some(orf),
         }
     }
 
@@ -104,19 +130,26 @@ impl RouteRefreshMessage {
 
     /// Decode a ROUTE-REFRESH message body from a buffer.
     ///
+    /// A 4-byte body is a plain/Enhanced refresh (`orf: None`). A longer body
+    /// carries an RFC 5291 ORF section, decoded into `orf`. A malformed ORF
+    /// *entry* does not fail the decode — it is surfaced via
+    /// [`crate::orf::OrfEntries::Malformed`] so the caller can apply the RFC
+    /// 5291 §5.2 reset semantics instead of tearing the session down.
+    ///
     /// # Errors
     ///
-    /// Returns [`DecodeError`] if the body length is not exactly 4.
-    /// Unknown AFI/SAFI values and unknown subtypes are preserved.
+    /// Returns [`DecodeError`] if the body length is below 4 or the buffer is
+    /// truncated relative to the declared body length. Unknown AFI/SAFI values
+    /// and unknown subtypes are preserved.
     pub fn decode(buf: &mut impl Buf, body_len: usize) -> Result<Self, DecodeError> {
-        if body_len != BODY_LEN {
+        if body_len < BODY_LEN {
             return Err(DecodeError::InvalidLength {
                 length: u16::try_from(HEADER_LEN + body_len).unwrap_or(u16::MAX),
             });
         }
-        if buf.remaining() < BODY_LEN {
+        if buf.remaining() < body_len {
             return Err(DecodeError::Incomplete {
-                needed: BODY_LEN,
+                needed: body_len,
                 available: buf.remaining(),
             });
         }
@@ -125,10 +158,21 @@ impl RouteRefreshMessage {
         let subtype_raw = buf.get_u8();
         let safi_raw = buf.get_u8();
 
+        let orf = if body_len > BODY_LEN {
+            // Bound the ORF parse to the declared body so a buffer carrying
+            // more than one message cannot over-read.
+            let mut orf_buf = buf.copy_to_bytes(body_len - BODY_LEN);
+            let family = Afi::from_u16(afi_raw).zip(Safi::from_u8(safi_raw));
+            Some(decode_route_refresh_orf(&mut orf_buf, family)?)
+        } else {
+            None
+        };
+
         Ok(Self {
             afi_raw,
             subtype_raw,
             safi_raw,
+            orf,
         })
     }
 
@@ -136,23 +180,30 @@ impl RouteRefreshMessage {
     ///
     /// # Errors
     ///
-    /// This encoding is infallible for valid values, but returns
-    /// [`EncodeError`] for API consistency.
+    /// Returns [`EncodeError`] if the total message length (with an ORF
+    /// section) exceeds the 16-bit length field.
     pub fn encode(&self, buf: &mut impl BufMut) -> Result<(), EncodeError> {
+        let total = self.encoded_len();
+        let total_u16 = u16::try_from(total).map_err(|_| EncodeError::ValueOutOfRange {
+            field: "route_refresh_message_length",
+            value: total.to_string(),
+        })?;
         buf.put_slice(&MARKER);
-        #[expect(clippy::cast_possible_truncation)]
-        buf.put_u16(TOTAL_LEN as u16);
+        buf.put_u16(total_u16);
         buf.put_u8(message_type::ROUTE_REFRESH);
         buf.put_u16(self.afi_raw);
         buf.put_u8(self.subtype_raw);
         buf.put_u8(self.safi_raw);
+        if let Some(orf) = &self.orf {
+            encode_route_refresh_orf(orf, buf)?;
+        }
         Ok(())
     }
 
-    /// Total encoded size on the wire (header + body).
+    /// Total encoded size on the wire (header + base body + any ORF section).
     #[must_use]
     pub fn encoded_len(&self) -> usize {
-        TOTAL_LEN
+        TOTAL_LEN + self.orf.as_ref().map_or(0, route_refresh_orf_len)
     }
 }
 
@@ -165,16 +216,25 @@ impl std::fmt::Display for RouteRefreshMessage {
             RouteRefreshSubtype::Unknown(value) => format!("Unknown({value})"),
         };
 
+        let orf = if let Some(payload) = &self.orf {
+            format!(
+                " ORF(when={:?}, groups={})",
+                payload.when_to_refresh,
+                payload.groups.len()
+            )
+        } else {
+            String::new()
+        };
         match (self.afi(), self.safi()) {
             (Some(afi), Some(safi)) => {
                 write!(
                     f,
-                    "ROUTE-REFRESH subtype={subtype} AFI={afi:?} SAFI={safi:?}"
+                    "ROUTE-REFRESH subtype={subtype} AFI={afi:?} SAFI={safi:?}{orf}"
                 )
             }
             _ => write!(
                 f,
-                "ROUTE-REFRESH subtype={subtype} AFI={} SAFI={}",
+                "ROUTE-REFRESH subtype={subtype} AFI={} SAFI={}{orf}",
                 self.afi_raw, self.safi_raw
             ),
         }
@@ -251,10 +311,12 @@ mod tests {
     }
 
     #[test]
-    fn reject_wrong_body_length() {
-        let data: &[u8] = &[0, 1, 0, 1, 0xFF];
+    fn plain_four_byte_body_has_no_orf() {
+        // Regression: a 4-byte body is a plain/Enhanced refresh, never ORF.
+        let data: &[u8] = &[0, 1, 0, 1];
         let mut buf = Bytes::copy_from_slice(data);
-        assert!(RouteRefreshMessage::decode(&mut buf, 5).is_err());
+        let msg = RouteRefreshMessage::decode(&mut buf, 4).unwrap();
+        assert_eq!(msg.orf, None);
     }
 
     #[test]
@@ -262,6 +324,51 @@ mod tests {
         let data: &[u8] = &[0, 1, 0];
         let mut buf = Bytes::copy_from_slice(data);
         assert!(RouteRefreshMessage::decode(&mut buf, 3).is_err());
+    }
+
+    #[test]
+    fn reject_truncated_orf_body() {
+        // body_len claims 10 but only 4 bytes are present.
+        let data: &[u8] = &[0, 1, 0, 1];
+        let mut buf = Bytes::copy_from_slice(data);
+        assert!(RouteRefreshMessage::decode(&mut buf, 10).is_err());
+    }
+
+    #[test]
+    fn roundtrip_orf_route_refresh() {
+        use crate::nlri::{Ipv4Prefix, Prefix};
+        use crate::orf::{
+            AddressPrefixOrf, OrfAction, OrfEntries, OrfEntryGroup, OrfMatch, OrfPayload, OrfType,
+            WhenToRefresh,
+        };
+        use std::net::Ipv4Addr;
+
+        let payload = OrfPayload {
+            when_to_refresh: WhenToRefresh::Immediate,
+            groups: vec![OrfEntryGroup {
+                orf_type: OrfType::AddressPrefix,
+                entries: OrfEntries::AddressPrefix(vec![AddressPrefixOrf {
+                    action: OrfAction::Add,
+                    match_: OrfMatch::Permit,
+                    sequence: 10,
+                    min_len: 24,
+                    max_len: 32,
+                    prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))),
+                }]),
+            }],
+        };
+        let msg = RouteRefreshMessage::new_with_orf(Afi::Ipv4, Safi::Unicast, payload);
+
+        let mut buf = BytesMut::with_capacity(msg.encoded_len());
+        msg.encode(&mut buf).unwrap();
+        assert_eq!(buf.len(), msg.encoded_len());
+
+        let mut bytes = buf.freeze();
+        bytes.advance(HEADER_LEN);
+        let body_len = msg.encoded_len() - HEADER_LEN;
+        let decoded = RouteRefreshMessage::decode(&mut bytes, body_len).unwrap();
+        assert_eq!(decoded, msg);
+        assert!(decoded.orf.is_some());
     }
 
     #[test]
@@ -284,6 +391,40 @@ mod tests {
         assert_eq!(msg.safi(), None);
         assert_eq!(msg.afi(), Some(Afi::Ipv4));
         assert_eq!(msg.subtype(), RouteRefreshSubtype::Normal);
+    }
+
+    #[test]
+    fn decode_orf_unknown_safi_preserves_address_prefix_group_as_raw() {
+        use crate::constants::orf;
+        use crate::orf::{OrfEntries, OrfType, WhenToRefresh};
+
+        let data: &[u8] = &[
+            0,
+            1,
+            0,
+            128, // AFI IPv4, Reserved, future/unknown SAFI.
+            orf::WHEN_IMMEDIATE,
+            orf::TYPE_ADDRESS_PREFIX,
+            0,
+            8,
+            orf::ACTION_ADD,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            40,
+        ];
+        let mut buf = Bytes::copy_from_slice(data);
+        let msg = RouteRefreshMessage::decode(&mut buf, data.len()).unwrap();
+        let payload = msg.orf.unwrap();
+        assert_eq!(payload.when_to_refresh, WhenToRefresh::Immediate);
+        assert_eq!(payload.groups[0].orf_type, OrfType::AddressPrefix);
+        assert_eq!(
+            payload.groups[0].entries,
+            OrfEntries::Raw(Bytes::from_static(&[orf::ACTION_ADD, 0, 0, 0, 1, 0, 0, 40]))
+        );
     }
 
     #[test]
@@ -315,6 +456,7 @@ mod tests {
             afi_raw: 99,
             subtype_raw: 7,
             safi_raw: 42,
+            orf: None,
         };
         let s = format!("{msg}");
         assert!(s.contains("99"));

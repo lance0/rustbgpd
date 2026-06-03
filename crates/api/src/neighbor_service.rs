@@ -530,6 +530,9 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             add_path_send_max: config.add_path_send_max,
             local_role,
             strict_role: config.strict_role,
+            // ORF is not exposed on the dynamic-neighbor gRPC surface; enable
+            // it via the static TOML `prefix_orf_receive` knob instead.
+            prefix_orf_receive: false,
             import_policy: None,
             export_policy: None,
         };
@@ -1041,6 +1044,7 @@ mod tests {
             add_path_send_max: 0,
             local_role: None,
             strict_role: false,
+            prefix_orf_receive: false,
             import_policy: None,
             export_policy: None,
         }
