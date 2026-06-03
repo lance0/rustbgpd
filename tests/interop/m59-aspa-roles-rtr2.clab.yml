@@ -1,0 +1,62 @@
+# Containerlab topology: rustbgpd (BGP Role = customer) ↔ FRR provider + RTR v2 server
+#
+# Validates role-aware ASPA verification (ADR-0049,
+# draft-ietf-sidrops-aspa-verification-25 §5.5): rustbgpd configures a local
+# BGP Role of `customer` toward the FRR peer, so routes received from it are
+# verified with the DOWNSTREAM (customer-cone) procedure rather than upstream.
+# M27 covers the roleless/upstream side; this scenario covers the downstream
+# half shipped with role-aware ASPA.
+#
+# rustbgpd (AS 65001, role=customer) ↔ FRR (AS 65003, its provider). FRR
+# advertises two prefixes with crafted AS_PATHs; the RTR v2 server feeds the
+# ASPA records that make one downstream-Valid and one downstream-Invalid:
+#   - 192.168.20.0/24 → [65003, 65011, 65010] → downstream Valid
+#   - 192.168.21.0/24 → [65003, 65007, 65008] → downstream Invalid
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m59-aspa-roles-rtr2.clab.yml
+#   bash tests/interop/scripts/test-m59-aspa-roles.sh
+#   containerlab destroy -t tests/interop/m59-aspa-roles-rtr2.clab.yml --cleanup
+
+name: m59-aspa-roles-rtr2
+
+mgmt:
+  network: clab-mgmt
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m59-aspa-roles.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m59.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    rtr-server:
+      kind: linux
+      image: python:3.12-slim
+      cmd: sleep infinity
+      binds:
+        - ./scripts/rtr-v2-server-m59.py:/usr/local/bin/rtr-v2-server-m59.py:ro
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.0.0.0/24 — rustbgpd (10.0.0.1, AS 65001) ↔ FRR (10.0.0.2, AS 65003)
+# RTR server: management network only (TCP 3323)
