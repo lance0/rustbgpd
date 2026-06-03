@@ -531,7 +531,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             local_role,
             strict_role: config.strict_role,
             // ORF is not exposed on the dynamic-neighbor gRPC surface; enable
-            // it via the static TOML `prefix-orf-receive` knob instead.
+            // it via the static TOML `prefix_orf_receive` knob instead.
             prefix_orf_receive: false,
             import_policy: None,
             export_policy: None,

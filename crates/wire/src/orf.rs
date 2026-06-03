@@ -8,9 +8,11 @@
 //!
 //! This module is the pure wire codec. Semantic validation (is the ORF-Type
 //! negotiated? is `min_len <= max_len`?) is the caller's responsibility — see
-//! the transport/RIB layers. The codec only rejects genuine framing errors
-//! (truncation, a prefix length that exceeds the address family, an undefined
-//! Action), mirroring how `nlri` treats an over-long prefix length.
+//! the transport/RIB layers. Only genuine BGP-framing errors (truncation, or a
+//! group length that overruns the message body) return a `DecodeError`; a
+//! malformed Address-Prefix *entry* (undefined Action, or a prefix length
+//! beyond the address family) decodes into [`OrfEntries::Malformed`] so the
+//! caller can apply the RFC 5291 §5.2 reset instead of tearing the session down.
 
 use bytes::{Buf, BufMut, Bytes};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -313,9 +315,11 @@ pub fn decode_capability_value(mut raw: &[u8]) -> Option<Vec<OrfCapEntry>> {
 ///
 /// # Errors
 ///
-/// Returns [`DecodeError`] on truncation, a group length that overruns the
-/// body, an undefined Action, or a prefix length that exceeds the address
-/// family (consistent with `nlri` decoding).
+/// Returns [`DecodeError`] only on genuine framing problems: truncation, or a
+/// group length that overruns the body. A malformed Address-Prefix *entry*
+/// (undefined Action, or a prefix length beyond the address family) does not
+/// error — that group decodes into [`OrfEntries::Malformed`] for the caller to
+/// reset (RFC 5291 §5.2).
 pub fn decode_route_refresh_orf(
     buf: &mut impl Buf,
     family: Option<Afi>,
