@@ -130,79 +130,93 @@ async fn mutate(
         let current = read_current_tables(Some(&fib_cmd_tx))
             .await?
             .unwrap_or_default();
-        let previous_tables = current.clone();
-        let previous_snapshots: Vec<FibTableSnapshot> =
-            current.iter().map(config_to_snapshot).collect();
         let candidate = apply_mutation(current, mutation)?;
-        let snapshots: Vec<FibTableSnapshot> = candidate.iter().map(config_to_snapshot).collect();
-
-        // Validate AND stage the candidate into the peer manager's live config
-        // in one atomic command. This closes the TOCTOU against peer-group
-        // deletion: once staged, the candidate's `allowed_peer_groups` are
-        // visible to `peer_group_references`, so a concurrent delete is rejected
-        // (and if a delete raced ahead, the candidate fails validation here).
-        // The peer manager processes commands one at a time, so the check and
-        // the commit cannot interleave with another config mutation.
-        stage_candidate(&peer_mgr_tx, snapshots.clone()).await?;
-
-        // From here the candidate is staged in the live config, so every early
-        // exit must roll it back to `previous` to keep the snapshot from
-        // drifting ahead of the runtime/disk state.
-        let permit = match reserve_persist_permit(&config_tx).await {
-            Ok(permit) => permit,
-            Err(error) => {
-                rollback_snapshot(&peer_mgr_tx, previous_snapshots).await;
-                return Err(error);
-            }
-        };
-
-        // Apply to the reconciler and wait for its acknowledgement.
-        if let Err(error) = replace_tables(&fib_cmd_tx, candidate.clone()).await {
-            rollback_snapshot(&peer_mgr_tx, previous_snapshots).await;
-            return Err(error);
-        }
-
-        // Persist exactly the accepted set, only after the ack. The live config
-        // snapshot already holds the candidate (staged above). Await the bridge
-        // and persister acknowledgement before releasing the coordinator lock,
-        // otherwise an immediate SIGHUP can reload stale disk and overwrite the
-        // accepted runtime snapshot.
-        let (persist_ack_tx, persist_ack_rx) = oneshot::channel();
-        permit.send(ConfigEvent::FibTablesReplaced {
-            tables: snapshots,
-            ack: Some(persist_ack_tx),
-        });
-        let persist_result = persist_ack_rx.await.map_err(|_| {
-            FibTableControlError::Internal(
-                "config bridge dropped FIB-table persistence acknowledgement".to_string(),
-            )
-        })?;
-        if let Err(error) = persist_result {
-            if let Err(rollback_error) = rollback_applied_tables(
-                &fib_cmd_tx,
-                &peer_mgr_tx,
-                previous_tables,
-                previous_snapshots,
-            )
-            .await
-            {
-                return Err(FibTableControlError::Internal(format!(
-                    "FIB-table persistence failed ({error}); runtime rollback failed: \
-                     {rollback_error}"
-                )));
-            }
-            return Err(FibTableControlError::FailedPrecondition(error));
-        }
-
-        Ok(proto::ListFibTablesResponse {
-            tables: candidate.iter().map(config_to_proto).collect(),
-            runtime_available: true,
-        })
+        commit_fib_tables_locked(&fib_cmd_tx, &peer_mgr_tx, &config_tx, candidate).await
     });
 
     join.await.map_err(|_| {
         FibTableControlError::Internal("FIB-table mutation task did not complete".to_string())
     })?
+}
+
+/// Commit a full `[[fib_tables]]` replacement while the caller holds the shared
+/// runtime-config coordinator lock.
+///
+/// This is the single safety-critical FIB commit path used by targeted FIB CRUD
+/// and config transactions: stage the peer-manager snapshot, apply to the
+/// reconciler, persist the exact accepted set, and roll back on every
+/// post-stage failure.
+pub(crate) async fn commit_fib_tables_locked(
+    fib_cmd_tx: &mpsc::Sender<FibRuntimeCommand>,
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    config_tx: &mpsc::Sender<ConfigEvent>,
+    candidate: Vec<FibTableConfig>,
+) -> Result<proto::ListFibTablesResponse, FibTableControlError> {
+    let previous_tables = read_current_tables(Some(fib_cmd_tx))
+        .await?
+        .unwrap_or_default();
+    let previous_snapshots: Vec<FibTableSnapshot> =
+        previous_tables.iter().map(config_to_snapshot).collect();
+    let snapshots: Vec<FibTableSnapshot> = candidate.iter().map(config_to_snapshot).collect();
+
+    // Validate AND stage the candidate into the peer manager's live config in
+    // one atomic command. This closes the TOCTOU against peer-group deletion:
+    // once staged, the candidate's `allowed_peer_groups` are visible to
+    // `peer_group_references`, so a concurrent delete is rejected (and if a
+    // delete raced ahead, the candidate fails validation here). The peer manager
+    // processes commands one at a time, so the check and commit cannot
+    // interleave with another config mutation.
+    stage_candidate(peer_mgr_tx, snapshots.clone()).await?;
+
+    // From here the candidate is staged in the live config, so every early exit
+    // must roll it back to `previous` to keep the snapshot from drifting ahead
+    // of the runtime/disk state.
+    let permit = match reserve_persist_permit(config_tx).await {
+        Ok(permit) => permit,
+        Err(error) => {
+            rollback_snapshot(peer_mgr_tx, previous_snapshots).await;
+            return Err(error);
+        }
+    };
+
+    // Apply to the reconciler and wait for its acknowledgement.
+    if let Err(error) = replace_tables(fib_cmd_tx, candidate.clone()).await {
+        rollback_snapshot(peer_mgr_tx, previous_snapshots).await;
+        return Err(error);
+    }
+
+    // Persist exactly the accepted set, only after the ack. The live config
+    // snapshot already holds the candidate (staged above). Await the bridge and
+    // persister acknowledgement before releasing the coordinator lock, otherwise
+    // an immediate SIGHUP can reload stale disk and overwrite the accepted
+    // runtime snapshot.
+    let (persist_ack_tx, persist_ack_rx) = oneshot::channel();
+    permit.send(ConfigEvent::FibTablesReplaced {
+        tables: snapshots,
+        ack: Some(persist_ack_tx),
+    });
+    let persist_result = persist_ack_rx.await.map_err(|_| {
+        FibTableControlError::Internal(
+            "config bridge dropped FIB-table persistence acknowledgement".to_string(),
+        )
+    })?;
+    if let Err(error) = persist_result {
+        if let Err(rollback_error) =
+            rollback_applied_tables(fib_cmd_tx, peer_mgr_tx, previous_tables, previous_snapshots)
+                .await
+        {
+            return Err(FibTableControlError::Internal(format!(
+                "FIB-table persistence failed ({error}); runtime rollback failed: \
+                 {rollback_error}"
+            )));
+        }
+        return Err(FibTableControlError::FailedPrecondition(error));
+    }
+
+    Ok(proto::ListFibTablesResponse {
+        tables: candidate.iter().map(config_to_proto).collect(),
+        runtime_available: true,
+    })
 }
 
 /// Read the reconciler's current table set. `Ok(None)` means no reconciler is
@@ -363,7 +377,7 @@ async fn replace_tables(
         .map_err(FibTableControlError::FailedPrecondition)
 }
 
-fn runtime_unavailable_error(startup_had_tables: bool) -> FibTableControlError {
+pub(crate) fn runtime_unavailable_error(startup_had_tables: bool) -> FibTableControlError {
     if startup_had_tables {
         FibTableControlError::FailedPrecondition(
             "the FIB reconciler is unavailable (it did not spawn at startup — non-Linux platform \

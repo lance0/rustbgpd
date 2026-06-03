@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio::net::{TcpListener, UnixListener};
@@ -51,6 +52,54 @@ use crate::proto::rib_service_server::RibServiceServer;
 use crate::rib_service::RibService;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
+
+/// Error returned by the daemon-owned config transaction apply hook.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConfigTransactionApplyError {
+    /// Candidate or request validation failed.
+    InvalidArgument(String),
+    /// The request targets a stale runtime snapshot or an unavailable runtime
+    /// precondition such as missing persisted config.
+    FailedPrecondition(String),
+    /// Required runtime actor or persistence channel is unavailable.
+    Unavailable(String),
+    /// Internal actor/rollback failure.
+    Internal(String),
+}
+
+impl ConfigTransactionApplyError {
+    pub(crate) fn into_status(self) -> Status {
+        match self {
+            Self::InvalidArgument(message) => Status::invalid_argument(message),
+            Self::FailedPrecondition(message) => Status::failed_precondition(message),
+            Self::Unavailable(message) => Status::unavailable(message),
+            Self::Internal(message) => Status::internal(message),
+        }
+    }
+}
+
+/// Future returned by the daemon-owned config transaction apply hook.
+pub type ConfigTransactionApplyFuture = Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<
+                    crate::proto::ConfigTransactionApplyResponse,
+                    ConfigTransactionApplyError,
+                >,
+            > + Send,
+    >,
+>;
+
+/// Daemon-owned hook for `ConfigService.ApplyConfigTransaction`.
+///
+/// The binary crate owns this because config transactions need runtime actor
+/// senders, config persistence, and the shared SIGHUP/runtime-CRUD lock.
+pub type ConfigTransactionApplyFn = Arc<
+    dyn Fn(crate::proto::ApplyConfigTransactionRequest) -> ConfigTransactionApplyFuture
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Configuration for the gRPC server beyond basic connectivity.
 #[derive(Clone)]
@@ -113,6 +162,9 @@ pub struct ServeConfig {
     /// (they return `FAILED_PRECONDITION`). Wired in `main.rs` where the
     /// FIB actor sender, validator, and config persistence are visible.
     pub fib_table_control: Option<crate::rib_service::FibTableControlFn>,
+    /// Daemon hook for config transaction apply. `None` fails closed with
+    /// `FAILED_PRECONDITION`.
+    pub config_transaction_apply: Option<ConfigTransactionApplyFn>,
     /// Shared serialization lock for persisted runtime config mutations and
     /// SIGHUP reload. The daemon wires this to dynamic-neighbor CRUD and
     /// FIB-table CRUD so accepted runtime mutations cannot be clobbered by a
@@ -438,6 +490,7 @@ async fn run_listener(
     let blackhole_discard_snapshot = config.blackhole_discard_snapshot;
     let fib_route_snapshot = config.fib_route_snapshot;
     let fib_table_control = config.fib_table_control;
+    let config_transaction_apply = config.config_transaction_apply;
     let runtime_config_lock = config.runtime_config_lock;
     let dataplane_route_events = config.dataplane_route_events;
     let bfd_session_snapshot = config.bfd_session_snapshot;
@@ -486,6 +539,7 @@ async fn run_listener(
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
                 fib_table_control,
+                config_transaction_apply,
                 runtime_config_lock,
                 dataplane_route_events,
                 bfd_session_snapshot,
@@ -529,6 +583,7 @@ async fn run_listener(
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
                 fib_table_control,
+                config_transaction_apply,
                 runtime_config_lock,
                 dataplane_route_events,
                 bfd_session_snapshot,
@@ -579,6 +634,7 @@ async fn run_tcp_listener(
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
     fib_table_control: Option<crate::rib_service::FibTableControlFn>,
+    config_transaction_apply: Option<ConfigTransactionApplyFn>,
     runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
     dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
@@ -683,7 +739,8 @@ async fn run_tcp_listener(
         interceptor.clone(),
     ));
     routes.add_service(ConfigServiceServer::with_interceptor(
-        ConfigService::new(peer_mgr_tx.clone()),
+        ConfigService::new(peer_mgr_tx.clone())
+            .with_transaction_apply(config_transaction_apply.clone()),
         interceptor.clone(),
     ));
     routes.add_service(EvpnServiceServer::with_interceptor(
@@ -762,6 +819,7 @@ async fn run_uds_listener(
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
     fib_table_control: Option<crate::rib_service::FibTableControlFn>,
+    config_transaction_apply: Option<ConfigTransactionApplyFn>,
     runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
     dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
@@ -846,7 +904,8 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(ConfigServiceServer::with_interceptor(
-        ConfigService::new(peer_mgr_tx.clone()),
+        ConfigService::new(peer_mgr_tx.clone())
+            .with_transaction_apply(config_transaction_apply.clone()),
         interceptor.clone(),
     ));
     routes.add_service(EvpnServiceServer::with_interceptor(
