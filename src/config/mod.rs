@@ -1551,7 +1551,9 @@ impl ConfigTransactionSectionClassification {
 /// they planned against. It intentionally hashes normalized serialization
 /// rather than exposing live config content.
 pub fn runtime_snapshot_token(config: &Config) -> Result<String, String> {
-    let normalized = toml::to_string_pretty(config)
+    let canonical = toml::Value::try_from(config)
+        .map_err(|error| format!("failed to canonicalize runtime config snapshot: {error}"))?;
+    let normalized = toml::to_string_pretty(&canonical)
         .map_err(|error| format!("failed to serialize runtime config snapshot: {error}"))?;
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in normalized.as_bytes() {

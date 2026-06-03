@@ -6706,6 +6706,39 @@ fn runtime_snapshot_token_is_stable_and_changes_with_config() {
 }
 
 #[test]
+fn runtime_snapshot_token_canonicalizes_map_order() {
+    let mut left = parse(valid_toml()).unwrap();
+    let mut right = left.clone();
+
+    left.security.grpc.roles.clear();
+    left.security
+        .grpc
+        .roles
+        .insert("operator.example".to_string(), GrpcRoleConfig::Operator);
+    left.security
+        .grpc
+        .roles
+        .insert("observer.example".to_string(), GrpcRoleConfig::Observer);
+
+    right.security.grpc.roles.clear();
+    right
+        .security
+        .grpc
+        .roles
+        .insert("observer.example".to_string(), GrpcRoleConfig::Observer);
+    right
+        .security
+        .grpc
+        .roles
+        .insert("operator.example".to_string(), GrpcRoleConfig::Operator);
+
+    assert_eq!(
+        runtime_snapshot_token(&left).unwrap(),
+        runtime_snapshot_token(&right).unwrap()
+    );
+}
+
+#[test]
 fn bfd_rejects_ipv6_link_local_neighbor() {
     // v1 ships IPv4 + IPv6 global only; link-local BFD is deferred to v1.1
     // even though BGP link-local peers now carry interface scope.
