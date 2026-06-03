@@ -1,0 +1,27 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# Receive-side Address-Prefix ORF (RFC 5291/5292). The FRR client negotiates
+# ORF-Send and pushes its inbound prefix-list as an ORF; rustbgpd advertises
+# willingness to receive it and applies it as an additional outbound filter to
+# the routes it sends FRR. Routes are injected into the Loc-RIB via
+# InjectionService.AddPath by the test driver. No export policy — default
+# permit-all, so ORF is the only outbound filter in play.
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr-m57"
+hold_time = 90
+prefix_orf_receive = true
+
+[security.grpc]
+enforcement = "legacy"

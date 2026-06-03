@@ -79,11 +79,13 @@ an inbound Route Refresh handler that installs it.
 - No new gRPC/authz surface — the authz tier matrix is unaffected.
 - Behavior is covered by unit/integration tests across all five crates (wire
   codec round-trips, capability negotiation, filter semantics, the gate, and
-  IMMEDIATE/DEFER sweep behavior). Cross-vendor validation against FRR
-  (`neighbor X capability orf prefix-list both` + `prefix-list NAME in`,
-  asserting the advertised set shrinks/re-expands) is a follow-up `M`-series
-  containerlab interop lab — FRR is the reference for the one point of ecosystem
-  variance (implicit-deny on a non-empty list).
+  IMMEDIATE/DEFER sweep behavior), plus the **M57** containerlab interop lab
+  (`tests/interop/m57-orf-frr.clab.yml`): a real FRR 10.3.1 client negotiates
+  `capability orf prefix-list both` and pushes a `prefix-list NAME in`, and the
+  driver asserts rustbgpd's advertised set is constrained to the permitted
+  prefix and then re-expands when the filter is widened and the ORF re-sent.
+  FRR is the reference for the one point of ecosystem variance (implicit-deny on
+  a non-empty list).
 
 See also ADR-0071 (capability negotiation patterns) and the Route Refresh codec
 (RFC 2918/7313).
