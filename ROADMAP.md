@@ -133,7 +133,12 @@ Later for what remains.
   `match_rpki_validation` / `match_aspa_validation` is best-effort at ingress;
   later VRP/ASPA cache updates do not re-run import policy. Fix: on cache
   update, trigger `SoftResetIn` for peers whose resolved import policy uses
-  validation-state matches (infrastructure exists). Not urgent — current
+  validation-state matches (infrastructure exists). Scope notes from the
+  research pass: hook from the VRP/ASPA cache-update forwarding path, not the
+  RIB revalidation path, so routes previously denied by import policy can be
+  resurrected; pin Enhanced Route Refresh / non-ERR sweep behavior before
+  claiming full convergence; invalidate or generation-key `ExplainImportPolicy`
+  cache entries whose decision used validation state. Not urgent — current
   semantics match FRR/BIRD and are documented in `docs/CONFIGURATION.md`.
 - **EVPN standards tail.** Native overlay-index Type-5 local origination +
   protected recursion-path interop smoke; multi-homed-gateway ECMP; single-active
