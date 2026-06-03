@@ -626,6 +626,16 @@ impl Capability {
                 }
             }
             Capability::OutboundRouteFilter(entries) => {
+                // RFC 5291 §4: the value carries one or more blocks. An empty
+                // list would encode to a zero-length value, which the decoder
+                // (correctly) treats as malformed and round-trips as Unknown —
+                // reject it here so encode/decode stay symmetric.
+                if entries.is_empty() {
+                    return Err(EncodeError::ValueOutOfRange {
+                        field: "outbound_route_filter_capability_blocks",
+                        value: "0".to_string(),
+                    });
+                }
                 let value_len = crate::orf::capability_value_len(entries);
                 if value_len > 255 {
                     return Err(EncodeError::ValueOutOfRange {
@@ -1624,6 +1634,16 @@ mod tests {
         let mut buf = encoded.freeze();
         let decoded = Capability::decode(&mut buf).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn outbound_route_filter_rejects_empty_entries() {
+        // An empty block list has no valid wire form (RFC 5291 §4 requires one
+        // or more), and the decoder treats a zero-length value as Unknown —
+        // encode must refuse it so the codec stays symmetric.
+        let cap = Capability::OutboundRouteFilter(vec![]);
+        let mut buf = bytes::BytesMut::new();
+        assert!(cap.encode(&mut buf).is_err());
     }
 
     #[test]
