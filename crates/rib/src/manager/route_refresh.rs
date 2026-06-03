@@ -384,6 +384,21 @@ impl RibManager {
                     current_policy_filtered_routes.extend(policy_filtered);
                 }
             }
+            // The refresh view is intentionally empty so permitted routes are
+            // re-advertised for ROUTE-REFRESH. That empty view cannot discover
+            // routes that were advertised before a deferred ORF update and are
+            // now denied by the installed filter, so withdraw those explicitly
+            // from the real Adj-RIB-Out.
+            if let (Some(filter), Some(rib_out)) =
+                (orf_filter.as_ref(), self.adj_ribs_out.get(&peer))
+            {
+                for route in rib_out
+                    .iter()
+                    .filter(|r| prefix_family(&r.prefix) == family && !filter.permits(&r.prefix))
+                {
+                    withdraw.push((route.prefix, route.path_id));
+                }
+            }
         }
 
         if self.outbound_peers.contains_key(&peer) {

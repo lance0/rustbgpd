@@ -349,7 +349,7 @@ pub fn decode_route_refresh_orf(
             });
         }
         let group_bytes = buf.copy_to_bytes(len);
-        let entries = if orf_type.is_address_prefix() {
+        let entries = if orf_type.is_address_prefix() && family.is_some() {
             // A parse failure here is a malformed-but-framed group: surface it
             // as data (RFC 5291 §5.2 reset semantics), not a session error.
             match decode_address_prefix_entries(&group_bytes, family) {
@@ -819,6 +819,25 @@ mod tests {
         assert_eq!(
             decoded.groups[0].entries,
             OrfEntries::Raw(Bytes::from_static(&[0xAA, 0xBB, 0xCC]))
+        );
+    }
+
+    #[test]
+    fn rr_orf_address_prefix_without_family_preserved_as_raw() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(WhenToRefresh::Immediate.as_u8());
+        buf.put_u8(OrfType::AddressPrefix.as_u8());
+        buf.put_u16(8);
+        buf.put_u8(orf::ACTION_ADD);
+        buf.put_u32(1);
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(40); // would be malformed for IPv4, but family is unknown.
+        let mut cursor = buf.freeze();
+        let decoded = decode_route_refresh_orf(&mut cursor, None).unwrap();
+        assert_eq!(
+            decoded.groups[0].entries,
+            OrfEntries::Raw(Bytes::from_static(&[orf::ACTION_ADD, 0, 0, 0, 1, 0, 0, 40]))
         );
     }
 

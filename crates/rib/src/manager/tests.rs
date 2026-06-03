@@ -11281,3 +11281,72 @@ async fn orf_defer_does_not_sweep_existing_routes() {
     drop(tx);
     handle.await.unwrap();
 }
+
+#[tokio::test]
+async fn orf_defer_then_plain_refresh_withdraws_now_denied_prefix() {
+    let (tx, handle, target, mut out_rx) = orf_setup().await;
+
+    // Gate-lift with permit-all → both advertised.
+    send_peer_orf(
+        &tx,
+        target,
+        WhenToRefresh::Immediate,
+        vec![orf_permit(
+            1,
+            0,
+            32,
+            Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
+        )],
+    )
+    .await;
+    let _ = collect_announced(&mut out_rx, 2).await;
+
+    // Install a deferred filter that keeps 10/8 and denies everything else.
+    // DEFER itself must not sweep.
+    send_peer_orf(
+        &tx,
+        target,
+        WhenToRefresh::Defer,
+        vec![orf_permit(
+            1,
+            0,
+            32,
+            Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8),
+        )],
+    )
+    .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), out_rx.recv())
+            .await
+            .is_err(),
+        "DEFER must not sweep already-advertised routes"
+    );
+
+    // A later plain ROUTE-REFRESH is the deferred sweep point: permitted routes
+    // are re-advertised and previously-advertised routes denied by the installed
+    // ORF must be explicitly withdrawn.
+    tx.send(RibUpdate::RouteRefreshRequest {
+        peer: target,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+
+    let denied = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 168, 0, 0), 16));
+    let mut withdrawn = Vec::new();
+    while withdrawn.is_empty() {
+        let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("refresh response should arrive")
+            .expect("outbound channel open");
+        withdrawn.extend(update.withdraw.iter().map(|(p, _)| *p));
+    }
+    assert!(
+        withdrawn.contains(&denied),
+        "plain refresh after deferred ORF must withdraw the denied prefix"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}

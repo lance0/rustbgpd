@@ -69,7 +69,8 @@ log "Phase 1: FRR must receive ONLY $PERMITTED (ORF permits just that prefix)...
 phase1=0
 for i in $(seq 1 45); do
     if frr_has "$PERMITTED" && ! frr_has "$FILTERED_A" && ! frr_has "$FILTERED_B"; then
-        ok "FRR received only $PERMITTED after ${i}s — ORF honored, others filtered"
+        elapsed=$(( (i - 1) * 2 ))
+        ok "FRR received only $PERMITTED after ${elapsed}s — ORF honored, others filtered"
         phase1=1
         break
     fi
@@ -92,7 +93,8 @@ docker exec "$FRR" vtysh -c "clear bgp 10.0.0.1 in prefix-filter" >/dev/null 2>&
 phase2=0
 for i in $(seq 1 45); do
     if frr_has "$PERMITTED" && frr_has "$FILTERED_A" && frr_has "$FILTERED_B"; then
-        ok "FRR received all three prefixes after ${i}s — ORF re-expansion works"
+        elapsed=$(( (i - 1) * 2 ))
+        ok "FRR received all three prefixes after ${elapsed}s — ORF re-expansion works"
         phase2=1
         break
     fi

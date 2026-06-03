@@ -509,9 +509,11 @@ branch is between features.
   advisories bans licenses sources`, and wire into CI. Pairs with the next
   dependency audit.
 - [ ] **Workspace `cargo doc` warning posture.** CI already runs
-  `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --lib --no-deps`; make that
-  the standing local pre-flight expectation too, surfacing broken intra-doc-links
-  on the developer machine rather than at PR time.
+  `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --lib --no-deps --jobs 1`;
+  make that the standing local pre-flight expectation too, surfacing broken
+  intra-doc-links on the developer machine rather than at PR time. The `--jobs 1`
+  cap deliberately serializes rustdoc for deterministic `target/doc` generation
+  in the workspace.
 - [ ] **Mega-module splits.** The large `src/` modules have been split, but
   `crates/api/src/event_service.rs` remains borderline. Keep splitting only where
   it reduces real conflict or review cost.

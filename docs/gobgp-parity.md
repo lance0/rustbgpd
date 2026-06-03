@@ -35,6 +35,7 @@ For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 | Notification GR (RFC 8538) | Yes | Yes | N-bit (RFC 8538 §2), Cease/Hard Reset bypass |
 | Route Refresh (RFC 2918) | Yes | Yes | |
 | Enhanced Route Refresh (RFC 7313) | Yes | Yes | `BoRR` / `EoRR` demarcation; inbound replacement semantics on `SoftResetIn` |
+| Prefix ORF (RFC 5291/5292) | Partial | No | rustbgpd receive side for Address-Prefix ORF is shipped (route-server export filtering); send-side ORF remains deferred |
 | Add-Path (RFC 7911) | Yes | Yes | Dual-stack receive + multi-path send (route server mode) |
 | Route Reflector (RFC 4456) | Yes | Yes | |
 | Confederation (RFC 5065) | Yes | No | |
@@ -237,13 +238,16 @@ Competing head-to-head with GoBGP for all use cases:
 
 ### IX Route Server (~99% parity)
 
-The one remaining IX-relevant control-plane gap is **ORF / Outbound Route
-Filtering (RFC 5291)** — FRR and GoBGP let a peer push a prefix-filter so the
-route server suppresses unwanted routes before sending them; rustbgpd does not
-negotiate ORF yet (tracked under ROADMAP "Next"). Otherwise no material
-control-plane gaps remain; remaining work is operator polish: CLI integration
-tests, bulk policy-edit ergonomics, and production packaging hardening rather
-than missing protocol capability.
+The IX route-server ORF gap is closed for the receive-side shape operators
+normally need: a client can push an Address-Prefix ORF filter and rustbgpd
+suppresses matching outbound advertisements before export policy (ADR-0075,
+M57 FRR interop). This is now ahead of GoBGP's documented standard Prefix ORF
+surface. The remaining ORF tail is send-side/client behavior, where rustbgpd
+would push filters to its own upstreams, but that is demand-shaped rather than
+a route-server parity blocker. Otherwise no material control-plane gaps remain;
+remaining work is operator polish: CLI integration tests, bulk policy-edit
+ergonomics, and production packaging hardening rather than missing protocol
+capability.
 
 ### DC Fabric / Whitebox BGP Speaker (~95% parity)
 
@@ -279,10 +283,11 @@ scope:
 4. **EVPN standards tail** — native overlay-index local origination,
    recursion-path interop, single-active backup-path pre-install, EVPN over
    MPLS/PBB, and route types 6-11.
-5. **Operational policy features** — ORF / Outbound Route Filtering (RFC 5291;
-   route-server-relevant, tracked under ROADMAP "Next") and conditional
-   advertisement (advertise-if-present / advertise-if-absent; demand-shaped).
-   Both are carried by FRR and GoBGP.
+5. **Operational policy features** — send-side ORF / Outbound Route Filtering
+   (RFC 5291; client-side use, demand-shaped after the receive-side route-server
+   path) and conditional advertisement (advertise-if-present /
+   advertise-if-absent; demand-shaped). These are broader operational polish
+   items rather than blockers for the current route-server positioning.
 
 ## Pre-1.0 Tech Debt
 

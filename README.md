@@ -38,7 +38,7 @@ diversity scripts remain local / manual gates. See
 
 - **API-first control plane** -- full gRPC control surface across 11 services plus a thin CLI (`rustbgpctl`) with colored tables, dynamic column alignment, and human-readable uptimes. Dynamic peer management, dynamic-neighbor and FIB-table CRUD, route injection, policy CRUD, peer groups, BFD inspection, EVPN instance queries, streaming events, and daemon control without restarts.
 - **Explicit architecture** -- pure FSM with no I/O, single-owner RIB with no locks, bounded channels between tasks. No `Arc<RwLock>` on routing state. See [ARCHITECTURE.md](ARCHITECTURE.md).
-- **Dual-stack and modern protocol support** -- MP-BGP, Add-Path, Extended Next Hop, Extended Messages, GR/LLGR/Notification GR, Route Refresh/Enhanced Route Refresh, FlowSpec, Route Reflector, large and extended communities.
+- **Dual-stack and modern protocol support** -- MP-BGP, Add-Path, Extended Next Hop, Extended Messages, GR/LLGR/Notification GR, Route Refresh/Enhanced Route Refresh, receive-side Prefix ORF, FlowSpec, Route Reflector, large and extended communities.
 - **Operational visibility** -- Prometheus metrics, read-only gNMI / OpenConfig BGP telemetry (`Capabilities` / `Get` / `Subscribe`, RFC 7951 JSON over mTLS), BMP export to collectors, MRT TABLE_DUMP_V2 snapshots, birdwatcher-compatible looking glass REST API, structured JSON logging, per-peer counters, best-path explain.
 - **Evidence-driven correctness** -- fuzz targets on the wire decoder, property tests on the FSM, automated containerlab interop primarily against FRR plus GoBGP / StayRTR and documented BIRD coverage, extensive workspace tests, architecture decision records for every protocol and design choice.
 - **Reusable wire codec** -- `rustbgpd-wire` has zero internal dependencies and is independently publishable. Anyone building BGP tooling in Rust can use it without the daemon.
@@ -49,7 +49,7 @@ diversity scripts remain local / manual gates. See
 - **Cloud / AI-scale data-center fabrics** — API-first BGP control, BFD, ECMP,
   EVPN/VXLAN alpha, and whitebox-friendly interop surfaces
 - **Hosting provider prefix management** — API-driven customer prefix announcements
-- **Internet exchange route servers** — transparent mode, Add-Path, RPKI, per-member policy
+- **Internet exchange route servers** — transparent mode, Add-Path, RPKI, Prefix ORF, per-member policy
 - **SDN / network automation controllers** — programmable BGP control plane
 - **Route collectors and looking glasses** — structured data via gRPC, MRT, BMP, birdwatcher-compatible REST API
 - **Lab and test environments** — clean API, structured logs, containerlab interop
@@ -300,7 +300,7 @@ and more explicit internal architecture.
 | Workspace tests | Unit, integration, and property tests (`cargo test --workspace`) |
 | Wire fuzzing | libFuzzer harnesses on message and attribute decoders, CI smoke + nightly extended |
 | Interop suites | Automated interop suite (see `docs/INTEROP.md` for the full matrix), primarily against FRR 10.3.1 plus GoBGP 4.3.0 and StayRTR-backed RTR coverage; BIRD 2.0.12 covers M0 and BIRD 3.2.1 covers the TCP-AO smoke. A foundation tier is gated on every PR, privileged Linux dataplane smokes run in hosted kernel-dataplane CI, and longer soaks / platform-diversity scripts remain local. |
-| Protocol coverage | RFC 4271 FSM + UPDATE validation, MP-BGP, GR/LLGR, Add-Path, FlowSpec, RPKI, ASPA, Extended Messages, Extended Next Hop, Route Refresh/ERR, RFC 7999 BLACKHOLE receiver scoping + opt-in FIB discard, ADR-0061/0066/0068 configured-table unicast Linux FIB programming with ECMP / weighted multipath, RFC 5880/5881/5882 BFD, RFC 8326 Graceful Shutdown |
+| Protocol coverage | RFC 4271 FSM + UPDATE validation, MP-BGP, GR/LLGR, Add-Path, FlowSpec, RPKI, ASPA, Extended Messages, Extended Next Hop, Route Refresh/ERR, receive-side Prefix ORF, RFC 7999 BLACKHOLE receiver scoping + opt-in FIB discard, ADR-0061/0066/0068 configured-table unicast Linux FIB programming with ECMP / weighted multipath, RFC 5880/5881/5882 BFD, RFC 8326 Graceful Shutdown |
 | Architecture decisions | ADRs documenting every protocol and design choice ([docs/adr/](docs/adr/)) |
 
 ```bash

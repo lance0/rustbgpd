@@ -48,7 +48,8 @@ an inbound Route Refresh handler that installs it.
    `IMMEDIATE` (or a malformed-field reset) additionally re-runs the
    re-advertisement sweep now; `DEFER` installs only — the filter stays live for
    subsequent outbound churn and is swept on a later IMMEDIATE/plain refresh. A
-   plain (non-ORF) ROUTE-REFRESH always re-advertises now.
+   plain (non-ORF) ROUTE-REFRESH always re-advertises now and explicitly
+   withdraws routes that the deferred filter now denies.
 7. **Unsupported type vs malformed field (RFC 5291 §5.2).** An un-negotiated ORF
    type (128, unknown) is ignored. A structurally-framed but semantically
    invalid entry of a *negotiated* type (`minlen > maxlen`, length beyond the

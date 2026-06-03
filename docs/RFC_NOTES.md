@@ -439,6 +439,21 @@ implemented per ADR-0040.
 
 ---
 
+## RFC 5291 / RFC 5292 — Outbound Route Filtering, Address-Prefix ORF
+
+- Capability code 3, Address-Prefix ORF-Type 64.
+- rustbgpd implements the receive side: per-neighbor / peer-group
+  `prefix_orf_receive = true` advertises willingness to receive Address-Prefix
+  ORF entries and applies the peer-pushed filter before export policy.
+- ORF filters use prefix-list semantics: sequence order, first match wins,
+  implicit deny on a non-empty list, permit-all when empty.
+- The initial advertisement for an ORF-negotiated family is gated until the
+  peer's first ROUTE-REFRESH; `DEFER` installs state and waits for a later
+  immediate or plain refresh to sweep advertisements and withdrawals.
+- See ADR-0075.
+
+---
+
 ## RFC 7313 — Enhanced Route Refresh
 
 - Capability code 70, unconditionally advertised.
