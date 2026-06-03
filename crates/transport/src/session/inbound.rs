@@ -11,6 +11,7 @@ use super::{
 use rustbgpd_policy::{
     NextHopAction, PolicyAction, PolicyEvaluation, RouteContext, RouteModifications, RouteType,
 };
+use rustbgpd_wire::AspaValidationContext;
 
 /// Increment `bgp_policy_routes_total{peer, policy, direction=import,
 /// action}` for one import-side chain evaluation. Policy falls back to
@@ -332,6 +333,19 @@ impl PeerSession {
                 self.link_local_next_hop_scope.clone().map(Box::new)
             }
             _ => None,
+        }
+    }
+
+    pub(super) fn aspa_validation_context(&self) -> AspaValidationContext {
+        let local_role = self.config.peer.local_role;
+        AspaValidationContext {
+            neighbor_asn: local_role.map(|_| {
+                self.negotiated
+                    .as_ref()
+                    .map_or(self.config.peer.remote_asn, |n| n.peer_asn)
+            }),
+            local_role,
+            first_as_check_exempt: matches!(local_role, Some(BgpRole::RouteServerClient)),
         }
     }
 
@@ -757,17 +771,17 @@ impl PeerSession {
         // and `ValidationSnapshot::validate_aspa` returns `Unknown` for
         // every other family.
         //
-        // NOTE: draft v25 §5.4 step 2 also requires that the most-recent
-        // AS in `AS_PATH` equals the negotiated neighbor ASN, with a
-        // transparent-route-server-client exception. rustbgpd does not
-        // yet enforce this precondition (no `enforce-first-as`-equivalent
-        // exists today); operators relying on ASPA against peers that
-        // strip or rewrite the leftmost AS may see misleading verdicts.
-        // Tracked as a follow-up.
+        // draft v25 §5.4 step 2 also requires the most-recent AS in `AS_PATH`
+        // to equal the negotiated neighbor ASN, with a transparent-route-
+        // server-client exception. That leftmost-AS precondition is enforced
+        // here whenever a local BGP Role is configured (the role-aware
+        // context carries the neighbor ASN and the RS-client exemption); the
+        // roleless case keeps the legacy behavior and skips it.
+        let aspa_context = self.aspa_validation_context();
         let body_aspa_state = validation
             .as_ref()
             .map_or(rustbgpd_wire::AspaValidation::Unknown, |v| {
-                v.validate_aspa(parsed_as_path, (Afi::Ipv4, Safi::Unicast))
+                v.validate_aspa(parsed_as_path, (Afi::Ipv4, Safi::Unicast), aspa_context)
             });
 
         let unnumbered_ipv4_body_forbidden = self.is_scoped_link_local_peer();
@@ -892,6 +906,7 @@ impl PeerSession {
                             path_id: entry.path_id,
                             validation_state: rpki_state,
                             aspa_state: body_aspa_state,
+                            aspa_context,
                         })
                     })
                     .collect()
@@ -955,7 +970,7 @@ impl PeerSession {
                     let mp_aspa_state = validation
                         .as_ref()
                         .map_or(rustbgpd_wire::AspaValidation::Unknown, |v| {
-                            v.validate_aspa(parsed_as_path, family)
+                            v.validate_aspa(parsed_as_path, family, aspa_context)
                         });
 
                     if mp.safi == Safi::FlowSpec {
@@ -1193,6 +1208,7 @@ impl PeerSession {
                                 path_id: entry.path_id,
                                 validation_state: mp_rpki_state,
                                 aspa_state: mp_aspa_state,
+                                aspa_context,
                             });
                         }
                     }

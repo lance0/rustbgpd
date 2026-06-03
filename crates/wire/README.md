@@ -118,6 +118,9 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
 - **`UpdateMessage`** / **`ParsedUpdate`** — raw wire form and parsed routes + attributes
 - **`PathAttribute`** — 14 typed variants plus `Unknown` pass-through, including `AsPath`, `NextHop`, `Communities`, `MpReachNlri`, `LargeCommunities`, `PmsiTunnel` (RFC 6514), and `OnlyToCustomer` (RFC 9234)
 - **`Prefix`** — `V4(Ipv4Prefix)` / `V6(Ipv6Prefix)` enum
+- **`RpkiValidation` / `AspaValidation` / `AspaValidationContext`** — shared
+  routing-domain validation state and ASPA session context used by rustbgpd's
+  RIB, policy, transport, and RPKI crates
 - **`Capability`** — OPEN capabilities: multi-protocol, 4-octet AS, Add-Path, graceful restart, Outbound Route Filtering, etc.
 - **ORF types** (`orf` module, RFC 5291/5292) — `OrfCapEntry` (capability blocks), `OrfPayload` / `OrfEntryGroup` / `OrfEntries` (the Route Refresh ORF section), and `AddressPrefixOrf` (one Address-Prefix entry: action, match, sequence, min/max length, prefix). `RouteRefreshMessage::orf` carries the decoded section; a malformed IPv4/IPv6 unicast Address-Prefix group decodes to `OrfEntries::Malformed` (RFC 5291 §5.2 reset) rather than failing the message, while non-unicast / future-family Address-Prefix groups are preserved as raw bytes until those family encodings are implemented
 - **`FlowSpecRule`** / **`FlowSpecComponent`** — FlowSpec NLRI with all 13 match types

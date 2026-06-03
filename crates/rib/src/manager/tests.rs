@@ -260,6 +260,7 @@ fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }
 
@@ -287,6 +288,7 @@ fn make_v6_route(prefix: Ipv6Prefix, next_hop: Ipv6Addr) -> Route {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }
 
@@ -312,6 +314,7 @@ fn make_route_with_lp(prefix: Ipv4Prefix, peer: Ipv4Addr, local_pref: u32) -> Ro
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }
 
@@ -1175,6 +1178,7 @@ fn make_ibgp_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }
 
@@ -1455,6 +1459,7 @@ async fn local_route_sent_to_ibgp_peer() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::InjectRoute {
@@ -1497,6 +1502,7 @@ async fn local_route_in_initial_table_to_ibgp_peer() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::InjectRoute {
@@ -1624,6 +1630,7 @@ async fn inject_route_enters_loc_rib_and_distributes() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
 
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -1693,6 +1700,7 @@ async fn withdraw_injected_removes_and_distributes() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
 
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -4486,6 +4494,7 @@ async fn distribute_changes_filters_unsendable_families() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
 
     // Send both IPv4 and IPv6 routes
@@ -4551,6 +4560,7 @@ async fn send_initial_table_filters_unsendable_families() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
 
     // Pre-populate Loc-RIB with both IPv4 and IPv6 routes
@@ -4636,6 +4646,7 @@ async fn dual_stack_peer_receives_both_families() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
 
     // Pre-populate Loc-RIB
@@ -5780,6 +5791,7 @@ async fn gr_withdraws_non_gr_family_routes() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     tx.send(RibUpdate::RoutesReceived {
         peer: source,
@@ -6525,6 +6537,7 @@ async fn rr_local_route_to_all_ibgp() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let (reply_tx, _) = oneshot::channel();
     tx.send(RibUpdate::InjectRoute {
@@ -6568,6 +6581,7 @@ fn make_route_with_as_path(prefix: Ipv4Prefix, peer: Ipv4Addr, asns: Vec<u32>) -
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }
 
@@ -6682,6 +6696,7 @@ fn validate_route_rpki_empty_as_path() {
         path_id: 0,
         validation_state: RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     assert_eq!(
         super::validate_route_rpki(&route, &table),
@@ -6974,6 +6989,68 @@ async fn rpki_no_table_all_not_found() {
 }
 
 #[tokio::test]
+async fn aspa_cache_update_revalidates_with_stored_downstream_context() {
+    use rustbgpd_rpki::{AspaRecord, AspaTable};
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 4));
+    let mut route = make_route_with_as_path(
+        Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
+        Ipv4Addr::new(1, 0, 0, 4),
+        vec![65004, 65003, 65002, 65001],
+    );
+    route.aspa_context = rustbgpd_wire::AspaValidationContext {
+        neighbor_asn: Some(65004),
+        local_role: Some(rustbgpd_wire::BgpRole::Customer),
+        first_as_check_exempt: false,
+    };
+
+    tx.send(RibUpdate::RoutesReceived {
+        peer,
+        announced: vec![route],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let table = Arc::new(AspaTable::new(vec![
+        AspaRecord {
+            customer_asn: 65004,
+            provider_asns: vec![65003],
+        },
+        AspaRecord {
+            customer_asn: 65003,
+            provider_asns: vec![65002],
+        },
+        AspaRecord {
+            customer_asn: 65002,
+            provider_asns: vec![65001],
+        },
+    ]));
+    tx.send(RibUpdate::AspaTableUpdate { table }).await.unwrap();
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryReceivedRoutes {
+        peer: Some(peer),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    let routes = reply_rx.await.unwrap();
+    assert_eq!(routes[0].aspa_state, rustbgpd_wire::AspaValidation::Valid);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn rpki_cache_update_no_change_no_redistribution() {
     use rustbgpd_rpki::{VrpEntry, VrpTable};
     let (tx, rx) = mpsc::channel(64);
@@ -7076,6 +7153,7 @@ fn make_multipath_route(
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }
 
@@ -7109,6 +7187,7 @@ fn make_multipath_route_v6(
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }
 
@@ -7797,6 +7876,7 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
 
     tx.send(RibUpdate::RoutesReceived {
@@ -10603,6 +10683,7 @@ async fn fib_install_candidates_preserve_link_local_next_hop_scope() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     tx.send(RibUpdate::RoutesReceived {
         peer: route.peer,
@@ -10655,6 +10736,7 @@ async fn fib_install_candidates_keep_same_link_local_on_distinct_ifindexes() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     for route in [
         make_scoped("eth1", 7, "fe80::2"),

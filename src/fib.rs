@@ -1119,6 +1119,7 @@ mod tests {
             path_id,
             validation_state: RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         }
     }
 

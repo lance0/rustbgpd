@@ -2,7 +2,7 @@
 //!
 //! VRP table management, ASPA table management, RTR protocol (RFC 8210)
 //! client, and multi-cache aggregation for RPKI origin validation (RFC 6811)
-//! and ASPA upstream path verification (draft-ietf-sidrops-aspa-verification).
+//! and ASPA path verification (draft-ietf-sidrops-aspa-verification).
 //!
 //! # Components
 //!
@@ -10,7 +10,7 @@
 //! - [`VrpEntry`] — a single Validated ROA Payload
 //! - [`AspaTable`] — immutable ASPA lookup table
 //! - [`AspaRecord`] — a single ASPA record (customer → providers)
-//! - [`aspa_verify`] — ASPA upstream path verification algorithm
+//! - [`aspa_verify`] — ASPA path verification algorithms
 //! - [`rtr_codec`] — encode/decode RTR protocol PDUs
 //! - [`rtr_client`] — async per-cache-server connection manager
 //! - [`vrp_manager`] — multi-cache merge and snapshot distribution
@@ -43,7 +43,7 @@ pub use vrp_manager::{AspaTableUpdate, RpkiTableUpdate, VrpManager};
 pub struct ValidationSnapshot {
     /// Current VRP table for origin validation (RFC 6811).
     pub vrp_table: Option<Arc<VrpTable>>,
-    /// Current ASPA table for upstream path verification.
+    /// Current ASPA table for path verification.
     pub aspa_table: Option<Arc<AspaTable>>,
 }
 
@@ -80,6 +80,7 @@ impl ValidationSnapshot {
         &self,
         as_path: Option<&rustbgpd_wire::AsPath>,
         family: (rustbgpd_wire::Afi, rustbgpd_wire::Safi),
+        context: rustbgpd_wire::AspaValidationContext,
     ) -> rustbgpd_wire::AspaValidation {
         use rustbgpd_wire::{Afi, AspaValidation, Safi};
         // §6.2 family gate.
@@ -87,7 +88,7 @@ impl ValidationSnapshot {
             return AspaValidation::Unknown;
         }
         match (&self.aspa_table, as_path) {
-            (Some(table), Some(path)) => aspa_verify::verify_upstream(path, table),
+            (Some(table), Some(path)) => aspa_verify::verify(path, table, context),
             _ => AspaValidation::Unknown,
         }
     }
@@ -96,7 +97,7 @@ impl ValidationSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustbgpd_wire::{Afi, AsPath, AsPathSegment, AspaValidation, Safi};
+    use rustbgpd_wire::{Afi, AsPath, AsPathSegment, AspaValidation, AspaValidationContext, Safi};
 
     fn snap_with_table() -> ValidationSnapshot {
         ValidationSnapshot {
@@ -120,7 +121,11 @@ mod tests {
         let snap = snap_with_table();
         let path = ipv4_unicast_path();
         assert_eq!(
-            snap.validate_aspa(Some(&path), (Afi::Ipv4, Safi::Unicast)),
+            snap.validate_aspa(
+                Some(&path),
+                (Afi::Ipv4, Safi::Unicast),
+                AspaValidationContext::default(),
+            ),
             AspaValidation::Valid,
         );
     }
@@ -130,7 +135,11 @@ mod tests {
         let snap = snap_with_table();
         let path = ipv4_unicast_path();
         assert_eq!(
-            snap.validate_aspa(Some(&path), (Afi::Ipv6, Safi::Unicast)),
+            snap.validate_aspa(
+                Some(&path),
+                (Afi::Ipv6, Safi::Unicast),
+                AspaValidationContext::default(),
+            ),
             AspaValidation::Valid,
         );
     }
@@ -142,7 +151,11 @@ mod tests {
         let snap = snap_with_table();
         let path = ipv4_unicast_path();
         assert_eq!(
-            snap.validate_aspa(Some(&path), (Afi::L2Vpn, Safi::Evpn)),
+            snap.validate_aspa(
+                Some(&path),
+                (Afi::L2Vpn, Safi::Evpn),
+                AspaValidationContext::default(),
+            ),
             AspaValidation::Unknown,
         );
     }
@@ -152,7 +165,11 @@ mod tests {
         let snap = snap_with_table();
         let path = ipv4_unicast_path();
         assert_eq!(
-            snap.validate_aspa(Some(&path), (Afi::Ipv4, Safi::FlowSpec)),
+            snap.validate_aspa(
+                Some(&path),
+                (Afi::Ipv4, Safi::FlowSpec),
+                AspaValidationContext::default(),
+            ),
             AspaValidation::Unknown,
         );
     }
@@ -162,7 +179,11 @@ mod tests {
         let snap = snap_with_table();
         let path = ipv4_unicast_path();
         assert_eq!(
-            snap.validate_aspa(Some(&path), (Afi::Ipv6, Safi::FlowSpec)),
+            snap.validate_aspa(
+                Some(&path),
+                (Afi::Ipv6, Safi::FlowSpec),
+                AspaValidationContext::default(),
+            ),
             AspaValidation::Unknown,
         );
     }
@@ -172,7 +193,11 @@ mod tests {
         let snap = snap_with_table();
         let path = ipv4_unicast_path();
         assert_eq!(
-            snap.validate_aspa(Some(&path), (Afi::Ipv4, Safi::Multicast)),
+            snap.validate_aspa(
+                Some(&path),
+                (Afi::Ipv4, Safi::Multicast),
+                AspaValidationContext::default(),
+            ),
             AspaValidation::Unknown,
         );
     }
@@ -185,7 +210,11 @@ mod tests {
         };
         let path = ipv4_unicast_path();
         assert_eq!(
-            snap.validate_aspa(Some(&path), (Afi::Ipv4, Safi::Unicast)),
+            snap.validate_aspa(
+                Some(&path),
+                (Afi::Ipv4, Safi::Unicast),
+                AspaValidationContext::default(),
+            ),
             AspaValidation::Unknown,
         );
     }
@@ -194,7 +223,11 @@ mod tests {
     fn validate_aspa_returns_unknown_when_no_path() {
         let snap = snap_with_table();
         assert_eq!(
-            snap.validate_aspa(None, (Afi::Ipv4, Safi::Unicast)),
+            snap.validate_aspa(
+                None,
+                (Afi::Ipv4, Safi::Unicast),
+                AspaValidationContext::default(),
+            ),
             AspaValidation::Unknown,
         );
     }

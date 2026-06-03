@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use rustbgpd_wire::{
-    Afi, AsPath, AspaValidation, EvpnRoute, EvpnRouteKey, ExtendedCommunity, FlowSpecRule,
-    LargeCommunity, Origin, PathAttribute, Prefix, RpkiValidation,
+    Afi, AsPath, AspaValidation, AspaValidationContext, EvpnRoute, EvpnRouteKey, ExtendedCommunity,
+    FlowSpecRule, LargeCommunity, Origin, PathAttribute, Prefix, RpkiValidation,
 };
 
 /// Interface scope required to resolve an IPv6 link-local next-hop.
@@ -65,8 +65,11 @@ pub struct Route {
     pub path_id: u32,
     /// RPKI origin validation state (RFC 6811). Default: `NotFound`.
     pub validation_state: RpkiValidation,
-    /// ASPA upstream path verification state. Default: `Unknown`.
+    /// ASPA path verification state. Default: `Unknown`.
     pub aspa_state: AspaValidation,
+    /// Relationship context used to recompute `aspa_state` on ASPA cache
+    /// updates. Empty for locally originated or non-BGP synthetic routes.
+    pub aspa_context: AspaValidationContext,
 }
 
 /// One equal-cost next-hop in a multipath/ECMP install candidate.

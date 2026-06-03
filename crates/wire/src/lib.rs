@@ -137,6 +137,26 @@ pub enum AspaValidation {
     Unknown,
 }
 
+/// Session context needed to choose and replay ASPA path verification.
+///
+/// ASPA verification is role-aware in
+/// `draft-ietf-sidrops-aspa-verification-25`: routes received from a
+/// provider use downstream verification, while customer/peer/route-server
+/// shapes use upstream verification. Stored routes keep this compact context
+/// so RTR cache updates can revalidate them with the same relationship
+/// semantics used at import time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct AspaValidationContext {
+    /// Neighbor ASN used for the draft v25 leftmost-AS precondition.
+    pub neighbor_asn: Option<u32>,
+    /// Locally configured BGP Role for this eBGP session.
+    pub local_role: Option<BgpRole>,
+    /// True when the local speaker is an RS-client receiving through a
+    /// transparent route server / IX, where the draft exempts the leftmost-AS
+    /// precondition.
+    pub first_as_check_exempt: bool,
+}
+
 impl std::fmt::Display for AspaValidation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

@@ -114,9 +114,9 @@ pub(super) fn validate_route_rpki(route: &crate::route::Route, table: &VrpTable)
     }
 }
 
-/// Validate a route's `AS_PATH` against the ASPA table (upstream verification).
+/// Validate a route's `AS_PATH` against the ASPA table.
 ///
-/// Runs the upstream ASPA verification algorithm on the route's `AS_PATH`.
+/// Runs the same role-aware ASPA verification that was used at import time.
 /// Returns `Unknown` if no `AS_PATH` is present.
 ///
 /// Per `draft-ietf-sidrops-aspa-verification-25` §6.2, ASPA applies only
@@ -131,7 +131,7 @@ pub(super) fn validate_route_aspa(
     table: &AspaTable,
 ) -> AspaValidation {
     match route.as_path() {
-        Some(path) => rustbgpd_rpki::aspa_verify::verify_upstream(path, table),
+        Some(path) => rustbgpd_rpki::aspa_verify::verify(path, table, route.aspa_context),
         None => AspaValidation::Unknown,
     }
 }

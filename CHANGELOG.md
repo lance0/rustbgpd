@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Full-scope ASPA path verification.** ASPA validation now uses the
+  configured BGP Role to select the draft-ietf-sidrops-aspa-verification-25
+  procedure: routes received from providers use downstream/customer-cone
+  verification, while customer, peer, route-server, and route-server-client
+  sessions use upstream verification. Stored routes retain the compact session
+  context needed to replay the same ASPA direction on RTR cache updates, so
+  cache revalidation no longer falls back to context-free upstream verification.
+
 - **Outbound Route Filtering (ORF, RFC 5291 + RFC 5292) — receive side.**
   rustbgpd can now advertise willingness to receive Address-Prefix ORF entries
   (capability code 3, ORF-Type 64) and apply a peer-pushed prefix filter to the
@@ -26,6 +34,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `RouteRefreshMessage` — a breaking change for that crate.)
 
 ### Fixed
+
+- **ASPA draft v25 first-AS precondition.** Role-aware ASPA validation now
+  checks that the most recently added AS in the `AS_PATH` matches the negotiated
+  neighbor ASN, with the transparent route-server-client exception from the
+  draft. Routes that previously validated despite a stripped or rewritten
+  leftmost AS now evaluate `invalid` when BGP Roles provide the validation
+  context, which can affect the existing ASPA best-path preference and
+  `match_aspa_validation` import/export policy.
 
 - **Validation-cache updates now converge import policy matches.** When a fresh
   VRP or ASPA table arrives, rustbgpd still revalidates admitted RIB routes

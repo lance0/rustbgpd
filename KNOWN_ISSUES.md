@@ -275,18 +275,6 @@ resolved.
   per wire semantics (the AFI comes from the MP_REACH attribute, not the
   rule itself) but worth noting — the AFI is always set correctly from
   the MP_REACH/MP_UNREACH framing.
-- **ASPA missing draft v25 §5.4 step 2 first-AS check.**
-  `ValidationSnapshot::validate_aspa` implements the pairwise bounds-
-  checker walk per draft v25 §5.3-5.4 (equivalence proven against the
-  draft's bounds-checker form, PR #294) and the §6.2 AFI/SAFI family
-  gate (IPv4/IPv6 unicast only), but does not enforce step 2: the
-  most-recent AS in the `AS_PATH` MUST equal the negotiated neighbor
-  ASN, with a transparent-route-server-client exception. rustbgpd has
-  no `enforce-first-as`-equivalent today (FRR exposes it as a per-
-  neighbor knob; BIRD enforces it by default), so ASPA verdicts
-  against peers that strip or rewrite the leftmost AS may be
-  misleading. Tracked in `ROADMAP.md` under "ASPA verification —
-  complete scope".
 - **`[[evpn_instances]]` edits require a daemon restart to take effect.**
   The Phase-2 VTEP foundation slice (ADR-0052) ships the declarative
   EVI/VNI domain model — TOML schema, validation, runtime
