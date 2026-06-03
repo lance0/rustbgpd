@@ -12,7 +12,7 @@ use rustbgpd_api::peer_types::{PeerManagerCommand, RuntimeConfigTransactionStatu
 use rustbgpd_api::proto;
 use rustbgpd_api::server::{ConfigTransactionApplyError, ConfigTransactionApplyFn};
 
-use crate::config::{Config, runtime_snapshot_token};
+use crate::config::Config;
 use crate::fib_table_control::{
     FibTableControlDeps, commit_fib_tables_locked, runtime_unavailable_error,
 };
@@ -79,6 +79,12 @@ async fn apply_config_transaction(
                     .to_string(),
             )
         })?;
+        // The post-commit token is computed by the planner under the
+        // peer-manager's key and returned in the plan; the apply path no longer
+        // hashes the candidate itself (it could not produce a key-consistent
+        // token). For a committable single-family FIB candidate the resulting
+        // live config equals the candidate, so this token matches a fresh plan.
+        let runtime_snapshot_token = plan.post_commit_runtime_snapshot_token;
 
         let response = commit_fib_tables_locked(
             &fib_cmd_tx,
@@ -88,8 +94,6 @@ async fn apply_config_transaction(
         )
         .await
         .map_err(fib_error_to_apply_error)?;
-        let runtime_snapshot_token =
-            runtime_snapshot_token(&candidate).map_err(ConfigTransactionApplyError::Internal)?;
 
         Ok(proto::ConfigTransactionApplyResponse {
             status: proto::ConfigTransactionPlanStatus::Committable.into(),
@@ -255,7 +259,8 @@ remote_asn = 65002
     ) -> RuntimeConfigTransactionPlan {
         RuntimeConfigTransactionPlan {
             status,
-            runtime_snapshot_token: "fnv1a64:old:1".to_string(),
+            runtime_snapshot_token: "kv1:old:1".to_string(),
+            post_commit_runtime_snapshot_token: "kv1:new:2".to_string(),
             diff: diff(),
             supported_sections,
             unsupported_sections: Vec::new(),
@@ -369,7 +374,7 @@ prefix = "192.0.2.0/24"
 peer_group = "ix-members"
 "#,
                 ),
-                expected_runtime_snapshot_token: "fnv1a64:old:1".to_string(),
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: String::new(),
                 comment: String::new(),
             },
@@ -428,7 +433,7 @@ metric = 200
 families = ["ipv4_unicast"]
 "#,
                 ),
-                expected_runtime_snapshot_token: "fnv1a64:old:1".to_string(),
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: "deploy-1".to_string(),
                 comment: "commit FIB".to_string(),
             },
@@ -441,7 +446,7 @@ families = ["ipv4_unicast"]
             proto::ConfigTransactionPlanStatus::Committable as i32
         );
         assert_eq!(response.committed_sections, vec!["[[fib_tables]]"]);
-        assert!(response.runtime_snapshot_token.starts_with("fnv1a64:"));
+        assert!(response.runtime_snapshot_token.starts_with("kv1:"));
         assert_eq!(*fib_state.lock().await, vec![replacement.clone()]);
         assert_eq!(*staged.lock().await, vec![snapshot(&replacement)]);
     }
@@ -491,7 +496,7 @@ metric = 200
 families = ["ipv4_unicast"]
 "#,
                 ),
-                expected_runtime_snapshot_token: "fnv1a64:old:1".to_string(),
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: String::new(),
                 comment: String::new(),
             },
