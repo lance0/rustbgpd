@@ -24,9 +24,9 @@ bulk CLI/API changes need one set of invariants rather than per-method behavior.
 
 The existing runtime serialization work is the foundation: FIB-table CRUD,
 dynamic-neighbor CRUD, static-neighbor CRUD, and SIGHUP already use a shared
-runtime-config lock and persistence acknowledgements where needed. The next
-step is to expose a transaction planner first, then add small section executors
-behind the same public shape.
+runtime-config lock and persistence acknowledgements where needed. The
+transaction model exposes one planner and apply shape, then adds bounded
+section executors behind that public contract.
 
 ## Decisions
 
@@ -39,8 +39,7 @@ behind the same public shape.
    validates complete candidate TOML, compares it against the peer manager's
    live runtime config snapshot, returns the existing redacted diff rendering,
    and classifies sections into:
-   - `supported_sections`: sections v1 knows how to commit once the matching
-     executor slice is present.
+   - `supported_sections`: sections v1 knows how to commit.
    - `unsupported_sections`: hot-reloadable sections the transaction model
      intentionally refuses until an atomic executor exists.
    - `restart_required_sections`: sections that cannot be committed live.
@@ -63,13 +62,14 @@ behind the same public shape.
    Static neighbor modifies, policy/peer-group changes, global hot-applied
    flags, effective inheritance impacts, and all restart-required sections are
    rejected by the transaction planner until they have explicit executors.
-5. **Apply execution lands in bounded slices.** The first executor commits only
-   a pure full-set `[[fib_tables]]` diff. It re-plans under the shared
-   runtime-config coordinator, rejects mixed or unsupported candidates without
-   mutation, stages the peer-manager snapshot, applies to the FIB reconciler,
-   persists the exact accepted table set with an acknowledgement, and rolls back
-   on every post-stage failure. Dynamic-neighbor and static-neighbor executors
-   are follow-up slices under the same method.
+5. **Apply execution is one pure runtime family at a time.** V1 commits pure
+   full-set `[[fib_tables]]`, pure full-set `[[dynamic_neighbors]]`, or static
+   `[[neighbors]]` add/delete candidates. It re-plans under the shared
+   runtime-config coordinator, rejects mixed-family or unsupported candidates
+   without mutation, stages the peer-manager snapshot, applies live runtime
+   state, persists the exact accepted candidate with an acknowledgement, and
+   rolls back on every post-stage failure. Static-neighbor modifies remain
+   rejected until they have a dedicated reconcile/rollback executor.
 6. **gNMI Set remains out of scope.** gNMI mutation must map to this transaction
    model rather than invent a parallel commit path, but this ADR does not
    implement OpenConfig config datastores or `Set`.
@@ -78,7 +78,7 @@ behind the same public shape.
 
 - `ConfigService` grows two RPCs:
   - `PlanConfigTransaction` (`sensitive_read`)
-  - `ApplyConfigTransaction` (`operator_only`, initially `[[fib_tables]]` only)
+  - `ApplyConfigTransaction` (`operator_only`)
 - Candidate TOML remains credential-bearing input. Audit summaries for both new
   RPCs redact the TOML body; apply summaries also avoid logging free-form
   comments verbatim.
@@ -86,9 +86,15 @@ behind the same public shape.
   hot-apply are still rejected because no atomic transaction executor exists yet.
   That is intentional: transaction support means validate/commit/rollback under
   one coordinator, not merely "reload would do something."
+- V1 apply is intentionally single-family: a candidate that changes
+  `[[fib_tables]]` and `[[dynamic_neighbors]]` together, for example, is
+  rejected even though each family is independently supported.
 - The FIB-table executor requires the ADR-0061 reconciler to already be running;
   starting the FIB subsystem from an empty startup config remains
   restart-required. This matches SIGHUP and targeted FIB CRUD semantics.
+- Dynamic-neighbor transactions replace the full range set from the candidate
+  TOML. Static-neighbor transactions support add/delete only; modifying an
+  existing static neighbor remains a follow-up executor.
 - Follow-up executors should preserve the established pattern:
   validate candidate section against the live runtime snapshot, take the shared
   runtime-config coordinator, apply live mutation, persist with acknowledgement,

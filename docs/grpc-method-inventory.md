@@ -67,7 +67,7 @@ shape itself does not raise the tier.
 |-----|------|-------|
 | `DiffRuntimeConfig` | `sensitive_read` | Response is redacted by design (per RPC comment), but the diff structure exposes policy layout, peer-group inheritance, and which fields differ between candidate and runtime. Request `candidate_toml` can contain credentials and is audit-redacted (size and presence only, never the body) by `diff_runtime_config_summary`. |
 | `PlanConfigTransaction` | `sensitive_read` | Validate-only transaction planner. It returns a redacted diff, runtime snapshot token, and v1 section classification without mutating daemon state. Request `candidate_toml` can contain credentials and must be audit-redacted. |
-| `ApplyConfigTransaction` | `operator_only` | Commit entry point for ADR-0076 config transactions. Currently commits pure full-set `[[fib_tables]]` candidates under the runtime-config coordinator and rejects other valid candidates without mutation until their executors land. Request TOML and comment are audit-redacted. |
+| `ApplyConfigTransaction` | `operator_only` | Commit entry point for ADR-0076 config transactions. Currently commits one pure runtime family at a time: full-set `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, or static `[[neighbors]]` add/delete changes. Mixed-family and unsupported candidates are rejected without mutation. Request TOML and comment are audit-redacted. |
 
 ### NeighborService (11 RPCs)
 

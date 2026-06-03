@@ -220,7 +220,12 @@ fn make_dynamic_manager_config() -> Config {
             install_blackhole_discard: false,
             allow_blackhole_broad_prefixes: false,
         },
-        security: crate::config::SecurityConfig::default(),
+        security: crate::config::SecurityConfig {
+            grpc: crate::config::GrpcSecurityConfig {
+                enforcement: crate::config::GrpcEnforcementConfig::Legacy,
+                ..Default::default()
+            },
+        },
         neighbors: Vec::new(),
         peer_groups,
         policy: crate::config::PolicyConfig::default(),
@@ -407,6 +412,61 @@ async fn replace_config_snapshot_rebuilds_dynamic_range_matcher() {
     assert_eq!(ranges[0].prefix, "10.10.0.0/16");
     assert_eq!(ranges[0].peer_group, "ix-members");
     assert_eq!(ranges[0].remote_asn, 65010);
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn stage_config_snapshot_rebuilds_matcher_and_returns_previous_toml() {
+    let (tx, rx) = mpsc::channel(16);
+    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let config = make_dynamic_manager_config();
+    let mut replacement = config.clone();
+    replacement.dynamic_neighbors = vec![crate::config::DynamicNeighborConfig {
+        prefix: "10.20.0.0/16".to_string(),
+        peer_group: "ix-members".to_string(),
+        remote_asn: 65020,
+        description: Some("transaction range".to_string()),
+    }];
+    let candidate_toml = toml::to_string_pretty(&replacement).unwrap();
+
+    let manager = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+    let handle = tokio::spawn(manager.run());
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::StageConfigSnapshot {
+        candidate_toml,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    let previous_toml = reply_rx.await.unwrap().unwrap();
+    let previous = Config::load_toml_with_diagnostics(&previous_toml, "previous snapshot").unwrap();
+    assert_eq!(previous.dynamic_neighbors[0].prefix, "127.0.0.0/8");
+
+    let (list_tx, list_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::ListDynamicRanges { reply: list_tx })
+        .await
+        .unwrap();
+    let ranges = list_rx.await.unwrap();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].prefix, "10.20.0.0/16");
+    assert_eq!(ranges[0].peer_group, "ix-members");
+    assert_eq!(ranges[0].remote_asn, 65020);
 
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     handle.await.unwrap();

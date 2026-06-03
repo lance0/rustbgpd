@@ -6620,7 +6620,7 @@ peer_group = "ix-members"
     let diff = diff_config(&old, &new);
     let class = classify_config_transaction_v1(&diff);
 
-    assert!(class.is_committable());
+    assert!(!class.is_committable());
     assert_eq!(
         class.supported_sections,
         vec![
@@ -6629,6 +6629,45 @@ peer_group = "ix-members"
             "[[dynamic_neighbors]]",
             "[[fib_tables]]",
         ]
+    );
+    assert_eq!(
+        class.unsupported_sections,
+        vec!["mixed transaction families"]
+    );
+    assert!(class.restart_required_sections.is_empty());
+}
+
+#[test]
+fn transaction_v1_classifies_static_neighbor_add_delete_as_one_family() {
+    let old_toml = format!(
+        r#"
+{}
+
+[[neighbors]]
+address = "10.0.0.99"
+remote_asn = 65099
+"#,
+        valid_toml()
+    );
+    let new_toml = format!(
+        r#"
+{}
+
+[[neighbors]]
+address = "10.0.0.100"
+remote_asn = 65100
+"#,
+        valid_toml()
+    );
+    let old = parse(&old_toml).unwrap();
+    let new = parse(&new_toml).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(class.is_committable());
+    assert_eq!(
+        class.supported_sections,
+        vec!["[[neighbors]] add", "[[neighbors]] delete"]
     );
     assert!(class.unsupported_sections.is_empty());
     assert!(class.restart_required_sections.is_empty());

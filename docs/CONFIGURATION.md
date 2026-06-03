@@ -1807,13 +1807,14 @@ reports whether the reconciler is running.
 
 **Config transactions** (ADR-0076): `ConfigService.PlanConfigTransaction` can
 validate a complete candidate TOML and return an optimistic runtime snapshot
-token; `ApplyConfigTransaction` currently commits only a pure full-set
-`[[fib_tables]]` candidate. The apply path re-checks the token under the shared
-runtime-config coordinator, rejects mixed or unsupported candidates without
-mutation, hot-swaps the FIB actor to the candidate's exact table set, persists
-that accepted set with an acknowledgement, and rolls runtime state back if
-apply or persistence fails. Like SIGHUP and FIB CRUD, transaction apply requires
-the FIB reconciler to already be running: a daemon that started with no
+token; `ApplyConfigTransaction` commits one pure runtime family at a time:
+full-set `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, or static
+`[[neighbors]]` add/delete changes. The apply path re-checks the token under
+the shared runtime-config coordinator, rejects mixed or unsupported candidates
+without mutation, applies live runtime state, persists the exact accepted
+candidate with an acknowledgement, and rolls runtime state back if apply or
+persistence fails. Like SIGHUP and FIB CRUD, FIB transaction apply requires the
+FIB reconciler to already be running: a daemon that started with no
 `[[fib_tables]]` still needs a restart to enable the subsystem.
 
 ```console

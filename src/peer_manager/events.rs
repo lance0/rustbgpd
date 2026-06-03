@@ -170,6 +170,12 @@ impl PeerManager {
             ConfigEvent::FibTablesReplaced { .. } => {
                 ("replace", "fib_tables", "fib_tables".to_string(), None)
             }
+            ConfigEvent::ConfigTransactionCommitted { .. } => (
+                "commit",
+                "config_transaction",
+                "config_transaction".to_string(),
+                None,
+            ),
         }
     }
 

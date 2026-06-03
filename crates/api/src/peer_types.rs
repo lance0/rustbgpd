@@ -348,6 +348,14 @@ pub enum PeerManagerCommand {
         /// Reply channel returning the transaction plan.
         reply: oneshot::Sender<Result<RuntimeConfigTransactionPlan, String>>,
     },
+    /// Stage a full validated runtime config snapshot from TOML and return the
+    /// previous normalized TOML snapshot for rollback.
+    StageConfigSnapshot {
+        /// Complete candidate TOML content.
+        candidate_toml: String,
+        /// Reply returns the previous normalized runtime snapshot on success.
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     /// Atomically validate a candidate `[[fib_tables]]` set against the live
     /// runtime config (peer-group references, reserved/duplicate table ids,
     /// families, ECMP caps) and, on success, stage it into
@@ -1079,6 +1087,16 @@ pub enum ConfigEvent {
         /// IP prefix range that was removed (matched by effective prefix).
         prefix: String,
         /// Optional persistence acknowledgement (see `DynamicNeighborAdded`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
+    },
+    /// A config transaction committed a full candidate snapshot. This event is
+    /// daemon-internal: transaction apply has already proven the live diff is a
+    /// supported transaction family, and the config bridge parses this TOML back
+    /// into the exact candidate before persistence.
+    ConfigTransactionCommitted {
+        /// Complete candidate TOML to parse, validate, and persist.
+        candidate_toml: String,
+        /// Optional persistence acknowledgement.
         ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     /// Create or replace a named policy definition.

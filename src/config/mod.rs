@@ -1635,6 +1635,11 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
     if diff.fib_tables_changed && !diff.fib_tables_requires_restart {
         class.supported_sections.push("[[fib_tables]]".to_string());
     }
+    if !transaction_sections_are_one_family(&class.supported_sections) {
+        class
+            .unsupported_sections
+            .push("mixed transaction families".to_string());
+    }
 
     if !diff.neighbors.changed.is_empty() {
         class
@@ -1743,6 +1748,21 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
     }
 
     class
+}
+
+fn transaction_sections_are_one_family(sections: &[String]) -> bool {
+    let mut has_fib = false;
+    let mut has_dynamic = false;
+    let mut has_static_neighbor = false;
+    for section in sections {
+        match section.as_str() {
+            "[[fib_tables]]" => has_fib = true,
+            "[[dynamic_neighbors]]" => has_dynamic = true,
+            "[[neighbors]] add" | "[[neighbors]] delete" => has_static_neighbor = true,
+            _ => {}
+        }
+    }
+    u8::from(has_fib) + u8::from(has_dynamic) + u8::from(has_static_neighbor) <= 1
 }
 
 /// JSON schema shared by `rustbgpd --diff --json` and the live runtime

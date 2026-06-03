@@ -5,17 +5,27 @@
 //! peer-manager validation, and the runtime-config lock shared with SIGHUP.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 
-use rustbgpd_api::peer_types::{PeerManagerCommand, RuntimeConfigTransactionStatus};
+use rustbgpd_api::peer_types::{
+    ConfigEvent, PeerKey, PeerManagerCommand, PeerManagerNeighborConfig,
+    RuntimeConfigTransactionStatus,
+};
 use rustbgpd_api::proto;
 use rustbgpd_api::server::{ConfigTransactionApplyError, ConfigTransactionApplyFn};
 
-use crate::config::Config;
+use crate::config::{Config, Neighbor, diff_neighbors};
 use crate::fib_table_control::{
     FibTableControlDeps, commit_fib_tables_locked, runtime_unavailable_error,
 };
+
+const PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
+const FIB_SECTION: &str = "[[fib_tables]]";
+const DYNAMIC_SECTION: &str = "[[dynamic_neighbors]]";
+const NEIGHBOR_ADD_SECTION: &str = "[[neighbors]] add";
+const NEIGHBOR_DELETE_SECTION: &str = "[[neighbors]] delete";
 
 /// Build the daemon-owned apply hook wired into `ConfigService`.
 #[must_use]
@@ -39,71 +49,7 @@ async fn apply_config_transaction(
 
     let join = tokio::spawn(async move {
         let _guard = deps.lock.lock().await;
-        let plan = plan_candidate(
-            &deps.peer_mgr_tx,
-            request.candidate_toml.clone(),
-            request.expected_runtime_snapshot_token.clone(),
-        )
-        .await?;
-
-        match plan.status {
-            RuntimeConfigTransactionStatus::Noop => {
-                return Ok(proto::ConfigTransactionApplyResponse {
-                    status: proto::ConfigTransactionPlanStatus::Noop.into(),
-                    runtime_snapshot_token: plan.runtime_snapshot_token,
-                    committed_sections: Vec::new(),
-                    human_text: "No changes.\n".to_string(),
-                });
-            }
-            RuntimeConfigTransactionStatus::Rejected => {
-                return Ok(rejected_response(plan.runtime_snapshot_token));
-            }
-            RuntimeConfigTransactionStatus::Committable => {}
-        }
-
-        if plan.supported_sections.len() != 1 || plan.supported_sections[0] != "[[fib_tables]]" {
-            return Ok(rejected_response(plan.runtime_snapshot_token));
-        }
-
-        let candidate = Config::load_toml_with_diagnostics(
-            &request.candidate_toml,
-            "candidate config transaction",
-        )
-        .map_err(ConfigTransactionApplyError::InvalidArgument)?;
-        let fib_cmd_tx = deps.fib_cmd_tx.clone().ok_or_else(|| {
-            fib_error_to_apply_error(runtime_unavailable_error(!deps.startup_tables.is_empty()))
-        })?;
-        let config_tx = deps.config_tx.clone().ok_or_else(|| {
-            ConfigTransactionApplyError::FailedPrecondition(
-                "config transactions require a persisted config (start rustbgpd with --config)"
-                    .to_string(),
-            )
-        })?;
-        // The post-commit token is computed by the planner under the
-        // peer-manager's key and returned in the plan; the apply path no longer
-        // hashes the candidate itself (it could not produce a key-consistent
-        // token). For a committable single-family FIB candidate the resulting
-        // live config equals the candidate, so this token matches a fresh plan.
-        let runtime_snapshot_token = plan.post_commit_runtime_snapshot_token;
-
-        let response = commit_fib_tables_locked(
-            &fib_cmd_tx,
-            &deps.peer_mgr_tx,
-            &config_tx,
-            candidate.fib_tables.clone(),
-        )
-        .await
-        .map_err(fib_error_to_apply_error)?;
-
-        Ok(proto::ConfigTransactionApplyResponse {
-            status: proto::ConfigTransactionPlanStatus::Committable.into(),
-            runtime_snapshot_token,
-            committed_sections: vec!["[[fib_tables]]".to_string()],
-            human_text: format!(
-                "Committed [[fib_tables]] transaction.\n{} table(s) active.\n",
-                response.tables.len()
-            ),
-        })
+        apply_config_transaction_locked(&deps, request).await
     });
 
     join.await.map_err(|_| {
@@ -111,6 +57,158 @@ async fn apply_config_transaction(
             "config transaction apply task did not complete".to_string(),
         )
     })?
+}
+
+async fn apply_config_transaction_locked(
+    deps: &FibTableControlDeps,
+    request: proto::ApplyConfigTransactionRequest,
+) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+    let plan = plan_candidate(
+        &deps.peer_mgr_tx,
+        request.candidate_toml.clone(),
+        request.expected_runtime_snapshot_token.clone(),
+    )
+    .await?;
+
+    match plan.status {
+        RuntimeConfigTransactionStatus::Noop => {
+            return Ok(proto::ConfigTransactionApplyResponse {
+                status: proto::ConfigTransactionPlanStatus::Noop.into(),
+                runtime_snapshot_token: plan.runtime_snapshot_token,
+                committed_sections: Vec::new(),
+                human_text: "No changes.\n".to_string(),
+            });
+        }
+        RuntimeConfigTransactionStatus::Rejected => {
+            return Ok(rejected_response(plan.runtime_snapshot_token));
+        }
+        RuntimeConfigTransactionStatus::Committable => {}
+    }
+
+    let Some(family) = apply_family(&plan.supported_sections) else {
+        return Ok(rejected_response(plan.runtime_snapshot_token));
+    };
+
+    let candidate =
+        Config::load_toml_with_diagnostics(&request.candidate_toml, "candidate config transaction")
+            .map_err(ConfigTransactionApplyError::InvalidArgument)?;
+    let config_tx = deps.config_tx.clone().ok_or_else(|| {
+        ConfigTransactionApplyError::FailedPrecondition(
+            "config transactions require a persisted config (start rustbgpd with --config)"
+                .to_string(),
+        )
+    })?;
+    // Post-commit token comes from the plan (computed under the peer-manager's
+    // key); the apply path can't recompute a key-consistent token itself.
+    let post_commit_runtime_snapshot_token = plan.post_commit_runtime_snapshot_token;
+    commit_apply_family(
+        deps,
+        &config_tx,
+        family,
+        request.candidate_toml,
+        candidate,
+        plan.supported_sections,
+        post_commit_runtime_snapshot_token,
+    )
+    .await
+}
+
+async fn commit_apply_family(
+    deps: &FibTableControlDeps,
+    config_tx: &mpsc::Sender<ConfigEvent>,
+    family: ApplyFamily,
+    candidate_toml: String,
+    candidate: Config,
+    supported_sections: Vec<String>,
+    post_commit_runtime_snapshot_token: String,
+) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+    match family {
+        ApplyFamily::FibTables => {
+            commit_fib_transaction(
+                deps,
+                config_tx,
+                &candidate,
+                post_commit_runtime_snapshot_token,
+            )
+            .await
+        }
+        ApplyFamily::DynamicNeighbors => {
+            commit_candidate_snapshot_locked(&deps.peer_mgr_tx, config_tx, candidate_toml).await?;
+            Ok(committable_response(
+                post_commit_runtime_snapshot_token,
+                vec![DYNAMIC_SECTION.to_string()],
+                format!(
+                    "Committed [[dynamic_neighbors]] transaction.\n{} range(s) active.\n",
+                    candidate.dynamic_neighbors.len()
+                ),
+            ))
+        }
+        ApplyFamily::StaticNeighbors => {
+            commit_static_neighbors_locked(
+                &deps.peer_mgr_tx,
+                config_tx,
+                candidate_toml,
+                &candidate,
+                &supported_sections,
+            )
+            .await?;
+            Ok(committable_response(
+                post_commit_runtime_snapshot_token,
+                supported_sections,
+                "Committed [[neighbors]] add/delete transaction.\n".to_string(),
+            ))
+        }
+    }
+}
+
+async fn commit_fib_transaction(
+    deps: &FibTableControlDeps,
+    config_tx: &mpsc::Sender<ConfigEvent>,
+    candidate: &Config,
+    post_commit_runtime_snapshot_token: String,
+) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+    let fib_cmd_tx = deps.fib_cmd_tx.clone().ok_or_else(|| {
+        fib_error_to_apply_error(runtime_unavailable_error(!deps.startup_tables.is_empty()))
+    })?;
+    let response = commit_fib_tables_locked(
+        &fib_cmd_tx,
+        &deps.peer_mgr_tx,
+        config_tx,
+        candidate.fib_tables.clone(),
+    )
+    .await
+    .map_err(fib_error_to_apply_error)?;
+    Ok(committable_response(
+        post_commit_runtime_snapshot_token,
+        vec![FIB_SECTION.to_string()],
+        format!(
+            "Committed [[fib_tables]] transaction.\n{} table(s) active.\n",
+            response.tables.len()
+        ),
+    ))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ApplyFamily {
+    FibTables,
+    DynamicNeighbors,
+    StaticNeighbors,
+}
+
+fn apply_family(sections: &[String]) -> Option<ApplyFamily> {
+    match sections {
+        [section] if section == FIB_SECTION => Some(ApplyFamily::FibTables),
+        [section] if section == DYNAMIC_SECTION => Some(ApplyFamily::DynamicNeighbors),
+        sections
+            if !sections.is_empty()
+                && sections
+                    .iter()
+                    .all(|s| s == NEIGHBOR_ADD_SECTION || s == NEIGHBOR_DELETE_SECTION) =>
+        {
+            Some(ApplyFamily::StaticNeighbors)
+        }
+        _ => None,
+    }
 }
 
 async fn plan_candidate(
@@ -139,9 +237,315 @@ async fn plan_candidate(
         .map_err(plan_error_to_status)
 }
 
+async fn commit_candidate_snapshot_locked(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    config_tx: &mpsc::Sender<ConfigEvent>,
+    candidate_toml: String,
+) -> Result<(), ConfigTransactionApplyError> {
+    let permit = reserve_persist_permit(config_tx).await?;
+    let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
+    if let Err(error) = persist_candidate_config(permit, candidate_toml).await {
+        rollback_config_snapshot(peer_mgr_tx, previous_toml).await;
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn commit_static_neighbors_locked(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    config_tx: &mpsc::Sender<ConfigEvent>,
+    candidate_toml: String,
+    candidate: &Config,
+    committed_sections: &[String],
+) -> Result<(), ConfigTransactionApplyError> {
+    let permit = reserve_persist_permit(config_tx).await?;
+    let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
+    let previous = match Config::load_toml_with_diagnostics(
+        &previous_toml,
+        "previous runtime config transaction snapshot",
+    ) {
+        Ok(previous) => previous,
+        Err(error) => {
+            rollback_config_snapshot(peer_mgr_tx, previous_toml).await;
+            return Err(ConfigTransactionApplyError::Internal(error));
+        }
+    };
+    let neighbor_diff = diff_neighbors(&previous.neighbors, &candidate.neighbors);
+    if !neighbor_diff.changed.is_empty()
+        || committed_sections
+            .iter()
+            .any(|s| s != NEIGHBOR_ADD_SECTION && s != NEIGHBOR_DELETE_SECTION)
+    {
+        rollback_config_snapshot(peer_mgr_tx, previous_toml).await;
+        return Err(ConfigTransactionApplyError::Internal(
+            "static-neighbor transaction executor received a non-static-add/delete diff"
+                .to_string(),
+        ));
+    }
+
+    let mut applied = Vec::new();
+    let added = match resolve_added_neighbors(candidate, &neighbor_diff.added) {
+        Ok(added) => added,
+        Err(error) => {
+            rollback_config_snapshot(peer_mgr_tx, previous_toml).await;
+            return Err(error);
+        }
+    };
+    for config in added {
+        if let Err(error) = add_static_peer(peer_mgr_tx, config.clone()).await {
+            rollback_static_and_snapshot(peer_mgr_tx, applied, previous_toml).await?;
+            return Err(error);
+        }
+        applied.push(AppliedStaticOp::Added(PeerKey::new(
+            config.address,
+            config.interface.clone(),
+        )));
+    }
+    for peer in neighbor_diff.removed {
+        match delete_static_peer(peer_mgr_tx, peer.clone()).await {
+            Ok(removed) => applied.push(AppliedStaticOp::Deleted(Box::new(removed))),
+            Err(error) => {
+                rollback_static_and_snapshot(peer_mgr_tx, applied, previous_toml).await?;
+                return Err(error);
+            }
+        }
+    }
+
+    if let Err(error) = persist_candidate_config(permit, candidate_toml).await {
+        rollback_static_and_snapshot(peer_mgr_tx, applied, previous_toml).await?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn resolve_added_neighbors(
+    candidate: &Config,
+    added: &[Neighbor],
+) -> Result<Vec<PeerManagerNeighborConfig>, ConfigTransactionApplyError> {
+    let resolved = candidate
+        .resolved_neighbors()
+        .map_err(|error| ConfigTransactionApplyError::InvalidArgument(error.to_string()))?;
+    let peer_map: std::collections::HashMap<PeerKey, _> = resolved
+        .into_iter()
+        .map(|neighbor| {
+            (
+                PeerKey::new(
+                    neighbor.transport_config.remote_addr.ip(),
+                    neighbor.transport_config.peer_interface.clone(),
+                ),
+                neighbor,
+            )
+        })
+        .collect();
+    added
+        .iter()
+        .map(|neighbor| {
+            let address = neighbor.address.parse().map_err(|error| {
+                ConfigTransactionApplyError::InvalidArgument(format!(
+                    "invalid neighbor address {:?}: {error}",
+                    neighbor.address
+                ))
+            })?;
+            let key = PeerKey::new(address, neighbor.interface.clone());
+            let resolved = peer_map.get(&key).ok_or_else(|| {
+                ConfigTransactionApplyError::Internal(format!(
+                    "candidate neighbor {key} missing from resolved neighbor map",
+                ))
+            })?;
+            Ok(crate::reload::build_peer_mgr_config(
+                &resolved.transport_config,
+                &resolved.label,
+                resolved.import_policy.as_ref(),
+                resolved.export_policy.as_ref(),
+                resolved.peer_group.clone(),
+            ))
+        })
+        .collect()
+}
+
+async fn stage_config_snapshot(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    candidate_toml: String,
+) -> Result<String, ConfigTransactionApplyError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(PeerManagerCommand::StageConfigSnapshot {
+            candidate_toml,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable("peer manager is unavailable".to_string())
+        })?;
+    reply_rx
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable(
+                "peer manager dropped config snapshot stage reply".to_string(),
+            )
+        })?
+        .map_err(stage_config_snapshot_error_to_apply_error)
+}
+
+async fn rollback_config_snapshot(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    previous: String,
+) {
+    let _ = stage_config_snapshot(peer_mgr_tx, previous).await;
+}
+
+async fn reserve_persist_permit(
+    config_tx: &mpsc::Sender<ConfigEvent>,
+) -> Result<mpsc::OwnedPermit<ConfigEvent>, ConfigTransactionApplyError> {
+    tokio::time::timeout(PERSIST_RESERVE_TIMEOUT, config_tx.clone().reserve_owned())
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable(
+                "config persistence queue busy — refusing mutation to avoid drift".to_string(),
+            )
+        })?
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable("config persistence unavailable".to_string())
+        })
+}
+
+async fn persist_candidate_config(
+    permit: mpsc::OwnedPermit<ConfigEvent>,
+    candidate_toml: String,
+) -> Result<(), ConfigTransactionApplyError> {
+    let (ack_tx, ack_rx) = oneshot::channel();
+    permit.send(ConfigEvent::ConfigTransactionCommitted {
+        candidate_toml,
+        ack: Some(ack_tx),
+    });
+    ack_rx
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Internal(
+                "config bridge dropped transaction persistence acknowledgement".to_string(),
+            )
+        })?
+        .map_err(ConfigTransactionApplyError::FailedPrecondition)
+}
+
+async fn add_static_peer(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    config: PeerManagerNeighborConfig,
+) -> Result<(), ConfigTransactionApplyError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(PeerManagerCommand::AddPeer {
+            config,
+            sync_config_snapshot: false,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable("peer manager is unavailable".to_string())
+        })?;
+    reply_rx
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable(
+                "peer manager dropped static-neighbor add reply".to_string(),
+            )
+        })?
+        .map_err(ConfigTransactionApplyError::FailedPrecondition)
+}
+
+async fn delete_static_peer(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    peer: PeerKey,
+) -> Result<PeerManagerNeighborConfig, ConfigTransactionApplyError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(PeerManagerCommand::DeletePeer {
+            peer,
+            sync_config_snapshot: false,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable("peer manager is unavailable".to_string())
+        })?;
+    reply_rx
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable(
+                "peer manager dropped static-neighbor delete reply".to_string(),
+            )
+        })?
+        .map_err(ConfigTransactionApplyError::FailedPrecondition)
+}
+
+enum AppliedStaticOp {
+    Added(PeerKey),
+    Deleted(Box<PeerManagerNeighborConfig>),
+}
+
+async fn rollback_static_ops(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    applied: Vec<AppliedStaticOp>,
+) -> Result<(), ConfigTransactionApplyError> {
+    for op in applied.into_iter().rev() {
+        match op {
+            AppliedStaticOp::Added(peer) => {
+                delete_static_peer(peer_mgr_tx, peer)
+                    .await
+                    .map_err(|error| {
+                        ConfigTransactionApplyError::Internal(format!(
+                            "static-neighbor rollback delete failed: {error:?}"
+                        ))
+                    })?;
+            }
+            AppliedStaticOp::Deleted(config) => {
+                add_static_peer(peer_mgr_tx, *config)
+                    .await
+                    .map_err(|error| {
+                        ConfigTransactionApplyError::Internal(format!(
+                            "static-neighbor rollback add failed: {error:?}"
+                        ))
+                    })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn rollback_static_and_snapshot(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    applied: Vec<AppliedStaticOp>,
+    previous_toml: String,
+) -> Result<(), ConfigTransactionApplyError> {
+    let rollback = rollback_static_ops(peer_mgr_tx, applied).await;
+    rollback_config_snapshot(peer_mgr_tx, previous_toml).await;
+    rollback
+}
+
+fn committable_response(
+    runtime_snapshot_token: String,
+    committed_sections: Vec<String>,
+    human_text: String,
+) -> proto::ConfigTransactionApplyResponse {
+    proto::ConfigTransactionApplyResponse {
+        status: proto::ConfigTransactionPlanStatus::Committable.into(),
+        runtime_snapshot_token,
+        committed_sections,
+        human_text,
+    }
+}
+
 fn plan_error_to_status(error: String) -> ConfigTransactionApplyError {
     if error.starts_with("runtime config snapshot changed") {
         ConfigTransactionApplyError::FailedPrecondition(error)
+    } else {
+        ConfigTransactionApplyError::InvalidArgument(error)
+    }
+}
+
+fn stage_config_snapshot_error_to_apply_error(error: String) -> ConfigTransactionApplyError {
+    if error.starts_with("failed to serialize previous runtime config snapshot") {
+        ConfigTransactionApplyError::Internal(error)
     } else {
         ConfigTransactionApplyError::InvalidArgument(error)
     }
@@ -241,6 +645,22 @@ remote_asn = 65002
         }
     }
 
+    #[test]
+    fn stage_snapshot_serialization_error_maps_internal() {
+        let error = stage_config_snapshot_error_to_apply_error(
+            "failed to serialize previous runtime config snapshot: synthetic".to_string(),
+        );
+        assert!(matches!(error, ConfigTransactionApplyError::Internal(_)));
+
+        let error = stage_config_snapshot_error_to_apply_error(
+            "invalid candidate config transaction: synthetic".to_string(),
+        );
+        assert!(matches!(
+            error,
+            ConfigTransactionApplyError::InvalidArgument(_)
+        ));
+    }
+
     fn diff() -> RuntimeConfigDiff {
         RuntimeConfigDiff {
             has_actionable_changes: true,
@@ -313,6 +733,45 @@ remote_asn = 65002
         }
     }
 
+    async fn fake_snapshot_peer_manager(
+        mut rx: mpsc::Receiver<PeerManagerCommand>,
+        plan: RuntimeConfigTransactionPlan,
+        snapshot_toml: Arc<Mutex<String>>,
+        peers: Arc<Mutex<Vec<PeerManagerNeighborConfig>>>,
+    ) {
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                PeerManagerCommand::PlanConfigTransaction { reply, .. } => {
+                    let _ = reply.send(Ok(plan.clone()));
+                }
+                PeerManagerCommand::StageConfigSnapshot {
+                    candidate_toml,
+                    reply,
+                } => {
+                    let mut snapshot = snapshot_toml.lock().await;
+                    let previous = snapshot.clone();
+                    *snapshot = candidate_toml;
+                    let _ = reply.send(Ok(previous));
+                }
+                PeerManagerCommand::AddPeer { config, reply, .. } => {
+                    peers.lock().await.push(config);
+                    let _ = reply.send(Ok(()));
+                }
+                PeerManagerCommand::DeletePeer { peer, reply, .. } => {
+                    let mut peers = peers.lock().await;
+                    if let Some(index) = peers.iter().position(|config| {
+                        PeerKey::new(config.address, config.interface.clone()) == peer
+                    }) {
+                        let _ = reply.send(Ok(peers.remove(index)));
+                    } else {
+                        let _ = reply.send(Err(format!("peer {peer} not found")));
+                    }
+                }
+                _ => panic!("unexpected peer-manager command in snapshot transaction test"),
+            }
+        }
+    }
+
     fn deps(
         fib_cmd_tx: Option<mpsc::Sender<FibRuntimeCommand>>,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
@@ -350,14 +809,17 @@ remote_asn = 65002
     }
 
     #[tokio::test]
-    async fn apply_rejects_valid_non_fib_candidate_without_mutation() {
+    async fn apply_rejects_cross_family_candidate_without_mutation() {
         let (peer_tx, peer_rx) = mpsc::channel(8);
         let staged = Arc::new(Mutex::new(Vec::new()));
         tokio::spawn(fake_peer_manager(
             peer_rx,
             plan(
                 RuntimeConfigTransactionStatus::Committable,
-                vec!["[[dynamic_neighbors]]".to_string()],
+                vec![
+                    "[[dynamic_neighbors]]".to_string(),
+                    "[[fib_tables]]".to_string(),
+                ],
             ),
             staged.clone(),
         ));
@@ -388,6 +850,260 @@ peer_group = "ix-members"
         );
         assert!(response.committed_sections.is_empty());
         assert!(staged.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn apply_commits_dynamic_neighbors_full_set_after_persist_ack() {
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[peer_groups.ix-members]
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix-members"
+remote_asn = 65010
+"#,
+        );
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[dynamic_neighbors]]".to_string()],
+            ),
+            snapshot_toml.clone(),
+            peers,
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted {
+                candidate_toml,
+                ack: Some(ack),
+            }) = config_rx.recv().await
+            {
+                assert!(candidate_toml.contains("[[dynamic_neighbors]]"));
+                let _ = ack.send(Ok(()));
+            }
+        });
+
+        let response = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml: candidate_toml.clone(),
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        assert_eq!(response.committed_sections, vec!["[[dynamic_neighbors]]"]);
+        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+    }
+
+    #[tokio::test]
+    async fn dynamic_neighbor_persistence_failure_rolls_back_snapshot() {
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[peer_groups.ix-members]
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix-members"
+"#,
+        );
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[dynamic_neighbors]]".to_string()],
+            ),
+            snapshot_toml.clone(),
+            peers,
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+                config_rx.recv().await
+            {
+                let _ = ack.send(Err("persist failed".to_string()));
+            }
+        });
+
+        let err = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml,
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref message) if message == "persist failed"),
+            "{err:?}"
+        );
+        assert_eq!(*snapshot_toml.lock().await, previous_toml);
+    }
+
+    #[tokio::test]
+    async fn apply_commits_static_neighbor_add_after_persist_ack() {
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+"#,
+        );
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[neighbors]] add".to_string()],
+            ),
+            snapshot_toml,
+            peers.clone(),
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted {
+                candidate_toml,
+                ack: Some(ack),
+            }) = config_rx.recv().await
+            {
+                assert!(candidate_toml.contains("10.0.0.3"));
+                let _ = ack.send(Ok(()));
+            }
+        });
+
+        let response = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml,
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        assert_eq!(response.committed_sections, vec!["[[neighbors]] add"]);
+        let peers = peers.lock().await;
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].address.to_string(), "10.0.0.3");
+    }
+
+    #[tokio::test]
+    async fn static_neighbor_add_resolves_canonical_ipv6_address() {
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[[neighbors]]
+address = "2001:0db8:0000:0000:0000:0000:0000:0003"
+remote_asn = 65003
+"#,
+        );
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[neighbors]] add".to_string()],
+            ),
+            snapshot_toml,
+            peers.clone(),
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+                config_rx.recv().await
+            {
+                let _ = ack.send(Ok(()));
+            }
+        });
+
+        let response = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml,
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        let peers = peers.lock().await;
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].address.to_string(), "2001:db8::3");
+    }
+
+    #[tokio::test]
+    async fn static_neighbor_changed_diff_rolls_back_snapshot() {
+        let previous_toml = base_toml("");
+        let candidate_toml = previous_toml.replace("remote_asn = 65002", "remote_asn = 65102");
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[neighbors]] add".to_string()],
+            ),
+            snapshot_toml.clone(),
+            peers,
+        ));
+        let (config_tx, _config_rx) = mpsc::channel(8);
+
+        let err = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml,
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ConfigTransactionApplyError::Internal(ref message) if message.contains("non-static-add/delete diff")),
+            "{err:?}"
+        );
+        assert_eq!(*snapshot_toml.lock().await, previous_toml);
     }
 
     #[tokio::test]

@@ -90,14 +90,16 @@ Later for what remains.
 ### Next
 
 - **Config transaction model and runtime/file diff UX** *(in progress; ADR-0076
-  foundation + FIB executor landed).* Native gRPC now has a validate-only
+  foundation + FIB/dynamic/static executors landed).* Native gRPC now has a validate-only
   `PlanConfigTransaction` shape: candidate TOML validation, diff against the
   live runtime snapshot, optimistic snapshot token, and explicit v1 section
-  classification. `ApplyConfigTransaction` is operator-only and can commit pure
-  full-set `[[fib_tables]]` candidates under the shared runtime-config
-  coordinator, with persistence ack and rollback on apply/persist failure. Next
-  stacked slices: dynamic-neighbor full-set replacement plus static-neighbor
-  add/delete executor; CLI/operator docs and receipt polish.
+  classification. `ApplyConfigTransaction` is operator-only and can commit one
+  pure runtime family at a time: full-set `[[fib_tables]]`, full-set
+  `[[dynamic_neighbors]]`, or static `[[neighbors]]` add/delete changes under
+  the shared runtime-config coordinator, with persistence ack and rollback on
+  apply/persist failure. Next stacked slices: transaction CLI/operator receipt
+  polish, static-neighbor modify executor, and remaining hot-reload sections
+  whose rollback semantics are ready.
   Keep gNMI `Set` read-only until OpenConfig mutation maps onto this transaction
   model rather than a parallel commit path. Exit: atomic commit where supported,
   explicit restart-required/rejected surfaces, rollback/receipt model, no partial
