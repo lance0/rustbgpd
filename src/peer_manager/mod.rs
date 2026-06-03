@@ -558,6 +558,17 @@ impl PeerManager {
                             let result = self.diff_runtime_config(&candidate_toml);
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::PlanConfigTransaction {
+                            candidate_toml,
+                            expected_runtime_snapshot_token,
+                            reply,
+                        } => {
+                            let result = self.plan_config_transaction(
+                                &candidate_toml,
+                                expected_runtime_snapshot_token.as_deref(),
+                            );
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::StageFibTables { tables, reply } => {
                             let result = self.stage_fib_tables_candidate(&tables);
                             let _ = reply.send(result);

@@ -76,10 +76,13 @@ Preferred posture:
 - gRPC `grpc_authz` audit records are result-aware for forwarded calls and use
   bounded result labels such as `handler_ok`, `handler_invalid_argument`, and
   `listener_tier_denied`. Credential-bearing request summaries are masked:
-  `DiffRuntimeConfigRequest.candidate_toml` is never logged verbatim, and
+  `DiffRuntimeConfigRequest.candidate_toml`,
+  `PlanConfigTransactionRequest.candidate_toml`, and
+  `ApplyConfigTransactionRequest.candidate_toml` are never logged verbatim, and
   `SetPeerGroup` records only MD5 state (`set_redacted`, `preserve`, or
   `clear`) rather than secret material. TCP-AO keys embedded in candidate TOML
-  are covered by the same `candidate_toml=<redacted>` summary.
+  are covered by the same `candidate_toml=<redacted>` summary; transaction
+  apply comments are recorded only as present/absent.
 - Peer-group read RPCs redact `md5_password` rather than echoing stored
   secret material; they expose only the non-secret `has_md5_password`
   presence flag. The write path preserves an omitted redacted MD5 value by

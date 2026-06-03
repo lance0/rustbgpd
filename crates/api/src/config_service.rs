@@ -3,8 +3,14 @@
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
-use crate::audit::{diff_runtime_config_summary, set_request_summary};
-use crate::peer_types::{PeerManagerCommand, RuntimeConfigDiff};
+use crate::audit::{
+    apply_config_transaction_summary, diff_runtime_config_summary, plan_config_transaction_summary,
+    set_request_summary,
+};
+use crate::peer_types::{
+    PeerManagerCommand, RuntimeConfigDiff, RuntimeConfigTransactionPlan,
+    RuntimeConfigTransactionStatus,
+};
 use crate::proto;
 
 pub struct ConfigService {
@@ -26,6 +32,32 @@ fn diff_to_proto(diff: RuntimeConfigDiff) -> proto::DiffRuntimeConfigResponse {
         has_any_changes: diff.has_any_changes,
         human_text: diff.human_text,
         diff_json: diff.diff_json,
+    }
+}
+
+fn plan_status_to_proto(
+    status: RuntimeConfigTransactionStatus,
+) -> proto::ConfigTransactionPlanStatus {
+    match status {
+        RuntimeConfigTransactionStatus::Noop => proto::ConfigTransactionPlanStatus::Noop,
+        RuntimeConfigTransactionStatus::Committable => {
+            proto::ConfigTransactionPlanStatus::Committable
+        }
+        RuntimeConfigTransactionStatus::Rejected => proto::ConfigTransactionPlanStatus::Rejected,
+    }
+}
+
+fn transaction_plan_to_proto(
+    plan: RuntimeConfigTransactionPlan,
+) -> proto::ConfigTransactionPlanResponse {
+    proto::ConfigTransactionPlanResponse {
+        status: plan_status_to_proto(plan.status).into(),
+        runtime_snapshot_token: plan.runtime_snapshot_token,
+        diff: Some(diff_to_proto(plan.diff)),
+        supported_sections: plan.supported_sections,
+        unsupported_sections: plan.unsupported_sections,
+        restart_required_sections: plan.restart_required_sections,
+        human_text: plan.human_text,
     }
 }
 
@@ -56,6 +88,56 @@ impl proto::config_service_server::ConfigService for ConfigService {
             Ok(diff) => Ok(Response::new(diff_to_proto(diff))),
             Err(error) => Err(Status::invalid_argument(error)),
         }
+    }
+
+    async fn plan_config_transaction(
+        &self,
+        request: Request<proto::PlanConfigTransactionRequest>,
+    ) -> Result<Response<proto::ConfigTransactionPlanResponse>, Status> {
+        set_request_summary(
+            &request,
+            plan_config_transaction_summary(
+                &request.get_ref().candidate_toml,
+                &request.get_ref().expected_runtime_snapshot_token,
+            ),
+        );
+        let request = request.into_inner();
+        let expected_runtime_snapshot_token = (!request.expected_runtime_snapshot_token.is_empty())
+            .then_some(request.expected_runtime_snapshot_token);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::PlanConfigTransaction {
+                candidate_toml: request.candidate_toml,
+                expected_runtime_snapshot_token,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::unavailable("peer manager is unavailable"))?;
+
+        match reply_rx.await.map_err(|_| {
+            Status::unavailable("peer manager dropped config transaction plan reply")
+        })? {
+            Ok(plan) => Ok(Response::new(transaction_plan_to_proto(plan))),
+            Err(error) => Err(Status::invalid_argument(error)),
+        }
+    }
+
+    async fn apply_config_transaction(
+        &self,
+        request: Request<proto::ApplyConfigTransactionRequest>,
+    ) -> Result<Response<proto::ConfigTransactionApplyResponse>, Status> {
+        set_request_summary(
+            &request,
+            apply_config_transaction_summary(
+                &request.get_ref().candidate_toml,
+                &request.get_ref().expected_runtime_snapshot_token,
+                &request.get_ref().client_request_id,
+                &request.get_ref().comment,
+            ),
+        );
+        Err(Status::unimplemented(
+            "ConfigService.ApplyConfigTransaction executors are staged in follow-up PRs; use PlanConfigTransaction for validate-only planning",
+        ))
     }
 }
 
@@ -105,6 +187,160 @@ mod tests {
         assert!(resp.has_restart_required_changes);
         assert_eq!(resp.human_text, "Restart-required changes:\n");
         assert_eq!(resp.diff_json, "{\"has_any_changes\":true}");
+    }
+
+    fn sample_runtime_diff() -> RuntimeConfigDiff {
+        RuntimeConfigDiff {
+            has_actionable_changes: true,
+            has_reload_applied_changes: true,
+            has_restart_required_changes: false,
+            has_informational_changes: false,
+            has_any_changes: true,
+            human_text: "Reload-applied changes:\n".to_string(),
+            diff_json: "{\"has_any_changes\":true}".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_config_transaction_forwards_candidate_and_token() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let svc = ConfigService::new(tx);
+        let server = tokio::spawn(async move {
+            let Some(PeerManagerCommand::PlanConfigTransaction {
+                candidate_toml,
+                expected_runtime_snapshot_token,
+                reply,
+            }) = rx.recv().await
+            else {
+                panic!("expected PlanConfigTransaction command");
+            };
+            assert_eq!(candidate_toml, "candidate");
+            assert_eq!(
+                expected_runtime_snapshot_token.as_deref(),
+                Some("fnv1a64:abc:9")
+            );
+            let _ = reply.send(Ok(RuntimeConfigTransactionPlan {
+                status: RuntimeConfigTransactionStatus::Committable,
+                runtime_snapshot_token: "fnv1a64:abc:9".to_string(),
+                diff: sample_runtime_diff(),
+                supported_sections: vec!["[[fib_tables]]".to_string()],
+                unsupported_sections: Vec::new(),
+                restart_required_sections: Vec::new(),
+                human_text: "Config transaction is committable by v1.\n".to_string(),
+            }));
+        });
+
+        let resp = svc
+            .plan_config_transaction(Request::new(proto::PlanConfigTransactionRequest {
+                candidate_toml: "candidate".to_string(),
+                expected_runtime_snapshot_token: "fnv1a64:abc:9".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        server.await.unwrap();
+        assert_eq!(
+            resp.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        assert_eq!(resp.runtime_snapshot_token, "fnv1a64:abc:9");
+        assert_eq!(resp.supported_sections, vec!["[[fib_tables]]"]);
+        assert!(resp.diff.unwrap().has_actionable_changes);
+    }
+
+    #[tokio::test]
+    async fn plan_config_transaction_maps_peer_manager_error_to_invalid_argument() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let svc = ConfigService::new(tx);
+        tokio::spawn(async move {
+            let Some(PeerManagerCommand::PlanConfigTransaction { reply, .. }) = rx.recv().await
+            else {
+                panic!("expected PlanConfigTransaction command");
+            };
+            let _ = reply.send(Err("runtime config snapshot changed".to_string()));
+        });
+
+        let err = svc
+            .plan_config_transaction(Request::new(proto::PlanConfigTransactionRequest {
+                candidate_toml: "candidate".to_string(),
+                expected_runtime_snapshot_token: "stale".to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("runtime config snapshot changed"));
+    }
+
+    #[tokio::test]
+    async fn plan_config_transaction_audit_summary_redacts_candidate_toml() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let svc = ConfigService::new(tx);
+        tokio::spawn(async move {
+            let Some(PeerManagerCommand::PlanConfigTransaction { reply, .. }) = rx.recv().await
+            else {
+                panic!("expected PlanConfigTransaction command");
+            };
+            let _ = reply.send(Ok(RuntimeConfigTransactionPlan {
+                status: RuntimeConfigTransactionStatus::Noop,
+                runtime_snapshot_token: "fnv1a64:abc:9".to_string(),
+                diff: RuntimeConfigDiff {
+                    has_actionable_changes: false,
+                    has_reload_applied_changes: false,
+                    has_restart_required_changes: false,
+                    has_informational_changes: false,
+                    has_any_changes: false,
+                    human_text: String::new(),
+                    diff_json: "{}".to_string(),
+                },
+                supported_sections: Vec::new(),
+                unsupported_sections: Vec::new(),
+                restart_required_sections: Vec::new(),
+                human_text: "No changes.\n".to_string(),
+            }));
+        });
+
+        let audit_handle = GrpcAuditHandle::default();
+        let mut request = Request::new(proto::PlanConfigTransactionRequest {
+            candidate_toml: "[global]\nmd5_password = \"secret\"\n".to_string(),
+            expected_runtime_snapshot_token: "fnv1a64:abc:9".to_string(),
+        });
+        request.extensions_mut().insert(audit_handle.clone());
+
+        svc.plan_config_transaction(request).await.unwrap();
+
+        let summary = audit_handle.summary().expect("audit summary missing");
+        assert!(summary.as_str().contains("candidate_toml=<redacted>"));
+        assert!(
+            summary
+                .as_str()
+                .contains("expected_runtime_snapshot_token_present=true")
+        );
+        assert!(!summary.as_str().contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn apply_config_transaction_is_unimplemented_but_audited() {
+        let (tx, _rx) = mpsc::channel(1);
+        let svc = ConfigService::new(tx);
+        let audit_handle = GrpcAuditHandle::default();
+        let mut request = Request::new(proto::ApplyConfigTransactionRequest {
+            candidate_toml: "[global]\nmd5_password = \"secret\"\n".to_string(),
+            expected_runtime_snapshot_token: "fnv1a64:abc:9".to_string(),
+            client_request_id: "deploy-42".to_string(),
+            comment: "contains sensitive context".to_string(),
+        });
+        request.extensions_mut().insert(audit_handle.clone());
+
+        let err = svc.apply_config_transaction(request).await.unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        let summary = audit_handle.summary().expect("audit summary missing");
+        assert!(summary.as_str().contains("candidate_toml=<redacted>"));
+        assert!(summary.as_str().contains("client_request_id=deploy-42"));
+        assert!(summary.as_str().contains("comment_present=true"));
+        assert!(!summary.as_str().contains("secret"));
+        assert!(!summary.as_str().contains("sensitive context"));
     }
 
     #[tokio::test]

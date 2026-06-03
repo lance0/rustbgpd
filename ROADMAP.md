@@ -89,15 +89,18 @@ Later for what remains.
 
 ### Next
 
-- **Config transaction model and runtime/file diff UX** *(decision gate —
-  start or defer, do not bundle into polish).* gRPC owns truth after startup,
-  and a future gNMI `Set` requires transaction semantics. `Set` is a stable
-  `UNIMPLEMENTED` contract today, so deferring breaks no operator promise.
-  Decide explicitly: start as the next major feature, or declare mutation
-  surfaces out of scope for this cycle. Exit: candidate config object,
-  validate-only, diff against live effective runtime, atomic commit where
-  supported, explicit restart-required surfaces, rollback/receipt model, no
-  partial silent drift. Gated by ADR-0064 tier authz.
+- **Config transaction model and runtime/file diff UX** *(in progress; ADR-0076
+  foundation landed).* Native gRPC now has a validate-only
+  `PlanConfigTransaction` shape: candidate TOML validation, diff against the
+  live runtime snapshot, optimistic snapshot token, and explicit v1 section
+  classification. `ApplyConfigTransaction` is reserved as operator-only but
+  remains `UNIMPLEMENTED` until executors land. Next stacked slices: FIB-table
+  full-set replacement executor; dynamic-neighbor full-set replacement plus
+  static-neighbor add/delete executor; CLI/operator docs and receipt polish.
+  Keep gNMI `Set` read-only until OpenConfig mutation maps onto this transaction
+  model rather than a parallel commit path. Exit: atomic commit where supported,
+  explicit restart-required/rejected surfaces, rollback/receipt model, no partial
+  silent drift. Gated by ADR-0064 tier authz.
 - **FIB operational hardening** *(decision gate — pull only
   operator-confidence pieces).* ADR-0061/0066/0068 cover configured-table
   install, ECMP, per-class caps, `multipath_relax`, and Link Bandwidth

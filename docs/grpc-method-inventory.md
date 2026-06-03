@@ -61,11 +61,13 @@ shape itself does not raise the tier.
 | `GetGlobal` | `sensitive_read` | Returns `GlobalState`: `asn`, `router_id`, `listen_port`, TCP-AO kernel-support probe. Topology disclosure. |
 | `SetGlobal` | `operator_only` | Reserved; currently `UNIMPLEMENTED`. Future implementation would touch global daemon state, so classify defensively now to avoid the "we'll tag it later" trap. |
 
-### ConfigService (1 RPC)
+### ConfigService (3 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
 | `DiffRuntimeConfig` | `sensitive_read` | Response is redacted by design (per RPC comment), but the diff structure exposes policy layout, peer-group inheritance, and which fields differ between candidate and runtime. Request `candidate_toml` can contain credentials and must be omitted or masked by future audit logging. |
+| `PlanConfigTransaction` | `sensitive_read` | Validate-only transaction planner. It returns a redacted diff, runtime snapshot token, and v1 section classification without mutating daemon state. Request `candidate_toml` can contain credentials and must be audit-redacted. |
+| `ApplyConfigTransaction` | `operator_only` | Reserved commit entry point for ADR-0076 config transactions. Currently returns `UNIMPLEMENTED` until section executors land; classified defensively because future implementation will commit runtime config changes under one coordinator. Request TOML and comment are audit-redacted. |
 
 ### NeighborService (11 RPCs)
 
@@ -200,13 +202,13 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 43 | 53.1% |
-| `mutating` | 19 | 23.5% |
-| `operator_only` | 19 | 23.5% |
-| **Total** | **81** | **100%** |
+| `sensitive_read` | 44 | 53.0% |
+| `mutating` | 19 | 22.9% |
+| `operator_only` | 20 | 24.1% |
+| **Total** | **83** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 81
-total is 77 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 83
+total is 79 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 
@@ -246,9 +248,11 @@ specific method if the model warrants it.
    `ListPeerGroups` and `GetPeerGroup` redact `md5_password` instead
    of returning the stored value, while preserving a non-secret
    optional `has_md5_password` signal for safe read/modify/write
-   preservation. `DiffRuntimeConfig` also accepts
-   candidate TOML that may contain `md5_password` or `tcp_ao.key`;
-   audit logging must omit or mask that request body. The model does
+   preservation. `DiffRuntimeConfig`, `PlanConfigTransaction`, and
+   `ApplyConfigTransaction` also accept candidate TOML that may contain
+   `md5_password` or `tcp_ao.key`; audit logging must omit or mask that
+   request body. `ApplyConfigTransaction` also accepts a free-form comment
+   that is not logged verbatim. The model does
    not need a separate "credential-write" tier yet — `operator_only`
    plus mandatory audit redaction covers the current surface.
 6. **Backwards compatibility.** Today's coarse listener access is
@@ -273,16 +277,16 @@ specific method if the model warrants it.
    the client certificate (URI SAN → email SAN → Subject CN); non-mTLS
    listeners still emit operator-controlled principal labels.
    In opt-in tier mode, `principal_unmapped` and `role_tier_denied`
-   distinguish role-map denials from listener caps. `DiffRuntimeConfig`
-   and `SetPeerGroup` request summaries mask
-   credential-bearing fields, including candidate TOML that may contain
-   `md5_password` or `tcp_ao.key`. The default enforcement flip shipped in
+   distinguish role-map denials from listener caps. `DiffRuntimeConfig`,
+   `PlanConfigTransaction`, `ApplyConfigTransaction`, and `SetPeerGroup`
+   request summaries mask credential-bearing fields, including candidate TOML
+   that may contain `md5_password` or `tcp_ao.key`. The default enforcement flip shipped in
    v0.24.0; the external review still needs durable audit sink / retention
    guidance and optional proto credential markers.
 
 ## Code matrix
 
-`crates/api/src/authz.rs` contains the same 81-method classification
+`crates/api/src/authz.rs` contains the same 83-method classification
 as a static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added

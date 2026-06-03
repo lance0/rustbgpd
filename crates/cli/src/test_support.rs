@@ -294,6 +294,24 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
             diff_json: "{\"has_any_changes\":true}".to_string(),
         }))
     }
+
+    async fn plan_config_transaction(
+        &self,
+        _request: Request<server_proto::PlanConfigTransactionRequest>,
+    ) -> Result<Response<server_proto::ConfigTransactionPlanResponse>, Status> {
+        Err(Status::unimplemented(
+            "mock ConfigService does not implement PlanConfigTransaction",
+        ))
+    }
+
+    async fn apply_config_transaction(
+        &self,
+        _request: Request<server_proto::ApplyConfigTransactionRequest>,
+    ) -> Result<Response<server_proto::ConfigTransactionApplyResponse>, Status> {
+        Err(Status::unimplemented(
+            "mock ConfigService does not implement ApplyConfigTransaction",
+        ))
+    }
 }
 
 #[tonic::async_trait]

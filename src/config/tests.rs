@@ -6537,6 +6537,175 @@ peer_group = "ix-members"
 }
 
 #[test]
+fn transaction_v1_classifies_noop_candidate() {
+    let config = parse(valid_toml()).unwrap();
+    let diff = diff_config(&config, &config);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(class.is_noop());
+    assert!(!class.is_committable());
+}
+
+#[test]
+fn transaction_v1_classifies_supported_runtime_sections() {
+    let with_table = |table_id: u32| {
+        format!(
+            r#"
+{}
+
+[peer_groups.ix-members]
+
+[[neighbors]]
+address = "10.0.0.99"
+remote_asn = 65099
+
+[[fib_tables]]
+name = "edge"
+table_id = {table_id}
+metric = 200
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix-members"
+"#,
+            valid_toml()
+        )
+    };
+    let old = parse(&with_table(1000)).unwrap();
+    let new_toml = format!(
+        r#"
+{}
+
+[peer_groups.ix-members]
+
+[[neighbors]]
+address = "10.0.0.100"
+remote_asn = 65100
+
+[[fib_tables]]
+name = "edge"
+table_id = 1001
+metric = 200
+
+[[dynamic_neighbors]]
+prefix = "192.0.3.0/24"
+peer_group = "ix-members"
+"#,
+        valid_toml()
+    );
+    let new = parse(&new_toml).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(class.is_committable());
+    assert_eq!(
+        class.supported_sections,
+        vec![
+            "[[neighbors]] add",
+            "[[neighbors]] delete",
+            "[[dynamic_neighbors]]",
+            "[[fib_tables]]",
+        ]
+    );
+    assert!(class.unsupported_sections.is_empty());
+    assert!(class.restart_required_sections.is_empty());
+}
+
+#[test]
+fn transaction_v1_rejects_unsupported_reload_sections() {
+    let old_toml = format!(
+        r#"
+{}
+
+[peer_groups.ix-members]
+hold_time = 90
+
+[[neighbors]]
+address = "10.0.0.101"
+remote_asn = 65101
+hold_time = 90
+peer_group = "ix-members"
+"#,
+        valid_toml()
+    );
+    let new_toml = format!(
+        r#"
+{}
+
+[peer_groups.ix-members]
+hold_time = 120
+
+[[neighbors]]
+address = "10.0.0.101"
+remote_asn = 65101
+hold_time = 120
+peer_group = "ix-members"
+"#,
+        valid_toml()
+    );
+    let old = parse(&old_toml).unwrap();
+    let new = parse(&new_toml).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(!class.is_committable());
+    assert!(
+        class
+            .unsupported_sections
+            .contains(&"[[neighbors]] modify".to_string())
+    );
+    assert!(
+        class
+            .unsupported_sections
+            .contains(&"[peer_groups]".to_string())
+    );
+    assert!(class.supported_sections.is_empty());
+    assert!(class.restart_required_sections.is_empty());
+}
+
+#[test]
+fn transaction_v1_rejects_restart_required_sections() {
+    let old = parse(valid_toml()).unwrap();
+    let new_toml = format!(
+        r#"
+{}
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+"#,
+        valid_toml()
+    );
+    let new = parse(&new_toml).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(!class.is_committable());
+    assert!(class.supported_sections.is_empty());
+    assert!(
+        class
+            .restart_required_sections
+            .contains(&"[[fib_tables]] startup-from-empty".to_string())
+    );
+}
+
+#[test]
+fn runtime_snapshot_token_is_stable_and_changes_with_config() {
+    let old = parse(valid_toml()).unwrap();
+    let mut new = old.clone();
+    new.global.honor_graceful_shutdown = !new.global.honor_graceful_shutdown;
+
+    let token_a = runtime_snapshot_token(&old).unwrap();
+    let token_b = runtime_snapshot_token(&old).unwrap();
+    let token_c = runtime_snapshot_token(&new).unwrap();
+
+    assert_eq!(token_a, token_b);
+    assert_ne!(token_a, token_c);
+    assert!(token_a.starts_with("fnv1a64:"));
+}
+
+#[test]
 fn bfd_rejects_ipv6_link_local_neighbor() {
     // v1 ships IPv4 + IPv6 global only; link-local BFD is deferred to v1.1
     // even though BGP link-local peers now carry interface scope.

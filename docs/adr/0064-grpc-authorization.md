@@ -238,11 +238,14 @@ Every RPC call produces a structured log entry. Minimum level by tier:
 | `operator_only` | every call, at `WARN` | + full argument summary with credential fields masked, caller principal, listener address |
 
 Credential masking is mandatory: `PeerGroupDefinition.md5_password`,
-`DiffRuntimeConfigRequest.candidate_toml`, and any field tagged with a
-future credential marker are omitted or replaced with redacted metadata
-before the log line is emitted. TCP-AO key material is TOML/runtime-only
-today except when it appears inside `candidate_toml` for config-diff
-validation. The first implementation uses an explicit mask table for
+`DiffRuntimeConfigRequest.candidate_toml`,
+`PlanConfigTransactionRequest.candidate_toml`,
+`ApplyConfigTransactionRequest.candidate_toml`, and any field tagged with a
+future credential marker are omitted or replaced with redacted metadata before
+the log line is emitted. TCP-AO key material is TOML/runtime-only today except
+when it appears inside `candidate_toml` for config diff / transaction planning
+and apply. Transaction apply comments are also summarized as present/absent
+rather than logged verbatim. The first implementation uses an explicit mask table for
 the current narrow credential ingress instead of descriptor-driven proto
 field-option reflection; a proto credential marker remains a future schema
 aid if the field set grows. Peer-group read RPCs redact `md5_password`
@@ -339,9 +342,10 @@ review/rollback unit.
 6. **Audit log hardening.** First add result-aware audit records and
    explicit masking for the current credential ingress
    (`candidate_toml`, peer-group `md5_password`, and TCP-AO keys embedded in
-   candidate TOML). Add the `[(rustbgpd.v1.credential) = true]` field extension
-   and per-tier log-level configuration in follow-up slices if the credential
-   field set expands or operators need configurable sampling.
+   candidate TOML; transaction comments summarized as present/absent). Add the
+   `[(rustbgpd.v1.credential) = true]` field extension and per-tier log-level
+   configuration in follow-up slices if the credential field set expands or
+   operators need configurable sampling.
 7. **External-review prep.** Threat-model doc
    (`docs/adr/0064-threat-model.md`), per-slice security
    sign-off, external auditor packet (inventory + ADR + threat model
@@ -393,7 +397,8 @@ Slice 4a adds enforced per-listener `max_tier` caps while preserving
 certificate principal extraction (`rustbgpd:` URI SAN, then email SAN, then
 Subject CN). Slice 5a adds opt-in per-principal role enforcement while leaving
 `legacy` as the default. Slice 6a adds result-aware audit records and
-credential-masked request summaries for `DiffRuntimeConfig` and `SetPeerGroup`.
+credential-masked request summaries for `DiffRuntimeConfig`, `SetPeerGroup`,
+`PlanConfigTransaction`, and `ApplyConfigTransaction`.
 Slice 5b adds migration guidance and config-test coverage for staged tier-mode
 UDS / bearer-token deployments without flipping the default. Later slices
 implement the default enforcement flip, durable audit-sink guidance, and

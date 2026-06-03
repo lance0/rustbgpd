@@ -1511,6 +1511,197 @@ impl ConfigDiff {
     }
 }
 
+/// Section-level v1 transaction support classification.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "field names mirror ConfigTransactionPlanResponse proto repeated fields"
+)]
+pub struct ConfigTransactionSectionClassification {
+    /// Sections the v1 transaction model can commit once their executor slice
+    /// is present.
+    pub supported_sections: Vec<String>,
+    /// Hot-reloadable sections that are intentionally outside v1's commit
+    /// executor set.
+    pub unsupported_sections: Vec<String>,
+    /// Sections that still require a daemon restart.
+    pub restart_required_sections: Vec<String>,
+}
+
+impl ConfigTransactionSectionClassification {
+    /// The candidate contains no differences.
+    pub fn is_noop(&self) -> bool {
+        self.supported_sections.is_empty()
+            && self.unsupported_sections.is_empty()
+            && self.restart_required_sections.is_empty()
+    }
+
+    /// The candidate is wholly inside v1's supported commit surface.
+    pub fn is_committable(&self) -> bool {
+        !self.supported_sections.is_empty()
+            && self.unsupported_sections.is_empty()
+            && self.restart_required_sections.is_empty()
+    }
+}
+
+/// Deterministic token for optimistic config-transaction planning.
+///
+/// This is a change detector, not a credential or security boundary: callers
+/// pass it back to prove their apply request targets the same runtime snapshot
+/// they planned against. It intentionally hashes normalized serialization
+/// rather than exposing live config content.
+pub fn runtime_snapshot_token(config: &Config) -> Result<String, String> {
+    let normalized = toml::to_string_pretty(config)
+        .map_err(|error| format!("failed to serialize runtime config snapshot: {error}"))?;
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in normalized.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Ok(format!("fnv1a64:{hash:016x}:{}", normalized.len()))
+}
+
+/// Classify a validated config diff for the v1 config transaction model.
+///
+/// This deliberately does not mirror all SIGHUP reload-applied sections. The
+/// transaction model needs an atomic executor for each section it claims; PR1
+/// only exposes the validate-only planner and the safe surface that later PRs
+/// will execute.
+#[expect(
+    clippy::too_many_lines,
+    reason = "section classifier intentionally lists every diff bucket explicitly"
+)]
+pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSectionClassification {
+    let mut class = ConfigTransactionSectionClassification::default();
+
+    if !diff.neighbors.added.is_empty() {
+        class
+            .supported_sections
+            .push("[[neighbors]] add".to_string());
+    }
+    if !diff.neighbors.removed.is_empty() {
+        class
+            .supported_sections
+            .push("[[neighbors]] delete".to_string());
+    }
+    if diff.dynamic_neighbors_changed {
+        class
+            .supported_sections
+            .push("[[dynamic_neighbors]]".to_string());
+    }
+    if diff.fib_tables_changed && !diff.fib_tables_requires_restart {
+        class.supported_sections.push("[[fib_tables]]".to_string());
+    }
+
+    if !diff.neighbors.changed.is_empty() {
+        class
+            .unsupported_sections
+            .push("[[neighbors]] modify".to_string());
+    }
+    if !diff.peer_groups.added.is_empty()
+        || !diff.peer_groups.removed.is_empty()
+        || !diff.peer_groups.changed.is_empty()
+    {
+        class.unsupported_sections.push("[peer_groups]".to_string());
+    }
+    if !diff.policy.definitions_added.is_empty()
+        || !diff.policy.definitions_removed.is_empty()
+        || !diff.policy.definitions_changed.is_empty()
+        || !diff.policy.neighbor_sets_added.is_empty()
+        || !diff.policy.neighbor_sets_removed.is_empty()
+        || !diff.policy.neighbor_sets_changed.is_empty()
+        || diff.policy.import_chain_changed
+        || diff.policy.export_chain_changed
+    {
+        class.unsupported_sections.push("[policy]".to_string());
+    }
+    if !diff.effective_neighbor_impact.is_empty() {
+        class
+            .unsupported_sections
+            .push("effective neighbor inheritance impact".to_string());
+    }
+    if diff.honor_graceful_shutdown_changed {
+        class
+            .unsupported_sections
+            .push("[global].honor_graceful_shutdown".to_string());
+    }
+    if diff.honor_blackhole_changed {
+        class
+            .unsupported_sections
+            .push("[global].honor_blackhole".to_string());
+    }
+
+    if diff.global_changed {
+        class.restart_required_sections.push("[global]".to_string());
+    }
+    if diff.rpki_changed {
+        class.restart_required_sections.push("[rpki]".to_string());
+    }
+    if diff.bmp_changed {
+        class.restart_required_sections.push("[bmp]".to_string());
+    }
+    if diff.mrt_changed {
+        class.restart_required_sections.push("[mrt]".to_string());
+    }
+    if diff.evpn_instances_changed {
+        class
+            .restart_required_sections
+            .push("[[evpn_instances]]".to_string());
+    }
+    if diff.evpn_ip_vrfs_changed {
+        class
+            .restart_required_sections
+            .push("[[evpn_ip_vrfs]]".to_string());
+    }
+    if diff.ethernet_segments_changed {
+        class
+            .restart_required_sections
+            .push("[[ethernet_segments]]".to_string());
+    }
+    if diff.fib_tables_requires_restart {
+        class
+            .restart_required_sections
+            .push("[[fib_tables]] startup-from-empty".to_string());
+    }
+    if diff.apply_bum_enforcement_changed {
+        class
+            .restart_required_sections
+            .push("apply_bum_enforcement".to_string());
+    }
+    if diff.blackhole_fib_discard_changed {
+        class
+            .restart_required_sections
+            .push("BLACKHOLE FIB discard".to_string());
+    }
+    if diff.neighbor_tcp_ao_changed {
+        class
+            .restart_required_sections
+            .push("[[neighbors]].tcp_ao".to_string());
+    }
+    if diff.bfd_changed {
+        class
+            .restart_required_sections
+            .push("[[bfd_profiles]] / neighbor BFD".to_string());
+    }
+    if diff.policy_explain_changed {
+        class
+            .restart_required_sections
+            .push("[policy.explain]".to_string());
+    }
+    if diff.policy.import_changed {
+        class
+            .restart_required_sections
+            .push("[policy.import] inline".to_string());
+    }
+    if diff.policy.export_changed {
+        class
+            .restart_required_sections
+            .push("[policy.export] inline".to_string());
+    }
+
+    class
+}
+
 /// JSON schema shared by `rustbgpd --diff --json` and the live runtime
 /// config-diff API. The schema mirrors the human diff buckets:
 /// reload-applied, restart-required, and informational.

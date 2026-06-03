@@ -237,6 +237,30 @@ pub struct RuntimeConfigDiff {
     pub diff_json: String,
 }
 
+/// Validate-only classification for the config transaction model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeConfigTransactionStatus {
+    /// Candidate matches the runtime snapshot.
+    Noop,
+    /// Candidate contains only sections the v1 transaction model can commit.
+    Committable,
+    /// Candidate is valid TOML/config but contains unsupported or
+    /// restart-required sections.
+    Rejected,
+}
+
+/// Validate-only transaction plan returned by the peer manager.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeConfigTransactionPlan {
+    pub status: RuntimeConfigTransactionStatus,
+    pub runtime_snapshot_token: String,
+    pub diff: RuntimeConfigDiff,
+    pub supported_sections: Vec<String>,
+    pub unsupported_sections: Vec<String>,
+    pub restart_required_sections: Vec<String>,
+    pub human_text: String,
+}
+
 /// Import-policy validation state that can change route admissibility after an
 /// external cache update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -307,6 +331,17 @@ pub enum PeerManagerCommand {
         candidate_toml: String,
         /// Reply channel returning redacted diff output only.
         reply: oneshot::Sender<Result<RuntimeConfigDiff, String>>,
+    },
+    /// Validate and classify a candidate config transaction without mutating
+    /// daemon state.
+    PlanConfigTransaction {
+        /// Candidate TOML content supplied by the caller.
+        candidate_toml: String,
+        /// Optional optimistic-concurrency token the caller expects to plan
+        /// against.
+        expected_runtime_snapshot_token: Option<String>,
+        /// Reply channel returning the transaction plan.
+        reply: oneshot::Sender<Result<RuntimeConfigTransactionPlan, String>>,
     },
     /// Atomically validate a candidate `[[fib_tables]]` set against the live
     /// runtime config (peer-group references, reserved/duplicate table ids,

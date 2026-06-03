@@ -11,6 +11,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Config transaction model foundation (ADR-0076).** `ConfigService` now has a
+  validate-only `PlanConfigTransaction` RPC that parses a full candidate TOML,
+  compares it against the daemon's live runtime config snapshot, returns an
+  optimistic `runtime_snapshot_token`, and classifies sections into v1
+  `supported_sections`, `unsupported_sections`, and
+  `restart_required_sections`. `ApplyConfigTransaction` is reserved as an
+  operator-tier commit entry point but returns `UNIMPLEMENTED` until the section
+  executors land. Candidate TOML remains audit-redacted, and gNMI `Set` remains
+  unimplemented/read-only pending an OpenConfig mapping onto this transaction
+  model.
+
 - **Full-scope ASPA path verification.** ASPA validation now uses the
   configured BGP Role to select the draft-ietf-sidrops-aspa-verification-25
   procedure: routes received from providers use downstream/customer-cone
