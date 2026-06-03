@@ -87,7 +87,7 @@ don't survive to the demotion step.
 iBGP peers (`remote_asn == global.asn`) are exempt because `LOCAL_PREF` is
 preserved within an AS; re-applying the demotion per iBGP hop would clobber
 values set legitimately at the upstream EBGP edge. Confederation gating is
-tracked in [`KNOWN_ISSUES.md`](../KNOWN_ISSUES.md) as a follow-up.
+tracked in [`ROADMAP.md`](../ROADMAP.md) as a follow-up.
 
 Off by default — the operator opt-in is deliberate, RFC 8326 §4 says receivers
 SHOULD apply this, not MUST.
@@ -1103,13 +1103,14 @@ Every route receives a validation state based on RPKI data:
 |-------|---------|------------------|
 | **Valid** | Origin AS matches a VRP covering the prefix | Preferred |
 | **NotFound** | No VRP covers the prefix | Neutral (default) |
-| **Invalid** | VRP covers the prefix but origin AS doesn't match | Deprioritized |
+| **Invalid** | VRP covers the prefix but origin AS doesn't match, or the route exceeds the VRP `maxLength` | Deprioritized |
 
 ### Policy integration
 
 Use `match_rpki_validation` in import or export policy statements to filter
 routes by RPKI state. Import validation evaluates against the current VRP
-snapshot at ingress time — see [`KNOWN_ISSUES.md`](../KNOWN_ISSUES.md) for best-effort semantics.
+snapshot at ingress time; the validation-rules table below documents the
+current best-effort import semantics on later cache updates.
 
 Drop RPKI-invalid routes (recommended):
 

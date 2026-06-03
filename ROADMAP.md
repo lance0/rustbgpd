@@ -134,7 +134,7 @@ Later for what remains.
   later VRP/ASPA cache updates do not re-run import policy. Fix: on cache
   update, trigger `SoftResetIn` for peers whose resolved import policy uses
   validation-state matches (infrastructure exists). Not urgent — current
-  semantics match FRR/BIRD and are documented in `KNOWN_ISSUES.md`.
+  semantics match FRR/BIRD and are documented in `docs/CONFIGURATION.md`.
 - **EVPN standards tail.** Native overlay-index Type-5 local origination +
   protected recursion-path interop smoke; multi-homed-gateway ECMP; single-active
   backup-path pre-install (proactive receive-side backup VTEP next-hop so
@@ -168,10 +168,9 @@ Later for what remains.
   churn. Cold-start BGP reconnect also retries the first TCP-level dial misses
   quickly before returning to the slower exponential guard, reducing boot-order
   establishment delay when rustbgpd starts before passive peers. Remaining
-  backlog, in rough priority order. Near-term performance/polish targets are:
-  RPKI VRP lookup indexing first once there is room for the correctness-heavy
-  validation pass, then the remaining FIB projection table-name ownership and
-  high-volume CLI / JSON serializer cleanups.
+  backlog, in rough priority order. Near-term performance/polish targets are
+  the remaining FIB projection table-name ownership and high-volume CLI / JSON
+  serializer cleanups.
   - FIB projection: shipped the configured-table policy precompile so
     `allowed_neighbors` is parsed once per projection pass and peer /
     peer-group membership checks reuse prebuilt sets. The new root
@@ -187,9 +186,11 @@ Later for what remains.
     second owned `JsonRoute` tree before serialization; replace that with
     borrowed/streaming serializers if route-list JSON output shows up in
     profiles.
-  - RPKI validation: index VRP lookup instead of linearly scanning the VRP table
-    per NLRI. High payoff but correctness-sensitive around overlapping VRPs,
-    `max_len`, Invalid vs NotFound, and family handling.
+  - RPKI validation: shipped the bucketed VRP lookup index and RFC 6811
+    `maxLength` correctness fix, replacing the linear VRP scan with an
+    ancestor-bucket lookup while preserving overlapping-VRP semantics. Remaining
+    RPKI/ASPA correctness polish is the convergent import-policy revalidation on
+    cache update item above.
   - Export-policy AS_PATH formatting: shipped in #340 — the export-policy
     evaluator no longer calls `AsPath::to_aspath_string()` for every export
     candidate unless the effective export policy contains an AS_PATH-regex match,
@@ -404,7 +405,7 @@ an ADR "Deferred" section that points back here. Tightened, not dropped.
   inside `effective_policy_chains_for_neighbor` (currently
   `remote_asn != self.global.asn`) needs an explicit `is_external_neighbor()`
   helper aware of confederation sub-AS topology. The current gate is correct for
-  the traditional EBGP/iBGP topology today; tracked in `KNOWN_ISSUES.md`.
+  the traditional EBGP/iBGP topology today.
 
 - **Wire / API strictness items.** Typed error variants for API deletion
   handlers (today deletion matches `error.contains("still referenced")` —
