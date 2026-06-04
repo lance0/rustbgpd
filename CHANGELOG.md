@@ -27,11 +27,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   under the shared runtime-config coordinator, with persistence ack and rollback
   on apply/persist failure. Static-neighbor modifies use the same delete/re-add
   session-reconfigure semantics as SIGHUP while preserving disabled and
-  graceful-shutdown intent. Mixed-family candidates and other unsupported
-  sections are rejected without mutation. Candidate TOML remains audit-redacted,
-  and `rustbgpctl config plan` / `rustbgpctl config apply` expose the operator
-  workflow with text and JSON output. gNMI `Set` remains unimplemented/read-only
-  pending an OpenConfig mapping onto this transaction model.
+  graceful-shutdown intent. It also commits catalog-only policy definitions,
+  policy neighbor sets, peer groups, and global named-chain assignments when the
+  diff does not alter any existing neighbor's effective runtime policy. Mixed
+  families, live-impacting policy/peer-group inheritance edits, and other
+  unsupported sections are rejected without mutation. Candidate TOML remains
+  audit-redacted, and `rustbgpctl config plan` / `rustbgpctl config apply`
+  expose the operator workflow with text and JSON output. gNMI `Set` remains
+  unimplemented/read-only pending an OpenConfig mapping onto this transaction
+  model.
 
 - **Full-scope ASPA path verification.** ASPA validation now uses the
   configured BGP Role to select the draft-ietf-sidrops-aspa-verification-25

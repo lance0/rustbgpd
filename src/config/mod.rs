@@ -1053,6 +1053,16 @@ const fn access_mode_compatibility_max_tier(access_mode: GrpcAccessMode) -> Grpc
     }
 }
 
+const TRANSACTION_FIB_SECTION: &str = "[[fib_tables]]";
+const TRANSACTION_DYNAMIC_SECTION: &str = "[[dynamic_neighbors]]";
+const TRANSACTION_NEIGHBOR_ADD_SECTION: &str = "[[neighbors]] add";
+const TRANSACTION_NEIGHBOR_DELETE_SECTION: &str = "[[neighbors]] delete";
+const TRANSACTION_NEIGHBOR_MODIFY_SECTION: &str = "[[neighbors]] modify";
+const TRANSACTION_PEER_GROUP_CATALOG_SECTION: &str = "[peer_groups] catalog";
+const TRANSACTION_POLICY_DEFINITIONS_SECTION: &str = "[policy] definitions";
+const TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION: &str = "[policy] neighbor_sets";
+const TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION: &str = "[policy] global chains";
+
 /// Test-only auto-inject for the v0.24.0 `enforcement = "tier"`
 /// default flip. When compiled with `#[cfg(test)]` and the supplied
 /// TOML declares no `security.grpc` table or sub-table, appends an
@@ -1619,53 +1629,66 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
     if !diff.neighbors.added.is_empty() {
         class
             .supported_sections
-            .push("[[neighbors]] add".to_string());
+            .push(TRANSACTION_NEIGHBOR_ADD_SECTION.to_string());
     }
     if !diff.neighbors.removed.is_empty() {
         class
             .supported_sections
-            .push("[[neighbors]] delete".to_string());
+            .push(TRANSACTION_NEIGHBOR_DELETE_SECTION.to_string());
     }
     if !diff.neighbors.changed.is_empty() {
         class
             .supported_sections
-            .push("[[neighbors]] modify".to_string());
+            .push(TRANSACTION_NEIGHBOR_MODIFY_SECTION.to_string());
     }
     if diff.dynamic_neighbors_changed {
         class
             .supported_sections
-            .push("[[dynamic_neighbors]]".to_string());
+            .push(TRANSACTION_DYNAMIC_SECTION.to_string());
     }
     if diff.fib_tables_changed && !diff.fib_tables_requires_restart {
-        class.supported_sections.push("[[fib_tables]]".to_string());
-    }
-    if !transaction_sections_are_one_family(&class.supported_sections) {
         class
-            .unsupported_sections
-            .push("mixed transaction families".to_string());
-    }
-
-    if !diff.peer_groups.added.is_empty()
-        || !diff.peer_groups.removed.is_empty()
-        || !diff.peer_groups.changed.is_empty()
-    {
-        class.unsupported_sections.push("[peer_groups]".to_string());
+            .supported_sections
+            .push(TRANSACTION_FIB_SECTION.to_string());
     }
     if !diff.policy.definitions_added.is_empty()
         || !diff.policy.definitions_removed.is_empty()
         || !diff.policy.definitions_changed.is_empty()
-        || !diff.policy.neighbor_sets_added.is_empty()
+    {
+        class
+            .supported_sections
+            .push(TRANSACTION_POLICY_DEFINITIONS_SECTION.to_string());
+    }
+    if !diff.policy.neighbor_sets_added.is_empty()
         || !diff.policy.neighbor_sets_removed.is_empty()
         || !diff.policy.neighbor_sets_changed.is_empty()
-        || diff.policy.import_chain_changed
-        || diff.policy.export_chain_changed
     {
-        class.unsupported_sections.push("[policy]".to_string());
+        class
+            .supported_sections
+            .push(TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION.to_string());
+    }
+    if diff.policy.import_chain_changed || diff.policy.export_chain_changed {
+        class
+            .supported_sections
+            .push(TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION.to_string());
+    }
+    if !diff.peer_groups.added.is_empty()
+        || !diff.peer_groups.removed.is_empty()
+        || !diff.peer_groups.changed.is_empty()
+    {
+        class
+            .supported_sections
+            .push(TRANSACTION_PEER_GROUP_CATALOG_SECTION.to_string());
     }
     if !diff.effective_neighbor_impact.is_empty() {
         class
             .unsupported_sections
             .push("effective neighbor inheritance impact".to_string());
+    }
+    if !transaction_sections_are_one_family(&class.supported_sections) {
+        class
+            .unsupported_sections
+            .push("mixed transaction families".to_string());
     }
     if diff.honor_graceful_shutdown_changed {
         class
@@ -1753,17 +1776,30 @@ fn transaction_sections_are_one_family(sections: &[String]) -> bool {
     let mut has_fib = false;
     let mut has_dynamic = false;
     let mut has_static_neighbor = false;
+    let mut has_catalog = false;
     for section in sections {
         match section.as_str() {
-            "[[fib_tables]]" => has_fib = true,
-            "[[dynamic_neighbors]]" => has_dynamic = true,
-            "[[neighbors]] add" | "[[neighbors]] delete" | "[[neighbors]] modify" => {
+            TRANSACTION_FIB_SECTION => has_fib = true,
+            TRANSACTION_DYNAMIC_SECTION => has_dynamic = true,
+            TRANSACTION_NEIGHBOR_ADD_SECTION
+            | TRANSACTION_NEIGHBOR_DELETE_SECTION
+            | TRANSACTION_NEIGHBOR_MODIFY_SECTION => {
                 has_static_neighbor = true;
+            }
+            TRANSACTION_PEER_GROUP_CATALOG_SECTION
+            | TRANSACTION_POLICY_DEFINITIONS_SECTION
+            | TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION
+            | TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION => {
+                has_catalog = true;
             }
             _ => {}
         }
     }
-    u8::from(has_fib) + u8::from(has_dynamic) + u8::from(has_static_neighbor) <= 1
+    u8::from(has_fib)
+        + u8::from(has_dynamic)
+        + u8::from(has_static_neighbor)
+        + u8::from(has_catalog)
+        <= 1
 }
 
 /// JSON schema shared by `rustbgpd --diff --json` and the live runtime
@@ -2601,6 +2637,14 @@ fn global_restart_required_changed(old: &Config, new: &Config) -> bool {
     old_global != new_global
 }
 
+/// Network address of a `[[dynamic_neighbors]]` prefix, used only to resolve a
+/// representative neighbor for effective-policy comparison. The address selects
+/// the address family but does not affect import/export chain resolution, so
+/// the network address of the range is a faithful stand-in.
+fn dynamic_range_representative_addr(prefix: &str) -> Option<IpAddr> {
+    prefix.split_once('/')?.0.parse::<IpAddr>().ok()
+}
+
 /// Walk neighbors that exist in both configs and surface those whose
 /// resolved effective config differs between old and new through a
 /// reload-applied path — peer-group inheritance, named policy chain
@@ -2756,7 +2800,89 @@ fn compute_effective_neighbor_impact(
             });
         }
     }
+
+    out.extend(dynamic_range_effective_impact(old, new, &pg_changed));
+
     out.sort_by(|a, b| a.address.cmp(&b.address));
+    out
+}
+
+/// Surface `[[dynamic_neighbors]]` ranges whose resolved effective policy moves
+/// between `old` and `new`.
+///
+/// An established session accepted into a range inherits its peer group's
+/// resolved policy, and SIGHUP live-reconciles those dynamic peers on a policy /
+/// peer-group / chain edit. A catalog-only transaction stages such an edit
+/// without that live reconcile, so a range whose resolved import/export policy
+/// moves is not actually "catalog-only" and must surface as effective impact.
+/// Ranges are matched by prefix; a changed range record itself is a
+/// `[[dynamic_neighbors]]` family edit handled by the dynamic-neighbor executor,
+/// not here. The prefix's network address is a faithful stand-in for resolution
+/// (it only picks the address family, which does not affect policy chains).
+fn dynamic_range_effective_impact(
+    old: &Config,
+    new: &Config,
+    pg_changed: &HashSet<&str>,
+) -> Vec<EffectiveNeighborImpact> {
+    let new_ranges: HashMap<&str, &DynamicNeighborConfig> = new
+        .dynamic_neighbors
+        .iter()
+        .map(|dn| (dn.prefix.as_str(), dn))
+        .collect();
+    let mut out = Vec::new();
+    for old_range in &old.dynamic_neighbors {
+        let Some(new_range) = new_ranges.get(old_range.prefix.as_str()) else {
+            continue;
+        };
+        let Some(addr) = dynamic_range_representative_addr(&old_range.prefix) else {
+            continue;
+        };
+        let Some(old_group) = old.peer_groups.get(&old_range.peer_group) else {
+            continue;
+        };
+        let Some(new_group) = new.peer_groups.get(&new_range.peer_group) else {
+            continue;
+        };
+        let Ok(old_resolved) = old.resolve_dynamic_neighbor(
+            addr,
+            old_range.remote_asn,
+            old_range.description.as_deref().unwrap_or_default(),
+            old_group,
+            &old_range.peer_group,
+        ) else {
+            continue;
+        };
+        let Ok(new_resolved) = new.resolve_dynamic_neighbor(
+            addr,
+            new_range.remote_asn,
+            new_range.description.as_deref().unwrap_or_default(),
+            new_group,
+            &new_range.peer_group,
+        ) else {
+            continue;
+        };
+
+        let mut reasons: Vec<String> = Vec::new();
+        if format!("{:?}", old_resolved.import_policy)
+            != format!("{:?}", new_resolved.import_policy)
+        {
+            reasons.push("dynamic-range import policy resolved differently".to_string());
+        }
+        if format!("{:?}", old_resolved.export_policy)
+            != format!("{:?}", new_resolved.export_policy)
+        {
+            reasons.push("dynamic-range export policy resolved differently".to_string());
+        }
+        if pg_changed.contains(old_range.peer_group.as_str()) {
+            reasons.push(format!("peer_group {:?} changed", old_range.peer_group));
+        }
+        if !reasons.is_empty() {
+            out.push(EffectiveNeighborImpact {
+                address: old_range.prefix.clone(),
+                reasons,
+            });
+        }
+    }
     out
 }
 
