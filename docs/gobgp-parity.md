@@ -35,7 +35,7 @@ For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 | Notification GR (RFC 8538) | Yes | Yes | N-bit (RFC 8538 §2), Cease/Hard Reset bypass |
 | Route Refresh (RFC 2918) | Yes | Yes | |
 | Enhanced Route Refresh (RFC 7313) | Yes | Yes | `BoRR` / `EoRR` demarcation; inbound replacement semantics on `SoftResetIn` |
-| Prefix ORF (RFC 5291/5292) | Partial | No | rustbgpd receive side for Address-Prefix ORF is shipped (route-server export filtering); send-side ORF remains deferred |
+| Prefix ORF (RFC 5291/5292) | Partial | Receive | rustbgpd receive side for Address-Prefix ORF is shipped (route-server export filtering); send-side ORF remains deferred |
 | Add-Path (RFC 7911) | Yes | Yes | Dual-stack receive + multi-path send (route server mode) |
 | Route Reflector (RFC 4456) | Yes | Yes | |
 | Confederation (RFC 5065) | Yes | No | |

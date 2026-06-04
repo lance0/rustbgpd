@@ -574,6 +574,13 @@ owned-state.
 | `bgp_gr_stale_routes` | Routes currently marked stale |
 | `bgp_gr_timer_expired_total` | GR timers that expired (routes swept) |
 
+### BFD
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `bfd_session_up{peer}` | Per-peer BFD session state (1 = Up, 0 = not Up) |
+| `bfd_session_flaps_total{peer}` | BFD session flaps (transitions out of Up) per peer |
+
 ### RPKI / ASPA validation
 
 | Metric | What it tells you |

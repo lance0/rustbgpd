@@ -66,6 +66,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `aspa`; `outcome` is `eligible`, `refreshed`, `skipped_not_established`, or
   `failed`.
 
+### Changed
+
+- **`rustbgpd-wire` 0.10.0 → 0.11.0 (breaking).** The receive-side ORF work adds
+  a new `orf` module (RFC 5291/5292 types) and an optional ORF section to
+  `RouteRefreshMessage`: the struct gains `orf: Option<OrfPayload>` and loses
+  `Copy` (now `Clone` only). Consumers that construct or match `RouteRefreshMessage`
+  literally, or rely on its `Copy` semantics, must update.
+
 ### Fixed
 
 - **SIGHUP reload baseline after config transactions.** SIGHUP now reads the
