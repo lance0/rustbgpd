@@ -78,6 +78,19 @@ impl ConfigTransactionApplyError {
     }
 }
 
+impl std::fmt::Display for ConfigTransactionApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidArgument(message)
+            | Self::FailedPrecondition(message)
+            | Self::Unavailable(message)
+            | Self::Internal(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ConfigTransactionApplyError {}
+
 /// Future returned by the daemon-owned config transaction apply hook.
 pub type ConfigTransactionApplyFuture = Pin<
     Box<

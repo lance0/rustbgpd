@@ -305,7 +305,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d @ localhost:50051 rustbgpd.v1.ConfigService/ApplyConfigTransaction <<'JSON'
 {
   "candidate_toml": "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n[[fib_tables]]\nname = \"edge\"\ntable_id = 1000\nmetric = 200\n",
-  "expected_runtime_snapshot_token": "fnv1a64:...",
+  "expected_runtime_snapshot_token": "kv1:...",
   "client_request_id": "deploy-2026-06-03-001",
   "comment": "roll edge FIB table definition"
 }
@@ -332,7 +332,7 @@ rustbgpctl config diff --from-file /tmp/new-config.toml
 rustbgpctl --json config diff --from-file /tmp/new-config.toml
 rustbgpctl config plan --from-file /tmp/new-config.toml
 rustbgpctl config apply --from-file /tmp/new-config.toml \
-  --expected-runtime-snapshot-token fnv1a64:...
+  --expected-runtime-snapshot-token kv1:...
 ```
 
 ---

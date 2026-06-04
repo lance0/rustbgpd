@@ -102,6 +102,9 @@ section executors behind that public contract.
   validate candidate section against the live runtime snapshot, take the shared
   runtime-config coordinator, apply live mutation, persist with acknowledgement,
   rollback on persistence/apply failure, and only then release the lock.
+- If rollback itself fails, apply returns `INTERNAL` with both the original
+  apply/persistence error and the rollback failure context. Silent rollback
+  failure is not an acceptable transaction outcome.
 
 See also ADR-0043 (config persistence and SIGHUP reload), ADR-0061 (unicast FIB
 integration), ADR-0064 (gRPC authorization), ADR-0074 (FIB-table CRUD tier), and

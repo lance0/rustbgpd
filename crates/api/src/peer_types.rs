@@ -266,6 +266,45 @@ pub struct RuntimeConfigTransactionPlan {
     pub human_text: String,
 }
 
+/// Validate-only transaction planning error returned by the peer manager.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeConfigTransactionPlanError {
+    /// Caller planned against an older runtime config snapshot.
+    StaleSnapshot { expected: String, current: String },
+    /// Candidate TOML/config failed validation.
+    InvalidCandidate(String),
+    /// Internal serialization / diff rendering failed.
+    Internal(String),
+}
+
+impl RuntimeConfigTransactionPlanError {
+    #[must_use]
+    pub fn message(&self) -> String {
+        match self {
+            Self::StaleSnapshot { expected, current } => {
+                format!("runtime config snapshot changed: expected {expected}, current {current}")
+            }
+            Self::InvalidCandidate(message) | Self::Internal(message) => message.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for RuntimeConfigTransactionPlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StaleSnapshot { expected, current } => {
+                write!(
+                    f,
+                    "runtime config snapshot changed: expected {expected}, current {current}"
+                )
+            }
+            Self::InvalidCandidate(message) | Self::Internal(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for RuntimeConfigTransactionPlanError {}
+
 /// Import-policy validation state that can change route admissibility after an
 /// external cache update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -346,7 +385,9 @@ pub enum PeerManagerCommand {
         /// against.
         expected_runtime_snapshot_token: Option<String>,
         /// Reply channel returning the transaction plan.
-        reply: oneshot::Sender<Result<RuntimeConfigTransactionPlan, String>>,
+        reply: oneshot::Sender<
+            Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError>,
+        >,
     },
     /// Stage a full validated runtime config snapshot from TOML and return the
     /// previous normalized TOML snapshot for rollback.

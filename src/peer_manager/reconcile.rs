@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use rustbgpd_api::peer_types::{
     FibTableSnapshot, PeerKey, PeerManagerNeighborConfig, ReconcileFailure, ReconcileFailureKind,
     ReconcileResult, RuntimeConfigDiff, RuntimeConfigTransactionPlan,
-    RuntimeConfigTransactionStatus,
+    RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus,
 };
 use tracing::{info, warn};
 
@@ -131,25 +131,33 @@ impl PeerManager {
         &self,
         candidate_toml: &str,
         expected_runtime_snapshot_token: Option<&str>,
-    ) -> Result<RuntimeConfigTransactionPlan, String> {
-        let runtime_snapshot_token = self.snapshot_key.token(&self.current_config)?;
+    ) -> Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError> {
+        let runtime_snapshot_token = self
+            .snapshot_key
+            .token(&self.current_config)
+            .map_err(RuntimeConfigTransactionPlanError::Internal)?;
         if let Some(expected) = expected_runtime_snapshot_token.filter(|token| !token.is_empty())
             && expected != runtime_snapshot_token
         {
-            return Err(format!(
-                "runtime config snapshot changed: expected {expected}, current {runtime_snapshot_token}"
-            ));
+            return Err(RuntimeConfigTransactionPlanError::StaleSnapshot {
+                expected: expected.to_string(),
+                current: runtime_snapshot_token,
+            });
         }
 
         let candidate =
-            Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")?;
+            Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")
+                .map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
         // Token the resulting live config would carry once this candidate is
         // committed. The apply path returns it so a client can chain a follow-up
         // apply without re-planning; computing it here keeps every token under
         // the peer-manager's key. For the v1 single-family surface the committed
         // state equals the candidate (full-snapshot families) or differs only in
         // the one staged family (FIB), which the candidate already reflects.
-        let post_commit_runtime_snapshot_token = self.snapshot_key.token(&candidate)?;
+        let post_commit_runtime_snapshot_token = self
+            .snapshot_key
+            .token(&candidate)
+            .map_err(RuntimeConfigTransactionPlanError::Internal)?;
         let diff = crate::config::diff_config(&self.current_config, &candidate);
         let classification = crate::config::classify_config_transaction_v1(&diff);
         let status = if classification.is_noop() {
@@ -159,7 +167,8 @@ impl PeerManager {
         } else {
             RuntimeConfigTransactionStatus::Rejected
         };
-        let diff = runtime_config_diff_from_config_diff(&diff)?;
+        let diff = runtime_config_diff_from_config_diff(&diff)
+            .map_err(RuntimeConfigTransactionPlanError::Internal)?;
         let human_text = format_transaction_plan_text(
             status,
             &classification.supported_sections,

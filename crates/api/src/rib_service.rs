@@ -71,6 +71,20 @@ impl FibTableControlError {
     }
 }
 
+impl std::fmt::Display for FibTableControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidArgument(message)
+            | Self::NotFound(message)
+            | Self::FailedPrecondition(message)
+            | Self::Unavailable(message)
+            | Self::Internal(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for FibTableControlError {}
+
 /// Future returned by the FIB-table control hook.
 pub type FibTableControlFuture = Pin<
     Box<

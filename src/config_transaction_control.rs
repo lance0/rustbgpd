@@ -4,6 +4,7 @@
 //! binary-only state: the FIB reconciler command channel, config persistence,
 //! peer-manager validation, and the runtime-config lock shared with SIGHUP.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,10 +12,11 @@ use tokio::sync::{mpsc, oneshot};
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, PeerKey, PeerManagerCommand, PeerManagerNeighborConfig,
-    RuntimeConfigTransactionStatus,
+    RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus,
 };
 use rustbgpd_api::proto;
 use rustbgpd_api::server::{ConfigTransactionApplyError, ConfigTransactionApplyFn};
+use tracing::error;
 
 use crate::config::{Config, Neighbor, diff_neighbors};
 use crate::fib_table_control::{
@@ -245,8 +247,7 @@ async fn commit_candidate_snapshot_locked(
     let permit = reserve_persist_permit(config_tx).await?;
     let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
     if let Err(error) = persist_candidate_config(permit, candidate_toml).await {
-        rollback_config_snapshot(peer_mgr_tx, previous_toml).await;
-        return Err(error);
+        return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
     }
     Ok(())
 }
@@ -266,8 +267,8 @@ async fn commit_static_neighbors_locked(
     ) {
         Ok(previous) => previous,
         Err(error) => {
-            rollback_config_snapshot(peer_mgr_tx, previous_toml).await;
-            return Err(ConfigTransactionApplyError::Internal(error));
+            let error = ConfigTransactionApplyError::Internal(error);
+            return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
         }
     };
     let neighbor_diff = diff_neighbors(&previous.neighbors, &candidate.neighbors);
@@ -276,25 +277,25 @@ async fn commit_static_neighbors_locked(
             .iter()
             .any(|s| s != NEIGHBOR_ADD_SECTION && s != NEIGHBOR_DELETE_SECTION)
     {
-        rollback_config_snapshot(peer_mgr_tx, previous_toml).await;
-        return Err(ConfigTransactionApplyError::Internal(
+        let error = ConfigTransactionApplyError::Internal(
             "static-neighbor transaction executor received a non-static-add/delete diff"
                 .to_string(),
-        ));
+        );
+        return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
     }
 
     let mut applied = Vec::new();
     let added = match resolve_added_neighbors(candidate, &neighbor_diff.added) {
         Ok(added) => added,
         Err(error) => {
-            rollback_config_snapshot(peer_mgr_tx, previous_toml).await;
-            return Err(error);
+            return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
         }
     };
     for config in added {
         if let Err(error) = add_static_peer(peer_mgr_tx, config.clone()).await {
-            rollback_static_and_snapshot(peer_mgr_tx, applied, previous_toml).await?;
-            return Err(error);
+            return Err(
+                rollback_static_and_snapshot(peer_mgr_tx, applied, previous_toml, error).await,
+            );
         }
         applied.push(AppliedStaticOp::Added(PeerKey::new(
             config.address,
@@ -305,15 +306,19 @@ async fn commit_static_neighbors_locked(
         match delete_static_peer(peer_mgr_tx, peer.clone()).await {
             Ok(removed) => applied.push(AppliedStaticOp::Deleted(Box::new(removed))),
             Err(error) => {
-                rollback_static_and_snapshot(peer_mgr_tx, applied, previous_toml).await?;
-                return Err(error);
+                return Err(rollback_static_and_snapshot(
+                    peer_mgr_tx,
+                    applied,
+                    previous_toml,
+                    error,
+                )
+                .await);
             }
         }
     }
 
     if let Err(error) = persist_candidate_config(permit, candidate_toml).await {
-        rollback_static_and_snapshot(peer_mgr_tx, applied, previous_toml).await?;
-        return Err(error);
+        return Err(rollback_static_and_snapshot(peer_mgr_tx, applied, previous_toml, error).await);
     }
     Ok(())
 }
@@ -390,8 +395,26 @@ async fn stage_config_snapshot(
 async fn rollback_config_snapshot(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     previous: String,
-) {
-    let _ = stage_config_snapshot(peer_mgr_tx, previous).await;
+) -> Result<(), ConfigTransactionApplyError> {
+    stage_config_snapshot(peer_mgr_tx, previous)
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            ConfigTransactionApplyError::Internal(format!(
+                "config snapshot rollback failed: {error}"
+            ))
+        })
+}
+
+async fn rollback_snapshot_after_error(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    previous_toml: String,
+    original: ConfigTransactionApplyError,
+) -> ConfigTransactionApplyError {
+    match rollback_config_snapshot(peer_mgr_tx, previous_toml).await {
+        Ok(()) => original,
+        Err(rollback_error) => combine_rollback_errors(&original, None, Some(rollback_error)),
+    }
 }
 
 async fn reserve_persist_permit(
@@ -516,10 +539,37 @@ async fn rollback_static_and_snapshot(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     applied: Vec<AppliedStaticOp>,
     previous_toml: String,
-) -> Result<(), ConfigTransactionApplyError> {
-    let rollback = rollback_static_ops(peer_mgr_tx, applied).await;
-    rollback_config_snapshot(peer_mgr_tx, previous_toml).await;
-    rollback
+    original: ConfigTransactionApplyError,
+) -> ConfigTransactionApplyError {
+    let static_rollback = rollback_static_ops(peer_mgr_tx, applied).await;
+    let snapshot_rollback = rollback_config_snapshot(peer_mgr_tx, previous_toml).await;
+    match (static_rollback, snapshot_rollback) {
+        (Ok(()), Ok(())) => original,
+        (static_result, snapshot_result) => {
+            combine_rollback_errors(&original, static_result.err(), snapshot_result.err())
+        }
+    }
+}
+
+fn combine_rollback_errors(
+    original: &ConfigTransactionApplyError,
+    static_rollback: Option<ConfigTransactionApplyError>,
+    snapshot_rollback: Option<ConfigTransactionApplyError>,
+) -> ConfigTransactionApplyError {
+    error!(
+        %original,
+        ?static_rollback,
+        ?snapshot_rollback,
+        "config transaction rollback failed"
+    );
+    let mut message = format!("{original}; rollback failed");
+    if let Some(error) = static_rollback {
+        let _ = write!(message, "; static rollback: {error}");
+    }
+    if let Some(error) = snapshot_rollback {
+        let _ = write!(message, "; snapshot rollback: {error}");
+    }
+    ConfigTransactionApplyError::Internal(message)
 }
 
 fn committable_response(
@@ -535,11 +585,17 @@ fn committable_response(
     }
 }
 
-fn plan_error_to_status(error: String) -> ConfigTransactionApplyError {
-    if error.starts_with("runtime config snapshot changed") {
-        ConfigTransactionApplyError::FailedPrecondition(error)
-    } else {
-        ConfigTransactionApplyError::InvalidArgument(error)
+fn plan_error_to_status(error: RuntimeConfigTransactionPlanError) -> ConfigTransactionApplyError {
+    match error {
+        RuntimeConfigTransactionPlanError::StaleSnapshot { .. } => {
+            ConfigTransactionApplyError::FailedPrecondition(error.message())
+        }
+        RuntimeConfigTransactionPlanError::InvalidCandidate(message) => {
+            ConfigTransactionApplyError::InvalidArgument(message)
+        }
+        RuntimeConfigTransactionPlanError::Internal(message) => {
+            ConfigTransactionApplyError::Internal(message)
+        }
     }
 }
 
@@ -587,8 +643,10 @@ mod tests {
     use crate::fib_runtime::FibRuntimeCommand;
     use rustbgpd_api::peer_types::{
         FibTableSnapshot, RuntimeConfigDiff, RuntimeConfigTransactionPlan,
+        RuntimeConfigTransactionPlanError,
     };
     use rustbgpd_api::rib_service::FibTableControlError;
+    use std::collections::VecDeque;
     use tokio::sync::Mutex;
 
     fn base_toml(extra: &str) -> String {
@@ -645,6 +703,24 @@ remote_asn = 65002
         }
     }
 
+    fn peer_config_from_toml(toml: &str, address: &str) -> PeerManagerNeighborConfig {
+        let config = Config::load_toml_with_diagnostics(toml, "test config")
+            .expect("test config must parse");
+        let address: std::net::IpAddr = address.parse().expect("test address must parse");
+        let resolved = config.resolved_neighbors().expect("neighbors must resolve");
+        let neighbor = resolved
+            .iter()
+            .find(|neighbor| neighbor.transport_config.remote_addr.ip() == address)
+            .expect("neighbor must exist");
+        crate::reload::build_peer_mgr_config(
+            &neighbor.transport_config,
+            &neighbor.label,
+            neighbor.import_policy.as_ref(),
+            neighbor.export_policy.as_ref(),
+            neighbor.peer_group.clone(),
+        )
+    }
+
     #[test]
     fn stage_snapshot_serialization_error_maps_internal() {
         let error = stage_config_snapshot_error_to_apply_error(
@@ -658,6 +734,27 @@ remote_asn = 65002
         assert!(matches!(
             error,
             ConfigTransactionApplyError::InvalidArgument(_)
+        ));
+    }
+
+    #[test]
+    fn transaction_plan_errors_map_without_string_matching() {
+        let stale = plan_error_to_status(RuntimeConfigTransactionPlanError::StaleSnapshot {
+            expected: "old".to_string(),
+            current: "new".to_string(),
+        });
+        assert!(matches!(
+            stale,
+            ConfigTransactionApplyError::FailedPrecondition(ref message)
+                if message.contains("expected old, current new")
+        ));
+
+        let invalid = plan_error_to_status(RuntimeConfigTransactionPlanError::InvalidCandidate(
+            "bad toml".to_string(),
+        ));
+        assert!(matches!(
+            invalid,
+            ConfigTransactionApplyError::InvalidArgument(ref message) if message == "bad toml"
         ));
     }
 
@@ -754,8 +851,72 @@ remote_asn = 65002
                     let _ = reply.send(Ok(previous));
                 }
                 PeerManagerCommand::AddPeer { config, reply, .. } => {
-                    peers.lock().await.push(config);
-                    let _ = reply.send(Ok(()));
+                    let mut peers = peers.lock().await;
+                    let key = PeerKey::new(config.address, config.interface.clone());
+                    if peers
+                        .iter()
+                        .any(|peer| PeerKey::new(peer.address, peer.interface.clone()) == key)
+                    {
+                        let _ = reply.send(Err(format!("peer {key} already exists")));
+                    } else {
+                        peers.push(config);
+                        let _ = reply.send(Ok(()));
+                    }
+                }
+                PeerManagerCommand::DeletePeer { peer, reply, .. } => {
+                    let mut peers = peers.lock().await;
+                    if let Some(index) = peers.iter().position(|config| {
+                        PeerKey::new(config.address, config.interface.clone()) == peer
+                    }) {
+                        let _ = reply.send(Ok(peers.remove(index)));
+                    } else {
+                        let _ = reply.send(Err(format!("peer {peer} not found")));
+                    }
+                }
+                _ => panic!("unexpected peer-manager command in snapshot transaction test"),
+            }
+        }
+    }
+
+    async fn fake_snapshot_peer_manager_with_stage_results(
+        mut rx: mpsc::Receiver<PeerManagerCommand>,
+        plan: RuntimeConfigTransactionPlan,
+        snapshot_toml: Arc<Mutex<String>>,
+        peers: Arc<Mutex<Vec<PeerManagerNeighborConfig>>>,
+        stage_results: Arc<Mutex<VecDeque<Result<(), String>>>>,
+    ) {
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                PeerManagerCommand::PlanConfigTransaction { reply, .. } => {
+                    let _ = reply.send(Ok(plan.clone()));
+                }
+                PeerManagerCommand::StageConfigSnapshot {
+                    candidate_toml,
+                    reply,
+                } => {
+                    if let Some(result) = stage_results.lock().await.pop_front()
+                        && let Err(error) = result
+                    {
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
+                    let mut snapshot = snapshot_toml.lock().await;
+                    let previous = snapshot.clone();
+                    *snapshot = candidate_toml;
+                    let _ = reply.send(Ok(previous));
+                }
+                PeerManagerCommand::AddPeer { config, reply, .. } => {
+                    let mut peers = peers.lock().await;
+                    let key = PeerKey::new(config.address, config.interface.clone());
+                    if peers
+                        .iter()
+                        .any(|peer| PeerKey::new(peer.address, peer.interface.clone()) == key)
+                    {
+                        let _ = reply.send(Err(format!("peer {key} already exists")));
+                    } else {
+                        peers.push(config);
+                        let _ = reply.send(Ok(()));
+                    }
                 }
                 PeerManagerCommand::DeletePeer { peer, reply, .. } => {
                     let mut peers = peers.lock().await;
@@ -962,6 +1123,65 @@ peer_group = "ix-members"
     }
 
     #[tokio::test]
+    async fn persistence_failure_reports_snapshot_rollback_failure() {
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[peer_groups.ix-members]
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix-members"
+"#,
+        );
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let stage_results = Arc::new(Mutex::new(VecDeque::from([
+            Ok(()),
+            Err("stage rollback failed".to_string()),
+        ])));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager_with_stage_results(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[dynamic_neighbors]]".to_string()],
+            ),
+            snapshot_toml,
+            peers,
+            stage_results,
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+                config_rx.recv().await
+            {
+                let _ = ack.send(Err("persist failed".to_string()));
+            }
+        });
+
+        let err = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml,
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ConfigTransactionApplyError::Internal(ref message)
+                if message.contains("persist failed")
+                    && message.contains("snapshot rollback")
+                    && message.contains("stage rollback failed")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn apply_commits_static_neighbor_add_after_persist_ack() {
         let previous_toml = base_toml("");
         let candidate_toml = base_toml(
@@ -1104,6 +1324,60 @@ remote_asn = 65003
             "{err:?}"
         );
         assert_eq!(*snapshot_toml.lock().await, previous_toml);
+    }
+
+    #[tokio::test]
+    async fn static_neighbor_mid_batch_add_failure_rolls_back_prior_add_and_snapshot() {
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+
+[[neighbors]]
+address = "10.0.0.4"
+remote_asn = 65004
+"#,
+        );
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+        let peers = Arc::new(Mutex::new(vec![peer_config_from_toml(
+            &candidate_toml,
+            "10.0.0.4",
+        )]));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[neighbors]] add".to_string()],
+            ),
+            snapshot_toml.clone(),
+            peers.clone(),
+        ));
+        let (config_tx, _config_rx) = mpsc::channel(8);
+
+        let err = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml,
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref message)
+                if message.contains("10.0.0.4") && message.contains("already exists")),
+            "{err:?}"
+        );
+        assert_eq!(*snapshot_toml.lock().await, previous_toml);
+        let peers = peers.lock().await;
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].address.to_string(), "10.0.0.4");
     }
 
     #[tokio::test]

@@ -89,17 +89,17 @@ Later for what remains.
 
 ### Next
 
-- **Config transaction model and runtime/file diff UX** *(in progress; ADR-0076
-  foundation + FIB/dynamic/static executors + CLI workflow landed).* Native gRPC now has a validate-only
-  `PlanConfigTransaction` shape: candidate TOML validation, diff against the
-  live runtime snapshot, optimistic snapshot token, and explicit v1 section
-  classification. `ApplyConfigTransaction` is operator-only and can commit one
-  pure runtime family at a time: full-set `[[fib_tables]]`, full-set
-  `[[dynamic_neighbors]]`, or static `[[neighbors]]` add/delete changes under
-  the shared runtime-config coordinator, with persistence ack and rollback on
-  apply/persist failure. `rustbgpctl config plan/apply` drives the text/JSON
-  operator workflow. Next stacked slices: static-neighbor modify executor and
-  remaining hot-reload sections whose rollback semantics are ready.
+- **Config transaction model follow-ons** *(ADR-0076 foundation shipped).* Native
+  gRPC now has a validate-only `PlanConfigTransaction` shape: candidate TOML
+  validation, diff against the live runtime snapshot, optimistic snapshot token,
+  and explicit v1 section classification. `ApplyConfigTransaction` is
+  operator-only and can commit one pure runtime family at a time: full-set
+  `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, or static `[[neighbors]]`
+  add/delete changes under the shared runtime-config coordinator, with
+  persistence ack and rollback on apply/persist failure. `rustbgpctl config
+  plan/apply` drives the text/JSON operator workflow. Next stacked slices:
+  static-neighbor modify executor, then remaining hot-reload sections whose
+  rollback semantics are ready.
   Keep gNMI `Set` read-only until OpenConfig mutation maps onto this transaction
   model rather than a parallel commit path. Exit: atomic commit where supported,
   explicit restart-required/rejected surfaces, rollback/receipt model, no partial
@@ -465,10 +465,28 @@ branch is between features.
   class.** PR #334 introduced `DynamicRangeError` so
   `AddDynamicNeighbor` / `DeleteDynamicNeighbor` can map duplicate, not-found,
   and invalid-input failures to stable gRPC status codes without parsing error
-  strings. Older peer-manager / RIB commands still commonly return
+  strings. ADR-0076 transaction planning uses a typed stale-snapshot /
+  invalid-candidate error for gRPC status mapping. Older peer-manager / RIB
+  commands still commonly return
   `Result<_, String>`; keep that for one-status surfaces, but migrate to small
   typed enums when a caller needs to distinguish `ALREADY_EXISTS`, `NOT_FOUND`,
   `INVALID_ARGUMENT`, or similar API-visible classes.
+- [ ] **Config transaction executor expansion.** ADR-0076 v1 intentionally
+  supports one pure runtime family at a time. Next useful executor is
+  static-neighbor modify; after that, add hot-reload sections only when they have
+  a clear validate/apply/persist/rollback path under the runtime-config
+  coordinator.
+- [ ] **Config transaction static-add resolution scaling.**
+  `resolve_added_neighbors` currently resolves the full candidate neighbor set
+  and then selects the newly-added peers. Correct and simple, but O(N) in the
+  number of configured neighbors; optimize to resolve only additions if large
+  static-neighbor transactions become common.
+- [ ] **SIGHUP baseline from live runtime snapshot.** The runtime-config lock
+  prevents SIGHUP from interleaving its apply step with transactions, but the
+  signal path captures the comparison baseline before waiting on the lock. Pull
+  the reload baseline from the peer manager's current runtime snapshot under the
+  coordinator if queued SIGHUP-after-transaction edge cases become operator
+  visible.
 - [x] **SIGHUP reconcile for `[[dynamic_neighbors]]` TOML edits (#338).**
   `ReplaceConfigSnapshot` rebuilds the live accept matcher, `--diff` classifies
   direct TOML edits as reload-applied, and runtime dynamic-neighbor CRUD shares
