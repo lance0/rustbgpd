@@ -3424,6 +3424,29 @@ fn diff_neighbors_ignores_tcp_ao_only_changes_because_reload_pins_them() {
 }
 
 #[test]
+fn diff_neighbors_detects_prefix_orf_receive_only_change() {
+    // ORF is negotiated in OPEN like add_path / families / role, so it is live
+    // config (effective on the next session via the ReconcilePeers delete/re-add
+    // path), NOT a startup-pinned resource like tcp_ao / bfd. A bare
+    // prefix_orf_receive toggle must therefore surface as a changed neighbor,
+    // not a silent no-op (the inverse of the tcp_ao case above).
+    let old = vec![test_neighbor("10.0.0.1", 65001)];
+    let mut new_neighbor = test_neighbor("10.0.0.1", 65001);
+    new_neighbor.prefix_orf_receive = Some(true);
+
+    let diff = super::diff_neighbors(&old, &[new_neighbor]);
+    assert!(diff.added.is_empty());
+    assert!(diff.removed.is_empty());
+    assert_eq!(diff.changed.len(), 1);
+
+    let changes = super::describe_neighbor_changes(&old[0], &diff.changed[0]);
+    assert!(
+        changes.iter().any(|c| c.contains("prefix_orf_receive")),
+        "describe_neighbor_changes must name prefix_orf_receive, got {changes:?}"
+    );
+}
+
+#[test]
 fn diff_config_flags_tcp_ao_changes_as_restart_required() {
     let mut old = parse(valid_toml()).unwrap();
     old.neighbors[0].tcp_ao = Some(TcpAoConfig {
@@ -6658,6 +6681,44 @@ peer_group = "ix-members"
         class
             .unsupported_sections
             .contains(&"[peer_groups]".to_string())
+    );
+    assert!(class.supported_sections.is_empty());
+    assert!(class.restart_required_sections.is_empty());
+}
+
+#[test]
+fn transaction_v1_classifies_prefix_orf_receive_toggle_as_neighbor_modify() {
+    // A bare prefix_orf_receive toggle on an existing neighbor is a
+    // [[neighbors]] modify. The v1 transaction surface supports static neighbor
+    // add/delete only, so a modify must be rejected — not classified as a no-op
+    // (which it silently was while prefix_orf_receive was invisible to the diff)
+    // and not committable — until a session-reconfigure executor exists.
+    let with_orf = |orf: bool| {
+        format!(
+            r#"
+{}
+
+[[neighbors]]
+address = "10.0.0.102"
+remote_asn = 65102
+prefix_orf_receive = {orf}
+"#,
+            valid_toml()
+        )
+    };
+    let old = parse(&with_orf(false)).unwrap();
+    let new = parse(&with_orf(true)).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(!class.is_noop(), "ORF toggle must not classify as a no-op");
+    assert!(!class.is_committable());
+    assert!(
+        class
+            .unsupported_sections
+            .contains(&"[[neighbors]] modify".to_string()),
+        "got {:?}",
+        class.unsupported_sections
     );
     assert!(class.supported_sections.is_empty());
     assert!(class.restart_required_sections.is_empty());

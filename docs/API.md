@@ -256,7 +256,7 @@ The corresponding `grpc_authz` request summaries never log `candidate_toml`
 content; they record only redacted metadata such as request body size and token
 presence.
 
-`PlanConfigTransactionResponse` wraps the same redacted diff with:
+`ConfigTransactionPlanResponse` wraps the same redacted diff with:
 
 - `runtime_snapshot_token`: an optimistic-concurrency token for the live runtime
   snapshot used during planning.

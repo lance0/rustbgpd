@@ -1138,6 +1138,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<String> 
     cmp_field!(route_server_client);
     cmp_field!(role);
     cmp_field!(strict_role);
+    cmp_field!(prefix_orf_receive);
     cmp_field!(remove_private_as);
     cmp_field!(add_path);
     cmp_field!(log_level);
@@ -1240,6 +1241,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.route_server_client == new.route_server_client
         && old.role == new.role
         && old.strict_role == new.strict_role
+        && old.prefix_orf_receive == new.prefix_orf_receive
         && old.remove_private_as == new.remove_private_as
         && old.add_path == new.add_path
         && old.log_level == new.log_level
@@ -1551,6 +1553,12 @@ impl ConfigTransactionSectionClassification {
 /// they planned against. It intentionally hashes normalized serialization
 /// rather than exposing live config content.
 pub fn runtime_snapshot_token(config: &Config) -> Result<String, String> {
+    // Canonical because `toml::Value::Table` is `BTreeMap`-backed (keys sorted)
+    // unless toml's `preserve_order` feature is enabled, which it is not here.
+    // That is what makes the token independent of `HashMap` insertion order for
+    // map-valued config (peer_groups, roles, policy definitions, neighbor_sets).
+    // If `preserve_order` is ever turned on, this token would silently become
+    // order-dependent — re-establish canonicalization (e.g. sort) before doing so.
     let canonical = toml::Value::try_from(config)
         .map_err(|error| format!("failed to canonicalize runtime config snapshot: {error}"))?;
     let normalized = toml::to_string_pretty(&canonical)
@@ -2762,6 +2770,7 @@ pub fn describe_peer_group_changes(old: &PeerGroupConfig, new: &PeerGroupConfig)
     cmp_field!(route_server_client);
     cmp_field!(role);
     cmp_field!(strict_role);
+    cmp_field!(prefix_orf_receive);
     cmp_field!(remove_private_as);
     cmp_field!(add_path);
     cmp_field!(log_level);
