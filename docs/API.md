@@ -149,7 +149,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | Service | Read-only RPCs | Mutating RPCs rejected on `read_only` |
 |---------|----------------|---------------------------------------|
 | `GlobalService` | `GetGlobal` | `SetGlobal` |
-| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction` | `ApplyConfigTransaction` (`[[fib_tables]]` transaction executor; other sections rejected until their executors land) |
+| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction` | `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, or static `[[neighbors]]` add/delete transaction executors; mixed or unsupported candidates rejected without mutation) |
 | `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
@@ -246,7 +246,7 @@ and receive only redacted diff / plan output.
 |-----|-------------|
 | `DiffRuntimeConfig` | Validate candidate TOML and compare it against the daemon's live runtime config snapshot |
 | `PlanConfigTransaction` | Validate candidate TOML, return a runtime snapshot token, and classify v1 transaction support without mutating daemon state |
-| `ApplyConfigTransaction` | Operator-tier commit entry point for ADR-0076 config transactions; currently commits pure full-set `[[fib_tables]]` candidates and rejects other valid candidates without mutation until their executors land |
+| `ApplyConfigTransaction` | Operator-tier commit entry point for ADR-0076 config transactions; currently commits one pure runtime family at a time: full-set `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, or static `[[neighbors]]` add/delete changes |
 
 `DiffRuntimeConfigResponse` contains boolean summary fields, a
 plain-text `human_text` rendering, and `diff_json` using the
@@ -260,18 +260,18 @@ presence.
 
 - `runtime_snapshot_token`: an optimistic-concurrency token for the live runtime
   snapshot used during planning.
-- `supported_sections`: sections the v1 transaction model can commit once their
-  executor slice is present (`[[fib_tables]]`, `[[dynamic_neighbors]]`, static
-  neighbor add/delete).
+- `supported_sections`: sections the v1 transaction model can commit
+  (`[[fib_tables]]`, `[[dynamic_neighbors]]`, static neighbor add/delete).
 - `unsupported_sections`: hot-reloadable sections v1 refuses until an atomic
   executor exists.
 - `restart_required_sections`: sections that still require daemon restart.
 
 The planner is intentionally stricter than SIGHUP: "reload-applied" does not
 mean "transaction-committable" unless the section appears in
-`supported_sections`. `ApplyConfigTransaction` currently commits only a pure
-full-set `[[fib_tables]]` diff. Valid candidates that change other sections
-return `REJECTED` without mutation until their section executor lands.
+`supported_sections`. `ApplyConfigTransaction` commits one pure runtime family
+at a time. Cross-family candidates, static-neighbor modifies, policy/peer-group
+changes, and other valid-but-unsupported sections return `REJECTED` without
+mutation until their section executor lands.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
@@ -312,13 +312,18 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 JSON
 ```
 
-The FIB transaction executor uses the same reconciler and persistence ordering
-as `SetFibTable` / `DeleteFibTable`: stage the live config snapshot, apply to
-the FIB actor, persist the exact accepted `[[fib_tables]]` set with an
-acknowledgement, roll back on failure, and only then release the coordinator
-lock. The FIB reconciler must already be running, so adding the first
-`[[fib_tables]]` entry to a daemon that started without any tables still
-requires a restart.
+The transaction executors share the same coordinator and persistence ordering
+as the targeted runtime CRUD paths: re-plan under the runtime snapshot token,
+stage the live config snapshot, apply the live runtime change, persist the
+exact accepted candidate with an acknowledgement, roll back on failure, and
+only then release the coordinator lock. FIB transactions still require the FIB
+reconciler to already be running, so adding the first `[[fib_tables]]` entry to
+a daemon that started without any tables requires a restart.
+
+Dynamic-neighbor transactions replace the complete `[[dynamic_neighbors]]` set
+from the candidate TOML. Static-neighbor transactions support add/delete only:
+changing an existing `[[neighbors]]` entry is rejected in v1 because it needs a
+dedicated reconcile/rollback executor.
 
 CLI equivalent:
 

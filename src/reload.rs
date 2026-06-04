@@ -20,7 +20,7 @@ use crate::peer_manager::InternalCommand;
 use crate::policy_admin::{self, apply_config_event};
 
 /// Build a `PeerManagerNeighborConfig` from transport config components.
-fn build_peer_mgr_config(
+pub(crate) fn build_peer_mgr_config(
     tc: &rustbgpd_transport::TransportConfig,
     label: &str,
     import: Option<&PolicyChain>,
@@ -135,7 +135,8 @@ fn take_config_event_ack(event: &mut ConfigEvent) -> Option<oneshot::Sender<Resu
         | ConfigEvent::NeighborAdded { ack, .. }
         | ConfigEvent::NeighborDeleted { ack, .. }
         | ConfigEvent::DynamicNeighborAdded { ack, .. }
-        | ConfigEvent::DynamicNeighborDeleted { ack, .. } => ack.take(),
+        | ConfigEvent::DynamicNeighborDeleted { ack, .. }
+        | ConfigEvent::ConfigTransactionCommitted { ack, .. } => ack.take(),
         _ => None,
     }
 }
@@ -224,14 +225,33 @@ pub(crate) async fn run_config_bridge(
                         // Apply to a candidate clone and commit only on success,
                         // so a validation failure can't leave the live snapshot
                         // partially mutated (poisoned) for the next event.
-                        let mut candidate = current_config.clone();
-                        if let Err(error) = apply_config_event(&mut candidate, &event) {
+                        let candidate_result = if let ConfigEvent::ConfigTransactionCommitted {
+                            candidate_toml,
+                            ..
+                        } = &event
+                        {
+                            Config::load_toml_with_diagnostics(
+                                candidate_toml,
+                                "committed config transaction",
+                            )
+                            .map_err(|error| error.clone())
+                        } else {
+                            let mut candidate = current_config.clone();
+                            match apply_config_event(&mut candidate, &event) {
+                                Ok(()) => Ok(candidate),
+                                Err(error) => Err(error.to_string()),
+                            }
+                        };
+                        let candidate = match candidate_result {
+                            Ok(candidate) => candidate,
+                            Err(error) => {
                             error!(error = %error, "failed to apply config event before persistence");
                             if let Some(ack) = event_ack {
-                                let _ = ack.send(Err(error.to_string()));
+                                let _ = ack.send(Err(error.clone()));
                             }
                             continue;
-                        }
+                            }
+                        };
                         if let Some(ack) = event_ack {
                             let (persist_ack_tx, persist_ack_rx) = oneshot::channel();
                             if mutation_tx
@@ -3401,6 +3421,76 @@ peer_group = "secure"
                 .unwrap(),
             Ok(()),
             "FIB event ack should reflect the persister result"
+        );
+
+        drop(replace_tx);
+        drop(event_tx);
+        timeout(Duration::from_secs(1), bridge)
+            .await
+            .expect("bridge should exit after both inputs close")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn config_bridge_acks_config_transaction_after_persister_ack() {
+        use rustbgpd_api::peer_types::ConfigEvent;
+        use tokio::sync::oneshot::error::TryRecvError;
+        use tokio::time::{Duration, timeout};
+
+        let stale_path = unique_temp_path("bridge-transaction-ack-stale");
+        std::fs::write(&stale_path, baseline_toml()).unwrap();
+        let stale = Config::load_with_diagnostics(stale_path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&stale_path).ok();
+
+        let candidate_toml = format!(
+            r#"{}
+
+[peer_groups.fabric]
+hold_time = 90
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "fabric"
+remote_asn = 65002
+"#,
+            baseline_toml()
+        );
+
+        let (event_tx, event_rx) = mpsc::channel::<ConfigEvent>(8);
+        let (replace_tx, replace_rx) = mpsc::unbounded_channel::<Box<Config>>();
+        let (mutation_tx, mut mutation_rx) = mpsc::channel::<ConfigMutation>(8);
+        let bridge = tokio::spawn(run_config_bridge(event_rx, replace_rx, mutation_tx, stale));
+
+        let (ack_tx, mut ack_rx) = oneshot::channel();
+        event_tx
+            .send(ConfigEvent::ConfigTransactionCommitted {
+                candidate_toml,
+                ack: Some(ack_tx),
+            })
+            .await
+            .unwrap();
+
+        let event_msg = timeout(Duration::from_secs(1), mutation_rx.recv())
+            .await
+            .expect("bridge should forward config transaction to persister")
+            .expect("event forwarded");
+        let ConfigMutation::ReplaceConfigAck(received_event, persist_ack) = event_msg else {
+            panic!("config transaction events with an ack must request acknowledged persist");
+        };
+        assert!(received_event.peer_groups.contains_key("fabric"));
+        assert_eq!(received_event.dynamic_neighbors.len(), 1);
+        assert!(
+            matches!(ack_rx.try_recv(), Err(TryRecvError::Empty),),
+            "bridge must not acknowledge the config transaction before the persister replies"
+        );
+        persist_ack.send(Ok(())).unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(1), ack_rx)
+                .await
+                .unwrap()
+                .unwrap(),
+            Ok(()),
+            "config transaction ack should reflect the persister result"
         );
 
         drop(replace_tx);

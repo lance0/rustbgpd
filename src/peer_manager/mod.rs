@@ -575,6 +575,31 @@ impl PeerManager {
                             );
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::StageConfigSnapshot {
+                            candidate_toml,
+                            reply,
+                        } => {
+                            let result = Config::load_toml_with_diagnostics(
+                                &candidate_toml,
+                                "candidate config transaction",
+                            )
+                            .and_then(|candidate| {
+                                let previous =
+                                    toml::to_string_pretty(&self.current_config).map_err(
+                                        |error| {
+                                            format!(
+                                                "failed to serialize previous runtime config \
+                                                 snapshot: {error}"
+                                            )
+                                        },
+                                    )?;
+                                self.current_config = candidate;
+                                self.dynamic_ranges =
+                                    Self::parse_dynamic_ranges(&self.current_config);
+                                Ok(previous)
+                            });
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::StageFibTables { tables, reply } => {
                             let result = self.stage_fib_tables_candidate(&tables);
                             let _ = reply.send(result);

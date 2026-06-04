@@ -122,9 +122,11 @@ service ConfigService {
   // the current runtime snapshot and a section-level v1 support plan.
   rpc PlanConfigTransaction(PlanConfigTransactionRequest) returns (ConfigTransactionPlanResponse);
 
-  // Commit a previously planned candidate transaction. The first v1 executor
-  // commits pure full-set `[[fib_tables]]` changes; other supported sections
-  // remain validate-only until their executors land.
+  // Commit a previously planned candidate transaction. V1 commits one pure
+  // runtime family at a time: full-set `[[fib_tables]]`, full-set
+  // `[[dynamic_neighbors]]`, or static `[[neighbors]]` add/delete changes.
+  // Mixed families and sections without an atomic executor are rejected
+  // without mutation.
   rpc ApplyConfigTransaction(ApplyConfigTransactionRequest) returns (ConfigTransactionApplyResponse);
 }
 

@@ -590,6 +590,11 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
             // cannot poison the persisted config.
             config.fib_tables = snapshots.iter().map(fib_table_snapshot_to_config).collect();
         }
+        ConfigEvent::ConfigTransactionCommitted { candidate_toml, .. } => {
+            *config =
+                Config::load_toml_with_diagnostics(candidate_toml, "committed config transaction")
+                    .map_err(|reason| ConfigError::InvalidGrpcConfig { reason })?;
+        }
     }
     config.validate()
 }
