@@ -349,8 +349,13 @@ fn resolve_static_neighbors(
     candidate: &Config,
     neighbors: &[Neighbor],
 ) -> Result<Vec<PeerManagerNeighborConfig>, ConfigTransactionApplyError> {
-    // Plan/apply already validated the full candidate. Resolve only the touched
-    // static neighbors instead of rebuilding every candidate peer.
+    // The candidate has already passed `Config::validate()` at plan/apply load
+    // time, which catches every config-correctness error across the full
+    // neighbor set (undefined peer groups, malformed families, policy chains).
+    // Resolve only the touched static neighbors here instead of rebuilding every
+    // candidate peer. `resolve_neighbor` can still surface a per-neighbor error
+    // (e.g. an IPv6 link-local interface-index lookup), which we map to
+    // `InvalidArgument`.
     neighbors
         .iter()
         .map(|neighbor| {
