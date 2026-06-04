@@ -79,6 +79,36 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
+(plan)
+_arguments "${_arguments_options[@]}" : \
+'--from-file=[Candidate TOML file to validate and classify]:PATH:_default' \
+'--expected-runtime-snapshot-token=[Optional runtime snapshot token to check while planning]:TOKEN:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(apply)
+_arguments "${_arguments_options[@]}" : \
+'--from-file=[Candidate TOML file to validate and commit]:PATH:_default' \
+'--expected-runtime-snapshot-token=[Runtime snapshot token returned by config plan]:TOKEN:_default' \
+'--client-request-id=[Optional audit/correlation identifier]:ID:_default' \
+'--comment=[Optional human change note; not logged verbatim by the daemon]:TEXT:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 ":: :_rustbgpctl__subcmd__config__subcmd__help_commands" \
@@ -92,6 +122,14 @@ _arguments "${_arguments_options[@]}" : \
         curcontext="${curcontext%:*:*}:rustbgpctl-config-help-command-$line[1]:"
         case $line[1] in
             (diff)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(plan)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(apply)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -135,11 +173,13 @@ _arguments "${_arguments_options[@]}" : \
 '--hold-time=[Hold time in seconds]:HOLD_TIME:_default' \
 '--max-prefixes=[Max prefix limit]:MAX_PREFIXES:_default' \
 '*--families=[Address families (comma-separated)]:FAMILIES:_default' \
+'--role=[Local BGP Role for RFC 9234 route-leak protection]:ROLE:_default' \
 '--add-path-send-max=[Max paths per prefix for Add-Path send]:ADD_PATH_SEND_MAX:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--route-server-client[Enable transparent route-server client mode (eBGP only)]' \
+'--strict-role[Require the peer to advertise a compatible BGP Role capability]' \
 '--add-path-receive[Enable Add-Path receive]' \
 '--add-path-send[Enable Add-Path send]' \
 '-j[Output in JSON format]' \
@@ -244,6 +284,83 @@ esac
     ;;
 esac
 ;;
+(bfd)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_rustbgpctl__subcmd__bfd_commands" \
+"*::: :->bfd" \
+&& ret=0
+
+    case $state in
+    (bfd)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-bfd-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':address -- Peer address:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__bfd__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-bfd-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
 (rib)
 _arguments "${_arguments_options[@]}" : \
 '-a+[Address family filter (ipv4_unicast, ipv6_unicast)]:FAMILY:_default' \
@@ -321,6 +438,13 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (fib)
 _arguments "${_arguments_options[@]}" : \
+'--table=[FIB table-name filter]:TABLE:_default' \
+'--state=[FIB route state filter\: installed, rejected, failed]:STATE:_default' \
+'--reason=[Exact reason-code filter, e.g. owned or route_limit_exceeded]:REASON:_default' \
+'--prefix=[Exact prefix filter, e.g. 203.0.113.0/24]:PREFIX:_default' \
+'--peer=[Source peer-address filter]:PEER:_default' \
+'--page-size=[Maximum FIB status rows to return; omitted returns the full snapshot]:PAGE_SIZE:_default' \
+'--page-token=[Page token returned by a previous paginated FIB status query]:PAGE_TOKEN:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -576,6 +700,27 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
+(add-ip-prefix)
+_arguments "${_arguments_options[@]}" : \
+'--rd=[]:RD:_default' \
+'--ethernet-tag=[Ethernet Tag ID. Must be 0 for supported Type 5 injection]:ETHERNET_TAG:_default' \
+'--prefix=[IP prefix, e.g. "10.0.0.0/24" or "2001\:db8\:\:/48"]:PREFIX:_default' \
+'--label=[L3VNI for this IP-VRF]:LABEL:_default' \
+'--next-hop=[VTEP loopback IP (next-hop)]:NEXT_HOP:_default' \
+'--gateway=[Optional Type 5 Gateway IP for overlay-index injection. Omit for interface-less Type 5]:GATEWAY:_default' \
+'--router-mac=[Router MAC extended community value. Required unless --no-vxlan-encap is set]:ROUTER_MAC:_default' \
+'*--rt=[]:RT:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--no-vxlan-encap[]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
 (delete-mac-ip)
 _arguments "${_arguments_options[@]}" : \
 '--rd=[]:RD:_default' \
@@ -597,6 +742,47 @@ _arguments "${_arguments_options[@]}" : \
 '--rd=[]:RD:_default' \
 '--ethernet-tag=[]:ETHERNET_TAG:_default' \
 '--ip=[]:IP:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(delete-ip-prefix)
+_arguments "${_arguments_options[@]}" : \
+'--rd=[]:RD:_default' \
+'--ethernet-tag=[Ethernet Tag ID. Must be 0 for Type 5 withdrawal]:ETHERNET_TAG:_default' \
+'--prefix=[IP prefix, e.g. "10.0.0.0/24" or "2001\:db8\:\:/48"]:PREFIX:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(clear-duplicate-mac)
+_arguments "${_arguments_options[@]}" : \
+'--vni=[L2VNI containing the quarantined MAC]:VNI:_default' \
+'--mac=[MAC address "aa\:bb\:cc\:dd\:ee\:ff"]:MAC:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(runtime)
+_arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -680,11 +866,27 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(add-ip-prefix)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (delete-mac-ip)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (delete-imet)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete-ip-prefix)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(clear-duplicate-mac)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(runtime)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -759,13 +961,14 @@ _arguments "${_arguments_options[@]}" : \
         case $line[1] in
             (watch)
 _arguments "${_arguments_options[@]}" : \
-'*--category=[Event category filter\: route, session, policy, dataplane]:CATEGORIES:_default' \
+'*--category=[Event category filter\: route, session, policy, dataplane, evpn, bfd]:CATEGORIES:_default' \
 '--address=[Neighbor address filter]:ADDRESS:_default' \
 '-a+[Address family filter]:FAMILY:_default' \
 '--family=[Address family filter]:FAMILY:_default' \
 '--prefix=[Exact prefix filter, e.g. 203.0.113.0/24]:PREFIX:_default' \
-'*--type=[Event type filter\: added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, dataplane_status_changed]:EVENT_TYPES:_default' \
-'--backfill=[Print recent route history before tailing the live stream. Applies only to route-capable event streams]:BACKFILL:_default' \
+'*--type=[Event type filter\: added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, dataplane_status_changed, dataplane_route_installed, dataplane_route_withdrawn, dataplane_route_failed, evpn_added, evpn_withdrawn, evpn_best_changed, bfd_up, bfd_down, bfd_state_changed]:EVENT_TYPES:_default' \
+'--backfill=[Print recent route history before tailing the live stream. Applies only to route-capable event streams. Mutually exclusive with \`--from-event-id\`; \`--backfill\` replays the daemon'\''s process-local route ring (resets on restart), while \`--from-event-id\` replays the durable event outbox (survives restart)]:BACKFILL:_default' \
+'--from-event-id=[ADR-0072 durable cursor\: replay committed events with \`event_id > N\` from the daemon'\''s local event outbox, then tail the live stream. \`0\` replays everything retained. Survives daemon restart. Returns \`FAILED_PRECONDITION\` when the daemon was started with \`\[event_history\].enabled = false\` or EHM is unavailable]:EVENT_ID:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -808,6 +1011,24 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
+(evpn)
+_arguments "${_arguments_options[@]}" : \
+'--address=[Neighbor address filter. Matches current and previous best-path peer]:ADDRESS:_default' \
+'--route-type=[EVPN route type filter (1..=5)]:ROUTE_TYPE:_default' \
+'--rd=[Route Distinguisher filter, e.g. "65000\:100"]:RD:_default' \
+'*--type=[EVPN event type filter\: evpn_added, evpn_withdrawn, evpn_best_changed]:EVENT_TYPES:_default' \
+'-l+[Maximum recent EVPN events to return (default 100; explicit 0 requests the daemon'\''s full bounded window)]:LIMIT:_default' \
+'--limit=[Maximum recent EVPN events to return (default 100; explicit 0 requests the daemon'\''s full bounded window)]:LIMIT:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 ":: :_rustbgpctl__subcmd__events__subcmd__help_commands" \
@@ -829,6 +1050,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (policy)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(evpn)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1124,6 +1349,21 @@ esac
     ;;
 esac
 ;;
+(explain)
+_arguments "${_arguments_options[@]}" : \
+'--neighbor=[Neighbor (peer) address whose import-decision cache to read]:NEIGHBOR:_default' \
+'--prefix=[Prefix in CIDR form, e.g. \`192.0.2.0/24\` or \`2001\:db8\:\:/32\`]:PREFIX:_default' \
+'--path-id=[Add-Path identifier; omit to show every matching path]:PATH_ID:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 ":: :_rustbgpctl__subcmd__policy__subcmd__help_commands" \
@@ -1187,6 +1427,10 @@ _arguments "${_arguments_options[@]}" : \
         esac
     ;;
 esac
+;;
+(explain)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
@@ -1459,6 +1703,206 @@ esac
     ;;
 esac
 ;;
+(dynamic-neighbor)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_rustbgpctl__subcmd__dynamic-neighbor_commands" \
+"*::: :->dynamic-neighbor" \
+&& ret=0
+
+    case $state in
+    (dynamic-neighbor)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-dynamic-neighbor-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(add)
+_arguments "${_arguments_options[@]}" : \
+'--peer-group=[Peer group the dynamic peers inherit]:PEER_GROUP:_default' \
+'--asn=[Expected remote ASN (0 = accept any ASN from OPEN)]:ASN:_default' \
+'--description=[Optional description]:DESCRIPTION:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':prefix -- Prefix range (e.g. 10.0.0.0/24):_default' \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':prefix -- Prefix range to remove:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__dynamic-neighbor__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-dynamic-neighbor-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(fib-table)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_rustbgpctl__subcmd__fib-table_commands" \
+"*::: :->fib-table" \
+&& ret=0
+
+    case $state in
+    (fib-table)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-fib-table-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+'--table-id=[Linux route table id]:TABLE_ID:_default' \
+'--metric=[Kernel route metric / priority for daemon-owned rows]:METRIC:_default' \
+'*--families=[Address families (comma-separated, e.g. ipv4_unicast,ipv6_unicast). Empty defaults to both unicast families]:FAMILIES:_default' \
+'*--allowed-peer-group=[Peer-group allow-list (repeatable / comma-separated). Empty = all]:ALLOWED_PEER_GROUPS:_default' \
+'*--allowed-neighbor=[Neighbor-address allow-list (repeatable / comma-separated). Empty = all]:ALLOWED_NEIGHBORS:_default' \
+'--max-routes=[Hard cap on eligible routes (rows). Unset = no cap]:MAX_ROUTES:_default' \
+'--maximum-paths=[Global ECMP cap (1..=256). Unset/1 = single next-hop]:MAXIMUM_PATHS:_default' \
+'--maximum-paths-ebgp=[Per-class eBGP ECMP cap (overrides maximum_paths for eBGP)]:MAXIMUM_PATHS_EBGP:_default' \
+'--maximum-paths-ibgp=[Per-class iBGP ECMP cap (overrides maximum_paths for iBGP)]:MAXIMUM_PATHS_IBGP:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':name -- Table name (unique handle):_default' \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':name -- Table name to remove:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__fib-table__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-fib-table-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
 (completions)
 _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -1504,6 +1948,14 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(plan)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(apply)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
         esac
     ;;
 esac
@@ -1537,6 +1989,30 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (softreset)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(bfd)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__help__subcmd__bfd_commands" \
+"*::: :->bfd" \
+&& ret=0
+
+    case $state in
+    (bfd)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-help-bfd-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1632,11 +2108,27 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(add-ip-prefix)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (delete-mac-ip)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (delete-imet)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete-ip-prefix)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(clear-duplicate-mac)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(runtime)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1685,6 +2177,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (policy)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(evpn)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1780,6 +2276,10 @@ _arguments "${_arguments_options[@]}" : \
     ;;
 esac
 ;;
+(explain)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
         esac
     ;;
 esac
@@ -1856,6 +2356,62 @@ _arguments "${_arguments_options[@]}" : \
     ;;
 esac
 ;;
+(dynamic-neighbor)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__help__subcmd__dynamic-neighbor_commands" \
+"*::: :->dynamic-neighbor" \
+&& ret=0
+
+    case $state in
+    (dynamic-neighbor)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-help-dynamic-neighbor-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(fib-table)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__help__subcmd__fib-table_commands" \
+"*::: :->fib-table" \
+&& ret=0
+
+    case $state in
+    (fib-table)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-help-fib-table-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
 (completions)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -1879,6 +2435,7 @@ _rustbgpctl_commands() {
 'global:Show daemon global configuration' \
 'config:Runtime config diagnostics' \
 'neighbor:Manage BGP neighbors' \
+'bfd:Inspect single-hop BFD sessions (ADR-0067)' \
 'rib:Query and manage the RIB' \
 'flowspec:Manage FlowSpec routes' \
 'evpn:Manage EVPN routes (list, add, delete — RFC 7432)' \
@@ -1893,10 +2450,55 @@ _rustbgpctl_commands() {
 'policy:Manage named \`\[\[policy_definitions\]\]\` entries and the global / per-neighbor import/export chains. Backed by PolicyService' \
 'neighbor-set:Manage named \`\[\[neighbor_sets\]\]\` entries used by policy \`match_neighbor_set\`. Backed by PolicyService' \
 'peer-group:Manage named \`\[\[peer_groups\]\]\` entries and bind/unbind neighbors to them. Backed by PeerGroupService' \
+'dynamic-neighbor:Manage \`\[\[dynamic_neighbors\]\]\` prefix ranges that auto-accept inbound peers into a peer group. Backed by NeighborService' \
+'fib-table:Manage \`\[\[fib_tables\]\]\` (ADR-0061 general unicast FIB export) at runtime. Hot-applies through the FIB reconciler and persists to the config' \
 'completions:Generate shell completions' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rustbgpctl commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__bfd_commands] )) ||
+_rustbgpctl__subcmd__bfd_commands() {
+    local commands; commands=(
+'list:List all BFD sessions (default)' \
+'show:Show a single BFD session by peer address' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl bfd commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__bfd__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__bfd__subcmd__help_commands() {
+    local commands; commands=(
+'list:List all BFD sessions (default)' \
+'show:Show a single BFD session by peer address' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl bfd help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__bfd__subcmd__help__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__bfd__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl bfd help help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__bfd__subcmd__help__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__bfd__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl bfd help list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__bfd__subcmd__help__subcmd__show_commands] )) ||
+_rustbgpctl__subcmd__bfd__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl bfd help show commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__bfd__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__bfd__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl bfd list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__bfd__subcmd__show_commands] )) ||
+_rustbgpctl__subcmd__bfd__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl bfd show commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__completions_commands] )) ||
 _rustbgpctl__subcmd__completions_commands() {
@@ -1907,9 +2509,16 @@ _rustbgpctl__subcmd__completions_commands() {
 _rustbgpctl__subcmd__config_commands() {
     local commands; commands=(
 'diff:Diff a candidate TOML file against the daemon'\''s live runtime snapshot' \
+'plan:Validate and classify a candidate transaction without mutation' \
+'apply:Commit a previously planned candidate transaction' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rustbgpctl config commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__config__subcmd__apply_commands] )) ||
+_rustbgpctl__subcmd__config__subcmd__apply_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl config apply commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__config__subcmd__diff_commands] )) ||
 _rustbgpctl__subcmd__config__subcmd__diff_commands() {
@@ -1920,9 +2529,16 @@ _rustbgpctl__subcmd__config__subcmd__diff_commands() {
 _rustbgpctl__subcmd__config__subcmd__help_commands() {
     local commands; commands=(
 'diff:Diff a candidate TOML file against the daemon'\''s live runtime snapshot' \
+'plan:Validate and classify a candidate transaction without mutation' \
+'apply:Commit a previously planned candidate transaction' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rustbgpctl config help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__config__subcmd__help__subcmd__apply_commands] )) ||
+_rustbgpctl__subcmd__config__subcmd__help__subcmd__apply_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl config help apply commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__config__subcmd__help__subcmd__diff_commands] )) ||
 _rustbgpctl__subcmd__config__subcmd__help__subcmd__diff_commands() {
@@ -1934,15 +2550,86 @@ _rustbgpctl__subcmd__config__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl config help help commands' commands "$@"
 }
+(( $+functions[_rustbgpctl__subcmd__config__subcmd__help__subcmd__plan_commands] )) ||
+_rustbgpctl__subcmd__config__subcmd__help__subcmd__plan_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl config help plan commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__config__subcmd__plan_commands] )) ||
+_rustbgpctl__subcmd__config__subcmd__plan_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl config plan commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__dynamic-neighbor_commands] )) ||
+_rustbgpctl__subcmd__dynamic-neighbor_commands() {
+    local commands; commands=(
+'list:List configured dynamic neighbor ranges' \
+'add:Add a dynamic neighbor range' \
+'delete:Delete a dynamic neighbor range by prefix' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl dynamic-neighbor commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__dynamic-neighbor__subcmd__add_commands] )) ||
+_rustbgpctl__subcmd__dynamic-neighbor__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl dynamic-neighbor add commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__dynamic-neighbor__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__dynamic-neighbor__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl dynamic-neighbor delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__dynamic-neighbor__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__dynamic-neighbor__subcmd__help_commands() {
+    local commands; commands=(
+'list:List configured dynamic neighbor ranges' \
+'add:Add a dynamic neighbor range' \
+'delete:Delete a dynamic neighbor range by prefix' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl dynamic-neighbor help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__dynamic-neighbor__subcmd__help__subcmd__add_commands] )) ||
+_rustbgpctl__subcmd__dynamic-neighbor__subcmd__help__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl dynamic-neighbor help add commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__dynamic-neighbor__subcmd__help__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__dynamic-neighbor__subcmd__help__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl dynamic-neighbor help delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__dynamic-neighbor__subcmd__help__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__dynamic-neighbor__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl dynamic-neighbor help help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__dynamic-neighbor__subcmd__help__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__dynamic-neighbor__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl dynamic-neighbor help list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__dynamic-neighbor__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__dynamic-neighbor__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl dynamic-neighbor list commands' commands "$@"
+}
 (( $+functions[_rustbgpctl__subcmd__events_commands] )) ||
 _rustbgpctl__subcmd__events_commands() {
     local commands; commands=(
 'watch:Watch the unified live event stream' \
 'sessions:Show recent session lifecycle events' \
 'policy:Show recent policy / neighbor-set / peer-group / chain mutation events' \
+'evpn:Show recent EVPN route events' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rustbgpctl events commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__events__subcmd__evpn_commands] )) ||
+_rustbgpctl__subcmd__events__subcmd__evpn_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl events evpn commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__events__subcmd__help_commands] )) ||
 _rustbgpctl__subcmd__events__subcmd__help_commands() {
@@ -1950,9 +2637,15 @@ _rustbgpctl__subcmd__events__subcmd__help_commands() {
 'watch:Watch the unified live event stream' \
 'sessions:Show recent session lifecycle events' \
 'policy:Show recent policy / neighbor-set / peer-group / chain mutation events' \
+'evpn:Show recent EVPN route events' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rustbgpctl events help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__events__subcmd__help__subcmd__evpn_commands] )) ||
+_rustbgpctl__subcmd__events__subcmd__help__subcmd__evpn_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl events help evpn commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__events__subcmd__help__subcmd__help_commands] )) ||
 _rustbgpctl__subcmd__events__subcmd__help__subcmd__help_commands() {
@@ -1995,8 +2688,12 @@ _rustbgpctl__subcmd__evpn_commands() {
 'list:List EVPN routes (default action — same as omitting the subcommand)' \
 'add-mac-ip:Inject a Type 2 MAC/IP route' \
 'add-imet:Inject a Type 3 IMET route' \
+'add-ip-prefix:Inject a Type 5 IP Prefix route' \
 'delete-mac-ip:Withdraw a Type 2 MAC/IP route by its key fields' \
 'delete-imet:Withdraw a Type 3 IMET route by its key fields' \
+'delete-ip-prefix:Withdraw a Type 5 IP Prefix route by its key fields' \
+'clear-duplicate-mac:Clear one duplicate-MAC local-origin quarantine' \
+'runtime:Show the committed ADR-0063 EVPN runtime generation' \
 'instances:List local EVPN instances configured on this VTEP. Empty when the daemon is acting purely as an EVPN route reflector' \
 'nexthops:List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)' \
 'vrfs:List configured IP-VRFs (Gate 9, ADR-0058) and their readiness verdict from the most recent reconcile pass' \
@@ -2010,15 +2707,30 @@ _rustbgpctl__subcmd__evpn__subcmd__add-imet_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl evpn add-imet commands' commands "$@"
 }
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__add-ip-prefix_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__add-ip-prefix_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn add-ip-prefix commands' commands "$@"
+}
 (( $+functions[_rustbgpctl__subcmd__evpn__subcmd__add-mac-ip_commands] )) ||
 _rustbgpctl__subcmd__evpn__subcmd__add-mac-ip_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl evpn add-mac-ip commands' commands "$@"
 }
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__clear-duplicate-mac_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__clear-duplicate-mac_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn clear-duplicate-mac commands' commands "$@"
+}
 (( $+functions[_rustbgpctl__subcmd__evpn__subcmd__delete-imet_commands] )) ||
 _rustbgpctl__subcmd__evpn__subcmd__delete-imet_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl evpn delete-imet commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__delete-ip-prefix_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__delete-ip-prefix_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn delete-ip-prefix commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__evpn__subcmd__delete-mac-ip_commands] )) ||
 _rustbgpctl__subcmd__evpn__subcmd__delete-mac-ip_commands() {
@@ -2036,8 +2748,12 @@ _rustbgpctl__subcmd__evpn__subcmd__help_commands() {
 'list:List EVPN routes (default action — same as omitting the subcommand)' \
 'add-mac-ip:Inject a Type 2 MAC/IP route' \
 'add-imet:Inject a Type 3 IMET route' \
+'add-ip-prefix:Inject a Type 5 IP Prefix route' \
 'delete-mac-ip:Withdraw a Type 2 MAC/IP route by its key fields' \
 'delete-imet:Withdraw a Type 3 IMET route by its key fields' \
+'delete-ip-prefix:Withdraw a Type 5 IP Prefix route by its key fields' \
+'clear-duplicate-mac:Clear one duplicate-MAC local-origin quarantine' \
+'runtime:Show the committed ADR-0063 EVPN runtime generation' \
 'instances:List local EVPN instances configured on this VTEP. Empty when the daemon is acting purely as an EVPN route reflector' \
 'nexthops:List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)' \
 'vrfs:List configured IP-VRFs (Gate 9, ADR-0058) and their readiness verdict from the most recent reconcile pass' \
@@ -2051,15 +2767,30 @@ _rustbgpctl__subcmd__evpn__subcmd__help__subcmd__add-imet_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl evpn help add-imet commands' commands "$@"
 }
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__add-ip-prefix_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__add-ip-prefix_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn help add-ip-prefix commands' commands "$@"
+}
 (( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__add-mac-ip_commands] )) ||
 _rustbgpctl__subcmd__evpn__subcmd__help__subcmd__add-mac-ip_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl evpn help add-mac-ip commands' commands "$@"
 }
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__clear-duplicate-mac_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__clear-duplicate-mac_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn help clear-duplicate-mac commands' commands "$@"
+}
 (( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__delete-imet_commands] )) ||
 _rustbgpctl__subcmd__evpn__subcmd__help__subcmd__delete-imet_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl evpn help delete-imet commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__delete-ip-prefix_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__delete-ip-prefix_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn help delete-ip-prefix commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__delete-mac-ip_commands] )) ||
 _rustbgpctl__subcmd__evpn__subcmd__help__subcmd__delete-mac-ip_commands() {
@@ -2091,6 +2822,11 @@ _rustbgpctl__subcmd__evpn__subcmd__help__subcmd__nexthops_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl evpn help nexthops commands' commands "$@"
 }
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__runtime_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__runtime_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn help runtime commands' commands "$@"
+}
 (( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__vrfs_commands] )) ||
 _rustbgpctl__subcmd__evpn__subcmd__help__subcmd__vrfs_commands() {
     local commands; commands=()
@@ -2111,10 +2847,70 @@ _rustbgpctl__subcmd__evpn__subcmd__nexthops_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl evpn nexthops commands' commands "$@"
 }
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__runtime_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__runtime_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn runtime commands' commands "$@"
+}
 (( $+functions[_rustbgpctl__subcmd__evpn__subcmd__vrfs_commands] )) ||
 _rustbgpctl__subcmd__evpn__subcmd__vrfs_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl evpn vrfs commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__fib-table_commands] )) ||
+_rustbgpctl__subcmd__fib-table_commands() {
+    local commands; commands=(
+'list:List the configured FIB tables and runtime availability' \
+'set:Create or replace a FIB table by name (full definition, not a patch)' \
+'delete:Delete a FIB table by name' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl fib-table commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__fib-table__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__fib-table__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl fib-table delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__fib-table__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__fib-table__subcmd__help_commands() {
+    local commands; commands=(
+'list:List the configured FIB tables and runtime availability' \
+'set:Create or replace a FIB table by name (full definition, not a patch)' \
+'delete:Delete a FIB table by name' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl fib-table help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__fib-table__subcmd__help__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__fib-table__subcmd__help__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl fib-table help delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__fib-table__subcmd__help__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__fib-table__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl fib-table help help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__fib-table__subcmd__help__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__fib-table__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl fib-table help list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__fib-table__subcmd__help__subcmd__set_commands] )) ||
+_rustbgpctl__subcmd__fib-table__subcmd__help__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl fib-table help set commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__fib-table__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__fib-table__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl fib-table list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__fib-table__subcmd__set_commands] )) ||
+_rustbgpctl__subcmd__fib-table__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl fib-table set commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__flowspec_commands] )) ||
 _rustbgpctl__subcmd__flowspec_commands() {
@@ -2180,6 +2976,7 @@ _rustbgpctl__subcmd__help_commands() {
 'global:Show daemon global configuration' \
 'config:Runtime config diagnostics' \
 'neighbor:Manage BGP neighbors' \
+'bfd:Inspect single-hop BFD sessions (ADR-0067)' \
 'rib:Query and manage the RIB' \
 'flowspec:Manage FlowSpec routes' \
 'evpn:Manage EVPN routes (list, add, delete — RFC 7432)' \
@@ -2194,10 +2991,30 @@ _rustbgpctl__subcmd__help_commands() {
 'policy:Manage named \`\[\[policy_definitions\]\]\` entries and the global / per-neighbor import/export chains. Backed by PolicyService' \
 'neighbor-set:Manage named \`\[\[neighbor_sets\]\]\` entries used by policy \`match_neighbor_set\`. Backed by PolicyService' \
 'peer-group:Manage named \`\[\[peer_groups\]\]\` entries and bind/unbind neighbors to them. Backed by PeerGroupService' \
+'dynamic-neighbor:Manage \`\[\[dynamic_neighbors\]\]\` prefix ranges that auto-accept inbound peers into a peer group. Backed by NeighborService' \
+'fib-table:Manage \`\[\[fib_tables\]\]\` (ADR-0061 general unicast FIB export) at runtime. Hot-applies through the FIB reconciler and persists to the config' \
 'completions:Generate shell completions' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rustbgpctl help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__bfd_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__bfd_commands() {
+    local commands; commands=(
+'list:List all BFD sessions (default)' \
+'show:Show a single BFD session by peer address' \
+    )
+    _describe -t commands 'rustbgpctl help bfd commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__bfd__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__bfd__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help bfd list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__bfd__subcmd__show_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__bfd__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help bfd show commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__help__subcmd__completions_commands] )) ||
 _rustbgpctl__subcmd__help__subcmd__completions_commands() {
@@ -2208,13 +3025,49 @@ _rustbgpctl__subcmd__help__subcmd__completions_commands() {
 _rustbgpctl__subcmd__help__subcmd__config_commands() {
     local commands; commands=(
 'diff:Diff a candidate TOML file against the daemon'\''s live runtime snapshot' \
+'plan:Validate and classify a candidate transaction without mutation' \
+'apply:Commit a previously planned candidate transaction' \
     )
     _describe -t commands 'rustbgpctl help config commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__config__subcmd__apply_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__config__subcmd__apply_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help config apply commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__help__subcmd__config__subcmd__diff_commands] )) ||
 _rustbgpctl__subcmd__help__subcmd__config__subcmd__diff_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help config diff commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__config__subcmd__plan_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__config__subcmd__plan_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help config plan commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__dynamic-neighbor_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__dynamic-neighbor_commands() {
+    local commands; commands=(
+'list:List configured dynamic neighbor ranges' \
+'add:Add a dynamic neighbor range' \
+'delete:Delete a dynamic neighbor range by prefix' \
+    )
+    _describe -t commands 'rustbgpctl help dynamic-neighbor commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__dynamic-neighbor__subcmd__add_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__dynamic-neighbor__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help dynamic-neighbor add commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__dynamic-neighbor__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__dynamic-neighbor__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help dynamic-neighbor delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__dynamic-neighbor__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__dynamic-neighbor__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help dynamic-neighbor list commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__help__subcmd__events_commands] )) ||
 _rustbgpctl__subcmd__help__subcmd__events_commands() {
@@ -2222,8 +3075,14 @@ _rustbgpctl__subcmd__help__subcmd__events_commands() {
 'watch:Watch the unified live event stream' \
 'sessions:Show recent session lifecycle events' \
 'policy:Show recent policy / neighbor-set / peer-group / chain mutation events' \
+'evpn:Show recent EVPN route events' \
     )
     _describe -t commands 'rustbgpctl help events commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__events__subcmd__evpn_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__events__subcmd__evpn_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help events evpn commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__help__subcmd__events__subcmd__policy_commands] )) ||
 _rustbgpctl__subcmd__help__subcmd__events__subcmd__policy_commands() {
@@ -2246,8 +3105,12 @@ _rustbgpctl__subcmd__help__subcmd__evpn_commands() {
 'list:List EVPN routes (default action — same as omitting the subcommand)' \
 'add-mac-ip:Inject a Type 2 MAC/IP route' \
 'add-imet:Inject a Type 3 IMET route' \
+'add-ip-prefix:Inject a Type 5 IP Prefix route' \
 'delete-mac-ip:Withdraw a Type 2 MAC/IP route by its key fields' \
 'delete-imet:Withdraw a Type 3 IMET route by its key fields' \
+'delete-ip-prefix:Withdraw a Type 5 IP Prefix route by its key fields' \
+'clear-duplicate-mac:Clear one duplicate-MAC local-origin quarantine' \
+'runtime:Show the committed ADR-0063 EVPN runtime generation' \
 'instances:List local EVPN instances configured on this VTEP. Empty when the daemon is acting purely as an EVPN route reflector' \
 'nexthops:List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)' \
 'vrfs:List configured IP-VRFs (Gate 9, ADR-0058) and their readiness verdict from the most recent reconcile pass' \
@@ -2260,15 +3123,30 @@ _rustbgpctl__subcmd__help__subcmd__evpn__subcmd__add-imet_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help evpn add-imet commands' commands "$@"
 }
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__add-ip-prefix_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__add-ip-prefix_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help evpn add-ip-prefix commands' commands "$@"
+}
 (( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__add-mac-ip_commands] )) ||
 _rustbgpctl__subcmd__help__subcmd__evpn__subcmd__add-mac-ip_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help evpn add-mac-ip commands' commands "$@"
 }
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__clear-duplicate-mac_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__clear-duplicate-mac_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help evpn clear-duplicate-mac commands' commands "$@"
+}
 (( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__delete-imet_commands] )) ||
 _rustbgpctl__subcmd__help__subcmd__evpn__subcmd__delete-imet_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help evpn delete-imet commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__delete-ip-prefix_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__delete-ip-prefix_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help evpn delete-ip-prefix commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__delete-mac-ip_commands] )) ||
 _rustbgpctl__subcmd__help__subcmd__evpn__subcmd__delete-mac-ip_commands() {
@@ -2295,10 +3173,39 @@ _rustbgpctl__subcmd__help__subcmd__evpn__subcmd__nexthops_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help evpn nexthops commands' commands "$@"
 }
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__runtime_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__runtime_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help evpn runtime commands' commands "$@"
+}
 (( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__vrfs_commands] )) ||
 _rustbgpctl__subcmd__help__subcmd__evpn__subcmd__vrfs_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help evpn vrfs commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__fib-table_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__fib-table_commands() {
+    local commands; commands=(
+'list:List the configured FIB tables and runtime availability' \
+'set:Create or replace a FIB table by name (full definition, not a patch)' \
+'delete:Delete a FIB table by name' \
+    )
+    _describe -t commands 'rustbgpctl help fib-table commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__fib-table__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__fib-table__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help fib-table delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__fib-table__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__fib-table__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help fib-table list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__fib-table__subcmd__set_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__fib-table__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help fib-table set commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__help__subcmd__flowspec_commands] )) ||
 _rustbgpctl__subcmd__help__subcmd__flowspec_commands() {
@@ -2464,6 +3371,7 @@ _rustbgpctl__subcmd__help__subcmd__policy_commands() {
 'set:Set (create or replace) a policy from a JSON file' \
 'delete:Delete a policy by name' \
 'chain:Manage global / per-neighbor import/export chains' \
+'explain:Explain the import-policy decision for a prefix on a neighbor (ADR-0073)\: why it was permitted / denied / withdrawn, or not-seen / evicted / stale. Reads the per-session decision cache; requires \`\[policy.explain\].enabled\` on the daemon' \
     )
     _describe -t commands 'rustbgpctl help policy commands' commands "$@"
 }
@@ -2507,6 +3415,11 @@ _rustbgpctl__subcmd__help__subcmd__policy__subcmd__chain__subcmd__show_commands(
 _rustbgpctl__subcmd__help__subcmd__policy__subcmd__delete_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help policy delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__policy__subcmd__explain_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__policy__subcmd__explain_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help policy explain commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__help__subcmd__policy__subcmd__get_commands] )) ||
 _rustbgpctl__subcmd__help__subcmd__policy__subcmd__get_commands() {
@@ -2835,6 +3748,7 @@ _rustbgpctl__subcmd__policy_commands() {
 'set:Set (create or replace) a policy from a JSON file' \
 'delete:Delete a policy by name' \
 'chain:Manage global / per-neighbor import/export chains' \
+'explain:Explain the import-policy decision for a prefix on a neighbor (ADR-0073)\: why it was permitted / denied / withdrawn, or not-seen / evicted / stale. Reads the per-session decision cache; requires \`\[policy.explain\].enabled\` on the daemon' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rustbgpctl policy commands' commands "$@"
@@ -2923,6 +3837,11 @@ _rustbgpctl__subcmd__policy__subcmd__delete_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl policy delete commands' commands "$@"
 }
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__explain_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__explain_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy explain commands' commands "$@"
+}
 (( $+functions[_rustbgpctl__subcmd__policy__subcmd__get_commands] )) ||
 _rustbgpctl__subcmd__policy__subcmd__get_commands() {
     local commands; commands=()
@@ -2936,6 +3855,7 @@ _rustbgpctl__subcmd__policy__subcmd__help_commands() {
 'set:Set (create or replace) a policy from a JSON file' \
 'delete:Delete a policy by name' \
 'chain:Manage global / per-neighbor import/export chains' \
+'explain:Explain the import-policy decision for a prefix on a neighbor (ADR-0073)\: why it was permitted / denied / withdrawn, or not-seen / evicted / stale. Reads the per-session decision cache; requires \`\[policy.explain\].enabled\` on the daemon' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rustbgpctl policy help commands' commands "$@"
@@ -2980,6 +3900,11 @@ _rustbgpctl__subcmd__policy__subcmd__help__subcmd__chain__subcmd__show_commands(
 _rustbgpctl__subcmd__policy__subcmd__help__subcmd__delete_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl policy help delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__help__subcmd__explain_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__help__subcmd__explain_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy help explain commands' commands "$@"
 }
 (( $+functions[_rustbgpctl__subcmd__policy__subcmd__help__subcmd__get_commands] )) ||
 _rustbgpctl__subcmd__policy__subcmd__help__subcmd__get_commands() {

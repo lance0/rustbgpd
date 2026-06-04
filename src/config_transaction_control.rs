@@ -28,6 +28,7 @@ const FIB_SECTION: &str = "[[fib_tables]]";
 const DYNAMIC_SECTION: &str = "[[dynamic_neighbors]]";
 const NEIGHBOR_ADD_SECTION: &str = "[[neighbors]] add";
 const NEIGHBOR_DELETE_SECTION: &str = "[[neighbors]] delete";
+const NEIGHBOR_MODIFY_SECTION: &str = "[[neighbors]] modify";
 
 /// Build the daemon-owned apply hook wired into `ConfigService`.
 #[must_use]
@@ -157,7 +158,7 @@ async fn commit_apply_family(
             Ok(committable_response(
                 post_commit_runtime_snapshot_token,
                 supported_sections,
-                "Committed [[neighbors]] add/delete transaction.\n".to_string(),
+                "Committed [[neighbors]] add/delete/modify transaction.\n".to_string(),
             ))
         }
     }
@@ -203,9 +204,11 @@ fn apply_family(sections: &[String]) -> Option<ApplyFamily> {
         [section] if section == DYNAMIC_SECTION => Some(ApplyFamily::DynamicNeighbors),
         sections
             if !sections.is_empty()
-                && sections
-                    .iter()
-                    .all(|s| s == NEIGHBOR_ADD_SECTION || s == NEIGHBOR_DELETE_SECTION) =>
+                && sections.iter().all(|s| {
+                    s == NEIGHBOR_ADD_SECTION
+                        || s == NEIGHBOR_DELETE_SECTION
+                        || s == NEIGHBOR_MODIFY_SECTION
+                }) =>
         {
             Some(ApplyFamily::StaticNeighbors)
         }
@@ -272,23 +275,28 @@ async fn commit_static_neighbors_locked(
         }
     };
     let neighbor_diff = diff_neighbors(&previous.neighbors, &candidate.neighbors);
-    if !neighbor_diff.changed.is_empty()
-        || committed_sections
-            .iter()
-            .any(|s| s != NEIGHBOR_ADD_SECTION && s != NEIGHBOR_DELETE_SECTION)
-    {
+    if committed_sections.iter().any(|s| {
+        s != NEIGHBOR_ADD_SECTION && s != NEIGHBOR_DELETE_SECTION && s != NEIGHBOR_MODIFY_SECTION
+    }) {
         let error = ConfigTransactionApplyError::Internal(
-            "static-neighbor transaction executor received a non-static-add/delete diff"
-                .to_string(),
+            "static-neighbor transaction executor received a non-static-neighbor diff".to_string(),
         );
         return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
     }
 
     let mut applied = Vec::new();
-    let added = match resolve_added_neighbors(candidate, &neighbor_diff.added) {
+    let added = match resolve_static_neighbors(candidate, &neighbor_diff.added) {
         Ok(added) => added,
         Err(error) => {
             return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
+        }
+    };
+    let changed = match resolve_static_neighbors(candidate, &neighbor_diff.changed) {
+        Ok(changed) => changed,
+        Err(error) => {
+            return Err(
+                rollback_static_and_snapshot(peer_mgr_tx, applied, previous_toml, error).await,
+            );
         }
     };
     for config in added {
@@ -301,6 +309,20 @@ async fn commit_static_neighbors_locked(
             config.address,
             config.interface.clone(),
         )));
+    }
+    for config in changed {
+        match reconfigure_static_peer(peer_mgr_tx, config).await {
+            Ok(previous) => applied.push(AppliedStaticOp::Modified(Box::new(previous))),
+            Err(error) => {
+                return Err(rollback_static_and_snapshot(
+                    peer_mgr_tx,
+                    applied,
+                    previous_toml,
+                    error,
+                )
+                .await);
+            }
+        }
     }
     for peer in neighbor_diff.removed {
         match delete_static_peer(peer_mgr_tx, peer.clone()).await {
@@ -323,9 +345,9 @@ async fn commit_static_neighbors_locked(
     Ok(())
 }
 
-fn resolve_added_neighbors(
+fn resolve_static_neighbors(
     candidate: &Config,
-    added: &[Neighbor],
+    neighbors: &[Neighbor],
 ) -> Result<Vec<PeerManagerNeighborConfig>, ConfigTransactionApplyError> {
     let resolved = candidate
         .resolved_neighbors()
@@ -342,7 +364,7 @@ fn resolve_added_neighbors(
             )
         })
         .collect();
-    added
+    neighbors
         .iter()
         .map(|neighbor| {
             let address = neighbor.address.parse().map_err(|error| {
@@ -501,9 +523,34 @@ async fn delete_static_peer(
         .map_err(ConfigTransactionApplyError::FailedPrecondition)
 }
 
+async fn reconfigure_static_peer(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    config: PeerManagerNeighborConfig,
+) -> Result<PeerManagerNeighborConfig, ConfigTransactionApplyError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(PeerManagerCommand::ReconfigurePeer {
+            config,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable("peer manager is unavailable".to_string())
+        })?;
+    reply_rx
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable(
+                "peer manager dropped static-neighbor reconfigure reply".to_string(),
+            )
+        })?
+        .map_err(ConfigTransactionApplyError::FailedPrecondition)
+}
+
 enum AppliedStaticOp {
     Added(PeerKey),
     Deleted(Box<PeerManagerNeighborConfig>),
+    Modified(Box<PeerManagerNeighborConfig>),
 }
 
 async fn rollback_static_ops(
@@ -527,6 +574,15 @@ async fn rollback_static_ops(
                     .map_err(|error| {
                         ConfigTransactionApplyError::Internal(format!(
                             "static-neighbor rollback add failed: {error:?}"
+                        ))
+                    })?;
+            }
+            AppliedStaticOp::Modified(config) => {
+                reconfigure_static_peer(peer_mgr_tx, *config)
+                    .await
+                    .map_err(|error| {
+                        ConfigTransactionApplyError::Internal(format!(
+                            "static-neighbor rollback reconfigure failed: {error}"
                         ))
                     })?;
             }
@@ -873,6 +929,18 @@ remote_asn = 65002
                         let _ = reply.send(Err(format!("peer {peer} not found")));
                     }
                 }
+                PeerManagerCommand::ReconfigurePeer { config, reply } => {
+                    let mut peers = peers.lock().await;
+                    let key = PeerKey::new(config.address, config.interface.clone());
+                    if let Some(index) = peers.iter().position(|existing| {
+                        PeerKey::new(existing.address, existing.interface.clone()) == key
+                    }) {
+                        let previous = std::mem::replace(&mut peers[index], config);
+                        let _ = reply.send(Ok(previous));
+                    } else {
+                        let _ = reply.send(Err(format!("peer {key} not found")));
+                    }
+                }
                 _ => panic!("unexpected peer-manager command in snapshot transaction test"),
             }
         }
@@ -926,6 +994,18 @@ remote_asn = 65002
                         let _ = reply.send(Ok(peers.remove(index)));
                     } else {
                         let _ = reply.send(Err(format!("peer {peer} not found")));
+                    }
+                }
+                PeerManagerCommand::ReconfigurePeer { config, reply } => {
+                    let mut peers = peers.lock().await;
+                    let key = PeerKey::new(config.address, config.interface.clone());
+                    if let Some(index) = peers.iter().position(|existing| {
+                        PeerKey::new(existing.address, existing.interface.clone()) == key
+                    }) {
+                        let previous = std::mem::replace(&mut peers[index], config);
+                        let _ = reply.send(Ok(previous));
+                    } else {
+                        let _ = reply.send(Err(format!("peer {key} not found")));
                     }
                 }
                 _ => panic!("unexpected peer-manager command in snapshot transaction test"),
@@ -1290,22 +1370,85 @@ remote_asn = 65003
     }
 
     #[tokio::test]
-    async fn static_neighbor_changed_diff_rolls_back_snapshot() {
+    async fn apply_commits_static_neighbor_modify_after_persist_ack() {
         let previous_toml = base_toml("");
-        let candidate_toml = previous_toml.replace("remote_asn = 65002", "remote_asn = 65102");
+        let candidate_toml =
+            previous_toml.replace("remote_asn = 65002", "remote_asn = 65002\nhold_time = 45");
         let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
-        let peers = Arc::new(Mutex::new(Vec::new()));
+        let previous_peer = peer_config_from_toml(&previous_toml, "10.0.0.2");
+        let peers = Arc::new(Mutex::new(vec![previous_peer]));
         let (peer_tx, peer_rx) = mpsc::channel(8);
         tokio::spawn(fake_snapshot_peer_manager(
             peer_rx,
             plan(
                 RuntimeConfigTransactionStatus::Committable,
-                vec!["[[neighbors]] add".to_string()],
+                vec!["[[neighbors]] modify".to_string()],
             ),
             snapshot_toml.clone(),
-            peers,
+            peers.clone(),
         ));
-        let (config_tx, _config_rx) = mpsc::channel(8);
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted {
+                candidate_toml,
+                ack: Some(ack),
+            }) = config_rx.recv().await
+            {
+                assert!(candidate_toml.contains("hold_time = 45"));
+                let _ = ack.send(Ok(()));
+            }
+        });
+
+        let response = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml: candidate_toml.clone(),
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        assert_eq!(response.committed_sections, vec!["[[neighbors]] modify"]);
+        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        let peers = peers.lock().await;
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].address.to_string(), "10.0.0.2");
+        assert_eq!(peers[0].hold_time, Some(45));
+    }
+
+    #[tokio::test]
+    async fn static_neighbor_modify_persistence_failure_rolls_back_peer_and_snapshot() {
+        let previous_toml = base_toml("");
+        let candidate_toml =
+            previous_toml.replace("remote_asn = 65002", "remote_asn = 65002\nhold_time = 45");
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+        let previous_peer = peer_config_from_toml(&previous_toml, "10.0.0.2");
+        let peers = Arc::new(Mutex::new(vec![previous_peer.clone()]));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[neighbors]] modify".to_string()],
+            ),
+            snapshot_toml.clone(),
+            peers.clone(),
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+                config_rx.recv().await
+            {
+                let _ = ack.send(Err("persist failed".to_string()));
+            }
+        });
 
         let err = apply_config_transaction(
             deps(None, peer_tx, Some(config_tx), Vec::new()),
@@ -1320,10 +1463,14 @@ remote_asn = 65003
         .unwrap_err();
 
         assert!(
-            matches!(err, ConfigTransactionApplyError::Internal(ref message) if message.contains("non-static-add/delete diff")),
+            matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref message) if message == "persist failed"),
             "{err:?}"
         );
         assert_eq!(*snapshot_toml.lock().await, previous_toml);
+        let peers = peers.lock().await;
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].address, previous_peer.address);
+        assert_eq!(peers[0].hold_time, previous_peer.hold_time);
     }
 
     #[tokio::test]

@@ -1626,6 +1626,11 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .supported_sections
             .push("[[neighbors]] delete".to_string());
     }
+    if !diff.neighbors.changed.is_empty() {
+        class
+            .supported_sections
+            .push("[[neighbors]] modify".to_string());
+    }
     if diff.dynamic_neighbors_changed {
         class
             .supported_sections
@@ -1640,11 +1645,6 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .push("mixed transaction families".to_string());
     }
 
-    if !diff.neighbors.changed.is_empty() {
-        class
-            .unsupported_sections
-            .push("[[neighbors]] modify".to_string());
-    }
     if !diff.peer_groups.added.is_empty()
         || !diff.peer_groups.removed.is_empty()
         || !diff.peer_groups.changed.is_empty()
@@ -1757,7 +1757,9 @@ fn transaction_sections_are_one_family(sections: &[String]) -> bool {
         match section.as_str() {
             "[[fib_tables]]" => has_fib = true,
             "[[dynamic_neighbors]]" => has_dynamic = true,
-            "[[neighbors]] add" | "[[neighbors]] delete" => has_static_neighbor = true,
+            "[[neighbors]] add" | "[[neighbors]] delete" | "[[neighbors]] modify" => {
+                has_static_neighbor = true;
+            }
             _ => {}
         }
     }

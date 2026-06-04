@@ -57,19 +57,20 @@ section executors behind that public contract.
    a token does not survive a daemon restart, and a client holding a pre-restart
    token must re-plan (apply returns `FAILED_PRECONDITION` on mismatch).
 4. **V1 supported surface is narrow on purpose.** The planner marks
-   `[[fib_tables]]` N→M/N→0 changes, `[[dynamic_neighbors]]` changes, static
-   neighbor adds, and static neighbor deletes as the v1 transaction surface.
-   Static neighbor modifies, policy/peer-group changes, global hot-applied
-   flags, effective inheritance impacts, and all restart-required sections are
-   rejected by the transaction planner until they have explicit executors.
+   `[[fib_tables]]` N→M/N→0 changes, `[[dynamic_neighbors]]` changes, and
+   static neighbor add/delete/modify changes as the v1 transaction surface.
+   Policy/peer-group changes, global hot-applied flags, effective inheritance
+   impacts, and all restart-required sections are rejected by the transaction
+   planner until they have explicit executors.
 5. **Apply execution is one pure runtime family at a time.** V1 commits pure
    full-set `[[fib_tables]]`, pure full-set `[[dynamic_neighbors]]`, or static
-   `[[neighbors]]` add/delete candidates. It re-plans under the shared
+   `[[neighbors]]` add/delete/modify candidates. It re-plans under the shared
    runtime-config coordinator, rejects mixed-family or unsupported candidates
    without mutation, stages the peer-manager snapshot, applies live runtime
    state, persists the exact accepted candidate with an acknowledgement, and
-   rolls back on every post-stage failure. Static-neighbor modifies remain
-   rejected until they have a dedicated reconcile/rollback executor.
+   rolls back on every post-stage failure. Static-neighbor modifies use the
+   same delete/re-add session-reconfigure semantics as SIGHUP, but with
+   transaction rollback rather than best-effort reconcile.
 6. **gNMI Set remains out of scope.** gNMI mutation must map to this transaction
    model rather than invent a parallel commit path, but this ADR does not
    implement OpenConfig config datastores or `Set`.
@@ -96,8 +97,8 @@ section executors behind that public contract.
   starting the FIB subsystem from an empty startup config remains
   restart-required. This matches SIGHUP and targeted FIB CRUD semantics.
 - Dynamic-neighbor transactions replace the full range set from the candidate
-  TOML. Static-neighbor transactions support add/delete only; modifying an
-  existing static neighbor remains a follow-up executor.
+  TOML. Static-neighbor transactions support add/delete/modify; modifies rebuild
+  the session like SIGHUP and preserve disabled / graceful-shutdown intent.
 - Follow-up executors should preserve the established pattern:
   validate candidate section against the live runtime snapshot, take the shared
   runtime-config coordinator, apply live mutation, persist with acknowledgement,

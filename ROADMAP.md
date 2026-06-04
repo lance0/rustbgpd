@@ -95,11 +95,10 @@ Later for what remains.
   and explicit v1 section classification. `ApplyConfigTransaction` is
   operator-only and can commit one pure runtime family at a time: full-set
   `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, or static `[[neighbors]]`
-  add/delete changes under the shared runtime-config coordinator, with
+  add/delete/modify changes under the shared runtime-config coordinator, with
   persistence ack and rollback on apply/persist failure. `rustbgpctl config
-  plan/apply` drives the text/JSON operator workflow. Next stacked slices:
-  static-neighbor modify executor, then remaining hot-reload sections whose
-  rollback semantics are ready.
+  plan/apply` drives the text/JSON operator workflow. Next useful slices are
+  the remaining hot-reload sections whose rollback semantics are ready.
   Keep gNMI `Set` read-only until OpenConfig mutation maps onto this transaction
   model rather than a parallel commit path. Exit: atomic commit where supported,
   explicit restart-required/rejected surfaces, rollback/receipt model, no partial
@@ -473,14 +472,20 @@ branch is between features.
   `INVALID_ARGUMENT`, or similar API-visible classes.
 - [ ] **Config transaction executor expansion.** ADR-0076 v1 intentionally
   supports one pure runtime family at a time. Next useful executor is
-  static-neighbor modify; after that, add hot-reload sections only when they have
-  a clear validate/apply/persist/rollback path under the runtime-config
-  coordinator.
-- [ ] **Config transaction static-add resolution scaling.**
-  `resolve_added_neighbors` currently resolves the full candidate neighbor set
-  and then selects the newly-added peers. Correct and simple, but O(N) in the
-  number of configured neighbors; optimize to resolve only additions if large
-  static-neighbor transactions become common.
+  whichever hot-reload section has a clear validate/apply/persist/rollback path
+  under the runtime-config coordinator.
+- [ ] **Config transaction static-neighbor resolution scaling.**
+  `resolve_static_neighbors` currently resolves the full candidate neighbor set
+  and then selects the added or changed peers. Correct and simple, but O(N) in
+  the number of configured neighbors; optimize to resolve only touched
+  neighbors if large static-neighbor transactions become common.
+- [ ] **Peer-manager add-without-start path for disabled reconfigure.**
+  `reconfigure_peer` preserves a disabled static peer by re-adding it and then
+  disabling it again, so the new session can briefly start and the modify is
+  coupled to `PeerHandle::start()` succeeding. Correct and rollback-safe, but
+  polish the lifecycle by splitting peer construction/registration from session
+  start so disabled-peer modifies and SIGHUP reconcile can rebuild the
+  `ManagedPeer` without transient bring-up.
 - [ ] **SIGHUP baseline from live runtime snapshot.** The runtime-config lock
   prevents SIGHUP from interleaving its apply step with transactions, but the
   signal path captures the comparison baseline before waiting on the lock. Pull

@@ -124,7 +124,7 @@ service ConfigService {
 
   // Commit a previously planned candidate transaction. V1 commits one pure
   // runtime family at a time: full-set `[[fib_tables]]`, full-set
-  // `[[dynamic_neighbors]]`, or static `[[neighbors]]` add/delete changes.
+  // `[[dynamic_neighbors]]`, or static `[[neighbors]]` add/delete/modify changes.
   // Mixed families and sections without an atomic executor are rejected
   // without mutation.
   rpc ApplyConfigTransaction(ApplyConfigTransactionRequest) returns (ConfigTransactionApplyResponse);
