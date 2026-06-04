@@ -66,6 +66,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   path used by FIB-table CRUD and config transactions now reports peer-manager
   snapshot rollback failures consistently too.
 
+- **Disabled static-peer reconfigure hardening.** Static-neighbor modify,
+  SIGHUP changed-peer reconcile, and peer-group hot-apply now rebuild a disabled
+  peer as disabled instead of re-adding it enabled and stopping it afterward.
+  That prevents a transient session start and preserves disabled state across
+  the SIGHUP reconcile path.
+
 - **ASPA draft v25 first-AS precondition.** Role-aware ASPA validation now
   checks that the most recently added AS in the `AS_PATH` matches the negotiated
   neighbor ASN, with the transparent route-server-client exception from the

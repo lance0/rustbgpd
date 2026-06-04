@@ -50,14 +50,24 @@ impl PeerManager {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "peer add wires transport, policy, BFD desired state, persistence, and events"
-    )]
     pub(super) async fn add_peer(
         &mut self,
         config: PeerManagerNeighborConfig,
         sync_config_snapshot: bool,
+    ) -> Result<(), String> {
+        self.add_peer_with_admin_state(config, sync_config_snapshot, true)
+            .await
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "peer add wires transport, policy, BFD desired state, persistence, and events"
+    )]
+    pub(super) async fn add_peer_with_admin_state(
+        &mut self,
+        config: PeerManagerNeighborConfig,
+        sync_config_snapshot: bool,
+        enabled: bool,
     ) -> Result<(), String> {
         let peer_key = PeerKey::new(config.address, config.interface.clone());
         let is_link_local = matches!(config.address, std::net::IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80);
@@ -153,14 +163,18 @@ impl PeerManager {
         );
 
         // ADR-0067 step 4b — strict BFD: create/store the peer but withhold BGP
-        // establishment until BFD is Up. Non-strict (the default) starts now.
+        // establishment until BFD is Up. Non-strict (the default) starts now
+        // only when the peer is administratively enabled.
         // The handle is spawned Idle either way; `start()` is what begins the
-        // FSM, so withholding is simply not sending it yet. Level-triggered: if
-        // BFD already reached Up before this add (the actor starts sessions at
-        // spawn), we do NOT withhold — start now, since no future transition
-        // would release the hold.
-        let withhold = self.bfd_should_withhold(&address);
-        if !withhold && let Err(e) = handle.start().await {
+        // FSM, so withholding is simply not sending it yet. Strict BFD is
+        // level-triggered: always pre-hold on add/enable, then release when the
+        // BFD actor confirms the current permitted state through a resync ack
+        // or a fresh transition.
+        let withhold = enabled && self.bfd_should_withhold(&address);
+        if enabled
+            && !withhold
+            && let Err(e) = handle.start().await
+        {
             warn!(%address, error = %e, "failed to start peer session");
             return Err(format!("failed to start peer: {e}"));
         }
@@ -174,7 +188,7 @@ impl PeerManager {
                 remote_asn,
                 description,
                 peer_group,
-                enabled: true,
+                enabled,
                 hold_time,
                 max_prefixes,
                 transport_config: transport,
@@ -193,16 +207,23 @@ impl PeerManager {
             self.current_config = next_config;
         }
 
-        // ADR-0067 step 4: (re-)arm this peer's BFD session. Critically covers
-        // the delete→add reconfigure cycle — a re-added BFD peer must clear its
-        // disabled mark so the actor restarts the session. A brand-new peer not
-        // in the startup-pinned BFD set is unaffected (BFD is restart-required).
-        self.set_bfd_peer_disabled(address, false);
-        // For a strict peer, mark it pre-held so the first BFD Up releases the
-        // withhold via the normal up→start path.
-        if withhold {
-            self.mark_bfd_withheld(address);
-            info!(%address, "strict BFD — withholding BGP establishment until BFD is Up");
+        if enabled {
+            // ADR-0067 step 4: (re-)arm this peer's BFD session. Critically
+            // covers the delete→add reconfigure cycle — a re-added BFD peer
+            // must clear its disabled mark so the actor restarts the session.
+            // A brand-new peer not in the startup-pinned BFD set is unaffected
+            // (BFD is restart-required).
+            self.set_bfd_peer_disabled(address, false);
+            // For a strict peer, mark it pre-held so the first BFD Up releases
+            // the withhold via the normal up→start path.
+            if withhold {
+                self.mark_bfd_withheld(address);
+                info!(%address, "strict BFD — withholding BGP establishment until BFD is Up");
+            }
+        } else {
+            // A disabled re-add is a live config object only; keep BGP stopped
+            // and keep the BFD desired session disabled until EnablePeer.
+            self.set_bfd_peer_disabled(address, true);
         }
         Ok(())
     }
@@ -240,7 +261,10 @@ impl PeerManager {
         let previous = self
             .delete_peer_checked(peer.clone(), false, config.tcp_ao.as_ref())
             .await?;
-        if let Err(add_error) = self.add_peer(config, false).await {
+        if let Err(add_error) = self
+            .add_peer_with_admin_state(config, false, was_enabled)
+            .await
+        {
             return match self
                 .restore_reconfigured_peer(
                     peer.clone(),
@@ -260,7 +284,7 @@ impl PeerManager {
         }
 
         if let Err(state_error) = self
-            .apply_reconfigured_peer_state(peer.clone(), was_enabled, graceful_shutdown)
+            .apply_reconfigured_peer_state(peer.clone(), graceful_shutdown)
             .await
         {
             return match self
@@ -295,20 +319,20 @@ impl PeerManager {
             self.delete_peer_checked(peer.clone(), false, previous.tcp_ao.as_ref())
                 .await?;
         }
-        self.add_peer(previous, false).await?;
-        self.apply_reconfigured_peer_state(peer, was_enabled, graceful_shutdown)
+        self.add_peer_with_admin_state(previous, false, was_enabled)
+            .await?;
+        self.apply_reconfigured_peer_state(peer, graceful_shutdown)
             .await
     }
 
     async fn apply_reconfigured_peer_state(
         &mut self,
         peer: PeerKey,
-        was_enabled: bool,
         graceful_shutdown: bool,
     ) -> Result<(), String> {
-        // Graceful-shutdown replay is best-effort like normal GSHUT fan-out;
-        // disabled-state replay below is mandatory so a failed reconfigure
-        // cannot accidentally bring a disabled peer up.
+        // Graceful-shutdown replay is best-effort like normal GSHUT fan-out.
+        // The enabled/disabled state itself is applied during add, before a
+        // disabled peer can transiently start.
         if graceful_shutdown
             && let Err(error) = self.set_graceful_shutdown(Some(peer.clone()), true).await
         {
@@ -317,9 +341,6 @@ impl PeerManager {
                 error = %error,
                 "failed to replay graceful-shutdown intent after peer reconfigure"
             );
-        }
-        if !was_enabled {
-            self.disable_peer(peer, None).await?;
         }
         Ok(())
     }

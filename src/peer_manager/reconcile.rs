@@ -24,22 +24,16 @@ impl PeerManager {
         let removed_count = removed.len();
         let changed_count = changed.len();
 
-        // Capture per-peer operator-runtime state that should survive
-        // a delete-then-readd cycle. RFC 8326 graceful-shutdown
-        // toggle: a static-peer config edit (e.g. `description` change)
-        // triggers a delete+readd in this reconcile path; without
-        // capturing the desired state by address, the freshly added
-        // ManagedPeer would come up with `advertise_graceful_shutdown
-        // = false`, silently dropping the toggle mid-maintenance and
-        // re-emitting untagged routes on the next outbound tick.
-        let preserved_gshut: HashMap<PeerKey, bool> = changed
+        // Capture per-peer operator-runtime state that should survive a
+        // delete-then-readd cycle. Runtime state is not encoded in the TOML
+        // candidate, so SIGHUP reconcile must carry it across explicitly.
+        let preserved_runtime_state: HashMap<PeerKey, (bool, bool)> = changed
             .iter()
             .filter_map(|cfg| {
                 let peer = PeerKey::new(cfg.address, cfg.interface.clone());
                 self.peers
                     .get(&peer)
-                    .filter(|m| m.advertise_graceful_shutdown)
-                    .map(|_| (peer, true))
+                    .map(|managed| (peer, (managed.enabled, managed.advertise_graceful_shutdown)))
             })
             .collect();
 
@@ -69,7 +63,13 @@ impl PeerManager {
                 });
                 continue;
             }
-            if let Err(e) = self.add_peer(cfg.clone(), false).await {
+            let was_enabled = preserved_runtime_state
+                .get(&addr)
+                .is_none_or(|(enabled, _)| *enabled);
+            if let Err(e) = self
+                .add_peer_with_admin_state(cfg.clone(), false, was_enabled)
+                .await
+            {
                 warn!(peer = %addr, error = %e, "reconcile: failed to re-add changed peer");
                 result.failures.push(ReconcileFailure {
                     kind: ReconcileFailureKind::ChangeAdd,
@@ -78,16 +78,18 @@ impl PeerManager {
                 });
             }
         }
-        // Replay preserved RFC 8326 toggles onto the freshly added
-        // peers. This goes through the same path as the operator's
-        // `rustbgpctl gshut` so the live session bool, ManagedPeer
-        // desired state, AND RIB refresh all advance in lockstep —
-        // even though the new session is mid-bring-up, the desired
-        // state is in place and the bool will be applied to the
-        // session's first emission once it reaches Established.
-        for (addr, enabled) in preserved_gshut {
+        // Replay preserved RFC 8326 toggles onto the freshly added peers. This
+        // goes through the same path as the operator's `rustbgpctl gshut` so
+        // the live session bool, ManagedPeer desired state, and RIB refresh all
+        // advance in lockstep. Disabled state was already applied during
+        // add_peer_with_admin_state above, so a disabled changed peer never
+        // transiently starts before being disabled again.
+        for (addr, (_was_enabled, gshut_enabled)) in preserved_runtime_state {
+            if !gshut_enabled {
+                continue;
+            }
             let label = addr.to_string();
-            if let Err(e) = self.set_graceful_shutdown(Some(addr), enabled).await {
+            if let Err(e) = self.set_graceful_shutdown(Some(addr), true).await {
                 warn!(
                     peer = %label,
                     error = %e,
