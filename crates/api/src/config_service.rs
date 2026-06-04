@@ -77,7 +77,8 @@ fn transaction_plan_to_proto(
 /// Map a peer-manager plan error to a gRPC status. A runtime snapshot-token
 /// mismatch is a stale-plan optimistic-concurrency failure
 /// (`FAILED_PRECONDITION`) — consistent with the apply path — not a malformed
-/// request; every other plan error is candidate validation (`INVALID_ARGUMENT`).
+/// request. Candidate validation errors map to `INVALID_ARGUMENT`; internal
+/// plan failures map to `INTERNAL`.
 fn plan_error_to_status(error: RuntimeConfigTransactionPlanError) -> Status {
     match error {
         RuntimeConfigTransactionPlanError::StaleSnapshot { .. } => {

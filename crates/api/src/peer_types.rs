@@ -291,7 +291,15 @@ impl RuntimeConfigTransactionPlanError {
 
 impl std::fmt::Display for RuntimeConfigTransactionPlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message())
+        match self {
+            Self::StaleSnapshot { expected, current } => {
+                write!(
+                    f,
+                    "runtime config snapshot changed: expected {expected}, current {current}"
+                )
+            }
+            Self::InvalidCandidate(message) | Self::Internal(message) => f.write_str(message),
+        }
     }
 }
 
