@@ -84,6 +84,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0073](0073-import-policy-explain.md) | Import policy explain via per-session decision cache | Accepted | 2026-05-28 |
 | [0074](0074-fib-table-crud-authz-tier.md) | Runtime FIB-table CRUD authorization tier | Accepted | 2026-06-01 |
 | [0075](0075-outbound-route-filtering.md) | Receive-side Address-Prefix Outbound Route Filtering (ORF) | Accepted | 2026-06-03 |
+| [0076](0076-config-transaction-model.md) | Config transaction model foundation | Accepted | 2026-06-03 |
 
 ## Template
 

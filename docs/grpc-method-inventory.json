@@ -6,12 +6,12 @@
   "additional_protos": [
     "proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto"
   ],
-  "method_count": 81,
+  "method_count": 83,
   "tier_counts": {
     "read": 0,
-    "sensitive_read": 43,
+    "sensitive_read": 44,
     "mutating": 19,
-    "operator_only": 19
+    "operator_only": 20
   },
   "methods": [
     { "service": "gnmi.gNMI", "method": "Capabilities", "path": "/gnmi.gNMI/Capabilities", "tier": "sensitive_read" },
@@ -21,6 +21,8 @@
     { "service": "rustbgpd.v1.GlobalService", "method": "GetGlobal", "path": "/rustbgpd.v1.GlobalService/GetGlobal", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.GlobalService", "method": "SetGlobal", "path": "/rustbgpd.v1.GlobalService/SetGlobal", "tier": "operator_only" },
     { "service": "rustbgpd.v1.ConfigService", "method": "DiffRuntimeConfig", "path": "/rustbgpd.v1.ConfigService/DiffRuntimeConfig", "tier": "sensitive_read" },
+    { "service": "rustbgpd.v1.ConfigService", "method": "PlanConfigTransaction", "path": "/rustbgpd.v1.ConfigService/PlanConfigTransaction", "tier": "sensitive_read" },
+    { "service": "rustbgpd.v1.ConfigService", "method": "ApplyConfigTransaction", "path": "/rustbgpd.v1.ConfigService/ApplyConfigTransaction", "tier": "operator_only" },
     { "service": "rustbgpd.v1.NeighborService", "method": "AddNeighbor", "path": "/rustbgpd.v1.NeighborService/AddNeighbor", "tier": "mutating" },
     { "service": "rustbgpd.v1.NeighborService", "method": "DeleteNeighbor", "path": "/rustbgpd.v1.NeighborService/DeleteNeighbor", "tier": "mutating" },
     { "service": "rustbgpd.v1.NeighborService", "method": "ListNeighbors", "path": "/rustbgpd.v1.NeighborService/ListNeighbors", "tier": "sensitive_read" },

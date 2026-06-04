@@ -116,6 +116,16 @@ service ConfigService {
   // snapshot. The response returns only redacted diff output; it never
   // exports the live config document.
   rpc DiffRuntimeConfig(DiffRuntimeConfigRequest) returns (DiffRuntimeConfigResponse);
+
+  // Validate and classify a candidate config transaction without mutating
+  // daemon state. The response includes an optimistic-concurrency token for
+  // the current runtime snapshot and a section-level v1 support plan.
+  rpc PlanConfigTransaction(PlanConfigTransactionRequest) returns (ConfigTransactionPlanResponse);
+
+  // Commit a previously planned candidate transaction. v1 executors are
+  // staged across follow-up PRs; callers should use PlanConfigTransaction for
+  // validate-only planning until this method advertises supported sections.
+  rpc ApplyConfigTransaction(ApplyConfigTransactionRequest) returns (ConfigTransactionApplyResponse);
 }
 
 message DiffRuntimeConfigRequest {
@@ -135,6 +145,60 @@ message DiffRuntimeConfigResponse {
   // Pretty-printed JSON object using the same schema as
   // `rustbgpd --diff --json`.
   string diff_json = 7;
+}
+
+message PlanConfigTransactionRequest {
+  // Complete candidate TOML contents to validate and classify.
+  string candidate_toml = 1;
+  // Optional optimistic-concurrency token from a previous plan response.
+  // Empty means "plan against whatever runtime snapshot is current now".
+  string expected_runtime_snapshot_token = 2;
+}
+
+enum ConfigTransactionPlanStatus {
+  CONFIG_TRANSACTION_PLAN_STATUS_UNSPECIFIED = 0;
+  CONFIG_TRANSACTION_PLAN_STATUS_NOOP = 1;
+  CONFIG_TRANSACTION_PLAN_STATUS_COMMITTABLE = 2;
+  CONFIG_TRANSACTION_PLAN_STATUS_REJECTED = 3;
+}
+
+message ConfigTransactionPlanResponse {
+  ConfigTransactionPlanStatus status = 1;
+  // Token for the live runtime config snapshot used to produce this plan.
+  string runtime_snapshot_token = 2;
+  DiffRuntimeConfigResponse diff = 3;
+  // Sections v1 knows how to commit atomically once the matching executor PRs
+  // are present. Empty when status is NOOP. May be non-empty when REJECTED — a
+  // supported section can coexist with an unsupported or restart-required one
+  // (or a second supported family), and any such mix rejects the whole
+  // single-family transaction.
+  repeated string supported_sections = 4;
+  // Hot-reloadable sections v1 deliberately refuses to commit yet.
+  repeated string unsupported_sections = 5;
+  // Sections that still require daemon restart and cannot be committed live.
+  repeated string restart_required_sections = 6;
+  // Short operator-facing summary of the transaction classification.
+  string human_text = 7;
+}
+
+message ApplyConfigTransactionRequest {
+  // Complete candidate TOML contents to validate and commit.
+  string candidate_toml = 1;
+  // Required optimistic-concurrency token from PlanConfigTransaction once v1
+  // executors are enabled. Empty is rejected by the apply path.
+  string expected_runtime_snapshot_token = 2;
+  // Optional idempotency/audit identifier supplied by automation.
+  string client_request_id = 3;
+  // Optional human change note. The daemon does not log this field verbatim
+  // because operators may include sensitive context.
+  string comment = 4;
+}
+
+message ConfigTransactionApplyResponse {
+  ConfigTransactionPlanStatus status = 1;
+  string runtime_snapshot_token = 2;
+  repeated string committed_sections = 3;
+  string human_text = 4;
 }
 
 // ---------------------------------------------------------------------------

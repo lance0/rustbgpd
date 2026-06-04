@@ -87,6 +87,38 @@ pub(crate) fn diff_runtime_config_summary(candidate_toml: &str) -> GrpcRequestSu
     ))
 }
 
+/// Summary for `PlanConfigTransaction`. Candidate TOML has the same
+/// credential risk as `DiffRuntimeConfig`, so log only size and token state.
+pub(crate) fn plan_config_transaction_summary(
+    candidate_toml: &str,
+    expected_runtime_snapshot_token: &str,
+) -> GrpcRequestSummary {
+    debug_assert!(CREDENTIAL_MASK_TABLE.contains(&"PlanConfigTransactionRequest.candidate_toml"));
+    GrpcRequestSummary::new(format!(
+        "candidate_toml={REDACTED} candidate_toml_bytes={} expected_runtime_snapshot_token_present={}",
+        candidate_toml.len(),
+        !expected_runtime_snapshot_token.is_empty()
+    ))
+}
+
+/// Summary for `ApplyConfigTransaction`. Candidate TOML and free-form comments
+/// are not logged verbatim.
+pub(crate) fn apply_config_transaction_summary(
+    candidate_toml: &str,
+    expected_runtime_snapshot_token: &str,
+    client_request_id: &str,
+    comment: &str,
+) -> GrpcRequestSummary {
+    debug_assert!(CREDENTIAL_MASK_TABLE.contains(&"ApplyConfigTransactionRequest.candidate_toml"));
+    GrpcRequestSummary::new(format!(
+        "candidate_toml={REDACTED} candidate_toml_bytes={} expected_runtime_snapshot_token_present={} client_request_id={} comment_present={}",
+        candidate_toml.len(),
+        !expected_runtime_snapshot_token.is_empty(),
+        safe_summary_value(client_request_id),
+        !comment.is_empty()
+    ))
+}
+
 /// Summary for `ApplyEvpnRuntime`. Candidate TOML has the same
 /// credential risk as `DiffRuntimeConfig`, so log only size and mode.
 pub(crate) fn apply_evpn_runtime_summary(
@@ -125,6 +157,8 @@ pub(crate) fn set_peer_group_summary(
 /// Explicit credential fields covered by this audit-summary layer.
 pub(crate) const CREDENTIAL_MASK_TABLE: &[&str] = &[
     "DiffRuntimeConfigRequest.candidate_toml",
+    "PlanConfigTransactionRequest.candidate_toml",
+    "ApplyConfigTransactionRequest.candidate_toml",
     "ApplyEvpnRuntimeRequest.candidate_toml",
     "PeerGroupDefinition.md5_password",
     "candidate_toml:tcp_ao.key",
@@ -156,6 +190,39 @@ mod tests {
     }
 
     #[test]
+    fn plan_config_transaction_summary_redacts_candidate_toml() {
+        let summary = plan_config_transaction_summary(
+            "md5_password = \"secret\"\ntcp_ao = { key = \"ao-secret\" }\n",
+            "fnv1a64:abc:1",
+        );
+        assert!(summary.as_str().contains("candidate_toml=<redacted>"));
+        assert!(summary.as_str().contains("candidate_toml_bytes="));
+        assert!(
+            summary
+                .as_str()
+                .contains("expected_runtime_snapshot_token_present=true")
+        );
+        assert!(!summary.as_str().contains("secret"));
+        assert!(!summary.as_str().contains("ao-secret"));
+    }
+
+    #[test]
+    fn apply_config_transaction_summary_redacts_candidate_and_comment() {
+        let summary = apply_config_transaction_summary(
+            "md5_password = \"secret\"\ntcp_ao = { key = \"ao-secret\" }\n",
+            "fnv1a64:abc:1",
+            "deploy-42",
+            "secret maintenance note",
+        );
+        assert!(summary.as_str().contains("candidate_toml=<redacted>"));
+        assert!(summary.as_str().contains("client_request_id=deploy-42"));
+        assert!(summary.as_str().contains("comment_present=true"));
+        assert!(!summary.as_str().contains("secret"));
+        assert!(!summary.as_str().contains("ao-secret"));
+        assert!(!summary.as_str().contains("maintenance"));
+    }
+
+    #[test]
     fn apply_evpn_runtime_summary_redacts_candidate_toml() {
         let summary = apply_evpn_runtime_summary(
             "md5_password = \"secret\"\ntcp_ao = { key = \"ao-secret\" }\n",
@@ -181,6 +248,8 @@ mod tests {
     #[test]
     fn credential_mask_table_lists_current_secret_ingress() {
         assert!(CREDENTIAL_MASK_TABLE.contains(&"DiffRuntimeConfigRequest.candidate_toml"));
+        assert!(CREDENTIAL_MASK_TABLE.contains(&"PlanConfigTransactionRequest.candidate_toml"));
+        assert!(CREDENTIAL_MASK_TABLE.contains(&"ApplyConfigTransactionRequest.candidate_toml"));
         assert!(CREDENTIAL_MASK_TABLE.contains(&"ApplyEvpnRuntimeRequest.candidate_toml"));
         assert!(CREDENTIAL_MASK_TABLE.contains(&"PeerGroupDefinition.md5_password"));
         assert!(CREDENTIAL_MASK_TABLE.contains(&"candidate_toml:tcp_ao.key"));

@@ -1138,6 +1138,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<String> 
     cmp_field!(route_server_client);
     cmp_field!(role);
     cmp_field!(strict_role);
+    cmp_field!(prefix_orf_receive);
     cmp_field!(remove_private_as);
     cmp_field!(add_path);
     cmp_field!(log_level);
@@ -1240,6 +1241,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.route_server_client == new.route_server_client
         && old.role == new.role
         && old.strict_role == new.strict_role
+        && old.prefix_orf_receive == new.prefix_orf_receive
         && old.remove_private_as == new.remove_private_as
         && old.add_path == new.add_path
         && old.log_level == new.log_level
@@ -1509,6 +1511,238 @@ impl ConfigDiff {
     pub fn has_any_changes(&self) -> bool {
         self.has_actionable_changes() || self.has_informational_changes()
     }
+}
+
+/// Section-level v1 transaction support classification.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "field names mirror ConfigTransactionPlanResponse proto repeated fields"
+)]
+pub struct ConfigTransactionSectionClassification {
+    /// Sections the v1 transaction model can commit once their executor slice
+    /// is present.
+    pub supported_sections: Vec<String>,
+    /// Hot-reloadable sections that are intentionally outside v1's commit
+    /// executor set.
+    pub unsupported_sections: Vec<String>,
+    /// Sections that still require a daemon restart.
+    pub restart_required_sections: Vec<String>,
+}
+
+impl ConfigTransactionSectionClassification {
+    /// The candidate contains no differences.
+    pub fn is_noop(&self) -> bool {
+        self.supported_sections.is_empty()
+            && self.unsupported_sections.is_empty()
+            && self.restart_required_sections.is_empty()
+    }
+
+    /// The candidate is wholly inside v1's supported commit surface.
+    pub fn is_committable(&self) -> bool {
+        !self.supported_sections.is_empty()
+            && self.unsupported_sections.is_empty()
+            && self.restart_required_sections.is_empty()
+    }
+}
+
+/// Per-process key for the optimistic config-transaction snapshot token.
+///
+/// The snapshot token is a change detector handed to `sensitive_read` plan
+/// callers — not a credential or a config document. But hashing the canonical
+/// config *unkeyed* would turn it into an offline oracle: the serialization
+/// includes secret-bearing fields (`md5_password`, `tcp_ao.key`), so a caller
+/// who already knows the rest of the config could brute-force a weak secret by
+/// hashing guesses and matching the returned token. A per-process random key
+/// closes that — without the key a caller cannot recompute the digest for a
+/// guessed secret. The full config (secrets included) is still hashed, so a
+/// secret rotation invalidates a stale plan.
+///
+/// The key is seeded once when the peer manager is constructed and never leaves
+/// the process, so tokens are **process-local**: a token does not survive a
+/// daemon restart, and a client holding a pre-restart token must re-plan (apply
+/// returns `FAILED_PRECONDITION` on mismatch). Plan and apply both run in this
+/// process against the same peer-manager key, so they compare correctly within
+/// a daemon lifetime.
+#[derive(Clone)]
+pub struct RuntimeSnapshotKey(std::collections::hash_map::RandomState);
+
+impl std::fmt::Debug for RuntimeSnapshotKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never render the key material.
+        f.write_str("RuntimeSnapshotKey(<redacted>)")
+    }
+}
+
+impl RuntimeSnapshotKey {
+    /// Seed a fresh per-process key from the OS RNG (via `RandomState`).
+    #[must_use]
+    pub fn random() -> Self {
+        Self(std::collections::hash_map::RandomState::new())
+    }
+
+    /// Keyed change-detector token for `config`. Hashes the canonical TOML
+    /// serialization under this key, so the token changes when any config byte
+    /// relevant to a candidate changes (secrets included) but cannot be
+    /// reproduced by a caller who does not hold the key.
+    pub fn token(&self, config: &Config) -> Result<String, String> {
+        use std::hash::{BuildHasher, Hasher};
+        // Canonical because `toml::Value::Table` is `BTreeMap`-backed (keys
+        // sorted) unless toml's `preserve_order` feature is enabled, which it is
+        // not here. That makes the token independent of `HashMap` insertion
+        // order for map-valued config (peer_groups, roles, policy definitions,
+        // neighbor_sets). If `preserve_order` is ever turned on, this token
+        // would silently become order-dependent — re-establish canonicalization
+        // (e.g. sort) before doing so.
+        let canonical = toml::Value::try_from(config)
+            .map_err(|error| format!("failed to canonicalize runtime config snapshot: {error}"))?;
+        let normalized = toml::to_string_pretty(&canonical)
+            .map_err(|error| format!("failed to serialize runtime config snapshot: {error}"))?;
+        let mut hasher = self.0.build_hasher();
+        hasher.write(normalized.as_bytes());
+        Ok(format!("kv1:{:016x}:{}", hasher.finish(), normalized.len()))
+    }
+}
+
+/// Classify a validated config diff for the v1 config transaction model.
+///
+/// This deliberately does not mirror all SIGHUP reload-applied sections. The
+/// transaction model needs an atomic executor for each section it claims; PR1
+/// only exposes the validate-only planner and the safe surface that later PRs
+/// will execute.
+#[expect(
+    clippy::too_many_lines,
+    reason = "section classifier intentionally lists every diff bucket explicitly"
+)]
+pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSectionClassification {
+    let mut class = ConfigTransactionSectionClassification::default();
+
+    if !diff.neighbors.added.is_empty() {
+        class
+            .supported_sections
+            .push("[[neighbors]] add".to_string());
+    }
+    if !diff.neighbors.removed.is_empty() {
+        class
+            .supported_sections
+            .push("[[neighbors]] delete".to_string());
+    }
+    if diff.dynamic_neighbors_changed {
+        class
+            .supported_sections
+            .push("[[dynamic_neighbors]]".to_string());
+    }
+    if diff.fib_tables_changed && !diff.fib_tables_requires_restart {
+        class.supported_sections.push("[[fib_tables]]".to_string());
+    }
+
+    if !diff.neighbors.changed.is_empty() {
+        class
+            .unsupported_sections
+            .push("[[neighbors]] modify".to_string());
+    }
+    if !diff.peer_groups.added.is_empty()
+        || !diff.peer_groups.removed.is_empty()
+        || !diff.peer_groups.changed.is_empty()
+    {
+        class.unsupported_sections.push("[peer_groups]".to_string());
+    }
+    if !diff.policy.definitions_added.is_empty()
+        || !diff.policy.definitions_removed.is_empty()
+        || !diff.policy.definitions_changed.is_empty()
+        || !diff.policy.neighbor_sets_added.is_empty()
+        || !diff.policy.neighbor_sets_removed.is_empty()
+        || !diff.policy.neighbor_sets_changed.is_empty()
+        || diff.policy.import_chain_changed
+        || diff.policy.export_chain_changed
+    {
+        class.unsupported_sections.push("[policy]".to_string());
+    }
+    if !diff.effective_neighbor_impact.is_empty() {
+        class
+            .unsupported_sections
+            .push("effective neighbor inheritance impact".to_string());
+    }
+    if diff.honor_graceful_shutdown_changed {
+        class
+            .unsupported_sections
+            .push("[global].honor_graceful_shutdown".to_string());
+    }
+    if diff.honor_blackhole_changed {
+        class
+            .unsupported_sections
+            .push("[global].honor_blackhole".to_string());
+    }
+
+    if diff.global_changed {
+        class.restart_required_sections.push("[global]".to_string());
+    }
+    if diff.rpki_changed {
+        class.restart_required_sections.push("[rpki]".to_string());
+    }
+    if diff.bmp_changed {
+        class.restart_required_sections.push("[bmp]".to_string());
+    }
+    if diff.mrt_changed {
+        class.restart_required_sections.push("[mrt]".to_string());
+    }
+    if diff.evpn_instances_changed {
+        class
+            .restart_required_sections
+            .push("[[evpn_instances]]".to_string());
+    }
+    if diff.evpn_ip_vrfs_changed {
+        class
+            .restart_required_sections
+            .push("[[evpn_ip_vrfs]]".to_string());
+    }
+    if diff.ethernet_segments_changed {
+        class
+            .restart_required_sections
+            .push("[[ethernet_segments]]".to_string());
+    }
+    if diff.fib_tables_requires_restart {
+        class
+            .restart_required_sections
+            .push("[[fib_tables]] startup-from-empty".to_string());
+    }
+    if diff.apply_bum_enforcement_changed {
+        class
+            .restart_required_sections
+            .push("apply_bum_enforcement".to_string());
+    }
+    if diff.blackhole_fib_discard_changed {
+        class
+            .restart_required_sections
+            .push("BLACKHOLE FIB discard".to_string());
+    }
+    if diff.neighbor_tcp_ao_changed {
+        class
+            .restart_required_sections
+            .push("[[neighbors]].tcp_ao".to_string());
+    }
+    if diff.bfd_changed {
+        class
+            .restart_required_sections
+            .push("[[bfd_profiles]] / neighbor BFD".to_string());
+    }
+    if diff.policy_explain_changed {
+        class
+            .restart_required_sections
+            .push("[policy.explain]".to_string());
+    }
+    if diff.policy.import_changed {
+        class
+            .restart_required_sections
+            .push("[policy.import] inline".to_string());
+    }
+    if diff.policy.export_changed {
+        class
+            .restart_required_sections
+            .push("[policy.export] inline".to_string());
+    }
+
+    class
 }
 
 /// JSON schema shared by `rustbgpd --diff --json` and the live runtime
@@ -2569,6 +2803,7 @@ pub fn describe_peer_group_changes(old: &PeerGroupConfig, new: &PeerGroupConfig)
     cmp_field!(route_server_client);
     cmp_field!(role);
     cmp_field!(strict_role);
+    cmp_field!(prefix_orf_receive);
     cmp_field!(remove_private_as);
     cmp_field!(add_path);
     cmp_field!(log_level);

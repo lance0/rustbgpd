@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use rustbgpd_api::peer_types::{
     FibTableSnapshot, PeerKey, PeerManagerNeighborConfig, ReconcileFailure, ReconcileFailureKind,
-    ReconcileResult, RuntimeConfigDiff,
+    ReconcileResult, RuntimeConfigDiff, RuntimeConfigTransactionPlan,
+    RuntimeConfigTransactionStatus,
 };
 use tracing::{info, warn};
 
@@ -123,16 +124,58 @@ impl PeerManager {
         let candidate =
             Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")?;
         let diff = crate::config::diff_config(&self.current_config, &candidate);
-        let diff_json = serde_json::to_string_pretty(&crate::config::config_diff_json_value(&diff))
-            .map_err(|error| format!("failed to serialize config diff: {error}"))?;
-        Ok(RuntimeConfigDiff {
-            has_actionable_changes: diff.has_actionable_changes(),
-            has_reload_applied_changes: diff.has_reload_applied_changes(),
-            has_restart_required_changes: diff.has_restart_required_changes(),
-            has_informational_changes: diff.has_informational_changes(),
-            has_any_changes: diff.has_any_changes(),
-            human_text: crate::config::format_config_diff(&diff),
-            diff_json,
+        runtime_config_diff_from_config_diff(&diff)
+    }
+
+    pub(super) fn plan_config_transaction(
+        &self,
+        candidate_toml: &str,
+        expected_runtime_snapshot_token: Option<&str>,
+    ) -> Result<RuntimeConfigTransactionPlan, String> {
+        let runtime_snapshot_token = self.snapshot_key.token(&self.current_config)?;
+        if let Some(expected) = expected_runtime_snapshot_token.filter(|token| !token.is_empty())
+            && expected != runtime_snapshot_token
+        {
+            return Err(format!(
+                "runtime config snapshot changed: expected {expected}, current {runtime_snapshot_token}"
+            ));
+        }
+
+        let candidate =
+            Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")?;
+        // Token the resulting live config would carry once this candidate is
+        // committed. The apply path returns it so a client can chain a follow-up
+        // apply without re-planning; computing it here keeps every token under
+        // the peer-manager's key. For the v1 single-family surface the committed
+        // state equals the candidate (full-snapshot families) or differs only in
+        // the one staged family (FIB), which the candidate already reflects.
+        let post_commit_runtime_snapshot_token = self.snapshot_key.token(&candidate)?;
+        let diff = crate::config::diff_config(&self.current_config, &candidate);
+        let classification = crate::config::classify_config_transaction_v1(&diff);
+        let status = if classification.is_noop() {
+            RuntimeConfigTransactionStatus::Noop
+        } else if classification.is_committable() {
+            RuntimeConfigTransactionStatus::Committable
+        } else {
+            RuntimeConfigTransactionStatus::Rejected
+        };
+        let diff = runtime_config_diff_from_config_diff(&diff)?;
+        let human_text = format_transaction_plan_text(
+            status,
+            &classification.supported_sections,
+            &classification.unsupported_sections,
+            &classification.restart_required_sections,
+        );
+
+        Ok(RuntimeConfigTransactionPlan {
+            status,
+            runtime_snapshot_token,
+            post_commit_runtime_snapshot_token,
+            diff,
+            supported_sections: classification.supported_sections,
+            unsupported_sections: classification.unsupported_sections,
+            restart_required_sections: classification.restart_required_sections,
+            human_text,
         })
     }
 
@@ -165,4 +208,59 @@ impl PeerManager {
     pub(super) fn set_fib_tables_snapshot(&mut self, tables: &[FibTableSnapshot]) {
         self.current_config.fib_tables = tables.iter().map(fib_table_snapshot_to_config).collect();
     }
+}
+
+fn runtime_config_diff_from_config_diff(
+    diff: &crate::config::ConfigDiff,
+) -> Result<RuntimeConfigDiff, String> {
+    let diff_json = serde_json::to_string_pretty(&crate::config::config_diff_json_value(diff))
+        .map_err(|error| format!("failed to serialize config diff: {error}"))?;
+    Ok(RuntimeConfigDiff {
+        has_actionable_changes: diff.has_actionable_changes(),
+        has_reload_applied_changes: diff.has_reload_applied_changes(),
+        has_restart_required_changes: diff.has_restart_required_changes(),
+        has_informational_changes: diff.has_informational_changes(),
+        has_any_changes: diff.has_any_changes(),
+        human_text: crate::config::format_config_diff(diff),
+        diff_json,
+    })
+}
+
+fn format_transaction_plan_text(
+    status: RuntimeConfigTransactionStatus,
+    supported_sections: &[String],
+    unsupported_sections: &[String],
+    restart_required_sections: &[String],
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    match status {
+        RuntimeConfigTransactionStatus::Noop => out.push_str("No changes.\n"),
+        RuntimeConfigTransactionStatus::Committable => {
+            out.push_str("Config transaction is committable by v1.\n");
+        }
+        RuntimeConfigTransactionStatus::Rejected => {
+            out.push_str("Config transaction is not committable by v1.\n");
+        }
+    }
+    if !supported_sections.is_empty() {
+        out.push_str("Supported sections:\n");
+        for section in supported_sections {
+            let _ = writeln!(out, "  - {section}");
+        }
+    }
+    if !unsupported_sections.is_empty() {
+        out.push_str("Unsupported sections:\n");
+        for section in unsupported_sections {
+            let _ = writeln!(out, "  - {section}");
+        }
+    }
+    if !restart_required_sections.is_empty() {
+        out.push_str("Restart-required sections:\n");
+        for section in restart_required_sections {
+            let _ = writeln!(out, "  - {section}");
+        }
+    }
+    out
 }

@@ -7,7 +7,9 @@ operational-state subset. It is intended for collectors and tools such as
 This is not a full OpenConfig router model. The v1 surface is deliberately
 narrow: `Capabilities`, `Get`, and `Subscribe` for BGP global and neighbor
 state. `Set` is present because gNMI defines it, but always returns
-`UNIMPLEMENTED` after authorization.
+`UNIMPLEMENTED` after authorization. ADR-0076 adds a native gRPC config
+transaction planner; it is not an OpenConfig datastore and does not change this
+read-only gNMI boundary.
 
 Design details live in [ADR-0070](adr/0070-gnmi-openconfig-telemetry.md). The
 complete native gRPC reference remains [API.md](API.md).
@@ -212,7 +214,7 @@ above one hour is capped at the 1-hour ceiling.
 | `UNIMPLEMENTED` for a path | The path is valid OpenConfig but outside rustbgpd's supported whitelist. This is expected for per-AFI counters, negotiated capabilities, `last-established`, and unsupported subtrees. |
 | `INVALID_ARGUMENT` | The path is malformed, uses unsupported key syntax, or omits required keys such as `network-instance`, `protocol`, or `neighbor-address`. |
 | `NOT_FOUND` | The requested keyed object does not exist, such as a neighbor address that is not configured. |
-| `Set` returns `UNIMPLEMENTED` | Expected for an authorized operator-tier principal. gNMI mutation is deferred until rustbgpd has a daemon-wide config transaction model. |
+| `Set` returns `UNIMPLEMENTED` | Expected for an authorized operator-tier principal. gNMI mutation is deferred until OpenConfig `Set` can map onto the ADR-0076 transaction model without a parallel commit path. |
 
 ## Interop Proof
 

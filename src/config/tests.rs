@@ -3424,6 +3424,29 @@ fn diff_neighbors_ignores_tcp_ao_only_changes_because_reload_pins_them() {
 }
 
 #[test]
+fn diff_neighbors_detects_prefix_orf_receive_only_change() {
+    // ORF is negotiated in OPEN like add_path / families / role, so it is live
+    // config (effective on the next session via the ReconcilePeers delete/re-add
+    // path), NOT a startup-pinned resource like tcp_ao / bfd. A bare
+    // prefix_orf_receive toggle must therefore surface as a changed neighbor,
+    // not a silent no-op (the inverse of the tcp_ao case above).
+    let old = vec![test_neighbor("10.0.0.1", 65001)];
+    let mut new_neighbor = test_neighbor("10.0.0.1", 65001);
+    new_neighbor.prefix_orf_receive = Some(true);
+
+    let diff = super::diff_neighbors(&old, &[new_neighbor]);
+    assert!(diff.added.is_empty());
+    assert!(diff.removed.is_empty());
+    assert_eq!(diff.changed.len(), 1);
+
+    let changes = super::describe_neighbor_changes(&old[0], &diff.changed[0]);
+    assert!(
+        changes.iter().any(|c| c.contains("prefix_orf_receive")),
+        "describe_neighbor_changes must name prefix_orf_receive, got {changes:?}"
+    );
+}
+
+#[test]
 fn diff_config_flags_tcp_ao_changes_as_restart_required() {
     let mut old = parse(valid_toml()).unwrap();
     old.neighbors[0].tcp_ao = Some(TcpAoConfig {
@@ -6534,6 +6557,273 @@ peer_group = "ix-members"
         serde_json::Value::Bool(true)
     );
     assert!(text.contains("[[dynamic_neighbors]] matcher rebuilt"));
+}
+
+#[test]
+fn transaction_v1_classifies_noop_candidate() {
+    let config = parse(valid_toml()).unwrap();
+    let diff = diff_config(&config, &config);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(class.is_noop());
+    assert!(!class.is_committable());
+}
+
+#[test]
+fn transaction_v1_classifies_supported_runtime_sections() {
+    let with_table = |table_id: u32| {
+        format!(
+            r#"
+{}
+
+[peer_groups.ix-members]
+
+[[neighbors]]
+address = "10.0.0.99"
+remote_asn = 65099
+
+[[fib_tables]]
+name = "edge"
+table_id = {table_id}
+metric = 200
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix-members"
+"#,
+            valid_toml()
+        )
+    };
+    let old = parse(&with_table(1000)).unwrap();
+    let new_toml = format!(
+        r#"
+{}
+
+[peer_groups.ix-members]
+
+[[neighbors]]
+address = "10.0.0.100"
+remote_asn = 65100
+
+[[fib_tables]]
+name = "edge"
+table_id = 1001
+metric = 200
+
+[[dynamic_neighbors]]
+prefix = "192.0.3.0/24"
+peer_group = "ix-members"
+"#,
+        valid_toml()
+    );
+    let new = parse(&new_toml).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(class.is_committable());
+    assert_eq!(
+        class.supported_sections,
+        vec![
+            "[[neighbors]] add",
+            "[[neighbors]] delete",
+            "[[dynamic_neighbors]]",
+            "[[fib_tables]]",
+        ]
+    );
+    assert!(class.unsupported_sections.is_empty());
+    assert!(class.restart_required_sections.is_empty());
+}
+
+#[test]
+fn transaction_v1_rejects_unsupported_reload_sections() {
+    let old_toml = format!(
+        r#"
+{}
+
+[peer_groups.ix-members]
+hold_time = 90
+
+[[neighbors]]
+address = "10.0.0.101"
+remote_asn = 65101
+hold_time = 90
+peer_group = "ix-members"
+"#,
+        valid_toml()
+    );
+    let new_toml = format!(
+        r#"
+{}
+
+[peer_groups.ix-members]
+hold_time = 120
+
+[[neighbors]]
+address = "10.0.0.101"
+remote_asn = 65101
+hold_time = 120
+peer_group = "ix-members"
+"#,
+        valid_toml()
+    );
+    let old = parse(&old_toml).unwrap();
+    let new = parse(&new_toml).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(!class.is_committable());
+    assert!(
+        class
+            .unsupported_sections
+            .contains(&"[[neighbors]] modify".to_string())
+    );
+    assert!(
+        class
+            .unsupported_sections
+            .contains(&"[peer_groups]".to_string())
+    );
+    assert!(class.supported_sections.is_empty());
+    assert!(class.restart_required_sections.is_empty());
+}
+
+#[test]
+fn transaction_v1_classifies_prefix_orf_receive_toggle_as_neighbor_modify() {
+    // A bare prefix_orf_receive toggle on an existing neighbor is a
+    // [[neighbors]] modify. The v1 transaction surface supports static neighbor
+    // add/delete only, so a modify must be rejected — not classified as a no-op
+    // (which it silently was while prefix_orf_receive was invisible to the diff)
+    // and not committable — until a session-reconfigure executor exists.
+    let with_orf = |orf: bool| {
+        format!(
+            r#"
+{}
+
+[[neighbors]]
+address = "10.0.0.102"
+remote_asn = 65102
+prefix_orf_receive = {orf}
+"#,
+            valid_toml()
+        )
+    };
+    let old = parse(&with_orf(false)).unwrap();
+    let new = parse(&with_orf(true)).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(!class.is_noop(), "ORF toggle must not classify as a no-op");
+    assert!(!class.is_committable());
+    assert!(
+        class
+            .unsupported_sections
+            .contains(&"[[neighbors]] modify".to_string()),
+        "got {:?}",
+        class.unsupported_sections
+    );
+    assert!(class.supported_sections.is_empty());
+    assert!(class.restart_required_sections.is_empty());
+}
+
+#[test]
+fn transaction_v1_rejects_restart_required_sections() {
+    let old = parse(valid_toml()).unwrap();
+    let new_toml = format!(
+        r#"
+{}
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+"#,
+        valid_toml()
+    );
+    let new = parse(&new_toml).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(!class.is_committable());
+    assert!(class.supported_sections.is_empty());
+    assert!(
+        class
+            .restart_required_sections
+            .contains(&"[[fib_tables]] startup-from-empty".to_string())
+    );
+}
+
+#[test]
+fn runtime_snapshot_token_is_stable_and_changes_with_config() {
+    let old = parse(valid_toml()).unwrap();
+    let mut new = old.clone();
+    new.global.honor_graceful_shutdown = !new.global.honor_graceful_shutdown;
+
+    // Same key + same config => same token; same key + changed config => differs.
+    let key = RuntimeSnapshotKey::random();
+    let token_a = key.token(&old).unwrap();
+    let token_b = key.token(&old).unwrap();
+    let token_c = key.token(&new).unwrap();
+
+    assert_eq!(token_a, token_b);
+    assert_ne!(token_a, token_c);
+    assert!(token_a.starts_with("kv1:"));
+}
+
+#[test]
+fn runtime_snapshot_token_changes_when_only_a_secret_rotates() {
+    // The token hashes the full config, secrets included, so a bare secret
+    // rotation still invalidates a stale optimistic-concurrency token (ADR-0076:
+    // the token must change if any candidate-relevant config byte changes).
+    let mut old = parse(valid_toml()).unwrap();
+    old.neighbors[0].md5_password = Some("old-secret".to_string());
+    let mut new = old.clone();
+    new.neighbors[0].md5_password = Some("new-secret".to_string());
+
+    let key = RuntimeSnapshotKey::random();
+    assert_ne!(key.token(&old).unwrap(), key.token(&new).unwrap());
+}
+
+#[test]
+fn runtime_snapshot_token_differs_across_keys() {
+    // The token is keyed: a caller who does not hold the per-process key cannot
+    // reproduce the digest for a known config. That is what closes the
+    // secret-guessing oracle — two independently seeded keys must disagree on
+    // the same config.
+    let config = parse(valid_toml()).unwrap();
+    let key_a = RuntimeSnapshotKey::random();
+    let key_b = RuntimeSnapshotKey::random();
+    assert_ne!(key_a.token(&config).unwrap(), key_b.token(&config).unwrap());
+}
+
+#[test]
+fn runtime_snapshot_token_canonicalizes_map_order() {
+    let mut left = parse(valid_toml()).unwrap();
+    let mut right = left.clone();
+
+    left.security.grpc.roles.clear();
+    left.security
+        .grpc
+        .roles
+        .insert("operator.example".to_string(), GrpcRoleConfig::Operator);
+    left.security
+        .grpc
+        .roles
+        .insert("observer.example".to_string(), GrpcRoleConfig::Observer);
+
+    right.security.grpc.roles.clear();
+    right
+        .security
+        .grpc
+        .roles
+        .insert("observer.example".to_string(), GrpcRoleConfig::Observer);
+    right
+        .security
+        .grpc
+        .roles
+        .insert("operator.example".to_string(), GrpcRoleConfig::Operator);
+
+    // Map insertion order must not perturb the token (same key both sides).
+    let key = RuntimeSnapshotKey::random();
+    assert_eq!(key.token(&left).unwrap(), key.token(&right).unwrap());
 }
 
 #[test]

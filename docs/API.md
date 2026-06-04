@@ -115,8 +115,11 @@ Tier-mode denials use `result="principal_unmapped"` when the authenticated
 principal has no role entry and `result="role_tier_denied"` when the principal's
 role is below the method tier.
 Credential-bearing request summaries are masked before entering `grpc_authz`
-logs; `DiffRuntimeConfigRequest.candidate_toml` is always summarized as
-redacted metadata, and `SetPeerGroup` logs MD5 state without the MD5 value.
+logs; `DiffRuntimeConfigRequest.candidate_toml`,
+`PlanConfigTransactionRequest.candidate_toml`, and
+`ApplyConfigTransactionRequest.candidate_toml` are always summarized as
+redacted metadata, transaction apply comments are not logged verbatim, and
+`SetPeerGroup` logs MD5 state without the MD5 value.
 Operators can now predeclare `[security.grpc.roles]` and set explicit
 listener `principal` labels for bearer-token TCP and UDS listeners. In legacy
 mode those labels improve audit identity only; in tier mode they are the
@@ -146,7 +149,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | Service | Read-only RPCs | Mutating RPCs rejected on `read_only` |
 |---------|----------------|---------------------------------------|
 | `GlobalService` | `GetGlobal` | `SetGlobal` |
-| `ConfigService` | `DiffRuntimeConfig` | None |
+| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction` | `ApplyConfigTransaction` (currently returns `UNIMPLEMENTED`) |
 | `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
@@ -235,22 +238,38 @@ dynamic neighbor wildcard-MKT support are not exposed through the API yet.
 
 ## ConfigService
 
-Read-only live runtime config diagnostics. This service never exports
-the daemon's full live config snapshot; callers submit candidate TOML
-and receive only the same redacted diff buckets used by
-`rustbgpd --diff`.
+Live runtime config diagnostics and transaction planning. This service never
+exports the daemon's full live config snapshot; callers submit candidate TOML
+and receive only redacted diff / plan output.
 
 | RPC | Description |
 |-----|-------------|
 | `DiffRuntimeConfig` | Validate candidate TOML and compare it against the daemon's live runtime config snapshot |
+| `PlanConfigTransaction` | Validate candidate TOML, return a runtime snapshot token, and classify v1 transaction support without mutating daemon state |
+| `ApplyConfigTransaction` | Reserved operator-tier commit entry point for ADR-0076 config transactions; currently returns `UNIMPLEMENTED` until section executors land |
 
 `DiffRuntimeConfigResponse` contains boolean summary fields, a
 plain-text `human_text` rendering, and `diff_json` using the
 `rustbgpd --diff --json` schema. Secret-bearing fields such as
-neighbor `md5_password` and `tcp_ao.key` material are redacted in both
-renderings. The corresponding `grpc_authz` request summary never logs
-`candidate_toml` content; it records only redacted metadata such as the request
-body size.
+neighbor `md5_password` and `tcp_ao.key` material are redacted in renderings.
+The corresponding `grpc_authz` request summaries never log `candidate_toml`
+content; they record only redacted metadata such as request body size and token
+presence.
+
+`ConfigTransactionPlanResponse` wraps the same redacted diff with:
+
+- `runtime_snapshot_token`: an optimistic-concurrency token for the live runtime
+  snapshot used during planning.
+- `supported_sections`: sections the v1 transaction model can commit once their
+  executor slice is present (`[[fib_tables]]`, `[[dynamic_neighbors]]`, static
+  neighbor add/delete).
+- `unsupported_sections`: hot-reloadable sections v1 refuses until an atomic
+  executor exists.
+- `restart_required_sections`: sections that still require daemon restart.
+
+The planner is intentionally stricter than SIGHUP: "reload-applied" does not
+mean "transaction-committable" unless the section appears in
+`supported_sections`.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
@@ -260,6 +279,21 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 }
 JSON
 ```
+
+Plan a transaction without mutation:
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d @ localhost:50051 rustbgpd.v1.ConfigService/PlanConfigTransaction <<'JSON'
+{
+  "candidate_toml": "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n[[fib_tables]]\nname = \"edge\"\ntable_id = 1000\nmetric = 200\n"
+}
+JSON
+```
+
+Use the returned `runtime_snapshot_token` on a later apply request once the
+matching executor slice exists. Until then, `ApplyConfigTransaction` is present
+for authz/API stability but returns `UNIMPLEMENTED`.
 
 CLI equivalent:
 
