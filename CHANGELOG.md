@@ -95,6 +95,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   loads or changes; peers without validation-state import predicates are not
   refreshed.
 
+- **BFD discriminator allocation no longer panics on theoretical exhaustion.**
+  The local discriminator allocator now returns a typed exhaustion error, and
+  the daemon logs and refuses to start that BFD session instead of panicking if
+  the 32-bit non-zero discriminator space is ever exhausted.
+
 ### Performance
 
 - **Config transaction static-neighbor apply now resolves only touched peers.**

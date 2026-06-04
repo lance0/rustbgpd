@@ -3,6 +3,14 @@
 
 use std::collections::BTreeSet;
 
+/// Local discriminator allocation failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DiscriminatorAllocationError {
+    /// Every non-zero 32-bit discriminator is already in use.
+    #[error("BFD discriminator space exhausted")]
+    Exhausted,
+}
+
 /// Hands out unique, non-zero local discriminators and tracks which are in use.
 #[derive(Debug, Default, Clone)]
 pub struct DiscriminatorAllocator {
@@ -22,21 +30,28 @@ impl DiscriminatorAllocator {
 
     /// Allocate the next free non-zero discriminator.
     ///
-    /// # Panics
-    /// Panics only in the pathological case that all 2³²−1 discriminators are
-    /// simultaneously in use, which cannot happen with any realistic peer count.
-    pub fn allocate(&mut self) -> u32 {
-        for _ in 0..=u32::MAX {
+    /// # Errors
+    /// Returns [`DiscriminatorAllocationError::Exhausted`] only when every
+    /// non-zero 32-bit discriminator is simultaneously in use.
+    pub fn allocate(&mut self) -> Result<u32, DiscriminatorAllocationError> {
+        self.allocate_with_scan_limit(u64::from(u32::MAX) + 1)
+    }
+
+    fn allocate_with_scan_limit(
+        &mut self,
+        scan_limit: u64,
+    ) -> Result<u32, DiscriminatorAllocationError> {
+        for _ in 0..scan_limit {
             if self.next == 0 {
                 self.next = 1;
             }
             let candidate = self.next;
             self.next = self.next.wrapping_add(1);
             if self.in_use.insert(candidate) {
-                return candidate;
+                return Ok(candidate);
             }
         }
-        panic!("BFD discriminator space exhausted");
+        Err(DiscriminatorAllocationError::Exhausted)
     }
 
     /// Release a previously allocated discriminator.
@@ -66,7 +81,7 @@ mod tests {
         let mut alloc = DiscriminatorAllocator::new();
         let mut seen = BTreeSet::new();
         for _ in 0..1000 {
-            let d = alloc.allocate();
+            let d = alloc.allocate().expect("test allocation must succeed");
             assert_ne!(d, 0);
             assert!(seen.insert(d), "discriminator {d} handed out twice");
         }
@@ -76,12 +91,25 @@ mod tests {
     #[test]
     fn released_discriminators_become_reusable() {
         let mut alloc = DiscriminatorAllocator::new();
-        let a = alloc.allocate();
-        let b = alloc.allocate();
+        let a = alloc.allocate().expect("test allocation must succeed");
+        let b = alloc.allocate().expect("test allocation must succeed");
         alloc.release(a);
         assert_eq!(alloc.len(), 1);
         // Eventually the freed value is handed out again after wraparound.
         alloc.release(b);
         assert!(alloc.is_empty());
+    }
+
+    #[test]
+    fn exhausted_scan_returns_error_instead_of_panicking() {
+        let mut alloc = DiscriminatorAllocator::new();
+        alloc.in_use.insert(1);
+        alloc.next = 1;
+
+        assert_eq!(
+            alloc.allocate_with_scan_limit(1),
+            Err(DiscriminatorAllocationError::Exhausted)
+        );
+        assert_eq!(alloc.len(), 1);
     }
 }
