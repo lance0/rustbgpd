@@ -65,7 +65,7 @@ shape itself does not raise the tier.
 
 | RPC | Tier | Notes |
 |-----|------|-------|
-| `DiffRuntimeConfig` | `sensitive_read` | Response is redacted by design (per RPC comment), but the diff structure exposes policy layout, peer-group inheritance, and which fields differ between candidate and runtime. Request `candidate_toml` can contain credentials and must be omitted or masked by future audit logging. |
+| `DiffRuntimeConfig` | `sensitive_read` | Response is redacted by design (per RPC comment), but the diff structure exposes policy layout, peer-group inheritance, and which fields differ between candidate and runtime. Request `candidate_toml` can contain credentials and is audit-redacted (size and presence only, never the body) by `diff_runtime_config_summary`. |
 | `PlanConfigTransaction` | `sensitive_read` | Validate-only transaction planner. It returns a redacted diff, runtime snapshot token, and v1 section classification without mutating daemon state. Request `candidate_toml` can contain credentials and must be audit-redacted. |
 | `ApplyConfigTransaction` | `operator_only` | Reserved commit entry point for ADR-0076 config transactions. Currently returns `UNIMPLEMENTED` until section executors land; classified defensively because future implementation will commit runtime config changes under one coordinator. Request TOML and comment are audit-redacted. |
 

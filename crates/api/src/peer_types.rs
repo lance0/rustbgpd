@@ -254,6 +254,11 @@ pub enum RuntimeConfigTransactionStatus {
 pub struct RuntimeConfigTransactionPlan {
     pub status: RuntimeConfigTransactionStatus,
     pub runtime_snapshot_token: String,
+    /// Keyed token the live runtime config would carry once this candidate is
+    /// committed. The apply path returns it so a client can chain a follow-up
+    /// apply without re-planning. Computed under the same peer-manager key as
+    /// `runtime_snapshot_token`; not surfaced in the gRPC plan response.
+    pub post_commit_runtime_snapshot_token: String,
     pub diff: RuntimeConfigDiff,
     pub supported_sections: Vec<String>,
     pub unsupported_sections: Vec<String>,

@@ -45,9 +45,18 @@ behind the same public shape.
      intentionally refuses until an atomic executor exists.
    - `restart_required_sections`: sections that cannot be committed live.
 3. **Optimistic snapshot token, not live config export.** Plan responses include
-   a deterministic runtime snapshot token derived from normalized config
-   serialization. The token is only a change detector for plan/apply races; it
-   is not cryptographic and does not expose the live config document.
+   a runtime snapshot token: a keyed hash of the normalized config serialization
+   under a per-process key seeded when the peer manager starts. The token is a
+   change detector for plan/apply races, not a live config document. It is
+   **keyed** rather than a plain hash because the canonical serialization
+   includes secret-bearing fields (`md5_password`, `tcp_ao.key`): an unkeyed
+   hash handed to a `sensitive_read` caller would be an offline oracle for
+   brute-forcing a weak secret (hash a guess, match the token). The key never
+   leaves the process, so a caller cannot recompute the digest for a guessed
+   secret; the full config (secrets included) is still hashed, so a secret
+   rotation invalidates a stale plan. Consequence: **tokens are process-local** —
+   a token does not survive a daemon restart, and a client holding a pre-restart
+   token must re-plan (apply returns `FAILED_PRECONDITION` on mismatch).
 4. **V1 supported surface is narrow on purpose.** The planner marks
    `[[fib_tables]]` N→M/N→0 changes, `[[dynamic_neighbors]]` changes, static
    neighbor adds, and static neighbor deletes as the v1 transaction surface.

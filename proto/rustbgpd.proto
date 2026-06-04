@@ -168,7 +168,10 @@ message ConfigTransactionPlanResponse {
   string runtime_snapshot_token = 2;
   DiffRuntimeConfigResponse diff = 3;
   // Sections v1 knows how to commit atomically once the matching executor PRs
-  // are present. Empty when status is NOOP or REJECTED.
+  // are present. Empty when status is NOOP. May be non-empty when REJECTED — a
+  // supported section can coexist with an unsupported or restart-required one
+  // (or a second supported family), and any such mix rejects the whole
+  // single-family transaction.
   repeated string supported_sections = 4;
   // Hot-reloadable sections v1 deliberately refuses to commit yet.
   repeated string unsupported_sections = 5;

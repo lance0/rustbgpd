@@ -217,11 +217,12 @@ mod tests {
             assert_eq!(candidate_toml, "candidate");
             assert_eq!(
                 expected_runtime_snapshot_token.as_deref(),
-                Some("fnv1a64:abc:9")
+                Some("kv1:abc:9")
             );
             let _ = reply.send(Ok(RuntimeConfigTransactionPlan {
                 status: RuntimeConfigTransactionStatus::Committable,
-                runtime_snapshot_token: "fnv1a64:abc:9".to_string(),
+                runtime_snapshot_token: "kv1:abc:9".to_string(),
+                post_commit_runtime_snapshot_token: "kv1:def:10".to_string(),
                 diff: sample_runtime_diff(),
                 supported_sections: vec!["[[fib_tables]]".to_string()],
                 unsupported_sections: Vec::new(),
@@ -233,7 +234,7 @@ mod tests {
         let resp = svc
             .plan_config_transaction(Request::new(proto::PlanConfigTransactionRequest {
                 candidate_toml: "candidate".to_string(),
-                expected_runtime_snapshot_token: "fnv1a64:abc:9".to_string(),
+                expected_runtime_snapshot_token: "kv1:abc:9".to_string(),
             }))
             .await
             .unwrap()
@@ -244,7 +245,7 @@ mod tests {
             resp.status,
             proto::ConfigTransactionPlanStatus::Committable as i32
         );
-        assert_eq!(resp.runtime_snapshot_token, "fnv1a64:abc:9");
+        assert_eq!(resp.runtime_snapshot_token, "kv1:abc:9");
         assert_eq!(resp.supported_sections, vec!["[[fib_tables]]"]);
         assert!(resp.diff.unwrap().has_actionable_changes);
     }
@@ -283,7 +284,8 @@ mod tests {
             };
             let _ = reply.send(Ok(RuntimeConfigTransactionPlan {
                 status: RuntimeConfigTransactionStatus::Noop,
-                runtime_snapshot_token: "fnv1a64:abc:9".to_string(),
+                runtime_snapshot_token: "kv1:abc:9".to_string(),
+                post_commit_runtime_snapshot_token: "kv1:abc:9".to_string(),
                 diff: RuntimeConfigDiff {
                     has_actionable_changes: false,
                     has_reload_applied_changes: false,
@@ -303,7 +305,7 @@ mod tests {
         let audit_handle = GrpcAuditHandle::default();
         let mut request = Request::new(proto::PlanConfigTransactionRequest {
             candidate_toml: "[global]\nmd5_password = \"secret\"\n".to_string(),
-            expected_runtime_snapshot_token: "fnv1a64:abc:9".to_string(),
+            expected_runtime_snapshot_token: "kv1:abc:9".to_string(),
         });
         request.extensions_mut().insert(audit_handle.clone());
 
@@ -326,7 +328,7 @@ mod tests {
         let audit_handle = GrpcAuditHandle::default();
         let mut request = Request::new(proto::ApplyConfigTransactionRequest {
             candidate_toml: "[global]\nmd5_password = \"secret\"\n".to_string(),
-            expected_runtime_snapshot_token: "fnv1a64:abc:9".to_string(),
+            expected_runtime_snapshot_token: "kv1:abc:9".to_string(),
             client_request_id: "deploy-42".to_string(),
             comment: "contains sensitive context".to_string(),
         });

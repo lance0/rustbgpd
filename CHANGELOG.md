@@ -16,11 +16,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   compares it against the daemon's live runtime config snapshot, returns an
   optimistic `runtime_snapshot_token`, and classifies sections into v1
   `supported_sections`, `unsupported_sections`, and
-  `restart_required_sections`. `ApplyConfigTransaction` is reserved as an
-  operator-tier commit entry point but returns `UNIMPLEMENTED` until the section
-  executors land. Candidate TOML remains audit-redacted, and gNMI `Set` remains
-  unimplemented/read-only pending an OpenConfig mapping onto this transaction
-  model.
+  `restart_required_sections`. The token is a per-process **keyed** hash of the
+  canonical config: it still covers secrets (so a `md5_password`/`tcp_ao.key`
+  rotation invalidates a stale plan) but cannot be used as an offline
+  secret-guessing oracle by a `sensitive_read` caller. Tokens are process-local
+  and do not survive a daemon restart — re-plan after a restart.
+  `ApplyConfigTransaction` is reserved as an operator-tier commit entry point but
+  returns `UNIMPLEMENTED` until the section executors land. Candidate TOML
+  remains audit-redacted, and gNMI `Set` remains unimplemented/read-only pending
+  an OpenConfig mapping onto this transaction model.
 
 - **Full-scope ASPA path verification.** ASPA validation now uses the
   configured BGP Role to select the draft-ietf-sidrops-aspa-verification-25

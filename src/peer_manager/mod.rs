@@ -215,6 +215,11 @@ pub struct PeerManager {
     /// decisions) are published through the durable cursor. Wired
     /// at the same daemon-startup site as `event_history`.
     transport_event_sink: Option<std::sync::Arc<dyn rustbgpd_transport::TransportEventSink>>,
+    /// Per-process key for the optimistic config-transaction snapshot token.
+    /// Seeded once at construction; never leaves the process. Keeps the token
+    /// from acting as an offline oracle for config secrets. See
+    /// [`crate::config::RuntimeSnapshotKey`].
+    snapshot_key: crate::config::RuntimeSnapshotKey,
 }
 
 impl PeerManager {
@@ -351,6 +356,7 @@ impl PeerManager {
             bfd_coupling: None,
             event_history: None,
             transport_event_sink: None,
+            snapshot_key: crate::config::RuntimeSnapshotKey::random(),
         }
     }
 

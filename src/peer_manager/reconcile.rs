@@ -132,7 +132,7 @@ impl PeerManager {
         candidate_toml: &str,
         expected_runtime_snapshot_token: Option<&str>,
     ) -> Result<RuntimeConfigTransactionPlan, String> {
-        let runtime_snapshot_token = crate::config::runtime_snapshot_token(&self.current_config)?;
+        let runtime_snapshot_token = self.snapshot_key.token(&self.current_config)?;
         if let Some(expected) = expected_runtime_snapshot_token.filter(|token| !token.is_empty())
             && expected != runtime_snapshot_token
         {
@@ -143,6 +143,13 @@ impl PeerManager {
 
         let candidate =
             Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")?;
+        // Token the resulting live config would carry once this candidate is
+        // committed. The apply path returns it so a client can chain a follow-up
+        // apply without re-planning; computing it here keeps every token under
+        // the peer-manager's key. For the v1 single-family surface the committed
+        // state equals the candidate (full-snapshot families) or differs only in
+        // the one staged family (FIB), which the candidate already reflects.
+        let post_commit_runtime_snapshot_token = self.snapshot_key.token(&candidate)?;
         let diff = crate::config::diff_config(&self.current_config, &candidate);
         let classification = crate::config::classify_config_transaction_v1(&diff);
         let status = if classification.is_noop() {
@@ -163,6 +170,7 @@ impl PeerManager {
         Ok(RuntimeConfigTransactionPlan {
             status,
             runtime_snapshot_token,
+            post_commit_runtime_snapshot_token,
             diff,
             supported_sections: classification.supported_sections,
             unsupported_sections: classification.unsupported_sections,

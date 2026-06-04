@@ -6757,13 +6757,41 @@ fn runtime_snapshot_token_is_stable_and_changes_with_config() {
     let mut new = old.clone();
     new.global.honor_graceful_shutdown = !new.global.honor_graceful_shutdown;
 
-    let token_a = runtime_snapshot_token(&old).unwrap();
-    let token_b = runtime_snapshot_token(&old).unwrap();
-    let token_c = runtime_snapshot_token(&new).unwrap();
+    // Same key + same config => same token; same key + changed config => differs.
+    let key = RuntimeSnapshotKey::random();
+    let token_a = key.token(&old).unwrap();
+    let token_b = key.token(&old).unwrap();
+    let token_c = key.token(&new).unwrap();
 
     assert_eq!(token_a, token_b);
     assert_ne!(token_a, token_c);
-    assert!(token_a.starts_with("fnv1a64:"));
+    assert!(token_a.starts_with("kv1:"));
+}
+
+#[test]
+fn runtime_snapshot_token_changes_when_only_a_secret_rotates() {
+    // The token hashes the full config, secrets included, so a bare secret
+    // rotation still invalidates a stale optimistic-concurrency token (ADR-0076:
+    // the token must change if any candidate-relevant config byte changes).
+    let mut old = parse(valid_toml()).unwrap();
+    old.neighbors[0].md5_password = Some("old-secret".to_string());
+    let mut new = old.clone();
+    new.neighbors[0].md5_password = Some("new-secret".to_string());
+
+    let key = RuntimeSnapshotKey::random();
+    assert_ne!(key.token(&old).unwrap(), key.token(&new).unwrap());
+}
+
+#[test]
+fn runtime_snapshot_token_differs_across_keys() {
+    // The token is keyed: a caller who does not hold the per-process key cannot
+    // reproduce the digest for a known config. That is what closes the
+    // secret-guessing oracle — two independently seeded keys must disagree on
+    // the same config.
+    let config = parse(valid_toml()).unwrap();
+    let key_a = RuntimeSnapshotKey::random();
+    let key_b = RuntimeSnapshotKey::random();
+    assert_ne!(key_a.token(&config).unwrap(), key_b.token(&config).unwrap());
 }
 
 #[test]
@@ -6793,10 +6821,9 @@ fn runtime_snapshot_token_canonicalizes_map_order() {
         .roles
         .insert("operator.example".to_string(), GrpcRoleConfig::Operator);
 
-    assert_eq!(
-        runtime_snapshot_token(&left).unwrap(),
-        runtime_snapshot_token(&right).unwrap()
-    );
+    // Map insertion order must not perturb the token (same key both sides).
+    let key = RuntimeSnapshotKey::random();
+    assert_eq!(key.token(&left).unwrap(), key.token(&right).unwrap());
 }
 
 #[test]
