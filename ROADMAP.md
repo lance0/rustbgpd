@@ -479,13 +479,10 @@ branch is between features.
   and then selects the added or changed peers. Correct and simple, but O(N) in
   the number of configured neighbors; optimize to resolve only touched
   neighbors if large static-neighbor transactions become common.
-- [ ] **Peer-manager add-without-start path for disabled reconfigure.**
-  `reconfigure_peer` preserves a disabled static peer by re-adding it and then
-  disabling it again, so the new session can briefly start and the modify is
-  coupled to `PeerHandle::start()` succeeding. Correct and rollback-safe, but
-  polish the lifecycle by splitting peer construction/registration from session
-  start so disabled-peer modifies and SIGHUP reconcile can rebuild the
-  `ManagedPeer` without transient bring-up.
+- [x] **Peer-manager add-without-start path for disabled reconfigure.**
+  Static-neighbor modify, SIGHUP changed-peer reconcile, and peer-group
+  hot-apply now rebuild a disabled peer as disabled, without transient session
+  start. Enabled peers still start immediately unless strict BFD withholds them.
 - [ ] **SIGHUP baseline from live runtime snapshot.** The runtime-config lock
   prevents SIGHUP from interleaving its apply step with transactions, but the
   signal path captures the comparison baseline before waiting on the lock. Pull

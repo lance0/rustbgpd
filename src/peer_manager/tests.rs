@@ -962,6 +962,125 @@ async fn reconfigure_peer_restores_previous_peer_when_replacement_add_fails() {
 }
 
 #[tokio::test]
+async fn reconcile_changed_peer_preserves_disabled_state() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+    mgr.disable_peer(key(addr), None).await.unwrap();
+
+    let mut replacement = make_config(addr, 65002);
+    replacement.description = "reloaded description".to_string();
+    replacement.hold_time = Some(45);
+    let result = mgr
+        .reconcile_peers(Vec::new(), Vec::new(), vec![replacement])
+        .await;
+
+    assert!(result.failures.is_empty(), "{:?}", result.failures);
+    let managed = mgr.peers.get(&key(addr)).expect("reconciled peer");
+    assert_eq!(managed.description, "reloaded description");
+    assert_eq!(managed.hold_time, Some(45));
+    assert!(!managed.enabled);
+}
+
+#[tokio::test]
+async fn peer_group_change_preserves_disabled_state() {
+    let config = load_test_config(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.edge]
+hold_time = 90
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "edge"
+"#,
+    );
+    let (_tx, rx) = mpsc::channel(16);
+    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+        None,
+        config.clone(),
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let initial = PeerManager::peer_manager_config_from_resolved(
+        config
+            .resolved_neighbors()
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("one neighbor"),
+        false,
+    );
+    mgr.add_peer(initial, false).await.unwrap();
+    mgr.disable_peer(key(addr), None).await.unwrap();
+
+    mgr.apply_peer_group_change(
+        rustbgpd_api::peer_types::ConfigEvent::SetPeerGroup {
+            name: "edge".to_string(),
+            definition: rustbgpd_api::peer_types::PeerGroupDefinition {
+                hold_time: Some(45),
+                max_prefixes: None,
+                md5_password: None,
+                ttl_security: None,
+                families: Vec::new(),
+                graceful_restart: None,
+                gr_restart_time: None,
+                gr_stale_routes_time: None,
+                llgr_stale_time: None,
+                local_ipv6_nexthop: None,
+                route_reflector_client: None,
+                route_server_client: None,
+                remove_private_as: None,
+                add_path: None,
+                import_policy: Vec::new(),
+                export_policy: Vec::new(),
+                import_policy_chain: Vec::new(),
+                export_policy_chain: Vec::new(),
+            },
+        },
+        vec![addr],
+    )
+    .await
+    .unwrap();
+
+    let managed = mgr.peers.get(&key(addr)).expect("reconfigured peer");
+    assert_eq!(managed.hold_time, Some(45));
+    assert!(!managed.enabled);
+}
+
+#[tokio::test]
 async fn session_events_publish_state_changes() {
     let (tx, rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);

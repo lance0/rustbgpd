@@ -751,12 +751,9 @@ impl PeerManager {
             }
 
             if let Some(cfg) = next_peer_config {
-                let added_key = PeerKey::new(cfg.address, cfg.interface.clone());
-                self.add_peer(cfg, false).await?;
+                self.add_peer_with_admin_state(cfg, false, was_enabled)
+                    .await?;
                 affected_peer_count += 1;
-                if !was_enabled {
-                    self.disable_peer(added_key, None).await?;
-                }
             }
         }
 
