@@ -109,10 +109,10 @@ section executors behind that public contract.
   TOML. Static-neighbor transactions support add/delete/modify; modifies rebuild
   the session like SIGHUP and preserve disabled / graceful-shutdown intent.
 - Catalog-only policy/peer-group/global-chain transactions stage reusable config
-  objects before existing peers depend on them. A policy, neighbor-set,
-  peer-group, or global-chain edit that changes an existing neighbor's effective
-  runtime policy remains rejected until a rollback-capable live policy executor
-  exists.
+  objects before static neighbors or dynamic ranges depend on them. A policy,
+  neighbor-set, peer-group, or global-chain edit that changes the effective
+  runtime policy of any static neighbor or dynamic range remains rejected until a
+  rollback-capable live policy executor exists.
 - Follow-up executors should preserve the established pattern:
   validate candidate section against the live runtime snapshot, take the shared
   runtime-config coordinator, apply live mutation, persist with acknowledgement,

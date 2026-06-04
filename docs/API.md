@@ -246,7 +246,7 @@ and receive only redacted diff / plan output.
 |-----|-------------|
 | `DiffRuntimeConfig` | Validate candidate TOML and compare it against the daemon's live runtime config snapshot |
 | `PlanConfigTransaction` | Validate candidate TOML, return a runtime snapshot token, and classify v1 transaction support without mutating daemon state |
-| `ApplyConfigTransaction` | Operator-tier commit entry point for ADR-0076 config transactions; currently commits one pure runtime family at a time: full-set `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify changes, or catalog-only policy/peer-group/global-chain changes that do not alter existing neighbors' effective runtime policy |
+| `ApplyConfigTransaction` | Operator-tier commit entry point for ADR-0076 config transactions; currently commits one pure runtime family at a time: full-set `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify changes, or catalog-only policy/peer-group/global-chain changes that do not alter the effective runtime policy of any static neighbor or dynamic range |
 
 `DiffRuntimeConfigResponse` contains boolean summary fields, a
 plain-text `human_text` rendering, and `diff_json` using the
@@ -262,8 +262,8 @@ presence.
   snapshot used during planning.
 - `supported_sections`: sections the v1 transaction model can commit
   (`[[fib_tables]]`, `[[dynamic_neighbors]]`, static neighbor add/delete/modify,
-  and catalog-only `[policy]` / `[peer_groups]` changes with no effective
-  live-neighbor impact).
+  and catalog-only `[policy]` / `[peer_groups]` changes with no effective impact
+  on static neighbors or dynamic ranges).
 - `unsupported_sections`: hot-reloadable sections v1 refuses until an atomic
   executor exists.
 - `restart_required_sections`: sections that still require daemon restart.
@@ -271,9 +271,10 @@ presence.
 The planner is intentionally stricter than SIGHUP: "reload-applied" does not
 mean "transaction-committable" unless the section appears in
 `supported_sections`. `ApplyConfigTransaction` commits one pure runtime family
-at a time. Cross-family candidates, policy/peer-group edits that alter existing
-neighbors' effective runtime policy, and other valid-but-unsupported sections
-return `REJECTED` without mutation until their section executor lands.
+at a time. Cross-family candidates, policy/peer-group edits that alter the
+effective runtime policy of any static neighbor or dynamic range, and other
+valid-but-unsupported sections return `REJECTED` without mutation until their
+section executor lands.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
@@ -342,13 +343,14 @@ modifies use the same delete/re-add session-reconfigure semantics as SIGHUP,
 then roll back on apply or persistence failure.
 
 Catalog-only transactions can stage named policy definitions, policy
-`neighbor_sets`, peer groups, and global named policy-chain assignments before
-any existing neighbor depends on them. They are full-snapshot commits: the daemon
-updates the live runtime config snapshot and persists the accepted TOML, but
-does not run `SetPolicy` / `SetPeerGroup` live mutation commands. If the
-candidate changes an existing neighbor's effective import/export policy through
-policy, neighbor-set, peer-group, or global-chain inheritance, the planner
-reports `effective neighbor inheritance impact` and rejects the transaction.
+`neighbor_sets`, peer groups, and global named policy-chain assignments before a
+static neighbor or dynamic range depends on them. They are full-snapshot commits:
+the daemon updates the live runtime config snapshot and persists the accepted
+TOML, but does not run `SetPolicy` / `SetPeerGroup` live mutation commands. If
+the candidate changes the effective import/export policy of any static neighbor
+or dynamic range through policy, neighbor-set, peer-group, or global-chain
+inheritance, the planner reports `effective neighbor inheritance impact` and
+rejects the transaction.
 
 CLI equivalent:
 

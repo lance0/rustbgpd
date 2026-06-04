@@ -102,9 +102,10 @@ The live API returns redacted text / JSON diff buckets and never exports the
 daemon's full config snapshot. Transaction apply is intentionally narrower than
 SIGHUP: v1 commits one pure runtime family at a time (`[[fib_tables]]`,
 `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, or
-catalog-only policy/peer-group/global-chain edits that do not alter existing
-neighbors' effective runtime policy). Mixed-family candidates, live-impacting
-policy/peer-group inheritance edits, and unsupported sections are rejected
+catalog-only policy/peer-group/global-chain edits that do not alter the
+effective runtime policy of any static neighbor or dynamic range). Mixed-family
+candidates, live-impacting policy/peer-group inheritance edits, and unsupported
+sections are rejected
 without mutation.
 
 Output is grouped into two actionable sections plus a per-neighbor

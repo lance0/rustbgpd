@@ -96,10 +96,11 @@ Later for what remains.
   operator-only and can commit one pure runtime family at a time: full-set
   `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, static `[[neighbors]]`
   add/delete/modify, or catalog-only policy/peer-group/global-chain changes
-  under the shared runtime-config coordinator, with persistence ack and rollback
-  on apply/persist failure. `rustbgpctl config plan/apply` drives the text/JSON
-  operator workflow. Next useful slices are the remaining hot-reload sections
-  whose live-impact rollback semantics are ready.
+  that do not alter the effective runtime policy of any static neighbor or
+  dynamic range, under the shared runtime-config coordinator, with persistence
+  ack and rollback on apply/persist failure. `rustbgpctl config plan/apply` drives
+  the text/JSON operator workflow. Next useful slices are the remaining hot-reload
+  sections whose live-impact rollback semantics are ready.
   Keep gNMI `Set` read-only until OpenConfig mutation maps onto this transaction
   model rather than a parallel commit path. Exit: atomic commit where supported,
   explicit restart-required/rejected surfaces, rollback/receipt model, no partial
@@ -473,16 +474,16 @@ branch is between features.
   `INVALID_ARGUMENT`, or similar API-visible classes.
 - [ ] **Config transaction live-impact policy / peer-group executor.**
   Catalog-only policy definitions, neighbor_sets, peer_groups, and global named
-  chains can now commit as snapshot transactions when no existing neighbor's
-  effective runtime policy changes. The remaining executor is the harder case:
-  policy / peer-group / global-chain edits that reshape live peers and therefore
-  need rollback-capable runtime policy/session mutation, not just snapshot
-  staging.
+  chains can now commit as snapshot transactions when they do not change the
+  effective runtime policy of any static neighbor or dynamic range. The remaining
+  executor is the harder case: policy / peer-group / global-chain edits that
+  reshape live peers and therefore need rollback-capable runtime policy/session
+  mutation, not just snapshot staging.
 - [x] **Config transaction catalog snapshot executor.** ADR-0076 can now commit
   catalog-only policy definitions, policy neighbor_sets, peer_groups, and global
   named-chain assignments under the same reserve/stage/persist-ack/rollback
   ordering used by full-snapshot dynamic-neighbor transactions, while rejecting
-  candidates with effective live-neighbor inheritance impact.
+  candidates with effective static-neighbor or dynamic-range inheritance impact.
 - [x] **Config transaction static-neighbor resolution scaling.**
   Static-neighbor add/modify transactions now resolve only the touched
   `[[neighbors]]` entries through the same single-neighbor inheritance path,
