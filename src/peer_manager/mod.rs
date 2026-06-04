@@ -534,6 +534,10 @@ impl PeerManager {
                             let result = self.delete_peer(peer, sync_config_snapshot).await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::ReconfigurePeer { config, reply } => {
+                            let result = self.reconfigure_peer(config).await;
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::ListPeers { reply } => {
                             let infos = self.list_peers().await;
                             let _ = reply.send(infos);

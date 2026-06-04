@@ -334,6 +334,14 @@ pub enum PeerManagerCommand {
         /// Reply channel returning the removed config on success.
         reply: oneshot::Sender<Result<PeerManagerNeighborConfig, String>>,
     },
+    /// Reconfigure an existing static peer by replacing its live session with
+    /// a newly resolved configuration.
+    ReconfigurePeer {
+        /// Replacement neighbor configuration.
+        config: PeerManagerNeighborConfig,
+        /// Reply channel returning the previous config on success.
+        reply: oneshot::Sender<Result<PeerManagerNeighborConfig, String>>,
+    },
     /// List all configured peers and their state.
     ListPeers {
         /// Reply channel returning all peer snapshots.

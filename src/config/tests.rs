@@ -6711,27 +6711,22 @@ peer_group = "ix-members"
     let class = classify_config_transaction_v1(&diff);
 
     assert!(!class.is_committable());
-    assert!(
-        class
-            .unsupported_sections
-            .contains(&"[[neighbors]] modify".to_string())
-    );
+    assert_eq!(class.supported_sections, vec!["[[neighbors]] modify"]);
     assert!(
         class
             .unsupported_sections
             .contains(&"[peer_groups]".to_string())
     );
-    assert!(class.supported_sections.is_empty());
     assert!(class.restart_required_sections.is_empty());
 }
 
 #[test]
 fn transaction_v1_classifies_prefix_orf_receive_toggle_as_neighbor_modify() {
     // A bare prefix_orf_receive toggle on an existing neighbor is a
-    // [[neighbors]] modify. The v1 transaction surface supports static neighbor
-    // add/delete only, so a modify must be rejected — not classified as a no-op
-    // (which it silently was while prefix_orf_receive was invisible to the diff)
-    // and not committable — until a session-reconfigure executor exists.
+    // [[neighbors]] modify. The transaction surface now commits static neighbor
+    // modifies by reconfiguring the peer, so this must be committable — not a
+    // no-op (which it silently was while prefix_orf_receive was invisible to
+    // the diff).
     let with_orf = |orf: bool| {
         format!(
             r#"
@@ -6751,15 +6746,9 @@ prefix_orf_receive = {orf}
     let class = classify_config_transaction_v1(&diff);
 
     assert!(!class.is_noop(), "ORF toggle must not classify as a no-op");
-    assert!(!class.is_committable());
-    assert!(
-        class
-            .unsupported_sections
-            .contains(&"[[neighbors]] modify".to_string()),
-        "got {:?}",
-        class.unsupported_sections
-    );
-    assert!(class.supported_sections.is_empty());
+    assert!(class.is_committable());
+    assert_eq!(class.supported_sections, vec!["[[neighbors]] modify"]);
+    assert!(class.unsupported_sections.is_empty());
     assert!(class.restart_required_sections.is_empty());
 }
 

@@ -226,6 +226,104 @@ impl PeerManager {
             .map(|_| ())
     }
 
+    pub(super) async fn reconfigure_peer(
+        &mut self,
+        config: PeerManagerNeighborConfig,
+    ) -> Result<PeerManagerNeighborConfig, String> {
+        let peer = PeerKey::new(config.address, config.interface.clone());
+        let (was_enabled, graceful_shutdown) = self
+            .peers
+            .get(&peer)
+            .map(|managed| (managed.enabled, managed.advertise_graceful_shutdown))
+            .ok_or_else(|| format!("peer {peer} not found"))?;
+
+        let previous = self
+            .delete_peer_checked(peer.clone(), false, config.tcp_ao.as_ref())
+            .await?;
+        if let Err(add_error) = self.add_peer(config, false).await {
+            return match self
+                .restore_reconfigured_peer(
+                    peer.clone(),
+                    previous.clone(),
+                    was_enabled,
+                    graceful_shutdown,
+                )
+                .await
+            {
+                Ok(()) => Err(format!(
+                    "failed to add reconfigured peer {peer}: {add_error}; previous peer restored"
+                )),
+                Err(restore_error) => Err(format!(
+                    "failed to add reconfigured peer {peer}: {add_error}; restore previous peer failed: {restore_error}"
+                )),
+            };
+        }
+
+        if let Err(state_error) = self
+            .apply_reconfigured_peer_state(peer.clone(), was_enabled, graceful_shutdown)
+            .await
+        {
+            return match self
+                .restore_reconfigured_peer(
+                    peer.clone(),
+                    previous.clone(),
+                    was_enabled,
+                    graceful_shutdown,
+                )
+                .await
+            {
+                Ok(()) => Err(format!(
+                    "failed to restore runtime state for reconfigured peer {peer}: {state_error}; previous peer restored"
+                )),
+                Err(restore_error) => Err(format!(
+                    "failed to restore runtime state for reconfigured peer {peer}: {state_error}; restore previous peer failed: {restore_error}"
+                )),
+            };
+        }
+
+        Ok(previous)
+    }
+
+    async fn restore_reconfigured_peer(
+        &mut self,
+        peer: PeerKey,
+        previous: PeerManagerNeighborConfig,
+        was_enabled: bool,
+        graceful_shutdown: bool,
+    ) -> Result<(), String> {
+        if self.peers.contains_key(&peer) {
+            self.delete_peer_checked(peer.clone(), false, previous.tcp_ao.as_ref())
+                .await?;
+        }
+        self.add_peer(previous, false).await?;
+        self.apply_reconfigured_peer_state(peer, was_enabled, graceful_shutdown)
+            .await
+    }
+
+    async fn apply_reconfigured_peer_state(
+        &mut self,
+        peer: PeerKey,
+        was_enabled: bool,
+        graceful_shutdown: bool,
+    ) -> Result<(), String> {
+        // Graceful-shutdown replay is best-effort like normal GSHUT fan-out;
+        // disabled-state replay below is mandatory so a failed reconfigure
+        // cannot accidentally bring a disabled peer up.
+        if graceful_shutdown
+            && let Err(error) = self.set_graceful_shutdown(Some(peer.clone()), true).await
+        {
+            warn!(
+                peer = %peer,
+                error = %error,
+                "failed to replay graceful-shutdown intent after peer reconfigure"
+            );
+        }
+        if !was_enabled {
+            self.disable_peer(peer, None).await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn delete_peer_checked(
         &mut self,
         peer: PeerKey,

@@ -92,10 +92,16 @@ rustbgpctl config apply --from-file /tmp/new-config.toml \
   --expected-runtime-snapshot-token kv1:...
 ```
 
+For a static-neighbor edit, change the neighbor in the candidate file (for
+example `hold_time`, `max_prefixes`, policy-chain refs, or ORF receive), run
+`config plan`, then apply with the returned token. The transaction reconfigures
+that peer using the same delete/re-add semantics as SIGHUP and rolls back if
+apply or persistence fails.
+
 The live API returns redacted text / JSON diff buckets and never exports the
 daemon's full config snapshot. Transaction apply is intentionally narrower than
 SIGHUP: v1 commits one pure runtime family at a time (`[[fib_tables]]`,
-`[[dynamic_neighbors]]`, or static `[[neighbors]]` add/delete). Mixed-family
+`[[dynamic_neighbors]]`, or static `[[neighbors]]` add/delete/modify). Mixed-family
 candidates and unsupported sections are rejected without mutation.
 
 Output is grouped into two actionable sections plus a per-neighbor
@@ -194,7 +200,7 @@ chain, etc.).
 
 | State | Where | When |
 |-------|-------|------|
-| Neighbor add/delete via gRPC | Config file (atomic write) | Serialized with SIGHUP reload; the RPC waits for persistence acknowledgement and rolls runtime back if the write is rejected |
+| Neighbor add/delete/modify via gRPC | Config file (atomic write) | Serialized with SIGHUP reload; the RPC waits for persistence acknowledgement and rolls runtime back if the write is rejected |
 | Dynamic-neighbor add/delete via gRPC | Config file (atomic write) | Serialized with SIGHUP reload; the RPC waits for persistence acknowledgement and rolls the matcher back if the write is rejected |
 | GR restart marker | `<runtime_state_dir>/gr-restart.toml` | On coordinated shutdown |
 | General FIB owned-state | `<runtime_state_dir>/fib-owned.json` | After successful ADR-0061 FIB apply/drain |

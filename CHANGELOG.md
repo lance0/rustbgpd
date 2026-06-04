@@ -23,14 +23,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and do not survive a daemon restart — re-plan after a restart.
   `ApplyConfigTransaction` is the operator-tier commit entry point; v1 commits
   one pure runtime family at a time: full-set `[[fib_tables]]`, full-set
-  `[[dynamic_neighbors]]`, or static `[[neighbors]]` add/delete changes under
-  the shared runtime-config coordinator, with persistence ack and rollback on
-  apply/persist failure. Mixed-family candidates, static-neighbor modifies, and
-  other unsupported sections are rejected without mutation. Candidate TOML
-  remains audit-redacted, and `rustbgpctl config plan` / `rustbgpctl config
-  apply` expose the operator workflow with text and JSON output. gNMI `Set`
-  remains unimplemented/read-only pending an OpenConfig mapping onto this
-  transaction model.
+  `[[dynamic_neighbors]]`, or static `[[neighbors]]` add/delete/modify changes
+  under the shared runtime-config coordinator, with persistence ack and rollback
+  on apply/persist failure. Static-neighbor modifies use the same delete/re-add
+  session-reconfigure semantics as SIGHUP while preserving disabled and
+  graceful-shutdown intent. Mixed-family candidates and other unsupported
+  sections are rejected without mutation. Candidate TOML remains audit-redacted,
+  and `rustbgpctl config plan` / `rustbgpctl config apply` expose the operator
+  workflow with text and JSON output. gNMI `Set` remains unimplemented/read-only
+  pending an OpenConfig mapping onto this transaction model.
 
 - **Full-scope ASPA path verification.** ASPA validation now uses the
   configured BGP Role to select the draft-ietf-sidrops-aspa-verification-25

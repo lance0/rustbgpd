@@ -10,6 +10,8 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 ```
 rustbgpctl global                      # show ASN, router ID
 rustbgpctl config diff --from-file config.toml
+rustbgpctl config plan --from-file config.toml
+rustbgpctl config apply --from-file config.toml --expected-runtime-snapshot-token kv1:...
 rustbgpctl neighbor                    # list all peers
 rustbgpctl neighbor <addr>             # peer detail
 rustbgpctl neighbor <addr> add --asn <asn> [--role provider|rs|rs-client|customer|peer] [--strict-role]

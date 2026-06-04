@@ -1809,7 +1809,7 @@ reports whether the reconciler is running.
 validate a complete candidate TOML and return an optimistic runtime snapshot
 token; `ApplyConfigTransaction` commits one pure runtime family at a time:
 full-set `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, or static
-`[[neighbors]]` add/delete changes. The apply path re-checks the token under
+`[[neighbors]]` add/delete/modify changes. The apply path re-checks the token under
 the shared runtime-config coordinator, rejects mixed or unsupported candidates
 without mutation, applies live runtime state, persists the exact accepted
 candidate with an acknowledgement, and rolls runtime state back if apply or

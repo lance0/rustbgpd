@@ -7,6 +7,7 @@ use rustbgpd_wire::{
     Capability, Message, OpenMessage, decode_message, encode_message, peek_message_length,
 };
 use std::collections::BTreeSet;
+use std::net::Ipv6Addr;
 use std::sync::{
     Arc,
     atomic::{AtomicU32, Ordering},
@@ -848,6 +849,116 @@ async fn add_peer_and_list() {
 
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn reconfigure_peer_preserves_disabled_state() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+    mgr.disable_peer(key(addr), None).await.unwrap();
+
+    let mut replacement = make_config(addr, 65002);
+    replacement.hold_time = Some(45);
+    let previous = mgr.reconfigure_peer(replacement).await.unwrap();
+
+    assert_eq!(previous.hold_time, Some(90));
+    let managed = mgr.peers.get(&key(addr)).expect("reconfigured peer");
+    assert_eq!(managed.hold_time, Some(45));
+    assert!(!managed.enabled);
+}
+
+#[tokio::test]
+async fn reconfigure_peer_preserves_graceful_shutdown_intent() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::RefreshPeerOutbound { reply, .. } = update {
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+    mgr.peers
+        .get_mut(&key(addr))
+        .expect("managed peer")
+        .advertise_graceful_shutdown = true;
+
+    let mut replacement = make_config(addr, 65002);
+    replacement.description = "modified".to_string();
+    mgr.reconfigure_peer(replacement).await.unwrap();
+
+    let managed = mgr.peers.get(&key(addr)).expect("reconfigured peer");
+    assert_eq!(managed.description, "modified");
+    assert!(managed.advertise_graceful_shutdown);
+}
+
+#[tokio::test]
+async fn reconfigure_peer_restores_previous_peer_when_replacement_add_fails() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
+    let interface = "rustbgpd-test-missing0";
+    let mut original = make_config(addr, 65002);
+    original.interface = Some(interface.to_string());
+    original.scope_id = Some(42);
+    mgr.add_peer(original, false).await.unwrap();
+    mgr.disable_peer(scoped_key(addr, interface), None)
+        .await
+        .unwrap();
+
+    let mut replacement = make_config(addr, 65002);
+    replacement.interface = Some(interface.to_string());
+    replacement.description = "should not survive failed add".to_string();
+    let Err(error) = mgr.reconfigure_peer(replacement).await else {
+        panic!("invalid replacement should fail after internal restore");
+    };
+
+    assert!(error.contains("previous peer restored"), "{error}");
+    let managed = mgr
+        .peers
+        .get(&scoped_key(addr, interface))
+        .expect("restored peer");
+    assert_eq!(managed.description, format!("test-peer-{addr}"));
+    assert_eq!(managed.remote_asn, 65002);
+    assert_eq!(managed.hold_time, Some(90));
+    assert!(!managed.enabled);
 }
 
 #[tokio::test]
