@@ -61,6 +61,18 @@ fn transaction_plan_to_proto(
     }
 }
 
+/// Map a peer-manager plan error to a gRPC status. A runtime snapshot-token
+/// mismatch is a stale-plan optimistic-concurrency failure
+/// (`FAILED_PRECONDITION`) — consistent with the apply path — not a malformed
+/// request; every other plan error is candidate validation (`INVALID_ARGUMENT`).
+fn plan_error_to_status(error: String) -> Status {
+    if error.starts_with("runtime config snapshot changed") {
+        Status::failed_precondition(error)
+    } else {
+        Status::invalid_argument(error)
+    }
+}
+
 #[tonic::async_trait]
 impl proto::config_service_server::ConfigService for ConfigService {
     async fn diff_runtime_config(
@@ -118,7 +130,7 @@ impl proto::config_service_server::ConfigService for ConfigService {
             Status::unavailable("peer manager dropped config transaction plan reply")
         })? {
             Ok(plan) => Ok(Response::new(transaction_plan_to_proto(plan))),
-            Err(error) => Err(Status::invalid_argument(error)),
+            Err(error) => Err(plan_error_to_status(error)),
         }
     }
 
@@ -251,7 +263,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_config_transaction_maps_peer_manager_error_to_invalid_argument() {
+    async fn plan_config_transaction_maps_token_mismatch_to_failed_precondition() {
+        // A stale expected token is an optimistic-concurrency failure, not a
+        // malformed request — same mapping as the apply path.
         let (tx, mut rx) = mpsc::channel(1);
         let svc = ConfigService::new(tx);
         tokio::spawn(async move {
@@ -259,7 +273,9 @@ mod tests {
             else {
                 panic!("expected PlanConfigTransaction command");
             };
-            let _ = reply.send(Err("runtime config snapshot changed".to_string()));
+            let _ = reply.send(Err(
+                "runtime config snapshot changed: expected stale, current kv1:abc:9".to_string(),
+            ));
         });
 
         let err = svc
@@ -269,8 +285,31 @@ mod tests {
             }))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
         assert!(err.message().contains("runtime config snapshot changed"));
+    }
+
+    #[tokio::test]
+    async fn plan_config_transaction_maps_validation_error_to_invalid_argument() {
+        // A candidate validation error (not a token race) stays InvalidArgument.
+        let (tx, mut rx) = mpsc::channel(1);
+        let svc = ConfigService::new(tx);
+        tokio::spawn(async move {
+            let Some(PeerManagerCommand::PlanConfigTransaction { reply, .. }) = rx.recv().await
+            else {
+                panic!("expected PlanConfigTransaction command");
+            };
+            let _ = reply.send(Err("invalid candidate: unknown field `bogus`".to_string()));
+        });
+
+        let err = svc
+            .plan_config_transaction(Request::new(proto::PlanConfigTransactionRequest {
+                candidate_toml: "candidate".to_string(),
+                expected_runtime_snapshot_token: String::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 
     #[tokio::test]
