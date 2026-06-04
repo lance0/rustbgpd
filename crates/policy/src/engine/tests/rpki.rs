@@ -2,6 +2,32 @@ use super::*;
 
 // --- RPKI validation matching ---
 
+fn evaluate_policy_with_validation_states(
+    policy: Option<&Policy>,
+    validation_state: RpkiValidation,
+    aspa_state: AspaValidation,
+) -> PolicyResult {
+    let context = RouteContext {
+        prefix: v4_prefix([10, 0, 0, 0], 8),
+        next_hop: None,
+        extended_communities: &[],
+        communities: &[],
+        large_communities: &[],
+        as_path_str: "",
+        as_path_len: 0,
+        validation_state,
+        aspa_state,
+        peer_address: None,
+        peer_asn: None,
+        peer_group: None,
+        route_type: None,
+        evpn_route_type: None,
+        local_pref: None,
+        med: None,
+    };
+    super::super::evaluate_policy(policy, &context)
+}
+
 #[test]
 fn chain_reports_validation_state_dependencies() {
     let policy = |entries| Policy {
@@ -45,6 +71,144 @@ fn chain_reports_validation_state_dependencies() {
         ])
         .requires_rpki_validation(),
         "dependency detection must scan every policy in the chain"
+    );
+}
+
+#[test]
+fn aspa_match_invalid_deny() {
+    let mut deny_invalid = stmt(None, PolicyAction::Deny, vec![]);
+    deny_invalid.match_aspa_validation = Some(AspaValidation::Invalid);
+    let policy = Policy {
+        entries: vec![deny_invalid],
+        default_action: PolicyAction::Permit,
+    };
+
+    assert_eq!(
+        evaluate_policy_with_validation_states(
+            Some(&policy),
+            RpkiValidation::NotFound,
+            AspaValidation::Invalid,
+        )
+        .action,
+        PolicyAction::Deny
+    );
+    assert_eq!(
+        evaluate_policy_with_validation_states(
+            Some(&policy),
+            RpkiValidation::NotFound,
+            AspaValidation::Valid,
+        )
+        .action,
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        evaluate_policy_with_validation_states(
+            Some(&policy),
+            RpkiValidation::NotFound,
+            AspaValidation::Unknown,
+        )
+        .action,
+        PolicyAction::Permit
+    );
+}
+
+#[test]
+fn aspa_match_valid_applies_modification() {
+    let mut permit_valid = stmt(None, PolicyAction::Permit, vec![]);
+    permit_valid.match_aspa_validation = Some(AspaValidation::Valid);
+    permit_valid.modifications.set_local_pref = Some(250);
+    let policy = Policy {
+        entries: vec![permit_valid],
+        default_action: PolicyAction::Permit,
+    };
+
+    let valid = evaluate_policy_with_validation_states(
+        Some(&policy),
+        RpkiValidation::NotFound,
+        AspaValidation::Valid,
+    );
+    assert_eq!(valid.action, PolicyAction::Permit);
+    assert_eq!(valid.modifications.set_local_pref, Some(250));
+
+    let unknown = evaluate_policy_with_validation_states(
+        Some(&policy),
+        RpkiValidation::NotFound,
+        AspaValidation::Unknown,
+    );
+    assert_eq!(unknown.action, PolicyAction::Permit);
+    assert_eq!(
+        unknown.modifications.set_local_pref, None,
+        "non-matching ASPA state must fall through to the default policy result"
+    );
+}
+
+#[test]
+fn aspa_match_unknown() {
+    let mut permit_unknown = stmt(None, PolicyAction::Permit, vec![]);
+    permit_unknown.match_aspa_validation = Some(AspaValidation::Unknown);
+    permit_unknown.modifications.set_med = Some(75);
+    let policy = Policy {
+        entries: vec![permit_unknown],
+        default_action: PolicyAction::Deny,
+    };
+
+    let unknown = evaluate_policy_with_validation_states(
+        Some(&policy),
+        RpkiValidation::NotFound,
+        AspaValidation::Unknown,
+    );
+    assert_eq!(unknown.action, PolicyAction::Permit);
+    assert_eq!(unknown.modifications.set_med, Some(75));
+
+    assert_eq!(
+        evaluate_policy_with_validation_states(
+            Some(&policy),
+            RpkiValidation::NotFound,
+            AspaValidation::Invalid,
+        )
+        .action,
+        PolicyAction::Deny
+    );
+}
+
+#[test]
+fn rpki_and_aspa_predicates_are_logical_and() {
+    let mut deny_invalid_both = stmt(None, PolicyAction::Deny, vec![]);
+    deny_invalid_both.match_rpki_validation = Some(RpkiValidation::Invalid);
+    deny_invalid_both.match_aspa_validation = Some(AspaValidation::Invalid);
+    let policy = Policy {
+        entries: vec![deny_invalid_both],
+        default_action: PolicyAction::Permit,
+    };
+
+    assert_eq!(
+        evaluate_policy_with_validation_states(
+            Some(&policy),
+            RpkiValidation::Invalid,
+            AspaValidation::Invalid,
+        )
+        .action,
+        PolicyAction::Deny
+    );
+    assert_eq!(
+        evaluate_policy_with_validation_states(
+            Some(&policy),
+            RpkiValidation::Invalid,
+            AspaValidation::Valid,
+        )
+        .action,
+        PolicyAction::Permit,
+        "matching RPKI alone is not enough when ASPA is also configured"
+    );
+    assert_eq!(
+        evaluate_policy_with_validation_states(
+            Some(&policy),
+            RpkiValidation::Valid,
+            AspaValidation::Invalid,
+        )
+        .action,
+        PolicyAction::Permit,
+        "matching ASPA alone is not enough when RPKI is also configured"
     );
 }
 
