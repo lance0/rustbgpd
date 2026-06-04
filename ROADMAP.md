@@ -474,11 +474,11 @@ branch is between features.
   supports one pure runtime family at a time. Next useful executor is
   whichever hot-reload section has a clear validate/apply/persist/rollback path
   under the runtime-config coordinator.
-- [ ] **Config transaction static-neighbor resolution scaling.**
-  `resolve_static_neighbors` currently resolves the full candidate neighbor set
-  and then selects the added or changed peers. Correct and simple, but O(N) in
-  the number of configured neighbors; optimize to resolve only touched
-  neighbors if large static-neighbor transactions become common.
+- [x] **Config transaction static-neighbor resolution scaling.**
+  Static-neighbor add/modify transactions now resolve only the touched
+  `[[neighbors]]` entries through the same single-neighbor inheritance path,
+  instead of resolving the full candidate neighbor set and then selecting the
+  added or changed peers.
 - [x] **Peer-manager add-without-start path for disabled reconfigure.**
   Static-neighbor modify, SIGHUP changed-peer reconcile, and peer-group
   hot-apply now rebuild a disabled peer as disabled, without transient session
