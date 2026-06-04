@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.35.0] — 2026-06-04
+
 ### Added
 
 - **Config transaction model foundation (ADR-0076).** `ConfigService` now has a
