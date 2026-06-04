@@ -455,11 +455,10 @@ branch is between features.
   (TLS-cert reads downstream of validated `is_some()`, one const `try_from`
   cast, a few defensive parses of already-validated strings). Kept open as a
   forcing function when these stragglers come up for refactor; not blocking.
-- [ ] **`panic!` → typed-error sweep on the one production site.**
-  `crates/bfd/src/discriminator.rs` panics on discriminator-space exhaustion. The
-  2^32 space makes it theoretically unreachable, but a `Result<Discriminator,
-  AllocError>` removes the only `panic!()` outside tests; caller logs and refuses
-  to install the new session.
+- [x] **`panic!` → typed-error sweep on the one production site.**
+  `crates/bfd/src/discriminator.rs` now returns a typed discriminator-exhaustion
+  error instead of panicking. The daemon logs and refuses to install the new BFD
+  session if the 32-bit non-zero discriminator space is ever exhausted.
 - [ ] **Stringly command errors → typed errors where API status depends on
   class.** PR #334 introduced `DynamicRangeError` so
   `AddDynamicNeighbor` / `DeleteDynamicNeighbor` can map duplicate, not-found,

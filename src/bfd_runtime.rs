@@ -472,7 +472,17 @@ mod linux {
             // A unique non-zero local discriminator (RFC 5880 §6.8.1) from the
             // allocator — guaranteed distinct across peers, unlike an address
             // hash which can collide.
-            let discr = self.discriminators.allocate();
+            let discr = match self.discriminators.allocate() {
+                Ok(discr) => discr,
+                Err(error) => {
+                    warn!(
+                        peer = %params.peer,
+                        error = %error,
+                        "skipping BFD session: local discriminator allocation failed"
+                    );
+                    return;
+                }
+            };
             let (session, actions) = match Session::new(SessionConfig {
                 local_discriminator: discr,
                 desired_min_tx_interval_us: params.desired_min_tx_us,

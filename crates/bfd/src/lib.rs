@@ -32,7 +32,7 @@ pub mod session;
 pub mod state;
 
 pub use action::{Action, TimerKind};
-pub use discriminator::DiscriminatorAllocator;
+pub use discriminator::{DiscriminatorAllocationError, DiscriminatorAllocator};
 pub use error::DecodeError;
 pub use event::Event;
 pub use packet::{CONTROL_PACKET_LEN, ControlPacket, Diagnostic};
