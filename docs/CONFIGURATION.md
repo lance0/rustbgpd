@@ -1816,6 +1816,9 @@ candidate with an acknowledgement, and rolls runtime state back if apply or
 persistence fails. Like SIGHUP and FIB CRUD, FIB transaction apply requires the
 FIB reconciler to already be running: a daemon that started with no
 `[[fib_tables]]` still needs a restart to enable the subsystem.
+Operators can drive the workflow through `rustbgpctl config plan --from-file`
+and `rustbgpctl config apply --from-file --expected-runtime-snapshot-token`;
+`--json` returns the same status, section, and token fields for automation.
 
 ```console
 $ rustbgpctl fib-table set edge --table-id 1000 --metric 200 \

@@ -265,6 +265,36 @@ enum ConfigAction {
         #[arg(long, value_name = "PATH")]
         from_file: String,
     },
+
+    /// Validate and classify a candidate transaction without mutation
+    Plan {
+        /// Candidate TOML file to validate and classify
+        #[arg(long, value_name = "PATH")]
+        from_file: String,
+
+        /// Optional runtime snapshot token to check while planning
+        #[arg(long, value_name = "TOKEN")]
+        expected_runtime_snapshot_token: Option<String>,
+    },
+
+    /// Commit a previously planned candidate transaction
+    Apply {
+        /// Candidate TOML file to validate and commit
+        #[arg(long, value_name = "PATH")]
+        from_file: String,
+
+        /// Runtime snapshot token returned by config plan
+        #[arg(long, value_name = "TOKEN")]
+        expected_runtime_snapshot_token: String,
+
+        /// Optional audit/correlation identifier
+        #[arg(long, value_name = "ID")]
+        client_request_id: Option<String>,
+
+        /// Optional human change note; not logged verbatim by the daemon
+        #[arg(long, value_name = "TEXT")]
+        comment: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1012,9 +1042,39 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             Some(BfdAction::List) | None => commands::bfd::list(connection, json).await,
         },
 
-        Command::Config {
-            action: ConfigAction::Diff { from_file },
-        } => commands::config::diff(connection, &from_file, json).await,
+        Command::Config { action } => match action {
+            ConfigAction::Diff { from_file } => {
+                commands::config::diff(connection, &from_file, json).await
+            }
+            ConfigAction::Plan {
+                from_file,
+                expected_runtime_snapshot_token,
+            } => {
+                commands::config::plan(
+                    connection,
+                    &from_file,
+                    expected_runtime_snapshot_token.as_deref(),
+                    json,
+                )
+                .await
+            }
+            ConfigAction::Apply {
+                from_file,
+                expected_runtime_snapshot_token,
+                client_request_id,
+                comment,
+            } => {
+                commands::config::apply(
+                    connection,
+                    &from_file,
+                    &expected_runtime_snapshot_token,
+                    client_request_id.as_deref(),
+                    comment.as_deref(),
+                    json,
+                )
+                .await
+            }
+        },
 
         Command::Neighbor { address, action } => match (address, action) {
             (None, None) => commands::neighbor::list(connection, json).await,

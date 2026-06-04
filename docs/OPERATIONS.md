@@ -77,16 +77,26 @@ rustbgpd --diff /tmp/new-config.toml /etc/rustbgpd/config.toml
 rustbgpd --diff /tmp/new-config.toml /etc/rustbgpd/config.toml --json
 ```
 
-When the daemon is already running, compare a candidate file against
-the live runtime snapshot instead of the on-disk file:
+When the daemon is already running, compare a candidate file against the live
+runtime snapshot instead of the on-disk file, then plan/apply a supported
+transaction with an optimistic runtime snapshot token:
 
 ```bash
 rustbgpctl config diff --from-file /tmp/new-config.toml
 rustbgpctl --json config diff --from-file /tmp/new-config.toml
+
+rustbgpctl config plan --from-file /tmp/new-config.toml
+rustbgpctl --json config plan --from-file /tmp/new-config.toml
+
+rustbgpctl config apply --from-file /tmp/new-config.toml \
+  --expected-runtime-snapshot-token fnv1a64:...
 ```
 
-The live API is diff-only: it returns redacted text / JSON diff
-buckets and never exports the daemon's full config snapshot.
+The live API returns redacted text / JSON diff buckets and never exports the
+daemon's full config snapshot. Transaction apply is intentionally narrower than
+SIGHUP: v1 commits one pure runtime family at a time (`[[fib_tables]]`,
+`[[dynamic_neighbors]]`, or static `[[neighbors]]` add/delete). Mixed-family
+candidates and unsupported sections are rejected without mutation.
 
 Output is grouped into two actionable sections plus a per-neighbor
 effective-impact view:
