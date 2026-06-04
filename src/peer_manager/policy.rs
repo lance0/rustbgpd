@@ -6,6 +6,7 @@ use rustbgpd_api::peer_types::{
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::RibUpdate;
+use rustbgpd_telemetry::BgpMetrics;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
@@ -15,6 +16,40 @@ use crate::policy_admin::{
 };
 
 use super::{ManagedPeer, PEER_POLICY_UPDATE_TIMEOUT, PEER_QUERY_TIMEOUT, PeerManager};
+
+fn metric_count(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn import_validation_dependency_label(dependency: ImportValidationDependency) -> &'static str {
+    match dependency {
+        ImportValidationDependency::Rpki => "rpki",
+        ImportValidationDependency::Aspa => "aspa",
+    }
+}
+
+fn record_import_validation_refresh_metrics(
+    metrics: &BgpMetrics,
+    dependency: ImportValidationDependency,
+    eligible: usize,
+    refreshed: usize,
+    skipped_not_established: usize,
+    failed: usize,
+) {
+    let dependency_label = import_validation_dependency_label(dependency);
+    metrics.record_validation_import_refresh(dependency_label, "eligible", metric_count(eligible));
+    metrics.record_validation_import_refresh(
+        dependency_label,
+        "refreshed",
+        metric_count(refreshed),
+    );
+    metrics.record_validation_import_refresh(
+        dependency_label,
+        "skipped_not_established",
+        metric_count(skipped_not_established),
+    );
+    metrics.record_validation_import_refresh(dependency_label, "failed", metric_count(failed));
+}
 
 impl PeerManager {
     #[cfg(test)]
@@ -97,6 +132,15 @@ impl PeerManager {
                 }
             }
         }
+
+        record_import_validation_refresh_metrics(
+            &self.metrics,
+            dependency,
+            candidates.len(),
+            refreshed,
+            skipped_not_established,
+            failures.len(),
+        );
 
         info!(
             ?dependency,

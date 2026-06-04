@@ -81,6 +81,9 @@ pub struct BgpMetrics {
     // ── ASPA ───────────────────────────────────────────────────
     aspa_records_total: IntGauge,
 
+    // ── Validation-cache import refresh ───────────────────────
+    validation_import_refreshes: IntCounterVec,
+
     // ── EVPN ───────────────────────────────────────────────────
     evpn_local_originations: IntCounterVec,
     evpn_local_origination_errors: IntCounterVec,
@@ -467,6 +470,15 @@ impl BgpMetrics {
         let aspa_records_total = IntGauge::new(
             "bgp_aspa_records_total",
             "Number of ASPA customer records in the merged table",
+        )
+        .expect("valid metric definition");
+
+        let validation_import_refreshes = IntCounterVec::new(
+            Opts::new(
+                "bgp_validation_import_refreshes_total",
+                "Validation-cache-triggered inbound Route Refresh work by dependency and bounded outcome.",
+            ),
+            &["dependency", "outcome"],
         )
         .expect("valid metric definition");
 
@@ -865,6 +877,9 @@ impl BgpMetrics {
             .register(Box::new(aspa_records_total.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(validation_import_refreshes.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(evpn_local_originations.clone()))
             .expect("metric not already registered");
         registry
@@ -1001,6 +1016,7 @@ impl BgpMetrics {
             gr_timer_expired,
             rpki_vrp_count,
             aspa_records_total,
+            validation_import_refreshes,
             evpn_local_originations,
             evpn_local_origination_errors,
             evpn_local_observations_dropped,
@@ -1336,6 +1352,18 @@ impl BgpMetrics {
     /// Set ASPA record count.
     pub fn set_aspa_records_total(&self, count: i64) {
         self.aspa_records_total.set(count);
+    }
+
+    /// Record validation-cache-triggered inbound Route Refresh work.
+    ///
+    /// Labels are bounded:
+    /// - `dependency`: `"rpki"` or `"aspa"`.
+    /// - `outcome`: `"eligible"`, `"refreshed"`,
+    ///   `"skipped_not_established"`, or `"failed"`.
+    pub fn record_validation_import_refresh(&self, dependency: &str, outcome: &str, count: u64) {
+        self.validation_import_refreshes
+            .with_label_values(&[dependency, outcome])
+            .inc_by(count);
     }
 
     /// Record a successful locally-originated EVPN Type 2 action.
@@ -1859,6 +1887,45 @@ mod tests {
         assert!(text.contains(r#"policy="ingress-filter""#));
         assert!(text.contains(r#"direction="import""#));
         assert!(text.contains(r#"action="deny""#));
+    }
+
+    #[test]
+    fn validation_import_refresh_counter_uses_bounded_labels() {
+        let m = BgpMetrics::new();
+        m.record_validation_import_refresh("rpki", "eligible", 3);
+        m.record_validation_import_refresh("rpki", "refreshed", 2);
+        m.record_validation_import_refresh("rpki", "skipped_not_established", 1);
+        m.record_validation_import_refresh("aspa", "failed", 1);
+
+        assert_eq!(
+            m.validation_import_refreshes
+                .with_label_values(&["rpki", "eligible"])
+                .get(),
+            3
+        );
+        assert_eq!(
+            m.validation_import_refreshes
+                .with_label_values(&["rpki", "refreshed"])
+                .get(),
+            2
+        );
+        assert_eq!(
+            m.validation_import_refreshes
+                .with_label_values(&["rpki", "skipped_not_established"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.validation_import_refreshes
+                .with_label_values(&["aspa", "failed"])
+                .get(),
+            1
+        );
+
+        let text = gather_text(&m);
+        assert!(text.contains("bgp_validation_import_refreshes_total"));
+        assert!(text.contains(r#"dependency="rpki""#));
+        assert!(text.contains(r#"outcome="skipped_not_established""#));
     }
 
     #[test]

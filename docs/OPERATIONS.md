@@ -570,15 +570,20 @@ owned-state.
 | `bgp_gr_stale_routes` | Routes currently marked stale |
 | `bgp_gr_timer_expired_total` | GR timers that expired (routes swept) |
 
-### RPKI
+### RPKI / ASPA validation
 
 | Metric | What it tells you |
 |--------|-------------------|
 | `bgp_rpki_vrp_count{af="ipv4"}` | IPv4 VRP entries loaded |
 | `bgp_rpki_vrp_count{af="ipv6"}` | IPv6 VRP entries loaded |
+| `bgp_aspa_records_total` | ASPA customer records loaded in the merged table |
+| `bgp_validation_import_refreshes_total{dependency, outcome}` | Inbound Route Refresh work triggered by VRP / ASPA cache updates for peers whose import policy matches validation state. `dependency` is `rpki` or `aspa`; `outcome` is `eligible`, `refreshed`, `skipped_not_established`, or `failed`. |
 
 A sudden drop in VRP count likely means a cache connection was lost or the
-cache itself has stale data.
+cache itself has stale data. A non-zero `failed` outcome on
+`bgp_validation_import_refreshes_total` means the cache update arrived, but one
+or more validation-dependent peers could not be refreshed immediately; check the
+daemon log for the peer-specific reason.
 
 ### EVPN VTEP alpha
 

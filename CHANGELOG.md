@@ -55,6 +55,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ADR-0075. (`rustbgpd-wire` gains an `orf` module and an optional ORF section on
   `RouteRefreshMessage` — a breaking change for that crate.)
 
+- **Validation-cache import-refresh metric.**
+  `bgp_validation_import_refreshes_total{dependency, outcome}` now counts
+  inbound Route Refresh work triggered by VRP / ASPA cache updates for peers
+  whose import policy matches validation state. `dependency` is `rpki` or
+  `aspa`; `outcome` is `eligible`, `refreshed`, `skipped_not_established`, or
+  `failed`.
+
 ### Fixed
 
 - **SIGHUP reload baseline after config transactions.** SIGHUP now reads the

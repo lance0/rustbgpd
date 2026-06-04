@@ -188,10 +188,11 @@ Later for what remains.
     ancestor-bucket lookup while preserving overlapping-VRP semantics. Cache
     updates now also trigger targeted inbound refresh for established peers
     whose resolved import policy matches RPKI/ASPA state, so previously denied
-    routes can be reconsidered after VRP/ASPA changes. Follow-ups, only if
-    operator scale or observability needs justify them: add a
-    cache-triggered-refresh counter and parallelize or otherwise de-block the
-    per-peer refresh loop for very large validation-dependent peer sets.
+    routes can be reconsidered after VRP/ASPA changes. The
+    `bgp_validation_import_refreshes_total{dependency, outcome}` metric now
+    exposes the cache-triggered refresh work. Remaining follow-up, only if
+    operator scale justifies it: parallelize or otherwise de-block the per-peer
+    refresh loop for very large validation-dependent peer sets.
   - Export-policy AS_PATH formatting: shipped in #340 — the export-policy
     evaluator no longer calls `AsPath::to_aspath_string()` for every export
     candidate unless the effective export policy contains an AS_PATH-regex match,
