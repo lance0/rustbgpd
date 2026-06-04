@@ -1053,6 +1053,16 @@ const fn access_mode_compatibility_max_tier(access_mode: GrpcAccessMode) -> Grpc
     }
 }
 
+const TRANSACTION_FIB_SECTION: &str = "[[fib_tables]]";
+const TRANSACTION_DYNAMIC_SECTION: &str = "[[dynamic_neighbors]]";
+const TRANSACTION_NEIGHBOR_ADD_SECTION: &str = "[[neighbors]] add";
+const TRANSACTION_NEIGHBOR_DELETE_SECTION: &str = "[[neighbors]] delete";
+const TRANSACTION_NEIGHBOR_MODIFY_SECTION: &str = "[[neighbors]] modify";
+const TRANSACTION_PEER_GROUP_CATALOG_SECTION: &str = "[peer_groups] catalog";
+const TRANSACTION_POLICY_DEFINITIONS_SECTION: &str = "[policy] definitions";
+const TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION: &str = "[policy] neighbor_sets";
+const TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION: &str = "[policy] global chains";
+
 /// Test-only auto-inject for the v0.24.0 `enforcement = "tier"`
 /// default flip. When compiled with `#[cfg(test)]` and the supplied
 /// TOML declares no `security.grpc` table or sub-table, appends an
@@ -1619,53 +1629,66 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
     if !diff.neighbors.added.is_empty() {
         class
             .supported_sections
-            .push("[[neighbors]] add".to_string());
+            .push(TRANSACTION_NEIGHBOR_ADD_SECTION.to_string());
     }
     if !diff.neighbors.removed.is_empty() {
         class
             .supported_sections
-            .push("[[neighbors]] delete".to_string());
+            .push(TRANSACTION_NEIGHBOR_DELETE_SECTION.to_string());
     }
     if !diff.neighbors.changed.is_empty() {
         class
             .supported_sections
-            .push("[[neighbors]] modify".to_string());
+            .push(TRANSACTION_NEIGHBOR_MODIFY_SECTION.to_string());
     }
     if diff.dynamic_neighbors_changed {
         class
             .supported_sections
-            .push("[[dynamic_neighbors]]".to_string());
+            .push(TRANSACTION_DYNAMIC_SECTION.to_string());
     }
     if diff.fib_tables_changed && !diff.fib_tables_requires_restart {
-        class.supported_sections.push("[[fib_tables]]".to_string());
-    }
-    if !transaction_sections_are_one_family(&class.supported_sections) {
         class
-            .unsupported_sections
-            .push("mixed transaction families".to_string());
-    }
-
-    if !diff.peer_groups.added.is_empty()
-        || !diff.peer_groups.removed.is_empty()
-        || !diff.peer_groups.changed.is_empty()
-    {
-        class.unsupported_sections.push("[peer_groups]".to_string());
+            .supported_sections
+            .push(TRANSACTION_FIB_SECTION.to_string());
     }
     if !diff.policy.definitions_added.is_empty()
         || !diff.policy.definitions_removed.is_empty()
         || !diff.policy.definitions_changed.is_empty()
-        || !diff.policy.neighbor_sets_added.is_empty()
+    {
+        class
+            .supported_sections
+            .push(TRANSACTION_POLICY_DEFINITIONS_SECTION.to_string());
+    }
+    if !diff.policy.neighbor_sets_added.is_empty()
         || !diff.policy.neighbor_sets_removed.is_empty()
         || !diff.policy.neighbor_sets_changed.is_empty()
-        || diff.policy.import_chain_changed
-        || diff.policy.export_chain_changed
     {
-        class.unsupported_sections.push("[policy]".to_string());
+        class
+            .supported_sections
+            .push(TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION.to_string());
+    }
+    if diff.policy.import_chain_changed || diff.policy.export_chain_changed {
+        class
+            .supported_sections
+            .push(TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION.to_string());
+    }
+    if !diff.peer_groups.added.is_empty()
+        || !diff.peer_groups.removed.is_empty()
+        || !diff.peer_groups.changed.is_empty()
+    {
+        class
+            .supported_sections
+            .push(TRANSACTION_PEER_GROUP_CATALOG_SECTION.to_string());
     }
     if !diff.effective_neighbor_impact.is_empty() {
         class
             .unsupported_sections
             .push("effective neighbor inheritance impact".to_string());
+    }
+    if !transaction_sections_are_one_family(&class.supported_sections) {
+        class
+            .unsupported_sections
+            .push("mixed transaction families".to_string());
     }
     if diff.honor_graceful_shutdown_changed {
         class
@@ -1753,17 +1776,30 @@ fn transaction_sections_are_one_family(sections: &[String]) -> bool {
     let mut has_fib = false;
     let mut has_dynamic = false;
     let mut has_static_neighbor = false;
+    let mut has_catalog = false;
     for section in sections {
         match section.as_str() {
-            "[[fib_tables]]" => has_fib = true,
-            "[[dynamic_neighbors]]" => has_dynamic = true,
-            "[[neighbors]] add" | "[[neighbors]] delete" | "[[neighbors]] modify" => {
+            TRANSACTION_FIB_SECTION => has_fib = true,
+            TRANSACTION_DYNAMIC_SECTION => has_dynamic = true,
+            TRANSACTION_NEIGHBOR_ADD_SECTION
+            | TRANSACTION_NEIGHBOR_DELETE_SECTION
+            | TRANSACTION_NEIGHBOR_MODIFY_SECTION => {
                 has_static_neighbor = true;
+            }
+            TRANSACTION_PEER_GROUP_CATALOG_SECTION
+            | TRANSACTION_POLICY_DEFINITIONS_SECTION
+            | TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION
+            | TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION => {
+                has_catalog = true;
             }
             _ => {}
         }
     }
-    u8::from(has_fib) + u8::from(has_dynamic) + u8::from(has_static_neighbor) <= 1
+    u8::from(has_fib)
+        + u8::from(has_dynamic)
+        + u8::from(has_static_neighbor)
+        + u8::from(has_catalog)
+        <= 1
 }
 
 /// JSON schema shared by `rustbgpd --diff --json` and the live runtime

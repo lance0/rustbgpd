@@ -57,20 +57,25 @@ section executors behind that public contract.
    a token does not survive a daemon restart, and a client holding a pre-restart
    token must re-plan (apply returns `FAILED_PRECONDITION` on mismatch).
 4. **V1 supported surface is narrow on purpose.** The planner marks
-   `[[fib_tables]]` N→M/N→0 changes, `[[dynamic_neighbors]]` changes, and
-   static neighbor add/delete/modify changes as the v1 transaction surface.
-   Policy/peer-group changes, global hot-applied flags, effective inheritance
-   impacts, and all restart-required sections are rejected by the transaction
-   planner until they have explicit executors.
+   `[[fib_tables]]` N→M/N→0 changes, `[[dynamic_neighbors]]` changes, static
+   neighbor add/delete/modify changes, and catalog-only policy/peer-group/global
+   named-chain changes as the v1 transaction surface. "Catalog-only" means the
+   diff has no `effective_neighbor_impact`: no existing peer's resolved runtime
+   import/export policy or inherited peer-group state changes. Policy/peer-group
+   edits with live neighbor impact, global hot-applied flags, and all
+   restart-required sections are rejected until they have explicit executors.
 5. **Apply execution is one pure runtime family at a time.** V1 commits pure
-   full-set `[[fib_tables]]`, pure full-set `[[dynamic_neighbors]]`, or static
-   `[[neighbors]]` add/delete/modify candidates. It re-plans under the shared
-   runtime-config coordinator, rejects mixed-family or unsupported candidates
-   without mutation, stages the peer-manager snapshot, applies live runtime
-   state, persists the exact accepted candidate with an acknowledgement, and
-   rolls back on every post-stage failure. Static-neighbor modifies use the
-   same delete/re-add session-reconfigure semantics as SIGHUP, but with
-   transaction rollback rather than best-effort reconcile.
+   full-set `[[fib_tables]]`, pure full-set `[[dynamic_neighbors]]`, static
+   `[[neighbors]]` add/delete/modify, or catalog-only snapshot candidates. It
+   re-plans under the shared runtime-config coordinator, rejects mixed-family or
+   unsupported candidates without mutation, stages the peer-manager snapshot,
+   applies live runtime state when the family has one, persists the exact
+   accepted candidate with an acknowledgement, and rolls back on every
+   post-stage failure. Static-neighbor modifies use the same delete/re-add
+   session-reconfigure semantics as SIGHUP, but with transaction rollback rather
+   than best-effort reconcile. Catalog-only transactions have no live peer
+   runtime mutation: they stage and persist the snapshot so future peers or
+   later neighbor transactions can reference the catalog objects.
 6. **gNMI Set remains out of scope.** gNMI mutation must map to this transaction
    model rather than invent a parallel commit path, but this ADR does not
    implement OpenConfig config datastores or `Set`.
@@ -99,6 +104,11 @@ section executors behind that public contract.
 - Dynamic-neighbor transactions replace the full range set from the candidate
   TOML. Static-neighbor transactions support add/delete/modify; modifies rebuild
   the session like SIGHUP and preserve disabled / graceful-shutdown intent.
+- Catalog-only policy/peer-group/global-chain transactions stage reusable config
+  objects before existing peers depend on them. A policy, neighbor-set,
+  peer-group, or global-chain edit that changes an existing neighbor's effective
+  runtime policy remains rejected until a rollback-capable live policy executor
+  exists.
 - Follow-up executors should preserve the established pattern:
   validate candidate section against the live runtime snapshot, take the shared
   runtime-config coordinator, apply live mutation, persist with acknowledgement,

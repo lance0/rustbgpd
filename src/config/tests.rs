@@ -6711,12 +6711,128 @@ peer_group = "ix-members"
     let class = classify_config_transaction_v1(&diff);
 
     assert!(!class.is_committable());
-    assert_eq!(class.supported_sections, vec!["[[neighbors]] modify"]);
+    assert_eq!(
+        class.supported_sections,
+        vec!["[[neighbors]] modify", "[peer_groups] catalog"]
+    );
     assert!(
         class
             .unsupported_sections
-            .contains(&"[peer_groups]".to_string())
+            .contains(&"mixed transaction families".to_string())
     );
+    assert!(class.restart_required_sections.is_empty());
+}
+
+#[test]
+fn transaction_v1_classifies_catalog_only_policy_and_peer_group_changes() {
+    let old = parse(valid_toml()).unwrap();
+    let new_toml = format!(
+        r#"
+{}
+
+[peer_groups.unused]
+hold_time = 120
+
+[policy.neighbor_sets.ixp]
+addresses = ["10.0.0.2"]
+
+[policy.definitions.prep-only]
+default_action = "permit"
+"#,
+        valid_toml()
+    );
+    let new = parse(&new_toml).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(class.is_committable());
+    assert_eq!(
+        class.supported_sections,
+        vec![
+            "[policy] definitions",
+            "[policy] neighbor_sets",
+            "[peer_groups] catalog",
+        ]
+    );
+    assert!(class.unsupported_sections.is_empty());
+    assert!(class.restart_required_sections.is_empty());
+    assert!(
+        diff.effective_neighbor_impact.is_empty(),
+        "catalog-only changes must not affect existing neighbors"
+    );
+}
+
+#[test]
+fn transaction_v1_classifies_catalog_only_global_chain_without_neighbors() {
+    let old_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+"#;
+    let new_toml = format!(
+        r#"
+{old_toml}
+
+[policy]
+import_chain = ["prep-only"]
+
+[policy.definitions.prep-only]
+default_action = "permit"
+"#
+    );
+    let old = parse(old_toml).unwrap();
+    let new = parse(&new_toml).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(class.is_committable());
+    assert_eq!(
+        class.supported_sections,
+        vec!["[policy] definitions", "[policy] global chains"]
+    );
+    assert!(class.unsupported_sections.is_empty());
+    assert!(class.restart_required_sections.is_empty());
+}
+
+#[test]
+fn transaction_v1_rejects_catalog_policy_change_with_live_neighbor_impact() {
+    let with_policy = |default_action: &str| {
+        format!(
+            r#"
+{}
+
+[policy.definitions.import-filter]
+default_action = "{default_action}"
+"#,
+            valid_toml().replace(
+                "hold_time = 90",
+                "hold_time = 90\nimport_policy_chain = [\"import-filter\"]",
+            )
+        )
+    };
+    let old = parse(&with_policy("permit")).unwrap();
+    let new = parse(&with_policy("deny")).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(!class.is_committable());
+    assert_eq!(class.supported_sections, vec!["[policy] definitions"]);
+    assert!(
+        class
+            .unsupported_sections
+            .contains(&"effective neighbor inheritance impact".to_string()),
+        "{:?}",
+        class.unsupported_sections
+    );
+    assert!(!diff.effective_neighbor_impact.is_empty());
     assert!(class.restart_required_sections.is_empty());
 }
 

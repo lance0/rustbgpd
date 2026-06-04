@@ -29,6 +29,10 @@ const DYNAMIC_SECTION: &str = "[[dynamic_neighbors]]";
 const NEIGHBOR_ADD_SECTION: &str = "[[neighbors]] add";
 const NEIGHBOR_DELETE_SECTION: &str = "[[neighbors]] delete";
 const NEIGHBOR_MODIFY_SECTION: &str = "[[neighbors]] modify";
+const PEER_GROUP_CATALOG_SECTION: &str = "[peer_groups] catalog";
+const POLICY_DEFINITIONS_SECTION: &str = "[policy] definitions";
+const POLICY_NEIGHBOR_SETS_SECTION: &str = "[policy] neighbor_sets";
+const POLICY_GLOBAL_CHAINS_SECTION: &str = "[policy] global chains";
 
 /// Build the daemon-owned apply hook wired into `ConfigService`.
 #[must_use]
@@ -146,6 +150,19 @@ async fn commit_apply_family(
                 ),
             ))
         }
+        ApplyFamily::CatalogSnapshot => {
+            commit_candidate_snapshot_locked(&deps.peer_mgr_tx, config_tx, candidate_toml).await?;
+            Ok(committable_response(
+                post_commit_runtime_snapshot_token,
+                supported_sections,
+                format!(
+                    "Committed catalog-only runtime config transaction.\n{} policy definition(s), {} neighbor_set(s), {} peer_group(s) active.\n",
+                    candidate.policy.definitions.len(),
+                    candidate.policy.neighbor_sets.len(),
+                    candidate.peer_groups.len(),
+                ),
+            ))
+        }
         ApplyFamily::StaticNeighbors => {
             commit_static_neighbors_locked(
                 &deps.peer_mgr_tx,
@@ -195,6 +212,7 @@ async fn commit_fib_transaction(
 enum ApplyFamily {
     FibTables,
     DynamicNeighbors,
+    CatalogSnapshot,
     StaticNeighbors,
 }
 
@@ -202,6 +220,17 @@ fn apply_family(sections: &[String]) -> Option<ApplyFamily> {
     match sections {
         [section] if section == FIB_SECTION => Some(ApplyFamily::FibTables),
         [section] if section == DYNAMIC_SECTION => Some(ApplyFamily::DynamicNeighbors),
+        sections
+            if !sections.is_empty()
+                && sections.iter().all(|s| {
+                    s == PEER_GROUP_CATALOG_SECTION
+                        || s == POLICY_DEFINITIONS_SECTION
+                        || s == POLICY_NEIGHBOR_SETS_SECTION
+                        || s == POLICY_GLOBAL_CHAINS_SECTION
+                }) =>
+        {
+            Some(ApplyFamily::CatalogSnapshot)
+        }
         sections
             if !sections.is_empty()
                 && sections.iter().all(|s| {
@@ -1171,6 +1200,127 @@ remote_asn = 65010
         );
         assert_eq!(response.committed_sections, vec!["[[dynamic_neighbors]]"]);
         assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+    }
+
+    #[tokio::test]
+    async fn apply_commits_catalog_snapshot_after_persist_ack() {
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[peer_groups.prep-only]
+hold_time = 120
+
+[policy.neighbor_sets.ixp]
+addresses = ["10.0.0.2"]
+
+[policy.definitions.prep-only]
+default_action = "permit"
+"#,
+        );
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec![
+                    "[policy] definitions".to_string(),
+                    "[policy] neighbor_sets".to_string(),
+                    "[peer_groups] catalog".to_string(),
+                ],
+            ),
+            snapshot_toml.clone(),
+            peers,
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted {
+                candidate_toml,
+                ack: Some(ack),
+            }) = config_rx.recv().await
+            {
+                assert!(candidate_toml.contains("[policy.definitions.prep-only]"));
+                assert!(candidate_toml.contains("[peer_groups.prep-only]"));
+                let _ = ack.send(Ok(()));
+            }
+        });
+
+        let response = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml: candidate_toml.clone(),
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        assert_eq!(
+            response.committed_sections,
+            vec![
+                "[policy] definitions",
+                "[policy] neighbor_sets",
+                "[peer_groups] catalog",
+            ]
+        );
+        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        assert!(response.human_text.contains("catalog-only"));
+    }
+
+    #[tokio::test]
+    async fn catalog_snapshot_persistence_failure_rolls_back_snapshot() {
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[policy.definitions.prep-only]
+default_action = "permit"
+"#,
+        );
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[policy] definitions".to_string()],
+            ),
+            snapshot_toml.clone(),
+            peers,
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+                config_rx.recv().await
+            {
+                let _ = ack.send(Err("persist failed".to_string()));
+            }
+        });
+
+        let err = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml,
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref message) if message == "persist failed"),
+            "{err:?}"
+        );
+        assert_eq!(*snapshot_toml.lock().await, previous_toml);
     }
 
     #[tokio::test]
