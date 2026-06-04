@@ -56,6 +56,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Config transaction rollback hardening.** Snapshot rollback during
+  `ApplyConfigTransaction` now reports failure instead of silently discarding it,
+  and static-neighbor rollback preserves both the original apply/persistence
+  error and any rollback error in the returned `INTERNAL` status. Transaction
+  plan stale-token errors are now structurally typed before gRPC status mapping
+  instead of classified by string-prefix matching.
+
 - **ASPA draft v25 first-AS precondition.** Role-aware ASPA validation now
   checks that the most recently added AS in the `AS_PATH` matches the negotiated
   neighbor ASN, with the transparent route-server-client exception from the

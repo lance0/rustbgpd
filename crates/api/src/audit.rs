@@ -193,7 +193,7 @@ mod tests {
     fn plan_config_transaction_summary_redacts_candidate_toml() {
         let summary = plan_config_transaction_summary(
             "md5_password = \"secret\"\ntcp_ao = { key = \"ao-secret\" }\n",
-            "fnv1a64:abc:1",
+            "kv1:abc:1",
         );
         assert!(summary.as_str().contains("candidate_toml=<redacted>"));
         assert!(summary.as_str().contains("candidate_toml_bytes="));
@@ -210,7 +210,7 @@ mod tests {
     fn apply_config_transaction_summary_redacts_candidate_and_comment() {
         let summary = apply_config_transaction_summary(
             "md5_password = \"secret\"\ntcp_ao = { key = \"ao-secret\" }\n",
-            "fnv1a64:abc:1",
+            "kv1:abc:1",
             "deploy-42",
             "secret maintenance note",
         );

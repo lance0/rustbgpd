@@ -89,7 +89,7 @@ rustbgpctl config plan --from-file /tmp/new-config.toml
 rustbgpctl --json config plan --from-file /tmp/new-config.toml
 
 rustbgpctl config apply --from-file /tmp/new-config.toml \
-  --expected-runtime-snapshot-token fnv1a64:...
+  --expected-runtime-snapshot-token kv1:...
 ```
 
 The live API returns redacted text / JSON diff buckets and never exports the

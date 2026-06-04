@@ -9,7 +9,7 @@ use crate::audit::{
 };
 use crate::peer_types::{
     PeerManagerCommand, RuntimeConfigDiff, RuntimeConfigTransactionPlan,
-    RuntimeConfigTransactionStatus,
+    RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus,
 };
 use crate::proto;
 use crate::server::{ConfigTransactionApplyError, ConfigTransactionApplyFn};
@@ -78,11 +78,15 @@ fn transaction_plan_to_proto(
 /// mismatch is a stale-plan optimistic-concurrency failure
 /// (`FAILED_PRECONDITION`) — consistent with the apply path — not a malformed
 /// request; every other plan error is candidate validation (`INVALID_ARGUMENT`).
-fn plan_error_to_status(error: String) -> Status {
-    if error.starts_with("runtime config snapshot changed") {
-        Status::failed_precondition(error)
-    } else {
-        Status::invalid_argument(error)
+fn plan_error_to_status(error: RuntimeConfigTransactionPlanError) -> Status {
+    match error {
+        RuntimeConfigTransactionPlanError::StaleSnapshot { .. } => {
+            Status::failed_precondition(error.message())
+        }
+        RuntimeConfigTransactionPlanError::InvalidCandidate(message) => {
+            Status::invalid_argument(message)
+        }
+        RuntimeConfigTransactionPlanError::Internal(message) => Status::internal(message),
     }
 }
 
@@ -295,9 +299,10 @@ mod tests {
             else {
                 panic!("expected PlanConfigTransaction command");
             };
-            let _ = reply.send(Err(
-                "runtime config snapshot changed: expected stale, current kv1:abc:9".to_string(),
-            ));
+            let _ = reply.send(Err(RuntimeConfigTransactionPlanError::StaleSnapshot {
+                expected: "stale".to_string(),
+                current: "kv1:abc:9".to_string(),
+            }));
         });
 
         let err = svc
@@ -321,7 +326,9 @@ mod tests {
             else {
                 panic!("expected PlanConfigTransaction command");
             };
-            let _ = reply.send(Err("invalid candidate: unknown field `bogus`".to_string()));
+            let _ = reply.send(Err(RuntimeConfigTransactionPlanError::InvalidCandidate(
+                "invalid candidate: unknown field `bogus`".to_string(),
+            )));
         });
 
         let err = svc
@@ -412,12 +419,12 @@ mod tests {
         let svc = ConfigService::new(tx).with_transaction_apply(Some(Arc::new(|request| {
             Box::pin(async move {
                 assert_eq!(request.candidate_toml, "candidate");
-                assert_eq!(request.expected_runtime_snapshot_token, "fnv1a64:abc:9");
+                assert_eq!(request.expected_runtime_snapshot_token, "kv1:abc:9");
                 assert_eq!(request.client_request_id, "deploy-42");
                 assert_eq!(request.comment, "change note");
                 Ok(proto::ConfigTransactionApplyResponse {
                     status: proto::ConfigTransactionPlanStatus::Committable.into(),
-                    runtime_snapshot_token: "fnv1a64:def:10".to_string(),
+                    runtime_snapshot_token: "kv1:def:10".to_string(),
                     committed_sections: vec!["[[fib_tables]]".to_string()],
                     human_text: "Committed [[fib_tables]] transaction.\n".to_string(),
                 })
@@ -427,7 +434,7 @@ mod tests {
         let resp = svc
             .apply_config_transaction(Request::new(proto::ApplyConfigTransactionRequest {
                 candidate_toml: "candidate".to_string(),
-                expected_runtime_snapshot_token: "fnv1a64:abc:9".to_string(),
+                expected_runtime_snapshot_token: "kv1:abc:9".to_string(),
                 client_request_id: "deploy-42".to_string(),
                 comment: "change note".to_string(),
             }))
@@ -439,7 +446,7 @@ mod tests {
             resp.status,
             proto::ConfigTransactionPlanStatus::Committable as i32
         );
-        assert_eq!(resp.runtime_snapshot_token, "fnv1a64:def:10");
+        assert_eq!(resp.runtime_snapshot_token, "kv1:def:10");
         assert_eq!(resp.committed_sections, vec!["[[fib_tables]]"]);
     }
 
