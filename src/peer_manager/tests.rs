@@ -638,6 +638,41 @@ fn validation_policy_chain(dependency: ImportValidationDependency) -> PolicyChai
     }])
 }
 
+fn validation_import_refresh_metric(mgr: &PeerManager, dependency: &str, outcome: &str) -> f64 {
+    mgr.metrics
+        .registry()
+        .gather()
+        .iter()
+        .find(|family| family.name() == "bgp_validation_import_refreshes_total")
+        .and_then(|family| {
+            family.metric.iter().find(|metric| {
+                let label_value = |name| {
+                    metric
+                        .get_label()
+                        .iter()
+                        .find(|label| label.name() == name)
+                        .map(prometheus::proto::LabelPair::value)
+                };
+                label_value("dependency") == Some(dependency)
+                    && label_value("outcome") == Some(outcome)
+            })
+        })
+        .map_or(0.0, |metric| metric.get_counter().value())
+}
+
+fn assert_validation_import_refresh_metric(
+    mgr: &PeerManager,
+    dependency: &str,
+    outcome: &str,
+    expected: f64,
+) {
+    let actual = validation_import_refresh_metric(mgr, dependency, outcome);
+    assert!(
+        (actual - expected).abs() < f64::EPSILON,
+        "metric dependency={dependency} outcome={outcome}: got {actual}, expected {expected}"
+    );
+}
+
 fn insert_test_managed_peer(
     mgr: &mut PeerManager,
     addr: IpAddr,
@@ -2250,6 +2285,13 @@ async fn validation_cache_refresh_targets_matching_established_import_policies()
         1,
         "RPKI peer must not receive a second refresh from an ASPA-only update"
     );
+
+    assert_validation_import_refresh_metric(&mgr, "rpki", "eligible", 2.0);
+    assert_validation_import_refresh_metric(&mgr, "rpki", "refreshed", 1.0);
+    assert_validation_import_refresh_metric(&mgr, "rpki", "skipped_not_established", 1.0);
+    assert_validation_import_refresh_metric(&mgr, "rpki", "failed", 0.0);
+    assert_validation_import_refresh_metric(&mgr, "aspa", "eligible", 1.0);
+    assert_validation_import_refresh_metric(&mgr, "aspa", "refreshed", 1.0);
 }
 
 #[tokio::test]
@@ -2287,6 +2329,9 @@ async fn validation_cache_refresh_times_out_unresponsive_route_refresh() {
     );
     assert_eq!(counters.query_state.load(Ordering::SeqCst), 1);
     assert_eq!(counters.route_refresh.load(Ordering::SeqCst), 1);
+    assert_validation_import_refresh_metric(&mgr, "rpki", "eligible", 1.0);
+    assert_validation_import_refresh_metric(&mgr, "rpki", "refreshed", 0.0);
+    assert_validation_import_refresh_metric(&mgr, "rpki", "failed", 1.0);
 }
 
 /// Regression: when a policy mutation actually changes the
