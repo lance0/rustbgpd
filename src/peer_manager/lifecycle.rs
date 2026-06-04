@@ -166,10 +166,10 @@ impl PeerManager {
         // establishment until BFD is Up. Non-strict (the default) starts now
         // only when the peer is administratively enabled.
         // The handle is spawned Idle either way; `start()` is what begins the
-        // FSM, so withholding is simply not sending it yet. Level-triggered: if
-        // BFD already reached Up before this add (the actor starts sessions at
-        // spawn), we do NOT withhold — start now, since no future transition
-        // would release the hold.
+        // FSM, so withholding is simply not sending it yet. Strict BFD is
+        // level-triggered: always pre-hold on add/enable, then release when the
+        // BFD actor confirms the current permitted state through a resync ack
+        // or a fresh transition.
         let withhold = enabled && self.bfd_should_withhold(&address);
         if enabled
             && !withhold
