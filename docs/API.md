@@ -149,7 +149,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | Service | Read-only RPCs | Mutating RPCs rejected on `read_only` |
 |---------|----------------|---------------------------------------|
 | `GlobalService` | `GetGlobal` | `SetGlobal` |
-| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction` | `ApplyConfigTransaction` (currently returns `UNIMPLEMENTED`) |
+| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction` | `ApplyConfigTransaction` (`[[fib_tables]]` transaction executor; other sections rejected until their executors land) |
 | `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
@@ -246,7 +246,7 @@ and receive only redacted diff / plan output.
 |-----|-------------|
 | `DiffRuntimeConfig` | Validate candidate TOML and compare it against the daemon's live runtime config snapshot |
 | `PlanConfigTransaction` | Validate candidate TOML, return a runtime snapshot token, and classify v1 transaction support without mutating daemon state |
-| `ApplyConfigTransaction` | Reserved operator-tier commit entry point for ADR-0076 config transactions; currently returns `UNIMPLEMENTED` until section executors land |
+| `ApplyConfigTransaction` | Operator-tier commit entry point for ADR-0076 config transactions; currently commits pure full-set `[[fib_tables]]` candidates and rejects other valid candidates without mutation until their executors land |
 
 `DiffRuntimeConfigResponse` contains boolean summary fields, a
 plain-text `human_text` rendering, and `diff_json` using the
@@ -269,7 +269,9 @@ presence.
 
 The planner is intentionally stricter than SIGHUP: "reload-applied" does not
 mean "transaction-committable" unless the section appears in
-`supported_sections`.
+`supported_sections`. `ApplyConfigTransaction` currently commits only a pure
+full-set `[[fib_tables]]` diff. Valid candidates that change other sections
+return `REJECTED` without mutation until their section executor lands.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
@@ -291,9 +293,32 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 JSON
 ```
 
-Use the returned `runtime_snapshot_token` on a later apply request once the
-matching executor slice exists. Until then, `ApplyConfigTransaction` is present
-for authz/API stability but returns `UNIMPLEMENTED`.
+Use the returned `runtime_snapshot_token` on the apply request. The daemon
+re-plans under the shared runtime-config coordinator before committing; a stale
+token fails without mutation. `client_request_id` and `comment` are audit
+metadata only and are not logged verbatim.
+
+Apply a pure full-set `[[fib_tables]]` transaction:
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d @ localhost:50051 rustbgpd.v1.ConfigService/ApplyConfigTransaction <<'JSON'
+{
+  "candidate_toml": "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n[[fib_tables]]\nname = \"edge\"\ntable_id = 1000\nmetric = 200\n",
+  "expected_runtime_snapshot_token": "fnv1a64:...",
+  "client_request_id": "deploy-2026-06-03-001",
+  "comment": "roll edge FIB table definition"
+}
+JSON
+```
+
+The FIB transaction executor uses the same reconciler and persistence ordering
+as `SetFibTable` / `DeleteFibTable`: stage the live config snapshot, apply to
+the FIB actor, persist the exact accepted `[[fib_tables]]` set with an
+acknowledgement, roll back on failure, and only then release the coordinator
+lock. The FIB reconciler must already be running, so adding the first
+`[[fib_tables]]` entry to a daemon that started without any tables still
+requires a restart.
 
 CLI equivalent:
 

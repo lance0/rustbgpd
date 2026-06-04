@@ -21,10 +21,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rotation invalidates a stale plan) but cannot be used as an offline
   secret-guessing oracle by a `sensitive_read` caller. Tokens are process-local
   and do not survive a daemon restart — re-plan after a restart.
-  `ApplyConfigTransaction` is reserved as an operator-tier commit entry point but
-  returns `UNIMPLEMENTED` until the section executors land. Candidate TOML
-  remains audit-redacted, and gNMI `Set` remains unimplemented/read-only pending
-  an OpenConfig mapping onto this transaction model.
+  `ApplyConfigTransaction` is the operator-tier commit entry point; the first
+  executor commits pure full-set `[[fib_tables]]` candidates under the shared
+  runtime-config coordinator, with persistence ack and rollback on apply/persist
+  failure. Valid candidates for other sections are rejected without mutation
+  until their executors land. Candidate TOML remains audit-redacted, and gNMI
+  `Set` remains unimplemented/read-only pending an OpenConfig mapping onto this
+  transaction model.
 
 - **Full-scope ASPA path verification.** ASPA validation now uses the
   configured BGP Role to select the draft-ietf-sidrops-aspa-verification-25

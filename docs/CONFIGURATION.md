@@ -1805,6 +1805,17 @@ RPCs require the reconciler to be running (return `FAILED_PRECONDITION`
 otherwise) and are tier `mutating`; `ListFibTables` is `sensitive_read` and also
 reports whether the reconciler is running.
 
+**Config transactions** (ADR-0076): `ConfigService.PlanConfigTransaction` can
+validate a complete candidate TOML and return an optimistic runtime snapshot
+token; `ApplyConfigTransaction` currently commits only a pure full-set
+`[[fib_tables]]` candidate. The apply path re-checks the token under the shared
+runtime-config coordinator, rejects mixed or unsupported candidates without
+mutation, hot-swaps the FIB actor to the candidate's exact table set, persists
+that accepted set with an acknowledgement, and rolls runtime state back if
+apply or persistence fails. Like SIGHUP and FIB CRUD, transaction apply requires
+the FIB reconciler to already be running: a daemon that started with no
+`[[fib_tables]]` still needs a restart to enable the subsystem.
+
 ```console
 $ rustbgpctl fib-table set edge --table-id 1000 --metric 200 \
     --families ipv4_unicast,ipv6_unicast --max-routes 50000

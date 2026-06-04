@@ -12,14 +12,27 @@ use crate::peer_types::{
     RuntimeConfigTransactionStatus,
 };
 use crate::proto;
+use crate::server::{ConfigTransactionApplyError, ConfigTransactionApplyFn};
 
 pub struct ConfigService {
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+    transaction_apply: Option<ConfigTransactionApplyFn>,
 }
 
 impl ConfigService {
     pub fn new(peer_mgr_tx: mpsc::Sender<PeerManagerCommand>) -> Self {
-        Self { peer_mgr_tx }
+        Self {
+            peer_mgr_tx,
+            transaction_apply: None,
+        }
+    }
+
+    pub(crate) fn with_transaction_apply(
+        mut self,
+        transaction_apply: Option<ConfigTransactionApplyFn>,
+    ) -> Self {
+        self.transaction_apply = transaction_apply;
+        self
     }
 }
 
@@ -147,15 +160,24 @@ impl proto::config_service_server::ConfigService for ConfigService {
                 &request.get_ref().comment,
             ),
         );
-        Err(Status::unimplemented(
-            "ConfigService.ApplyConfigTransaction executors are staged in follow-up PRs; use PlanConfigTransaction for validate-only planning",
-        ))
+        let request = request.into_inner();
+        let Some(transaction_apply) = &self.transaction_apply else {
+            return Err(Status::failed_precondition(
+                "ConfigService.ApplyConfigTransaction executor is unavailable",
+            ));
+        };
+        transaction_apply(request)
+            .await
+            .map(Response::new)
+            .map_err(ConfigTransactionApplyError::into_status)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use crate::audit::GrpcAuditHandle;
     use proto::config_service_server::ConfigService as _;
 
@@ -361,7 +383,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_config_transaction_is_unimplemented_but_audited() {
+    async fn apply_config_transaction_without_hook_fails_closed_but_audited() {
         let (tx, _rx) = mpsc::channel(1);
         let svc = ConfigService::new(tx);
         let audit_handle = GrpcAuditHandle::default();
@@ -375,13 +397,50 @@ mod tests {
 
         let err = svc.apply_config_transaction(request).await.unwrap_err();
 
-        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
         let summary = audit_handle.summary().expect("audit summary missing");
         assert!(summary.as_str().contains("candidate_toml=<redacted>"));
         assert!(summary.as_str().contains("client_request_id=deploy-42"));
         assert!(summary.as_str().contains("comment_present=true"));
         assert!(!summary.as_str().contains("secret"));
         assert!(!summary.as_str().contains("sensitive context"));
+    }
+
+    #[tokio::test]
+    async fn apply_config_transaction_forwards_to_hook() {
+        let (tx, _rx) = mpsc::channel(1);
+        let svc = ConfigService::new(tx).with_transaction_apply(Some(Arc::new(|request| {
+            Box::pin(async move {
+                assert_eq!(request.candidate_toml, "candidate");
+                assert_eq!(request.expected_runtime_snapshot_token, "fnv1a64:abc:9");
+                assert_eq!(request.client_request_id, "deploy-42");
+                assert_eq!(request.comment, "change note");
+                Ok(proto::ConfigTransactionApplyResponse {
+                    status: proto::ConfigTransactionPlanStatus::Committable.into(),
+                    runtime_snapshot_token: "fnv1a64:def:10".to_string(),
+                    committed_sections: vec!["[[fib_tables]]".to_string()],
+                    human_text: "Committed [[fib_tables]] transaction.\n".to_string(),
+                })
+            })
+        })));
+
+        let resp = svc
+            .apply_config_transaction(Request::new(proto::ApplyConfigTransactionRequest {
+                candidate_toml: "candidate".to_string(),
+                expected_runtime_snapshot_token: "fnv1a64:abc:9".to_string(),
+                client_request_id: "deploy-42".to_string(),
+                comment: "change note".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(
+            resp.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        assert_eq!(resp.runtime_snapshot_token, "fnv1a64:def:10");
+        assert_eq!(resp.committed_sections, vec!["[[fib_tables]]"]);
     }
 
     #[tokio::test]

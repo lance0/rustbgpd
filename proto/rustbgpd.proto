@@ -122,9 +122,9 @@ service ConfigService {
   // the current runtime snapshot and a section-level v1 support plan.
   rpc PlanConfigTransaction(PlanConfigTransactionRequest) returns (ConfigTransactionPlanResponse);
 
-  // Commit a previously planned candidate transaction. v1 executors are
-  // staged across follow-up PRs; callers should use PlanConfigTransaction for
-  // validate-only planning until this method advertises supported sections.
+  // Commit a previously planned candidate transaction. The first v1 executor
+  // commits pure full-set `[[fib_tables]]` changes; other supported sections
+  // remain validate-only until their executors land.
   rpc ApplyConfigTransaction(ApplyConfigTransactionRequest) returns (ConfigTransactionApplyResponse);
 }
 
@@ -187,7 +187,8 @@ message ApplyConfigTransactionRequest {
   // Required optimistic-concurrency token from PlanConfigTransaction once v1
   // executors are enabled. Empty is rejected by the apply path.
   string expected_runtime_snapshot_token = 2;
-  // Optional idempotency/audit identifier supplied by automation.
+  // Optional audit/correlation identifier supplied by automation. It is not an
+  // idempotency key; callers must still use the runtime snapshot token.
   string client_request_id = 3;
   // Optional human change note. The daemon does not log this field verbatim
   // because operators may include sensitive context.

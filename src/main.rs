@@ -21,6 +21,7 @@ mod bfd_runtime;
 mod blackhole;
 mod config;
 mod config_persister;
+mod config_transaction_control;
 mod evpn_dataplane;
 mod evpn_imet;
 mod evpn_l3_originator;
@@ -2120,6 +2121,17 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 startup_tables: config.fib_tables.clone(),
             },
         )),
+        config_transaction_apply: Some(
+            config_transaction_control::make_config_transaction_apply_fn(
+                fib_table_control::FibTableControlDeps {
+                    fib_cmd_tx: fib_cmd_tx.clone(),
+                    peer_mgr_tx: peer_mgr_tx.clone(),
+                    config_tx: config_event_tx.clone(),
+                    lock: runtime_config_lock.clone(),
+                    startup_tables: config.fib_tables.clone(),
+                },
+            ),
+        ),
         runtime_config_lock: runtime_config_lock.clone(),
         dataplane_route_events: Some(fib_bgp_event_tx),
         bfd_session_snapshot: {
