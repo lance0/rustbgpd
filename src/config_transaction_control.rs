@@ -16,6 +16,7 @@ use rustbgpd_api::peer_types::{
 };
 use rustbgpd_api::proto;
 use rustbgpd_api::server::{ConfigTransactionApplyError, ConfigTransactionApplyFn};
+use tracing::error;
 
 use crate::config::{Config, Neighbor, diff_neighbors};
 use crate::fib_table_control::{
@@ -555,6 +556,12 @@ fn combine_rollback_errors(
     static_rollback: Option<ConfigTransactionApplyError>,
     snapshot_rollback: Option<ConfigTransactionApplyError>,
 ) -> ConfigTransactionApplyError {
+    error!(
+        %original,
+        ?static_rollback,
+        ?snapshot_rollback,
+        "config transaction rollback failed"
+    );
     let mut message = format!("{original}; rollback failed");
     if let Some(error) = static_rollback {
         let _ = write!(message, "; static rollback: {error}");
