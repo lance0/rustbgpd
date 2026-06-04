@@ -405,6 +405,16 @@ pub enum PeerManagerCommand {
         /// Reply returns the previous normalized runtime snapshot on success.
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Return the current normalized runtime config snapshot as TOML.
+    ///
+    /// Internal SIGHUP code uses this after taking the shared runtime-config
+    /// coordinator so reload diffing starts from the latest transaction-updated
+    /// peer-manager snapshot, not from main.rs' process-local startup/reload
+    /// copy.
+    RuntimeConfigSnapshot {
+        /// Reply returns normalized TOML for the current runtime snapshot.
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     /// Atomically validate a candidate `[[fib_tables]]` set against the live
     /// runtime config (peer-group references, reserved/duplicate table ids,
     /// families, ECMP caps) and, on success, stage it into

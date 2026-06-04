@@ -473,6 +473,59 @@ async fn stage_config_snapshot_rebuilds_matcher_and_returns_previous_toml() {
     handle.await.unwrap();
 }
 
+#[tokio::test]
+async fn runtime_config_snapshot_returns_current_staged_config() {
+    let (tx, rx) = mpsc::channel(16);
+    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let config = make_dynamic_manager_config();
+    let mut replacement = config.clone();
+    replacement.dynamic_neighbors = vec![crate::config::DynamicNeighborConfig {
+        prefix: "10.30.0.0/16".to_string(),
+        peer_group: "ix-members".to_string(),
+        remote_asn: 65030,
+        description: Some("transaction range".to_string()),
+    }];
+    let candidate_toml = toml::to_string_pretty(&replacement).unwrap();
+
+    let manager = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+    let handle = tokio::spawn(manager.run());
+
+    let (stage_tx, stage_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::StageConfigSnapshot {
+        candidate_toml,
+        reply: stage_tx,
+    })
+    .await
+    .unwrap();
+    stage_rx.await.unwrap().unwrap();
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::RuntimeConfigSnapshot { reply: reply_tx })
+        .await
+        .unwrap();
+    let snapshot_toml = reply_rx.await.unwrap().unwrap();
+    let snapshot = Config::load_toml_with_diagnostics(&snapshot_toml, "runtime snapshot").unwrap();
+    assert_eq!(snapshot.dynamic_neighbors.len(), 1);
+    assert_eq!(snapshot.dynamic_neighbors[0].prefix, "10.30.0.0/16");
+    assert_eq!(snapshot.dynamic_neighbors[0].remote_asn, 65030);
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
 #[test]
 fn runtime_config_diff_compares_candidate_against_live_snapshot_and_redacts_secret() {
     let (_tx, rx) = mpsc::channel(16);

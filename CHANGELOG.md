@@ -57,6 +57,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **SIGHUP reload baseline after config transactions.** SIGHUP now reads the
+  peer manager's live runtime config snapshot after acquiring the shared
+  runtime-config coordinator lock, so a reload queued behind a committed
+  transaction diffs against the transaction-updated runtime state instead of
+  main.rs' stale process-local copy.
+
 - **Config transaction rollback hardening.** Snapshot rollback during
   `ApplyConfigTransaction` now reports failure instead of silently discarding it,
   and static-neighbor rollback preserves both the original apply/persistence

@@ -483,12 +483,10 @@ branch is between features.
   Static-neighbor modify, SIGHUP changed-peer reconcile, and peer-group
   hot-apply now rebuild a disabled peer as disabled, without transient session
   start. Enabled peers still start immediately unless strict BFD withholds them.
-- [ ] **SIGHUP baseline from live runtime snapshot.** The runtime-config lock
-  prevents SIGHUP from interleaving its apply step with transactions, but the
-  signal path captures the comparison baseline before waiting on the lock. Pull
-  the reload baseline from the peer manager's current runtime snapshot under the
-  coordinator if queued SIGHUP-after-transaction edge cases become operator
-  visible.
+- [x] **SIGHUP baseline from live runtime snapshot.** SIGHUP now reads the peer
+  manager's current runtime snapshot after taking the runtime-config coordinator
+  lock, so a reload queued behind a committed transaction starts from the
+  transaction-updated baseline instead of main.rs' stale process-local copy.
 - [x] **SIGHUP reconcile for `[[dynamic_neighbors]]` TOML edits (#338).**
   `ReplaceConfigSnapshot` rebuilds the live accept matcher, `--diff` classifies
   direct TOML edits as reload-applied, and runtime dynamic-neighbor CRUD shares

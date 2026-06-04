@@ -111,6 +111,26 @@ async fn send_pm_step(
     }
 }
 
+/// Read the peer manager's current runtime config snapshot.
+///
+/// SIGHUP callers take the shared runtime-config coordinator before calling
+/// this helper, so any transaction that acquired the same lock first has
+/// already staged its accepted snapshot. That makes the returned config the
+/// correct live baseline for reload diffing.
+pub(crate) async fn runtime_config_snapshot(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+) -> Result<Config, String> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(PeerManagerCommand::RuntimeConfigSnapshot { reply: reply_tx })
+        .await
+        .map_err(|e| format!("send to peer manager failed: {e}"))?;
+    let snapshot_toml = reply_rx
+        .await
+        .map_err(|e| format!("peer manager dropped runtime snapshot reply: {e}"))??;
+    Config::load_toml_with_diagnostics(&snapshot_toml, "runtime config snapshot")
+}
+
 fn fib_table_snapshots(tables: &[config::FibTableConfig]) -> Vec<FibTableSnapshot> {
     tables
         .iter()
@@ -1462,6 +1482,8 @@ mod tests {
 
     use super::*;
     use crate::config_persister::ConfigPersister;
+    use crate::peer_manager::PeerManager;
+    use rustbgpd_telemetry::BgpMetrics;
 
     fn unique_temp_path(name: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -1469,6 +1491,56 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("rustbgpd-{name}-{suffix}.toml"))
+    }
+
+    #[tokio::test]
+    async fn sighup_runtime_baseline_reads_peer_manager_snapshot_after_stage() {
+        let initial = load_config_from_toml("runtime-baseline-initial", baseline_toml());
+        let mut candidate = initial.clone();
+        candidate.neighbors[0].hold_time = Some(45);
+        let candidate_toml = toml::to_string_pretty(&candidate).unwrap();
+
+        let (tx, rx) = mpsc::channel(16);
+        let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let manager = PeerManager::new_with_config(
+            rx,
+            internal_rx,
+            65001,
+            "10.0.0.1".parse().unwrap(),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+            None,
+            initial,
+        );
+        let handle = tokio::spawn(manager.run());
+
+        let (stage_tx, stage_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::StageConfigSnapshot {
+            candidate_toml,
+            reply: stage_tx,
+        })
+        .await
+        .unwrap();
+        stage_rx.await.unwrap().unwrap();
+
+        let snapshot = runtime_config_snapshot(&tx).await.unwrap();
+        assert_eq!(snapshot.neighbors[0].hold_time, Some(45));
+
+        tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_config_snapshot_errors_when_peer_manager_is_gone() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+
+        let error = runtime_config_snapshot(&tx).await.unwrap_err();
+        assert!(error.contains("send to peer manager failed"), "{error}");
     }
 
     /// SIGHUP that adds mTLS to `grpc_tcp` must NOT advance the
