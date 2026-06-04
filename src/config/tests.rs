@@ -6837,6 +6837,66 @@ default_action = "{default_action}"
 }
 
 #[test]
+fn transaction_v1_rejects_catalog_policy_change_feeding_dynamic_range() {
+    // A policy-definition edit reaches an established dynamic session through
+    // its peer group's chain, even with no static neighbor referencing it.
+    // SIGHUP live-reconciles dynamic peers, so the catalog gate must surface the
+    // range as effective neighbor inheritance impact and reject the transaction
+    // rather than committing it as catalog-only.
+    let config = |action: &str| {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[peer_groups.ix]
+import_policy_chain = ["import-filter"]
+
+[policy.definitions.import-filter]
+default_action = "{action}"
+
+[[dynamic_neighbors]]
+prefix = "10.30.0.0/16"
+peer_group = "ix"
+remote_asn = 65030
+"#
+        )
+    };
+    let old = parse(&config("permit")).unwrap();
+    let new = parse(&config("deny")).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(!class.is_committable());
+    assert_eq!(class.supported_sections, vec!["[policy] definitions"]);
+    assert!(
+        class
+            .unsupported_sections
+            .contains(&"effective neighbor inheritance impact".to_string()),
+        "{:?}",
+        class.unsupported_sections
+    );
+    assert_eq!(
+        diff.effective_neighbor_impact
+            .iter()
+            .map(|impact| impact.address.clone())
+            .collect::<Vec<_>>(),
+        vec!["10.30.0.0/16".to_string()],
+        "the dynamic range inheriting the changed policy must be flagged"
+    );
+    assert!(class.restart_required_sections.is_empty());
+}
+
+#[test]
 fn transaction_v1_classifies_prefix_orf_receive_toggle_as_neighbor_modify() {
     // A bare prefix_orf_receive toggle on an existing neighbor is a
     // [[neighbors]] modify. The transaction surface now commits static neighbor

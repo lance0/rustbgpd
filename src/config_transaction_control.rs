@@ -156,7 +156,7 @@ async fn commit_apply_family(
                 post_commit_runtime_snapshot_token,
                 supported_sections,
                 format!(
-                    "Committed catalog-only runtime config transaction.\n{} policy definition(s), {} neighbor_set(s), {} peer_group(s) active.\n",
+                    "Committed catalog-only runtime config transaction.\n{} policy definition(s), {} neighbor set(s), {} peer group(s) active.\n",
                     candidate.policy.definitions.len(),
                     candidate.policy.neighbor_sets.len(),
                     candidate.peer_groups.len(),

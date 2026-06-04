@@ -61,9 +61,13 @@ section executors behind that public contract.
    neighbor add/delete/modify changes, and catalog-only policy/peer-group/global
    named-chain changes as the v1 transaction surface. "Catalog-only" means the
    diff has no `effective_neighbor_impact`: no existing peer's resolved runtime
-   import/export policy or inherited peer-group state changes. Policy/peer-group
-   edits with live neighbor impact, global hot-applied flags, and all
-   restart-required sections are rejected until they have explicit executors.
+   import/export policy or inherited peer-group state changes. The impact check
+   spans both static `[[neighbors]]` and `[[dynamic_neighbors]]` ranges — an edit
+   that reshapes the resolved policy a dynamic range inherits is rejected too,
+   because SIGHUP live-reconciles established dynamic peers and a catalog
+   snapshot does not. Policy/peer-group edits with live neighbor impact, global
+   hot-applied flags, and all restart-required sections are rejected until they
+   have explicit executors.
 5. **Apply execution is one pure runtime family at a time.** V1 commits pure
    full-set `[[fib_tables]]`, pure full-set `[[dynamic_neighbors]]`, static
    `[[neighbors]]` add/delete/modify, or catalog-only snapshot candidates. It

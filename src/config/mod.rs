@@ -2637,6 +2637,14 @@ fn global_restart_required_changed(old: &Config, new: &Config) -> bool {
     old_global != new_global
 }
 
+/// Network address of a `[[dynamic_neighbors]]` prefix, used only to resolve a
+/// representative neighbor for effective-policy comparison. The address selects
+/// the address family but does not affect import/export chain resolution, so
+/// the network address of the range is a faithful stand-in.
+fn dynamic_range_representative_addr(prefix: &str) -> Option<IpAddr> {
+    prefix.split_once('/')?.0.parse::<IpAddr>().ok()
+}
+
 /// Walk neighbors that exist in both configs and surface those whose
 /// resolved effective config differs between old and new through a
 /// reload-applied path — peer-group inheritance, named policy chain
@@ -2792,7 +2800,89 @@ fn compute_effective_neighbor_impact(
             });
         }
     }
+
+    out.extend(dynamic_range_effective_impact(old, new, &pg_changed));
+
     out.sort_by(|a, b| a.address.cmp(&b.address));
+    out
+}
+
+/// Surface `[[dynamic_neighbors]]` ranges whose resolved effective policy moves
+/// between `old` and `new`.
+///
+/// An established session accepted into a range inherits its peer group's
+/// resolved policy, and SIGHUP live-reconciles those dynamic peers on a policy /
+/// peer-group / chain edit. A catalog-only transaction stages such an edit
+/// without that live reconcile, so a range whose resolved import/export policy
+/// moves is not actually "catalog-only" and must surface as effective impact.
+/// Ranges are matched by prefix; a changed range record itself is a
+/// `[[dynamic_neighbors]]` family edit handled by the dynamic-neighbor executor,
+/// not here. The prefix's network address is a faithful stand-in for resolution
+/// (it only picks the address family, which does not affect policy chains).
+fn dynamic_range_effective_impact(
+    old: &Config,
+    new: &Config,
+    pg_changed: &HashSet<&str>,
+) -> Vec<EffectiveNeighborImpact> {
+    let new_ranges: HashMap<&str, &DynamicNeighborConfig> = new
+        .dynamic_neighbors
+        .iter()
+        .map(|dn| (dn.prefix.as_str(), dn))
+        .collect();
+    let mut out = Vec::new();
+    for old_range in &old.dynamic_neighbors {
+        let Some(new_range) = new_ranges.get(old_range.prefix.as_str()) else {
+            continue;
+        };
+        let Some(addr) = dynamic_range_representative_addr(&old_range.prefix) else {
+            continue;
+        };
+        let Some(old_group) = old.peer_groups.get(&old_range.peer_group) else {
+            continue;
+        };
+        let Some(new_group) = new.peer_groups.get(&new_range.peer_group) else {
+            continue;
+        };
+        let Ok(old_resolved) = old.resolve_dynamic_neighbor(
+            addr,
+            old_range.remote_asn,
+            old_range.description.as_deref().unwrap_or_default(),
+            old_group,
+            &old_range.peer_group,
+        ) else {
+            continue;
+        };
+        let Ok(new_resolved) = new.resolve_dynamic_neighbor(
+            addr,
+            new_range.remote_asn,
+            new_range.description.as_deref().unwrap_or_default(),
+            new_group,
+            &new_range.peer_group,
+        ) else {
+            continue;
+        };
+
+        let mut reasons: Vec<String> = Vec::new();
+        if format!("{:?}", old_resolved.import_policy)
+            != format!("{:?}", new_resolved.import_policy)
+        {
+            reasons.push("dynamic-range import policy resolved differently".to_string());
+        }
+        if format!("{:?}", old_resolved.export_policy)
+            != format!("{:?}", new_resolved.export_policy)
+        {
+            reasons.push("dynamic-range export policy resolved differently".to_string());
+        }
+        if pg_changed.contains(old_range.peer_group.as_str()) {
+            reasons.push(format!("peer_group {:?} changed", old_range.peer_group));
+        }
+        if !reasons.is_empty() {
+            out.push(EffectiveNeighborImpact {
+                address: old_range.prefix.clone(),
+                reasons,
+            });
+        }
+    }
     out
 }
 
