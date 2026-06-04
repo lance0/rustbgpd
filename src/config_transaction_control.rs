@@ -349,36 +349,14 @@ fn resolve_static_neighbors(
     candidate: &Config,
     neighbors: &[Neighbor],
 ) -> Result<Vec<PeerManagerNeighborConfig>, ConfigTransactionApplyError> {
-    let resolved = candidate
-        .resolved_neighbors()
-        .map_err(|error| ConfigTransactionApplyError::InvalidArgument(error.to_string()))?;
-    let peer_map: std::collections::HashMap<PeerKey, _> = resolved
-        .into_iter()
-        .map(|neighbor| {
-            (
-                PeerKey::new(
-                    neighbor.transport_config.remote_addr.ip(),
-                    neighbor.transport_config.peer_interface.clone(),
-                ),
-                neighbor,
-            )
-        })
-        .collect();
+    // Plan/apply already validated the full candidate. Resolve only the touched
+    // static neighbors instead of rebuilding every candidate peer.
     neighbors
         .iter()
         .map(|neighbor| {
-            let address = neighbor.address.parse().map_err(|error| {
-                ConfigTransactionApplyError::InvalidArgument(format!(
-                    "invalid neighbor address {:?}: {error}",
-                    neighbor.address
-                ))
-            })?;
-            let key = PeerKey::new(address, neighbor.interface.clone());
-            let resolved = peer_map.get(&key).ok_or_else(|| {
-                ConfigTransactionApplyError::Internal(format!(
-                    "candidate neighbor {key} missing from resolved neighbor map",
-                ))
-            })?;
+            let resolved = candidate
+                .resolve_neighbor(neighbor)
+                .map_err(|error| ConfigTransactionApplyError::InvalidArgument(error.to_string()))?;
             Ok(crate::reload::build_peer_mgr_config(
                 &resolved.transport_config,
                 &resolved.label,
@@ -775,6 +753,46 @@ remote_asn = 65002
             neighbor.export_policy.as_ref(),
             neighbor.peer_group.clone(),
         )
+    }
+
+    #[test]
+    fn resolve_static_neighbors_resolves_only_touched_neighbors() {
+        let candidate = Config::load_toml_with_diagnostics(
+            &base_toml(
+                r#"
+[peer_groups.edge]
+hold_time = 75
+max_prefixes = 9000
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "edge"
+
+[[neighbors]]
+address = "10.0.0.4"
+remote_asn = 65004
+peer_group = "edge"
+"#,
+            ),
+            "candidate config",
+        )
+        .expect("candidate must parse");
+        let touched = candidate
+            .neighbors
+            .iter()
+            .find(|neighbor| neighbor.address == "10.0.0.3")
+            .expect("target neighbor must exist")
+            .clone();
+
+        let resolved =
+            resolve_static_neighbors(&candidate, &[touched]).expect("target neighbor must resolve");
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].address.to_string(), "10.0.0.3");
+        assert_eq!(resolved[0].peer_group.as_deref(), Some("edge"));
+        assert_eq!(resolved[0].hold_time, Some(75));
+        assert_eq!(resolved[0].max_prefixes, Some(9000));
     }
 
     #[test]

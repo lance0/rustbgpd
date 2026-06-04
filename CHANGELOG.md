@@ -95,6 +95,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   loads or changes; peers without validation-state import predicates are not
   refreshed.
 
+### Performance
+
+- **Config transaction static-neighbor apply now resolves only touched peers.**
+  Static-neighbor add/modify transactions no longer rebuild the full candidate
+  neighbor set before selecting the changed peers; the executor resolves just
+  the added/modified `[[neighbors]]` entries through the same inheritance path.
+
 ## [0.34.0] — 2026-06-02
 
 ### Performance
