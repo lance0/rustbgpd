@@ -59,7 +59,9 @@ use crate::config::{
 };
 use crate::config_persister::{ConfigMutation, ConfigPersister};
 use crate::peer_manager::PeerManager;
-use crate::reload::{apply_reload_outcome, reload_config, run_config_bridge};
+use crate::reload::{
+    apply_reload_outcome, reload_config, run_config_bridge, runtime_config_snapshot,
+};
 use rustbgpd_api::peer_types::{
     ImportValidationDependency, PeerManagerCommand, PeerManagerNeighborConfig,
 };
@@ -2329,7 +2331,6 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 }
                 info!("SIGHUP received, reloading configuration");
                 let path = config.file_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-                let snapshot = config.clone();
                 let live_tcp = live_grpc_tcp.clone();
                 let live_uds = live_grpc_uds.clone();
                 let pm_tx = peer_mgr_tx.clone();
@@ -2344,6 +2345,16 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 let bridge_replace = bridge_replace_tx.clone();
                 reload_in_flight = Some(tokio::spawn(async move {
                     let _runtime_config_guard = runtime_config_lock.lock().await;
+                    let snapshot = match runtime_config_snapshot(&pm_tx).await {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            error!(
+                                error = %error,
+                                "failed to read live runtime config snapshot for SIGHUP reload"
+                            );
+                            return None;
+                        }
+                    };
                     let reloaded = reload_config(
                         &path,
                         &snapshot,

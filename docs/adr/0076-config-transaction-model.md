@@ -103,6 +103,10 @@ section executors behind that public contract.
   validate candidate section against the live runtime snapshot, take the shared
   runtime-config coordinator, apply live mutation, persist with acknowledgement,
   rollback on persistence/apply failure, and only then release the lock.
+- SIGHUP reload also takes that coordinator and reads the live peer-manager
+  runtime snapshot after acquiring it, so a reload queued behind a committed
+  transaction compares the operator's TOML against the transaction-updated
+  baseline.
 - If rollback itself fails, apply returns `INTERNAL` with both the original
   apply/persistence error and the rollback failure context. Silent rollback
   failure is not an acceptable transaction outcome.

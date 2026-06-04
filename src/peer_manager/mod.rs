@@ -604,6 +604,16 @@ impl PeerManager {
                             });
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
+                            let result = toml::to_string_pretty(&self.current_config).map_err(
+                                |error| {
+                                    format!(
+                                        "failed to serialize runtime config snapshot: {error}"
+                                    )
+                                },
+                            );
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::StageFibTables { tables, reply } => {
                             let result = self.stage_fib_tables_candidate(&tables);
                             let _ = reply.send(result);
