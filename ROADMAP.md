@@ -128,10 +128,10 @@ Later for what remains.
 - **ASPA verification — test hardening.** Role-aware upstream/downstream
   verification now ships with the draft-v25 first-AS precondition, §6.2
   IPv4/IPv6-unicast family gate, best-path preference, and
-  `match_aspa_validation` import/export policy. Remaining hardening is test
-  breadth rather than feature scope: import NIST-BRIO ASPA vectors when they are
-  easy to automate, and expand policy-match unit coverage around
-  `match_aspa_validation`.
+  `match_aspa_validation` import/export policy. Direct policy-match unit coverage
+  now pins all ASPA verdicts plus combined RPKI+ASPA predicates. Remaining
+  hardening is external-vector breadth rather than feature scope: import
+  NIST-BRIO ASPA vectors when they are easy to automate.
 - **EVPN standards tail.** Native overlay-index Type-5 local origination +
   protected recursion-path interop smoke; multi-homed-gateway ECMP; single-active
   backup-path pre-install (proactive receive-side backup VTEP next-hop so
