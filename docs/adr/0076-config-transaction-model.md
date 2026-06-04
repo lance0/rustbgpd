@@ -55,7 +55,10 @@ section executors behind that public contract.
    secret; the full config (secrets included) is still hashed, so a secret
    rotation invalidates a stale plan. Consequence: **tokens are process-local** —
    a token does not survive a daemon restart, and a client holding a pre-restart
-   token must re-plan (apply returns `FAILED_PRECONDITION` on mismatch).
+   token must re-plan (apply returns `FAILED_PRECONDITION` on mismatch). The
+   token is not a cryptographic commitment, proof-of-knowledge, lease, or
+   authorization credential; if a future API needs those properties it must use a
+   wider cryptographic MAC/commitment and a new token version.
 4. **V1 supported surface is narrow on purpose.** The planner marks
    `[[fib_tables]]` N→M/N→0 changes, `[[dynamic_neighbors]]` changes, static
    neighbor add/delete/modify changes, and catalog-only policy/peer-group/global

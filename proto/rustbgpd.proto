@@ -168,7 +168,10 @@ enum ConfigTransactionPlanStatus {
 
 message ConfigTransactionPlanResponse {
   ConfigTransactionPlanStatus status = 1;
-  // Token for the live runtime config snapshot used to produce this plan.
+  // Opaque process-local optimistic-concurrency token for the live runtime
+  // config snapshot used to produce this plan. It is not a cryptographic
+  // commitment or authorization credential; clients must re-plan after daemon
+  // restart.
   string runtime_snapshot_token = 2;
   DiffRuntimeConfigResponse diff = 3;
   // Sections v1 knows how to commit atomically once the matching executor PRs

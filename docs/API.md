@@ -259,7 +259,9 @@ presence.
 `ConfigTransactionPlanResponse` wraps the same redacted diff with:
 
 - `runtime_snapshot_token`: an optimistic-concurrency token for the live runtime
-  snapshot used during planning.
+  snapshot used during planning. It is an opaque, process-local change detector,
+  not a cryptographic commitment or authorization credential; re-plan after a
+  daemon restart.
 - `supported_sections`: sections the v1 transaction model can commit
   (`[[fib_tables]]`, `[[dynamic_neighbors]]`, static neighbor add/delete/modify,
   and catalog-only `[policy]` / `[peer_groups]` changes with no effective impact
