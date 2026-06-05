@@ -87,7 +87,7 @@ complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from apply" -l client-request-id -d 'Optional audit/correlation identifier' -r
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from apply" -l comment -d 'Optional human change note; not logged verbatim by the daemon' -r
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from apply" -l confirm-id -d 'Optional confirmed-commit handle; requires explicit confirm/abort' -r
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from apply" -l confirm-timeout -d 'Confirmed-commit timeout in seconds; daemon default applies when omitted' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from apply" -l confirm-timeout -d 'Confirmed-commit timeout in seconds; daemon default is 600, max is 86400' -r
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from apply" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from apply" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from apply" -s j -l json -d 'Output in JSON format'

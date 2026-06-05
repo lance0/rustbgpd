@@ -101,15 +101,15 @@ immediately, starts the timer, and rolls back when the timer expires unless the
 same handle is confirmed:
 
 ```bash
-rustbgpctl config apply --from-file /tmp/new-config.toml \
+rbgp config apply --from-file /tmp/new-config.toml \
   --expected-runtime-snapshot-token kv1:... \
   --confirm-id deploy-20260605-1 \
   --confirm-timeout 120
 
-rustbgpctl config status
-rustbgpctl config confirm deploy-20260605-1
+rbgp config status
+rbgp config confirm deploy-20260605-1
 # or, to roll back immediately:
-rustbgpctl config abort deploy-20260605-1
+rbgp config abort deploy-20260605-1
 ```
 
 Confirm handles must be non-empty, at most 128 characters, and free of control

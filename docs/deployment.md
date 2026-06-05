@@ -461,7 +461,9 @@ rbgp evpn                      # EVPN instances + Type 2/3 RIB
 rbgp top                       # live TUI dashboard
 ```
 
-All read commands also support `--json` for scripting.
+Most data-oriented read commands support `--json` for scripting. Commands with
+fixed formats, such as `metrics`, `completions`, and `top`, keep their
+command-specific output.
 
 ## Upgrade & state migration
 

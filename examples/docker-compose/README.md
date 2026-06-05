@@ -15,13 +15,13 @@ First run builds the rustbgpd image (~60s). Sessions establish within seconds.
 
 ```bash
 # Inside the container
-docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 neighbor
-docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 rib
-docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 top
+docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 neighbor
+docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 rib
+docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 top
 
 # From the host (gRPC is forwarded to localhost:50051)
-cargo run -p rustbgpctl -- -s http://127.0.0.1:50051 neighbor
-cargo run -p rustbgpctl -- -s http://127.0.0.1:50051 top
+cargo run -p rustbgpctl --bin rbgp -- -s http://127.0.0.1:50051 neighbor
+cargo run -p rustbgpctl --bin rbgp -- -s http://127.0.0.1:50051 top
 ```
 
 ## Stop

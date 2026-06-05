@@ -100,7 +100,7 @@ _arguments "${_arguments_options[@]}" : \
 '--client-request-id=[Optional audit/correlation identifier]:ID:_default' \
 '--comment=[Optional human change note; not logged verbatim by the daemon]:TEXT:_default' \
 '--confirm-id=[Optional confirmed-commit handle; requires explicit confirm/abort]:ID:_default' \
-'--confirm-timeout=[Confirmed-commit timeout in seconds; daemon default applies when omitted]:SECONDS:_default' \
+'--confirm-timeout=[Confirmed-commit timeout in seconds; daemon default is 600, max is 86400]:SECONDS:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
