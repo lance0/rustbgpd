@@ -17,6 +17,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   invoked binary name, and pre-generated bash/fish/zsh completions are included
   for `rbgp`.
 
+- **CLI command-surface README refresh.** The `rustbgpctl` crate README now
+  groups commands by workflow — config transactions, peers/BFD, RIB/policy,
+  EVPN, events, dataplane, and daemon control — instead of a single long
+  command list.
+
 - **Commit-confirmed config transactions.** `ApplyConfigTransaction` now accepts
   a `confirm_id` plus optional `confirm_timeout_seconds` to apply a candidate
   immediately while starting a confirm timer. `ConfirmConfigTransaction` makes
@@ -48,6 +53,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   families, and other unsupported sections remain rejected without mutation.
 
 ### Fixed
+
+- **`rustbgpctl` confirmed config workflow input checks.** The CLI now rejects
+  invalid confirmed-commit handles and over-limit `--confirm-timeout` values
+  before reading the candidate file or sending an RPC, matching the daemon-side
+  guardrails for safe deploys.
+
+- **CLI JSON serialization failures are errors, not panics.** Non-config
+  `rustbgpctl` JSON renderers now route `serde_json` serialization failures
+  through `CliError::Json` instead of `expect(...)`, including route/event JSON,
+  mutation result JSON, and streaming watch output. Operator-visible JSON shapes
+  are unchanged.
 
 - **Typed config-transaction stage errors.** The internal
   `StageConfigSnapshot` path now returns a typed peer-manager error so

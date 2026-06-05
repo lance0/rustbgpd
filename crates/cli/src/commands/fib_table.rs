@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::connection::Connection;
 use crate::error::CliError;
+use crate::output;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     DeleteFibTableRequest, FibTableConfig, ListFibTablesRequest, ListFibTablesResponse,
@@ -53,17 +54,14 @@ impl From<&FibTableConfig> for JsonFibTable {
     }
 }
 
-fn render(resp: &ListFibTablesResponse, json: bool) {
+fn render(resp: &ListFibTablesResponse, json: bool) -> Result<(), CliError> {
     if json {
         let out = JsonFibTableList {
             runtime_available: resp.runtime_available,
             tables: resp.tables.iter().map(JsonFibTable::from).collect(),
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).expect("failed to serialize FIB tables as JSON")
-        );
-        return;
+        output::print_json_pretty(&out)?;
+        return Ok(());
     }
     if !resp.runtime_available {
         println!(
@@ -73,7 +71,7 @@ fn render(resp: &ListFibTablesResponse, json: bool) {
     }
     if resp.tables.is_empty() {
         println!("No FIB tables configured");
-        return;
+        return Ok(());
     }
     println!(
         "{:<16} {:<9} {:<7} {:<24} MAX_ROUTES",
@@ -93,6 +91,7 @@ fn render(resp: &ListFibTablesResponse, json: bool) {
             t.name, t.table_id, t.metric, families, max_routes
         );
     }
+    Ok(())
 }
 
 pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
@@ -102,8 +101,7 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
         .list_fib_tables(ListFibTablesRequest {})
         .await?
         .into_inner();
-    render(&resp, json);
-    Ok(())
+    render(&resp, json)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -141,7 +139,7 @@ pub async fn set(
         .await?
         .into_inner();
     if json {
-        render(&resp, true);
+        render(&resp, true)?;
     } else {
         println!(
             "FIB table {name} applied ({} table(s) now active)",
@@ -161,7 +159,7 @@ pub async fn delete(connection: Connection, name: &str, json: bool) -> Result<()
         .await?
         .into_inner();
     if json {
-        render(&resp, true);
+        render(&resp, true)?;
     } else {
         println!(
             "FIB table {name} deleted ({} table(s) now active)",
