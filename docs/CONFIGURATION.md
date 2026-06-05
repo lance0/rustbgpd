@@ -1849,6 +1849,10 @@ the failed lifecycle result and clears the pending fence so operators can apply
 a corrective transaction instead of leaving runtime config mutations blocked
 indefinitely.
 
+Confirm handles are operator-chosen correlation IDs. They must be non-empty, at
+most 128 characters, and free of control characters; the CLI validates those
+constraints before reading the candidate file or calling the daemon.
+
 ```console
 $ rustbgpctl fib-table set edge --table-id 1000 --metric 200 \
     --families ipv4_unicast,ipv6_unicast --max-routes 50000

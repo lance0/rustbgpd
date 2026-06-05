@@ -43,6 +43,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`rustbgpctl` confirmed config workflow input checks.** The CLI now rejects
+  invalid confirmed-commit handles and over-limit `--confirm-timeout` values
+  before reading the candidate file or sending an RPC, matching the daemon-side
+  guardrails for safe deploys.
+
 - **Typed config-transaction stage errors.** The internal
   `StageConfigSnapshot` path now returns a typed peer-manager error so
   `ApplyConfigTransaction` maps candidate-validation failures and rollback

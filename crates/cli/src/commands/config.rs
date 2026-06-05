@@ -9,6 +9,9 @@ use crate::proto::{
     GetConfigTransactionStatusRequest, PlanConfigTransactionRequest,
 };
 
+const MAX_CONFIRM_ID_CHARS: usize = 128;
+const MAX_CONFIRM_TIMEOUT_SECONDS: u32 = 86_400;
+
 pub struct ApplyOptions<'a> {
     pub from_file: &'a str,
     pub expected_runtime_snapshot_token: &'a str,
@@ -72,8 +75,21 @@ pub async fn apply(
             "--expected-runtime-snapshot-token must not be empty".to_string(),
         ));
     }
+    if options.confirm_id.is_none() && options.confirm_timeout_seconds.is_some() {
+        return Err(CliError::Argument(
+            "--confirm-timeout requires --confirm-id".to_string(),
+        ));
+    }
     if let Some(confirm_id) = options.confirm_id {
         validate_confirm_id(confirm_id)?;
+    }
+    if matches!(
+        options.confirm_timeout_seconds,
+        Some(timeout_seconds) if timeout_seconds > MAX_CONFIRM_TIMEOUT_SECONDS
+    ) {
+        return Err(CliError::Argument(format!(
+            "--confirm-timeout must be <= {MAX_CONFIRM_TIMEOUT_SECONDS}"
+        )));
     }
     let candidate_toml = read_candidate_toml(options.from_file)?;
     let mut client =
@@ -171,9 +187,19 @@ fn read_candidate_toml(from_file: &str) -> Result<String, CliError> {
 }
 
 fn validate_confirm_id(confirm_id: &str) -> Result<(), CliError> {
-    if confirm_id.is_empty() {
+    if confirm_id.trim().is_empty() {
         return Err(CliError::Argument(
             "confirm_id must not be empty".to_string(),
+        ));
+    }
+    if confirm_id.chars().count() > MAX_CONFIRM_ID_CHARS {
+        return Err(CliError::Argument(format!(
+            "confirm_id must be at most {MAX_CONFIRM_ID_CHARS} characters"
+        )));
+    }
+    if confirm_id.chars().any(char::is_control) {
+        return Err(CliError::Argument(
+            "confirm_id must not contain control characters".to_string(),
         ));
     }
     Ok(())
@@ -456,6 +482,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_rejects_confirm_timeout_without_confirm_id_before_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let err = apply(
+            connection,
+            ApplyOptions {
+                from_file: "/does/not/matter.toml",
+                expected_runtime_snapshot_token: "kv1:old:1",
+                client_request_id: None,
+                comment: None,
+                confirm_id: None,
+                confirm_timeout_seconds: Some(120),
+            },
+            true,
+        )
+        .await
+        .expect_err("confirm timeout without confirm_id must fail before RPC");
+
+        assert!(
+            matches!(err, CliError::Argument(ref message) if message == "--confirm-timeout requires --confirm-id"),
+            "{err:?}"
+        );
+        assert_eq!(server.state.config_apply_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn apply_rejects_too_large_confirm_timeout_before_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let err = apply(
+            connection,
+            ApplyOptions {
+                from_file: "/does/not/matter.toml",
+                expected_runtime_snapshot_token: "kv1:old:1",
+                client_request_id: None,
+                comment: None,
+                confirm_id: Some("deploy-123"),
+                confirm_timeout_seconds: Some(MAX_CONFIRM_TIMEOUT_SECONDS + 1),
+            },
+            true,
+        )
+        .await
+        .expect_err("over-limit confirm timeout must fail before RPC");
+
+        assert!(
+            matches!(err, CliError::Argument(ref message) if message == "--confirm-timeout must be <= 86400"),
+            "{err:?}"
+        );
+        assert_eq!(server.state.config_apply_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn confirm_sends_confirm_id() {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
@@ -486,6 +566,31 @@ mod tests {
             matches!(err, CliError::Argument(ref message) if message == "confirm_id must not be empty"),
             "{err:?}"
         );
+        assert_eq!(server.state.config_confirm_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn confirm_rejects_invalid_confirm_id_before_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let err = confirm(connection, "   ", true)
+            .await
+            .expect_err("blank confirm_id must fail before RPC");
+        assert!(
+            matches!(err, CliError::Argument(ref message) if message == "confirm_id must not be empty"),
+            "{err:?}"
+        );
+
+        let connection = connect(&server.addr, None).await.unwrap();
+        let err = confirm(connection, "bad\nid", true)
+            .await
+            .expect_err("control-character confirm_id must fail before RPC");
+        assert!(
+            matches!(err, CliError::Argument(ref message) if message == "confirm_id must not contain control characters"),
+            "{err:?}"
+        );
+
         assert_eq!(server.state.config_confirm_calls.load(Ordering::SeqCst), 0);
     }
 
@@ -530,6 +635,23 @@ mod tests {
 
         assert!(
             matches!(err, CliError::Argument(ref message) if message == "confirm_id must not be empty"),
+            "{err:?}"
+        );
+        assert_eq!(server.state.config_abort_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn abort_rejects_too_long_confirm_id_before_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let confirm_id = "x".repeat(MAX_CONFIRM_ID_CHARS + 1);
+
+        let err = abort(connection, &confirm_id, true)
+            .await
+            .expect_err("over-limit confirm_id must fail before RPC");
+
+        assert!(
+            matches!(err, CliError::Argument(ref message) if message == "confirm_id must be at most 128 characters"),
             "{err:?}"
         );
         assert_eq!(server.state.config_abort_calls.load(Ordering::SeqCst), 0);

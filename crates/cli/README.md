@@ -73,6 +73,10 @@ All commands support `--json` for machine-parseable output and `--no-color`
 (or `NO_COLOR=1`) to disable colored output. Colors auto-disable when
 output is piped to a non-TTY.
 
+Confirmed config transaction handles must be non-empty, at most 128
+characters, and contain no control characters. `--confirm-timeout` requires
+`--confirm-id`; the daemon default is 600 seconds and the maximum is 86400.
+
 ## License
 
 MIT OR Apache-2.0
