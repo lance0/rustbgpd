@@ -24,6 +24,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   back cleanly. Dynamic-range policy impact, peer-group/session reshapes, mixed
   families, and other unsupported sections remain rejected without mutation.
 
+### Fixed
+
+- **Typed config-transaction stage errors.** The internal
+  `StageConfigSnapshot` path now returns a typed peer-manager error so
+  `ApplyConfigTransaction` maps candidate-validation failures and rollback
+  snapshot serialization failures without parsing error-string prefixes.
+
 ## [0.35.0] — 2026-06-04
 
 ### Added

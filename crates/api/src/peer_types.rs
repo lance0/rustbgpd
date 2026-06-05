@@ -305,6 +305,31 @@ impl std::fmt::Display for RuntimeConfigTransactionPlanError {
 
 impl std::error::Error for RuntimeConfigTransactionPlanError {}
 
+/// Error returned when the peer manager stages a candidate runtime config snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StageConfigSnapshotError {
+    /// Candidate TOML/config failed validation.
+    InvalidCandidate(String),
+    /// Serializing the previous runtime snapshot for rollback failed.
+    SerializePreviousSnapshot(String),
+}
+
+impl std::fmt::Display for StageConfigSnapshotError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidCandidate(message) => f.write_str(message),
+            Self::SerializePreviousSnapshot(message) => {
+                write!(
+                    f,
+                    "failed to serialize previous runtime config snapshot: {message}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for StageConfigSnapshotError {}
+
 /// Import-policy validation state that can change route admissibility after an
 /// external cache update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -420,7 +445,7 @@ pub enum PeerManagerCommand {
         /// Complete candidate TOML content.
         candidate_toml: String,
         /// Reply returns the previous normalized runtime snapshot on success.
-        reply: oneshot::Sender<Result<String, String>>,
+        reply: oneshot::Sender<Result<String, StageConfigSnapshotError>>,
     },
     /// Return the current normalized runtime config snapshot as TOML.
     ///
