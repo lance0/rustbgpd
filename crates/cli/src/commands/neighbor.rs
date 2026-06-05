@@ -42,10 +42,7 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
                 }
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).expect("failed to serialize neighbor list as JSON")
-        );
+        output::print_json_pretty(&out)?;
     } else if resp.neighbors.is_empty() {
         println!("No neighbors configured");
     } else {
@@ -101,11 +98,7 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             export_policy_routes_permitted: n.export_policy_routes_permitted,
             export_policy_routes_denied: n.export_policy_routes_denied,
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out)
-                .expect("failed to serialize neighbor detail as JSON")
-        );
+        output::print_json_pretty(&out)?;
     } else {
         println!(
             "Neighbor:              {}",
@@ -250,8 +243,7 @@ pub async fn add(
         "add_neighbor",
         address,
         &format!("Neighbor {address} added"),
-    );
-    Ok(())
+    )
 }
 
 pub async fn delete(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
@@ -269,8 +261,7 @@ pub async fn delete(connection: Connection, address: &str, json: bool) -> Result
         "delete_neighbor",
         address,
         &format!("Neighbor {address} deleted"),
-    );
-    Ok(())
+    )
 }
 
 pub async fn enable(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
@@ -288,8 +279,7 @@ pub async fn enable(connection: Connection, address: &str, json: bool) -> Result
         "enable_neighbor",
         address,
         &format!("Neighbor {address} enabled"),
-    );
-    Ok(())
+    )
 }
 
 pub async fn disable(
@@ -313,8 +303,7 @@ pub async fn disable(
         "disable_neighbor",
         address,
         &format!("Neighbor {address} disabled"),
-    );
-    Ok(())
+    )
 }
 
 pub async fn softreset(
@@ -338,8 +327,7 @@ pub async fn softreset(
         "softreset",
         address,
         &format!("Soft reset requested for {address}"),
-    );
-    Ok(())
+    )
 }
 
 /// Toggle the RFC 8326 GRACEFUL_SHUTDOWN community on outbound updates.
@@ -369,8 +357,7 @@ pub async fn set_graceful_shutdown(
         "set_graceful_shutdown",
         scope,
         &format!("GRACEFUL_SHUTDOWN advertise {verb} for {scope}"),
-    );
-    Ok(())
+    )
 }
 
 #[cfg(test)]

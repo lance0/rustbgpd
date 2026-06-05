@@ -166,10 +166,7 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
                     .unwrap_or(0),
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).expect("failed to serialize policy list as JSON")
-        );
+        output::print_json_pretty(&out)?;
     } else if resp.policies.is_empty() {
         println!("No policies configured");
     } else {
@@ -201,11 +198,7 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
             default_action: def.default_action.clone(),
             statements: def.statements.into_iter().map(Into::into).collect(),
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&detail)
-                .expect("failed to serialize policy detail as JSON")
-        );
+        output::print_json_pretty(&detail)?;
     } else {
         println!("Name:           {}", resp.name);
         println!("Default Action: {}", def.default_action);
@@ -233,8 +226,7 @@ pub async fn set(
             definition: Some(definition.into()),
         })
         .await?;
-    output::print_result(json, "set_policy", name, &format!("Policy {name} set"));
-    Ok(())
+    output::print_result(json, "set_policy", name, &format!("Policy {name} set"))
 }
 
 pub async fn delete(connection: Connection, name: &str, json: bool) -> Result<(), CliError> {
@@ -250,8 +242,7 @@ pub async fn delete(connection: Connection, name: &str, json: bool) -> Result<()
         "delete_policy",
         name,
         &format!("Policy {name} deleted"),
-    );
-    Ok(())
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -371,10 +362,7 @@ pub async fn explain_import(
             current_policy_generation: resp.current_policy_generation,
             matches: resp.matches.iter().map(match_to_json).collect(),
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).expect("failed to serialize explain as JSON")
-        );
+        output::print_json_pretty(&out)?;
         return Ok(());
     }
 
@@ -542,10 +530,7 @@ pub async fn chain_show(
             import_policy_names: import,
             export_policy_names: export,
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).expect("failed to serialize chains as JSON")
-        );
+        output::print_json_pretty(&out)?;
     } else {
         let scope = neighbor.unwrap_or("global");
         println!("Scope:        {scope}");
@@ -635,8 +620,7 @@ pub async fn chain_set(
         },
         &target,
         &message,
-    );
-    Ok(())
+    )
 }
 
 pub async fn chain_clear(
@@ -698,8 +682,7 @@ pub async fn chain_clear(
         },
         &target,
         &message,
-    );
-    Ok(())
+    )
 }
 
 #[derive(Clone, Copy, Debug)]

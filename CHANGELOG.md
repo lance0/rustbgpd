@@ -48,6 +48,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before reading the candidate file or sending an RPC, matching the daemon-side
   guardrails for safe deploys.
 
+- **CLI JSON serialization failures are errors, not panics.** Non-config
+  `rustbgpctl` JSON renderers now route `serde_json` serialization failures
+  through `CliError::Json` instead of `expect(...)`, including route/event JSON,
+  mutation result JSON, and streaming watch output. Operator-visible JSON shapes
+  are unchanged.
+
 - **Typed config-transaction stage errors.** The internal
   `StageConfigSnapshot` path now returns a typed peer-manager error so
   `ApplyConfigTransaction` maps candidate-validation failures and rollback

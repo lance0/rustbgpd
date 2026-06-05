@@ -2,6 +2,7 @@ use serde::Serialize;
 
 use std::net::IpAddr;
 
+use crate::error::CliError;
 use crate::proto;
 use owo_colors::{OwoColorize, Stream::Stdout};
 
@@ -516,20 +517,31 @@ pub fn print_route_table(routes: &[proto::Route]) {
 }
 
 /// Print a mutating command result, either as JSON or plain text.
-pub fn print_result(json: bool, action: &str, target: &str, message: &str) {
+pub fn print_result(json: bool, action: &str, target: &str, message: &str) -> Result<(), CliError> {
     if json {
         let out = serde_json::json!({
             "ok": true,
             "action": action,
             "target": target,
         });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).expect("failed to serialize command result as JSON")
-        );
+        print_json_pretty(&out)?;
     } else {
         println!("{message}");
     }
+    Ok(())
+}
+
+/// Print a pretty JSON value, returning a CLI error instead of panicking if
+/// serialization fails.
+pub fn print_json_pretty<T: Serialize>(value: &T) -> Result<(), CliError> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+/// Print a compact single-line JSON value for streaming commands.
+pub fn print_json_line<T: Serialize>(value: &T) -> Result<(), CliError> {
+    println!("{}", serde_json::to_string(value)?);
+    Ok(())
 }
 
 /// Parse "prefix/length" or "prefix" (for host routes) into (IP, length).
@@ -572,6 +584,7 @@ pub fn parse_prefix(s: &str) -> Result<(String, u32), String> {
 mod tests {
     use super::*;
     use serde_json::Value;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_format_duration() {
@@ -691,6 +704,15 @@ mod tests {
         assert!(parse_prefix("10.0.0.0/abc").is_err());
         assert!(parse_prefix("999.999.999.999/24").is_err());
         assert!(parse_prefix("not-an-ip").is_err());
+    }
+
+    #[test]
+    fn print_json_pretty_surfaces_serialize_errors() {
+        let mut non_string_keyed_map = BTreeMap::new();
+        non_string_keyed_map.insert(vec![1_u8], "value");
+
+        let err = print_json_pretty(&non_string_keyed_map).unwrap_err();
+        assert!(matches!(err, CliError::Json(_)));
     }
 
     #[test]
