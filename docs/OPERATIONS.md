@@ -105,7 +105,10 @@ SIGHUP: v1 commits one pure runtime family at a time (`[[fib_tables]]`,
 catalog-only policy/neighbor-set/peer-group/global-chain edits). It can also
 commit policy/neighbor-set/peer-group/global-chain edits that only move existing
 static neighbors' resolved import/export policy chains; the executor re-applies
-those chains to live sessions and rolls them back if persistence fails.
+those chains to live sessions and rolls them back if apply or persistence fails.
+Because import-chain changes are re-evaluated with Route Refresh, every impacted
+Established peer must have negotiated Route Refresh or the transaction is
+rejected without committing the candidate.
 Mixed-family candidates, dynamic-range policy impact, peer-group/session reshapes, and
 unsupported sections are rejected without mutation.
 

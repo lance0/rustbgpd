@@ -17,6 +17,20 @@ use crate::policy_admin::{
 
 use super::{ManagedPeer, PEER_POLICY_UPDATE_TIMEOUT, PEER_QUERY_TIMEOUT, PeerManager};
 
+#[derive(Clone, Copy)]
+enum RefreshFailureHandling {
+    Fatal,
+    BestEffortRearm,
+    BestEffortRestorePrior { pending_refresh: bool },
+}
+
+struct CapturedResolvedPolicy {
+    policy: ResolvedPeerPolicy,
+    pending_refresh: bool,
+    pending_export_apply: bool,
+    forward_completed: bool,
+}
+
 fn metric_count(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
@@ -62,8 +76,13 @@ impl PeerManager {
         let Some(peer_key) = self.unique_peer_key_for_address(address) else {
             return Ok(());
         };
-        self.update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy, true)
-            .await
+        self.update_runtime_policies_for_peer_key(
+            peer_key,
+            import_policy,
+            export_policy,
+            RefreshFailureHandling::Fatal,
+        )
+        .await
     }
 
     /// Apply resolved import/export chains to a set of live peers, capturing each
@@ -80,7 +99,7 @@ impl PeerManager {
         targets: Vec<ResolvedPeerPolicy>,
     ) -> Result<Vec<ResolvedPeerPolicy>, String> {
         // Captured priors, in application order, for peers actually mutated.
-        let mut applied: Vec<ResolvedPeerPolicy> = Vec::new();
+        let mut applied: Vec<CapturedResolvedPolicy> = Vec::new();
         for target in targets {
             let peer_key = PeerKey::new(target.address, target.interface.clone());
             let prior = {
@@ -88,20 +107,26 @@ impl PeerManager {
                     // Not currently live — skip; absent from returned priors.
                     continue;
                 };
-                ResolvedPeerPolicy {
-                    address: target.address,
-                    interface: target.interface.clone(),
-                    import_policy: managed.import_policy.clone(),
-                    export_policy: managed.export_policy.clone(),
+                CapturedResolvedPolicy {
+                    policy: ResolvedPeerPolicy {
+                        address: target.address,
+                        interface: target.interface.clone(),
+                        import_policy: managed.import_policy.clone(),
+                        export_policy: managed.export_policy.clone(),
+                    },
+                    pending_refresh: managed.pending_refresh,
+                    pending_export_apply: managed.pending_export_apply,
+                    forward_completed: false,
                 }
             };
             applied.push(prior);
+            let applied_idx = applied.len() - 1;
             if let Err(apply_error) = self
                 .update_runtime_policies_for_peer_key(
                     peer_key,
                     target.import_policy.clone(),
                     target.export_policy.clone(),
-                    true,
+                    RefreshFailureHandling::Fatal,
                 )
                 .await
             {
@@ -119,8 +144,12 @@ impl PeerManager {
                     ),
                 });
             }
+            applied[applied_idx].forward_completed = true;
         }
-        Ok(applied)
+        Ok(applied
+            .into_iter()
+            .map(|captured| captured.policy)
+            .collect())
     }
 
     /// Re-apply captured prior chains (reverse of application order) to restore
@@ -128,28 +157,37 @@ impl PeerManager {
     /// peers no longer live are skipped.
     async fn restore_resolved_policies(
         &mut self,
-        priors: Vec<ResolvedPeerPolicy>,
+        priors: Vec<CapturedResolvedPolicy>,
     ) -> Result<(), String> {
         let mut errors: Vec<String> = Vec::new();
         for prior in priors.into_iter().rev() {
-            let peer_key = PeerKey::new(prior.address, prior.interface.clone());
+            let address = prior.policy.address;
+            let peer_key = PeerKey::new(address, prior.policy.interface.clone());
             if !self.peers.contains_key(&peer_key) {
                 continue;
             }
+            let refresh_failure = if prior.forward_completed {
+                RefreshFailureHandling::BestEffortRearm
+            } else {
+                RefreshFailureHandling::BestEffortRestorePrior {
+                    pending_refresh: prior.pending_refresh,
+                }
+            };
             if let Err(error) = self
                 .update_runtime_policies_for_peer_key(
-                    peer_key,
-                    prior.import_policy,
-                    prior.export_policy,
-                    // Best-effort refresh on rollback: restoring the prior chain
-                    // is the critical part; a refresh failure here (e.g. a peer
-                    // without Route Refresh, whose forward refresh also failed)
-                    // must not escalate a clean rollback into a compound error.
-                    false,
+                    peer_key.clone(),
+                    prior.policy.import_policy,
+                    prior.policy.export_policy,
+                    refresh_failure,
                 )
                 .await
             {
-                errors.push(format!("{}: {error}", prior.address));
+                errors.push(format!("{address}: {error}"));
+            } else if !prior.forward_completed
+                && let Some(managed) = self.peers.get_mut(&peer_key)
+            {
+                managed.pending_refresh = prior.pending_refresh;
+                managed.pending_export_apply = prior.pending_export_apply;
             }
         }
         if errors.is_empty() {
@@ -262,7 +300,7 @@ impl PeerManager {
         peer_key: PeerKey,
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
-        refresh_fatal: bool,
+        refresh_failure: RefreshFailureHandling,
     ) -> Result<(), String> {
         use std::fmt::Write as _;
         let address = peer_key.address;
@@ -496,25 +534,34 @@ impl PeerManager {
         // policy until the operator reissues a SetPolicy.
         if needs_refresh && is_established {
             if let Err(error) = self.soft_reset_in(peer_key.clone(), Vec::new()).await {
-                if let Some(managed) = self.peers.get_mut(&peer_key) {
-                    managed.pending_refresh = true;
+                match refresh_failure {
+                    RefreshFailureHandling::Fatal => {
+                        if let Some(managed) = self.peers.get_mut(&peer_key) {
+                            managed.pending_refresh = true;
+                        }
+                        return Err(error);
+                    }
+                    RefreshFailureHandling::BestEffortRearm => {
+                        if let Some(managed) = self.peers.get_mut(&peer_key) {
+                            managed.pending_refresh = true;
+                        }
+                        warn!(
+                            %address,
+                            error = %error,
+                            "route refresh failed during policy rollback; armed pending_refresh"
+                        );
+                    }
+                    RefreshFailureHandling::BestEffortRestorePrior { pending_refresh } => {
+                        if let Some(managed) = self.peers.get_mut(&peer_key) {
+                            managed.pending_refresh = pending_refresh;
+                        }
+                        warn!(
+                            %address,
+                            error = %error,
+                            "route refresh failed while restoring a failed policy apply; restored prior pending_refresh state"
+                        );
+                    }
                 }
-                // On the forward apply a refresh failure is fatal (the policy
-                // change didn't fully take effect). During a transaction
-                // rollback (`refresh_fatal = false`) it is best-effort: the
-                // prior chain is already restored in bookkeeping, the peer's
-                // AdjRibIn is either already under the prior policy (its forward
-                // refresh failed too — e.g. a peer without Route Refresh) or is
-                // re-converged by the armed `pending_refresh`. Escalating it
-                // would turn a clean rollback into a spurious compound error.
-                if refresh_fatal {
-                    return Err(error);
-                }
-                warn!(
-                    %address,
-                    error = %error,
-                    "route refresh failed during policy rollback; armed pending_refresh"
-                );
             }
         } else if needs_refresh {
             // `!is_established` here means one of: the peer really is
@@ -536,7 +583,12 @@ impl PeerManager {
             // AdjRibIn) is small and acceptable next to silent
             // staleness.
             if let Some(managed) = self.peers.get_mut(&peer_key) {
-                managed.pending_refresh = true;
+                managed.pending_refresh = match refresh_failure {
+                    RefreshFailureHandling::BestEffortRestorePrior { pending_refresh } => {
+                        pending_refresh
+                    }
+                    RefreshFailureHandling::Fatal | RefreshFailureHandling::BestEffortRearm => true,
+                };
             }
         }
 
@@ -594,8 +646,13 @@ impl PeerManager {
             let (import_policy, export_policy) = next_config
                 .effective_policy_chains_for_neighbor(neighbor)
                 .map_err(|e| e.to_string())?;
-            self.update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy, true)
-                .await?;
+            self.update_runtime_policies_for_peer_key(
+                peer_key,
+                import_policy,
+                export_policy,
+                RefreshFailureHandling::Fatal,
+            )
+            .await?;
         }
 
         self.current_config = next_config;
@@ -704,7 +761,12 @@ impl PeerManager {
                 }
             };
             if let Err(e) = self
-                .update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy, true)
+                .update_runtime_policies_for_peer_key(
+                    peer_key,
+                    import_policy,
+                    export_policy,
+                    RefreshFailureHandling::Fatal,
+                )
                 .await
             {
                 warn!(
@@ -781,7 +843,12 @@ impl PeerManager {
                 }
             };
             if let Err(e) = self
-                .update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy, true)
+                .update_runtime_policies_for_peer_key(
+                    peer_key,
+                    import_policy,
+                    export_policy,
+                    RefreshFailureHandling::Fatal,
+                )
                 .await
             {
                 warn!(

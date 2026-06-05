@@ -1815,7 +1815,10 @@ live policy-chain impact. The apply path
 re-checks the token under the shared runtime-config coordinator, rejects mixed or
 unsupported candidates without mutation, applies live runtime state when the
 family has one, persists the exact accepted candidate with an acknowledgement,
-and rolls runtime state back if apply or persistence fails. Dynamic-range policy
+and rolls runtime state back if apply or persistence fails. Live policy-chain
+impact uses Route Refresh to re-evaluate already-received routes, so every
+impacted Established peer must have negotiated Route Refresh or the transaction
+is rejected and rolled back. Dynamic-range policy
 impact and policy/peer-group edits that require session reconfiguration remain
 rejected until dedicated executors exist.
 Like SIGHUP and FIB CRUD, FIB transaction apply requires the FIB reconciler to

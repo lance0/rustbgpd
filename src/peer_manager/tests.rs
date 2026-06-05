@@ -3003,7 +3003,25 @@ async fn apply_resolved_policy_snapshot_rejects_non_route_refresh_peer_cleanly()
     // existing AdjRibIn under the new policy must reject. The rollback must be
     // clean (prior chain restored) — not a compound "restore also failed", since
     // the doomed rollback refresh is best-effort.
-    let mut mgr = live_policy_test_manager();
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let rib_drainer = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     insert_test_managed_peer(
         &mut mgr,
@@ -3042,6 +3060,11 @@ async fn apply_resolved_policy_snapshot_rejects_non_route_refresh_peer_cleanly()
         format!("{:?}", Some(prior)),
         "the peer's import policy must be restored to its prior chain"
     );
+    assert!(
+        !mgr.peers.get(&key(addr)).unwrap().pending_refresh,
+        "a rejected non-RR apply must restore the prior pending_refresh state"
+    );
+    rib_drainer.abort();
 }
 
 #[allow(clippy::too_many_lines)]
