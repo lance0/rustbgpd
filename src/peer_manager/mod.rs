@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use rustbgpd_api::peer_types::{
     ConfigEvent, DynamicNeighborInfo, POLICY_EVENT_HISTORY_CAPACITY, PeerKey, PeerManagerCommand,
     PeerManagerNeighborConfig, PolicyEvent, SESSION_EVENT_HISTORY_CAPACITY, SessionEvent,
-    SessionLifecycleEvent,
+    SessionLifecycleEvent, StageConfigSnapshotError,
 };
 use rustbgpd_bmp::BmpEvent;
 use rustbgpd_fsm::PeerConfig;
@@ -587,13 +587,13 @@ impl PeerManager {
                                 &candidate_toml,
                                 "candidate config transaction",
                             )
+                            .map_err(StageConfigSnapshotError::InvalidCandidate)
                             .and_then(|candidate| {
                                 let previous =
                                     toml::to_string_pretty(&self.current_config).map_err(
                                         |error| {
-                                            format!(
-                                                "failed to serialize previous runtime config \
-                                                 snapshot: {error}"
+                                            StageConfigSnapshotError::SerializePreviousSnapshot(
+                                                error.to_string(),
                                             )
                                         },
                                     )?;

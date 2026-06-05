@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, PeerKey, PeerManagerCommand, PeerManagerNeighborConfig, ResolvedPeerPolicy,
-    RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus,
+    RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus, StageConfigSnapshotError,
 };
 use rustbgpd_api::proto;
 use rustbgpd_api::server::{ConfigTransactionApplyError, ConfigTransactionApplyFn};
@@ -849,11 +849,16 @@ fn plan_error_to_status(error: RuntimeConfigTransactionPlanError) -> ConfigTrans
     }
 }
 
-fn stage_config_snapshot_error_to_apply_error(error: String) -> ConfigTransactionApplyError {
-    if error.starts_with("failed to serialize previous runtime config snapshot") {
-        ConfigTransactionApplyError::Internal(error)
-    } else {
-        ConfigTransactionApplyError::InvalidArgument(error)
+fn stage_config_snapshot_error_to_apply_error(
+    error: StageConfigSnapshotError,
+) -> ConfigTransactionApplyError {
+    match error {
+        StageConfigSnapshotError::InvalidCandidate(message) => {
+            ConfigTransactionApplyError::InvalidArgument(message)
+        }
+        error @ StageConfigSnapshotError::SerializePreviousSnapshot(_) => {
+            ConfigTransactionApplyError::Internal(error.to_string())
+        }
     }
 }
 
@@ -1013,15 +1018,19 @@ peer_group = "edge"
     }
 
     #[test]
-    fn stage_snapshot_serialization_error_maps_internal() {
+    fn stage_snapshot_errors_map_by_variant() {
         let error = stage_config_snapshot_error_to_apply_error(
-            "failed to serialize previous runtime config snapshot: synthetic".to_string(),
+            StageConfigSnapshotError::SerializePreviousSnapshot("synthetic".to_string()),
         );
-        assert!(matches!(error, ConfigTransactionApplyError::Internal(_)));
+        assert!(
+            matches!(error, ConfigTransactionApplyError::Internal(ref message)
+                if message.contains("failed to serialize previous runtime config snapshot: synthetic"))
+        );
 
-        let error = stage_config_snapshot_error_to_apply_error(
-            "invalid candidate config transaction: synthetic".to_string(),
-        );
+        let error =
+            stage_config_snapshot_error_to_apply_error(StageConfigSnapshotError::InvalidCandidate(
+                "invalid candidate config transaction: synthetic".to_string(),
+            ));
         assert!(matches!(
             error,
             ConfigTransactionApplyError::InvalidArgument(_)
@@ -1186,7 +1195,7 @@ peer_group = "edge"
         plan: RuntimeConfigTransactionPlan,
         snapshot_toml: Arc<Mutex<String>>,
         peers: Arc<Mutex<Vec<PeerManagerNeighborConfig>>>,
-        stage_results: Arc<Mutex<VecDeque<Result<(), String>>>>,
+        stage_results: Arc<Mutex<VecDeque<Result<(), StageConfigSnapshotError>>>>,
     ) {
         while let Some(cmd) = rx.recv().await {
             match cmd {
@@ -1910,7 +1919,9 @@ peer_group = "ix-members"
         let peers = Arc::new(Mutex::new(Vec::new()));
         let stage_results = Arc::new(Mutex::new(VecDeque::from([
             Ok(()),
-            Err("stage rollback failed".to_string()),
+            Err(StageConfigSnapshotError::SerializePreviousSnapshot(
+                "stage rollback failed".to_string(),
+            )),
         ])));
         let (peer_tx, peer_rx) = mpsc::channel(8);
         tokio::spawn(fake_snapshot_peer_manager_with_stage_results(

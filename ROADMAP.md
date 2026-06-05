@@ -475,8 +475,10 @@ branch is between features.
   `AddDynamicNeighbor` / `DeleteDynamicNeighbor` can map duplicate, not-found,
   and invalid-input failures to stable gRPC status codes without parsing error
   strings. ADR-0076 transaction planning uses a typed stale-snapshot /
-  invalid-candidate error for gRPC status mapping. Older peer-manager / RIB
-  commands still commonly return
+  invalid-candidate error for gRPC status mapping, and `StageConfigSnapshot`
+  now returns typed candidate-validation vs previous-snapshot-serialization
+  errors to the transaction executor. Older peer-manager / RIB commands still
+  commonly return
   `Result<_, String>`; keep that for one-status surfaces, but migrate to small
   typed enums when a caller needs to distinguish `ALREADY_EXISTS`, `NOT_FOUND`,
   `INVALID_ARGUMENT`, or similar API-visible classes.
