@@ -73,11 +73,7 @@ pub async fn list(
                 })
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out)
-                .expect("failed to serialize EVPN route list as JSON")
-        );
+        output::print_json_pretty(&out)?;
     } else if resp.routes.is_empty() {
         println!("No EVPN routes");
     } else {
@@ -167,8 +163,7 @@ pub async fn add_mac_ip(
             gateway: String::new(),
         })
         .await?;
-    output::print_result(json, "add_evpn", "", "EVPN Type 2 route added");
-    Ok(())
+    output::print_result(json, "add_evpn", "", "EVPN Type 2 route added")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -202,8 +197,7 @@ pub async fn add_imet(
             gateway: String::new(),
         })
         .await?;
-    output::print_result(json, "add_evpn", "", "EVPN Type 3 route added");
-    Ok(())
+    output::print_result(json, "add_evpn", "", "EVPN Type 3 route added")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -253,8 +247,7 @@ pub async fn add_ip_prefix(
             gateway: gateway.unwrap_or_default(),
         })
         .await?;
-    output::print_result(json, "add_evpn", "", "EVPN Type 5 route added");
-    Ok(())
+    output::print_result(json, "add_evpn", "", "EVPN Type 5 route added")
 }
 
 fn validate_ip_prefix_ethernet_tag(ethernet_tag: u32) -> Result<(), CliError> {
@@ -309,8 +302,7 @@ pub async fn delete_mac_ip(
             prefix_length: 0,
         })
         .await?;
-    output::print_result(json, "delete_evpn", "", "EVPN Type 2 route deleted");
-    Ok(())
+    output::print_result(json, "delete_evpn", "", "EVPN Type 2 route deleted")
 }
 
 pub async fn delete_imet(
@@ -333,8 +325,7 @@ pub async fn delete_imet(
             prefix_length: 0,
         })
         .await?;
-    output::print_result(json, "delete_evpn", "", "EVPN Type 3 route deleted");
-    Ok(())
+    output::print_result(json, "delete_evpn", "", "EVPN Type 3 route deleted")
 }
 
 pub async fn delete_ip_prefix(
@@ -359,8 +350,7 @@ pub async fn delete_ip_prefix(
             prefix_length,
         })
         .await?;
-    output::print_result(json, "delete_evpn", "", "EVPN Type 5 route deleted");
-    Ok(())
+    output::print_result(json, "delete_evpn", "", "EVPN Type 5 route deleted")
 }
 
 /// Clear one RFC 7432 duplicate-MAC local-origin quarantine.
@@ -380,16 +370,12 @@ pub async fn clear_duplicate_mac(
         .await?
         .into_inner();
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+        output::print_json_pretty(&serde_json::json!({
                 "vni": vni,
                 "mac": mac,
                 "cleared": resp.cleared,
                 "message": resp.message,
-            }))
-            .expect("failed to serialize duplicate-MAC clear result as JSON")
-        );
+        }))?;
     } else if resp.cleared {
         println!("EVPN duplicate-MAC quarantine cleared: {mac} on VNI {vni}");
     } else {
@@ -408,11 +394,7 @@ pub async fn runtime(connection: Connection, json: bool) -> Result<(), CliError>
         .into_inner();
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&runtime_to_json(&state))
-                .expect("failed to serialize EVPN runtime state as JSON")
-        );
+        output::print_json_pretty(&runtime_to_json(&state))?;
     } else {
         println!(
             "EVPN runtime generation={} lifecycle={} mutation={} l2-instances={} ip-vrfs={} ethernet-segments={} es-member-vnis={}",
@@ -460,11 +442,7 @@ pub async fn list_instances(connection: Connection, json: bool) -> Result<(), Cl
                 })
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out)
-                .expect("failed to serialize EVPN instance list as JSON")
-        );
+        output::print_json_pretty(&out)?;
     } else if resp.instances.is_empty() {
         println!("No local EVPN instances configured");
     } else {
@@ -506,11 +484,7 @@ pub async fn list_nexthops(connection: Connection, json: bool) -> Result<(), Cli
         .into_inner();
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&fdb_nexthops_to_json(&resp))
-                .expect("failed to serialize EVPN nexthop list as JSON")
-        );
+        output::print_json_pretty(&fdb_nexthops_to_json(&resp))?;
     } else {
         // Print the latch directly rather than label it as
         // "enabled" / "disabled" — `drift_recovery_disabled = false`
@@ -632,10 +606,7 @@ pub async fn list_ip_vrfs(connection: Connection, json: bool) -> Result<(), CliE
 
     if json {
         let out: Vec<serde_json::Value> = resp.ip_vrfs.iter().map(ip_vrf_to_json).collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).expect("failed to serialize IP-VRF list as JSON")
-        );
+        output::print_json_pretty(&out)?;
     } else if resp.ip_vrfs.is_empty() {
         println!("No IP-VRFs configured");
     } else {
@@ -657,11 +628,7 @@ pub async fn get_ip_vrf(connection: Connection, name: String, json: bool) -> Res
         .into_inner();
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&ip_vrf_to_json(&vrf))
-                .expect("failed to serialize IP-VRF as JSON")
-        );
+        output::print_json_pretty(&ip_vrf_to_json(&vrf))?;
     } else {
         println!("{}", format_ip_vrf_human(&vrf));
         // In the detail view we also print each not-ready reason on
@@ -794,9 +761,7 @@ pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError
         .sum();
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+        output::print_json_pretty(&serde_json::json!({
                 "instance_count": instances.len(),
                 "originated_local_macs_count": originated_local_macs,
                 "type2_route_count": type2_routes.len(),
@@ -804,9 +769,7 @@ pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError
                 "type3_route_count": type3_routes.len(),
                 "type3_present": !type3_routes.is_empty(),
                 "key_metrics": key_metrics,
-            }))
-            .expect("failed to serialize EVPN diagnose output as JSON")
-        );
+        }))?;
     } else {
         println!("EVPN diagnose");
         println!("Instances: {}", instances.len());

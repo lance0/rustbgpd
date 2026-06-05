@@ -1,6 +1,6 @@
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output::JsonGlobal;
+use crate::output::{self, JsonGlobal};
 use crate::proto::GetGlobalRequest;
 use crate::proto::global_service_client::GlobalServiceClient;
 
@@ -26,10 +26,7 @@ pub async fn run(connection: Connection, json: bool) -> Result<(), CliError> {
             tcp_ao_support: tcp_ao_support_label(resp.tcp_ao_support).to_string(),
             tcp_ao_detail: resp.tcp_ao_detail.clone(),
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).expect("failed to serialize global state as JSON")
-        );
+        output::print_json_pretty(&out)?;
     } else {
         println!("ASN:         {}", resp.asn);
         println!("Router ID:   {}", resp.router_id);

@@ -16,10 +16,7 @@ pub async fn health(connection: Connection, json: bool) -> Result<(), CliError> 
             active_peers: resp.active_peers,
             total_routes: resp.total_routes,
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).expect("failed to serialize health output as JSON")
-        );
+        output::print_json_pretty(&out)?;
     } else {
         println!("Status:  {}", output::colored_health(resp.healthy));
         println!("Uptime:  {}", output::format_duration(resp.uptime_seconds));
@@ -49,8 +46,7 @@ pub async fn shutdown(
             reason: reason.unwrap_or_default(),
         })
         .await?;
-    output::print_result(json, "shutdown", "", "Shutdown requested");
-    Ok(())
+    output::print_result(json, "shutdown", "", "Shutdown requested")
 }
 
 pub async fn mrt_dump(connection: Connection, json: bool) -> Result<(), CliError> {
@@ -62,7 +58,7 @@ pub async fn mrt_dump(connection: Connection, json: bool) -> Result<(), CliError
         .into_inner();
 
     if json {
-        println!("{}", serde_json::json!({ "file_path": resp.file_path }));
+        output::print_json_line(&serde_json::json!({ "file_path": resp.file_path }))?;
     } else {
         println!("MRT dump written: {}", resp.file_path);
     }

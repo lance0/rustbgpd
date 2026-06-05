@@ -54,14 +54,10 @@ fn json_event(event: &RouteEvent) -> JsonRouteEvent {
     }
 }
 
-fn print_event(event: &RouteEvent, json: bool) {
+fn print_event(event: &RouteEvent, json: bool) -> Result<(), CliError> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string(&json_event(event))
-                .expect("failed to serialize route event as JSON")
-        );
-        return;
+        output::print_json_line(&json_event(event))?;
+        return Ok(());
     }
 
     let prefix = format!("{}/{}", event.prefix, event.prefix_length);
@@ -102,6 +98,7 @@ fn print_event(event: &RouteEvent, json: bool) {
         path_id_str,
         event_id_str,
     );
+    Ok(())
 }
 
 fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
@@ -637,17 +634,14 @@ fn format_bgp_event_line(event: &BgpEvent) -> String {
     )
 }
 
-fn print_bgp_event(event: &BgpEvent, json: bool) {
+fn print_bgp_event(event: &BgpEvent, json: bool) -> Result<(), CliError> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string(&json_bgp_event(event))
-                .expect("failed to serialize BGP event as JSON")
-        );
-        return;
+        output::print_json_line(&json_bgp_event(event))?;
+        return Ok(());
     }
 
     println!("{}", format_bgp_event_line(event));
+    Ok(())
 }
 
 fn json_route_stream_lag_event(event: &BgpEvent, lag: &StreamLagEvent) -> JsonRouteEvent {
@@ -666,34 +660,30 @@ fn json_route_stream_lag_event(event: &BgpEvent, lag: &StreamLagEvent) -> JsonRo
     }
 }
 
-fn json_route_watch_event(event: &BgpEvent) -> serde_json::Value {
+fn json_route_watch_event(event: &BgpEvent) -> Result<serde_json::Value, CliError> {
     match event.payload.as_ref() {
         Some(crate::proto::bgp_event::Payload::Route(route)) => {
-            serde_json::to_value(json_event(route)).expect("failed to serialize route event")
+            Ok(serde_json::to_value(json_event(route))?)
         }
-        Some(crate::proto::bgp_event::Payload::StreamLag(lag)) => {
-            serde_json::to_value(json_route_stream_lag_event(event, lag))
-                .expect("failed to serialize route stream lag event")
-        }
-        _ => json_bgp_event(event),
+        Some(crate::proto::bgp_event::Payload::StreamLag(lag)) => Ok(serde_json::to_value(
+            json_route_stream_lag_event(event, lag),
+        )?),
+        _ => Ok(json_bgp_event(event)),
     }
 }
 
-fn print_route_watch_event(event: &BgpEvent, json: bool) {
+fn print_route_watch_event(event: &BgpEvent, json: bool) -> Result<(), CliError> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string(&json_route_watch_event(event))
-                .expect("failed to serialize route watch event as JSON")
-        );
-        return;
+        output::print_json_line(&json_route_watch_event(event)?)?;
+        return Ok(());
     }
 
     if let Some(crate::proto::bgp_event::Payload::Route(route)) = event.payload.as_ref() {
-        print_event(route, false);
+        print_event(route, false)?;
     } else {
-        print_bgp_event(event, false);
+        print_bgp_event(event, false)?;
     }
+    Ok(())
 }
 
 fn is_route_event_type(event_type: i32) -> bool {
@@ -851,7 +841,7 @@ pub async fn run(
         .into_inner();
 
     while let Some(event) = stream.message().await? {
-        print_route_watch_event(&event, json);
+        print_route_watch_event(&event, json)?;
     }
     Ok(())
 }
@@ -932,7 +922,7 @@ pub async fn events_watch(
         };
         let mut stream = client.subscribe_from_event(request).await?.into_inner();
         while let Some(event) = stream.message().await? {
-            print_bgp_event(&event, json);
+            print_bgp_event(&event, json)?;
         }
         return Ok(());
     }
@@ -978,7 +968,7 @@ pub async fn events_watch(
         for event in events {
             last_backfilled_route_event_id = last_backfilled_route_event_id.max(event.event_id);
             let event = route_event_to_bgp_event(event);
-            print_bgp_event(&event, json);
+            print_bgp_event(&event, json)?;
         }
     }
 
@@ -988,7 +978,7 @@ pub async fn events_watch(
         {
             continue;
         }
-        print_bgp_event(&event, json);
+        print_bgp_event(&event, json)?;
     }
     Ok(())
 }
@@ -1017,7 +1007,7 @@ pub async fn history(
         .into_inner();
 
     for event in response.events {
-        print_event(&event, json);
+        print_event(&event, json)?;
     }
     Ok(())
 }
@@ -1046,7 +1036,7 @@ pub async fn session_history(
         .into_inner();
 
     for event in response.events {
-        print_bgp_event(&event, json);
+        print_bgp_event(&event, json)?;
     }
     Ok(())
 }
@@ -1075,7 +1065,7 @@ pub async fn policy_history(
         .into_inner();
 
     for event in response.events {
-        print_bgp_event(&event, json);
+        print_bgp_event(&event, json)?;
     }
     Ok(())
 }
@@ -1108,7 +1098,7 @@ pub async fn evpn_history(
         .into_inner();
 
     for event in response.events {
-        print_bgp_event(&event, json);
+        print_bgp_event(&event, json)?;
     }
     Ok(())
 }
@@ -1717,7 +1707,7 @@ mod tests {
             ..Default::default()
         };
 
-        let value = json_route_watch_event(&event);
+        let value = json_route_watch_event(&event).unwrap();
         assert_eq!(value["event_type"], "stream_lagged");
         assert_eq!(value["missed_count"], 7);
         assert_eq!(

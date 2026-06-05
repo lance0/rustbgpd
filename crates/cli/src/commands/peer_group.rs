@@ -92,11 +92,7 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
                 }
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out)
-                .expect("failed to serialize peer-group list as JSON")
-        );
+        output::print_json_pretty(&out)?;
     } else if resp.peer_groups.is_empty() {
         println!("No peer groups configured");
     } else {
@@ -150,11 +146,7 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
             import_policy_chain: def.import_policy_chain.clone(),
             export_policy_chain: def.export_policy_chain.clone(),
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&detail)
-                .expect("failed to serialize peer-group detail as JSON")
-        );
+        output::print_json_pretty(&detail)?;
     } else {
         println!("Name:                  {}", resp.name);
         if let Some(h) = def.hold_time {
@@ -255,8 +247,7 @@ pub async fn set(
         "set_peer_group",
         name,
         &format!("Peer group {name} set"),
-    );
-    Ok(())
+    )
 }
 
 pub async fn delete(connection: Connection, name: &str, json: bool) -> Result<(), CliError> {
@@ -272,8 +263,7 @@ pub async fn delete(connection: Connection, name: &str, json: bool) -> Result<()
         "delete_peer_group",
         name,
         &format!("Peer group {name} deleted"),
-    );
-    Ok(())
+    )
 }
 
 pub async fn attach(
@@ -295,8 +285,7 @@ pub async fn attach(
         "attach_peer_group",
         address,
         &format!("Neighbor {address} attached to peer-group {group}"),
-    );
-    Ok(())
+    )
 }
 
 pub async fn detach(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
@@ -312,8 +301,7 @@ pub async fn detach(connection: Connection, address: &str, json: bool) -> Result
         "detach_peer_group",
         address,
         &format!("Neighbor {address} detached from its peer-group"),
-    );
-    Ok(())
+    )
 }
 
 #[cfg(test)]

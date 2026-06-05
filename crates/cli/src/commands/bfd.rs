@@ -2,6 +2,7 @@
 
 use crate::connection::Connection;
 use crate::error::CliError;
+use crate::output;
 use crate::proto::bfd_service_client::BfdServiceClient;
 use crate::proto::{BfdSession, BfdSessionState, GetBfdSessionsRequest};
 use serde::Serialize;
@@ -48,25 +49,19 @@ async fn fetch(connection: Connection, peer: Option<&str>) -> Result<Vec<BfdSess
 /// List all BFD sessions.
 pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
     let sessions = fetch(connection, None).await?;
-    print_sessions(&sessions, json);
-    Ok(())
+    print_sessions(&sessions, json)
 }
 
 /// Show a single BFD session by peer address.
 pub async fn show(connection: Connection, peer: &str, json: bool) -> Result<(), CliError> {
     let sessions = fetch(connection, Some(peer)).await?;
-    print_sessions(&sessions, json);
-    Ok(())
+    print_sessions(&sessions, json)
 }
 
-fn print_sessions(sessions: &[BfdSession], json: bool) {
+fn print_sessions(sessions: &[BfdSession], json: bool) -> Result<(), CliError> {
     if json {
         let out: Vec<JsonBfdSession> = sessions.iter().map(to_json).collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out)
-                .expect("failed to serialize BFD session list as JSON")
-        );
+        output::print_json_pretty(&out)?;
     } else if sessions.is_empty() {
         println!("No BFD sessions");
     } else {
@@ -82,4 +77,5 @@ fn print_sessions(sessions: &[BfdSession], json: bool) {
             );
         }
     }
+    Ok(())
 }

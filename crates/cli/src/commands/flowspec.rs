@@ -86,11 +86,7 @@ pub async fn list(connection: Connection, family: Option<i32>, json: bool) -> Re
                 })
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out)
-                .expect("failed to serialize FlowSpec route list as JSON")
-        );
+        output::print_json_pretty(&out)?;
     } else if resp.routes.is_empty() {
         println!("No FlowSpec routes");
     } else {
@@ -227,8 +223,7 @@ pub async fn add(
             extended_communities: vec![],
         })
         .await?;
-    output::print_result(json, "add_flowspec", "", "FlowSpec rule added");
-    Ok(())
+    output::print_result(json, "add_flowspec", "", "FlowSpec rule added")
 }
 
 pub async fn delete(
@@ -251,8 +246,7 @@ pub async fn delete(
             components: parsed_components,
         })
         .await?;
-    output::print_result(json, "delete_flowspec", "", "FlowSpec rule deleted");
-    Ok(())
+    output::print_result(json, "delete_flowspec", "", "FlowSpec rule deleted")
 }
 
 #[cfg(test)]
