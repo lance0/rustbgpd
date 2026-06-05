@@ -1,7 +1,7 @@
 use std::net::IpAddr;
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, ImportValidationDependency, PeerKey, PeerManagerNeighborConfig,
+    ConfigEvent, ImportValidationDependency, PeerKey, PeerManagerNeighborConfig, ResolvedPeerPolicy,
 };
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
@@ -64,6 +64,93 @@ impl PeerManager {
         };
         self.update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy)
             .await
+    }
+
+    /// Apply resolved import/export chains to a set of live peers, capturing each
+    /// peer's prior chains for rollback. Atomic at the peer-manager layer: on the
+    /// first per-peer apply failure, restores the peers already changed (newest
+    /// first) and returns `Err` with nothing left mutated. On success returns the
+    /// captured priors — the rollback token the transaction executor replays
+    /// through this same path after a later persistence failure. Targets not
+    /// currently in `self.peers` (e.g. a dynamic peer that disconnected) are
+    /// skipped and absent from the returned priors. Does NOT touch
+    /// `current_config`; snapshot staging owns that.
+    pub(super) async fn apply_resolved_policy_snapshot(
+        &mut self,
+        targets: Vec<ResolvedPeerPolicy>,
+    ) -> Result<Vec<ResolvedPeerPolicy>, String> {
+        // Captured priors, in application order, for peers actually mutated.
+        let mut applied: Vec<ResolvedPeerPolicy> = Vec::new();
+        for target in targets {
+            let peer_key = PeerKey::new(target.address, target.interface.clone());
+            let prior = {
+                let Some(managed) = self.peers.get(&peer_key) else {
+                    // Not currently live — skip; absent from returned priors.
+                    continue;
+                };
+                ResolvedPeerPolicy {
+                    address: target.address,
+                    interface: target.interface.clone(),
+                    import_policy: managed.import_policy.clone(),
+                    export_policy: managed.export_policy.clone(),
+                }
+            };
+            applied.push(prior);
+            if let Err(apply_error) = self
+                .update_runtime_policies_for_peer_key(
+                    peer_key,
+                    target.import_policy.clone(),
+                    target.export_policy.clone(),
+                )
+                .await
+            {
+                let restored = std::mem::take(&mut applied);
+                return Err(match self.restore_resolved_policies(restored).await {
+                    Ok(()) => format!(
+                        "failed to apply resolved policy to {}: {apply_error}; \
+                         already-applied peers restored",
+                        target.address
+                    ),
+                    Err(restore_error) => format!(
+                        "failed to apply resolved policy to {}: {apply_error}; \
+                         restoring already-applied peers also failed: {restore_error}",
+                        target.address
+                    ),
+                });
+            }
+        }
+        Ok(applied)
+    }
+
+    /// Re-apply captured prior chains (reverse of application order) to restore
+    /// live peers during a transaction rollback. Composes per-peer failures;
+    /// peers no longer live are skipped.
+    async fn restore_resolved_policies(
+        &mut self,
+        priors: Vec<ResolvedPeerPolicy>,
+    ) -> Result<(), String> {
+        let mut errors: Vec<String> = Vec::new();
+        for prior in priors.into_iter().rev() {
+            let peer_key = PeerKey::new(prior.address, prior.interface.clone());
+            if !self.peers.contains_key(&peer_key) {
+                continue;
+            }
+            if let Err(error) = self
+                .update_runtime_policies_for_peer_key(
+                    peer_key,
+                    prior.import_policy,
+                    prior.export_policy,
+                )
+                .await
+            {
+                errors.push(format!("{}: {error}", prior.address));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 
     pub(super) async fn soft_reset_import_validation_dependents(

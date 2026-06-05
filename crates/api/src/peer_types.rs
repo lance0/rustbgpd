@@ -315,6 +315,23 @@ pub enum ImportValidationDependency {
     Aspa,
 }
 
+/// Resolved import/export policy chains for one live peer session.
+///
+/// Carried by [`PeerManagerCommand::ApplyResolvedPolicySnapshot`]. The same
+/// shape is reused for the captured PRIOR chains the command returns, so a
+/// rollback is just `ApplyResolvedPolicySnapshot` of the priors.
+#[derive(Clone, Debug)]
+pub struct ResolvedPeerPolicy {
+    /// Peer address (with `interface` for IPv6 link-local) identifying the live session.
+    pub address: IpAddr,
+    /// Interface name for IPv6 link-local peers; `None` for numbered peers.
+    pub interface: Option<String>,
+    /// Resolved import chain to apply (`None` clears the peer's import policy).
+    pub import_policy: Option<PolicyChain>,
+    /// Resolved export chain to apply (`None` clears the peer's export policy).
+    pub export_policy: Option<PolicyChain>,
+}
+
 pub enum PeerManagerCommand {
     /// Add a new peer with the given configuration.
     AddPeer {
@@ -414,6 +431,27 @@ pub enum PeerManagerCommand {
     RuntimeConfigSnapshot {
         /// Reply returns normalized TOML for the current runtime snapshot.
         reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Atomically apply resolved import/export policy chains to a set of live
+    /// peer sessions, returning each peer's PRIOR chains for rollback.
+    ///
+    /// Used by the ADR-0076 live-impact policy executor to commit policy /
+    /// neighbor-set / peer-group / global-chain edits that reshape existing
+    /// peers' resolved policy. Each target's prior chains are captured before the
+    /// new ones are hot-applied through the same per-peer path SIGHUP uses. The
+    /// command is atomic at the peer-manager layer: on the first per-peer apply
+    /// failure it restores the peers it already changed (reverse order) and
+    /// returns `Err` with nothing left mutated. On success it returns the
+    /// captured priors; the executor replays them through this same command to
+    /// roll back after a later persistence failure. Targets not currently live
+    /// (e.g. a dynamic peer that disconnected) are skipped and absent from the
+    /// returned priors. Never mutates `current_config` — snapshot staging owns
+    /// that, keeping a single token-advance point.
+    ApplyResolvedPolicySnapshot {
+        /// Resolved chains to apply, one entry per concrete live peer.
+        targets: Vec<ResolvedPeerPolicy>,
+        /// Reply returns the captured prior chains (the rollback token).
+        reply: oneshot::Sender<Result<Vec<ResolvedPeerPolicy>, String>>,
     },
     /// Atomically validate a candidate `[[fib_tables]]` set against the live
     /// runtime config (peer-group references, reserved/duplicate table ids,
