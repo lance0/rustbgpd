@@ -1,7 +1,10 @@
-# rustbgpd-cli (rustbgpctl)
+# rustbgpd-cli (rbgp / rustbgpctl)
 
 Command-line interface for rustbgpd. Thin gRPC wrapper for daemon
 management with human-readable and JSON output modes.
+
+`rbgp` is the preferred short binary name. `rustbgpctl` remains available as a
+compatible long-form spelling with the same command surface.
 
 Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
@@ -10,106 +13,106 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 ### Runtime Snapshot
 
 ```bash
-rustbgpctl global       # ASN, router ID, families, TCP-AO support
-rustbgpctl health       # daemon health check
-rustbgpctl metrics      # Prometheus metrics snapshot
-rustbgpctl top          # live terminal dashboard
+rbgp global       # ASN, router ID, families, TCP-AO support
+rbgp health       # daemon health check
+rbgp metrics      # Prometheus metrics snapshot
+rbgp top          # live terminal dashboard
 ```
 
 ### Config Transactions
 
 ```bash
-rustbgpctl config diff --from-file config.toml
-rustbgpctl config plan --from-file config.toml
-rustbgpctl config apply --from-file config.toml \
+rbgp config diff --from-file config.toml
+rbgp config plan --from-file config.toml
+rbgp config apply --from-file config.toml \
   --expected-runtime-snapshot-token kv1:...
 
 # Confirmed apply: rolls back unless confirmed before the timeout.
-rustbgpctl config apply --from-file config.toml \
+rbgp config apply --from-file config.toml \
   --expected-runtime-snapshot-token kv1:... \
   --confirm-id deploy-123 \
   --confirm-timeout 120
-rustbgpctl config status
-rustbgpctl config confirm deploy-123
-rustbgpctl config abort deploy-123
+rbgp config status
+rbgp config confirm deploy-123
+rbgp config abort deploy-123
 ```
 
 ### Peers and BFD
 
 ```bash
-rustbgpctl neighbor
-rustbgpctl neighbor <addr>
-rustbgpctl neighbor <addr> add --asn <asn> [--role provider|rs|rs-client|customer|peer] [--strict-role]
-rustbgpctl neighbor <addr> enable
-rustbgpctl neighbor <addr> disable --reason "maintenance"
-rustbgpctl neighbor <addr> softreset
-rustbgpctl neighbor <addr> delete
+rbgp neighbor
+rbgp neighbor <addr>
+rbgp neighbor <addr> add --asn <asn> [--role provider|rs|rs-client|customer|peer] [--strict-role]
+rbgp neighbor <addr> enable
+rbgp neighbor <addr> disable --reason "maintenance"
+rbgp neighbor <addr> softreset
+rbgp neighbor <addr> delete
 
-rustbgpctl dynamic-neighbor list
-rustbgpctl dynamic-neighbor add 10.0.0.0/24 --peer-group ix-members
-rustbgpctl dynamic-neighbor delete 10.0.0.0/24
+rbgp dynamic-neighbor list
+rbgp dynamic-neighbor add 10.0.0.0/24 --peer-group ix-members
+rbgp dynamic-neighbor delete 10.0.0.0/24
 
-rustbgpctl bfd
-rustbgpctl bfd show <addr>
+rbgp bfd
+rbgp bfd show <addr>
 ```
 
 ### Routes, Policy, and Dataplane
 
 ```bash
-rustbgpctl rib
-rustbgpctl rib received <addr>
-rustbgpctl rib advertised <addr>
-rustbgpctl rib --prefix <prefix> --explain
-rustbgpctl rib blackholes
-rustbgpctl rib fib
+rbgp rib
+rbgp rib received <addr>
+rbgp rib advertised <addr>
+rbgp rib --prefix <prefix> --explain
+rbgp rib blackholes
+rbgp rib fib
 
-rustbgpctl policy list
-rustbgpctl policy get <name>
-rustbgpctl policy set <name> --from-file policy.json
-rustbgpctl policy delete <name>
-rustbgpctl policy chain show [--neighbor <addr>]
-rustbgpctl policy chain set-import [--neighbor <addr>] <names...>
-rustbgpctl policy chain set-export [--neighbor <addr>] <names...>
-rustbgpctl policy chain clear-import [--neighbor <addr>]
-rustbgpctl policy chain clear-export [--neighbor <addr>]
-rustbgpctl policy explain --neighbor <addr> --prefix <cidr> [--path-id <n>]
+rbgp policy list
+rbgp policy get <name>
+rbgp policy set <name> --from-file policy.json
+rbgp policy delete <name>
+rbgp policy chain show [--neighbor <addr>]
+rbgp policy chain set-import [--neighbor <addr>] <names...>
+rbgp policy chain set-export [--neighbor <addr>] <names...>
+rbgp policy chain clear-import [--neighbor <addr>]
+rbgp policy chain clear-export [--neighbor <addr>]
+rbgp policy explain --neighbor <addr> --prefix <cidr> [--path-id <n>]
 
-rustbgpctl flowspec
-rustbgpctl fib-table list
-rustbgpctl fib-table set edge --table-id 1000 --metric 200 --families ipv4_unicast,ipv6_unicast
+rbgp flowspec
+rbgp fib-table list
+rbgp fib-table set edge --table-id 1000 --metric 200 --families ipv4_unicast,ipv6_unicast
 ```
 
 ### EVPN
 
 ```bash
-rustbgpctl evpn
-rustbgpctl evpn runtime
-rustbgpctl evpn instances
-rustbgpctl evpn nexthops
-rustbgpctl evpn vrfs
-rustbgpctl evpn diagnose
-rustbgpctl evpn add-mac-ip ...
-rustbgpctl evpn add-imet ...
-rustbgpctl evpn add-ip-prefix ...
-rustbgpctl evpn delete-mac-ip ...
-rustbgpctl evpn delete-imet ...
-rustbgpctl evpn delete-ip-prefix ...
+rbgp evpn
+rbgp evpn runtime
+rbgp evpn instances
+rbgp evpn nexthops
+rbgp evpn vrfs
+rbgp evpn diagnose
+rbgp evpn add-mac-ip ...
+rbgp evpn add-imet ...
+rbgp evpn add-ip-prefix ...
+rbgp evpn delete-mac-ip ...
+rbgp evpn delete-imet ...
+rbgp evpn delete-ip-prefix ...
 ```
 
 ### Events and Control
 
 ```bash
-rustbgpctl events watch
-rustbgpctl events watch --backfill 50
-rustbgpctl events watch --category bfd --type bfd_up,bfd_down,bfd_state_changed
-rustbgpctl events sessions
-rustbgpctl events policy
-rustbgpctl events evpn
-rustbgpctl watch              # legacy route-update stream
+rbgp events watch
+rbgp events watch --backfill 50
+rbgp events watch --category bfd --type bfd_up,bfd_down,bfd_state_changed
+rbgp events sessions
+rbgp events policy
+rbgp events evpn
+rbgp watch              # legacy route-update stream
 
-rustbgpctl mrt-dump
-rustbgpctl shutdown
-rustbgpctl completions bash
+rbgp mrt-dump
+rbgp shutdown
+rbgp completions bash
 ```
 
 Most data-oriented commands support `--json` for machine-parseable output.

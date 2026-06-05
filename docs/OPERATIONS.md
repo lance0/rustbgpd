@@ -81,14 +81,17 @@ When the daemon is already running, compare a candidate file against the live
 runtime snapshot instead of the on-disk file, then plan/apply a supported
 transaction with an optimistic runtime snapshot token:
 
+`rbgp` is the preferred short CLI spelling. `rustbgpctl` remains available as a
+compatible long-form binary with the same command surface.
+
 ```bash
-rustbgpctl config diff --from-file /tmp/new-config.toml
-rustbgpctl --json config diff --from-file /tmp/new-config.toml
+rbgp config diff --from-file /tmp/new-config.toml
+rbgp --json config diff --from-file /tmp/new-config.toml
 
-rustbgpctl config plan --from-file /tmp/new-config.toml
-rustbgpctl --json config plan --from-file /tmp/new-config.toml
+rbgp config plan --from-file /tmp/new-config.toml
+rbgp --json config plan --from-file /tmp/new-config.toml
 
-rustbgpctl config apply --from-file /tmp/new-config.toml \
+rbgp config apply --from-file /tmp/new-config.toml \
   --expected-runtime-snapshot-token kv1:...
 ```
 
@@ -246,7 +249,7 @@ selection state is still rebuilt from peers after restart.
 ## Upgrading
 
 1. Build the new version: `cargo build --release`
-2. Stop the daemon: `systemctl stop rustbgpd` (or `rustbgpctl shutdown`)
+2. Stop the daemon: `systemctl stop rustbgpd` (or `rbgp shutdown`)
 3. Replace the binary at `/usr/local/bin/rustbgpd`
 4. Start: `systemctl start rustbgpd`
 
@@ -304,7 +307,7 @@ daemon does not crash on MRT failures.
 When a peer sends more prefixes than `max_prefixes`, the daemon sends a
 NOTIFICATION (Cease / Maximum Number of Prefixes Reached) and tears down the
 session. The peer is not automatically re-enabled — use
-`rustbgpctl neighbor <addr> enable` or the gRPC `EnableNeighbor` RPC to
+`rbgp neighbor <addr> enable` or the gRPC `EnableNeighbor` RPC to
 restart it.
 
 ---
@@ -324,7 +327,7 @@ via gRPC `GetMetrics` and `GetHealth` RPCs.
 | `bgp_session_state_transitions_total` | FSM state transitions |
 
 The current count of Established peers and daemon uptime are read via
-`ControlService.GetHealth` / `rustbgpctl health` (and `GetMetrics`), not a
+`ControlService.GetHealth` / `rbgp health` (and `GetMetrics`), not a
 Prometheus gauge.
 
 ### Routing
@@ -343,7 +346,7 @@ Prometheus gauge.
 |--------|-------------------|
 | `bgp_event_stream_lagged_total{service,source}` | Events skipped because a live stream subscriber fell behind the bounded broadcast channel. `service` is `watch_events`, `watch_route_events`, or `watch_routes`; `source` is `route`, `session`, `evpn`, `dataplane`, or `dataplane_route` where applicable |
 | `bgp_event_stream_subscribers{service,source}` | Current live stream subscriber count by service/source |
-| `bgp_route_event_history_depth` | Current number of unicast route events retained for `ListRouteEvents` / `rustbgpctl events` history queries |
+| `bgp_route_event_history_depth` | Current number of unicast route events retained for `ListRouteEvents` / `rbgp events` history queries |
 | `bgp_route_event_history_capacity` | Fixed capacity of the bounded unicast route-event history ring |
 
 `WatchEvents`, `WatchRouteEvents`, and `WatchRoutes` are live tails, not
@@ -354,7 +357,7 @@ query with a new live watch.
 ### Durable Event Cursor (ADR-0072)
 
 The durable outbox (`SubscribeFromEvent` RPC, CLI
-`rustbgpctl events watch --from-event-id <N>`, and the
+`rbgp events watch --from-event-id <N>`, and the
 `examples/event-bridge/` reference binary) survives daemon restart and
 exposes a monotonic `event_id` cursor. The legacy live surfaces above
 (`WatchEvents` / `WatchRoutes` / `List*Events`) keep their existing
@@ -578,7 +581,7 @@ FIB runtime. The actor is still default-off; configure at least one
 | `bgp_fib_kernel_failures_total{action="remove"}` | Kernel rejected a remove operation |
 | `bgp_fib_kernel_failures_total{action="unsupported_platform"}` | Config requested FIB programming on a non-Linux build |
 
-Use `rustbgpctl rib fib --json` as the per-route companion to these counters.
+Use `rbgp rib fib --json` as the per-route companion to these counters.
 The most important states to investigate are `foreign_route_exists` and
 `owned_route_drifted`. `foreign_route_exists` means rustbgpd never proved
 ownership of the live row; `owned_route_drifted` means rustbgpd previously
@@ -655,15 +658,15 @@ the local FDB reconciler. After confirming the loop condition is gone, an
 operator can clear one active quarantine immediately:
 
 ```bash
-rustbgpctl evpn clear-duplicate-mac --vni 100 --mac aa:bb:cc:dd:ee:ff
+rbgp evpn clear-duplicate-mac --vni 100 --mac aa:bb:cc:dd:ee:ff
 ```
 
 The clear path returns success with `cleared=false` if no active quarantine
 exists. When it clears an active key, the originator resets the active gauge
 to `0`, republishes the quarantine set, and replays still-live local MAC or
 MAC+IP state through the normal recovery path.
-`rustbgpctl evpn instances` also reports `originated-local-macs=N` per
-instance, and `rustbgpctl evpn instances --json` exposes the same value as
+`rbgp evpn instances` also reports `originated-local-macs=N` per
+instance, and `rbgp evpn instances --json` exposes the same value as
 `originated_local_macs_count`.
 
 ---
@@ -692,7 +695,7 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 
 1. **Check peer state:**
    ```bash
-   rustbgpctl neighbor
+   rbgp neighbor
    ```
    Look at the FSM state. `Active` means we're trying to connect but TCP
    isn't establishing. `OpenSent`/`OpenConfirm` means OPEN exchange is
@@ -723,8 +726,8 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 ### Add a peer at runtime
 
 ```bash
-rustbgpctl neighbor 10.0.0.5 add --asn 65005 --description "new-peer"
-rustbgpctl neighbor 203.0.113.2 add --asn 65002 --role provider --strict-role
+rbgp neighbor 10.0.0.5 add --asn 65005 --description "new-peer"
+rbgp neighbor 203.0.113.2 add --asn 65002 --role provider --strict-role
 ```
 
 The peer is persisted to the config file automatically. `--role` enables RFC
@@ -734,7 +737,7 @@ The peer is persisted to the config file automatically. `--role` enables RFC
 ### Remove a peer
 
 ```bash
-rustbgpctl neighbor 10.0.0.5 delete
+rbgp neighbor 10.0.0.5 delete
 ```
 
 Sends NOTIFICATION, tears down the session, removes from config.
@@ -742,9 +745,9 @@ Sends NOTIFICATION, tears down the session, removes from config.
 ### Manage dynamic-neighbor ranges at runtime
 
 ```bash
-rustbgpctl dynamic-neighbor list
-rustbgpctl dynamic-neighbor add 10.0.0.0/24 --peer-group ix-members
-rustbgpctl dynamic-neighbor delete 10.0.0.0/24
+rbgp dynamic-neighbor list
+rbgp dynamic-neighbor add 10.0.0.0/24 --peer-group ix-members
+rbgp dynamic-neighbor delete 10.0.0.0/24
 ```
 
 Adds or removes `[[dynamic_neighbors]]` accept-prefix ranges without a
@@ -763,7 +766,7 @@ drop an accepted-but-not-yet-persisted range.
 ### Soft reset (re-evaluate import policy)
 
 ```bash
-rustbgpctl neighbor 10.0.0.2 softreset
+rbgp neighbor 10.0.0.2 softreset
 ```
 
 Re-applies import policy to all routes from this peer without tearing down
@@ -783,10 +786,10 @@ Answer "why didn't this prefix come in?" — or "what did the chain do to
 it when it did?" — from the per-session import-decision cache:
 
 ```bash
-rustbgpctl policy explain --neighbor 10.0.0.2 --prefix 198.51.100.0/24
-rustbgpctl policy explain --neighbor 10.0.0.2 --prefix 2001:db8::/32 --json
+rbgp policy explain --neighbor 10.0.0.2 --prefix 198.51.100.0/24
+rbgp policy explain --neighbor 10.0.0.2 --prefix 2001:db8::/32 --json
 # Add-Path peer: omit --path-id to see every path, or pin one:
-rustbgpctl policy explain --neighbor 10.0.0.2 --prefix 192.0.2.0/24 --path-id 3
+rbgp policy explain --neighbor 10.0.0.2 --prefix 192.0.2.0/24 --path-id 3
 ```
 
 The address family is inferred from the prefix (IPv4 / IPv6 unicast).
@@ -817,21 +820,21 @@ never affects which routes are accepted):
 ### Enable / disable a peer
 
 ```bash
-rustbgpctl neighbor 10.0.0.2 enable
-rustbgpctl neighbor 10.0.0.2 disable --reason "maintenance"
+rbgp neighbor 10.0.0.2 enable
+rbgp neighbor 10.0.0.2 disable --reason "maintenance"
 ```
 
 ### Trigger an MRT dump
 
 ```bash
-rustbgpctl mrt-dump
+rbgp mrt-dump
 ```
 
 ### Live dashboard
 
 ```bash
-rustbgpctl top          # default 2s poll
-rustbgpctl top -i 5     # 5s poll interval
+rbgp top          # default 2s poll
+rbgp top -i 5     # 5s poll interval
 ```
 
 Shows sessions, prefix counts, message rates, RPKI VRP counts, and
@@ -840,25 +843,25 @@ streaming route events in a terminal UI. Press `h` for keybindings.
 ### Watch live events
 
 ```bash
-rustbgpctl events watch
-rustbgpctl events watch --backfill 50
-rustbgpctl events watch --prefix 203.0.113.0/24 --type added,best_changed
-rustbgpctl events watch --category session --type established,lost
-rustbgpctl events watch --category session --type notification_sent,notification_received
-rustbgpctl events watch --category policy --type policy_changed
+rbgp events watch
+rbgp events watch --backfill 50
+rbgp events watch --prefix 203.0.113.0/24 --type added,best_changed
+rbgp events watch --category session --type established,lost
+rbgp events watch --category session --type notification_sent,notification_received
+rbgp events watch --category policy --type policy_changed
 # OTC route-leak decisions are published only through the durable
 # outbox; the CLI automatically routes this filter through
 # SubscribeFromEvent in live-only mode. Add `--from-event-id 0` to
 # also replay any retained history.
-rustbgpctl events watch --category policy --type otc_route_blocked
-rustbgpctl events watch --category dataplane --type dataplane_status_changed
-rustbgpctl events watch --category dataplane --type dataplane_route_failed --prefix 203.0.113.0/24
-rustbgpctl events watch --prefix 203.0.113.0/24 --type policy_filtered
-rustbgpctl events watch --category evpn --type evpn_added,evpn_withdrawn,evpn_best_changed
-rustbgpctl events watch --category bfd --type bfd_up,bfd_down,bfd_state_changed
-rustbgpctl events sessions --address 10.0.0.2 --type established,lost --limit 20
-rustbgpctl events policy --address 10.0.0.2 --type policy_changed --limit 20
-rustbgpctl events evpn --route-type 2 --rd 65000:100 --limit 20
+rbgp events watch --category policy --type otc_route_blocked
+rbgp events watch --category dataplane --type dataplane_status_changed
+rbgp events watch --category dataplane --type dataplane_route_failed --prefix 203.0.113.0/24
+rbgp events watch --prefix 203.0.113.0/24 --type policy_filtered
+rbgp events watch --category evpn --type evpn_added,evpn_withdrawn,evpn_best_changed
+rbgp events watch --category bfd --type bfd_up,bfd_down,bfd_state_changed
+rbgp events sessions --address 10.0.0.2 --type established,lost --limit 20
+rbgp events policy --address 10.0.0.2 --type policy_changed --limit 20
+rbgp events evpn --route-type 2 --rd 65000:100 --limit 20
 ```
 
 `events watch` tails the unified `EventService.WatchEvents` stream. The
@@ -896,29 +899,29 @@ live tail after a gap. Use `--backfill N`
 to print recent matching route history before the live tail starts. Backfill
 is route-history only; session, policy, EVPN, dataplane, and BFD events are not
 backfilled through the live stream command. Per-route FIB dataplane events are
-live-only; use `rustbgpctl rib fib` for the current route ownership snapshot
+live-only; use `rbgp rib fib` for the current route ownership snapshot
 after a reconnect.
 Backfilled route events use the same output shape as live route events, but
 the command still prints a history block followed by the live tail rather than
 merging the two by wall-clock timestamp.
 For recent route history without a live tail, use
-`rustbgpctl events --prefix <PREFIX>`. For recent session lifecycle history,
-use `rustbgpctl events sessions`; it reads the peer manager's bounded
+`rbgp events --prefix <PREFIX>`. For recent session lifecycle history,
+use `rbgp events sessions`; it reads the peer manager's bounded
 process-local history and resets on daemon restart. The CLI returns 100
 history entries by default. The session-history API uses `limit = 0` as a
-daemon-default sentinel, so `rustbgpctl events sessions --limit 0` requests
+daemon-default sentinel, so `rbgp events sessions --limit 0` requests
 the full bounded in-memory window rather than zero rows.
 For recent runtime policy / neighbor-set / peer-group / chain mutation history,
-use `rustbgpctl events policy`; it reads a separate bounded 4096-event
+use `rbgp events policy`; it reads a separate bounded 4096-event
 process-local history from the peer manager. `--address` matches only
 peer-scoped policy events, so global policy and peer-group changes disappear
-from an address-filtered query. `rustbgpctl events policy --limit 0` requests
+from an address-filtered query. `rbgp events policy --limit 0` requests
 the full bounded in-memory window.
-For recent EVPN route history, use `rustbgpctl events evpn`; it reads the RIB's
+For recent EVPN route history, use `rbgp events evpn`; it reads the RIB's
 bounded 4096-event process-local EVPN route-event history. `--address` matches
 both the current and previous best-path peer, `--route-type` accepts route types
 1 through 5, and `--rd` uses the same Route Distinguisher display format as
-`rustbgpctl evpn`.
+`rbgp evpn`.
 
 ### Pick the right observability surface
 
@@ -926,17 +929,17 @@ Use the narrowest surface for the question you are asking:
 
 | Question | Command / RPC | Notes |
 |----------|---------------|-------|
-| "What is changing right now?" | `rustbgpctl events watch` / `EventService.WatchEvents` | Default live route + session stream. Policy, EVPN, dataplane, and BFD streams are opt-in with `--category` or matching `--type`. No replay after reconnect. |
-| "What just changed for this prefix?" | `rustbgpctl events --prefix 203.0.113.0/24` / `ListRouteEvents` | Exact-prefix route history from the bounded in-memory RIB ring. |
-| "Why did this prefix not reach a peer?" | `rustbgpctl events watch --address 10.0.0.2 --type policy_filtered --prefix 203.0.113.0/24` / `ListRouteEvents` | Export-policy denials where the peer is the denied outbound target. |
-| "Did FIB apply fail for this prefix?" | `rustbgpctl events watch --category dataplane --type dataplane_route_failed --prefix 203.0.113.0/24` / `EventService.WatchEvents` | Live ADR-0061 route apply outcome; replayable through `SubscribeFromEvent` when `[event_history].enabled = true`. |
-| "What policy changed recently?" | `rustbgpctl events policy` / `ListPolicyEvents` | Recent policy / neighbor-set / peer-group / chain mutation summaries from the bounded peer-manager ring. |
-| "What EVPN route changed recently?" | `rustbgpctl events evpn --route-type 2 --rd 65000:100` / `ListEvpnEvents` | Recent EVPN route add / withdraw / best-change history from the bounded RIB ring. |
-| "Are BFD sessions up?" | `rustbgpctl bfd`, `rustbgpctl bfd show 10.0.0.2` / `BfdService.GetBfdSessions` | Snapshot of configured single-hop BFD sessions, strict flag, state, and diagnostic. |
-| "Did BFD flap right now?" | `rustbgpctl events watch --category bfd --type bfd_up,bfd_down,bfd_state_changed` / `EventService.WatchEvents` | Live BFD session events. No bounded BFD history API. |
-| "What routes does the general FIB runtime own or reject?" | `rustbgpctl rib fib` / `ListFibRoutes` | Snapshot of ADR-0061 configured-table route ownership. |
-| "What BLACKHOLE discards are installed or rejected?" | `rustbgpctl rib blackholes` / `ListBlackholeDiscards` | Snapshot of RFC 7999 discard programming. |
-| "Are EVPN L2/L3 dataplane pieces ready?" | `rustbgpctl evpn runtime`, `rustbgpctl evpn instances`, `rustbgpctl evpn nexthops`, `rustbgpctl evpn vrfs` | Snapshot of the committed EVPN runtime generation, resolved EVPN config, and latest dataplane reports. |
+| "What is changing right now?" | `rbgp events watch` / `EventService.WatchEvents` | Default live route + session stream. Policy, EVPN, dataplane, and BFD streams are opt-in with `--category` or matching `--type`. No replay after reconnect. |
+| "What just changed for this prefix?" | `rbgp events --prefix 203.0.113.0/24` / `ListRouteEvents` | Exact-prefix route history from the bounded in-memory RIB ring. |
+| "Why did this prefix not reach a peer?" | `rbgp events watch --address 10.0.0.2 --type policy_filtered --prefix 203.0.113.0/24` / `ListRouteEvents` | Export-policy denials where the peer is the denied outbound target. |
+| "Did FIB apply fail for this prefix?" | `rbgp events watch --category dataplane --type dataplane_route_failed --prefix 203.0.113.0/24` / `EventService.WatchEvents` | Live ADR-0061 route apply outcome; replayable through `SubscribeFromEvent` when `[event_history].enabled = true`. |
+| "What policy changed recently?" | `rbgp events policy` / `ListPolicyEvents` | Recent policy / neighbor-set / peer-group / chain mutation summaries from the bounded peer-manager ring. |
+| "What EVPN route changed recently?" | `rbgp events evpn --route-type 2 --rd 65000:100` / `ListEvpnEvents` | Recent EVPN route add / withdraw / best-change history from the bounded RIB ring. |
+| "Are BFD sessions up?" | `rbgp bfd`, `rbgp bfd show 10.0.0.2` / `BfdService.GetBfdSessions` | Snapshot of configured single-hop BFD sessions, strict flag, state, and diagnostic. |
+| "Did BFD flap right now?" | `rbgp events watch --category bfd --type bfd_up,bfd_down,bfd_state_changed` / `EventService.WatchEvents` | Live BFD session events. No bounded BFD history API. |
+| "What routes does the general FIB runtime own or reject?" | `rbgp rib fib` / `ListFibRoutes` | Snapshot of ADR-0061 configured-table route ownership. |
+| "What BLACKHOLE discards are installed or rejected?" | `rbgp rib blackholes` / `ListBlackholeDiscards` | Snapshot of RFC 7999 discard programming. |
+| "Are EVPN L2/L3 dataplane pieces ready?" | `rbgp evpn runtime`, `rbgp evpn instances`, `rbgp evpn nexthops`, `rbgp evpn vrfs` | Snapshot of the committed EVPN runtime generation, resolved EVPN config, and latest dataplane reports. |
 | "Do I need alerting over time?" | Prometheus `/metrics` | Use counters/gauges for alerting; pair with CLI/RPC snapshots for row-level detail. |
 
 Streams answer "what happened while I was connected." Snapshot RPCs answer
@@ -947,13 +950,13 @@ Per-route/per-MAC dataplane histories remain roadmap items.
 ### Check health
 
 ```bash
-rustbgpctl health
+rbgp health
 ```
 
 ### Check TCP-AO readiness
 
 ```bash
-rustbgpctl global
+rbgp global
 ```
 
 The `TCP-AO` row reports the local kernel capability probe for RFC 5925
@@ -968,23 +971,23 @@ exist when active-open or passive-listener sockets are created.
 ### View received routes from a peer
 
 ```bash
-rustbgpctl rib received 10.0.0.2
+rbgp rib received 10.0.0.2
 ```
 
 ### View best routes (Loc-RIB)
 
 ```bash
-rustbgpctl rib
+rbgp rib
 ```
 
 ### View general FIB route status
 
 ```bash
-rustbgpctl rib fib
-rustbgpctl -j rib fib
-rustbgpctl rib fib --table edge --state rejected --reason route_limit_exceeded
-rustbgpctl rib fib --prefix 203.0.113.0/24 --peer 198.51.100.2
-rustbgpctl rib fib --page-size 100
+rbgp rib fib
+rbgp -j rib fib
+rbgp rib fib --table edge --state rejected --reason route_limit_exceeded
+rbgp rib fib --prefix 203.0.113.0/24 --peer 198.51.100.2
+rbgp rib fib --page-size 100
 ```
 
 This reports only the ADR-0061 configured-table runtime, not the ordinary
@@ -1035,7 +1038,7 @@ ownership is dropped.
 programming the kernel (substitute the configured `table_id`):
 
 ```bash
-rustbgpctl rib fib                                  # per-route owned / rejected / failed state
+rbgp rib fib                                  # per-route owned / rejected / failed state
 ip route show table 1000                            # the configured table, straight from the kernel
 curl -s localhost:9179/metrics | grep '^bgp_fib_'   # install / withdraw / reject / kernel-failure counters
 ```
@@ -1043,10 +1046,10 @@ curl -s localhost:9179/metrics | grep '^bgp_fib_'   # install / withdraw / rejec
 ### Manage FIB export tables at runtime (ADR-0061)
 
 ```bash
-rustbgpctl fib-table list
-rustbgpctl fib-table set edge --table-id 1000 --metric 200 \
+rbgp fib-table list
+rbgp fib-table set edge --table-id 1000 --metric 200 \
     --families ipv4_unicast,ipv6_unicast --max-routes 50000
-rustbgpctl fib-table delete edge
+rbgp fib-table delete edge
 ```
 
 `set` is create-or-replace by name and carries the full table definition (not
@@ -1065,7 +1068,7 @@ one `[[fib_tables]]` entry at startup, on Linux); otherwise they fail
 ```bash
 # Global Loc-RIB view: best route + every losing candidate annotated with
 # the decisive comparison reason.
-rustbgpctl rib --prefix 203.0.113.0/24 --explain
+rbgp rib --prefix 203.0.113.0/24 --explain
 
 # Peer-scoped view: same shape, but every candidate the named peer would
 # actually receive gets a non-zero `advertised_path_id` (rank within the
@@ -1073,31 +1076,31 @@ rustbgpctl rib --prefix 203.0.113.0/24 --explain
 # reject, family mismatch, split-horizon, iBGP / RFC 4456 RR suppression,
 # beyond send_max) stay at 0 so the operator can see *why* each isn't
 # advertised.
-rustbgpctl rib --prefix 203.0.113.0/24 --explain --explain-peer 10.0.0.2
+rbgp rib --prefix 203.0.113.0/24 --explain --explain-peer 10.0.0.2
 ```
 
 ### Manage policies, peer groups, and neighbor sets
 
 ```bash
 # Read
-rustbgpctl policy list
-rustbgpctl policy get import-from-transit
-rustbgpctl neighbor-set list
-rustbgpctl peer-group list
+rbgp policy list
+rbgp policy get import-from-transit
+rbgp neighbor-set list
+rbgp peer-group list
 
 # Write — JSON file matches the proto message shape
-rustbgpctl policy set import-from-transit --from-file policy.json
-rustbgpctl neighbor-set set transit-peers --from-file ns.json
-rustbgpctl peer-group set transit --from-file pg.json
+rbgp policy set import-from-transit --from-file policy.json
+rbgp neighbor-set set transit-peers --from-file ns.json
+rbgp peer-group set transit --from-file pg.json
 
 # Apply chains globally or per-neighbor
-rustbgpctl policy chain set-import import-from-transit
-rustbgpctl policy chain set-import import-from-transit --neighbor 10.0.0.2
-rustbgpctl policy chain show --neighbor 10.0.0.2
+rbgp policy chain set-import import-from-transit
+rbgp policy chain set-import import-from-transit --neighbor 10.0.0.2
+rbgp policy chain show --neighbor 10.0.0.2
 
 # Bind / unbind neighbors to a peer-group
-rustbgpctl peer-group attach 10.0.0.5 --group transit
-rustbgpctl peer-group detach 10.0.0.5
+rbgp peer-group attach 10.0.0.5 --group transit
+rbgp peer-group detach 10.0.0.5
 ```
 
 `--from-file` accepts JSON whose shape mirrors the proto message
@@ -1109,7 +1112,7 @@ subcommand to drop a chain.
 ### Graceful shutdown (daemon exit)
 
 ```bash
-rustbgpctl shutdown
+rbgp shutdown
 ```
 
 Sends NOTIFICATION to all peers, writes GR marker, exits cleanly.
@@ -1128,18 +1131,18 @@ already moved.
 
 ```bash
 # Start the drain on one peer
-rustbgpctl gshut --peer 10.0.0.2
+rbgp gshut --peer 10.0.0.2
 
 # Or drain every currently-managed peer at once
-rustbgpctl gshut
+rbgp gshut
 
 # Wait for traffic to shift (operator-defined, typically 30s-5min
 # depending on convergence in the upstream AS), then proceed with
 # the actual maintenance — restart, config edit, etc.
 
 # Clear the community when maintenance ends
-rustbgpctl gshut --peer 10.0.0.2 --clear
-rustbgpctl gshut --clear
+rbgp gshut --peer 10.0.0.2 --clear
+rbgp gshut --clear
 ```
 
 The toggle is **operator-runtime state**, not config — it lives on
@@ -1170,7 +1173,7 @@ iBGP peers are exempt because `LOCAL_PREF` is preserved within an AS.
 
 The community is attached on the wire by the per-peer transport layer
 **after** the RIB-side advertised view is computed, so
-`rustbgpctl rib advertised` does NOT show the GShut community on the
+`rbgp rib advertised` does NOT show the GShut community on the
 initiator side — the RIB doesn't know about the toggle. The
 authoritative checks are:
 
@@ -1180,7 +1183,7 @@ authoritative checks are:
 # chain-tail rule fired). EBGP-received routes have no LOCAL_PREF on
 # the wire, so look at local_pref_attr (explicit) rather than
 # local_pref (proto3 default).
-rustbgpctl rib --neighbor <draining-peer> \
+rbgp rib --neighbor <draining-peer> \
     | jq '.routes[] | {prefix, localPrefAttr, communities}'
 
 # Initiator-side: confirm the toggle is set on the live session via
@@ -1204,7 +1207,7 @@ rustbgpd → FRR outbound advertise + clear) end-to-end.
 ### Explain best-path selection
 
 ```bash
-rustbgpctl rib --prefix 10.0.0.0/24 --explain
+rbgp rib --prefix 10.0.0.0/24 --explain
 ```
 
 Shows all candidates for a prefix with the decisive comparison reason
@@ -1255,7 +1258,7 @@ session machinery:
 > `RibUpdate::InjectEvpn` gated on readiness, remote import + L3
 > FIB programming through a transactional `L3OwnedState` model,
 > `RTNLGRP_IPV4/IPV6_ROUTE` multicast for sub-second withdraw,
-> `ListIpVrfs`/`GetIpVrf` gRPC + `rustbgpctl evpn vrfs` CLI,
+> `ListIpVrfs`/`GetIpVrf` gRPC + `rbgp evpn vrfs` CLI,
 > M39 hosted kernel-dataplane CI. **ADR-0059** (v0.19.0)
 > adds receive-path aliasing-ECMP via FDB nexthop groups
 > (slices 1-4, M40 FRR-validated); **slice 3.5 hardening**
@@ -1291,13 +1294,13 @@ own `cluster_id` (under `[global]`) drives the RFC 4456 ORIGINATOR_ID
 #### Inspect the EVPN RIB
 
 ```bash
-rustbgpctl evpn                             # all EVPN routes
-rustbgpctl evpn --route-type 2              # MAC/IP only
-rustbgpctl evpn --rd 65000:100              # filter by RD
-rustbgpctl evpn --peer 10.0.1.1             # filter by source peer
-rustbgpctl evpn diagnose                    # alpha VTEP summary
-rustbgpctl evpn runtime                     # committed EVPN generation / mutation state
-rustbgpctl evpn clear-duplicate-mac --vni 100 --mac aa:bb:cc:dd:ee:ff
+rbgp evpn                             # all EVPN routes
+rbgp evpn --route-type 2              # MAC/IP only
+rbgp evpn --rd 65000:100              # filter by RD
+rbgp evpn --peer 10.0.1.1             # filter by source peer
+rbgp evpn diagnose                    # alpha VTEP summary
+rbgp evpn runtime                     # committed EVPN generation / mutation state
+rbgp evpn clear-duplicate-mac --vni 100 --mac aa:bb:cc:dd:ee:ff
 ```
 
 `tunnel_type=8` in the output indicates the RFC 8365 VXLAN
@@ -1306,8 +1309,8 @@ encapsulation extended community is present.
 #### Inspect the dataplane (ADR-0059 FDB nexthop groups)
 
 ```bash
-rustbgpctl evpn nexthops                    # owned FDB-NHG groups / members / MAC refs
-rustbgpctl evpn nexthops --json             # JSON for scripting
+rbgp evpn nexthops                    # owned FDB-NHG groups / members / MAC refs
+rbgp evpn nexthops --json             # JSON for scripting
 ```
 
 This is the rustbgpd-owned view of ADR-0059 aliasing-ECMP state —
@@ -1321,27 +1324,27 @@ allocator GC backlog are visible without log scraping.
 #### Inject a route from a controller
 
 ```bash
-rustbgpctl evpn add-mac-ip --rd 65000:100 \
+rbgp evpn add-mac-ip --rd 65000:100 \
   --mac 02:00:00:aa:bb:cc --ip 10.0.0.5 \
   --label 100 --next-hop 10.0.0.2 \
   --rt 65000:100
 
-rustbgpctl evpn delete-mac-ip --rd 65000:100 \
+rbgp evpn delete-mac-ip --rd 65000:100 \
   --mac 02:00:00:aa:bb:cc --ip 10.0.0.5
 
-rustbgpctl evpn add-ip-prefix --rd 65000:5000 \
+rbgp evpn add-ip-prefix --rd 65000:5000 \
   --prefix 10.50.0.0/24 --label 5000 \
   --next-hop 192.0.2.10 --router-mac 02:00:00:00:50:00 \
   --rt 65000:5000
 
-rustbgpctl evpn delete-ip-prefix --rd 65000:5000 \
+rbgp evpn delete-ip-prefix --rd 65000:5000 \
   --prefix 10.50.0.0/24
 ```
 
 Two complementary origination paths exist:
 
 1. **gRPC injection (Phase 1, Gate 6):** `InjectionService.AddEvpnRoute` /
-   `DeleteEvpnRoute` (the `rustbgpctl evpn add-mac-ip / add-imet /
+   `DeleteEvpnRoute` (the `rbgp evpn add-mac-ip / add-imet /
    add-ip-prefix / delete-*` commands above). The controller decides
    what to originate; rustbgpd reflects + distributes. Type 2
    (MAC/IP), Type 3 (IMET), and Type 5 (IP Prefix) are exposed.

@@ -36,7 +36,8 @@ note.
 Tagged releases publish `rustbgpd-linux-amd64.tar.gz` and
 `rustbgpd-linux-arm64.tar.gz` under
 [GitHub Releases](https://github.com/lance0/rustbgpd/releases). Each
-ships `rustbgpd` (the daemon) and `rustbgpctl` (the CLI). The
+ships `rustbgpd` (the daemon), `rbgp` (the preferred short CLI), and
+`rustbgpctl` (the compatible long-form CLI). The
 filename is the same on every release; `releases/latest/download/`
 always resolves to the current tag, so this snippet never needs a
 version bump.
@@ -49,7 +50,7 @@ TARBALL=rustbgpd-${SUFFIX}.tar.gz
 curl -fL -o "$TARBALL" \
   "https://github.com/lance0/rustbgpd/releases/latest/download/${TARBALL}"
 tar -xzf "$TARBALL"
-sudo install -m 0755 rustbgpd rustbgpctl /usr/local/bin/
+sudo install -m 0755 rustbgpd rbgp rustbgpctl /usr/local/bin/
 ```
 
 To pin to a specific tag for reproducibility, swap `latest` for the
@@ -61,6 +62,7 @@ Verify:
 
 ```sh
 rustbgpd --version
+rbgp --version
 rustbgpctl --version
 ```
 
@@ -73,7 +75,8 @@ git clone https://github.com/lance0/rustbgpd
 cd rustbgpd
 cargo build --workspace --release
 sudo install -m 0755 \
-  target/release/rustbgpd target/release/rustbgpctl /usr/local/bin/
+  target/release/rustbgpd target/release/rbgp target/release/rustbgpctl \
+  /usr/local/bin/
 ```
 
 ### Container image
@@ -180,7 +183,7 @@ prefixes — no real routers required.
 cd examples/docker-compose
 docker compose up -d
 docker compose exec rustbgpd \
-  rustbgpctl -s http://127.0.0.1:50051 neighbor
+  rbgp -s http://127.0.0.1:50051 neighbor
 docker compose down
 ```
 
@@ -243,7 +246,7 @@ docker build -t rustbgpd:dev .
 sudo containerlab deploy -t tests/interop/m0-frr.clab.yml
 
 # Inspect (the test driver scripts under tests/interop/scripts/ show
-# the typical incantations for FRR vtysh + rustbgpctl gRPC).
+# the typical incantations for FRR vtysh + rbgp gRPC).
 
 # Tear down
 sudo containerlab destroy -t tests/interop/m0-frr.clab.yml --cleanup
@@ -290,7 +293,7 @@ scaling out.
    Watch for the session to reach `Established`:
 
    ```sh
-   rustbgpctl neighbor
+   rbgp neighbor
    ```
 
 5. **Edit + reload cycle.** Edit
@@ -324,7 +327,7 @@ scaling out.
    ```sh
    curl -s http://10.0.0.1:9179/metrics \
      | grep -E "bgp_session_established_total|bgp_messages_received_total"
-   rustbgpctl neighbor 10.0.0.2 show
+   rbgp neighbor 10.0.0.2
    ```
 
 If all six steps work end-to-end, your install is sound. Scale from
@@ -417,7 +420,7 @@ sanity-check on the labelled Prometheus counter:
 Both directions reset together on the next session establishment, so
 "how many routes did this session permit / deny in total" is straight
 subtraction; "how many across reconnects" requires Prometheus history.
-The CLI surfaces these in `rustbgpctl neighbor show` as a Policy Stats
+The CLI surfaces these in `rbgp neighbor show` as a Policy Stats
 block:
 
 ```
@@ -426,7 +429,7 @@ Policy Stats:
   Export — permitted: 892    denied: 0
 ```
 
-JSON output (`rustbgpctl neighbor show --format json`) carries the same
+JSON output (`rbgp --json neighbor show`) carries the same
 fields under `import_policy_routes_permitted` / `import_policy_routes_denied`
 / `export_policy_routes_permitted` / `export_policy_routes_denied`,
 elided when zero.
@@ -446,18 +449,19 @@ JSON encoding. See [`GNMI.md`](GNMI.md) for the path namespace.
 
 ### CLI introspection
 
-`rustbgpctl` is the primary operator interface for read queries:
+`rbgp` is the primary operator interface for read queries. The compatible
+`rustbgpctl` binary accepts the same commands.
 
 ```sh
-rustbgpctl neighbor                  # list all neighbors
-rustbgpctl neighbor 10.0.0.2 show    # detail
-rustbgpctl rib                       # browse Loc-RIB
-rustbgpctl bfd                       # BFD sessions (ADR-0067)
-rustbgpctl evpn                      # EVPN instances + Type 2/3 RIB
-rustbgpctl top                       # live TUI dashboard
+rbgp neighbor                  # list all neighbors
+rbgp neighbor 10.0.0.2         # detail
+rbgp rib                       # browse Loc-RIB
+rbgp bfd                       # BFD sessions (ADR-0067)
+rbgp evpn                      # EVPN instances + Type 2/3 RIB
+rbgp top                       # live TUI dashboard
 ```
 
-All read commands also support `--format json` for scripting.
+All read commands also support `--json` for scripting.
 
 ## Upgrade & state migration
 
@@ -553,8 +557,8 @@ short version for first deployment:
 
 | Symptom | Where to look |
 |---|---|
-| Session won't establish | `rustbgpctl neighbor <addr> show` + `journalctl -u rustbgpd -p warning` |
-| Routes received but not installed | `rustbgpctl rib`, then check policy chain via `rustbgpctl explain-advertised-route` |
+| Session won't establish | `rbgp neighbor <addr>` + `journalctl -u rustbgpd -p warning` |
+| Routes received but not installed | `rbgp rib`, then check the import decision via `rbgp policy explain --neighbor <peer> --prefix <CIDR>` |
 | Reload didn't change behavior | `rustbgpd --diff <file>` + cross-reference [reload matrix](reload-matrix.md) |
 | FIB programming failures | `bgp_fib_kernel_failures_total` Prometheus counter + `journalctl` for `kernel-dataplane` lines |
 | EVPN-specific issues | [`evpn-vtep-troubleshooting.md`](evpn-vtep-troubleshooting.md) |
