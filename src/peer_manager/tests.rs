@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::net::Ipv6Addr;
 use std::sync::{
     Arc,
-    atomic::{AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2594,6 +2594,352 @@ async fn channel_full_policy_update_bails_and_preserves_pending_refresh() {
     );
 
     let _ = finish_tx.send(());
+}
+
+/// A peer handle that acknowledges policy hot-applies (and route refreshes), so
+/// `update_runtime_policies_for_peer_key` succeeds and advances bookkeeping.
+/// `fake_peer_handle`'s catch-all never replies to UpdateImport/ExportPolicy, so
+/// it would time out — this one is for the resolved-policy-snapshot apply tests.
+fn acking_policy_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
+    use rustbgpd_transport::PeerCommand;
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        while let Some(cmd) = session_rx.recv().await {
+            match cmd {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(PeerSessionState {
+                        fsm_state: state,
+                        peer_ip: peer_addr,
+                        peer_asn: None,
+                        prefix_count: 0,
+                        negotiated_hold_time: None,
+                        four_octet_as: None,
+                        remote_router_id: None,
+                        local_role: None,
+                        remote_role: None,
+                        role_negotiated: false,
+                        updates_received: 0,
+                        updates_sent: 0,
+                        notifications_received: 0,
+                        notifications_sent: 0,
+                        otc_routes_blocked: 0,
+                        import_policy_routes_permitted: 0,
+                        import_policy_routes_denied: 0,
+                        flap_count: 0,
+                        uptime_secs: 0,
+                        last_error: String::new(),
+                    });
+                }
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateExportPolicy { reply, .. }
+                | PeerCommand::SendRouteRefresh { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
+/// A peer handle whose session receiver is dropped, so every command send fails
+/// — forces a per-peer policy hot-apply failure.
+fn closed_peer_handle() -> PeerHandle {
+    use rustbgpd_transport::PeerCommand;
+    let (session_tx, session_rx) = mpsc::channel::<PeerCommand>(1);
+    drop(session_rx);
+    let task = tokio::spawn(async { Ok(()) });
+    PeerHandle::from_parts(session_tx, task)
+}
+
+/// A peer handle that accepts import-policy hot-apply but fails the first export
+/// hot-apply, then accepts later export updates. This forces the transaction
+/// primitive's partial-mutation path: the peer's import bookkeeping can advance
+/// before export fails, and rollback must restore the same peer too.
+fn export_fails_once_policy_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
+    use rustbgpd_transport::PeerCommand;
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let export_failed = Arc::new(AtomicBool::new(false));
+    let task = tokio::spawn(async move {
+        while let Some(cmd) = session_rx.recv().await {
+            match cmd {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(PeerSessionState {
+                        fsm_state: state,
+                        peer_ip: peer_addr,
+                        peer_asn: None,
+                        prefix_count: 0,
+                        negotiated_hold_time: None,
+                        four_octet_as: None,
+                        remote_router_id: None,
+                        local_role: None,
+                        remote_role: None,
+                        role_negotiated: false,
+                        updates_received: 0,
+                        updates_sent: 0,
+                        notifications_received: 0,
+                        notifications_sent: 0,
+                        otc_routes_blocked: 0,
+                        import_policy_routes_permitted: 0,
+                        import_policy_routes_denied: 0,
+                        flap_count: 0,
+                        uptime_secs: 0,
+                        last_error: String::new(),
+                    });
+                }
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::SendRouteRefresh { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    if export_failed.swap(true, Ordering::SeqCst) {
+                        let _ = reply.send(Ok(()));
+                    } else {
+                        let _ = reply.send(Err("export apply failed once".to_string()));
+                    }
+                }
+                PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
+fn live_policy_test_manager() -> PeerManager {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    // Leak the RIB receiver so soft-reset / RIB sends during apply never fail.
+    Box::leak(Box::new(rib_rx));
+    PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    )
+}
+
+#[tokio::test]
+async fn apply_resolved_policy_snapshot_captures_priors_and_applies() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let mut mgr = live_policy_test_manager();
+    let a1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let a2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    insert_test_managed_peer(
+        &mut mgr,
+        a1,
+        acking_policy_handle(a1, SessionState::Idle),
+        false,
+    );
+    insert_test_managed_peer(
+        &mut mgr,
+        a2,
+        acking_policy_handle(a2, SessionState::Idle),
+        false,
+    );
+    let peer_a_prior = validation_policy_chain(ImportValidationDependency::Rpki);
+    mgr.peers.get_mut(&key(a1)).unwrap().import_policy = Some(peer_a_prior.clone());
+    // a2 starts with no import policy (None).
+
+    let new_chain = deny_policy_chain();
+    let targets = vec![
+        ResolvedPeerPolicy {
+            address: a1,
+            interface: None,
+            import_policy: Some(new_chain.clone()),
+            export_policy: None,
+        },
+        ResolvedPeerPolicy {
+            address: a2,
+            interface: None,
+            import_policy: Some(new_chain.clone()),
+            export_policy: None,
+        },
+    ];
+    let priors = mgr
+        .apply_resolved_policy_snapshot(targets)
+        .await
+        .expect("apply must succeed");
+
+    assert_eq!(priors.len(), 2);
+    assert_eq!(priors[0].address, a1);
+    assert_eq!(
+        format!("{:?}", priors[0].import_policy),
+        format!("{:?}", Some(peer_a_prior))
+    );
+    assert_eq!(priors[1].address, a2);
+    assert_eq!(
+        format!("{:?}", priors[1].import_policy),
+        format!("{:?}", Option::<PolicyChain>::None)
+    );
+
+    let expect_new = format!("{:?}", Some(new_chain));
+    assert_eq!(
+        format!("{:?}", mgr.peers.get(&key(a1)).unwrap().import_policy),
+        expect_new,
+        "peer 1 import policy must advance to the new chain"
+    );
+    assert_eq!(
+        format!("{:?}", mgr.peers.get(&key(a2)).unwrap().import_policy),
+        expect_new,
+        "peer 2 import policy must advance to the new chain"
+    );
+}
+
+#[tokio::test]
+async fn apply_resolved_policy_snapshot_mid_fanout_failure_self_heals() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let mut mgr = live_policy_test_manager();
+    let a1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let a2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)); // its apply fails
+    let a3 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    insert_test_managed_peer(
+        &mut mgr,
+        a1,
+        acking_policy_handle(a1, SessionState::Idle),
+        false,
+    );
+    insert_test_managed_peer(&mut mgr, a2, closed_peer_handle(), false);
+    insert_test_managed_peer(
+        &mut mgr,
+        a3,
+        acking_policy_handle(a3, SessionState::Idle),
+        false,
+    );
+    let prior = validation_policy_chain(ImportValidationDependency::Rpki);
+    for a in [a1, a2, a3] {
+        mgr.peers.get_mut(&key(a)).unwrap().import_policy = Some(prior.clone());
+    }
+
+    let new_chain = deny_policy_chain();
+    let targets = [a1, a2, a3]
+        .into_iter()
+        .map(|address| ResolvedPeerPolicy {
+            address,
+            interface: None,
+            import_policy: Some(new_chain.clone()),
+            export_policy: None,
+        })
+        .collect();
+    let result = mgr.apply_resolved_policy_snapshot(targets).await;
+    assert!(
+        result.is_err(),
+        "a mid-fanout per-peer failure must surface as Err: {result:?}"
+    );
+
+    let expect_prior = format!("{:?}", Some(prior));
+    assert_eq!(
+        format!("{:?}", mgr.peers.get(&key(a1)).unwrap().import_policy),
+        expect_prior,
+        "peer 1 must be restored to its prior chain after the self-heal"
+    );
+    assert_eq!(
+        format!("{:?}", mgr.peers.get(&key(a3)).unwrap().import_policy),
+        expect_prior,
+        "peer 3 was never reached and must keep its prior chain"
+    );
+}
+
+#[tokio::test]
+async fn apply_resolved_policy_snapshot_restores_partially_mutated_failing_peer() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let mut mgr = live_policy_test_manager();
+    let address = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    insert_test_managed_peer(
+        &mut mgr,
+        address,
+        export_fails_once_policy_handle(address, SessionState::Idle),
+        false,
+    );
+    let import_prior = validation_policy_chain(ImportValidationDependency::Rpki);
+    let export_prior = validation_policy_chain(ImportValidationDependency::Aspa);
+    {
+        let managed = mgr.peers.get_mut(&key(address)).unwrap();
+        managed.import_policy = Some(import_prior.clone());
+        managed.export_policy = Some(export_prior.clone());
+    }
+
+    let new_chain = deny_policy_chain();
+    let result = mgr
+        .apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
+            address,
+            interface: None,
+            import_policy: Some(new_chain.clone()),
+            export_policy: Some(new_chain),
+        }])
+        .await;
+    assert!(
+        result.is_err(),
+        "the one-shot export failure must surface as Err: {result:?}"
+    );
+
+    let managed = mgr.peers.get(&key(address)).unwrap();
+    assert_eq!(
+        format!("{:?}", managed.import_policy),
+        format!("{:?}", Some(import_prior)),
+        "failing peer's import policy must be restored after partial mutation"
+    );
+    assert_eq!(
+        format!("{:?}", managed.export_policy),
+        format!("{:?}", Some(export_prior)),
+        "failing peer's export policy must be restored too"
+    );
+}
+
+#[tokio::test]
+async fn apply_resolved_policy_snapshot_skips_non_live_targets() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let mut mgr = live_policy_test_manager();
+    let live = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let missing = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+    insert_test_managed_peer(
+        &mut mgr,
+        live,
+        acking_policy_handle(live, SessionState::Idle),
+        false,
+    );
+
+    let new_chain = deny_policy_chain();
+    let targets = vec![
+        ResolvedPeerPolicy {
+            address: missing,
+            interface: None,
+            import_policy: Some(new_chain.clone()),
+            export_policy: None,
+        },
+        ResolvedPeerPolicy {
+            address: live,
+            interface: None,
+            import_policy: Some(new_chain.clone()),
+            export_policy: None,
+        },
+    ];
+    let priors = mgr
+        .apply_resolved_policy_snapshot(targets)
+        .await
+        .expect("apply must succeed");
+
+    assert_eq!(priors.len(), 1, "non-live target must be skipped");
+    assert_eq!(priors[0].address, live);
+    assert_eq!(
+        format!("{:?}", mgr.peers.get(&key(live)).unwrap().import_policy),
+        format!("{:?}", Some(new_chain))
+    );
 }
 
 #[allow(clippy::too_many_lines)]

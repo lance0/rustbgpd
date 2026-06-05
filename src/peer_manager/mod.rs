@@ -614,6 +614,10 @@ impl PeerManager {
                             );
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::ApplyResolvedPolicySnapshot { targets, reply } => {
+                            let result = self.apply_resolved_policy_snapshot(targets).await;
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::StageFibTables { tables, reply } => {
                             let result = self.stage_fib_tables_candidate(&tables);
                             let _ = reply.send(result);
