@@ -327,7 +327,7 @@ scaling out.
    ```sh
    curl -s http://10.0.0.1:9179/metrics \
      | grep -E "bgp_session_established_total|bgp_messages_received_total"
-   rbgp neighbor 10.0.0.2 show
+   rbgp neighbor 10.0.0.2
    ```
 
 If all six steps work end-to-end, your install is sound. Scale from
@@ -454,7 +454,7 @@ JSON encoding. See [`GNMI.md`](GNMI.md) for the path namespace.
 
 ```sh
 rbgp neighbor                  # list all neighbors
-rbgp neighbor 10.0.0.2 show    # detail
+rbgp neighbor 10.0.0.2         # detail
 rbgp rib                       # browse Loc-RIB
 rbgp bfd                       # BFD sessions (ADR-0067)
 rbgp evpn                      # EVPN instances + Type 2/3 RIB
@@ -557,8 +557,8 @@ short version for first deployment:
 
 | Symptom | Where to look |
 |---|---|
-| Session won't establish | `rbgp neighbor <addr> show` + `journalctl -u rustbgpd -p warning` |
-| Routes received but not installed | `rbgp rib`, then check policy chain via `rbgp rib advertised <peer> --prefix <CIDR> --explain` |
+| Session won't establish | `rbgp neighbor <addr>` + `journalctl -u rustbgpd -p warning` |
+| Routes received but not installed | `rbgp rib`, then check the import decision via `rbgp policy explain --neighbor <peer> --prefix <CIDR>` |
 | Reload didn't change behavior | `rustbgpd --diff <file>` + cross-reference [reload matrix](reload-matrix.md) |
 | FIB programming failures | `bgp_fib_kernel_failures_total` Prometheus counter + `journalctl` for `kernel-dataplane` lines |
 | EVPN-specific issues | [`evpn-vtep-troubleshooting.md`](evpn-vtep-troubleshooting.md) |

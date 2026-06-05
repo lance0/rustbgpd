@@ -1,6 +1,11 @@
 [package]
 publish = false
 name = "rustbgpctl"
+# Two binaries (rustbgpctl + the rbgp alias) ship from this package, so
+# `cargo run -p rustbgpctl` would otherwise be ambiguous. Pin the canonical
+# binary as the default-run target — integration tests shell out via
+# `cargo run -p rustbgpctl --`.
+default-run = "rustbgpctl"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1064,8 +1064,10 @@ fn invoked_binary_name() -> &'static str {
 }
 
 fn binary_name_from_arg0(arg0: &OsStr) -> &'static str {
+    // `file_stem` (not `file_name`) so a platform extension like `rbgp.exe`
+    // still resolves to the short alias.
     match std::path::Path::new(arg0)
-        .file_name()
+        .file_stem()
         .and_then(OsStr::to_str)
     {
         Some(SHORT_BINARY_NAME) => SHORT_BINARY_NAME,
@@ -1885,7 +1887,15 @@ mod tests {
             SHORT_BINARY_NAME
         );
         assert_eq!(
+            binary_name_from_arg0(OsStr::new("/usr/local/bin/rbgp.exe")),
+            SHORT_BINARY_NAME
+        );
+        assert_eq!(
             binary_name_from_arg0(OsStr::new("/usr/local/bin/rustbgpctl")),
+            LONG_BINARY_NAME
+        );
+        assert_eq!(
+            binary_name_from_arg0(OsStr::new("rustbgpctl.exe")),
             LONG_BINARY_NAME
         );
         assert_eq!(
