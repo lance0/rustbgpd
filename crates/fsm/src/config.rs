@@ -9,7 +9,7 @@ use rustbgpd_wire::{
 };
 
 /// Configuration for a single BGP peer session.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "PeerConfig mirrors independent negotiated BGP feature knobs"

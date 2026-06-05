@@ -11,14 +11,14 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, PeerKey, PeerManagerCommand, PeerManagerNeighborConfig,
+    ConfigEvent, PeerKey, PeerManagerCommand, PeerManagerNeighborConfig, ResolvedPeerPolicy,
     RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus,
 };
 use rustbgpd_api::proto;
 use rustbgpd_api::server::{ConfigTransactionApplyError, ConfigTransactionApplyFn};
 use tracing::error;
 
-use crate::config::{Config, Neighbor, diff_neighbors};
+use crate::config::{Config, Neighbor, diff_config, diff_neighbors};
 use crate::fib_table_control::{
     FibTableControlDeps, commit_fib_tables_locked, runtime_unavailable_error,
 };
@@ -33,6 +33,7 @@ const PEER_GROUP_CATALOG_SECTION: &str = "[peer_groups] catalog";
 const POLICY_DEFINITIONS_SECTION: &str = "[policy] definitions";
 const POLICY_NEIGHBOR_SETS_SECTION: &str = "[policy] neighbor_sets";
 const POLICY_GLOBAL_CHAINS_SECTION: &str = "[policy] global chains";
+const POLICY_LIVE_IMPACT_SECTION: &str = "[policy] live impact";
 
 /// Build the daemon-owned apply hook wired into `ConfigService`.
 #[must_use]
@@ -163,6 +164,22 @@ async fn commit_apply_family(
                 ),
             ))
         }
+        ApplyFamily::LivePolicyImpact => {
+            let refreshed = commit_live_policy_impact_locked(
+                &deps.peer_mgr_tx,
+                config_tx,
+                candidate_toml,
+                &candidate,
+            )
+            .await?;
+            Ok(committable_response(
+                post_commit_runtime_snapshot_token,
+                supported_sections,
+                format!(
+                    "Committed live policy-impact runtime config transaction.\n{refreshed} live session(s) re-evaluated under the new resolved policy.\n"
+                ),
+            ))
+        }
         ApplyFamily::StaticNeighbors => {
             commit_static_neighbors_locked(
                 &deps.peer_mgr_tx,
@@ -213,6 +230,7 @@ enum ApplyFamily {
     FibTables,
     DynamicNeighbors,
     CatalogSnapshot,
+    LivePolicyImpact,
     StaticNeighbors,
 }
 
@@ -220,6 +238,22 @@ fn apply_family(sections: &[String]) -> Option<ApplyFamily> {
     match sections {
         [section] if section == FIB_SECTION => Some(ApplyFamily::FibTables),
         [section] if section == DYNAMIC_SECTION => Some(ApplyFamily::DynamicNeighbors),
+        // A live-impact transaction carries the `[policy] live impact` marker
+        // alongside the catalog record section(s) it stems from. It supersedes
+        // the catalog executor: catalog-only stages a snapshot, but a live
+        // impact must also re-apply resolved chains to the affected sessions.
+        sections
+            if sections.iter().any(|s| s == POLICY_LIVE_IMPACT_SECTION)
+                && sections.iter().all(|s| {
+                    s == POLICY_LIVE_IMPACT_SECTION
+                        || s == PEER_GROUP_CATALOG_SECTION
+                        || s == POLICY_DEFINITIONS_SECTION
+                        || s == POLICY_NEIGHBOR_SETS_SECTION
+                        || s == POLICY_GLOBAL_CHAINS_SECTION
+                }) =>
+        {
+            Some(ApplyFamily::LivePolicyImpact)
+        }
         sections
             if !sections.is_empty()
                 && sections.iter().all(|s| {
@@ -374,6 +408,148 @@ async fn commit_static_neighbors_locked(
     Ok(())
 }
 
+/// Commit a live-impact policy/peer-group/global-chain transaction: stage the
+/// candidate snapshot, re-apply the affected static neighbors' resolved chains
+/// to their live sessions (capturing priors), persist, and roll back live +
+/// snapshot on failure. Returns the number of live sessions re-evaluated.
+async fn commit_live_policy_impact_locked(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    config_tx: &mpsc::Sender<ConfigEvent>,
+    candidate_toml: String,
+    candidate: &Config,
+) -> Result<usize, ConfigTransactionApplyError> {
+    let permit = reserve_persist_permit(config_tx).await?;
+    let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
+    let previous = match Config::load_toml_with_diagnostics(
+        &previous_toml,
+        "previous runtime config transaction snapshot",
+    ) {
+        Ok(previous) => previous,
+        Err(error) => {
+            let error = ConfigTransactionApplyError::Internal(error);
+            return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
+        }
+    };
+
+    let targets = match resolve_live_policy_targets(&previous, candidate) {
+        Ok(targets) => targets,
+        Err(error) => {
+            return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
+        }
+    };
+
+    let priors = match send_apply_resolved_policy_snapshot(peer_mgr_tx, targets).await {
+        Ok(priors) => priors,
+        Err(error) => {
+            // The peer-manager command self-heals its live mutations on a
+            // mid-fanout failure, so only the staged snapshot needs rollback.
+            return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
+        }
+    };
+
+    if let Err(error) = persist_candidate_config(permit, candidate_toml).await {
+        return Err(
+            rollback_live_policy_and_snapshot(peer_mgr_tx, priors, previous_toml, error).await,
+        );
+    }
+    Ok(priors.len())
+}
+
+/// Build the resolved-chain apply set from a live-impact diff: every static
+/// neighbor whose resolved import/export policy moved (`policy_chain_only`).
+fn resolve_live_policy_targets(
+    previous: &Config,
+    candidate: &Config,
+) -> Result<Vec<ResolvedPeerPolicy>, ConfigTransactionApplyError> {
+    let diff = diff_config(previous, candidate);
+    let candidate_by_addr: std::collections::HashMap<&str, &Neighbor> = candidate
+        .neighbors
+        .iter()
+        .map(|neighbor| (neighbor.address.as_str(), neighbor))
+        .collect();
+    let mut targets = Vec::new();
+    for impact in &diff.effective_neighbor_impact {
+        if !impact.policy_chain_only {
+            // A committable live-impact plan only carries policy-chain-only
+            // impacts; anything else (field reshape / dynamic range) is an
+            // internal inconsistency — fail closed rather than silently skip.
+            return Err(ConfigTransactionApplyError::Internal(format!(
+                "live-policy executor received a non-policy-chain impact for {}",
+                impact.address
+            )));
+        }
+        let Some(neighbor) = candidate_by_addr.get(impact.address.as_str()) else {
+            return Err(ConfigTransactionApplyError::Internal(format!(
+                "live-policy impact references neighbor {} absent from the candidate",
+                impact.address
+            )));
+        };
+        let address = neighbor.address.parse().map_err(|error| {
+            ConfigTransactionApplyError::InvalidArgument(format!(
+                "invalid neighbor address {:?}: {error}",
+                neighbor.address
+            ))
+        })?;
+        let resolved = candidate
+            .resolve_neighbor(neighbor)
+            .map_err(|error| ConfigTransactionApplyError::InvalidArgument(error.to_string()))?;
+        targets.push(ResolvedPeerPolicy {
+            address,
+            interface: neighbor.interface.clone(),
+            import_policy: resolved.import_policy,
+            export_policy: resolved.export_policy,
+        });
+    }
+    Ok(targets)
+}
+
+/// Send `ApplyResolvedPolicySnapshot` and return the captured prior chains.
+/// Also used in reverse to restore those priors during rollback.
+async fn send_apply_resolved_policy_snapshot(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    targets: Vec<ResolvedPeerPolicy>,
+) -> Result<Vec<ResolvedPeerPolicy>, ConfigTransactionApplyError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(PeerManagerCommand::ApplyResolvedPolicySnapshot {
+            targets,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable("peer manager is unavailable".to_string())
+        })?;
+    reply_rx
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable(
+                "peer manager dropped resolved-policy reply".to_string(),
+            )
+        })?
+        .map_err(ConfigTransactionApplyError::Internal)
+}
+
+async fn rollback_live_policy_and_snapshot(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    priors: Vec<ResolvedPeerPolicy>,
+    previous_toml: String,
+    original: ConfigTransactionApplyError,
+) -> ConfigTransactionApplyError {
+    let live_rollback = send_apply_resolved_policy_snapshot(peer_mgr_tx, priors)
+        .await
+        .map(|_| ());
+    let snapshot_rollback = rollback_config_snapshot(peer_mgr_tx, previous_toml).await;
+    match (live_rollback, snapshot_rollback) {
+        (Ok(()), Ok(())) => original,
+        (live_result, snapshot_result) => combine_rollback_errors(
+            &original,
+            "live policy rollback",
+            live_result.err(),
+            snapshot_result.err(),
+        ),
+    }
+}
+
 fn resolve_static_neighbors(
     candidate: &Config,
     neighbors: &[Neighbor],
@@ -447,7 +623,9 @@ async fn rollback_snapshot_after_error(
 ) -> ConfigTransactionApplyError {
     match rollback_config_snapshot(peer_mgr_tx, previous_toml).await {
         Ok(()) => original,
-        Err(rollback_error) => combine_rollback_errors(&original, None, Some(rollback_error)),
+        Err(rollback_error) => {
+            combine_rollback_errors(&original, "rollback", None, Some(rollback_error))
+        }
     }
 }
 
@@ -613,26 +791,30 @@ async fn rollback_static_and_snapshot(
     let snapshot_rollback = rollback_config_snapshot(peer_mgr_tx, previous_toml).await;
     match (static_rollback, snapshot_rollback) {
         (Ok(()), Ok(())) => original,
-        (static_result, snapshot_result) => {
-            combine_rollback_errors(&original, static_result.err(), snapshot_result.err())
-        }
+        (static_result, snapshot_result) => combine_rollback_errors(
+            &original,
+            "static rollback",
+            static_result.err(),
+            snapshot_result.err(),
+        ),
     }
 }
 
 fn combine_rollback_errors(
     original: &ConfigTransactionApplyError,
-    static_rollback: Option<ConfigTransactionApplyError>,
+    first_label: &str,
+    first_rollback: Option<ConfigTransactionApplyError>,
     snapshot_rollback: Option<ConfigTransactionApplyError>,
 ) -> ConfigTransactionApplyError {
     error!(
         %original,
-        ?static_rollback,
+        ?first_rollback,
         ?snapshot_rollback,
         "config transaction rollback failed"
     );
     let mut message = format!("{original}; rollback failed");
-    if let Some(error) = static_rollback {
-        let _ = write!(message, "; static rollback: {error}");
+    if let Some(error) = first_rollback {
+        let _ = write!(message, "; {first_label}: {error}");
     }
     if let Some(error) = snapshot_rollback {
         let _ = write!(message, "; snapshot rollback: {error}");
@@ -714,6 +896,7 @@ mod tests {
         RuntimeConfigTransactionPlanError,
     };
     use rustbgpd_api::rib_service::FibTableControlError;
+    use rustbgpd_policy::PolicyAction;
     use std::collections::VecDeque;
     use tokio::sync::Mutex;
 
@@ -1065,6 +1248,84 @@ peer_group = "edge"
         }
     }
 
+    /// A config with one static neighbor whose import chain resolves to a
+    /// named policy whose `default_action` is `action`. Diffing permit vs deny
+    /// produces a pure static-neighbor policy-chain impact (`policy_chain_only`).
+    fn live_policy_toml(action: &str) -> String {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[policy.definitions.f]
+default_action = "{action}"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+import_policy_chain = ["f"]
+"#
+        )
+    }
+
+    /// Fake peer manager for live-impact executor tests: serves the plan, swaps
+    /// the snapshot on `StageConfigSnapshot`, and drives each
+    /// `ApplyResolvedPolicySnapshot` from `apply_results` (Ok returns the next
+    /// `captured_priors` entry, falling back to echoing targets when the test
+    /// does not care about the returned prior payload; Err simulates a mid-fanout
+    /// failure). Records every apply call's targets in `apply_calls`.
+    async fn fake_live_policy_peer_manager(
+        mut rx: mpsc::Receiver<PeerManagerCommand>,
+        plan: RuntimeConfigTransactionPlan,
+        snapshot_toml: Arc<Mutex<String>>,
+        apply_results: Arc<Mutex<VecDeque<Result<(), String>>>>,
+        captured_priors: Arc<Mutex<VecDeque<Vec<ResolvedPeerPolicy>>>>,
+        apply_calls: Arc<Mutex<Vec<Vec<ResolvedPeerPolicy>>>>,
+    ) {
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                PeerManagerCommand::PlanConfigTransaction { reply, .. } => {
+                    let _ = reply.send(Ok(plan.clone()));
+                }
+                PeerManagerCommand::StageConfigSnapshot {
+                    candidate_toml,
+                    reply,
+                } => {
+                    let mut snapshot = snapshot_toml.lock().await;
+                    let previous = snapshot.clone();
+                    *snapshot = candidate_toml;
+                    let _ = reply.send(Ok(previous));
+                }
+                PeerManagerCommand::ApplyResolvedPolicySnapshot { targets, reply } => {
+                    apply_calls.lock().await.push(targets.clone());
+                    match apply_results.lock().await.pop_front().unwrap_or(Ok(())) {
+                        Ok(()) => {
+                            let priors = captured_priors
+                                .lock()
+                                .await
+                                .pop_front()
+                                .unwrap_or_else(|| targets.clone());
+                            let _ = reply.send(Ok(priors));
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                        }
+                    }
+                }
+                _ => panic!("unexpected peer-manager command in live-policy transaction test"),
+            }
+        }
+    }
+
     fn deps(
         fib_cmd_tx: Option<mpsc::Sender<FibRuntimeCommand>>,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
@@ -1272,6 +1533,264 @@ default_action = "permit"
         );
         assert_eq!(*snapshot_toml.lock().await, candidate_toml);
         assert!(response.human_text.contains("catalog-only"));
+    }
+
+    fn live_impact_plan() -> RuntimeConfigTransactionPlan {
+        plan(
+            RuntimeConfigTransactionStatus::Committable,
+            vec![
+                "[policy] definitions".to_string(),
+                "[policy] live impact".to_string(),
+            ],
+        )
+    }
+
+    fn resolved_policy_targets(
+        previous_toml: &str,
+        candidate_toml: &str,
+    ) -> Vec<ResolvedPeerPolicy> {
+        let previous = Config::load_toml_with_diagnostics(previous_toml, "previous config")
+            .expect("previous config must parse");
+        let candidate = Config::load_toml_with_diagnostics(candidate_toml, "candidate config")
+            .expect("candidate config must parse");
+        resolve_live_policy_targets(&previous, &candidate)
+            .expect("live policy targets must resolve")
+    }
+
+    fn import_default_action(target: &ResolvedPeerPolicy) -> PolicyAction {
+        target
+            .import_policy
+            .as_ref()
+            .and_then(|chain| chain.policies.first())
+            .map(|policy| policy.default_action)
+            .expect("test target must carry one import policy")
+    }
+
+    #[tokio::test]
+    async fn apply_commits_live_policy_impact_after_persist_ack() {
+        let previous_toml = live_policy_toml("permit");
+        let candidate_toml = live_policy_toml("deny");
+        let captured_priors = Arc::new(Mutex::new(VecDeque::from([resolved_policy_targets(
+            &candidate_toml,
+            &previous_toml,
+        )])));
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let apply_results = Arc::new(Mutex::new(VecDeque::from([Ok(())])));
+        let apply_calls = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_live_policy_peer_manager(
+            peer_rx,
+            live_impact_plan(),
+            snapshot_toml.clone(),
+            apply_results,
+            captured_priors,
+            apply_calls.clone(),
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+                config_rx.recv().await
+            {
+                let _ = ack.send(Ok(()));
+            }
+        });
+
+        let response = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml: candidate_toml.clone(),
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        assert_eq!(
+            response.committed_sections,
+            vec!["[policy] definitions", "[policy] live impact"]
+        );
+        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        assert!(response.human_text.contains("live policy-impact"));
+        let calls = apply_calls.lock().await;
+        assert_eq!(calls.len(), 1, "exactly one apply call");
+        assert_eq!(calls[0].len(), 1, "one impacted static neighbor");
+        assert_eq!(calls[0][0].address.to_string(), "10.0.0.2");
+        assert_eq!(import_default_action(&calls[0][0]), PolicyAction::Deny);
+    }
+
+    #[tokio::test]
+    async fn live_policy_impact_persistence_failure_rolls_back_live_and_snapshot() {
+        let previous_toml = live_policy_toml("permit");
+        let candidate_toml = live_policy_toml("deny");
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+        let captured_priors = Arc::new(Mutex::new(VecDeque::from([resolved_policy_targets(
+            &candidate_toml,
+            &previous_toml,
+        )])));
+        // commit apply succeeds; the rollback restore apply also succeeds.
+        let apply_results = Arc::new(Mutex::new(VecDeque::from([Ok(()), Ok(())])));
+        let apply_calls = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_live_policy_peer_manager(
+            peer_rx,
+            live_impact_plan(),
+            snapshot_toml.clone(),
+            apply_results,
+            captured_priors,
+            apply_calls.clone(),
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+                config_rx.recv().await
+            {
+                let _ = ack.send(Err("persist failed".to_string()));
+            }
+        });
+
+        let err = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml,
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref m) if m == "persist failed"),
+            "{err:?}"
+        );
+        assert_eq!(
+            *snapshot_toml.lock().await,
+            previous_toml,
+            "snapshot must roll back to the previous config"
+        );
+        let calls = apply_calls.lock().await;
+        assert_eq!(calls.len(), 2, "commit apply + rollback restore");
+        assert_eq!(
+            calls[1][0].address.to_string(),
+            "10.0.0.2",
+            "restore re-applies the captured priors"
+        );
+        assert_eq!(import_default_action(&calls[0][0]), PolicyAction::Deny);
+        assert_eq!(import_default_action(&calls[1][0]), PolicyAction::Permit);
+    }
+
+    #[tokio::test]
+    async fn live_policy_impact_mid_fanout_failure_rolls_back_snapshot() {
+        let previous_toml = live_policy_toml("permit");
+        let candidate_toml = live_policy_toml("deny");
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+        // The apply itself fails; the peer-manager command self-heals its live
+        // mutations, so the executor only rolls back the snapshot.
+        let apply_results = Arc::new(Mutex::new(VecDeque::from([Err(
+            "peer apply failed".to_string()
+        )])));
+        let captured_priors = Arc::new(Mutex::new(VecDeque::new()));
+        let apply_calls = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_live_policy_peer_manager(
+            peer_rx,
+            live_impact_plan(),
+            snapshot_toml.clone(),
+            apply_results,
+            captured_priors,
+            apply_calls.clone(),
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            // Persist should never be reached; drain the channel if it closes.
+            let _ = config_rx.recv().await;
+        });
+
+        let err = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml,
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(format!("{err}").contains("peer apply failed"), "{err:?}");
+        assert_eq!(
+            *snapshot_toml.lock().await,
+            previous_toml,
+            "snapshot must roll back after the apply failure"
+        );
+        let calls = apply_calls.lock().await;
+        assert_eq!(
+            calls.len(),
+            1,
+            "only the failed apply; no restore (command self-heals)"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_policy_impact_compound_rollback_failure_reports_internal() {
+        let previous_toml = live_policy_toml("permit");
+        let candidate_toml = live_policy_toml("deny");
+        let captured_priors = Arc::new(Mutex::new(VecDeque::from([resolved_policy_targets(
+            &candidate_toml,
+            &previous_toml,
+        )])));
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        // commit apply succeeds; the rollback restore apply FAILS too.
+        let apply_results = Arc::new(Mutex::new(VecDeque::from([
+            Ok(()),
+            Err("restore failed".to_string()),
+        ])));
+        let apply_calls = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_live_policy_peer_manager(
+            peer_rx,
+            live_impact_plan(),
+            snapshot_toml.clone(),
+            apply_results,
+            captured_priors,
+            apply_calls,
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+                config_rx.recv().await
+            {
+                let _ = ack.send(Err("persist failed".to_string()));
+            }
+        });
+
+        let err = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml,
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ConfigTransactionApplyError::Internal(_)),
+            "{err:?}"
+        );
+        let message = format!("{err}");
+        assert!(message.contains("persist failed"), "{message}");
+        assert!(message.contains("live policy rollback"), "{message}");
     }
 
     #[tokio::test]
