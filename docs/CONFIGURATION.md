@@ -1828,8 +1828,12 @@ Operators can drive the workflow through `rustbgpctl config plan --from-file`
 and `rustbgpctl config apply --from-file --expected-runtime-snapshot-token`;
 `--json` returns the same status, section, and token fields for automation.
 For safe deploys, `ApplyConfigTransaction` also supports a confirmed-commit
-mode: use `rustbgpctl config apply --confirm-id <id> --confirm-timeout <seconds>`
-or set the matching gRPC fields directly. The timeout defaults to 600 seconds
+mode: add `--confirm-id <id>` (and optionally `--confirm-timeout <seconds>`) to
+the normal apply invocation — `rustbgpctl config apply --from-file <config.toml>
+--expected-runtime-snapshot-token <token> --confirm-id <id> --confirm-timeout
+<seconds>` — or set the matching gRPC fields directly. The confirm flags are
+additions; `--from-file` and `--expected-runtime-snapshot-token` are still
+required. The timeout defaults to 600 seconds
 and is capped at 86400. The change applies immediately, then remains pending
 until `rustbgpctl config confirm <id>` (or `ConfirmConfigTransaction`) makes it
 permanent. `rustbgpctl config abort <id>` rolls it back immediately, and an

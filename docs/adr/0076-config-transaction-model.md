@@ -111,7 +111,11 @@ section executors behind that public contract.
    pending, persisted runtime config mutators are rejected with
    `FAILED_PRECONDITION` so timeout rollback cannot overwrite a later ad hoc
    config write. Pending confirmed state is not persisted across daemon restart;
-   after restart, clients must re-plan and re-apply.
+   after restart, clients must re-plan and re-apply. The confirm timer is
+   in-memory, so a restart during the confirm window leaves the already-committed
+   candidate live (effectively confirmed-by-restart) and the auto-revert never
+   fires: the timer is a safety net against a bad-but-running config, not against
+   a daemon crash.
 7. **gNMI Set remains out of scope.** gNMI mutation must map to this transaction
    model rather than invent a parallel commit path, but this ADR does not
    implement OpenConfig config datastores or `Set`.

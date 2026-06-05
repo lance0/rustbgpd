@@ -24,8 +24,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`rustbgpctl` commit-confirmed workflow.** `rustbgpctl config apply` now
   accepts `--confirm-id` and `--confirm-timeout`; `rustbgpctl config confirm`,
-  `config abort`, and `config status` expose the corresponding confirmed
-  transaction control and status RPCs with text and JSON output.
+  `rustbgpctl config abort`, and `rustbgpctl config status` expose the
+  corresponding confirmed transaction control and status RPCs with text and JSON
+  output.
 
 - **Live-impact policy config transactions.** `ApplyConfigTransaction` can now
   commit policy definitions, neighbor sets, peer groups, and global named

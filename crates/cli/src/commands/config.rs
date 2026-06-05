@@ -653,4 +653,50 @@ mod tests {
             "[[dynamic_neighbors]]"
         );
     }
+
+    #[test]
+    fn status_json_shape_is_stable() {
+        let value = status_to_json(&ConfigTransactionStatusResponse {
+            confirmation: Some(ConfigTransactionConfirmation {
+                status: ConfigTransactionConfirmationStatus::Pending as i32,
+                confirm_id: "confirm-123".to_string(),
+                timeout_seconds: 120,
+                deadline_unix_seconds: 1_787_000_000,
+                committed_sections: vec!["[[dynamic_neighbors]]".to_string()],
+                runtime_snapshot_token: "kv1:committed:2".to_string(),
+                human_text: "Confirmed config transaction is pending confirmation.".to_string(),
+            }),
+            human_text: "Confirmed config transaction pending.\n".to_string(),
+        });
+
+        assert_eq!(
+            value["human_text"],
+            "Confirmed config transaction pending.\n"
+        );
+        assert_eq!(value["confirmation"]["status"], "pending");
+        assert_eq!(value["confirmation"]["confirm_id"], "confirm-123");
+        assert_eq!(value["confirmation"]["timeout_seconds"], 120);
+        assert_eq!(
+            value["confirmation"]["deadline_unix_seconds"],
+            1_787_000_000u64
+        );
+        assert_eq!(
+            value["confirmation"]["committed_sections"][0],
+            "[[dynamic_neighbors]]"
+        );
+        assert_eq!(
+            value["confirmation"]["runtime_snapshot_token"],
+            "kv1:committed:2"
+        );
+    }
+
+    #[test]
+    fn status_json_confirmation_null_when_absent() {
+        let value = status_to_json(&ConfigTransactionStatusResponse {
+            confirmation: None,
+            human_text: "No confirmed config transaction.\n".to_string(),
+        });
+        assert!(value["confirmation"].is_null());
+        assert_eq!(value["human_text"], "No confirmed config transaction.\n");
+    }
 }
