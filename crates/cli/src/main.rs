@@ -971,6 +971,7 @@ struct RibStatusFilterArgs<'a> {
 }
 
 fn reject_rib_status_filters(
+    binary_name: &str,
     command: &str,
     filters: RibStatusFilterArgs<'_>,
 ) -> Result<(), CliError> {
@@ -984,12 +985,12 @@ fn reject_rib_status_filters(
         || !filters.large_community.is_empty()
     {
         if command == "fib" {
-            return Err(CliError::Argument(
-                "rib fib does not support parent route filters; put FIB status filters after `fib`, for example `rbgp rib fib --prefix 203.0.113.0/24`".into(),
-            ));
+            return Err(CliError::Argument(format!(
+                "rib fib does not support parent route filters; put FIB status filters after `fib`, for example `{binary_name} rib fib --prefix 203.0.113.0/24`"
+            )));
         }
         return Err(CliError::Argument(format!(
-            "rib {command} does not support route filters; use `rbgp rib {command}`"
+            "rib {command} does not support route filters; use `{binary_name} rib {command}`"
         )));
     }
     Ok(())
@@ -1230,6 +1231,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     page_token,
                 }) => {
                     reject_rib_status_filters(
+                        binary_name,
                         "fib",
                         RibStatusFilterArgs {
                             family: &family,
@@ -1259,6 +1261,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 }
                 Some(RibAction::Blackholes) => {
                     reject_rib_status_filters(
+                        binary_name,
                         "blackholes",
                         RibStatusFilterArgs {
                             family: &family,
@@ -2086,6 +2089,7 @@ mod tests {
     #[test]
     fn rib_blackholes_rejects_route_filters() {
         let err = reject_rib_status_filters(
+            LONG_BINARY_NAME,
             "blackholes",
             RibStatusFilterArgs {
                 family: &Some("ipv4_unicast".to_string()),
@@ -2100,11 +2104,12 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("does not support route filters"),
+            err.to_string().contains("use `rustbgpctl rib blackholes`"),
             "unexpected error: {err}"
         );
 
         let err = reject_rib_status_filters(
+            SHORT_BINARY_NAME,
             "blackholes",
             RibStatusFilterArgs {
                 family: &None,
@@ -2119,7 +2124,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("does not support route filters"),
+            err.to_string().contains("use `rbgp rib blackholes`"),
             "unexpected error: {err}"
         );
     }
@@ -2127,6 +2132,7 @@ mod tests {
     #[test]
     fn rib_fib_rejects_route_filters() {
         let err = reject_rib_status_filters(
+            LONG_BINARY_NAME,
             "fib",
             RibStatusFilterArgs {
                 family: &None,
@@ -2142,7 +2148,7 @@ mod tests {
         .unwrap_err();
         assert!(
             err.to_string()
-                .contains("put FIB status filters after `fib`"),
+                .contains("`rustbgpctl rib fib --prefix 203.0.113.0/24`"),
             "unexpected error: {err}"
         );
     }
