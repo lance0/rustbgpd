@@ -36,7 +36,7 @@ diversity scripts remain local / manual gates. See
 
 ## Why rustbgpd
 
-- **API-first control plane** -- full gRPC control surface across 11 services plus a thin CLI (`rustbgpctl`) with colored tables, dynamic column alignment, and human-readable uptimes. Dynamic peer management, dynamic-neighbor and FIB-table CRUD, route injection, policy CRUD, peer groups, BFD inspection, EVPN instance queries, streaming events, and daemon control without restarts.
+- **API-first control plane** -- full gRPC control surface across 11 services plus a thin CLI (`rbgp`; compatible `rustbgpctl` spelling also ships) with colored tables, dynamic column alignment, and human-readable uptimes. Dynamic peer management, dynamic-neighbor and FIB-table CRUD, route injection, policy CRUD, peer groups, BFD inspection, EVPN instance queries, streaming events, and daemon control without restarts.
 - **Explicit architecture** -- pure FSM with no I/O, single-owner RIB with no locks, bounded channels between tasks. No `Arc<RwLock>` on routing state. See [ARCHITECTURE.md](ARCHITECTURE.md).
 - **Dual-stack and modern protocol support** -- MP-BGP, Add-Path, Extended Next Hop, Extended Messages, GR/LLGR/Notification GR, Route Refresh/Enhanced Route Refresh, receive-side Prefix ORF, FlowSpec, Route Reflector, large and extended communities.
 - **Operational visibility** -- Prometheus metrics, read-only gNMI / OpenConfig BGP telemetry (`Capabilities` / `Get` / `Subscribe`, RFC 7951 JSON over mTLS), BMP export to collectors, MRT TABLE_DUMP_V2 snapshots, birdwatcher-compatible looking glass REST API, structured JSON logging, per-peer counters, best-path explain.
@@ -90,16 +90,16 @@ Once both containers are running (a few seconds):
 
 ```bash
 # See the FRR peer come up
-docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 neighbor
+docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 neighbor
 
 # Browse the RIB
-docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 rib
+docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 rib
 
 # Live TUI dashboard — sessions, prefix counts, message rates
-docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 top
+docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 top
 ```
 
-![rustbgpctl top — live TUI dashboard](docs/images/tui-screenshot.png)
+![rbgp top — live TUI dashboard](docs/images/tui-screenshot.png)
 
 Press `q` to exit the TUI. When you're done: `docker compose down`.
 
@@ -112,7 +112,8 @@ Press `q` to exit the TUI. When you're done: `docker compose down`.
 sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
 cargo build --workspace --release
 
-# Binaries are at target/release/rustbgpd and target/release/rustbgpctl
+# Binaries are at target/release/rustbgpd, target/release/rbgp,
+# and the compatible long-form target/release/rustbgpctl
 ```
 
 ### Docker
@@ -169,11 +170,11 @@ reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 # The minimal example uses /tmp/rustbgpd as state dir, so point the CLI there:
 export RUSTBGPD_ADDR=unix:///tmp/rustbgpd/grpc.sock
 
-rustbgpctl health
-rustbgpctl neighbor
-rustbgpctl rib
-rustbgpctl bfd       # BFD sessions, if configured
-rustbgpctl top       # live TUI dashboard
+rbgp health
+rbgp neighbor
+rbgp rib
+rbgp bfd       # BFD sessions, if configured
+rbgp top       # live TUI dashboard
 ```
 
 In production with the systemd unit, the default UDS path
@@ -183,27 +184,27 @@ In production with the systemd unit, the default UDS path
 
 ```bash
 # Add a peer at runtime (persisted to config file automatically)
-rustbgpctl neighbor 10.0.0.5 add --asn 65005
-rustbgpctl neighbor 203.0.113.2 add --asn 65002 --role provider --strict-role
-rustbgpctl neighbor fe80::5054:ff:fe00:1%eth1 add --asn 65101
+rbgp neighbor 10.0.0.5 add --asn 65005
+rbgp neighbor 203.0.113.2 add --asn 65002 --role provider --strict-role
+rbgp neighbor fe80::5054:ff:fe00:1%eth1 add --asn 65101
 
 # Add a dynamic-neighbor accept range at runtime (queued to config when --config is used)
-rustbgpctl dynamic-neighbor add 10.0.0.0/24 --peer-group ix-members
+rbgp dynamic-neighbor add 10.0.0.0/24 --peer-group ix-members
 
 # Manage Linux unicast FIB-export tables at runtime (ADR-0061)
-rustbgpctl fib-table list
+rbgp fib-table list
 
 # Explain why a route was selected as best
-rustbgpctl rib --prefix 10.0.0.0/24 --explain
+rbgp rib --prefix 10.0.0.0/24 --explain
 
 # Reload config after editing the file
 kill -HUP $(pidof rustbgpd)
 
 # Graceful shutdown (writes GR marker, notifies peers)
-rustbgpctl shutdown
+rbgp shutdown
 
 # Enable shell completions (bash example)
-rustbgpctl completions bash > /etc/bash_completion.d/rustbgpctl
+rbgp completions bash > /etc/bash_completion.d/rbgp
 # Or use pre-generated: examples/completions/
 ```
 
@@ -352,7 +353,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
 - BFD (RFC 5880 / 5881 / 5882) single-hop **asynchronous** sessions are
   supported: an in-process, no-GC actor runs sessions over UDP/3784, config via
   `[[bfd_profiles]]` + `[neighbors.bfd]`, observable through
-  `BfdService.GetBfdSessions` / `rustbgpctl bfd` / events + Prometheus, with
+  `BfdService.GetBfdSessions` / `rbgp bfd` / events + Prometheus, with
   RFC 5882 BGP coupling in both strict (withhold BGP until BFD Up) and
   non-strict (tear BGP down on BFD-down before the hold timer) modes —
   FRR-`bfdd`-interop-tested (M51). IPv4 + IPv6 global, static neighbors only;
@@ -360,7 +361,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
   IPv6 link-local (v1.1) remain follow-up work.
 - BGP unnumbered (ADR-0069) static IPv6 link-local neighbors are supported for
   IPv4 unicast: TOML uses `address` plus `interface`, while gRPC and
-  `rustbgpctl` also render `fe80::...%ifname`; RFC 8950 route exchange uses the
+  `rbgp` also render `fe80::...%ifname`; RFC 8950 route exchange uses the
   FRR-proven link-local MP_REACH shape; and opt-in Linux FIB install carries the
   egress device for `fe80::/10` next-hops. M53 validates this against FRR.
   Interface-neighbor autodiscovery, capability 77, and link-local BFD remain

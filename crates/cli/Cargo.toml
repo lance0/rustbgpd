@@ -15,6 +15,11 @@ readme = "README.md"
 name = "rustbgpctl"
 path = "src/main.rs"
 
+[[bin]]
+name = "rbgp"
+path = "src/bin/rbgp.rs"
+test = false
+
 [dependencies]
 tonic.workspace = true
 tonic-prost.workspace = true

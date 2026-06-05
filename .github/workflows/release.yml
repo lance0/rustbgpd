@@ -57,7 +57,8 @@ jobs:
           mkdir -p dist staging
           cp target/${{ matrix.target }}/release/rustbgpd staging/
           cp target/${{ matrix.target }}/release/rustbgpctl staging/
-          tar -C staging -czf dist/rustbgpd-${SUFFIX}.tar.gz rustbgpd rustbgpctl
+          cp target/${{ matrix.target }}/release/rbgp staging/
+          tar -C staging -czf dist/rustbgpd-${SUFFIX}.tar.gz rustbgpd rustbgpctl rbgp
           cd dist
           sha256sum rustbgpd-${SUFFIX}.tar.gz > checksums-${SUFFIX}.txt
 

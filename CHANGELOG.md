@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Short CLI binary (`rbgp`).** Release artifacts and container images now ship
+  `rbgp` as the preferred operator CLI spelling alongside the compatible
+  `rustbgpctl` long-form binary. Help and shell completion generation render the
+  invoked binary name, and pre-generated bash/fish/zsh completions are included
+  for `rbgp`.
+
 - **Commit-confirmed config transactions.** `ApplyConfigTransaction` now accepts
   a `confirm_id` plus optional `confirm_timeout_seconds` to apply a candidate
   immediately while starting a confirm timer. `ConfirmConfigTransaction` makes
@@ -22,9 +28,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   persisted runtime config mutators are rejected with `FAILED_PRECONDITION` so
   timeout rollback cannot overwrite a later ad hoc config change.
 
-- **`rustbgpctl` commit-confirmed workflow.** `rustbgpctl config apply` now
-  accepts `--confirm-id` and `--confirm-timeout`; `rustbgpctl config confirm`,
-  `rustbgpctl config abort`, and `rustbgpctl config status` expose the
+- **`rbgp` commit-confirmed workflow.** `rbgp config apply` now accepts
+  `--confirm-id` and `--confirm-timeout`; `rbgp config confirm`,
+  `rbgp config abort`, and `rbgp config status` expose the
   corresponding confirmed transaction control and status RPCs with text and JSON
   output.
 

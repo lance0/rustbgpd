@@ -15,11 +15,20 @@ pub mod proto {
 use crate::connection::connect;
 use crate::error::CliError;
 use crate::output::parse_family;
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
+use std::ffi::OsStr;
+
+const LONG_BINARY_NAME: &str = "rustbgpctl";
+const SHORT_BINARY_NAME: &str = "rbgp";
 
 #[derive(Parser)]
-#[command(name = "rustbgpctl", about = "CLI for rustbgpd", version)]
+#[command(
+    name = "rustbgpctl",
+    bin_name = "rustbgpctl",
+    about = "CLI for rustbgpd",
+    version
+)]
 struct Cli {
     /// gRPC server address or unix:///path/to/socket
     #[arg(
@@ -976,11 +985,11 @@ fn reject_rib_status_filters(
     {
         if command == "fib" {
             return Err(CliError::Argument(
-                "rib fib does not support parent route filters; put FIB status filters after `fib`, for example `rustbgpctl rib fib --prefix 203.0.113.0/24`".into(),
+                "rib fib does not support parent route filters; put FIB status filters after `fib`, for example `rbgp rib fib --prefix 203.0.113.0/24`".into(),
             ));
         }
         return Err(CliError::Argument(format!(
-            "rib {command} does not support route filters; use `rustbgpctl rib {command}`"
+            "rib {command} does not support route filters; use `rbgp rib {command}`"
         )));
     }
     Ok(())
@@ -1031,28 +1040,55 @@ fn parse_community_str(s: &str) -> Result<u32, String> {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let binary_name = invoked_binary_name();
+    let cli = parse_cli(binary_name);
 
     let no_color = cli.no_color || std::env::var_os("NO_COLOR").is_some();
     if no_color || cli.json {
         owo_colors::set_override(false);
     }
 
-    if let Err(e) = run(cli).await {
+    if let Err(e) = run(cli, binary_name).await {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }
 }
 
-async fn run(cli: Cli) -> Result<(), CliError> {
+fn invoked_binary_name() -> &'static str {
+    std::env::args_os()
+        .next()
+        .as_deref()
+        .map(binary_name_from_arg0)
+        .unwrap_or(LONG_BINARY_NAME)
+}
+
+fn binary_name_from_arg0(arg0: &OsStr) -> &'static str {
+    match std::path::Path::new(arg0)
+        .file_name()
+        .and_then(OsStr::to_str)
+    {
+        Some(SHORT_BINARY_NAME) => SHORT_BINARY_NAME,
+        _ => LONG_BINARY_NAME,
+    }
+}
+
+fn cli_command(binary_name: &'static str) -> clap::Command {
+    Cli::command().name(binary_name).bin_name(binary_name)
+}
+
+fn parse_cli(binary_name: &'static str) -> Cli {
+    let matches = cli_command(binary_name).get_matches();
+    Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
+}
+
+fn generate_completions(shell: Shell, binary_name: &'static str, output: &mut dyn std::io::Write) {
+    clap_complete::generate(shell, &mut cli_command(binary_name), binary_name, output);
+}
+
+async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
     // Shell completions don't need a gRPC connection.
     if let Command::Completions { shell } = cli.command {
-        clap_complete::generate(
-            shell,
-            &mut Cli::command(),
-            "rustbgpctl",
-            &mut std::io::stdout(),
-        );
+        generate_completions(shell, binary_name, &mut std::io::stdout());
         return Ok(());
     }
 
@@ -1838,6 +1874,60 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn test_binary_name_from_arg0() {
+        assert_eq!(
+            binary_name_from_arg0(OsStr::new("/usr/local/bin/rbgp")),
+            SHORT_BINARY_NAME
+        );
+        assert_eq!(
+            binary_name_from_arg0(OsStr::new("/usr/local/bin/rustbgpctl")),
+            LONG_BINARY_NAME
+        );
+        assert_eq!(
+            binary_name_from_arg0(OsStr::new("unknown")),
+            LONG_BINARY_NAME
+        );
+    }
+
+    #[test]
+    fn test_rbgp_command_renders_short_usage() {
+        let mut command = cli_command(SHORT_BINARY_NAME);
+        let help = command.render_long_help().to_string();
+
+        assert!(help.contains("Usage: rbgp"));
+        assert!(!help.contains("Usage: rustbgpctl"));
+    }
+
+    #[test]
+    fn test_rustbgpctl_command_keeps_long_usage() {
+        let mut command = cli_command(LONG_BINARY_NAME);
+        let help = command.render_long_help().to_string();
+
+        assert!(help.contains("Usage: rustbgpctl"));
+    }
+
+    #[test]
+    fn test_rbgp_command_parses_same_surface() {
+        let matches = cli_command(SHORT_BINARY_NAME)
+            .try_get_matches_from(["rbgp", "global"])
+            .unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+
+        assert!(matches!(cli.command, Command::Global));
+    }
+
+    #[test]
+    fn test_rbgp_completion_uses_short_name() {
+        let mut output = Vec::new();
+        generate_completions(Shell::Bash, SHORT_BINARY_NAME, &mut output);
+        let completion = String::from_utf8(output).unwrap();
+
+        assert!(completion.contains("_rbgp()"));
+        assert!(completion.contains("cmd=\"rbgp\""));
+        assert!(!completion.contains("rustbgpctl"));
+    }
 
     #[test]
     fn test_parse_global() {
