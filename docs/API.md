@@ -149,7 +149,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | Service | Read-only RPCs | Mutating RPCs rejected on `read_only` |
 |---------|----------------|---------------------------------------|
 | `GlobalService` | `GetGlobal` | `SetGlobal` |
-| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction` | `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, or catalog-only policy/peer-group/global-chain transaction executors; mixed or unsupported candidates rejected without mutation) |
+| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction` | `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain changes, or pure static-neighbor live policy-chain impact; mixed or unsupported candidates rejected without mutation) |
 | `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
@@ -187,8 +187,10 @@ deliberately narrow: `Capabilities`, `Get`, and `Subscribe` (`ONCE`, `POLL`,
 session-state leaf, requires `[event_history]` enabled, and returns
 `FAILED_PRECONDITION` otherwise) for global and neighbor `state` under the
 default network instance; `Set` is present because gNMI requires it, but always
-returns `UNIMPLEMENTED`. See [GNMI.md](GNMI.md) for the full `ON_CHANGE` v1
-scope (initial sync, reconnect-no-replay, lag → `DATA_LOSS`).
+returns `UNIMPLEMENTED`. Future `Set` support should translate OpenConfig edits
+into candidate TOML and feed `PlanConfigTransaction` / `ApplyConfigTransaction`,
+not bypass the transaction model. See [GNMI.md](GNMI.md) for the full
+`ON_CHANGE` v1 scope (initial sync, reconnect-no-replay, lag → `DATA_LOSS`).
 
 Network gNMI is served only on mTLS TCP listeners. The UDS listener also exposes
 the service as a local-only extension.
@@ -246,7 +248,7 @@ and receive only redacted diff / plan output.
 |-----|-------------|
 | `DiffRuntimeConfig` | Validate candidate TOML and compare it against the daemon's live runtime config snapshot |
 | `PlanConfigTransaction` | Validate candidate TOML, return a runtime snapshot token, and classify v1 transaction support without mutating daemon state |
-| `ApplyConfigTransaction` | Operator-tier commit entry point for ADR-0076 config transactions; currently commits one pure runtime family at a time: full-set `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify changes, or catalog-only policy/peer-group/global-chain changes that do not alter the effective runtime policy of any static neighbor or dynamic range |
+| `ApplyConfigTransaction` | Operator-tier commit entry point for ADR-0076 config transactions; currently commits one pure runtime family at a time: full-set `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify changes, catalog-only policy/neighbor-set/peer-group/global-chain changes, or pure static-neighbor live policy-chain impact |
 
 `DiffRuntimeConfigResponse` contains boolean summary fields, a
 plain-text `human_text` rendering, and `diff_json` using the
@@ -264,8 +266,9 @@ presence.
   daemon restart.
 - `supported_sections`: sections the v1 transaction model can commit
   (`[[fib_tables]]`, `[[dynamic_neighbors]]`, static neighbor add/delete/modify,
-  and catalog-only `[policy]` / `[peer_groups]` changes with no effective impact
-  on static neighbors or dynamic ranges).
+  catalog-only `[policy]` / `[peer_groups]` changes with no effective impact on
+  static neighbors or dynamic ranges, and pure static-neighbor live
+  policy-chain impact).
 - `unsupported_sections`: hot-reloadable sections v1 refuses until an atomic
   executor exists.
 - `restart_required_sections`: sections that still require daemon restart.
@@ -273,10 +276,9 @@ presence.
 The planner is intentionally stricter than SIGHUP: "reload-applied" does not
 mean "transaction-committable" unless the section appears in
 `supported_sections`. `ApplyConfigTransaction` commits one pure runtime family
-at a time. Cross-family candidates, policy/peer-group edits that alter the
-effective runtime policy of any static neighbor or dynamic range, and other
-valid-but-unsupported sections return `REJECTED` without mutation until their
-section executor lands.
+at a time. Cross-family candidates, dynamic-range policy impact, peer-group
+edits that reshape transport/session config, and other valid-but-unsupported
+sections return `REJECTED` without mutation until their section executor lands.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
@@ -348,11 +350,17 @@ Catalog-only transactions can stage named policy definitions, policy
 `neighbor_sets`, peer groups, and global named policy-chain assignments before a
 static neighbor or dynamic range depends on them. They are full-snapshot commits:
 the daemon updates the live runtime config snapshot and persists the accepted
-TOML, but does not run `SetPolicy` / `SetPeerGroup` live mutation commands. If
-the candidate changes the effective import/export policy of any static neighbor
-or dynamic range through policy, neighbor-set, peer-group, or global-chain
-inheritance, the planner reports `effective neighbor inheritance impact` and
-rejects the transaction.
+TOML, but does not run `SetPolicy` / `SetPeerGroup` live mutation commands.
+
+Policy/neighbor-set/peer-group/global-chain transactions that move an existing
+static neighbor's resolved import/export `PolicyChain` are also committable when
+the impact is purely a chain move. The executor stages the snapshot, re-applies
+the resolved chains to affected live sessions, captures prior chains for
+rollback, persists with an acknowledgement, and restores both live policy chains
+and the snapshot on failure. Dynamic-range policy impact, peer-group
+reassignment, and peer-group field edits that reshape transport/session config
+still report `effective neighbor inheritance impact` and reject until their own
+rollback-capable executors exist.
 
 CLI equivalent:
 

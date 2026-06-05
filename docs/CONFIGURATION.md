@@ -1809,13 +1809,15 @@ reports whether the reconciler is running.
 validate a complete candidate TOML and return an optimistic runtime snapshot
 token; `ApplyConfigTransaction` commits one pure runtime family at a time:
 full-set `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, static
-`[[neighbors]]` add/delete/modify, or catalog-only policy/peer-group/global-chain
-changes that do not alter the effective runtime policy of any static neighbor or
-dynamic range. The apply path re-checks the token under the shared runtime-config
-coordinator, rejects mixed or unsupported candidates without mutation, applies
-live runtime state when the family has one, persists the exact accepted
-candidate with an acknowledgement, and rolls runtime state back if apply or
-persistence fails.
+`[[neighbors]]` add/delete/modify, catalog-only
+policy/neighbor-set/peer-group/global-chain changes, or pure static-neighbor
+live policy-chain impact. The apply path
+re-checks the token under the shared runtime-config coordinator, rejects mixed or
+unsupported candidates without mutation, applies live runtime state when the
+family has one, persists the exact accepted candidate with an acknowledgement,
+and rolls runtime state back if apply or persistence fails. Dynamic-range policy
+impact and policy/peer-group edits that require session reconfiguration remain
+rejected until dedicated executors exist.
 Like SIGHUP and FIB CRUD, FIB transaction apply requires the FIB reconciler to
 already be running: a daemon that started with no `[[fib_tables]]` still needs a
 restart to enable the subsystem.
