@@ -101,7 +101,12 @@ Later for what remains.
   failure.
   `rustbgpctl config plan/apply` drives the text/JSON operator workflow. Next
   useful slices are the remaining hot-reload sections whose live-impact rollback
-  semantics are ready.
+  semantics are ready, the dynamic-range live-policy executor (deferred pending
+  longest-prefix-match accept attribution), and a **commit-confirmed / confirm-timer
+  auto-revert** safety net: today rollback only fires on apply/persist *failure*,
+  not on a change that applies cleanly but breaks reachability — Junos/IOS-XR/BIRD
+  and NETCONF (RFC 6241 §8.4) all guard that with a confirm timer, and ADR-0076
+  is the natural home for it.
   gNMI `Set` no longer needs a parallel commit primitive; the next slice is an
   OpenConfig-to-candidate-TOML mapping that feeds this transaction model. Exit:
   atomic commit where supported,

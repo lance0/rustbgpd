@@ -62,7 +62,7 @@ impl PeerManager {
         let Some(peer_key) = self.unique_peer_key_for_address(address) else {
             return Ok(());
         };
-        self.update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy)
+        self.update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy, true)
             .await
     }
 
@@ -101,6 +101,7 @@ impl PeerManager {
                     peer_key,
                     target.import_policy.clone(),
                     target.export_policy.clone(),
+                    true,
                 )
                 .await
             {
@@ -140,6 +141,11 @@ impl PeerManager {
                     peer_key,
                     prior.import_policy,
                     prior.export_policy,
+                    // Best-effort refresh on rollback: restoring the prior chain
+                    // is the critical part; a refresh failure here (e.g. a peer
+                    // without Route Refresh, whose forward refresh also failed)
+                    // must not escalate a clean rollback into a compound error.
+                    false,
                 )
                 .await
             {
@@ -256,6 +262,7 @@ impl PeerManager {
         peer_key: PeerKey,
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
+        refresh_fatal: bool,
     ) -> Result<(), String> {
         use std::fmt::Write as _;
         let address = peer_key.address;
@@ -492,7 +499,22 @@ impl PeerManager {
                 if let Some(managed) = self.peers.get_mut(&peer_key) {
                     managed.pending_refresh = true;
                 }
-                return Err(error);
+                // On the forward apply a refresh failure is fatal (the policy
+                // change didn't fully take effect). During a transaction
+                // rollback (`refresh_fatal = false`) it is best-effort: the
+                // prior chain is already restored in bookkeeping, the peer's
+                // AdjRibIn is either already under the prior policy (its forward
+                // refresh failed too — e.g. a peer without Route Refresh) or is
+                // re-converged by the armed `pending_refresh`. Escalating it
+                // would turn a clean rollback into a spurious compound error.
+                if refresh_fatal {
+                    return Err(error);
+                }
+                warn!(
+                    %address,
+                    error = %error,
+                    "route refresh failed during policy rollback; armed pending_refresh"
+                );
             }
         } else if needs_refresh {
             // `!is_established` here means one of: the peer really is
@@ -572,7 +594,7 @@ impl PeerManager {
             let (import_policy, export_policy) = next_config
                 .effective_policy_chains_for_neighbor(neighbor)
                 .map_err(|e| e.to_string())?;
-            self.update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy)
+            self.update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy, true)
                 .await?;
         }
 
@@ -682,7 +704,7 @@ impl PeerManager {
                 }
             };
             if let Err(e) = self
-                .update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy)
+                .update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy, true)
                 .await
             {
                 warn!(
@@ -759,7 +781,7 @@ impl PeerManager {
                 }
             };
             if let Err(e) = self
-                .update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy)
+                .update_runtime_policies_for_peer_key(peer_key, import_policy, export_policy, true)
                 .await
             {
                 warn!(

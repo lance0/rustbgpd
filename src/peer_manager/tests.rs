@@ -2713,6 +2713,58 @@ fn export_fails_once_policy_handle(peer_addr: IpAddr, state: SessionState) -> Pe
     PeerHandle::from_parts(session_tx, task)
 }
 
+/// A peer handle that acks policy hot-applies but rejects Route Refresh, as a
+/// peer that did not negotiate the Route Refresh capability would (the session
+/// returns "peer lacks Route Refresh capability"). Used to verify a live-impact
+/// apply rejects an Established non-RR peer cleanly.
+fn route_refresh_failing_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
+    use rustbgpd_transport::PeerCommand;
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        while let Some(cmd) = session_rx.recv().await {
+            match cmd {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(PeerSessionState {
+                        fsm_state: state,
+                        peer_ip: peer_addr,
+                        peer_asn: None,
+                        prefix_count: 0,
+                        negotiated_hold_time: None,
+                        four_octet_as: None,
+                        remote_router_id: None,
+                        local_role: None,
+                        remote_role: None,
+                        role_negotiated: false,
+                        updates_received: 0,
+                        updates_sent: 0,
+                        notifications_received: 0,
+                        notifications_sent: 0,
+                        otc_routes_blocked: 0,
+                        import_policy_routes_permitted: 0,
+                        import_policy_routes_denied: 0,
+                        flap_count: 0,
+                        uptime_secs: 0,
+                        last_error: String::new(),
+                    });
+                }
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::SendRouteRefresh { reply, .. } => {
+                    let _ = reply.send(Err("peer lacks Route Refresh capability".to_string()));
+                }
+                PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
 fn live_policy_test_manager() -> PeerManager {
     let (_cmd_tx, cmd_rx) = mpsc::channel(16);
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
@@ -2939,6 +2991,56 @@ async fn apply_resolved_policy_snapshot_skips_non_live_targets() {
     assert_eq!(
         format!("{:?}", mgr.peers.get(&key(live)).unwrap().import_policy),
         format!("{:?}", Some(new_chain))
+    );
+}
+
+#[tokio::test]
+async fn apply_resolved_policy_snapshot_rejects_non_route_refresh_peer_cleanly() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    // An Established peer that never negotiated Route Refresh can't be
+    // soft-refreshed, so a live-impact apply that needs to re-evaluate its
+    // existing AdjRibIn under the new policy must reject. The rollback must be
+    // clean (prior chain restored) — not a compound "restore also failed", since
+    // the doomed rollback refresh is best-effort.
+    let mut mgr = live_policy_test_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        route_refresh_failing_handle(addr, SessionState::Established),
+        false,
+    );
+    let prior = validation_policy_chain(ImportValidationDependency::Rpki);
+    mgr.peers.get_mut(&key(addr)).unwrap().import_policy = Some(prior.clone());
+
+    let targets = vec![ResolvedPeerPolicy {
+        address: addr,
+        interface: None,
+        import_policy: Some(deny_policy_chain()),
+        export_policy: None,
+    }];
+    let err = mgr
+        .apply_resolved_policy_snapshot(targets)
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_lowercase().contains("route refresh"),
+        "rejection should cite the Route Refresh failure: {err}"
+    );
+    assert!(
+        err.contains("already-applied peers restored"),
+        "rollback should be clean: {err}"
+    );
+    assert!(
+        !err.contains("restoring already-applied peers also failed"),
+        "rollback must not be a compound failure for a non-RR peer: {err}"
+    );
+    assert_eq!(
+        format!("{:?}", mgr.peers.get(&key(addr)).unwrap().import_policy),
+        format!("{:?}", Some(prior)),
+        "the peer's import policy must be restored to its prior chain"
     );
 }
 

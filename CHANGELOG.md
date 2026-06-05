@@ -18,8 +18,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The executor stages the candidate snapshot, re-applies resolved chains to
   affected live sessions, captures prior chains for rollback, persists with an
   acknowledgement, and restores live chains plus the snapshot on failure.
-  Dynamic-range policy impact, peer-group/session reshapes, mixed families, and
-  other unsupported sections remain rejected without mutation.
+  Re-evaluating an affected Established peer's received routes uses Route Refresh
+  (RFC 2918), so the transaction requires every impacted Established peer to have
+  negotiated the Route Refresh capability; otherwise it is rejected and rolled
+  back cleanly. Dynamic-range policy impact, peer-group/session reshapes, mixed
+  families, and other unsupported sections remain rejected without mutation.
 
 ## [0.35.0] — 2026-06-04
 

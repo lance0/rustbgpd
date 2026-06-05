@@ -91,7 +91,13 @@ section executors behind that public contract.
    static neighbor's resolved import/export chains to the live session through
    the peer manager, captures prior chains as a rollback token, persists with an
    acknowledgement, and restores live chains plus the snapshot on persistence
-   failure.
+   failure. Re-evaluating an affected Established peer's already-received routes
+   under the new import policy is driven by Route Refresh (RFC 2918) — rustbgpd
+   does not keep a pre-policy soft-reconfiguration copy — so a live-policy impact
+   transaction **requires that every impacted Established peer negotiated the
+   Route Refresh capability**; if one did not, the apply is rejected and rolled
+   back cleanly (the refresh during rollback is best-effort, so a non-RR peer
+   yields a single clear rejection, not a compound rollback error).
 6. **gNMI Set remains out of scope.** gNMI mutation must map to this transaction
    model rather than invent a parallel commit path, but this ADR does not
    implement OpenConfig config datastores or `Set`.
