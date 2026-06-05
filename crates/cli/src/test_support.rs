@@ -9,7 +9,7 @@ use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
 use tonic::metadata::MetadataValue;
 use tonic::service::Interceptor;
 use tonic::transport::Server;
-use tonic::{Request, Response, Status};
+use tonic::{Code, Request, Response, Status};
 
 use rustbgpd_api::proto as server_proto;
 use rustbgpd_api::proto::config_service_server::ConfigServiceServer;
@@ -28,9 +28,17 @@ pub(crate) struct MockState {
     pub(crate) config_diff_calls: AtomicUsize,
     pub(crate) config_plan_calls: AtomicUsize,
     pub(crate) config_apply_calls: AtomicUsize,
+    pub(crate) config_confirm_calls: AtomicUsize,
+    pub(crate) config_abort_calls: AtomicUsize,
+    pub(crate) config_status_calls: AtomicUsize,
+    pub(crate) config_confirm_error: Mutex<Option<(Code, String)>>,
+    pub(crate) config_abort_error: Mutex<Option<(Code, String)>>,
+    pub(crate) config_status_error: Mutex<Option<(Code, String)>>,
     pub(crate) last_config_diff: Mutex<Option<String>>,
     pub(crate) last_config_plan: Mutex<Option<server_proto::PlanConfigTransactionRequest>>,
     pub(crate) last_config_apply: Mutex<Option<server_proto::ApplyConfigTransactionRequest>>,
+    pub(crate) last_config_confirm: Mutex<Option<server_proto::ConfirmConfigTransactionRequest>>,
+    pub(crate) last_config_abort: Mutex<Option<server_proto::AbortConfigTransactionRequest>>,
     pub(crate) last_add_neighbor: Mutex<Option<server_proto::NeighborConfig>>,
     pub(crate) last_softreset: Mutex<Option<server_proto::SoftResetInRequest>>,
     pub(crate) last_explain_advertised: Mutex<Option<server_proto::ExplainAdvertisedRouteRequest>>,
@@ -345,11 +353,19 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
         &self,
         request: Request<server_proto::ConfirmConfigTransactionRequest>,
     ) -> Result<Response<server_proto::ConfirmConfigTransactionResponse>, Status> {
+        self.state
+            .config_confirm_calls
+            .fetch_add(1, Ordering::SeqCst);
+        let request = request.into_inner();
+        *self.state.last_config_confirm.lock().await = Some(request.clone());
+        if let Some((code, message)) = self.state.config_confirm_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
         Ok(Response::new(
             server_proto::ConfirmConfigTransactionResponse {
                 confirmation: Some(server_proto::ConfigTransactionConfirmation {
                     status: server_proto::ConfigTransactionConfirmationStatus::Confirmed as i32,
-                    confirm_id: request.into_inner().confirm_id,
+                    confirm_id: request.confirm_id,
                     timeout_seconds: 120,
                     deadline_unix_seconds: 0,
                     committed_sections: vec!["[[fib_tables]]".to_string()],
@@ -365,11 +381,17 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
         &self,
         request: Request<server_proto::AbortConfigTransactionRequest>,
     ) -> Result<Response<server_proto::AbortConfigTransactionResponse>, Status> {
+        self.state.config_abort_calls.fetch_add(1, Ordering::SeqCst);
+        let request = request.into_inner();
+        *self.state.last_config_abort.lock().await = Some(request.clone());
+        if let Some((code, message)) = self.state.config_abort_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
         Ok(Response::new(
             server_proto::AbortConfigTransactionResponse {
                 confirmation: Some(server_proto::ConfigTransactionConfirmation {
                     status: server_proto::ConfigTransactionConfirmationStatus::Aborted as i32,
-                    confirm_id: request.into_inner().confirm_id,
+                    confirm_id: request.confirm_id,
                     timeout_seconds: 120,
                     deadline_unix_seconds: 0,
                     committed_sections: vec!["[[fib_tables]]".to_string()],
@@ -386,6 +408,12 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
         &self,
         _request: Request<server_proto::GetConfigTransactionStatusRequest>,
     ) -> Result<Response<server_proto::ConfigTransactionStatusResponse>, Status> {
+        self.state
+            .config_status_calls
+            .fetch_add(1, Ordering::SeqCst);
+        if let Some((code, message)) = self.state.config_status_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
         Ok(Response::new(
             server_proto::ConfigTransactionStatusResponse {
                 confirmation: Some(server_proto::ConfigTransactionConfirmation {

@@ -57,15 +57,18 @@ complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand global" -l token-f
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand global" -s j -l json -d 'Output in JSON format'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand global" -l no-color -d 'Disable colored output'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand global" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply help" -s j -l json -d 'Output in JSON format'
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply help" -l no-color -d 'Disable colored output'
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply help" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply help" -f -a "diff" -d 'Diff a candidate TOML file against the daemon\'s live runtime snapshot'
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply help" -f -a "plan" -d 'Validate and classify a candidate transaction without mutation'
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply help" -f -a "apply" -d 'Commit a previously planned candidate transaction'
-complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status help" -s j -l json -d 'Output in JSON format'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status help" -l no-color -d 'Disable colored output'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status help" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status help" -f -a "diff" -d 'Diff a candidate TOML file against the daemon\'s live runtime snapshot'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status help" -f -a "plan" -d 'Validate and classify a candidate transaction without mutation'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status help" -f -a "apply" -d 'Commit a previously planned candidate transaction'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status help" -f -a "confirm" -d 'Confirm a pending confirmed config transaction'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status help" -f -a "abort" -d 'Abort a pending confirmed config transaction and roll back immediately'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status help" -f -a "status" -d 'Show pending or last confirmed-transaction lifecycle state'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from diff" -l from-file -d 'Candidate TOML file to validate and compare' -r
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from diff" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from diff" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
@@ -83,14 +86,34 @@ complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from apply" -l expected-runtime-snapshot-token -d 'Runtime snapshot token returned by config plan' -r
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from apply" -l client-request-id -d 'Optional audit/correlation identifier' -r
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from apply" -l comment -d 'Optional human change note; not logged verbatim by the daemon' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from apply" -l confirm-id -d 'Optional confirmed-commit handle; requires explicit confirm/abort' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from apply" -l confirm-timeout -d 'Confirmed-commit timeout in seconds; daemon default applies when omitted' -r
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from apply" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from apply" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from apply" -s j -l json -d 'Output in JSON format'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from apply" -l no-color -d 'Disable colored output'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from apply" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from confirm" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from confirm" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from confirm" -s j -l json -d 'Output in JSON format'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from confirm" -l no-color -d 'Disable colored output'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from confirm" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from abort" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from abort" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from abort" -s j -l json -d 'Output in JSON format'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from abort" -l no-color -d 'Disable colored output'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from abort" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from status" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from status" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from status" -s j -l json -d 'Output in JSON format'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from status" -l no-color -d 'Disable colored output'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from status" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "diff" -d 'Diff a candidate TOML file against the daemon\'s live runtime snapshot'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "plan" -d 'Validate and classify a candidate transaction without mutation'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "apply" -d 'Commit a previously planned candidate transaction'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "confirm" -d 'Confirm a pending confirmed config transaction'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "abort" -d 'Abort a pending confirmed config transaction and roll back immediately'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "status" -d 'Show pending or last confirmed-transaction lifecycle state'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
@@ -752,6 +775,9 @@ complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand help; and not __fi
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "diff" -d 'Diff a candidate TOML file against the daemon\'s live runtime snapshot'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "plan" -d 'Validate and classify a candidate transaction without mutation'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "apply" -d 'Commit a previously planned candidate transaction'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "confirm" -d 'Confirm a pending confirmed config transaction'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "abort" -d 'Abort a pending confirmed config transaction and roll back immediately'
+complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "status" -d 'Show pending or last confirmed-transaction lifecycle state'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand help; and __fish_seen_subcommand_from neighbor" -f -a "add" -d 'Add a new neighbor'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand help; and __fish_seen_subcommand_from neighbor" -f -a "delete" -d 'Delete this neighbor'
 complete -c rustbgpctl -n "__fish_rustbgpctl_using_subcommand help; and __fish_seen_subcommand_from neighbor" -f -a "enable" -d 'Enable this neighbor'

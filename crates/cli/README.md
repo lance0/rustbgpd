@@ -12,6 +12,11 @@ rustbgpctl global                      # show ASN, router ID
 rustbgpctl config diff --from-file config.toml
 rustbgpctl config plan --from-file config.toml
 rustbgpctl config apply --from-file config.toml --expected-runtime-snapshot-token kv1:...
+rustbgpctl config apply --from-file config.toml --expected-runtime-snapshot-token kv1:... \
+  --confirm-id deploy-123 --confirm-timeout 120
+rustbgpctl config status
+rustbgpctl config confirm deploy-123
+rustbgpctl config abort deploy-123
 rustbgpctl neighbor                    # list all peers
 rustbgpctl neighbor <addr>             # peer detail
 rustbgpctl neighbor <addr> add --asn <asn> [--role provider|rs|rs-client|customer|peer] [--strict-role]

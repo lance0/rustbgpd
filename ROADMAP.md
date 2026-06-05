@@ -102,8 +102,8 @@ Later for what remains.
   `rustbgpctl config plan/apply` drives the text/JSON operator workflow. Next
   useful slices are the remaining hot-reload sections whose live-impact rollback
   semantics are ready, the dynamic-range live-policy executor (deferred pending
-  longest-prefix-match accept attribution), and CLI/status polish on top of the
-  commit-confirmed core.
+  longest-prefix-match accept attribution), and any remaining audit/status
+  polish on top of the commit-confirmed core and CLI.
   gNMI `Set` no longer needs a parallel commit primitive; the next slice is an
   OpenConfig-to-candidate-TOML mapping that feeds this transaction model. Exit:
   atomic commit where supported,
@@ -493,6 +493,10 @@ branch is between features.
   abort or timer expiry rolls back by applying the captured pre-commit runtime
   snapshot through the same transaction executor. Persisted runtime config
   mutators are fenced while a confirmed transaction is applying or pending.
+- [x] **`rustbgpctl` commit-confirmed workflow.**
+  The CLI can now run safe deploys end to end: `config apply --confirm-id
+  --confirm-timeout`, `config status`, `config confirm`, and `config abort`
+  expose the confirmed transaction lifecycle with text and JSON output.
 - [x] **Config transaction catalog snapshot executor.** ADR-0076 can now commit
   catalog-only policy definitions, policy `neighbor_sets`, `peer_groups`, and
   global named policy-chain assignments under the same

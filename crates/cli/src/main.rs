@@ -294,7 +294,34 @@ enum ConfigAction {
         /// Optional human change note; not logged verbatim by the daemon
         #[arg(long, value_name = "TEXT")]
         comment: Option<String>,
+
+        /// Optional confirmed-commit handle; requires explicit confirm/abort
+        #[arg(long, value_name = "ID")]
+        confirm_id: Option<String>,
+
+        /// Confirmed-commit timeout in seconds; daemon default applies when omitted
+        #[arg(
+            long = "confirm-timeout",
+            value_name = "SECONDS",
+            requires = "confirm_id"
+        )]
+        confirm_timeout_seconds: Option<u32>,
     },
+
+    /// Confirm a pending confirmed config transaction
+    Confirm {
+        /// Confirmed-commit handle passed to config apply
+        confirm_id: String,
+    },
+
+    /// Abort a pending confirmed config transaction and roll back immediately
+    Abort {
+        /// Confirmed-commit handle passed to config apply
+        confirm_id: String,
+    },
+
+    /// Show pending or last confirmed-transaction lifecycle state
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -1063,17 +1090,30 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 expected_runtime_snapshot_token,
                 client_request_id,
                 comment,
+                confirm_id,
+                confirm_timeout_seconds,
             } => {
                 commands::config::apply(
                     connection,
-                    &from_file,
-                    &expected_runtime_snapshot_token,
-                    client_request_id.as_deref(),
-                    comment.as_deref(),
+                    commands::config::ApplyOptions {
+                        from_file: &from_file,
+                        expected_runtime_snapshot_token: &expected_runtime_snapshot_token,
+                        client_request_id: client_request_id.as_deref(),
+                        comment: comment.as_deref(),
+                        confirm_id: confirm_id.as_deref(),
+                        confirm_timeout_seconds,
+                    },
                     json,
                 )
                 .await
             }
+            ConfigAction::Confirm { confirm_id } => {
+                commands::config::confirm(connection, &confirm_id, json).await
+            }
+            ConfigAction::Abort { confirm_id } => {
+                commands::config::abort(connection, &confirm_id, json).await
+            }
+            ConfigAction::Status => commands::config::status(connection, json).await,
         },
 
         Command::Neighbor { address, action } => match (address, action) {
@@ -1803,6 +1843,64 @@ mod tests {
     fn test_parse_global() {
         let cli = Cli::try_parse_from(["rustbgpctl", "global"]).unwrap();
         assert!(matches!(cli.command, Command::Global));
+    }
+
+    #[test]
+    fn test_parse_config_apply_confirmed() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "config",
+            "apply",
+            "--from-file",
+            "candidate.toml",
+            "--expected-runtime-snapshot-token",
+            "kv1:old:1",
+            "--confirm-id",
+            "deploy-123",
+            "--confirm-timeout",
+            "120",
+        ])
+        .unwrap();
+        let Command::Config {
+            action:
+                ConfigAction::Apply {
+                    confirm_id,
+                    confirm_timeout_seconds,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected config apply");
+        };
+        assert_eq!(confirm_id.as_deref(), Some("deploy-123"));
+        assert_eq!(confirm_timeout_seconds, Some(120));
+    }
+
+    #[test]
+    fn test_parse_config_confirm_abort_status() {
+        let cli = Cli::try_parse_from(["rustbgpctl", "config", "confirm", "deploy-123"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Config {
+                action: ConfigAction::Confirm { .. }
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["rustbgpctl", "config", "abort", "deploy-123"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Config {
+                action: ConfigAction::Abort { .. }
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["rustbgpctl", "config", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Config {
+                action: ConfigAction::Status
+            }
+        ));
     }
 
     #[test]
