@@ -423,6 +423,14 @@ rustbgpctl --json config diff --from-file /tmp/new-config.toml
 rustbgpctl config plan --from-file /tmp/new-config.toml
 rustbgpctl config apply --from-file /tmp/new-config.toml \
   --expected-runtime-snapshot-token kv1:...
+rustbgpctl config apply --from-file /tmp/new-config.toml \
+  --expected-runtime-snapshot-token kv1:... \
+  --client-request-id deploy-2026-06-03-003 \
+  --confirm-id deploy-2026-06-03-003 \
+  --confirm-timeout 120
+rustbgpctl config status
+rustbgpctl config confirm deploy-2026-06-03-003
+rustbgpctl config abort deploy-2026-06-03-003
 ```
 
 ---

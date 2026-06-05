@@ -2,10 +2,21 @@ use crate::connection::Connection;
 use crate::error::CliError;
 use crate::proto::config_service_client::ConfigServiceClient;
 use crate::proto::{
-    ApplyConfigTransactionRequest, ConfigTransactionApplyResponse, ConfigTransactionPlanResponse,
-    ConfigTransactionPlanStatus, DiffRuntimeConfigRequest, DiffRuntimeConfigResponse,
-    PlanConfigTransactionRequest,
+    AbortConfigTransactionRequest, ApplyConfigTransactionRequest, ConfigTransactionApplyResponse,
+    ConfigTransactionConfirmation, ConfigTransactionConfirmationStatus,
+    ConfigTransactionPlanResponse, ConfigTransactionPlanStatus, ConfigTransactionStatusResponse,
+    ConfirmConfigTransactionRequest, DiffRuntimeConfigRequest, DiffRuntimeConfigResponse,
+    GetConfigTransactionStatusRequest, PlanConfigTransactionRequest,
 };
+
+pub struct ApplyOptions<'a> {
+    pub from_file: &'a str,
+    pub expected_runtime_snapshot_token: &'a str,
+    pub client_request_id: Option<&'a str>,
+    pub comment: Option<&'a str>,
+    pub confirm_id: Option<&'a str>,
+    pub confirm_timeout_seconds: Option<u32>,
+}
 
 pub async fn diff(connection: Connection, from_file: &str, json: bool) -> Result<(), CliError> {
     let candidate_toml = read_candidate_toml(from_file)?;
@@ -44,10 +55,7 @@ pub async fn plan(
         .into_inner();
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&plan_to_json(&resp)).unwrap()
-        );
+        print_json(plan_to_json(&resp))?;
     } else {
         print_plan_human(&resp);
     }
@@ -56,39 +64,103 @@ pub async fn plan(
 
 pub async fn apply(
     connection: Connection,
-    from_file: &str,
-    expected_runtime_snapshot_token: &str,
-    client_request_id: Option<&str>,
-    comment: Option<&str>,
+    options: ApplyOptions<'_>,
     json: bool,
 ) -> Result<(), CliError> {
-    if expected_runtime_snapshot_token.is_empty() {
+    if options.expected_runtime_snapshot_token.is_empty() {
         return Err(CliError::Argument(
             "--expected-runtime-snapshot-token must not be empty".to_string(),
         ));
     }
-    let candidate_toml = read_candidate_toml(from_file)?;
+    if let Some(confirm_id) = options.confirm_id {
+        validate_confirm_id(confirm_id)?;
+    }
+    let candidate_toml = read_candidate_toml(options.from_file)?;
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let resp = client
         .apply_config_transaction(ApplyConfigTransactionRequest {
             candidate_toml,
-            expected_runtime_snapshot_token: expected_runtime_snapshot_token.to_string(),
-            client_request_id: client_request_id.unwrap_or_default().to_string(),
-            comment: comment.unwrap_or_default().to_string(),
-            confirm_id: String::new(),
-            confirm_timeout_seconds: 0,
+            expected_runtime_snapshot_token: options.expected_runtime_snapshot_token.to_string(),
+            client_request_id: options.client_request_id.unwrap_or_default().to_string(),
+            comment: options.comment.unwrap_or_default().to_string(),
+            confirm_id: options.confirm_id.unwrap_or_default().to_string(),
+            confirm_timeout_seconds: options.confirm_timeout_seconds.unwrap_or_default(),
         })
         .await?
         .into_inner();
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&apply_to_json(&resp)).unwrap()
-        );
+        print_json(apply_to_json(&resp))?;
     } else {
         print_apply_human(&resp);
+    }
+    Ok(())
+}
+
+pub async fn confirm(connection: Connection, confirm_id: &str, json: bool) -> Result<(), CliError> {
+    validate_confirm_id(confirm_id)?;
+    let mut client =
+        ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .confirm_config_transaction(ConfirmConfigTransactionRequest {
+            confirm_id: confirm_id.to_string(),
+        })
+        .await?
+        .into_inner();
+
+    if json {
+        print_json(serde_json::json!({
+            "confirmation": confirmation_to_json(resp.confirmation.as_ref()),
+            "human_text": resp.human_text,
+        }))?;
+    } else {
+        print!("{}", resp.human_text);
+        print_confirmation(resp.confirmation.as_ref());
+    }
+    Ok(())
+}
+
+pub async fn abort(connection: Connection, confirm_id: &str, json: bool) -> Result<(), CliError> {
+    validate_confirm_id(confirm_id)?;
+    let mut client =
+        ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .abort_config_transaction(AbortConfigTransactionRequest {
+            confirm_id: confirm_id.to_string(),
+        })
+        .await?
+        .into_inner();
+
+    if json {
+        print_json(serde_json::json!({
+            "confirmation": confirmation_to_json(resp.confirmation.as_ref()),
+            "runtime_snapshot_token": resp.runtime_snapshot_token,
+            "human_text": resp.human_text,
+        }))?;
+    } else {
+        print!("{}", resp.human_text);
+        if !resp.runtime_snapshot_token.is_empty() {
+            println!("runtime_snapshot_token: {}", resp.runtime_snapshot_token);
+        }
+        print_confirmation(resp.confirmation.as_ref());
+    }
+    Ok(())
+}
+
+pub async fn status(connection: Connection, json: bool) -> Result<(), CliError> {
+    let mut client =
+        ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .get_config_transaction_status(GetConfigTransactionStatusRequest {})
+        .await?
+        .into_inner();
+
+    if json {
+        print_json(status_to_json(&resp))?;
+    } else {
+        print!("{}", resp.human_text);
+        print_confirmation(resp.confirmation.as_ref());
     }
     Ok(())
 }
@@ -96,6 +168,20 @@ pub async fn apply(
 fn read_candidate_toml(from_file: &str) -> Result<String, CliError> {
     std::fs::read_to_string(from_file)
         .map_err(|error| CliError::Argument(format!("failed to read {from_file}: {error}")))
+}
+
+fn validate_confirm_id(confirm_id: &str) -> Result<(), CliError> {
+    if confirm_id.is_empty() {
+        return Err(CliError::Argument(
+            "confirm_id must not be empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn print_json(value: serde_json::Value) -> Result<(), CliError> {
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
 }
 
 fn status_label(status: i32) -> &'static str {
@@ -106,6 +192,21 @@ fn status_label(status: i32) -> &'static str {
         ConfigTransactionPlanStatus::Noop => "noop",
         ConfigTransactionPlanStatus::Committable => "committable",
         ConfigTransactionPlanStatus::Rejected => "rejected",
+    }
+}
+
+fn confirmation_status_label(status: i32) -> &'static str {
+    match ConfigTransactionConfirmationStatus::try_from(status)
+        .unwrap_or(ConfigTransactionConfirmationStatus::Unspecified)
+    {
+        ConfigTransactionConfirmationStatus::Unspecified => "unspecified",
+        ConfigTransactionConfirmationStatus::None => "none",
+        ConfigTransactionConfirmationStatus::Pending => "pending",
+        ConfigTransactionConfirmationStatus::Confirmed => "confirmed",
+        ConfigTransactionConfirmationStatus::Aborted => "aborted",
+        ConfigTransactionConfirmationStatus::AutoReverted => "auto_reverted",
+        ConfigTransactionConfirmationStatus::AutoRevertFailed => "auto_revert_failed",
+        ConfigTransactionConfirmationStatus::AbortFailed => "abort_failed",
     }
 }
 
@@ -144,6 +245,29 @@ fn apply_to_json(resp: &ConfigTransactionApplyResponse) -> serde_json::Value {
         "runtime_snapshot_token": resp.runtime_snapshot_token,
         "committed_sections": resp.committed_sections,
         "human_text": resp.human_text,
+        "confirmation": confirmation_to_json(resp.confirmation.as_ref()),
+    })
+}
+
+fn confirmation_to_json(confirmation: Option<&ConfigTransactionConfirmation>) -> serde_json::Value {
+    let Some(confirmation) = confirmation else {
+        return serde_json::Value::Null;
+    };
+    serde_json::json!({
+        "status": confirmation_status_label(confirmation.status),
+        "confirm_id": confirmation.confirm_id,
+        "timeout_seconds": confirmation.timeout_seconds,
+        "deadline_unix_seconds": confirmation.deadline_unix_seconds,
+        "committed_sections": confirmation.committed_sections,
+        "runtime_snapshot_token": confirmation.runtime_snapshot_token,
+        "human_text": confirmation.human_text,
+    })
+}
+
+fn status_to_json(resp: &ConfigTransactionStatusResponse) -> serde_json::Value {
+    serde_json::json!({
+        "confirmation": confirmation_to_json(resp.confirmation.as_ref()),
+        "human_text": resp.human_text,
     })
 }
 
@@ -167,6 +291,41 @@ fn print_apply_human(resp: &ConfigTransactionApplyResponse) {
         &resp.runtime_snapshot_token,
         &[("committed_sections", &resp.committed_sections)],
     );
+    print_confirmation(resp.confirmation.as_ref());
+}
+
+fn print_confirmation(confirmation: Option<&ConfigTransactionConfirmation>) {
+    let Some(confirmation) = confirmation else {
+        return;
+    };
+    println!(
+        "confirmation_status: {}",
+        confirmation_status_label(confirmation.status)
+    );
+    if !confirmation.confirm_id.is_empty() {
+        println!("confirm_id: {}", confirmation.confirm_id);
+    }
+    if confirmation.timeout_seconds > 0 {
+        println!("confirm_timeout_seconds: {}", confirmation.timeout_seconds);
+    }
+    if confirmation.deadline_unix_seconds > 0 {
+        println!(
+            "confirm_deadline_unix_seconds: {}",
+            confirmation.deadline_unix_seconds
+        );
+    }
+    if !confirmation.runtime_snapshot_token.is_empty() {
+        println!(
+            "confirmation_runtime_snapshot_token: {}",
+            confirmation.runtime_snapshot_token
+        );
+    }
+    if !confirmation.committed_sections.is_empty() {
+        println!(
+            "confirmation_committed_sections: {}",
+            confirmation.committed_sections.join(", ")
+        );
+    }
 }
 
 fn print_transaction_tail(
@@ -243,10 +402,14 @@ mod tests {
 
         apply(
             connection,
-            path.to_str().unwrap(),
-            "kv1:old:1",
-            Some("deploy-123"),
-            Some("roll candidate"),
+            ApplyOptions {
+                from_file: path.to_str().unwrap(),
+                expected_runtime_snapshot_token: "kv1:old:1",
+                client_request_id: Some("deploy-123"),
+                comment: Some("roll candidate"),
+                confirm_id: Some("confirm-123"),
+                confirm_timeout_seconds: Some(120),
+            },
             true,
         )
         .await
@@ -261,6 +424,169 @@ mod tests {
         assert_eq!(request.expected_runtime_snapshot_token, "kv1:old:1");
         assert_eq!(request.client_request_id, "deploy-123");
         assert_eq!(request.comment, "roll candidate");
+        assert_eq!(request.confirm_id, "confirm-123");
+        assert_eq!(request.confirm_timeout_seconds, 120);
+    }
+
+    #[tokio::test]
+    async fn apply_rejects_empty_confirm_id_before_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let err = apply(
+            connection,
+            ApplyOptions {
+                from_file: "/does/not/matter.toml",
+                expected_runtime_snapshot_token: "kv1:old:1",
+                client_request_id: None,
+                comment: None,
+                confirm_id: Some(""),
+                confirm_timeout_seconds: Some(120),
+            },
+            true,
+        )
+        .await
+        .expect_err("empty confirm_id must fail before RPC");
+
+        assert!(
+            matches!(err, CliError::Argument(ref message) if message == "confirm_id must not be empty"),
+            "{err:?}"
+        );
+        assert_eq!(server.state.config_apply_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn confirm_sends_confirm_id() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        confirm(connection, "confirm-123", true).await.unwrap();
+
+        assert_eq!(server.state.config_confirm_calls.load(Ordering::SeqCst), 1);
+        let request = server
+            .state
+            .last_config_confirm
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        assert_eq!(request.confirm_id, "confirm-123");
+    }
+
+    #[tokio::test]
+    async fn confirm_rejects_empty_confirm_id_before_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let err = confirm(connection, "", true)
+            .await
+            .expect_err("empty confirm_id must fail before RPC");
+
+        assert!(
+            matches!(err, CliError::Argument(ref message) if message == "confirm_id must not be empty"),
+            "{err:?}"
+        );
+        assert_eq!(server.state.config_confirm_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn confirm_rpc_error_maps_to_cli_error() {
+        let server = spawn_mock_server(None).await;
+        *server.state.config_confirm_error.lock().await =
+            Some((tonic::Code::FailedPrecondition, "no pending".to_string()));
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let err = confirm(connection, "confirm-123", true)
+            .await
+            .expect_err("confirm RPC error must surface as CLI error");
+
+        assert!(
+            matches!(err, CliError::Rpc(ref message) if message.contains("no pending")),
+            "{err:?}"
+        );
+        assert_eq!(server.state.config_confirm_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn abort_sends_confirm_id() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        abort(connection, "confirm-123", true).await.unwrap();
+
+        assert_eq!(server.state.config_abort_calls.load(Ordering::SeqCst), 1);
+        let request = server.state.last_config_abort.lock().await.clone().unwrap();
+        assert_eq!(request.confirm_id, "confirm-123");
+    }
+
+    #[tokio::test]
+    async fn abort_rejects_empty_confirm_id_before_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let err = abort(connection, "", true)
+            .await
+            .expect_err("empty confirm_id must fail before RPC");
+
+        assert!(
+            matches!(err, CliError::Argument(ref message) if message == "confirm_id must not be empty"),
+            "{err:?}"
+        );
+        assert_eq!(server.state.config_abort_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn abort_rpc_error_maps_to_cli_error() {
+        let server = spawn_mock_server(None).await;
+        *server.state.config_abort_error.lock().await =
+            Some((tonic::Code::Internal, "abort failed".to_string()));
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let err = abort(connection, "confirm-123", true)
+            .await
+            .expect_err("abort RPC error must surface as CLI error");
+
+        assert!(
+            matches!(err, CliError::Rpc(ref message) if message.contains("abort failed")),
+            "{err:?}"
+        );
+        assert_eq!(server.state.config_abort_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn status_calls_config_status_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        status(connection, true).await.unwrap();
+
+        assert_eq!(server.state.config_status_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn status_rpc_error_maps_to_cli_error() {
+        let server = spawn_mock_server(None).await;
+        *server.state.config_status_error.lock().await =
+            Some((tonic::Code::Internal, "status unavailable".to_string()));
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let err = status(connection, true)
+            .await
+            .expect_err("status RPC error must surface as CLI error");
+
+        assert!(
+            matches!(err, CliError::Rpc(ref message) if message.contains("status unavailable")),
+            "{err:?}"
+        );
+        assert_eq!(server.state.config_status_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn confirmation_status_labels_include_abort_failed() {
+        assert_eq!(
+            confirmation_status_label(ConfigTransactionConfirmationStatus::AbortFailed as i32),
+            "abort_failed"
+        );
     }
 
     #[test]
@@ -301,7 +627,15 @@ mod tests {
             runtime_snapshot_token: "kv1:committed:2".to_string(),
             committed_sections: vec!["[[dynamic_neighbors]]".to_string()],
             human_text: "Committed [[dynamic_neighbors]] transaction.\n".to_string(),
-            confirmation: None,
+            confirmation: Some(ConfigTransactionConfirmation {
+                status: ConfigTransactionConfirmationStatus::Pending as i32,
+                confirm_id: "confirm-123".to_string(),
+                timeout_seconds: 120,
+                deadline_unix_seconds: 1_787_000_000,
+                committed_sections: vec!["[[dynamic_neighbors]]".to_string()],
+                runtime_snapshot_token: "kv1:committed:2".to_string(),
+                human_text: "Confirmed config transaction is pending confirmation.".to_string(),
+            }),
         });
 
         assert_eq!(value["status"], "committable");
@@ -310,6 +644,13 @@ mod tests {
         assert_eq!(
             value["human_text"],
             "Committed [[dynamic_neighbors]] transaction.\n"
+        );
+        assert_eq!(value["confirmation"]["status"], "pending");
+        assert_eq!(value["confirmation"]["confirm_id"], "confirm-123");
+        assert_eq!(value["confirmation"]["timeout_seconds"], 120);
+        assert_eq!(
+            value["confirmation"]["committed_sections"][0],
+            "[[dynamic_neighbors]]"
         );
     }
 }

@@ -6,6 +6,7 @@ pub enum CliError {
     Rpc(String),
     Argument(String),
     Io(std::io::Error),
+    Json(serde_json::Error),
 }
 
 impl fmt::Display for CliError {
@@ -16,6 +17,7 @@ impl fmt::Display for CliError {
             CliError::Rpc(msg) => write!(f, "{msg}"),
             CliError::Argument(msg) => write!(f, "{msg}"),
             CliError::Io(e) => write!(f, "{e}"),
+            CliError::Json(e) => write!(f, "failed to encode JSON output: {e}"),
         }
     }
 }
@@ -47,5 +49,11 @@ impl From<tonic::Status> for CliError {
 impl From<std::io::Error> for CliError {
     fn from(e: std::io::Error) -> Self {
         CliError::Io(e)
+    }
+}
+
+impl From<serde_json::Error> for CliError {
+    fn from(e: serde_json::Error) -> Self {
+        CliError::Json(e)
     }
 }
