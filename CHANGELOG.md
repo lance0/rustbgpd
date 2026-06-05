@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.36.0] — 2026-06-05
+
 ### Added
 
 - **Short CLI binary (`rbgp`).** Release artifacts and container images now ship
@@ -54,13 +56,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **`rustbgpctl` confirmed config workflow input checks.** The CLI now rejects
+- **`rbgp` confirmed config workflow input checks.** The CLI now rejects
   invalid confirmed-commit handles and over-limit `--confirm-timeout` values
   before reading the candidate file or sending an RPC, matching the daemon-side
   guardrails for safe deploys.
 
 - **CLI JSON serialization failures are errors, not panics.** Non-config
-  `rustbgpctl` JSON renderers now route `serde_json` serialization failures
+  `rbgp` JSON renderers now route `serde_json` serialization failures
   through `CliError::Json` instead of `expect(...)`, including route/event JSON,
   mutation result JSON, and streaming watch output. Operator-visible JSON shapes
   are unchanged.
