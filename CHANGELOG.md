@@ -11,6 +11,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Commit-confirmed config transactions.** `ApplyConfigTransaction` now accepts
+  a `confirm_id` plus optional `confirm_timeout_seconds` to apply a candidate
+  immediately while starting a confirm timer. `ConfirmConfigTransaction` makes
+  the change permanent, `AbortConfigTransaction` rolls it back immediately, and
+  timer expiry automatically re-applies the pre-commit runtime snapshot through
+  the same transaction executor. `GetConfigTransactionStatus` exposes the
+  redacted pending/last lifecycle state, including failed abort/auto-revert
+  rollback attempts. While a confirmed transaction is applying or pending,
+  persisted runtime config mutators are rejected with `FAILED_PRECONDITION` so
+  timeout rollback cannot overwrite a later ad hoc config change.
+
 - **Live-impact policy config transactions.** `ApplyConfigTransaction` can now
   commit policy definitions, neighbor sets, peer groups, and global named
   policy-chain edits that move existing static neighbors' resolved import/export

@@ -9,7 +9,7 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 | Service | Scope |
 |---------|-------|
 | **GlobalService** | Read daemon identity and bootstrap config |
-| **ConfigService** | Diff a candidate config against the running daemon's effective view |
+| **ConfigService** | Diff, plan, apply, confirm, abort, and inspect runtime config transactions |
 | **NeighborService** | Dynamic peer CRUD, enable/disable, soft reset |
 | **PolicyService** | Named policy CRUD, neighbor-set CRUD, global/per-neighbor chain assignment, and import-policy explain (`ExplainImportPolicy`) |
 | **PeerGroupService** | Peer-group CRUD, neighbor-to-group assignment |

@@ -13,7 +13,9 @@ use crate::peer_types::{
 };
 use crate::policy_helpers::{proto_statement_to_input, validate_policy_action};
 use crate::proto;
-use crate::server::{AccessMode, read_only_rejection};
+use crate::server::{
+    AccessMode, ConfigMutationGateFn, check_config_mutation_gate, read_only_rejection,
+};
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -240,6 +242,7 @@ pub struct PolicyService {
     access_mode: AccessMode,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
+    config_mutation_gate: Option<ConfigMutationGateFn>,
 }
 
 impl PolicyService {
@@ -248,12 +251,18 @@ impl PolicyService {
         access_mode: AccessMode,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
+        config_mutation_gate: Option<ConfigMutationGateFn>,
     ) -> Self {
         Self {
             access_mode,
             peer_mgr_tx,
             config_tx,
+            config_mutation_gate,
         }
+    }
+
+    async fn check_mutation_gate(&self, operation: &'static str) -> Result<(), Status> {
+        check_config_mutation_gate(&self.config_mutation_gate, operation).await
     }
 }
 
@@ -319,6 +328,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         if req.name.trim().is_empty() {
             return Err(Status::invalid_argument("name is required"));
         }
+        self.check_mutation_gate("PolicyService.SetPolicy").await?;
         let definition = req
             .definition
             .ok_or_else(|| Status::invalid_argument("definition is required"))?;
@@ -363,6 +373,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             return Err(Status::invalid_argument("name is required"));
         }
 
+        self.check_mutation_gate("PolicyService.DeletePolicy")
+            .await?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -460,6 +472,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         if req.name.trim().is_empty() {
             return Err(Status::invalid_argument("name is required"));
         }
+        self.check_mutation_gate("PolicyService.SetNeighborSet")
+            .await?;
         let definition = req
             .definition
             .ok_or_else(|| Status::invalid_argument("definition is required"))?;
@@ -508,6 +522,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             return Err(Status::invalid_argument("name is required"));
         }
 
+        self.check_mutation_gate("PolicyService.DeleteNeighborSet")
+            .await?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
@@ -564,6 +580,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             return Err(status);
         }
         let req = request.into_inner();
+        self.check_mutation_gate("PolicyService.SetGlobalImportChain")
+            .await?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let persisted = persist_permit.as_ref().map(|_| req.policy_names.clone());
 
@@ -595,6 +613,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             return Err(status);
         }
         let req = request.into_inner();
+        self.check_mutation_gate("PolicyService.SetGlobalExportChain")
+            .await?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let persisted = persist_permit.as_ref().map(|_| req.policy_names.clone());
 
@@ -625,6 +645,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         if let Some(status) = read_only_rejection(self.access_mode) {
             return Err(status);
         }
+        self.check_mutation_gate("PolicyService.ClearGlobalImportChain")
+            .await?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
@@ -650,6 +672,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         if let Some(status) = read_only_rejection(self.access_mode) {
             return Err(status);
         }
+        self.check_mutation_gate("PolicyService.ClearGlobalExportChain")
+            .await?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
@@ -708,6 +732,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .address
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+        self.check_mutation_gate("PolicyService.SetNeighborImportChain")
+            .await?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let persisted = persist_permit.as_ref().map(|_| req.policy_names.clone());
 
@@ -751,6 +777,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .address
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+        self.check_mutation_gate("PolicyService.SetNeighborExportChain")
+            .await?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let persisted = persist_permit.as_ref().map(|_| req.policy_names.clone());
 
@@ -794,6 +822,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .address
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+        self.check_mutation_gate("PolicyService.ClearNeighborImportChain")
+            .await?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -832,6 +862,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .address
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+        self.check_mutation_gate("PolicyService.ClearNeighborExportChain")
+            .await?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -1000,7 +1032,7 @@ mod tests {
     async fn set_policy_emits_config_event_after_runtime_success() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx));
+        let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
 
         tokio::spawn(async move {
             if let Some(PeerManagerCommand::SetPolicy {
@@ -1041,7 +1073,7 @@ mod tests {
     async fn set_policy_rejected_on_read_only_listener() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx));
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx), None);
 
         let err = PolicyServiceRpc::set_policy(
             &svc,
@@ -1062,7 +1094,7 @@ mod tests {
     async fn policy_and_neighbor_set_mutations_rejected_on_read_only_listener() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx));
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx), None);
 
         let err = PolicyServiceRpc::delete_policy(
             &svc,
@@ -1103,7 +1135,7 @@ mod tests {
     async fn global_chain_mutations_rejected_on_read_only_listener() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx));
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx), None);
 
         let err = PolicyServiceRpc::set_global_import_chain(
             &svc,
@@ -1149,7 +1181,7 @@ mod tests {
     async fn neighbor_chain_mutations_rejected_on_read_only_listener() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx));
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx), None);
 
         let err = PolicyServiceRpc::set_neighbor_import_chain(
             &svc,
@@ -1201,7 +1233,7 @@ mod tests {
     async fn delete_policy_in_use_maps_to_failed_precondition() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx));
+        let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
 
         tokio::spawn(async move {
             if let Some(PeerManagerCommand::DeletePolicy { name, reply }) = peer_rx.recv().await {

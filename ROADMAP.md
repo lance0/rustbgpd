@@ -102,11 +102,8 @@ Later for what remains.
   `rustbgpctl config plan/apply` drives the text/JSON operator workflow. Next
   useful slices are the remaining hot-reload sections whose live-impact rollback
   semantics are ready, the dynamic-range live-policy executor (deferred pending
-  longest-prefix-match accept attribution), and a **commit-confirmed / confirm-timer
-  auto-revert** safety net: today rollback only fires on apply/persist *failure*,
-  not on a change that applies cleanly but breaks reachability — Junos/IOS-XR/BIRD
-  and NETCONF (RFC 6241 §8.4) all guard that with a confirm timer, and ADR-0076
-  is the natural home for it.
+  longest-prefix-match accept attribution), and CLI/status polish on top of the
+  commit-confirmed core.
   gNMI `Set` no longer needs a parallel commit primitive; the next slice is an
   OpenConfig-to-candidate-TOML mapping that feeds this transaction model. Exit:
   atomic commit where supported,
@@ -490,6 +487,12 @@ branch is between features.
   persist with ack, and restore live chains plus the snapshot on failure.
   Dynamic-range policy impact and peer-group/session reshapes remain rejected
   until dedicated executors exist.
+- [x] **Config transaction commit-confirmed core.**
+  `ApplyConfigTransaction` can now enter a singleton pending-confirm state with
+  `confirm_id` and a bounded confirm timer. Confirm makes the change permanent;
+  abort or timer expiry rolls back by applying the captured pre-commit runtime
+  snapshot through the same transaction executor. Persisted runtime config
+  mutators are fenced while a confirmed transaction is applying or pending.
 - [x] **Config transaction catalog snapshot executor.** ADR-0076 can now commit
   catalog-only policy definitions, policy `neighbor_sets`, `peer_groups`, and
   global named policy-chain assignments under the same

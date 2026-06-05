@@ -336,6 +336,68 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
                 runtime_snapshot_token: "kv1:committed:2".to_string(),
                 committed_sections: vec!["[[fib_tables]]".to_string()],
                 human_text: "Committed [[fib_tables]] transaction.\n".to_string(),
+                confirmation: None,
+            },
+        ))
+    }
+
+    async fn confirm_config_transaction(
+        &self,
+        request: Request<server_proto::ConfirmConfigTransactionRequest>,
+    ) -> Result<Response<server_proto::ConfirmConfigTransactionResponse>, Status> {
+        Ok(Response::new(
+            server_proto::ConfirmConfigTransactionResponse {
+                confirmation: Some(server_proto::ConfigTransactionConfirmation {
+                    status: server_proto::ConfigTransactionConfirmationStatus::Confirmed as i32,
+                    confirm_id: request.into_inner().confirm_id,
+                    timeout_seconds: 120,
+                    deadline_unix_seconds: 0,
+                    committed_sections: vec!["[[fib_tables]]".to_string()],
+                    runtime_snapshot_token: "kv1:committed:2".to_string(),
+                    human_text: "Confirmed config transaction committed permanently.".to_string(),
+                }),
+                human_text: "Confirmed config transaction committed permanently.\n".to_string(),
+            },
+        ))
+    }
+
+    async fn abort_config_transaction(
+        &self,
+        request: Request<server_proto::AbortConfigTransactionRequest>,
+    ) -> Result<Response<server_proto::AbortConfigTransactionResponse>, Status> {
+        Ok(Response::new(
+            server_proto::AbortConfigTransactionResponse {
+                confirmation: Some(server_proto::ConfigTransactionConfirmation {
+                    status: server_proto::ConfigTransactionConfirmationStatus::Aborted as i32,
+                    confirm_id: request.into_inner().confirm_id,
+                    timeout_seconds: 120,
+                    deadline_unix_seconds: 0,
+                    committed_sections: vec!["[[fib_tables]]".to_string()],
+                    runtime_snapshot_token: "kv1:rollback:3".to_string(),
+                    human_text: "Aborted confirmed config transaction.".to_string(),
+                }),
+                runtime_snapshot_token: "kv1:rollback:3".to_string(),
+                human_text: "Aborted confirmed config transaction.\n".to_string(),
+            },
+        ))
+    }
+
+    async fn get_config_transaction_status(
+        &self,
+        _request: Request<server_proto::GetConfigTransactionStatusRequest>,
+    ) -> Result<Response<server_proto::ConfigTransactionStatusResponse>, Status> {
+        Ok(Response::new(
+            server_proto::ConfigTransactionStatusResponse {
+                confirmation: Some(server_proto::ConfigTransactionConfirmation {
+                    status: server_proto::ConfigTransactionConfirmationStatus::None as i32,
+                    confirm_id: String::new(),
+                    timeout_seconds: 0,
+                    deadline_unix_seconds: 0,
+                    committed_sections: Vec::new(),
+                    runtime_snapshot_token: String::new(),
+                    human_text: "No confirmed config transaction is pending.".to_string(),
+                }),
+                human_text: "No confirmed config transaction is pending.\n".to_string(),
             },
         ))
     }

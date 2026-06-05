@@ -4,19 +4,26 @@ use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
 use crate::audit::{
-    apply_config_transaction_summary, diff_runtime_config_summary, plan_config_transaction_summary,
-    set_request_summary,
+    abort_config_transaction_summary, apply_config_transaction_summary,
+    confirm_config_transaction_summary, diff_runtime_config_summary,
+    get_config_transaction_status_summary, plan_config_transaction_summary, set_request_summary,
 };
 use crate::peer_types::{
     PeerManagerCommand, RuntimeConfigDiff, RuntimeConfigTransactionPlan,
     RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus,
 };
 use crate::proto;
-use crate::server::{ConfigTransactionApplyError, ConfigTransactionApplyFn};
+use crate::server::{
+    ConfigTransactionAbortFn, ConfigTransactionApplyError, ConfigTransactionApplyFn,
+    ConfigTransactionConfirmFn, ConfigTransactionStatusFn,
+};
 
 pub struct ConfigService {
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     transaction_apply: Option<ConfigTransactionApplyFn>,
+    transaction_confirm: Option<ConfigTransactionConfirmFn>,
+    transaction_abort: Option<ConfigTransactionAbortFn>,
+    transaction_status: Option<ConfigTransactionStatusFn>,
 }
 
 impl ConfigService {
@@ -24,14 +31,23 @@ impl ConfigService {
         Self {
             peer_mgr_tx,
             transaction_apply: None,
+            transaction_confirm: None,
+            transaction_abort: None,
+            transaction_status: None,
         }
     }
 
-    pub(crate) fn with_transaction_apply(
+    pub(crate) fn with_transaction_hooks(
         mut self,
         transaction_apply: Option<ConfigTransactionApplyFn>,
+        transaction_confirm: Option<ConfigTransactionConfirmFn>,
+        transaction_abort: Option<ConfigTransactionAbortFn>,
+        transaction_status: Option<ConfigTransactionStatusFn>,
     ) -> Self {
         self.transaction_apply = transaction_apply;
+        self.transaction_confirm = transaction_confirm;
+        self.transaction_abort = transaction_abort;
+        self.transaction_status = transaction_status;
         self
     }
 }
@@ -163,6 +179,8 @@ impl proto::config_service_server::ConfigService for ConfigService {
                 &request.get_ref().expected_runtime_snapshot_token,
                 &request.get_ref().client_request_id,
                 &request.get_ref().comment,
+                &request.get_ref().confirm_id,
+                request.get_ref().confirm_timeout_seconds,
             ),
         );
         let request = request.into_inner();
@@ -172,6 +190,63 @@ impl proto::config_service_server::ConfigService for ConfigService {
             ));
         };
         transaction_apply(request)
+            .await
+            .map(Response::new)
+            .map_err(ConfigTransactionApplyError::into_status)
+    }
+
+    async fn confirm_config_transaction(
+        &self,
+        request: Request<proto::ConfirmConfigTransactionRequest>,
+    ) -> Result<Response<proto::ConfirmConfigTransactionResponse>, Status> {
+        set_request_summary(
+            &request,
+            confirm_config_transaction_summary(&request.get_ref().confirm_id),
+        );
+        let request = request.into_inner();
+        let Some(transaction_confirm) = &self.transaction_confirm else {
+            return Err(Status::failed_precondition(
+                "ConfigService.ConfirmConfigTransaction executor is unavailable",
+            ));
+        };
+        transaction_confirm(request)
+            .await
+            .map(Response::new)
+            .map_err(ConfigTransactionApplyError::into_status)
+    }
+
+    async fn abort_config_transaction(
+        &self,
+        request: Request<proto::AbortConfigTransactionRequest>,
+    ) -> Result<Response<proto::AbortConfigTransactionResponse>, Status> {
+        set_request_summary(
+            &request,
+            abort_config_transaction_summary(&request.get_ref().confirm_id),
+        );
+        let request = request.into_inner();
+        let Some(transaction_abort) = &self.transaction_abort else {
+            return Err(Status::failed_precondition(
+                "ConfigService.AbortConfigTransaction executor is unavailable",
+            ));
+        };
+        transaction_abort(request)
+            .await
+            .map(Response::new)
+            .map_err(ConfigTransactionApplyError::into_status)
+    }
+
+    async fn get_config_transaction_status(
+        &self,
+        request: Request<proto::GetConfigTransactionStatusRequest>,
+    ) -> Result<Response<proto::ConfigTransactionStatusResponse>, Status> {
+        set_request_summary(&request, get_config_transaction_status_summary());
+        let request = request.into_inner();
+        let Some(transaction_status) = &self.transaction_status else {
+            return Err(Status::failed_precondition(
+                "ConfigService.GetConfigTransactionStatus executor is unavailable",
+            ));
+        };
+        transaction_status(request)
             .await
             .map(Response::new)
             .map_err(ConfigTransactionApplyError::into_status)
@@ -400,6 +475,8 @@ mod tests {
             expected_runtime_snapshot_token: "kv1:abc:9".to_string(),
             client_request_id: "deploy-42".to_string(),
             comment: "contains sensitive context".to_string(),
+            confirm_id: String::new(),
+            confirm_timeout_seconds: 0,
         });
         request.extensions_mut().insert(audit_handle.clone());
 
@@ -417,20 +494,28 @@ mod tests {
     #[tokio::test]
     async fn apply_config_transaction_forwards_to_hook() {
         let (tx, _rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx).with_transaction_apply(Some(Arc::new(|request| {
-            Box::pin(async move {
-                assert_eq!(request.candidate_toml, "candidate");
-                assert_eq!(request.expected_runtime_snapshot_token, "kv1:abc:9");
-                assert_eq!(request.client_request_id, "deploy-42");
-                assert_eq!(request.comment, "change note");
-                Ok(proto::ConfigTransactionApplyResponse {
-                    status: proto::ConfigTransactionPlanStatus::Committable.into(),
-                    runtime_snapshot_token: "kv1:def:10".to_string(),
-                    committed_sections: vec!["[[fib_tables]]".to_string()],
-                    human_text: "Committed [[fib_tables]] transaction.\n".to_string(),
+        let svc = ConfigService::new(tx).with_transaction_hooks(
+            Some(Arc::new(|request| {
+                Box::pin(async move {
+                    assert_eq!(request.candidate_toml, "candidate");
+                    assert_eq!(request.expected_runtime_snapshot_token, "kv1:abc:9");
+                    assert_eq!(request.client_request_id, "deploy-42");
+                    assert_eq!(request.comment, "change note");
+                    assert!(request.confirm_id.is_empty());
+                    assert_eq!(request.confirm_timeout_seconds, 0);
+                    Ok(proto::ConfigTransactionApplyResponse {
+                        status: proto::ConfigTransactionPlanStatus::Committable.into(),
+                        runtime_snapshot_token: "kv1:def:10".to_string(),
+                        committed_sections: vec!["[[fib_tables]]".to_string()],
+                        human_text: "Committed [[fib_tables]] transaction.\n".to_string(),
+                        confirmation: None,
+                    })
                 })
-            })
-        })));
+            })),
+            None,
+            None,
+            None,
+        );
 
         let resp = svc
             .apply_config_transaction(Request::new(proto::ApplyConfigTransactionRequest {
@@ -438,6 +523,8 @@ mod tests {
                 expected_runtime_snapshot_token: "kv1:abc:9".to_string(),
                 client_request_id: "deploy-42".to_string(),
                 comment: "change note".to_string(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             }))
             .await
             .unwrap()
@@ -449,6 +536,128 @@ mod tests {
         );
         assert_eq!(resp.runtime_snapshot_token, "kv1:def:10");
         assert_eq!(resp.committed_sections, vec!["[[fib_tables]]"]);
+    }
+
+    #[tokio::test]
+    async fn confirmed_transaction_control_hooks_forward_requests() {
+        let (tx, _rx) = mpsc::channel(1);
+        let svc = ConfigService::new(tx).with_transaction_hooks(
+            None,
+            Some(Arc::new(|request| {
+                Box::pin(async move {
+                    assert_eq!(request.confirm_id, "deploy-42");
+                    Ok(proto::ConfirmConfigTransactionResponse {
+                        confirmation: Some(proto::ConfigTransactionConfirmation {
+                            status: proto::ConfigTransactionConfirmationStatus::Confirmed.into(),
+                            confirm_id: request.confirm_id,
+                            timeout_seconds: 60,
+                            deadline_unix_seconds: 123,
+                            committed_sections: vec!["[[neighbors]] modify".to_string()],
+                            runtime_snapshot_token: "kv1:def:10".to_string(),
+                            human_text: "confirmed".to_string(),
+                        }),
+                        human_text: "confirmed\n".to_string(),
+                    })
+                })
+            })),
+            Some(Arc::new(|request| {
+                Box::pin(async move {
+                    assert_eq!(request.confirm_id, "deploy-42");
+                    Ok(proto::AbortConfigTransactionResponse {
+                        confirmation: Some(proto::ConfigTransactionConfirmation {
+                            status: proto::ConfigTransactionConfirmationStatus::Aborted.into(),
+                            confirm_id: request.confirm_id,
+                            timeout_seconds: 60,
+                            deadline_unix_seconds: 123,
+                            committed_sections: vec!["[[neighbors]] modify".to_string()],
+                            runtime_snapshot_token: "kv1:rollback:11".to_string(),
+                            human_text: "aborted".to_string(),
+                        }),
+                        runtime_snapshot_token: "kv1:rollback:11".to_string(),
+                        human_text: "aborted\n".to_string(),
+                    })
+                })
+            })),
+            Some(Arc::new(|_request| {
+                Box::pin(async move {
+                    Ok(proto::ConfigTransactionStatusResponse {
+                        confirmation: Some(proto::ConfigTransactionConfirmation {
+                            status: proto::ConfigTransactionConfirmationStatus::Pending.into(),
+                            confirm_id: "deploy-42".to_string(),
+                            timeout_seconds: 60,
+                            deadline_unix_seconds: 123,
+                            committed_sections: vec!["[[neighbors]] modify".to_string()],
+                            runtime_snapshot_token: "kv1:def:10".to_string(),
+                            human_text: "pending".to_string(),
+                        }),
+                        human_text: "pending\n".to_string(),
+                    })
+                })
+            })),
+        );
+
+        let confirmed = svc
+            .confirm_config_transaction(Request::new(proto::ConfirmConfigTransactionRequest {
+                confirm_id: "deploy-42".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            confirmed.confirmation.unwrap().status,
+            proto::ConfigTransactionConfirmationStatus::Confirmed as i32
+        );
+
+        let aborted = svc
+            .abort_config_transaction(Request::new(proto::AbortConfigTransactionRequest {
+                confirm_id: "deploy-42".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(aborted.runtime_snapshot_token, "kv1:rollback:11");
+
+        let status = svc
+            .get_config_transaction_status(Request::new(
+                proto::GetConfigTransactionStatusRequest {},
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            status.confirmation.unwrap().status,
+            proto::ConfigTransactionConfirmationStatus::Pending as i32
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmed_transaction_control_hooks_fail_closed_without_executor() {
+        let (tx, _rx) = mpsc::channel(1);
+        let svc = ConfigService::new(tx);
+
+        let err = svc
+            .confirm_config_transaction(Request::new(proto::ConfirmConfigTransactionRequest {
+                confirm_id: "deploy-42".to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+
+        let err = svc
+            .abort_config_transaction(Request::new(proto::AbortConfigTransactionRequest {
+                confirm_id: "deploy-42".to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+
+        let err = svc
+            .get_config_transaction_status(Request::new(
+                proto::GetConfigTransactionStatusRequest {},
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     }
 
     #[tokio::test]

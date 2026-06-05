@@ -14,7 +14,9 @@ use crate::peer_types::{
     PeerManagerNeighborConfig, RemovedDynamicRange,
 };
 use crate::proto;
-use crate::server::{AccessMode, read_only_rejection};
+use crate::server::{
+    AccessMode, ConfigMutationGateFn, check_config_mutation_gate, read_only_rejection,
+};
 use rustbgpd_rib::RibUpdate;
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -59,6 +61,7 @@ pub struct NeighborService {
     rib_tx: mpsc::Sender<RibUpdate>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
     runtime_config_lock: Arc<Mutex<()>>,
+    config_mutation_gate: Option<ConfigMutationGateFn>,
 }
 
 impl NeighborService {
@@ -78,6 +81,7 @@ impl NeighborService {
             rib_tx,
             config_tx,
             Arc::new(Mutex::new(())),
+            None,
         )
     }
 
@@ -92,6 +96,7 @@ impl NeighborService {
         rib_tx: mpsc::Sender<RibUpdate>,
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
         runtime_config_lock: Arc<Mutex<()>>,
+        config_mutation_gate: Option<ConfigMutationGateFn>,
     ) -> Self {
         Self {
             local_asn,
@@ -100,6 +105,7 @@ impl NeighborService {
             rib_tx,
             config_tx,
             runtime_config_lock,
+            config_mutation_gate,
         }
     }
 }
@@ -543,8 +549,11 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let peer_key = PeerKey::new(peer_config.address, peer_config.interface.clone());
         let peer_mgr_tx = self.peer_mgr_tx.clone();
         let runtime_config_lock = self.runtime_config_lock.clone();
+        let config_mutation_gate = self.config_mutation_gate.clone();
         let join = tokio::spawn(async move {
             let _guard = runtime_config_lock.lock().await;
+            check_config_mutation_gate(&config_mutation_gate, "NeighborService.AddNeighbor")
+                .await?;
             add_static_peer(&peer_mgr_tx, peer_config.clone()).await?;
 
             // Keep the shared runtime-config lock held until the TOML write is
@@ -590,8 +599,11 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
 
         let peer_mgr_tx = self.peer_mgr_tx.clone();
         let runtime_config_lock = self.runtime_config_lock.clone();
+        let config_mutation_gate = self.config_mutation_gate.clone();
         let join = tokio::spawn(async move {
             let _guard = runtime_config_lock.lock().await;
+            check_config_mutation_gate(&config_mutation_gate, "NeighborService.DeleteNeighbor")
+                .await?;
             let removed = delete_static_peer(&peer_mgr_tx, peer.clone(), false).await?;
 
             // Hold the shared runtime-config lock until persistence completes
@@ -861,8 +873,11 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
 
         let peer_mgr_tx = self.peer_mgr_tx.clone();
         let runtime_config_lock = self.runtime_config_lock.clone();
+        let config_mutation_gate = self.config_mutation_gate.clone();
         let join = tokio::spawn(async move {
             let _guard = runtime_config_lock.lock().await;
+            check_config_mutation_gate(&config_mutation_gate, "NeighborService.AddDynamicNeighbor")
+                .await?;
             add_dynamic_range(
                 &peer_mgr_tx,
                 range.prefix.clone(),
@@ -921,8 +936,14 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
 
         let peer_mgr_tx = self.peer_mgr_tx.clone();
         let runtime_config_lock = self.runtime_config_lock.clone();
+        let config_mutation_gate = self.config_mutation_gate.clone();
         let join = tokio::spawn(async move {
             let _guard = runtime_config_lock.lock().await;
+            check_config_mutation_gate(
+                &config_mutation_gate,
+                "NeighborService.DeleteDynamicNeighbor",
+            )
+            .await?;
             let removed = delete_dynamic_range(&peer_mgr_tx, prefix.clone()).await?;
 
             // Queue persistence inside the spawned task so cancellation after

@@ -76,6 +76,8 @@ pub async fn apply(
             expected_runtime_snapshot_token: expected_runtime_snapshot_token.to_string(),
             client_request_id: client_request_id.unwrap_or_default().to_string(),
             comment: comment.unwrap_or_default().to_string(),
+            confirm_id: String::new(),
+            confirm_timeout_seconds: 0,
         })
         .await?
         .into_inner();
@@ -299,6 +301,7 @@ mod tests {
             runtime_snapshot_token: "kv1:committed:2".to_string(),
             committed_sections: vec!["[[dynamic_neighbors]]".to_string()],
             human_text: "Committed [[dynamic_neighbors]] transaction.\n".to_string(),
+            confirmation: None,
         });
 
         assert_eq!(value["status"], "committable");

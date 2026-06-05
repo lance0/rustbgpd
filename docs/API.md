@@ -149,7 +149,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | Service | Read-only RPCs | Mutating RPCs rejected on `read_only` |
 |---------|----------------|---------------------------------------|
 | `GlobalService` | `GetGlobal` | `SetGlobal` |
-| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction` | `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain changes, or pure static-neighbor live policy-chain impact; mixed or unsupported candidates rejected without mutation) |
+| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `GetConfigTransactionStatus` | `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain changes, or pure static-neighbor live policy-chain impact; mixed or unsupported candidates rejected without mutation), `ConfirmConfigTransaction`, `AbortConfigTransaction` |
 | `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
@@ -249,6 +249,9 @@ and receive only redacted diff / plan output.
 | `DiffRuntimeConfig` | Validate candidate TOML and compare it against the daemon's live runtime config snapshot |
 | `PlanConfigTransaction` | Validate candidate TOML, return a runtime snapshot token, and classify v1 transaction support without mutating daemon state |
 | `ApplyConfigTransaction` | Operator-tier commit entry point for ADR-0076 config transactions; currently commits one pure runtime family at a time: full-set `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify changes, catalog-only policy/neighbor-set/peer-group/global-chain changes, or pure static-neighbor live policy-chain impact |
+| `ConfirmConfigTransaction` | Confirm a pending confirmed transaction before its timer expires |
+| `AbortConfigTransaction` | Abort a pending confirmed transaction and roll back immediately |
+| `GetConfigTransactionStatus` | Return redacted confirmed-transaction lifecycle state |
 
 `DiffRuntimeConfigResponse` contains boolean summary fields, a
 plain-text `human_text` rendering, and `diff_json` using the
@@ -304,6 +307,18 @@ Use the returned `runtime_snapshot_token` on the apply request. The daemon
 re-plans under the shared runtime-config coordinator before committing; a stale
 token fails without mutation. `client_request_id` and `comment` are audit
 metadata only and are not logged verbatim.
+To use a commit-confirmed workflow, include `confirm_id` on
+`ApplyConfigTransaction`; `confirm_timeout_seconds` defaults to 600 when omitted
+and is capped at 86400. While a confirmed transaction is applying or awaiting
+confirmation, other persisted runtime config mutators fail with
+`FAILED_PRECONDITION`. Call `ConfirmConfigTransaction` with the same
+`confirm_id` to make the change permanent, or `AbortConfigTransaction` to roll
+back immediately. If the timer expires first, the daemon re-applies the
+pre-commit runtime snapshot through the same transaction executor and persists
+the rollback. Pending confirmed-transaction state is process-local; after daemon
+restart, re-plan and re-apply. `GetConfigTransactionStatus` reports the current
+pending transaction or the last terminal lifecycle result, including failed
+abort/auto-revert attempts when rollback itself could not complete.
 
 Apply a pure full-set `[[fib_tables]]` transaction:
 
@@ -331,6 +346,41 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   "comment": "adjust neighbor hold timer"
 }
 JSON
+```
+
+Apply a transaction with a confirm timer:
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d @ localhost:50051 rustbgpd.v1.ConfigService/ApplyConfigTransaction <<'JSON'
+{
+  "candidate_toml": "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n[[neighbors]]\naddress = \"192.0.2.10\"\nremote_asn = 65010\nhold_time = 45\n",
+  "expected_runtime_snapshot_token": "kv1:...",
+  "client_request_id": "deploy-2026-06-03-003",
+  "comment": "safe neighbor timer deploy",
+  "confirm_id": "deploy-2026-06-03-003",
+  "confirm_timeout_seconds": 120
+}
+JSON
+```
+
+Inspect and confirm the pending transaction:
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{}' localhost:50051 rustbgpd.v1.ConfigService/GetConfigTransactionStatus
+
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"confirm_id":"deploy-2026-06-03-003"}' \
+  localhost:50051 rustbgpd.v1.ConfigService/ConfirmConfigTransaction
+```
+
+Abort instead of waiting for the timer:
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"confirm_id":"deploy-2026-06-03-003"}' \
+  localhost:50051 rustbgpd.v1.ConfigService/AbortConfigTransaction
 ```
 
 The transaction executors share the same coordinator and persistence ordering
