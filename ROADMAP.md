@@ -82,33 +82,34 @@ want an API-first BGP daemon with memory safety and predictable performance.
 
 One prioritized, forward-looking list. Items are grouped **Next** (committed
 near-term), **Later** (planned, not yet scheduled), and **Maybe /
-demand-shaped** (deferred until operator signal). The performance / scale /
-memory / CI-benchmark phase that headlined the previous cycle has largely
-shipped — see [CHANGELOG.md](CHANGELOG.md) and the "Performance" note under
-Later for what remains.
+demand-shaped** (deferred until operator signal). The current priority call is
+to finish the transaction surface and improve operational proof. Protocol
+breadth and additional performance work stay measurement- or demand-shaped.
 
 ### Next
 
-- **Config transaction model follow-ons** *(ADR-0076 foundation shipped).* Native
-  gRPC now has a validate-only `PlanConfigTransaction` shape: candidate TOML
-  validation, diff against the live runtime snapshot, optimistic snapshot token,
-  and explicit v1 section classification. `ApplyConfigTransaction` is
-  operator-only and can commit one pure runtime family at a time: full-set
-  `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, static `[[neighbors]]`
-  add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain
-  changes, or pure static-neighbor live policy-chain impact under the shared
-  runtime-config coordinator, with persistence ack and rollback on apply/persist
-  failure.
-  `rustbgpctl config plan/apply` drives the text/JSON operator workflow. Next
-  useful slices are the remaining hot-reload sections whose live-impact rollback
-  semantics are ready, especially the dynamic-range live-policy executor
-  (deferred pending longest-prefix-match accept attribution) and
-  peer-group/session reshape executors with captured rollback state.
-  gNMI `Set` no longer needs a parallel commit primitive; the next slice is an
-  OpenConfig-to-candidate-TOML mapping that feeds this transaction model. Exit:
-  atomic commit where supported,
-  explicit restart-required/rejected surfaces, rollback/receipt model, no partial
-  silent drift. Gated by ADR-0064 tier authz.
+- **Config transaction coverage + OpenConfig bridge** *(highest priority,
+  ADR-0076 foundation shipped).* Native gRPC now has validate-only planning,
+  optimistic snapshot tokens, commit/apply/confirm/abort/status, persistence
+  acknowledgement, and rollback for the v1 committable families. The next useful
+  slices are the two remaining hot-reload executors whose rollback semantics are
+  ready: dynamic-range live-policy impact (deferred pending
+  longest-prefix-match accept attribution) and peer-group/session reshapes with
+  captured rollback state. After that, gNMI `Set` should map OpenConfig changes
+  into candidate TOML and feed this transaction model rather than inventing a
+  parallel commit primitive. Exit: atomic commit where supported, explicit
+  restart-required/rejected surfaces, rollback/receipt model, no partial silent
+  drift. Gated by ADR-0064 tier authz.
+- **Operational proof / scale automation** *(parallel priority, small slices).*
+  Re-stand the proof loop that makes the v0.x posture credible: a continuous
+  churn/soak shape, automated or easy-to-trigger Criterion comparisons on the
+  `[self-hosted, rustbgpd-bench]` runner, and a fixed high-N memory harness for
+  regressions that `memory_profile` no longer scales to. Exit: one repeatable
+  soak result operators can inspect, bench comparison receipts for perf PRs, and
+  memory tracking that covers full-table scale without relying only on bgperf2.
+
+### Later
+
 - **FIB operational hardening** *(decision gate — pull only
   operator-confidence pieces).* ADR-0061/0066/0068 cover configured-table
   install, ECMP, per-class caps, `multipath_relax`, and Link Bandwidth
@@ -120,17 +121,6 @@ Later for what remains.
   `route_limit_exceeded` rows. Defer unless perf-gated or demanded: incremental
   equal-cost sibling index for wide full-table multipath; platform-diversity
   interop for weighted multipath.
-- **ORF / Outbound Route Filtering (RFC 5291)** — *receive side shipped*
-  (capability code 3, Address-Prefix ORF-Type 64; ADR-0075). rustbgpd advertises
-  willingness to receive ORF and applies a peer-pushed prefix filter to its
-  outbound advertisements, so route-server clients can suppress unwanted routes
-  before they are sent — the one IX-route-server control-plane gap vs FRR/GoBGP,
-  now closed for the receive direction. Possible follow-ups: send-side ORF
-  (rustbgpd pushing filters to its upstreams) and negotiating the legacy Cisco
-  type 128 — deferred pending operator demand.
-
-### Later
-
 - **ASPA verification — test hardening.** Role-aware upstream/downstream
   verification now ships with the draft-v25 first-AS precondition, §6.2
   IPv4/IPv6-unicast family gate, best-path preference, and
@@ -292,10 +282,14 @@ Later for what remains.
     grounds unless a profile shows policy evaluation is still hot.
   The bgperf2 cross-stack comparison was refreshed for v0.32.0 (full-daemon RSS
   dropped ~21% from the inbound clone-churn fix, but now exceeds GoBGP's ~203 MB
-  at 200k — daemon feature growth, not RIB bloat; see `docs/BENCHMARKS.md`), and
-  that re-run drove the **v0.32.0 event-history default flip to opt-in / off**
-  (done — the always-on outbox cost ~62 MB RSS + ~2× peak CPU at 2p/100k).
-  Shared route storage was measured and rejected — see Deferred.
+  at 200k; see `docs/BENCHMARKS.md`), and that re-run drove the **v0.32.0
+  event-history default flip to opt-in / off** (done — the always-on outbox cost
+  ~62 MB RSS + ~2× peak CPU at 2p/100k). Later whole-daemon dhat profiling
+  showed the durable heap is dominated by the three-layer RIB route/index
+  storage, especially hash bucket arrays, not operational surfaces. Stage-1
+  trie-backed prefix indexes shipped; the larger LocRib trie swap remains
+  deferred because the naive version regressed recompute. Shared route storage
+  was measured and rejected — see Deferred.
 - **AIGP best-path support (RFC 7311).** Standards completeness for deployments
   that carry accumulated IGP cost in BGP — the one best-path step we don't
   implement (the chain is otherwise 11/11). Not a headline feature unless
@@ -312,6 +306,12 @@ Later for what remains.
   multi-key rollover, and accepted-socket inspection / observability matter to
   some route-server / security operators but are demand-shaped, not core-feature
   blockers.
+- **ORF / Outbound Route Filtering follow-ups.** Receive-side Address-Prefix ORF
+  (capability code 3, type 64; ADR-0075) is shipped and closes the IX
+  route-server control-plane gap for clients pushing filters to rustbgpd.
+  Send-side ORF (rustbgpd pushing filters to upstreams) and advertising legacy
+  Cisco type 128 stay deferred pending operator demand; type 128 is accepted on
+  decode only today.
 - **Confederation (RFC 5065).** Required for service-provider deployments, but
   SPs are not the initial target market. (Unblocks several deferred RFC 9234
   confederation-scope items and the RFC 8326 confederation gating.)
@@ -372,8 +372,9 @@ an ADR "Deferred" section that points back here. Tightened, not dropped.
   The naive `Arc<Route>` whole-shell share would reach ~31–37% but is
   unachievable (the per-RIB-mutable stale/validation flags can't be shared).
   Harness at `crates/rib/tests/route_data_sharing_profile.rs`; see BENCHMARKS.md.
-  The shipped scale/memory wins came from the inlined SmallVec prefix index,
-  FxHash route maps, and coalesced multi-chunk distribution instead.
+  The shipped scale/memory wins came from trie-backed prefix indexes, inlined
+  SmallVec path-id lists, FxHash route maps, and coalesced multi-chunk
+  distribution instead.
 
 - **EVPN VXLAN local-bias split-horizon (remaining all-active correctness
   gate).** RFC 8365 §8.3.1: a DF must drop BUM whose VXLAN overlay source is an
@@ -574,7 +575,10 @@ branch is between features.
 
 rustbgpd is an API-first BGP daemon. The following are explicitly out of scope:
 
-- **Full routing suite.** No OSPF, IS-IS, LDP, MPLS, PIM. This is a BGP daemon.
+- **Full routing suite.** No OSPF, IS-IS, LDP, RSVP-TE, PIM, or MPLS dataplane
+  control plane. This is a BGP daemon. BGP-carried MPLS/VPN families
+  (labeled-unicast, VPNv4/v6, EVPN MPLS encapsulation) are demand-shaped
+  address-family breadth, not a commitment to become a full MPLS router.
 - **CLI-first operation.** The gRPC API is the primary interface; the CLI and
   TUI are polished convenience wrappers, but gRPC is the contract.
 - **GoBGP proto compatibility.** Our protos are our own. A compat adapter can
