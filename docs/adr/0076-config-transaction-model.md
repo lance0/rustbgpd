@@ -15,12 +15,13 @@ rustbgpd has several runtime config mutation paths today:
 - `DiffRuntimeConfig` validates a candidate TOML and reports what SIGHUP would
   apply or require a restart for.
 
-Those paths are useful, but they are not a daemon-wide transaction model:
-operators cannot yet ask the daemon to validate a full candidate, receive a
-stable optimistic-concurrency token, and then commit only the sections whose
-executors can apply atomically under the shared runtime-config coordinator.
-That matters for automation, because a future gNMI `Set` implementation and
-bulk CLI/API changes need one set of invariants rather than per-method behavior.
+Those paths were useful, but they did not provide a daemon-wide transaction
+contract for automation. ADR-0076 adds that contract: operators can validate a
+full candidate, receive a stable optimistic-concurrency token, and then commit
+only the sections whose executors can apply atomically under the shared
+runtime-config coordinator. That matters because a future gNMI `Set`
+implementation and bulk CLI/API changes need one set of invariants rather than
+per-method behavior.
 
 The existing runtime serialization work is the foundation: FIB-table CRUD,
 dynamic-neighbor CRUD, static-neighbor CRUD, and SIGHUP already use a shared

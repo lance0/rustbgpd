@@ -410,10 +410,10 @@ rollback, persists with an acknowledgement, and restores both live policy chains
 and the snapshot on failure. Re-evaluating already-received routes under a new
 import chain requires Route Refresh, so every impacted Established peer must have
 negotiated the Route Refresh capability; otherwise the apply is rejected and
-rolled back without committing the candidate. Dynamic-range policy impact, peer-group
-reassignment, and peer-group field edits that reshape transport/session config
-still report `effective neighbor inheritance impact` and reject until their own
-rollback-capable executors exist.
+rolled back without committing the candidate. Dynamic-range policy impact,
+peer-group reassignment, and peer-group field edits that reshape
+transport/session config still report `effective neighbor inheritance impact`
+and reject until their own rollback-capable executors exist.
 
 CLI equivalent:
 

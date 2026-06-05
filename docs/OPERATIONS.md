@@ -109,8 +109,8 @@ those chains to live sessions and rolls them back if apply or persistence fails.
 Because import-chain changes are re-evaluated with Route Refresh, every impacted
 Established peer must have negotiated Route Refresh or the transaction is
 rejected without committing the candidate.
-Mixed-family candidates, dynamic-range policy impact, peer-group/session reshapes, and
-unsupported sections are rejected without mutation.
+Mixed-family candidates, dynamic-range policy impact, peer-group/session
+reshapes, and unsupported sections are rejected without mutation.
 
 Output is grouped into two actionable sections plus a per-neighbor
 effective-impact view:
