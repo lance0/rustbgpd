@@ -299,7 +299,7 @@ enum ConfigAction {
         #[arg(long, value_name = "ID")]
         confirm_id: Option<String>,
 
-        /// Confirmed-commit timeout in seconds; daemon default applies when omitted
+        /// Confirmed-commit timeout in seconds; daemon default is 600, max is 86400
         #[arg(
             long = "confirm-timeout",
             value_name = "SECONDS",
@@ -1874,6 +1874,31 @@ mod tests {
         };
         assert_eq!(confirm_id.as_deref(), Some("deploy-123"));
         assert_eq!(confirm_timeout_seconds, Some(120));
+    }
+
+    #[test]
+    fn test_parse_config_apply_confirm_timeout_requires_confirm_id() {
+        let result = Cli::try_parse_from([
+            "rustbgpctl",
+            "config",
+            "apply",
+            "--from-file",
+            "candidate.toml",
+            "--expected-runtime-snapshot-token",
+            "kv1:old:1",
+            "--confirm-timeout",
+            "120",
+        ]);
+
+        match result {
+            Err(error) => {
+                assert_eq!(
+                    error.kind(),
+                    clap::error::ErrorKind::MissingRequiredArgument
+                );
+            }
+            Ok(_) => panic!("--confirm-timeout must require --confirm-id"),
+        }
     }
 
     #[test]

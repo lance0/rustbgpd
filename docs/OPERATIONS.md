@@ -92,6 +92,27 @@ rustbgpctl config apply --from-file /tmp/new-config.toml \
   --expected-runtime-snapshot-token kv1:...
 ```
 
+For a safe deploy that should roll back unless explicitly confirmed, provide a
+confirm handle and timeout on the same apply. The daemon applies the candidate
+immediately, starts the timer, and rolls back when the timer expires unless the
+same handle is confirmed:
+
+```bash
+rustbgpctl config apply --from-file /tmp/new-config.toml \
+  --expected-runtime-snapshot-token kv1:... \
+  --confirm-id deploy-20260605-1 \
+  --confirm-timeout 120
+
+rustbgpctl config status
+rustbgpctl config confirm deploy-20260605-1
+# or, to roll back immediately:
+rustbgpctl config abort deploy-20260605-1
+```
+
+Confirm handles must be non-empty, at most 128 characters, and free of control
+characters. `--confirm-timeout` requires `--confirm-id`; the daemon default is
+600 seconds and the maximum accepted timeout is 86400 seconds.
+
 For a static-neighbor edit, change the neighbor in the candidate file (for
 example `hold_time`, `max_prefixes`, policy-chain refs, or ORF receive), run
 `config plan`, then apply with the returned token. The transaction reconfigures
