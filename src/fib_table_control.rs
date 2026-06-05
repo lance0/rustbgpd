@@ -56,9 +56,9 @@ pub struct FibTableControlDeps {
     pub config_tx: Option<mpsc::Sender<ConfigEvent>>,
     /// Coordinator lock shared with the SIGHUP reload FIB step.
     pub lock: Arc<Mutex<()>>,
-    /// Optional confirmed config transaction gate. When a confirmed
-    /// transaction is pending, targeted FIB-table CRUD must fail closed so it
-    /// cannot be overwritten by timeout rollback.
+    /// Optional confirmed config transaction gate. While a confirmed
+    /// transaction is applying or pending confirmation, targeted FIB-table CRUD
+    /// must fail closed so it cannot be overwritten by timeout rollback.
     pub config_mutation_gate: Option<ConfigMutationGateFn>,
     /// The `[[fib_tables]]` set present at startup. When the reconciler is not
     /// running, `List` falls back to this so a non-Linux / netlink-failure

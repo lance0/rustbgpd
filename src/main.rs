@@ -2359,7 +2359,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                     {
                         warn!(
                             error = %error,
-                            "SIGHUP reload ignored while confirmed config transaction is pending"
+                            "SIGHUP reload ignored while confirmed config transaction is applying or pending"
                         );
                         return None;
                     }

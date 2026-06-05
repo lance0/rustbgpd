@@ -1520,8 +1520,13 @@ fn confirm_abort_rollback_error(
         "failed to abort confirmed config transaction {confirm_id:?}: rollback failed: {error}"
     );
     match error {
+        // Abort carries no candidate input — the rollback re-applies the
+        // captured pre-commit snapshot — so an `InvalidArgument` from that
+        // re-apply means the captured snapshot itself failed validation (data
+        // corruption / internal invariant violation), not a malformed abort
+        // request. Surface it as `Internal` rather than implying client fault.
         ConfigTransactionApplyError::InvalidArgument(_) => {
-            ConfigTransactionApplyError::InvalidArgument(message)
+            ConfigTransactionApplyError::Internal(message)
         }
         ConfigTransactionApplyError::FailedPrecondition(_) => {
             ConfigTransactionApplyError::FailedPrecondition(message)
@@ -2500,8 +2505,11 @@ remote_asn = 65010
             })
             .await
             .expect_err("abort rollback failure must be reported");
+        // A rollback re-apply that fails candidate validation is an internal
+        // condition (the captured snapshot is bad), not a malformed abort
+        // request, so the abort surfaces INTERNAL rather than INVALID_ARGUMENT.
         assert!(
-            matches!(err, ConfigTransactionApplyError::InvalidArgument(ref message)
+            matches!(err, ConfigTransactionApplyError::Internal(ref message)
                 if message.contains("failed to abort confirmed config transaction")
                     && message.contains("rollback failed")
                     && message.contains("stage rollback failed")),

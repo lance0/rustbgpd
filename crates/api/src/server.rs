@@ -179,7 +179,7 @@ pub type ConfigMutationGateFuture =
     Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
 
 /// Hook used by persisted runtime-config mutators to fail closed while a
-/// confirmed config transaction is awaiting confirmation.
+/// confirmed config transaction is applying or awaiting confirmation.
 pub type ConfigMutationGateFn =
     Arc<dyn Fn(&'static str) -> ConfigMutationGateFuture + Send + Sync + 'static>;
 
@@ -188,7 +188,7 @@ pub type ConfigMutationGateFn =
 /// # Errors
 ///
 /// Returns `FAILED_PRECONDITION` when the daemon-owned gate rejects `operation`,
-/// for example while a confirmed config transaction is pending.
+/// for example while a confirmed config transaction is applying or pending.
 pub async fn check_config_mutation_gate(
     gate: &Option<ConfigMutationGateFn>,
     operation: &'static str,
