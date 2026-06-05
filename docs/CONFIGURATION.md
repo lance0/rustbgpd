@@ -1827,6 +1827,19 @@ restart to enable the subsystem.
 Operators can drive the workflow through `rustbgpctl config plan --from-file`
 and `rustbgpctl config apply --from-file --expected-runtime-snapshot-token`;
 `--json` returns the same status, section, and token fields for automation.
+For safe deploys, `ApplyConfigTransaction` also supports a confirmed-commit
+mode: include a non-empty `confirm_id` and optional `confirm_timeout_seconds`
+(default 600, maximum 86400). The change applies immediately, then remains
+pending until `ConfirmConfigTransaction` makes it permanent. `AbortConfigTransaction`
+rolls it back immediately, and an expired timer automatically re-applies the
+pre-commit runtime snapshot through the same transaction executor. While a
+confirmed transaction is applying or pending, persisted runtime config mutators
+such as static/dynamic neighbor CRUD, policy/peer-group CRUD, FIB-table CRUD,
+and another config transaction are rejected with `FAILED_PRECONDITION`; SIGHUP
+reload is skipped and logged until the transaction is confirmed, aborted, or
+auto-reverted. If abort or timer rollback fails, status records the failed
+lifecycle result and clears the pending fence so operators can apply a corrective
+transaction instead of leaving runtime config mutations blocked indefinitely.
 
 ```console
 $ rustbgpctl fib-table set edge --table-id 1000 --metric 200 \

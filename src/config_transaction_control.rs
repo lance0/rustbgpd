@@ -6,24 +6,31 @@
 
 use std::fmt::Write as _;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, PeerKey, PeerManagerCommand, PeerManagerNeighborConfig, ResolvedPeerPolicy,
     RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus, StageConfigSnapshotError,
 };
 use rustbgpd_api::proto;
-use rustbgpd_api::server::{ConfigTransactionApplyError, ConfigTransactionApplyFn};
-use tracing::error;
+use rustbgpd_api::server::{
+    ConfigMutationGateFn, ConfigTransactionAbortFn, ConfigTransactionApplyError,
+    ConfigTransactionApplyFn, ConfigTransactionConfirmFn, ConfigTransactionStatusFn,
+};
+use tracing::{error, info};
 
 use crate::config::{Config, Neighbor, diff_config, diff_neighbors};
 use crate::fib_table_control::{
     FibTableControlDeps, commit_fib_tables_locked, runtime_unavailable_error,
 };
+use crate::reload::runtime_config_snapshot;
 
 const PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
+const DEFAULT_CONFIRM_TIMEOUT_SECONDS: u32 = 600;
+const MAX_CONFIRM_TIMEOUT_SECONDS: u32 = 86_400;
+const MAX_CONFIRM_ID_CHARS: usize = 128;
 const FIB_SECTION: &str = "[[fib_tables]]";
 const DYNAMIC_SECTION: &str = "[[dynamic_neighbors]]";
 const NEIGHBOR_ADD_SECTION: &str = "[[neighbors]] add";
@@ -35,25 +42,666 @@ const POLICY_NEIGHBOR_SETS_SECTION: &str = "[policy] neighbor_sets";
 const POLICY_GLOBAL_CHAINS_SECTION: &str = "[policy] global chains";
 const POLICY_LIVE_IMPACT_SECTION: &str = "[policy] live impact";
 
-/// Build the daemon-owned apply hook wired into `ConfigService`.
-#[must_use]
-pub fn make_config_transaction_apply_fn(deps: FibTableControlDeps) -> ConfigTransactionApplyFn {
-    let deps = Arc::new(deps);
-    Arc::new(move |request| {
-        let deps = deps.clone();
-        Box::pin(async move { apply_config_transaction(deps, request).await })
-    })
+#[derive(Clone)]
+pub struct ConfigTransactionController {
+    deps: Arc<FibTableControlDeps>,
+    state: Arc<Mutex<ConfirmedState>>,
 }
 
-async fn apply_config_transaction(
-    deps: Arc<FibTableControlDeps>,
-    request: proto::ApplyConfigTransactionRequest,
-) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+#[derive(Debug, Default)]
+struct ConfirmedState {
+    applying_confirm_id: Option<String>,
+    pending: Option<PendingConfirmedTransaction>,
+    last: Option<ConfirmedTransactionRecord>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingConfirmedTransaction {
+    confirm_id: String,
+    rollback_toml: String,
+    rollback_expected_runtime_snapshot_token: String,
+    timeout_seconds: u32,
+    deadline: tokio::time::Instant,
+    deadline_unix_seconds: u64,
+    committed_sections: Vec<String>,
+    runtime_snapshot_token: String,
+}
+
+#[derive(Clone, Debug)]
+struct ConfirmedTransactionRecord {
+    confirm_id: String,
+    status: proto::ConfigTransactionConfirmationStatus,
+    timeout_seconds: u32,
+    deadline_unix_seconds: u64,
+    committed_sections: Vec<String>,
+    runtime_snapshot_token: String,
+    human_text: String,
+}
+
+#[derive(Clone, Debug)]
+struct ConfirmedApplyMode {
+    confirm_id: String,
+    timeout_seconds: u32,
+}
+
+impl ConfigTransactionController {
+    #[must_use]
+    pub fn new(deps: FibTableControlDeps) -> Self {
+        Self {
+            deps: Arc::new(deps),
+            state: Arc::new(Mutex::new(ConfirmedState::default())),
+        }
+    }
+
+    #[must_use]
+    pub fn apply_fn(&self) -> ConfigTransactionApplyFn {
+        let controller = self.clone();
+        Arc::new(move |request| {
+            let controller = controller.clone();
+            Box::pin(async move { controller.apply(request).await })
+        })
+    }
+
+    #[must_use]
+    pub fn confirm_fn(&self) -> ConfigTransactionConfirmFn {
+        let controller = self.clone();
+        Arc::new(move |request| {
+            let controller = controller.clone();
+            Box::pin(async move { controller.confirm(request).await })
+        })
+    }
+
+    #[must_use]
+    pub fn abort_fn(&self) -> ConfigTransactionAbortFn {
+        let controller = self.clone();
+        Arc::new(move |request| {
+            let controller = controller.clone();
+            Box::pin(async move { controller.abort(request).await })
+        })
+    }
+
+    #[must_use]
+    pub fn status_fn(&self) -> ConfigTransactionStatusFn {
+        let controller = self.clone();
+        Arc::new(move |_request| {
+            let controller = controller.clone();
+            Box::pin(async move { controller.status().await })
+        })
+    }
+
+    #[must_use]
+    pub fn mutation_gate_fn(&self) -> ConfigMutationGateFn {
+        let controller = self.clone();
+        Arc::new(move |operation| {
+            let controller = controller.clone();
+            Box::pin(async move {
+                controller
+                    .reject_if_pending(operation)
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+        })
+    }
+
+    pub async fn reject_if_pending(
+        &self,
+        operation: &'static str,
+    ) -> Result<(), ConfigTransactionApplyError> {
+        let state = self.state.lock().await;
+        if let Some(pending) = &state.pending {
+            return Err(ConfigTransactionApplyError::FailedPrecondition(format!(
+                "{operation} is blocked while confirmed config transaction {:?} is awaiting confirmation",
+                pending.confirm_id
+            )));
+        }
+        if let Some(confirm_id) = &state.applying_confirm_id {
+            return Err(ConfigTransactionApplyError::FailedPrecondition(format!(
+                "{operation} is blocked while confirmed config transaction {confirm_id:?} is applying"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn apply(
+        self,
+        request: proto::ApplyConfigTransactionRequest,
+    ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+        validate_apply_request(&request)?;
+        let confirmed = parse_confirmed_apply_mode(&request)?;
+        let join = tokio::spawn(async move {
+            let _guard = self.deps.lock.lock().await;
+            self.apply_locked(request, confirmed).await
+        });
+
+        join.await.map_err(|_| {
+            ConfigTransactionApplyError::Internal(
+                "config transaction apply task did not complete".to_string(),
+            )
+        })?
+    }
+
+    async fn apply_locked(
+        &self,
+        request: proto::ApplyConfigTransactionRequest,
+        confirmed: Option<ConfirmedApplyMode>,
+    ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+        if let Some(confirmed) = confirmed {
+            self.begin_confirmed_apply(&confirmed.confirm_id).await?;
+            let result = self
+                .apply_confirmed_locked(request, confirmed.clone())
+                .await;
+            if !matches!(
+                result,
+                Ok(proto::ConfigTransactionApplyResponse {
+                    confirmation: Some(_),
+                    ..
+                })
+            ) {
+                self.clear_applying_confirm_id(&confirmed.confirm_id).await;
+            }
+            result
+        } else {
+            self.reject_if_pending("ConfigService.ApplyConfigTransaction")
+                .await?;
+            apply_config_transaction_locked(&self.deps, request).await
+        }
+    }
+
+    async fn apply_confirmed_locked(
+        &self,
+        request: proto::ApplyConfigTransactionRequest,
+        confirmed: ConfirmedApplyMode,
+    ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+        let rollback_config = runtime_config_snapshot(&self.deps.peer_mgr_tx)
+            .await
+            .map_err(ConfigTransactionApplyError::Unavailable)?;
+        let rollback_toml = toml::to_string_pretty(&rollback_config).map_err(|error| {
+            ConfigTransactionApplyError::Internal(format!(
+                "failed to serialize confirmed transaction rollback snapshot: {error}"
+            ))
+        })?;
+        let mut response = apply_config_transaction_locked(&self.deps, request).await?;
+        if response.status != proto::ConfigTransactionPlanStatus::Committable as i32 {
+            return Ok(response);
+        }
+
+        let timeout = Duration::from_secs(u64::from(confirmed.timeout_seconds));
+        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline_unix_seconds = SystemTime::now()
+            .checked_add(timeout)
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_secs());
+        let pending = PendingConfirmedTransaction {
+            confirm_id: confirmed.confirm_id.clone(),
+            rollback_toml,
+            rollback_expected_runtime_snapshot_token: response.runtime_snapshot_token.clone(),
+            timeout_seconds: confirmed.timeout_seconds,
+            deadline,
+            deadline_unix_seconds,
+            committed_sections: response.committed_sections.clone(),
+            runtime_snapshot_token: response.runtime_snapshot_token.clone(),
+        };
+        let confirmation = pending_confirmation_proto(
+            &pending,
+            "Confirmed config transaction is pending confirmation.",
+        );
+        self.install_pending_confirmed_transaction(pending).await;
+        self.spawn_confirm_timeout(confirmed.confirm_id);
+        response.confirmation = Some(confirmation);
+        response.human_text.push_str(
+            "Confirmed transaction pending; call ConfirmConfigTransaction before the timeout or it will be rolled back.\n",
+        );
+        Ok(response)
+    }
+
+    async fn confirm(
+        self,
+        request: proto::ConfirmConfigTransactionRequest,
+    ) -> Result<proto::ConfirmConfigTransactionResponse, ConfigTransactionApplyError> {
+        let confirm_id = validate_confirm_id(&request.confirm_id)?;
+        let join = tokio::spawn(async move {
+            let _guard = self.deps.lock.lock().await;
+            self.confirm_locked(confirm_id).await
+        });
+        join.await.map_err(|_| {
+            ConfigTransactionApplyError::Internal(
+                "config transaction confirm task did not complete".to_string(),
+            )
+        })?
+    }
+
+    async fn confirm_locked(
+        &self,
+        confirm_id: String,
+    ) -> Result<proto::ConfirmConfigTransactionResponse, ConfigTransactionApplyError> {
+        let pending = self.take_matching_pending(&confirm_id).await?;
+        let record = ConfirmedTransactionRecord {
+            confirm_id: pending.confirm_id,
+            status: proto::ConfigTransactionConfirmationStatus::Confirmed,
+            timeout_seconds: pending.timeout_seconds,
+            deadline_unix_seconds: pending.deadline_unix_seconds,
+            committed_sections: pending.committed_sections,
+            runtime_snapshot_token: pending.runtime_snapshot_token,
+            human_text: "Confirmed config transaction committed permanently.".to_string(),
+        };
+        let confirmation = record_confirmation_proto(&record);
+        self.set_last_record(record).await;
+        Ok(proto::ConfirmConfigTransactionResponse {
+            confirmation: Some(confirmation),
+            human_text: "Confirmed config transaction committed permanently.\n".to_string(),
+        })
+    }
+
+    async fn abort(
+        self,
+        request: proto::AbortConfigTransactionRequest,
+    ) -> Result<proto::AbortConfigTransactionResponse, ConfigTransactionApplyError> {
+        let confirm_id = validate_confirm_id(&request.confirm_id)?;
+        let join = tokio::spawn(async move {
+            let _guard = self.deps.lock.lock().await;
+            self.abort_locked(confirm_id).await
+        });
+        join.await.map_err(|_| {
+            ConfigTransactionApplyError::Internal(
+                "config transaction abort task did not complete".to_string(),
+            )
+        })?
+    }
+
+    async fn abort_locked(
+        &self,
+        confirm_id: String,
+    ) -> Result<proto::AbortConfigTransactionResponse, ConfigTransactionApplyError> {
+        let pending = self.matching_pending(&confirm_id).await?;
+        match self.rollback_pending_locked(&pending).await {
+            Ok(response) => {
+                self.remove_pending_after_rollback(
+                    &confirm_id,
+                    proto::ConfigTransactionConfirmationStatus::Aborted,
+                    response.runtime_snapshot_token.clone(),
+                    "Aborted confirmed config transaction and restored the previous runtime config.",
+                )
+                .await;
+                Ok(proto::AbortConfigTransactionResponse {
+                    confirmation: self.last_confirmation().await,
+                    runtime_snapshot_token: response.runtime_snapshot_token,
+                    human_text:
+                        "Aborted confirmed config transaction and restored the previous runtime config.\n"
+                            .to_string(),
+                })
+            }
+            Err(error) => {
+                self.remove_pending_after_rollback(
+                    &confirm_id,
+                    proto::ConfigTransactionConfirmationStatus::AbortFailed,
+                    pending.runtime_snapshot_token.clone(),
+                    "Abort requested, but rollback of the confirmed config transaction failed.",
+                )
+                .await;
+                Err(confirm_abort_rollback_error(&confirm_id, &error))
+            }
+        }
+    }
+
+    async fn status(
+        &self,
+    ) -> Result<proto::ConfigTransactionStatusResponse, ConfigTransactionApplyError> {
+        let state = self.state.lock().await;
+        if let Some(pending) = &state.pending {
+            return Ok(proto::ConfigTransactionStatusResponse {
+                confirmation: Some(pending_confirmation_proto(
+                    pending,
+                    "Confirmed config transaction is awaiting confirmation.",
+                )),
+                human_text: "Confirmed config transaction is awaiting confirmation.\n".to_string(),
+            });
+        }
+        if let Some(confirm_id) = &state.applying_confirm_id {
+            return Ok(proto::ConfigTransactionStatusResponse {
+                confirmation: Some(proto::ConfigTransactionConfirmation {
+                    status: proto::ConfigTransactionConfirmationStatus::Pending.into(),
+                    confirm_id: confirm_id.clone(),
+                    timeout_seconds: 0,
+                    deadline_unix_seconds: 0,
+                    committed_sections: Vec::new(),
+                    runtime_snapshot_token: String::new(),
+                    human_text: "Confirmed config transaction is applying.".to_string(),
+                }),
+                human_text: "Confirmed config transaction is applying.\n".to_string(),
+            });
+        }
+        if let Some(record) = &state.last {
+            return Ok(proto::ConfigTransactionStatusResponse {
+                confirmation: Some(record_confirmation_proto(record)),
+                human_text: format!("{}\n", record.human_text),
+            });
+        }
+        Ok(proto::ConfigTransactionStatusResponse {
+            confirmation: Some(proto::ConfigTransactionConfirmation {
+                status: proto::ConfigTransactionConfirmationStatus::None.into(),
+                confirm_id: String::new(),
+                timeout_seconds: 0,
+                deadline_unix_seconds: 0,
+                committed_sections: Vec::new(),
+                runtime_snapshot_token: String::new(),
+                human_text: "No confirmed config transaction is pending.".to_string(),
+            }),
+            human_text: "No confirmed config transaction is pending.\n".to_string(),
+        })
+    }
+
+    async fn begin_confirmed_apply(
+        &self,
+        confirm_id: &str,
+    ) -> Result<(), ConfigTransactionApplyError> {
+        let mut state = self.state.lock().await;
+        if let Some(pending) = &state.pending {
+            return Err(ConfigTransactionApplyError::FailedPrecondition(format!(
+                "confirmed config transaction {:?} is already awaiting confirmation",
+                pending.confirm_id
+            )));
+        }
+        if let Some(active) = &state.applying_confirm_id {
+            return Err(ConfigTransactionApplyError::FailedPrecondition(format!(
+                "confirmed config transaction {active:?} is already applying"
+            )));
+        }
+        state.applying_confirm_id = Some(confirm_id.to_string());
+        Ok(())
+    }
+
+    async fn clear_applying_confirm_id(&self, confirm_id: &str) {
+        let mut state = self.state.lock().await;
+        if state.applying_confirm_id.as_deref() == Some(confirm_id) {
+            state.applying_confirm_id = None;
+        }
+    }
+
+    async fn install_pending_confirmed_transaction(&self, pending: PendingConfirmedTransaction) {
+        let mut state = self.state.lock().await;
+        if let Some(existing) = &state.pending {
+            error!(
+                existing_confirm_id = %existing.confirm_id,
+                new_confirm_id = %pending.confirm_id,
+                "replacing unexpected pending confirmed config transaction state"
+            );
+        }
+        debug_assert!(
+            state.pending.is_none(),
+            "begin_confirmed_apply must prevent overlapping confirmed transactions"
+        );
+        state.applying_confirm_id = None;
+        state.last = None;
+        state.pending = Some(pending);
+    }
+
+    fn spawn_confirm_timeout(&self, confirm_id: String) {
+        let controller = self.clone();
+        tokio::spawn(async move {
+            let deadline = {
+                let state = controller.state.lock().await;
+                state
+                    .pending
+                    .as_ref()
+                    .filter(|pending| pending.confirm_id == confirm_id)
+                    .map(|pending| pending.deadline)
+            };
+            let Some(deadline) = deadline else {
+                return;
+            };
+            tokio::time::sleep_until(deadline).await;
+            if let Err(error) = controller.auto_revert(confirm_id.clone()).await {
+                error!(
+                    confirm_id,
+                    error = %error,
+                    "confirmed config transaction auto-revert failed"
+                );
+            }
+        });
+    }
+
+    async fn auto_revert(self, confirm_id: String) -> Result<(), ConfigTransactionApplyError> {
+        let join = tokio::spawn(async move {
+            let _guard = self.deps.lock.lock().await;
+            let Some(pending) = self.pending_for_timeout(&confirm_id).await else {
+                return Ok(());
+            };
+            if tokio::time::Instant::now() < pending.deadline {
+                return Ok(());
+            }
+            match self.rollback_pending_locked(&pending).await {
+                Ok(response) => {
+                    self.remove_pending_after_rollback(
+                        &confirm_id,
+                        proto::ConfigTransactionConfirmationStatus::AutoReverted,
+                        response.runtime_snapshot_token,
+                        "Confirmed config transaction timed out and was automatically rolled back.",
+                    )
+                    .await;
+                    info!(confirm_id, "confirmed config transaction auto-reverted");
+                    Ok(())
+                }
+                Err(error) => {
+                    self.remove_pending_after_rollback(
+                        &confirm_id,
+                        proto::ConfigTransactionConfirmationStatus::AutoRevertFailed,
+                        pending.runtime_snapshot_token.clone(),
+                        "Confirmed config transaction timed out, but automatic rollback failed.",
+                    )
+                    .await;
+                    Err(error)
+                }
+            }
+        });
+        join.await.map_err(|_| {
+            ConfigTransactionApplyError::Internal(
+                "config transaction auto-revert task did not complete".to_string(),
+            )
+        })?
+    }
+
+    async fn matching_pending(
+        &self,
+        confirm_id: &str,
+    ) -> Result<PendingConfirmedTransaction, ConfigTransactionApplyError> {
+        let state = self.state.lock().await;
+        let Some(pending) = &state.pending else {
+            return Err(ConfigTransactionApplyError::FailedPrecondition(
+                "no confirmed config transaction is pending".to_string(),
+            ));
+        };
+        if pending.confirm_id != confirm_id {
+            return Err(ConfigTransactionApplyError::FailedPrecondition(format!(
+                "confirmed config transaction id mismatch: pending {:?}",
+                pending.confirm_id
+            )));
+        }
+        Ok(pending.clone())
+    }
+
+    async fn pending_for_timeout(&self, confirm_id: &str) -> Option<PendingConfirmedTransaction> {
+        let state = self.state.lock().await;
+        state
+            .pending
+            .as_ref()
+            .filter(|pending| pending.confirm_id == confirm_id)
+            .cloned()
+    }
+
+    async fn take_matching_pending(
+        &self,
+        confirm_id: &str,
+    ) -> Result<PendingConfirmedTransaction, ConfigTransactionApplyError> {
+        let mut state = self.state.lock().await;
+        let Some(pending) = state.pending.take() else {
+            return Err(ConfigTransactionApplyError::FailedPrecondition(
+                "no confirmed config transaction is pending".to_string(),
+            ));
+        };
+        if pending.confirm_id != confirm_id {
+            let pending_id = pending.confirm_id.clone();
+            state.pending = Some(pending);
+            return Err(ConfigTransactionApplyError::FailedPrecondition(format!(
+                "confirmed config transaction id mismatch: pending {pending_id:?}"
+            )));
+        }
+        Ok(pending)
+    }
+
+    async fn rollback_pending_locked(
+        &self,
+        pending: &PendingConfirmedTransaction,
+    ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+        apply_config_transaction_locked(
+            &self.deps,
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml: pending.rollback_toml.clone(),
+                expected_runtime_snapshot_token: pending
+                    .rollback_expected_runtime_snapshot_token
+                    .clone(),
+                client_request_id: format!("confirmed-rollback:{}", pending.confirm_id),
+                comment: "confirmed transaction rollback".to_string(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            },
+        )
+        .await
+    }
+
+    async fn remove_pending_after_rollback(
+        &self,
+        confirm_id: &str,
+        status: proto::ConfigTransactionConfirmationStatus,
+        runtime_snapshot_token: String,
+        human_text: &'static str,
+    ) {
+        let mut state = self.state.lock().await;
+        let Some(pending) = state.pending.take() else {
+            return;
+        };
+        if pending.confirm_id != confirm_id {
+            state.pending = Some(pending);
+            return;
+        }
+        state.last = Some(ConfirmedTransactionRecord {
+            confirm_id: pending.confirm_id,
+            status,
+            timeout_seconds: pending.timeout_seconds,
+            deadline_unix_seconds: pending.deadline_unix_seconds,
+            committed_sections: pending.committed_sections,
+            runtime_snapshot_token,
+            human_text: human_text.to_string(),
+        });
+    }
+
+    async fn set_last_record(&self, record: ConfirmedTransactionRecord) {
+        let mut state = self.state.lock().await;
+        state.last = Some(record);
+    }
+
+    async fn last_confirmation(&self) -> Option<proto::ConfigTransactionConfirmation> {
+        self.state
+            .lock()
+            .await
+            .last
+            .as_ref()
+            .map(record_confirmation_proto)
+    }
+}
+
+fn validate_apply_request(
+    request: &proto::ApplyConfigTransactionRequest,
+) -> Result<(), ConfigTransactionApplyError> {
     if request.expected_runtime_snapshot_token.is_empty() {
         return Err(ConfigTransactionApplyError::InvalidArgument(
             "expected_runtime_snapshot_token is required for ApplyConfigTransaction".to_string(),
         ));
     }
+    if request.confirm_id.is_empty() && request.confirm_timeout_seconds > 0 {
+        return Err(ConfigTransactionApplyError::InvalidArgument(
+            "confirm_id is required when confirm_timeout_seconds is set".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_confirmed_apply_mode(
+    request: &proto::ApplyConfigTransactionRequest,
+) -> Result<Option<ConfirmedApplyMode>, ConfigTransactionApplyError> {
+    if request.confirm_id.is_empty() {
+        return Ok(None);
+    }
+    let confirm_id = validate_confirm_id(&request.confirm_id)?;
+    let timeout_seconds = if request.confirm_timeout_seconds == 0 {
+        DEFAULT_CONFIRM_TIMEOUT_SECONDS
+    } else {
+        request.confirm_timeout_seconds
+    };
+    if timeout_seconds > MAX_CONFIRM_TIMEOUT_SECONDS {
+        return Err(ConfigTransactionApplyError::InvalidArgument(format!(
+            "confirm_timeout_seconds must be <= {MAX_CONFIRM_TIMEOUT_SECONDS}"
+        )));
+    }
+    Ok(Some(ConfirmedApplyMode {
+        confirm_id,
+        timeout_seconds,
+    }))
+}
+
+fn validate_confirm_id(confirm_id: &str) -> Result<String, ConfigTransactionApplyError> {
+    if confirm_id.trim().is_empty() {
+        return Err(ConfigTransactionApplyError::InvalidArgument(
+            "confirm_id is required".to_string(),
+        ));
+    }
+    if confirm_id.chars().count() > MAX_CONFIRM_ID_CHARS {
+        return Err(ConfigTransactionApplyError::InvalidArgument(format!(
+            "confirm_id must be at most {MAX_CONFIRM_ID_CHARS} characters"
+        )));
+    }
+    if confirm_id.chars().any(char::is_control) {
+        return Err(ConfigTransactionApplyError::InvalidArgument(
+            "confirm_id must not contain control characters".to_string(),
+        ));
+    }
+    Ok(confirm_id.to_string())
+}
+
+fn pending_confirmation_proto(
+    pending: &PendingConfirmedTransaction,
+    human_text: &str,
+) -> proto::ConfigTransactionConfirmation {
+    proto::ConfigTransactionConfirmation {
+        status: proto::ConfigTransactionConfirmationStatus::Pending.into(),
+        confirm_id: pending.confirm_id.clone(),
+        timeout_seconds: pending.timeout_seconds,
+        deadline_unix_seconds: pending.deadline_unix_seconds,
+        committed_sections: pending.committed_sections.clone(),
+        runtime_snapshot_token: pending.runtime_snapshot_token.clone(),
+        human_text: human_text.to_string(),
+    }
+}
+
+fn record_confirmation_proto(
+    record: &ConfirmedTransactionRecord,
+) -> proto::ConfigTransactionConfirmation {
+    proto::ConfigTransactionConfirmation {
+        status: record.status.into(),
+        confirm_id: record.confirm_id.clone(),
+        timeout_seconds: record.timeout_seconds,
+        deadline_unix_seconds: record.deadline_unix_seconds,
+        committed_sections: record.committed_sections.clone(),
+        runtime_snapshot_token: record.runtime_snapshot_token.clone(),
+        human_text: record.human_text.clone(),
+    }
+}
+
+#[cfg(test)]
+async fn apply_config_transaction(
+    deps: Arc<FibTableControlDeps>,
+    request: proto::ApplyConfigTransactionRequest,
+) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+    validate_apply_request(&request)?;
 
     let join = tokio::spawn(async move {
         let _guard = deps.lock.lock().await;
@@ -85,6 +733,7 @@ async fn apply_config_transaction_locked(
                 runtime_snapshot_token: plan.runtime_snapshot_token,
                 committed_sections: Vec::new(),
                 human_text: "No changes.\n".to_string(),
+                confirmation: None,
             });
         }
         RuntimeConfigTransactionStatus::Rejected => {
@@ -832,6 +1481,7 @@ fn committable_response(
         runtime_snapshot_token,
         committed_sections,
         human_text,
+        confirmation: None,
     }
 }
 
@@ -862,12 +1512,39 @@ fn stage_config_snapshot_error_to_apply_error(
     }
 }
 
+fn confirm_abort_rollback_error(
+    confirm_id: &str,
+    error: &ConfigTransactionApplyError,
+) -> ConfigTransactionApplyError {
+    let message = format!(
+        "failed to abort confirmed config transaction {confirm_id:?}: rollback failed: {error}"
+    );
+    match error {
+        // Abort carries no candidate input — the rollback re-applies the
+        // captured pre-commit snapshot — so an `InvalidArgument` from that
+        // re-apply means the captured snapshot itself failed validation (data
+        // corruption / internal invariant violation), not a malformed abort
+        // request. Surface it as `Internal` rather than implying client fault.
+        ConfigTransactionApplyError::InvalidArgument(_) => {
+            ConfigTransactionApplyError::Internal(message)
+        }
+        ConfigTransactionApplyError::FailedPrecondition(_) => {
+            ConfigTransactionApplyError::FailedPrecondition(message)
+        }
+        ConfigTransactionApplyError::Unavailable(_) => {
+            ConfigTransactionApplyError::Unavailable(message)
+        }
+        ConfigTransactionApplyError::Internal(_) => ConfigTransactionApplyError::Internal(message),
+    }
+}
+
 fn rejected_response(runtime_snapshot_token: String) -> proto::ConfigTransactionApplyResponse {
     proto::ConfigTransactionApplyResponse {
         status: proto::ConfigTransactionPlanStatus::Rejected.into(),
         runtime_snapshot_token,
         committed_sections: Vec::new(),
         human_text: "Config transaction is not committable by the current apply executor.\nRun PlanConfigTransaction for section classification.\n".to_string(),
+        confirmation: None,
     }
 }
 
@@ -1150,6 +1827,9 @@ peer_group = "edge"
                     *snapshot = candidate_toml;
                     let _ = reply.send(Ok(previous));
                 }
+                PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
+                    let _ = reply.send(Ok(snapshot_toml.lock().await.clone()));
+                }
                 PeerManagerCommand::AddPeer { config, reply, .. } => {
                     let mut peers = peers.lock().await;
                     let key = PeerKey::new(config.address, config.interface.clone());
@@ -1216,6 +1896,9 @@ peer_group = "edge"
                     let previous = snapshot.clone();
                     *snapshot = candidate_toml;
                     let _ = reply.send(Ok(previous));
+                }
+                PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
+                    let _ = reply.send(Ok(snapshot_toml.lock().await.clone()));
                 }
                 PeerManagerCommand::AddPeer { config, reply, .. } => {
                     let mut peers = peers.lock().await;
@@ -1335,19 +2018,34 @@ import_policy_chain = ["f"]
         }
     }
 
+    fn deps_value(
+        fib_cmd_tx: Option<mpsc::Sender<FibRuntimeCommand>>,
+        peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+        config_tx: Option<mpsc::Sender<rustbgpd_api::peer_types::ConfigEvent>>,
+        startup_tables: Vec<FibTableConfig>,
+    ) -> FibTableControlDeps {
+        FibTableControlDeps {
+            fib_cmd_tx,
+            peer_mgr_tx,
+            config_tx,
+            lock: Arc::new(Mutex::new(())),
+            config_mutation_gate: None,
+            startup_tables,
+        }
+    }
+
     fn deps(
         fib_cmd_tx: Option<mpsc::Sender<FibRuntimeCommand>>,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         config_tx: Option<mpsc::Sender<rustbgpd_api::peer_types::ConfigEvent>>,
         startup_tables: Vec<FibTableConfig>,
     ) -> Arc<FibTableControlDeps> {
-        Arc::new(FibTableControlDeps {
+        Arc::new(deps_value(
             fib_cmd_tx,
             peer_mgr_tx,
             config_tx,
-            lock: Arc::new(Mutex::new(())),
             startup_tables,
-        })
+        ))
     }
 
     #[tokio::test]
@@ -1360,6 +2058,8 @@ import_policy_chain = ["f"]
                 expected_runtime_snapshot_token: String::new(),
                 client_request_id: String::new(),
                 comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             },
         )
         .await
@@ -1402,6 +2102,8 @@ peer_group = "ix-members"
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: String::new(),
                 comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             },
         )
         .await
@@ -1459,6 +2161,8 @@ remote_asn = 65010
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: String::new(),
                 comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             },
         )
         .await
@@ -1470,6 +2174,411 @@ remote_asn = 65010
         );
         assert_eq!(response.committed_sections, vec!["[[dynamic_neighbors]]"]);
         assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+    }
+
+    async fn ack_config_transaction_commits(mut config_rx: mpsc::Receiver<ConfigEvent>) {
+        while let Some(ConfigEvent::ConfigTransactionCommitted { ack, .. }) = config_rx.recv().await
+        {
+            if let Some(ack) = ack {
+                let _ = ack.send(Ok(()));
+            }
+        }
+    }
+
+    fn confirmed_dynamic_request(
+        candidate_toml: String,
+        confirm_id: &str,
+        confirm_timeout_seconds: u32,
+    ) -> proto::ApplyConfigTransactionRequest {
+        proto::ApplyConfigTransactionRequest {
+            candidate_toml,
+            expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+            client_request_id: "deploy-1".to_string(),
+            comment: "confirmed deploy".to_string(),
+            confirm_id: confirm_id.to_string(),
+            confirm_timeout_seconds,
+        }
+    }
+
+    async fn confirmed_dynamic_controller(
+        previous_toml: String,
+        candidate_toml: String,
+    ) -> (
+        ConfigTransactionController,
+        Arc<Mutex<String>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[dynamic_neighbors]]".to_string()],
+            ),
+            snapshot_toml.clone(),
+            peers,
+        ));
+        let (config_tx, config_rx) = mpsc::channel(8);
+        let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
+        let controller = ConfigTransactionController::new(deps_value(
+            None,
+            peer_tx,
+            Some(config_tx),
+            Vec::new(),
+        ));
+
+        let response = controller
+            .clone()
+            .apply(confirmed_dynamic_request(
+                candidate_toml.clone(),
+                "deploy-1",
+                60,
+            ))
+            .await
+            .expect("confirmed apply must succeed");
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        let confirmation = response
+            .confirmation
+            .as_ref()
+            .expect("confirmed apply must return pending metadata");
+        assert_eq!(
+            confirmation.status,
+            proto::ConfigTransactionConfirmationStatus::Pending as i32
+        );
+        assert_eq!(confirmation.confirm_id, "deploy-1");
+        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        (controller, snapshot_toml, ack_task)
+    }
+
+    fn assert_snapshot_matches_config(snapshot_toml: &str, expected_toml: &str) {
+        let snapshot =
+            Config::load_toml_with_diagnostics(snapshot_toml, "restored runtime snapshot")
+                .expect("restored snapshot must parse");
+        let expected =
+            Config::load_toml_with_diagnostics(expected_toml, "expected runtime snapshot")
+                .expect("expected snapshot must parse");
+        assert_eq!(snapshot, expected);
+    }
+
+    #[tokio::test]
+    async fn confirmed_apply_enters_pending_and_confirm_clears_gate() {
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[peer_groups.ix-members]
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix-members"
+remote_asn = 65010
+"#,
+        );
+        let (controller, _snapshot_toml, ack_task) =
+            confirmed_dynamic_controller(previous_toml, candidate_toml).await;
+
+        let status = controller
+            .clone()
+            .status()
+            .await
+            .expect("status must succeed");
+        assert_eq!(
+            status.confirmation.unwrap().status,
+            proto::ConfigTransactionConfirmationStatus::Pending as i32
+        );
+        let gate_err = controller
+            .reject_if_pending("test mutation")
+            .await
+            .expect_err("pending confirmed transaction must block mutations");
+        assert!(matches!(
+            gate_err,
+            ConfigTransactionApplyError::FailedPrecondition(_)
+        ));
+
+        let confirmed = controller
+            .clone()
+            .confirm(proto::ConfirmConfigTransactionRequest {
+                confirm_id: "deploy-1".to_string(),
+            })
+            .await
+            .expect("confirm must succeed");
+        assert_eq!(
+            confirmed.confirmation.unwrap().status,
+            proto::ConfigTransactionConfirmationStatus::Confirmed as i32
+        );
+        controller
+            .clone()
+            .auto_revert("deploy-1".to_string())
+            .await
+            .expect("stale timeout after confirm must be a no-op");
+        let status = controller
+            .clone()
+            .status()
+            .await
+            .expect("status must succeed");
+        assert_eq!(
+            status.confirmation.unwrap().status,
+            proto::ConfigTransactionConfirmationStatus::Confirmed as i32
+        );
+        controller
+            .reject_if_pending("test mutation")
+            .await
+            .expect("confirmed transaction should release mutation gate");
+        drop(controller);
+        ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn confirmed_abort_rolls_back_previous_snapshot() {
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[peer_groups.ix-members]
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix-members"
+remote_asn = 65010
+"#,
+        );
+        let (controller, snapshot_toml, ack_task) =
+            confirmed_dynamic_controller(previous_toml.clone(), candidate_toml).await;
+
+        let aborted = controller
+            .clone()
+            .abort(proto::AbortConfigTransactionRequest {
+                confirm_id: "deploy-1".to_string(),
+            })
+            .await
+            .expect("abort must roll back");
+        assert_eq!(
+            aborted.confirmation.unwrap().status,
+            proto::ConfigTransactionConfirmationStatus::Aborted as i32
+        );
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &previous_toml);
+        ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn confirmed_confirm_wrong_id_keeps_pending() {
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[peer_groups.ix-members]
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix-members"
+remote_asn = 65010
+"#,
+        );
+        let (controller, _snapshot_toml, ack_task) =
+            confirmed_dynamic_controller(previous_toml, candidate_toml).await;
+
+        let err = controller
+            .clone()
+            .confirm(proto::ConfirmConfigTransactionRequest {
+                confirm_id: "wrong-id".to_string(),
+            })
+            .await
+            .expect_err("wrong confirm_id must fail");
+        assert!(
+            matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref message)
+                if message.contains("confirmed config transaction id mismatch")),
+            "{err:?}"
+        );
+
+        let status = controller.status().await.expect("status must succeed");
+        let confirmation = status.confirmation.unwrap();
+        assert_eq!(
+            confirmation.status,
+            proto::ConfigTransactionConfirmationStatus::Pending as i32
+        );
+        assert_eq!(confirmation.confirm_id, "deploy-1");
+        let gate_err = controller
+            .reject_if_pending("test mutation")
+            .await
+            .expect_err("pending transaction must still gate mutations");
+        assert!(matches!(
+            gate_err,
+            ConfigTransactionApplyError::FailedPrecondition(_)
+        ));
+        ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn confirmed_apply_rejects_overlap_while_pending() {
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[peer_groups.ix-members]
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix-members"
+remote_asn = 65010
+"#,
+        );
+        let (controller, _snapshot_toml, ack_task) =
+            confirmed_dynamic_controller(previous_toml, candidate_toml.clone()).await;
+
+        let err = controller
+            .clone()
+            .apply(confirmed_dynamic_request(candidate_toml, "deploy-2", 60))
+            .await
+            .expect_err("second confirmed apply must fail while pending");
+        assert!(
+            matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref message)
+                if message.contains("already awaiting confirmation")),
+            "{err:?}"
+        );
+
+        let status = controller.status().await.expect("status must succeed");
+        let confirmation = status.confirmation.unwrap();
+        assert_eq!(
+            confirmation.status,
+            proto::ConfigTransactionConfirmationStatus::Pending as i32
+        );
+        assert_eq!(confirmation.confirm_id, "deploy-1");
+        ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn confirmed_abort_failure_clears_pending_with_failed_record() {
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[peer_groups.ix-members]
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix-members"
+remote_asn = 65010
+"#,
+        );
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let stage_results = Arc::new(Mutex::new(VecDeque::from([
+            Ok(()),
+            Err(StageConfigSnapshotError::InvalidCandidate(
+                "stage rollback failed".to_string(),
+            )),
+        ])));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager_with_stage_results(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[dynamic_neighbors]]".to_string()],
+            ),
+            snapshot_toml.clone(),
+            peers,
+            stage_results,
+        ));
+        let (config_tx, config_rx) = mpsc::channel(8);
+        let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
+        let controller = ConfigTransactionController::new(deps_value(
+            None,
+            peer_tx,
+            Some(config_tx),
+            Vec::new(),
+        ));
+
+        controller
+            .clone()
+            .apply(confirmed_dynamic_request(
+                candidate_toml.clone(),
+                "deploy-1",
+                60,
+            ))
+            .await
+            .expect("confirmed apply must succeed");
+
+        let err = controller
+            .clone()
+            .abort(proto::AbortConfigTransactionRequest {
+                confirm_id: "deploy-1".to_string(),
+            })
+            .await
+            .expect_err("abort rollback failure must be reported");
+        // A rollback re-apply that fails candidate validation is an internal
+        // condition (the captured snapshot is bad), not a malformed abort
+        // request, so the abort surfaces INTERNAL rather than INVALID_ARGUMENT.
+        assert!(
+            matches!(err, ConfigTransactionApplyError::Internal(ref message)
+                if message.contains("failed to abort confirmed config transaction")
+                    && message.contains("rollback failed")
+                    && message.contains("stage rollback failed")),
+            "{err:?}"
+        );
+
+        let status = controller.status().await.expect("status must succeed");
+        let confirmation = status.confirmation.unwrap();
+        assert_eq!(
+            confirmation.status,
+            proto::ConfigTransactionConfirmationStatus::AbortFailed as i32
+        );
+        assert_eq!(confirmation.confirm_id, "deploy-1");
+        controller
+            .reject_if_pending("test mutation")
+            .await
+            .expect("failed abort must clear the pending mutation gate");
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
+        ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn confirmed_timeout_auto_reverts_previous_snapshot() {
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[peer_groups.ix-members]
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix-members"
+remote_asn = 65010
+"#,
+        );
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[dynamic_neighbors]]".to_string()],
+            ),
+            snapshot_toml.clone(),
+            peers,
+        ));
+        let (config_tx, config_rx) = mpsc::channel(8);
+        let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
+        let controller = ConfigTransactionController::new(deps_value(
+            None,
+            peer_tx,
+            Some(config_tx),
+            Vec::new(),
+        ));
+
+        controller
+            .clone()
+            .apply(confirmed_dynamic_request(candidate_toml, "deploy-1", 1))
+            .await
+            .expect("confirmed apply must succeed");
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+        let status = controller.status().await.expect("status must succeed");
+        assert_eq!(
+            status.confirmation.unwrap().status,
+            proto::ConfigTransactionConfirmationStatus::AutoReverted as i32
+        );
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &previous_toml);
+        ack_task.abort();
     }
 
     #[tokio::test]
@@ -1523,6 +2632,8 @@ default_action = "permit"
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: String::new(),
                 comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             },
         )
         .await
@@ -1611,6 +2722,8 @@ default_action = "permit"
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: String::new(),
                 comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             },
         )
         .await
@@ -1670,6 +2783,8 @@ default_action = "permit"
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: String::new(),
                 comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             },
         )
         .await
@@ -1729,6 +2844,8 @@ default_action = "permit"
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: String::new(),
                 comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             },
         )
         .await
@@ -1788,6 +2905,8 @@ default_action = "permit"
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: String::new(),
                 comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             },
         )
         .await
@@ -1839,6 +2958,8 @@ default_action = "permit"
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: String::new(),
                 comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             },
         )
         .await
@@ -1891,6 +3012,8 @@ peer_group = "ix-members"
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: String::new(),
                 comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             },
         )
         .await
@@ -1950,6 +3073,8 @@ peer_group = "ix-members"
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: String::new(),
                 comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             },
         )
         .await
@@ -2005,6 +3130,8 @@ remote_asn = 65003
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: String::new(),
                 comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             },
         )
         .await
@@ -2058,6 +3185,8 @@ remote_asn = 65003
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: String::new(),
                 comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             },
         )
         .await
@@ -2109,6 +3238,8 @@ remote_asn = 65003
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: String::new(),
                 comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             },
         )
         .await
@@ -2160,6 +3291,8 @@ remote_asn = 65003
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: String::new(),
                 comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             },
         )
         .await
@@ -2214,6 +3347,8 @@ remote_asn = 65004
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: String::new(),
                 comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             },
         )
         .await
@@ -2276,6 +3411,8 @@ families = ["ipv4_unicast"]
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: "deploy-1".to_string(),
                 comment: "commit FIB".to_string(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             },
         )
         .await
@@ -2339,6 +3476,8 @@ families = ["ipv4_unicast"]
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
                 client_request_id: String::new(),
                 comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
             },
         )
         .await

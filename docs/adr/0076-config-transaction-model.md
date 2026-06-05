@@ -98,18 +98,36 @@ section executors behind that public contract.
    Route Refresh capability**; if one did not, the apply is rejected and rolled
    back cleanly (the refresh during rollback is best-effort, so a non-RR peer
    yields a single clear rejection, not a compound rollback error).
-6. **gNMI Set remains out of scope.** gNMI mutation must map to this transaction
+6. **Confirmed-commit is singleton and process-local.** A caller can set
+   `confirm_id` on `ApplyConfigTransaction` to enter commit-confirmed mode.
+   The candidate still goes through the same plan/apply/persist executor first;
+   if it commits, the daemon records the pre-commit runtime snapshot and starts a
+   confirm timer (default 600 seconds, maximum 86400). `ConfirmConfigTransaction`
+   with the same `confirm_id` makes the committed candidate permanent.
+   `AbortConfigTransaction` rolls back immediately by re-applying the captured
+   pre-commit snapshot through the same transaction executor. If the timer
+   expires, the daemon performs the same rollback automatically. V1 allows only
+   one pending confirmed transaction daemon-wide. While one is applying or
+   pending, persisted runtime config mutators are rejected with
+   `FAILED_PRECONDITION` so timeout rollback cannot overwrite a later ad hoc
+   config write. Pending confirmed state is not persisted across daemon restart;
+   after restart, clients must re-plan and re-apply.
+7. **gNMI Set remains out of scope.** gNMI mutation must map to this transaction
    model rather than invent a parallel commit path, but this ADR does not
    implement OpenConfig config datastores or `Set`.
 
 ## Consequences
 
-- `ConfigService` grows two RPCs:
+- `ConfigService` grows five RPCs:
   - `PlanConfigTransaction` (`sensitive_read`)
   - `ApplyConfigTransaction` (`operator_only`)
+  - `ConfirmConfigTransaction` (`operator_only`)
+  - `AbortConfigTransaction` (`operator_only`)
+  - `GetConfigTransactionStatus` (`sensitive_read`)
 - Candidate TOML remains credential-bearing input. Audit summaries for both new
   RPCs redact the TOML body; apply summaries also avoid logging free-form
-  comments verbatim.
+  comments verbatim. Confirm/abort/status summaries include only bounded
+  correlation/status fields.
 - `rustbgpctl config plan` and `rustbgpctl config apply` are thin clients over
   the same RPCs. They print redacted daemon summaries by default and stable JSON
   when `--json` is set.
@@ -145,6 +163,14 @@ section executors behind that public contract.
 - If rollback itself fails, apply returns `INTERNAL` with both the original
   apply/persistence error and the rollback failure context. Silent rollback
   failure is not an acceptable transaction outcome.
+- Commit-confirmed rollback uses the same executor as ordinary
+  `ApplyConfigTransaction`, so it inherits the same validation, persistence, and
+  rollback reporting. This also means abort or auto-revert can fail if the
+  current runtime snapshot no longer matches the post-commit snapshot token; the
+  pending mutation fence is what keeps ordinary runtime config writes from
+  creating that mismatch. A failed abort or auto-revert clears the pending fence
+  and records a failed lifecycle status so operators can inspect the failure and
+  issue a new corrective transaction.
 
 See also ADR-0043 (config persistence and SIGHUP reload), ADR-0061 (unicast FIB
 integration), ADR-0064 (gRPC authorization), ADR-0074 (FIB-table CRUD tier), and

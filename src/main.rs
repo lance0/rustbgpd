@@ -1969,6 +1969,18 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // reload path hold it across their read/apply/persist sequence so stale
     // TOML snapshots cannot clobber accepted runtime changes.
     let runtime_config_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let config_transaction_controller =
+        config_transaction_control::ConfigTransactionController::new(
+            fib_table_control::FibTableControlDeps {
+                fib_cmd_tx: fib_cmd_tx.clone(),
+                peer_mgr_tx: peer_mgr_tx.clone(),
+                config_tx: config_event_tx.clone(),
+                lock: runtime_config_lock.clone(),
+                config_mutation_gate: None,
+                startup_tables: config.fib_tables.clone(),
+            },
+        );
+    let config_mutation_gate = config_transaction_controller.mutation_gate_fn();
     let serve_config = ServeConfig {
         asn: config.global.asn,
         router_id: config.global.router_id.clone(),
@@ -2120,20 +2132,15 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 peer_mgr_tx: peer_mgr_tx.clone(),
                 config_tx: config_event_tx.clone(),
                 lock: runtime_config_lock.clone(),
+                config_mutation_gate: Some(config_mutation_gate.clone()),
                 startup_tables: config.fib_tables.clone(),
             },
         )),
-        config_transaction_apply: Some(
-            config_transaction_control::make_config_transaction_apply_fn(
-                fib_table_control::FibTableControlDeps {
-                    fib_cmd_tx: fib_cmd_tx.clone(),
-                    peer_mgr_tx: peer_mgr_tx.clone(),
-                    config_tx: config_event_tx.clone(),
-                    lock: runtime_config_lock.clone(),
-                    startup_tables: config.fib_tables.clone(),
-                },
-            ),
-        ),
+        config_transaction_apply: Some(config_transaction_controller.apply_fn()),
+        config_transaction_confirm: Some(config_transaction_controller.confirm_fn()),
+        config_transaction_abort: Some(config_transaction_controller.abort_fn()),
+        config_transaction_status: Some(config_transaction_controller.status_fn()),
+        config_mutation_gate: Some(config_mutation_gate.clone()),
         runtime_config_lock: runtime_config_lock.clone(),
         dataplane_route_events: Some(fib_bgp_event_tx),
         bfd_session_snapshot: {
@@ -2341,10 +2348,21 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 // runtime CRUD can't slip into the gap and have its
                 // applied/persisted state clobbered by a stale reload snapshot.
                 let runtime_config_lock = runtime_config_lock.clone();
+                let config_transaction_controller = config_transaction_controller.clone();
                 let pm_internal = peer_mgr_internal_tx.clone();
                 let bridge_replace = bridge_replace_tx.clone();
                 reload_in_flight = Some(tokio::spawn(async move {
                     let _runtime_config_guard = runtime_config_lock.lock().await;
+                    if let Err(error) = config_transaction_controller
+                        .reject_if_pending("SIGHUP reload")
+                        .await
+                    {
+                        warn!(
+                            error = %error,
+                            "SIGHUP reload ignored while confirmed config transaction is applying or pending"
+                        );
+                        return None;
+                    }
                     let snapshot = match runtime_config_snapshot(&pm_tx).await {
                         Ok(snapshot) => snapshot,
                         Err(error) => {

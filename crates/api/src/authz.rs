@@ -167,6 +167,24 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
         AuthTier::OperatorOnly,
     ),
     method(
+        "rustbgpd.v1.ConfigService",
+        "ConfirmConfigTransaction",
+        "/rustbgpd.v1.ConfigService/ConfirmConfigTransaction",
+        AuthTier::OperatorOnly,
+    ),
+    method(
+        "rustbgpd.v1.ConfigService",
+        "AbortConfigTransaction",
+        "/rustbgpd.v1.ConfigService/AbortConfigTransaction",
+        AuthTier::OperatorOnly,
+    ),
+    method(
+        "rustbgpd.v1.ConfigService",
+        "GetConfigTransactionStatus",
+        "/rustbgpd.v1.ConfigService/GetConfigTransactionStatus",
+        AuthTier::SensitiveRead,
+    ),
+    method(
         "rustbgpd.v1.NeighborService",
         "AddNeighbor",
         "/rustbgpd.v1.NeighborService/AddNeighbor",
@@ -744,7 +762,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 83);
+        assert_eq!(METHODS.len(), 86);
     }
 
     #[test]
@@ -785,9 +803,9 @@ mod tests {
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 0);
-        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 44);
+        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 45);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 19);
-        assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 20);
+        assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 22);
     }
 
     #[test]
@@ -818,6 +836,18 @@ mod tests {
         assert_eq!(
             method_authz("/rustbgpd.v1.ConfigService/ApplyConfigTransaction").map(|m| m.tier),
             Some(AuthTier::OperatorOnly)
+        );
+        assert_eq!(
+            method_authz("/rustbgpd.v1.ConfigService/ConfirmConfigTransaction").map(|m| m.tier),
+            Some(AuthTier::OperatorOnly)
+        );
+        assert_eq!(
+            method_authz("/rustbgpd.v1.ConfigService/AbortConfigTransaction").map(|m| m.tier),
+            Some(AuthTier::OperatorOnly)
+        );
+        assert_eq!(
+            method_authz("/rustbgpd.v1.ConfigService/GetConfigTransactionStatus").map(|m| m.tier),
+            Some(AuthTier::SensitiveRead)
         );
         assert_eq!(
             method_authz("/rustbgpd.v1.EvpnService/GetEvpnRuntime").map(|m| m.tier),

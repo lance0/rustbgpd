@@ -114,6 +114,91 @@ pub type ConfigTransactionApplyFn = Arc<
         + 'static,
 >;
 
+/// Future returned by the daemon-owned config transaction confirm hook.
+pub type ConfigTransactionConfirmFuture = Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<
+                    crate::proto::ConfirmConfigTransactionResponse,
+                    ConfigTransactionApplyError,
+                >,
+            > + Send,
+    >,
+>;
+
+/// Daemon-owned hook for `ConfigService.ConfirmConfigTransaction`.
+pub type ConfigTransactionConfirmFn = Arc<
+    dyn Fn(crate::proto::ConfirmConfigTransactionRequest) -> ConfigTransactionConfirmFuture
+        + Send
+        + Sync
+        + 'static,
+>;
+
+/// Future returned by the daemon-owned config transaction abort hook.
+pub type ConfigTransactionAbortFuture = Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<
+                    crate::proto::AbortConfigTransactionResponse,
+                    ConfigTransactionApplyError,
+                >,
+            > + Send,
+    >,
+>;
+
+/// Daemon-owned hook for `ConfigService.AbortConfigTransaction`.
+pub type ConfigTransactionAbortFn = Arc<
+    dyn Fn(crate::proto::AbortConfigTransactionRequest) -> ConfigTransactionAbortFuture
+        + Send
+        + Sync
+        + 'static,
+>;
+
+/// Future returned by the daemon-owned config transaction status hook.
+pub type ConfigTransactionStatusFuture = Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<
+                    crate::proto::ConfigTransactionStatusResponse,
+                    ConfigTransactionApplyError,
+                >,
+            > + Send,
+    >,
+>;
+
+/// Daemon-owned hook for `ConfigService.GetConfigTransactionStatus`.
+pub type ConfigTransactionStatusFn = Arc<
+    dyn Fn(crate::proto::GetConfigTransactionStatusRequest) -> ConfigTransactionStatusFuture
+        + Send
+        + Sync
+        + 'static,
+>;
+
+/// Future returned by a daemon-owned runtime config mutation gate.
+pub type ConfigMutationGateFuture =
+    Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
+
+/// Hook used by persisted runtime-config mutators to fail closed while a
+/// confirmed config transaction is applying or awaiting confirmation.
+pub type ConfigMutationGateFn =
+    Arc<dyn Fn(&'static str) -> ConfigMutationGateFuture + Send + Sync + 'static>;
+
+/// Check an optional runtime-config mutation gate and map its failure to gRPC.
+///
+/// # Errors
+///
+/// Returns `FAILED_PRECONDITION` when the daemon-owned gate rejects `operation`,
+/// for example while a confirmed config transaction is applying or pending.
+pub async fn check_config_mutation_gate(
+    gate: &Option<ConfigMutationGateFn>,
+    operation: &'static str,
+) -> Result<(), Status> {
+    if let Some(gate) = gate {
+        gate(operation).await.map_err(Status::failed_precondition)?;
+    }
+    Ok(())
+}
+
 /// Configuration for the gRPC server beyond basic connectivity.
 #[derive(Clone)]
 pub struct ServeConfig {
@@ -178,6 +263,15 @@ pub struct ServeConfig {
     /// Daemon hook for config transaction apply. `None` fails closed with
     /// `FAILED_PRECONDITION`.
     pub config_transaction_apply: Option<ConfigTransactionApplyFn>,
+    /// Daemon hook for confirmed config transaction confirmation.
+    pub config_transaction_confirm: Option<ConfigTransactionConfirmFn>,
+    /// Daemon hook for confirmed config transaction abort/rollback.
+    pub config_transaction_abort: Option<ConfigTransactionAbortFn>,
+    /// Daemon hook for confirmed config transaction status.
+    pub config_transaction_status: Option<ConfigTransactionStatusFn>,
+    /// Daemon hook used to reject persisted runtime-config mutations while a
+    /// confirmed transaction is pending.
+    pub config_mutation_gate: Option<ConfigMutationGateFn>,
     /// Shared serialization lock for persisted runtime config mutations and
     /// SIGHUP reload. The daemon wires this to dynamic-neighbor CRUD and
     /// FIB-table CRUD so accepted runtime mutations cannot be clobbered by a
@@ -504,6 +598,10 @@ async fn run_listener(
     let fib_route_snapshot = config.fib_route_snapshot;
     let fib_table_control = config.fib_table_control;
     let config_transaction_apply = config.config_transaction_apply;
+    let config_transaction_confirm = config.config_transaction_confirm;
+    let config_transaction_abort = config.config_transaction_abort;
+    let config_transaction_status = config.config_transaction_status;
+    let config_mutation_gate = config.config_mutation_gate;
     let runtime_config_lock = config.runtime_config_lock;
     let dataplane_route_events = config.dataplane_route_events;
     let bfd_session_snapshot = config.bfd_session_snapshot;
@@ -553,6 +651,10 @@ async fn run_listener(
                 fib_route_snapshot,
                 fib_table_control,
                 config_transaction_apply,
+                config_transaction_confirm,
+                config_transaction_abort,
+                config_transaction_status,
+                config_mutation_gate,
                 runtime_config_lock,
                 dataplane_route_events,
                 bfd_session_snapshot,
@@ -597,6 +699,10 @@ async fn run_listener(
                 fib_route_snapshot,
                 fib_table_control,
                 config_transaction_apply,
+                config_transaction_confirm,
+                config_transaction_abort,
+                config_transaction_status,
+                config_mutation_gate,
                 runtime_config_lock,
                 dataplane_route_events,
                 bfd_session_snapshot,
@@ -648,6 +754,10 @@ async fn run_tcp_listener(
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
     fib_table_control: Option<crate::rib_service::FibTableControlFn>,
     config_transaction_apply: Option<ConfigTransactionApplyFn>,
+    config_transaction_confirm: Option<ConfigTransactionConfirmFn>,
+    config_transaction_abort: Option<ConfigTransactionAbortFn>,
+    config_transaction_status: Option<ConfigTransactionStatusFn>,
+    config_mutation_gate: Option<ConfigMutationGateFn>,
     runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
     dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
@@ -736,15 +846,26 @@ async fn run_tcp_listener(
             rib_query_tx.clone(),
             config_tx.clone(),
             runtime_config_lock,
+            config_mutation_gate.clone(),
         ),
         interceptor.clone(),
     ));
     routes.add_service(PeerGroupServiceServer::with_interceptor(
-        PeerGroupService::new(access_mode, peer_mgr_tx.clone(), config_tx.clone()),
+        PeerGroupService::new(
+            access_mode,
+            peer_mgr_tx.clone(),
+            config_tx.clone(),
+            config_mutation_gate.clone(),
+        ),
         interceptor.clone(),
     ));
     routes.add_service(PolicyServiceServer::with_interceptor(
-        PolicyService::new(access_mode, peer_mgr_tx.clone(), config_tx.clone()),
+        PolicyService::new(
+            access_mode,
+            peer_mgr_tx.clone(),
+            config_tx.clone(),
+            config_mutation_gate.clone(),
+        ),
         interceptor.clone(),
     ));
     routes.add_service(GlobalServiceServer::with_interceptor(
@@ -752,8 +873,12 @@ async fn run_tcp_listener(
         interceptor.clone(),
     ));
     routes.add_service(ConfigServiceServer::with_interceptor(
-        ConfigService::new(peer_mgr_tx.clone())
-            .with_transaction_apply(config_transaction_apply.clone()),
+        ConfigService::new(peer_mgr_tx.clone()).with_transaction_hooks(
+            config_transaction_apply.clone(),
+            config_transaction_confirm.clone(),
+            config_transaction_abort.clone(),
+            config_transaction_status.clone(),
+        ),
         interceptor.clone(),
     ));
     routes.add_service(EvpnServiceServer::with_interceptor(
@@ -833,6 +958,10 @@ async fn run_uds_listener(
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
     fib_table_control: Option<crate::rib_service::FibTableControlFn>,
     config_transaction_apply: Option<ConfigTransactionApplyFn>,
+    config_transaction_confirm: Option<ConfigTransactionConfirmFn>,
+    config_transaction_abort: Option<ConfigTransactionAbortFn>,
+    config_transaction_status: Option<ConfigTransactionStatusFn>,
+    config_mutation_gate: Option<ConfigMutationGateFn>,
     runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
     dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
     bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
@@ -901,15 +1030,26 @@ async fn run_uds_listener(
             rib_query_tx.clone(),
             config_tx.clone(),
             runtime_config_lock,
+            config_mutation_gate.clone(),
         ),
         interceptor.clone(),
     ));
     routes.add_service(PeerGroupServiceServer::with_interceptor(
-        PeerGroupService::new(access_mode, peer_mgr_tx.clone(), config_tx.clone()),
+        PeerGroupService::new(
+            access_mode,
+            peer_mgr_tx.clone(),
+            config_tx.clone(),
+            config_mutation_gate.clone(),
+        ),
         interceptor.clone(),
     ));
     routes.add_service(PolicyServiceServer::with_interceptor(
-        PolicyService::new(access_mode, peer_mgr_tx.clone(), config_tx.clone()),
+        PolicyService::new(
+            access_mode,
+            peer_mgr_tx.clone(),
+            config_tx.clone(),
+            config_mutation_gate.clone(),
+        ),
         interceptor.clone(),
     ));
     routes.add_service(GlobalServiceServer::with_interceptor(
@@ -917,8 +1057,12 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(ConfigServiceServer::with_interceptor(
-        ConfigService::new(peer_mgr_tx.clone())
-            .with_transaction_apply(config_transaction_apply.clone()),
+        ConfigService::new(peer_mgr_tx.clone()).with_transaction_hooks(
+            config_transaction_apply.clone(),
+            config_transaction_confirm.clone(),
+            config_transaction_abort.clone(),
+            config_transaction_status.clone(),
+        ),
         interceptor.clone(),
     ));
     routes.add_service(EvpnServiceServer::with_interceptor(

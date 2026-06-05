@@ -15,7 +15,9 @@ use crate::peer_types::{
 };
 use crate::policy_helpers::proto_statement_to_input;
 use crate::proto;
-use crate::server::{AccessMode, read_only_rejection};
+use crate::server::{
+    AccessMode, ConfigMutationGateFn, check_config_mutation_gate, read_only_rejection,
+};
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -195,6 +197,7 @@ pub struct PeerGroupService {
     access_mode: AccessMode,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
+    config_mutation_gate: Option<ConfigMutationGateFn>,
 }
 
 impl PeerGroupService {
@@ -203,12 +206,18 @@ impl PeerGroupService {
         access_mode: AccessMode,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
+        config_mutation_gate: Option<ConfigMutationGateFn>,
     ) -> Self {
         Self {
             access_mode,
             peer_mgr_tx,
             config_tx,
+            config_mutation_gate,
         }
+    }
+
+    async fn check_mutation_gate(&self, operation: &'static str) -> Result<(), Status> {
+        check_config_mutation_gate(&self.config_mutation_gate, operation).await
     }
 }
 
@@ -286,6 +295,8 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
         if req.name.trim().is_empty() {
             return Err(Status::invalid_argument("name is required"));
         }
+        self.check_mutation_gate("PeerGroupService.SetPeerGroup")
+            .await?;
         let definition = req
             .definition
             .ok_or_else(|| Status::invalid_argument("definition is required"))?;
@@ -348,6 +359,8 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             return Err(Status::invalid_argument("name is required"));
         }
 
+        self.check_mutation_gate("PeerGroupService.DeletePeerGroup")
+            .await?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
@@ -394,6 +407,8 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             return Err(Status::invalid_argument("peer_group is required"));
         }
 
+        self.check_mutation_gate("PeerGroupService.SetNeighborPeerGroup")
+            .await?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
@@ -436,6 +451,8 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
 
+        self.check_mutation_gate("PeerGroupService.ClearNeighborPeerGroup")
+            .await?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
@@ -489,7 +506,7 @@ mod tests {
         assert_eq!(output.has_md5_password, Some(true));
 
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
-        let svc = PeerGroupService::new(AccessMode::ReadOnly, peer_tx, None);
+        let svc = PeerGroupService::new(AccessMode::ReadOnly, peer_tx, None, None);
 
         let task = tokio::spawn(async move {
             PeerGroupServiceRpc::list_peer_groups(
@@ -532,7 +549,7 @@ mod tests {
     async fn set_peer_group_preserves_redacted_md5_when_presence_flag_is_set() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx));
+        let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
 
         let task = tokio::spawn(async move {
             PeerGroupServiceRpc::set_peer_group(
@@ -592,7 +609,7 @@ mod tests {
     #[tokio::test]
     async fn set_peer_group_audit_summary_redacts_md5_password() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
-        let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, None);
+        let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, None, None);
         let audit_handle = GrpcAuditHandle::default();
         let mut request = Request::new(proto::SetPeerGroupRequest {
             name: "rs-clients".into(),
@@ -635,7 +652,7 @@ mod tests {
     #[tokio::test]
     async fn set_peer_group_omitted_md5_presence_preserves_by_default() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
-        let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, None);
+        let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, None, None);
 
         let task = tokio::spawn(async move {
             PeerGroupServiceRpc::set_peer_group(
@@ -680,7 +697,7 @@ mod tests {
     #[tokio::test]
     async fn set_peer_group_explicit_false_clears_redacted_md5() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
-        let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, None);
+        let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, None, None);
 
         let task = tokio::spawn(async move {
             PeerGroupServiceRpc::set_peer_group(
@@ -723,7 +740,7 @@ mod tests {
     async fn set_peer_group_rejected_on_read_only_listener() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PeerGroupService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx));
+        let svc = PeerGroupService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx), None);
 
         let err = PeerGroupServiceRpc::set_peer_group(
             &svc,
@@ -744,7 +761,7 @@ mod tests {
     async fn remaining_mutations_rejected_on_read_only_listener() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PeerGroupService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx));
+        let svc = PeerGroupService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx), None);
 
         let err = PeerGroupServiceRpc::delete_peer_group(
             &svc,

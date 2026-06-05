@@ -130,6 +130,16 @@ service ConfigService {
   // families and sections without an atomic executor are rejected without
   // mutation.
   rpc ApplyConfigTransaction(ApplyConfigTransactionRequest) returns (ConfigTransactionApplyResponse);
+
+  // Confirm a pending confirmed config transaction before its timeout expires.
+  rpc ConfirmConfigTransaction(ConfirmConfigTransactionRequest) returns (ConfirmConfigTransactionResponse);
+
+  // Abort a pending confirmed config transaction and roll back immediately.
+  rpc AbortConfigTransaction(AbortConfigTransactionRequest) returns (AbortConfigTransactionResponse);
+
+  // Return the current confirmed-transaction lifecycle state. The response is
+  // redacted and never includes candidate config contents.
+  rpc GetConfigTransactionStatus(GetConfigTransactionStatusRequest) returns (ConfigTransactionStatusResponse);
 }
 
 message DiffRuntimeConfigRequest {
@@ -200,6 +210,14 @@ message ApplyConfigTransactionRequest {
   // Optional human change note. The daemon does not log this field verbatim
   // because operators may include sensitive context.
   string comment = 4;
+  // Optional confirmed-commit handle. When set, the committed candidate enters
+  // a pending-confirm state and is automatically rolled back unless
+  // ConfirmConfigTransaction is called with the same value before the timeout.
+  // This is a correlation handle, not an authorization credential.
+  string confirm_id = 5;
+  // Optional confirmed-commit timeout in seconds. A zero value uses the daemon
+  // default when confirm_id is set and is ignored otherwise.
+  uint32 confirm_timeout_seconds = 6;
 }
 
 message ConfigTransactionApplyResponse {
@@ -207,6 +225,54 @@ message ConfigTransactionApplyResponse {
   string runtime_snapshot_token = 2;
   repeated string committed_sections = 3;
   string human_text = 4;
+  ConfigTransactionConfirmation confirmation = 5;
+}
+
+enum ConfigTransactionConfirmationStatus {
+  CONFIG_TRANSACTION_CONFIRMATION_STATUS_UNSPECIFIED = 0;
+  CONFIG_TRANSACTION_CONFIRMATION_STATUS_NONE = 1;
+  CONFIG_TRANSACTION_CONFIRMATION_STATUS_PENDING = 2;
+  CONFIG_TRANSACTION_CONFIRMATION_STATUS_CONFIRMED = 3;
+  CONFIG_TRANSACTION_CONFIRMATION_STATUS_ABORTED = 4;
+  CONFIG_TRANSACTION_CONFIRMATION_STATUS_AUTO_REVERTED = 5;
+  CONFIG_TRANSACTION_CONFIRMATION_STATUS_AUTO_REVERT_FAILED = 6;
+  CONFIG_TRANSACTION_CONFIRMATION_STATUS_ABORT_FAILED = 7;
+}
+
+message ConfigTransactionConfirmation {
+  ConfigTransactionConfirmationStatus status = 1;
+  string confirm_id = 2;
+  uint32 timeout_seconds = 3;
+  uint64 deadline_unix_seconds = 4;
+  repeated string committed_sections = 5;
+  string runtime_snapshot_token = 6;
+  string human_text = 7;
+}
+
+message ConfirmConfigTransactionRequest {
+  string confirm_id = 1;
+}
+
+message ConfirmConfigTransactionResponse {
+  ConfigTransactionConfirmation confirmation = 1;
+  string human_text = 2;
+}
+
+message AbortConfigTransactionRequest {
+  string confirm_id = 1;
+}
+
+message AbortConfigTransactionResponse {
+  ConfigTransactionConfirmation confirmation = 1;
+  string runtime_snapshot_token = 2;
+  string human_text = 3;
+}
+
+message GetConfigTransactionStatusRequest {}
+
+message ConfigTransactionStatusResponse {
+  ConfigTransactionConfirmation confirmation = 1;
+  string human_text = 2;
 }
 
 // ---------------------------------------------------------------------------

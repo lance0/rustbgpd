@@ -34,6 +34,7 @@ use rustbgpd_api::proto;
 use rustbgpd_api::rib_service::{
     FibTableControlError, FibTableControlFn, FibTableControlFuture, FibTableControlRequest,
 };
+use rustbgpd_api::server::ConfigMutationGateFn;
 use tracing::error;
 
 use crate::config::FibTableConfig;
@@ -55,6 +56,10 @@ pub struct FibTableControlDeps {
     pub config_tx: Option<mpsc::Sender<ConfigEvent>>,
     /// Coordinator lock shared with the SIGHUP reload FIB step.
     pub lock: Arc<Mutex<()>>,
+    /// Optional confirmed config transaction gate. While a confirmed
+    /// transaction is applying or pending confirmation, targeted FIB-table CRUD
+    /// must fail closed so it cannot be overwritten by timeout rollback.
+    pub config_mutation_gate: Option<ConfigMutationGateFn>,
     /// The `[[fib_tables]]` set present at startup. When the reconciler is not
     /// running, `List` falls back to this so a non-Linux / netlink-failure
     /// daemon still shows its configured tables, and an empty set distinguishes
@@ -106,6 +111,15 @@ enum Mutation {
     Delete(String),
 }
 
+impl Mutation {
+    const fn operation_label(&self) -> &'static str {
+        match self {
+            Self::Upsert(_) => "RibService.SetFibTable",
+            Self::Delete(_) => "RibService.DeleteFibTable",
+        }
+    }
+}
+
 async fn mutate(
     deps: Arc<FibTableControlDeps>,
     mutation: Mutation,
@@ -123,12 +137,19 @@ async fn mutate(
     })?;
     let peer_mgr_tx = deps.peer_mgr_tx.clone();
     let lock = deps.lock.clone();
+    let config_mutation_gate = deps.config_mutation_gate.clone();
+    let operation = mutation.operation_label();
 
     // Run the critical section in a detached task so a canceled gRPC request
     // cannot split a successful `ReplaceTables` from its persistence: once the
     // task starts it runs to completion regardless of the awaiting future.
     let join = tokio::spawn(async move {
         let _guard = lock.lock().await;
+        if let Some(gate) = &config_mutation_gate {
+            gate(operation)
+                .await
+                .map_err(FibTableControlError::FailedPrecondition)?;
+        }
 
         let current = read_current_tables(Some(&fib_cmd_tx))
             .await?
@@ -557,6 +578,7 @@ mod tests {
             peer_mgr_tx: peer_tx,
             config_tx: Some(config_tx),
             lock: Arc::new(Mutex::new(())),
+            config_mutation_gate: None,
             startup_tables: vec![original.clone()],
         });
         let err = mutate(deps, Mutation::Upsert(table("core", 1001)))
@@ -624,6 +646,7 @@ mod tests {
             peer_mgr_tx: peer_tx,
             config_tx: Some(config_tx),
             lock: Arc::new(Mutex::new(())),
+            config_mutation_gate: None,
             startup_tables: vec![original.clone()],
         });
         let err = mutate(deps, Mutation::Upsert(table("core", 1001)))

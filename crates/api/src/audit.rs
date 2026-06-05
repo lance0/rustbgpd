@@ -108,15 +108,36 @@ pub(crate) fn apply_config_transaction_summary(
     expected_runtime_snapshot_token: &str,
     client_request_id: &str,
     comment: &str,
+    confirm_id: &str,
+    confirm_timeout_seconds: u32,
 ) -> GrpcRequestSummary {
     debug_assert!(CREDENTIAL_MASK_TABLE.contains(&"ApplyConfigTransactionRequest.candidate_toml"));
     GrpcRequestSummary::new(format!(
-        "candidate_toml={REDACTED} candidate_toml_bytes={} expected_runtime_snapshot_token_present={} client_request_id={} comment_present={}",
+        "candidate_toml={REDACTED} candidate_toml_bytes={} expected_runtime_snapshot_token_present={} client_request_id={} comment_present={} confirm_id={} confirm_timeout_seconds={}",
         candidate_toml.len(),
         !expected_runtime_snapshot_token.is_empty(),
         safe_summary_value(client_request_id),
-        !comment.is_empty()
+        !comment.is_empty(),
+        safe_summary_value(confirm_id),
+        confirm_timeout_seconds
     ))
+}
+
+/// Summary for `ConfirmConfigTransaction`. The confirmation id is an operator
+/// correlation handle, not a secret, but still bounded before logging.
+pub(crate) fn confirm_config_transaction_summary(confirm_id: &str) -> GrpcRequestSummary {
+    GrpcRequestSummary::new(format!("confirm_id={}", safe_summary_value(confirm_id)))
+}
+
+/// Summary for `AbortConfigTransaction`. The confirmation id is an operator
+/// correlation handle, not a secret, but still bounded before logging.
+pub(crate) fn abort_config_transaction_summary(confirm_id: &str) -> GrpcRequestSummary {
+    GrpcRequestSummary::new(format!("confirm_id={}", safe_summary_value(confirm_id)))
+}
+
+/// Summary for `GetConfigTransactionStatus`; there are no request fields.
+pub(crate) fn get_config_transaction_status_summary() -> GrpcRequestSummary {
+    GrpcRequestSummary::new("request=empty")
 }
 
 /// Summary for `ApplyEvpnRuntime`. Candidate TOML has the same
@@ -213,10 +234,14 @@ mod tests {
             "kv1:abc:1",
             "deploy-42",
             "secret maintenance note",
+            "deploy-confirm",
+            120,
         );
         assert!(summary.as_str().contains("candidate_toml=<redacted>"));
         assert!(summary.as_str().contains("client_request_id=deploy-42"));
         assert!(summary.as_str().contains("comment_present=true"));
+        assert!(summary.as_str().contains("confirm_id=deploy-confirm"));
+        assert!(summary.as_str().contains("confirm_timeout_seconds=120"));
         assert!(!summary.as_str().contains("secret"));
         assert!(!summary.as_str().contains("ao-secret"));
         assert!(!summary.as_str().contains("maintenance"));
