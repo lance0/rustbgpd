@@ -82,7 +82,7 @@ impl fmt::Debug for TcpAoConfig {
 }
 
 /// Transport-layer configuration for a single BGP peer.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "flat per-peer transport config; each bool is an independent BGP feature toggle, not a state enum"

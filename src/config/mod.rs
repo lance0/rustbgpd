@@ -1062,6 +1062,7 @@ const TRANSACTION_PEER_GROUP_CATALOG_SECTION: &str = "[peer_groups] catalog";
 const TRANSACTION_POLICY_DEFINITIONS_SECTION: &str = "[policy] definitions";
 const TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION: &str = "[policy] neighbor_sets";
 const TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION: &str = "[policy] global chains";
+const TRANSACTION_POLICY_LIVE_IMPACT_SECTION: &str = "[policy] live impact";
 
 /// Test-only auto-inject for the v0.24.0 `enforcement = "tier"`
 /// default flip. When compiled with `#[cfg(test)]` and the supplied
@@ -1431,6 +1432,17 @@ pub struct ConfigDiff {
 pub struct EffectiveNeighborImpact {
     pub address: String,
     pub reasons: Vec<String>,
+    /// True when the live-impact policy transaction executor can commit this
+    /// impact by re-applying resolved chains to the live session: a static
+    /// neighbor whose impact is *exclusively* a resolved import/export
+    /// `PolicyChain` move — no transport-config (`hold_time`, families, `md5`,
+    /// `tcp_ao`, role, …) change and no peer-group reassignment. False for
+    /// peer-group field reshapes (need a session reconfigure) and for
+    /// `[[dynamic_neighbors]]` ranges (live-apply needs longest-match accept
+    /// attribution — deferred to a v2 follow-up). Not serialized into `--diff`;
+    /// an internal classification hint.
+    #[serde(skip)]
+    pub policy_chain_only: bool,
 }
 
 /// Serializable neighbor diff summary (`NeighborDiff` uses `IpAddr` which is fine,
@@ -1681,9 +1693,24 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .push(TRANSACTION_PEER_GROUP_CATALOG_SECTION.to_string());
     }
     if !diff.effective_neighbor_impact.is_empty() {
-        class
-            .unsupported_sections
-            .push("effective neighbor inheritance impact".to_string());
+        // A live-impact transaction is committable only when every impacted
+        // entry is a pure resolved-policy-chain move on a static neighbor (the
+        // live-impact executor re-applies the resolved chains in place). Any
+        // peer-group field reshape or dynamic-range impact (not `policy_chain_
+        // only`) still needs a session reconfigure / SIGHUP and is rejected.
+        if diff
+            .effective_neighbor_impact
+            .iter()
+            .all(|impact| impact.policy_chain_only)
+        {
+            class
+                .supported_sections
+                .push(TRANSACTION_POLICY_LIVE_IMPACT_SECTION.to_string());
+        } else {
+            class
+                .unsupported_sections
+                .push("effective neighbor inheritance impact".to_string());
+        }
     }
     if !transaction_sections_are_one_family(&class.supported_sections) {
         class
@@ -1789,7 +1816,11 @@ fn transaction_sections_are_one_family(sections: &[String]) -> bool {
             TRANSACTION_PEER_GROUP_CATALOG_SECTION
             | TRANSACTION_POLICY_DEFINITIONS_SECTION
             | TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION
-            | TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION => {
+            | TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION
+            // The live-impact section co-occurs with the catalog record sections
+            // it stems from (a policy/peer-group/chain edit), so it counts as
+            // the same family rather than tripping the mixed-family guard.
+            | TRANSACTION_POLICY_LIVE_IMPACT_SECTION => {
                 has_catalog = true;
             }
             _ => {}
@@ -2645,6 +2676,61 @@ fn dynamic_range_representative_addr(prefix: &str) -> Option<IpAddr> {
     prefix.split_once('/')?.0.parse::<IpAddr>().ok()
 }
 
+/// Attribute a neighbor's moved resolved chain to the specific changed policy
+/// definition / neighbor-set / global chain responsible, appending dedup'd
+/// reason strings. Called only when the resolved import/export chain actually
+/// moved, so a coarse neighbor-set/global-chain edit doesn't tag every neighbor.
+fn attribute_chain_move_reasons(
+    reasons: &mut Vec<String>,
+    old_neighbor: &Neighbor,
+    new_neighbor: &Neighbor,
+    new_peer_group: Option<&str>,
+    new: &Config,
+    policy: &PolicyDiff,
+) {
+    let policy_changed: HashSet<&str> = policy
+        .definitions_changed
+        .iter()
+        .map(String::as_str)
+        .chain(policy.definitions_added.iter().map(String::as_str))
+        .chain(policy.definitions_removed.iter().map(String::as_str))
+        .collect();
+    let mut chain_refs: Vec<&str> = Vec::new();
+    chain_refs.extend(new_neighbor.import_policy_chain.iter().map(String::as_str));
+    chain_refs.extend(new_neighbor.export_policy_chain.iter().map(String::as_str));
+    chain_refs.extend(old_neighbor.import_policy_chain.iter().map(String::as_str));
+    chain_refs.extend(old_neighbor.export_policy_chain.iter().map(String::as_str));
+    if let Some(pg_name) = new_peer_group
+        && let Some(pg) = new.peer_groups.get(pg_name)
+    {
+        chain_refs.extend(pg.import_policy_chain.iter().map(String::as_str));
+        chain_refs.extend(pg.export_policy_chain.iter().map(String::as_str));
+    }
+    for name in chain_refs {
+        if policy_changed.contains(name) {
+            let entry = format!("policy {name:?} changed");
+            if !reasons.contains(&entry) {
+                reasons.push(entry);
+            }
+        }
+    }
+    if policy.import_chain_changed || policy.export_chain_changed {
+        let entry = "global import/export chain changed".to_string();
+        if !reasons.contains(&entry) {
+            reasons.push(entry);
+        }
+    }
+    if !policy.neighbor_sets_added.is_empty()
+        || !policy.neighbor_sets_removed.is_empty()
+        || !policy.neighbor_sets_changed.is_empty()
+    {
+        let entry = "referenced neighbor_set changed".to_string();
+        if !reasons.contains(&entry) {
+            reasons.push(entry);
+        }
+    }
+}
+
 /// Walk neighbors that exist in both configs and surface those whose
 /// resolved effective config differs between old and new through a
 /// reload-applied path — peer-group inheritance, named policy chain
@@ -2701,18 +2787,6 @@ fn compute_effective_neighbor_impact(
         .chain(peer_groups.added.iter().map(String::as_str))
         .chain(peer_groups.removed.iter().map(String::as_str))
         .collect();
-    let policy_changed: HashSet<&str> = policy
-        .definitions_changed
-        .iter()
-        .map(String::as_str)
-        .chain(policy.definitions_added.iter().map(String::as_str))
-        .chain(policy.definitions_removed.iter().map(String::as_str))
-        .collect();
-    let nset_changed = !policy.neighbor_sets_added.is_empty()
-        || !policy.neighbor_sets_removed.is_empty()
-        || !policy.neighbor_sets_changed.is_empty();
-    let global_chain_changed = policy.import_chain_changed || policy.export_chain_changed;
-
     let new_by_addr: HashMap<&str, &Neighbor> = new
         .neighbors
         .iter()
@@ -2735,6 +2809,13 @@ fn compute_effective_neighbor_impact(
             != format!("{:?}", new_resolved.import_policy);
         let export_moved = format!("{:?}", old_resolved.export_policy)
             != format!("{:?}", new_resolved.export_policy);
+        // A non-policy resolved change (hold_time, families, md5, tcp_ao, role,
+        // add_path, …) lives in transport_config; a group reassignment changes
+        // the neighbor's raw record. Either means the impact is not a pure
+        // policy-chain move the live-impact executor can re-apply in place — it
+        // must route through a session reconfigure instead.
+        let transport_changed = old_resolved.transport_config != new_resolved.transport_config;
+        let peer_group_reassigned = old_resolved.peer_group != new_resolved.peer_group;
 
         let mut reasons: Vec<String> = Vec::new();
         if import_moved {
@@ -2755,48 +2836,27 @@ fn compute_effective_neighbor_impact(
             reasons.push(format!("peer_group {name:?} changed"));
         }
 
-        // Attribute moved chains to specific changed policies / sets
-        // / global chain, but only when something *did* move at the
-        // resolved-chain level — otherwise we'd surface every
-        // neighbor for any neighbor_set edit.
+        // Attribute moved chains to specific changed policies / sets / global
+        // chain, but only when something *did* move at the resolved-chain level
+        // — otherwise we'd surface every neighbor for any neighbor_set edit.
         if import_moved || export_moved {
-            let mut chain_refs: Vec<&str> = Vec::new();
-            chain_refs.extend(new_neighbor.import_policy_chain.iter().map(String::as_str));
-            chain_refs.extend(new_neighbor.export_policy_chain.iter().map(String::as_str));
-            chain_refs.extend(old_neighbor.import_policy_chain.iter().map(String::as_str));
-            chain_refs.extend(old_neighbor.export_policy_chain.iter().map(String::as_str));
-            if let Some(pg_name) = new_resolved.peer_group.as_deref()
-                && let Some(pg) = new.peer_groups.get(pg_name)
-            {
-                chain_refs.extend(pg.import_policy_chain.iter().map(String::as_str));
-                chain_refs.extend(pg.export_policy_chain.iter().map(String::as_str));
-            }
-            for name in chain_refs {
-                if policy_changed.contains(name) {
-                    let entry = format!("policy {name:?} changed");
-                    if !reasons.contains(&entry) {
-                        reasons.push(entry);
-                    }
-                }
-            }
-            if global_chain_changed {
-                let entry = "global import/export chain changed".to_string();
-                if !reasons.contains(&entry) {
-                    reasons.push(entry);
-                }
-            }
-            if nset_changed {
-                let entry = "referenced neighbor_set changed".to_string();
-                if !reasons.contains(&entry) {
-                    reasons.push(entry);
-                }
-            }
+            attribute_chain_move_reasons(
+                &mut reasons,
+                old_neighbor,
+                new_neighbor,
+                new_resolved.peer_group.as_deref(),
+                new,
+                policy,
+            );
         }
 
         if !reasons.is_empty() {
             out.push(EffectiveNeighborImpact {
                 address: old_neighbor.address.clone(),
                 reasons,
+                policy_chain_only: (import_moved || export_moved)
+                    && !transport_changed
+                    && !peer_group_reassigned,
             });
         }
     }
@@ -2880,6 +2940,12 @@ fn dynamic_range_effective_impact(
             out.push(EffectiveNeighborImpact {
                 address: old_range.prefix.clone(),
                 reasons,
+                // Live-applying a range's moved policy to its established
+                // sessions needs longest-prefix-match accept attribution to
+                // avoid mis-applying an overlapping range's policy. Until that
+                // v2 lands, a dynamic-range impact is not committable by the
+                // live-impact executor — it stays rejected (routed via SIGHUP).
+                policy_chain_only: false,
             });
         }
     }

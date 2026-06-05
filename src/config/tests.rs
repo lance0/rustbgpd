@@ -6803,7 +6803,10 @@ default_action = "permit"
 }
 
 #[test]
-fn transaction_v1_rejects_catalog_policy_change_with_live_neighbor_impact() {
+fn transaction_v1_classifies_static_neighbor_policy_chain_move_as_live_impact() {
+    // A policy-definition edit referenced via a static neighbor's import chain
+    // moves that neighbor's resolved import policy with no transport/peer-group
+    // reshape — committable by the live-impact executor (re-apply in place).
     let with_policy = |default_action: &str| {
         format!(
             r#"
@@ -6823,8 +6826,92 @@ default_action = "{default_action}"
     let diff = diff_config(&old, &new);
     let class = classify_config_transaction_v1(&diff);
 
-    assert!(!class.is_committable());
-    assert_eq!(class.supported_sections, vec!["[policy] definitions"]);
+    assert!(class.is_committable(), "{class:?}");
+    assert_eq!(
+        class.supported_sections,
+        vec!["[policy] definitions", "[policy] live impact"]
+    );
+    assert!(class.unsupported_sections.is_empty(), "{class:?}");
+    assert!(class.restart_required_sections.is_empty());
+    assert!(
+        diff.effective_neighbor_impact
+            .iter()
+            .all(|impact| impact.policy_chain_only),
+        "{:?}",
+        diff.effective_neighbor_impact
+    );
+}
+
+#[test]
+fn transaction_v1_rejects_policy_chain_move_with_tcp_ao_key_rotation_as_non_policy_impact() {
+    // TCP-AO key material is redacted from Debug, so the live-impact classifier
+    // must compare resolved transport config structurally rather than through
+    // rendered strings. A key rotation is restart-required transport impact even
+    // when the same candidate also moves a policy chain.
+    let with_policy_and_tcp_ao = |default_action: &str, key: &str| {
+        format!(
+            r#"
+{}
+
+[policy.definitions.import-filter]
+default_action = "{default_action}"
+"#,
+            valid_toml().replace(
+                "hold_time = 90",
+                &format!(
+                    "hold_time = 90\nimport_policy_chain = [\"import-filter\"]\ntcp_ao = {{ key = \"{key}\", send_id = 1, recv_id = 1, algorithm = \"hmac(sha256)\" }}"
+                ),
+            )
+        )
+    };
+    let old = parse(&with_policy_and_tcp_ao("permit", "old-secret")).unwrap();
+    let new = parse(&with_policy_and_tcp_ao("deny", "new-secret")).unwrap();
+    let peer_groups = diff_peer_groups(&old.peer_groups, &new.peer_groups);
+    let policy = diff_policy(&old.policy, &new.policy);
+    let impact = super::compute_effective_neighbor_impact(&old, &new, &peer_groups, &policy);
+
+    assert!(
+        impact.iter().any(|impact| !impact.policy_chain_only),
+        "{impact:?}"
+    );
+}
+
+#[test]
+fn transaction_v1_rejects_peer_group_field_reshape_with_live_neighbor_impact() {
+    // A peer-group hold_time edit reshapes the resolved transport_config of its
+    // member neighbor — that needs a session reconfigure, not an in-place chain
+    // re-apply, so it stays rejected (not `policy_chain_only`).
+    let with_hold = |hold: u32| {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[peer_groups.edge]
+hold_time = {hold}
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "edge"
+"#
+        )
+    };
+    let old = parse(&with_hold(90)).unwrap();
+    let new = parse(&with_hold(45)).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(!class.is_committable(), "{class:?}");
     assert!(
         class
             .unsupported_sections
@@ -6832,8 +6919,13 @@ default_action = "{default_action}"
         "{:?}",
         class.unsupported_sections
     );
-    assert!(!diff.effective_neighbor_impact.is_empty());
-    assert!(class.restart_required_sections.is_empty());
+    assert!(
+        diff.effective_neighbor_impact
+            .iter()
+            .any(|impact| !impact.policy_chain_only),
+        "{:?}",
+        diff.effective_neighbor_impact
+    );
 }
 
 #[test]
