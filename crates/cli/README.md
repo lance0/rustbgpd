@@ -7,66 +7,109 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
 ## Commands
 
+### Runtime Snapshot
+
+```bash
+rustbgpctl global       # ASN, router ID, families, TCP-AO support
+rustbgpctl health       # daemon health check
+rustbgpctl metrics      # Prometheus metrics snapshot
+rustbgpctl top          # live terminal dashboard
 ```
-rustbgpctl global                      # show ASN, router ID
+
+### Config Transactions
+
+```bash
 rustbgpctl config diff --from-file config.toml
 rustbgpctl config plan --from-file config.toml
-rustbgpctl config apply --from-file config.toml --expected-runtime-snapshot-token kv1:...
-rustbgpctl config apply --from-file config.toml --expected-runtime-snapshot-token kv1:... \
-  --confirm-id deploy-123 --confirm-timeout 120
+rustbgpctl config apply --from-file config.toml \
+  --expected-runtime-snapshot-token kv1:...
+
+# Confirmed apply: rolls back unless confirmed before the timeout.
+rustbgpctl config apply --from-file config.toml \
+  --expected-runtime-snapshot-token kv1:... \
+  --confirm-id deploy-123 \
+  --confirm-timeout 120
 rustbgpctl config status
 rustbgpctl config confirm deploy-123
 rustbgpctl config abort deploy-123
-rustbgpctl neighbor                    # list all peers
-rustbgpctl neighbor <addr>             # peer detail
+```
+
+### Peers and BFD
+
+```bash
+rustbgpctl neighbor
+rustbgpctl neighbor <addr>
 rustbgpctl neighbor <addr> add --asn <asn> [--role provider|rs|rs-client|customer|peer] [--strict-role]
-rustbgpctl neighbor <addr> delete      # remove peer
-rustbgpctl neighbor <addr> enable      # enable peer
-rustbgpctl neighbor <addr> disable     # disable peer with reason
-rustbgpctl neighbor <addr> softreset   # trigger inbound soft reset
-rustbgpctl bfd                         # list BFD sessions
-rustbgpctl bfd show <addr>             # BFD session detail
-rustbgpctl rib                         # list best routes
-rustbgpctl rib received <addr>         # received routes
-rustbgpctl rib advertised <addr>       # advertised routes
+rustbgpctl neighbor <addr> enable
+rustbgpctl neighbor <addr> disable --reason "maintenance"
+rustbgpctl neighbor <addr> softreset
+rustbgpctl neighbor <addr> delete
+
+rustbgpctl dynamic-neighbor list
+rustbgpctl dynamic-neighbor add 10.0.0.0/24 --peer-group ix-members
+rustbgpctl dynamic-neighbor delete 10.0.0.0/24
+
+rustbgpctl bfd
+rustbgpctl bfd show <addr>
+```
+
+### Routes, Policy, and Dataplane
+
+```bash
+rustbgpctl rib
+rustbgpctl rib received <addr>
+rustbgpctl rib advertised <addr>
 rustbgpctl rib --prefix <prefix> --explain
-rustbgpctl rib blackholes              # BLACKHOLE discard status
-rustbgpctl rib fib                     # general FIB route status
-rustbgpctl flowspec                    # list FlowSpec rules
-rustbgpctl policy list                 # list named policies (names + statement counts)
-rustbgpctl policy get <name>           # show one named policy
-rustbgpctl policy set <name> --from-file pol.json   # create/replace from a JSON PolicyDefinition
-rustbgpctl policy delete <name>        # delete a named policy
-rustbgpctl policy chain show [--neighbor <addr>]    # show global (or per-neighbor) import/export chains
-rustbgpctl policy chain set-import [--neighbor <addr>] <names...>   # replace the import chain
-rustbgpctl policy chain set-export [--neighbor <addr>] <names...>   # replace the export chain
-rustbgpctl policy chain clear-import [--neighbor <addr>]            # clear the import chain
-rustbgpctl policy chain clear-export [--neighbor <addr>]            # clear the export chain
-rustbgpctl policy explain --neighbor <addr> --prefix <cidr> [--path-id <n>]   # why a prefix was permitted/denied on import (ADR-0073)
-rustbgpctl evpn                        # list EVPN routes (RFC 7432)
-rustbgpctl evpn runtime                # committed EVPN runtime model
-rustbgpctl evpn instances              # resolved L2VNI state
-rustbgpctl evpn nexthops               # resolved EVPN next-hop state
-rustbgpctl evpn vrfs                   # resolved IP-VRF state
-rustbgpctl evpn diagnose               # EVPN readiness diagnostics
-rustbgpctl evpn add-mac-ip ...         # inject EVPN Type 2 MAC/IP route
-rustbgpctl evpn add-imet ...           # inject EVPN Type 3 IMET route
-rustbgpctl evpn add-ip-prefix ...      # inject EVPN Type 5 IP Prefix route
-rustbgpctl evpn delete-mac-ip ...      # withdraw EVPN Type 2 route
-rustbgpctl evpn delete-imet ...        # withdraw EVPN Type 3 route
-rustbgpctl evpn delete-ip-prefix ...   # withdraw EVPN Type 5 route
-rustbgpctl watch                       # legacy route-update stream
-rustbgpctl events watch                # unified live event stream
-rustbgpctl events watch --category bfd # BFD up/down/state-change stream
-rustbgpctl events sessions             # recent session lifecycle events
-rustbgpctl events policy               # recent runtime policy changes
-rustbgpctl events evpn                 # recent EVPN route events
-rustbgpctl health                      # daemon health check
-rustbgpctl shutdown                    # coordinated shutdown
-rustbgpctl mrt-dump                    # trigger MRT dump
-rustbgpctl metrics                     # Prometheus metrics snapshot
-rustbgpctl top                         # live terminal dashboard
-rustbgpctl completions bash            # shell completions
+rustbgpctl rib blackholes
+rustbgpctl rib fib
+
+rustbgpctl policy list
+rustbgpctl policy get <name>
+rustbgpctl policy set <name> --from-file policy.json
+rustbgpctl policy delete <name>
+rustbgpctl policy chain show [--neighbor <addr>]
+rustbgpctl policy chain set-import [--neighbor <addr>] <names...>
+rustbgpctl policy chain set-export [--neighbor <addr>] <names...>
+rustbgpctl policy chain clear-import [--neighbor <addr>]
+rustbgpctl policy chain clear-export [--neighbor <addr>]
+rustbgpctl policy explain --neighbor <addr> --prefix <cidr> [--path-id <n>]
+
+rustbgpctl flowspec
+rustbgpctl fib-table list
+rustbgpctl fib-table set edge --table-id 1000 --metric 200 --families ipv4_unicast,ipv6_unicast
+```
+
+### EVPN
+
+```bash
+rustbgpctl evpn
+rustbgpctl evpn runtime
+rustbgpctl evpn instances
+rustbgpctl evpn nexthops
+rustbgpctl evpn vrfs
+rustbgpctl evpn diagnose
+rustbgpctl evpn add-mac-ip ...
+rustbgpctl evpn add-imet ...
+rustbgpctl evpn add-ip-prefix ...
+rustbgpctl evpn delete-mac-ip ...
+rustbgpctl evpn delete-imet ...
+rustbgpctl evpn delete-ip-prefix ...
+```
+
+### Events and Control
+
+```bash
+rustbgpctl events watch
+rustbgpctl events watch --backfill 50
+rustbgpctl events watch --category bfd --type bfd_up,bfd_down,bfd_state_changed
+rustbgpctl events sessions
+rustbgpctl events policy
+rustbgpctl events evpn
+rustbgpctl watch              # legacy route-update stream
+
+rustbgpctl mrt-dump
+rustbgpctl shutdown
+rustbgpctl completions bash
 ```
 
 All commands support `--json` for machine-parseable output and `--no-color`

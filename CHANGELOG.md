@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **CLI command-surface README refresh.** The `rustbgpctl` crate README now
+  groups commands by workflow — config transactions, peers/BFD, RIB/policy,
+  EVPN, events, dataplane, and daemon control — instead of a single long
+  command list.
+
 - **Commit-confirmed config transactions.** `ApplyConfigTransaction` now accepts
   a `confirm_id` plus optional `confirm_timeout_seconds` to apply a candidate
   immediately while starting a confirm timer. `ConfirmConfigTransaction` makes
