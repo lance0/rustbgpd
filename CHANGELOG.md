@@ -9,6 +9,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Live-impact policy config transactions.** `ApplyConfigTransaction` can now
+  commit policy definitions, neighbor sets, peer groups, and global named
+  policy-chain edits that move existing static neighbors' resolved import/export
+  policy chains.
+  The executor stages the candidate snapshot, re-applies resolved chains to
+  affected live sessions, captures prior chains for rollback, persists with an
+  acknowledgement, and restores live chains plus the snapshot on failure.
+  Dynamic-range policy impact, peer-group/session reshapes, mixed families, and
+  other unsupported sections remain rejected without mutation.
+
 ## [0.35.0] — 2026-06-04
 
 ### Added

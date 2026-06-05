@@ -95,14 +95,16 @@ Later for what remains.
   and explicit v1 section classification. `ApplyConfigTransaction` is
   operator-only and can commit one pure runtime family at a time: full-set
   `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, static `[[neighbors]]`
-  add/delete/modify, or catalog-only policy/peer-group/global-chain changes
-  that do not alter the effective runtime policy of any static neighbor or
-  dynamic range, under the shared runtime-config coordinator, with persistence
-  ack and rollback on apply/persist failure. `rustbgpctl config plan/apply` drives
-  the text/JSON operator workflow. Next useful slices are the remaining hot-reload
-  sections whose live-impact rollback semantics are ready.
-  Keep gNMI `Set` read-only until OpenConfig mutation maps onto this transaction
-  model rather than a parallel commit path. Exit: atomic commit where supported,
+  add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain
+  changes, or pure static-neighbor live policy-chain impact under the shared
+  runtime-config coordinator, with persistence ack and rollback on apply/persist
+  failure.
+  `rustbgpctl config plan/apply` drives the text/JSON operator workflow. Next
+  useful slices are the remaining hot-reload sections whose live-impact rollback
+  semantics are ready.
+  gNMI `Set` no longer needs a parallel commit primitive; the next slice is an
+  OpenConfig-to-candidate-TOML mapping that feeds this transaction model. Exit:
+  atomic commit where supported,
   explicit restart-required/rejected surfaces, rollback/receipt model, no partial
   silent drift. Gated by ADR-0064 tier authz.
 - **FIB operational hardening** *(decision gate — pull only
@@ -346,12 +348,12 @@ Later for what remains.
   implementation with editions-first design, zero-copy views, and `no_std`
   support. Benchmark against prost/tonic for encode/decode and type ergonomics;
   needs a tonic codec adapter (buffa has no gRPC transport layer).
-- **gNMI breadth.** `Set` + config datastore, per-family/per-neighbor counters,
-  negotiated-capability state, wider encodings/AFIs, and BFD / FIB / EVPN
-  OpenConfig-adjacent surfaces — each lands on demand or when the underlying
-  snapshot exposes the data. Itemized under the ADR-0070 counterpart in Deferred.
-  YANG / NETCONF / RESTCONF stays deprioritized — gNMI is the telemetry-first
-  surface.
+- **gNMI breadth.** `Set` + config datastore mapping onto ADR-0076 candidate
+  transactions, per-family/per-neighbor counters, negotiated-capability state,
+  wider encodings/AFIs, and BFD / FIB / EVPN OpenConfig-adjacent surfaces — each
+  lands on demand or when the underlying snapshot exposes the data. Itemized
+  under the ADR-0070 counterpart in Deferred. YANG / NETCONF / RESTCONF stays
+  deprioritized — gNMI is the telemetry-first surface.
 
 ---
 
@@ -404,8 +406,9 @@ an ADR "Deferred" section that points back here. Tightened, not dropped.
   `Capabilities` / `Get` / `Subscribe` (`ONCE` / `POLL` / `STREAM SAMPLE`) over
   the strict OpenConfig BGP state subset, plus `ON_CHANGE` for the neighbor
   session-state leaf (M54/M56). Deferred until the underlying snapshot exposes
-  the data or demand appears: `Set` + config datastore (gated on the
-  config-transaction model); per-AFI-SAFI prefix counters; per-neighbor
+  the data or demand appears: `Set` + config datastore (now gated on
+  OpenConfig-to-candidate-TOML mapping onto the transaction model);
+  per-AFI-SAFI prefix counters; per-neighbor
   installed/accepted split; `supported-capabilities` + negotiated AFI-SAFI;
   global total-prefixes/total-paths; absolute `last-established`; `PROTO` /
   `ASCII` encodings, multicast / VPN AFIs, full OpenConfig coverage; BFD / FIB /
@@ -472,18 +475,20 @@ branch is between features.
   `Result<_, String>`; keep that for one-status surfaces, but migrate to small
   typed enums when a caller needs to distinguish `ALREADY_EXISTS`, `NOT_FOUND`,
   `INVALID_ARGUMENT`, or similar API-visible classes.
-- [ ] **Config transaction live-impact policy / peer-group executor.**
-  Catalog-only policy definitions, neighbor_sets, peer_groups, and global named
-  chains can now commit as snapshot transactions when they do not change the
-  effective runtime policy of any static neighbor or dynamic range. The remaining
-  executor is the harder case: policy / peer-group / global-chain edits that
-  reshape live peers and therefore need rollback-capable runtime policy/session
-  mutation, not just snapshot staging.
+- [x] **Config transaction live-impact policy / peer-group executor.**
+  Policy definitions, `neighbor_sets`, `peer_groups`, and global named
+  policy-chain edits that move existing static neighbors' resolved import/export
+  policy chains now commit as transactions: stage the candidate snapshot,
+  re-apply resolved chains to affected live sessions with captured priors,
+  persist with ack, and restore live chains plus the snapshot on failure.
+  Dynamic-range policy impact and peer-group/session reshapes remain rejected
+  until dedicated executors exist.
 - [x] **Config transaction catalog snapshot executor.** ADR-0076 can now commit
-  catalog-only policy definitions, policy neighbor_sets, peer_groups, and global
-  named-chain assignments under the same reserve/stage/persist-ack/rollback
-  ordering used by full-snapshot dynamic-neighbor transactions, while rejecting
-  candidates with effective static-neighbor or dynamic-range inheritance impact.
+  catalog-only policy definitions, policy `neighbor_sets`, `peer_groups`, and
+  global named policy-chain assignments under the same
+  reserve/stage/persist-ack/rollback ordering used by full-snapshot
+  dynamic-neighbor transactions, while rejecting candidates with effective
+  static-neighbor or dynamic-range inheritance impact.
 - [x] **Config transaction static-neighbor resolution scaling.**
   Static-neighbor add/modify transactions now resolve only the touched
   `[[neighbors]]` entries through the same single-neighbor inheritance path,
