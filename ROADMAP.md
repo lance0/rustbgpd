@@ -163,7 +163,7 @@ breadth and additional performance work stay measurement- or demand-shaped.
   establishment delay when rustbgpd starts before passive peers. Remaining
   backlog, in rough priority order. Near-term performance/polish targets are
   the remaining FIB projection table-name ownership and high-volume CLI / JSON
-  serializer cleanups.
+  serializer allocation cleanups.
   - FIB projection: shipped the configured-table policy precompile so
     `allowed_neighbors` is parsed once per projection pass and peer /
     peer-group membership checks reuse prebuilt sets. The new root
@@ -259,10 +259,13 @@ breadth and additional performance work stay measurement- or demand-shaped.
     not grow and codec / `memory_profile` runs show a real transient-allocation
     or unique-attribute win. Public `rustbgpd-wire` API churn makes this
     measurement-gated.
-  - CLI/API JSON outside route listing: after the route-listing cleanup, apply
-    the same borrowed `Serialize` wrapper / direct serializer pattern to
-    high-volume event and telemetry JSON so the CLI and API do not build a
-    second owned JSON tree from already-owned proto/event data.
+  - CLI/API JSON outside route listing: the CLI JSON error path is hardened —
+    runtime serializers now return `CliError::Json` instead of panicking on
+    `serde_json` failures. Remaining work here is allocation/data-shape cleanup:
+    after the route-listing cleanup, apply the same borrowed `Serialize` wrapper
+    / direct serializer pattern to high-volume event and telemetry JSON so the
+    CLI and API do not build a second owned JSON tree from already-owned
+    proto/event data.
   - Benchmark infrastructure: automatic per-PR CI bench triggering on the pinned
     `[self-hosted, rustbgpd-bench]` runner (the manual `Criterion Bench Compare`
     workflow exists); a continuous churn bench (short criterion variant of the

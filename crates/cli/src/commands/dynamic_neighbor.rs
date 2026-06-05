@@ -43,11 +43,7 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
                 description: r.description.clone(),
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out)
-                .expect("failed to serialize dynamic-neighbor list as JSON")
-        );
+        output::print_json_pretty(&out)?;
     } else if resp.ranges.is_empty() {
         println!("No dynamic neighbor ranges configured");
     } else {
@@ -95,8 +91,7 @@ pub async fn add(
         "add_dynamic_neighbor",
         prefix,
         &format!("Dynamic neighbor range {prefix} added"),
-    );
-    Ok(())
+    )
 }
 
 pub async fn delete(connection: Connection, prefix: &str, json: bool) -> Result<(), CliError> {
@@ -112,8 +107,7 @@ pub async fn delete(connection: Connection, prefix: &str, json: bool) -> Result<
         "delete_dynamic_neighbor",
         prefix,
         &format!("Dynamic neighbor range {prefix} deleted"),
-    );
-    Ok(())
+    )
 }
 
 #[cfg(test)]

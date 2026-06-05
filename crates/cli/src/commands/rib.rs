@@ -139,18 +139,16 @@ fn route_to_json(r: &crate::proto::Route) -> JsonRoute {
     }
 }
 
-fn print_routes(routes: &[crate::proto::Route], json: bool) {
+fn print_routes(routes: &[crate::proto::Route], json: bool) -> Result<(), CliError> {
     if json {
         let out: Vec<JsonRoute> = routes.iter().map(route_to_json).collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).expect("failed to serialize route list as JSON")
-        );
+        output::print_json_pretty(&out)?;
     } else if routes.is_empty() {
         println!("No routes");
     } else {
         output::print_route_table(routes);
     }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -203,15 +201,14 @@ struct JsonFibRoutePage {
     sampling: Vec<JsonFibRouteSamplingMetadata>,
 }
 
-fn print_blackhole_discards(discards: &[crate::proto::BlackholeDiscard], json: bool) {
+fn print_blackhole_discards(
+    discards: &[crate::proto::BlackholeDiscard],
+    json: bool,
+) -> Result<(), CliError> {
     if json {
         let out: Vec<JsonBlackholeDiscard> =
             discards.iter().map(blackhole_discard_to_json).collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out)
-                .expect("failed to serialize BLACKHOLE discard list as JSON")
-        );
+        output::print_json_pretty(&out)?;
     } else if discards.is_empty() {
         println!("No BLACKHOLE discard routes");
     } else {
@@ -227,9 +224,14 @@ fn print_blackhole_discards(discards: &[crate::proto::BlackholeDiscard], json: b
             );
         }
     }
+    Ok(())
 }
 
-fn print_fib_routes(resp: &ListFibRoutesResponse, json: bool, include_page_meta: bool) {
+fn print_fib_routes(
+    resp: &ListFibRoutesResponse,
+    json: bool,
+    include_page_meta: bool,
+) -> Result<(), CliError> {
     if json {
         let routes: Vec<JsonFibRouteStatus> =
             resp.routes.iter().map(fib_route_status_to_json).collect();
@@ -240,17 +242,9 @@ fn print_fib_routes(resp: &ListFibRoutesResponse, json: bool, include_page_meta:
                 next_page_token: resp.next_page_token.clone(),
                 total_count: resp.total_count,
             };
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&out)
-                    .expect("failed to serialize paginated general FIB route list as JSON")
-            );
+            output::print_json_pretty(&out)?;
         } else {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&routes)
-                    .expect("failed to serialize general FIB route list as JSON")
-            );
+            output::print_json_pretty(&routes)?;
         }
     } else if resp.routes.is_empty() {
         println!("{}", empty_fib_routes_message(resp, include_page_meta));
@@ -292,6 +286,7 @@ fn print_fib_routes(resp: &ListFibRoutesResponse, json: bool, include_page_meta:
             );
         }
     }
+    Ok(())
 }
 
 fn empty_fib_routes_message(resp: &ListFibRoutesResponse, include_page_meta: bool) -> &'static str {
@@ -458,14 +453,13 @@ fn explain_to_json(
     }
 }
 
-fn print_explain_advertised(explain: &crate::proto::ExplainAdvertisedRouteResponse, json: bool) {
+fn print_explain_advertised(
+    explain: &crate::proto::ExplainAdvertisedRouteResponse,
+    json: bool,
+) -> Result<(), CliError> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&explain_to_json(explain))
-                .expect("failed to serialize advertised-route explain as JSON")
-        );
-        return;
+        output::print_json_pretty(&explain_to_json(explain))?;
+        return Ok(());
     }
 
     let decision =
@@ -577,6 +571,7 @@ fn print_explain_advertised(explain: &crate::proto::ExplainAdvertisedRouteRespon
             println!("- as_path_prepend: {asn} x {count}");
         }
     }
+    Ok(())
 }
 
 /// Top-level shape of `--json` best-path explain output. Designed
@@ -617,7 +612,10 @@ struct JsonExplainCandidate {
     advertised_path_id: Option<u32>,
 }
 
-fn print_explain_best_path(resp: &crate::proto::ExplainBestPathResponse, json: bool) {
+fn print_explain_best_path(
+    resp: &crate::proto::ExplainBestPathResponse,
+    json: bool,
+) -> Result<(), CliError> {
     if json {
         let peer_scoped = !resp.peer_address.is_empty();
         let out = JsonExplainBestPath {
@@ -636,11 +634,8 @@ fn print_explain_best_path(resp: &crate::proto::ExplainBestPathResponse, json: b
                 })
                 .collect(),
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).expect("failed to serialize best-path explain")
-        );
-        return;
+        output::print_json_pretty(&out)?;
+        return Ok(());
     }
 
     println!(
@@ -661,12 +656,12 @@ fn print_explain_best_path(resp: &crate::proto::ExplainBestPathResponse, json: b
         );
     } else {
         println!("No best route");
-        return;
+        return Ok(());
     }
 
     if resp.candidates.is_empty() {
         println!("No candidates");
-        return;
+        return Ok(());
     }
 
     println!();
@@ -705,6 +700,7 @@ fn print_explain_best_path(resp: &crate::proto::ExplainBestPathResponse, json: b
             }
         }
     }
+    Ok(())
 }
 
 pub async fn explain_best_path(
@@ -724,8 +720,7 @@ pub async fn explain_best_path(
         })
         .await?
         .into_inner();
-    print_explain_best_path(&resp, json);
-    Ok(())
+    print_explain_best_path(&resp, json)
 }
 
 pub async fn best(
@@ -740,8 +735,7 @@ pub async fn best(
         .list_best_routes(make_route_request(None, family, filters)?)
         .await?
         .into_inner();
-    print_routes(&resp.routes, json);
-    Ok(())
+    print_routes(&resp.routes, json)
 }
 
 pub async fn blackholes(connection: Connection, json: bool) -> Result<(), CliError> {
@@ -751,8 +745,7 @@ pub async fn blackholes(connection: Connection, json: bool) -> Result<(), CliErr
         .list_blackhole_discards(ListBlackholeDiscardsRequest {})
         .await?
         .into_inner();
-    print_blackhole_discards(&resp.discards, json);
-    Ok(())
+    print_blackhole_discards(&resp.discards, json)
 }
 
 pub async fn fib(
@@ -766,8 +759,7 @@ pub async fn fib(
         .list_fib_routes(make_fib_request(&filters)?)
         .await?
         .into_inner();
-    print_fib_routes(&resp, json, include_fib_page_meta(&filters));
-    Ok(())
+    print_fib_routes(&resp, json, include_fib_page_meta(&filters))
 }
 
 pub async fn received(
@@ -783,8 +775,7 @@ pub async fn received(
         .list_received_routes(make_route_request(Some(address), family, filters)?)
         .await?
         .into_inner();
-    print_routes(&resp.routes, json);
-    Ok(())
+    print_routes(&resp.routes, json)
 }
 
 pub async fn advertised(
@@ -800,8 +791,7 @@ pub async fn advertised(
         .list_advertised_routes(make_route_request(Some(address), family, filters)?)
         .await?
         .into_inner();
-    print_routes(&resp.routes, json);
-    Ok(())
+    print_routes(&resp.routes, json)
 }
 
 pub async fn explain_advertised(
@@ -821,8 +811,7 @@ pub async fn explain_advertised(
         })
         .await?
         .into_inner();
-    print_explain_advertised(&resp, json);
-    Ok(())
+    print_explain_advertised(&resp, json)
 }
 
 pub struct AddRouteOpts {
@@ -860,8 +849,7 @@ pub async fn add_route(
             path_id: opts.path_id.unwrap_or(0),
         })
         .await?;
-    output::print_result(json, "add_route", prefix, &format!("Route {prefix} added"));
-    Ok(())
+    output::print_result(json, "add_route", prefix, &format!("Route {prefix} added"))
 }
 
 pub async fn delete_route(
@@ -885,8 +873,7 @@ pub async fn delete_route(
         "delete_route",
         prefix,
         &format!("Route {prefix} deleted"),
-    );
-    Ok(())
+    )
 }
 
 #[cfg(test)]

@@ -53,11 +53,7 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
                 }
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out)
-                .expect("failed to serialize neighbor-set list as JSON")
-        );
+        output::print_json_pretty(&out)?;
     } else if resp.neighbor_sets.is_empty() {
         println!("No neighbor sets configured");
     } else {
@@ -97,11 +93,7 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
             remote_asns: def.remote_asns.clone(),
             peer_groups: def.peer_groups.clone(),
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&detail)
-                .expect("failed to serialize neighbor-set detail as JSON")
-        );
+        output::print_json_pretty(&detail)?;
     } else {
         println!("Name:        {}", resp.name);
         println!(
@@ -156,8 +148,7 @@ pub async fn set(
         "set_neighbor_set",
         name,
         &format!("Neighbor set {name} set"),
-    );
-    Ok(())
+    )
 }
 
 pub async fn delete(connection: Connection, name: &str, json: bool) -> Result<(), CliError> {
@@ -173,8 +164,7 @@ pub async fn delete(connection: Connection, name: &str, json: bool) -> Result<()
         "delete_neighbor_set",
         name,
         &format!("Neighbor set {name} deleted"),
-    );
-    Ok(())
+    )
 }
 
 #[cfg(test)]
