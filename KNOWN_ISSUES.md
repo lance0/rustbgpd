@@ -47,7 +47,7 @@ resolved.
   consistently rejected OPENs (e.g., ASN mismatch), auto-reconnect fired
   `ManualStart` immediately as a synchronous follow-up, causing 29K+ cycles
   in 10 seconds. Fixed by introducing a deferred reconnect timer that waits
-  `connect_retry_secs` (default 30s) before reconnecting. Discovered during
+  `connect_retry_secs` (default 5s, exponential backoff) before reconnecting. Discovered during
   malformed OPEN interop testing against FRR.
 
 - **Unknown NOTIFICATION codes mapped to Cease (fixed).** The wire decoder
@@ -86,6 +86,16 @@ resolved.
   EVPN churn.
 
 ## Limitations (by design, not bugs)
+
+- **Commit-confirmed config transactions do not survive a daemon restart.**
+  The confirm timer and the captured pre-commit rollback snapshot are held in
+  memory only. A restart inside the confirm window leaves the already-committed
+  candidate live (effectively confirmed-by-restart) and the auto-revert never
+  fires. Commit-confirmed therefore guards against a bad-but-*running* config
+  (push a change, lose management reachability, and the timer rolls it back) —
+  not against a daemon crash. Validate with `rustbgpd --check` or
+  `PlanConfigTransaction` before applying a change that could itself prevent
+  recovery. See ADR-0076 Decision 6.
 
 - **RFC 8326 receiver gating doesn't yet know about confederations.**
   When `[global] honor_graceful_shutdown = true`, the implicit chain-

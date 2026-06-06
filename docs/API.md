@@ -320,6 +320,34 @@ restart, re-plan and re-apply. `GetConfigTransactionStatus` reports the current
 pending transaction or the last terminal lifecycle result, including failed
 abort/auto-revert attempts when rollback itself could not complete.
 
+`GetConfigTransactionStatus` (and the apply response) carries a
+`ConfigTransactionConfirmation`:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `status` | `ConfigTransactionConfirmationStatus` | Lifecycle state (see below). |
+| `confirm_id` | string | The operator-supplied handle for the transaction. |
+| `timeout_seconds` | uint32 | Effective confirm timeout applied (echoed). |
+| `deadline_unix_seconds` | uint64 | Absolute auto-revert deadline; `0` when not pending. |
+| `committed_sections` | repeated string | Sections the confirmed apply committed. |
+| `runtime_snapshot_token` | string | Post-commit token for the pending change. |
+| `human_text` | string | Redacted human-readable summary. |
+
+`ConfigTransactionConfirmationStatus` values:
+
+| Value | Meaning |
+|-------|---------|
+| `..._UNSPECIFIED` | Default zero value; not emitted in normal responses. |
+| `..._NONE` | No confirmed transaction is currently tracked. |
+| `..._PENDING` | Applied and awaiting confirmation before the timer expires. |
+| `..._CONFIRMED` | Made permanent by `ConfirmConfigTransaction`. |
+| `..._ABORTED` | Rolled back by `AbortConfigTransaction`. |
+| `..._AUTO_REVERTED` | Timer expired; the pre-commit snapshot was re-applied. |
+| `..._AUTO_REVERT_FAILED` | Timer expired but the rollback re-apply failed; manual correction required. |
+| `..._ABORT_FAILED` | Abort requested but the rollback re-apply failed; manual correction required. |
+
+(Each value is prefixed `CONFIG_TRANSACTION_CONFIRMATION_STATUS_` in the proto.)
+
 Apply a pure full-set `[[fib_tables]]` transaction:
 
 ```bash

@@ -449,7 +449,8 @@ Automated test: `bash tests/interop/scripts/test-m1-frr.sh` — **15 passed, 0 f
 | RIB repopulated after restart | PASS | 3/3 routes restored |
 
 Note: Test 4 (peer restart) relies on watchfrr auto-restarting bgpd after
-`killall -9`. rustbgpd reconnects after `connect_retry_secs` (default 30s).
+`killall -9`. rustbgpd reconnects after `connect_retry_secs` (default 5s, with
+exponential backoff on repeated failures).
 
 ---
 

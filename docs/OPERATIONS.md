@@ -116,6 +116,26 @@ Confirm handles must be non-empty, at most 128 characters, and free of control
 characters. `--confirm-timeout` requires `--confirm-id`; the daemon default is
 600 seconds and the maximum accepted timeout is 86400 seconds.
 
+While a confirmed transaction is applying or awaiting confirmation, SIGHUP
+reload is ignored and every persisted runtime config mutator (FIB-table and
+dynamic-neighbor CRUD, neighbor lifecycle, a further `config apply`) is rejected
+with `FAILED_PRECONDITION`, so a pending timeout rollback cannot be overwritten
+by a later ad hoc change. The fence clears once the transaction is confirmed,
+aborted, or auto-reverted.
+
+`rbgp config status` reports the lifecycle outcome: `pending` (timer running),
+`confirmed`, `aborted`, `auto_reverted` (timer expired and the pre-commit
+snapshot was re-applied), or one of the two rollback-failure terminal states,
+`auto_revert_failed` / `abort_failed` — these mean the daemon could not re-apply
+the pre-commit snapshot, the fence has been cleared, and the running config
+needs manual correction.
+
+The confirm timer is in-memory: a daemon restart inside the confirm window
+leaves the already-committed candidate live (effectively confirmed-by-restart)
+and the auto-revert never fires. Commit-confirmed guards a bad-but-running
+config, not a crash — validate with `rustbgpd --check` or `config plan` before
+applying anything that could itself prevent recovery.
+
 For a static-neighbor edit, change the neighbor in the candidate file (for
 example `hold_time`, `max_prefixes`, policy-chain refs, or ORF receive), run
 `config plan`, then apply with the returned token. The transaction reconfigures

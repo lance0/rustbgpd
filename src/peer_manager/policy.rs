@@ -17,17 +17,44 @@ use crate::policy_admin::{
 
 use super::{ManagedPeer, PEER_POLICY_UPDATE_TIMEOUT, PEER_QUERY_TIMEOUT, PeerManager};
 
+/// How `update_runtime_policies_for_peer_key` reacts when the Route Refresh
+/// send fails after the session already acked the new policy.
+///
+/// The three variants exist to keep rollback correct on a compound failure.
+/// The choice between them turns entirely on whether the peer's `AdjRibIn` was
+/// actually moved off the prior policy — see `CapturedResolvedPolicy::forward_completed`.
 #[derive(Clone, Copy)]
 enum RefreshFailureHandling {
+    /// Forward apply path: surface the failure to the caller and arm
+    /// `pending_refresh` so the next call retries.
     Fatal,
+    /// Rollback of a peer whose forward apply *completed* (`AdjRibIn` was moved to
+    /// the new policy): the rollback must refresh back to the prior policy, so a
+    /// failed rollback refresh re-arms `pending_refresh = true` to retry.
     BestEffortRearm,
+    /// Rollback of a peer whose forward apply did *not* complete (`AdjRibIn` never
+    /// left the prior policy): no refresh is actually needed, so restore the
+    /// captured prior `pending_refresh` rather than arming a spurious retry.
     BestEffortRestorePrior { pending_refresh: bool },
 }
 
+/// A peer's pre-apply policy state, captured during a live-impact apply so a
+/// later failure can roll the peer back to exactly where it was.
 struct CapturedResolvedPolicy {
     policy: ResolvedPeerPolicy,
     pending_refresh: bool,
     pending_export_apply: bool,
+    /// Whether this peer's forward apply fully succeeded. This is the load-
+    /// bearing flag for rollback correctness: it is really a proxy for *"did
+    /// this peer's `AdjRibIn` actually move off the prior policy?"*. A completed
+    /// forward ran a successful Route Refresh, so its `AdjRibIn` is at the new
+    /// policy and rollback must refresh it back (`RefreshFailureHandling::BestEffortRearm`).
+    /// An incomplete forward (session never acked, or the forward refresh
+    /// failed) left `AdjRibIn` on the prior policy, so rollback needs no refresh
+    /// and only restores the captured prior pending state
+    /// (`RefreshFailureHandling::BestEffortRestorePrior`). Do not collapse the
+    /// two branches: the asymmetry is what keeps a compound (rollback-time)
+    /// refresh failure from either leaving routes stale or arming a spurious retry.
     forward_completed: bool,
 }
 

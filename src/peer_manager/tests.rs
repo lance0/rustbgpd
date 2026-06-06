@@ -2765,6 +2765,66 @@ fn route_refresh_failing_handle(peer_addr: IpAddr, state: SessionState) -> PeerH
     PeerHandle::from_parts(session_tx, task)
 }
 
+/// A peer handle that acks policy hot-applies, reports Established, and acks the
+/// FIRST Route Refresh but fails every subsequent one. Drives the compound
+/// rollback path: the forward apply succeeds (peer captured
+/// `forward_completed = true`), but the refresh issued while rolling back fails,
+/// exercising `RefreshFailureHandling::BestEffortRearm`.
+fn route_refresh_failing_after_first_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
+    use rustbgpd_transport::PeerCommand;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let refresh_calls = Arc::new(AtomicU32::new(0));
+    let task = tokio::spawn(async move {
+        while let Some(cmd) = session_rx.recv().await {
+            match cmd {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(PeerSessionState {
+                        fsm_state: state,
+                        peer_ip: peer_addr,
+                        peer_asn: None,
+                        prefix_count: 0,
+                        negotiated_hold_time: None,
+                        four_octet_as: None,
+                        remote_router_id: None,
+                        local_role: None,
+                        remote_role: None,
+                        role_negotiated: false,
+                        updates_received: 0,
+                        updates_sent: 0,
+                        notifications_received: 0,
+                        notifications_sent: 0,
+                        otc_routes_blocked: 0,
+                        import_policy_routes_permitted: 0,
+                        import_policy_routes_denied: 0,
+                        flap_count: 0,
+                        uptime_secs: 0,
+                        last_error: String::new(),
+                    });
+                }
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::SendRouteRefresh { reply, .. } => {
+                    if refresh_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        let _ = reply.send(Ok(()));
+                    } else {
+                        let _ = reply.send(Err("transient route refresh failure".to_string()));
+                    }
+                }
+                PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
 fn live_policy_test_manager() -> PeerManager {
     let (_cmd_tx, cmd_rx) = mpsc::channel(16);
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
@@ -3063,6 +3123,92 @@ async fn apply_resolved_policy_snapshot_rejects_non_route_refresh_peer_cleanly()
     assert!(
         !mgr.peers.get(&key(addr)).unwrap().pending_refresh,
         "a rejected non-RR apply must restore the prior pending_refresh state"
+    );
+    rib_drainer.abort();
+}
+
+#[tokio::test]
+async fn apply_resolved_policy_snapshot_rearms_refresh_on_compound_rollback_failure() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    // Compound failure: peer A's forward apply fully succeeds (its AdjRibIn is
+    // moved to the new policy via a successful Route Refresh), then peer B's
+    // forward refresh fails and forces a rollback. While restoring A, its
+    // rollback-time refresh also fails. Because A's forward completed, its
+    // AdjRibIn is stale at the new policy, so pending_refresh must be RE-ARMED
+    // (true) — whereas B never completed, so B restores its prior pending state
+    // (false). Pins the RefreshFailureHandling::BestEffortRearm vs
+    // BestEffortRestorePrior asymmetry under a rollback-time refresh failure.
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let rib_drainer = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+
+    // Peer A: forward succeeds (first refresh acked), rollback refresh fails.
+    let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    insert_test_managed_peer(
+        &mut mgr,
+        a,
+        route_refresh_failing_after_first_handle(a, SessionState::Established),
+        false,
+    );
+    // Peer B: applied second; its forward refresh fails, forcing the rollback.
+    let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    insert_test_managed_peer(
+        &mut mgr,
+        b,
+        route_refresh_failing_handle(b, SessionState::Established),
+        false,
+    );
+    let prior = validation_policy_chain(ImportValidationDependency::Rpki);
+    for p in [a, b] {
+        mgr.peers.get_mut(&key(p)).unwrap().import_policy = Some(prior.clone());
+    }
+
+    let new_chain = deny_policy_chain();
+    let targets = [a, b]
+        .into_iter()
+        .map(|address| ResolvedPeerPolicy {
+            address,
+            interface: None,
+            import_policy: Some(new_chain.clone()),
+            export_policy: None,
+        })
+        .collect();
+    let result = mgr.apply_resolved_policy_snapshot(targets).await;
+    assert!(
+        result.is_err(),
+        "peer B's forward refresh failure must surface as Err: {result:?}"
+    );
+
+    let a_peer = mgr.peers.get(&key(a)).unwrap();
+    assert_eq!(
+        format!("{:?}", a_peer.import_policy),
+        format!("{:?}", Some(prior.clone())),
+        "peer A's import policy must be restored to its prior chain"
+    );
+    assert!(
+        a_peer.pending_refresh,
+        "peer A completed its forward apply, so a failed rollback refresh must re-arm pending_refresh"
+    );
+    assert!(
+        !mgr.peers.get(&key(b)).unwrap().pending_refresh,
+        "peer B never completed its forward apply, so it must restore prior pending_refresh, not re-arm"
     );
     rib_drainer.abort();
 }
