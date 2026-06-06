@@ -65,6 +65,17 @@ unicast Linux FIB, the BFD socket actor, and the EVPN dataplane glue).
 
 One tokio task per peer session, one RibManager task, one PeerManager task. No shared mutable routing state. State-owning task boundaries primarily use bounded `tokio::mpsc`, with `oneshot` for request/reply, `broadcast` for route event streaming, and one intentional unbounded channel for collision-resolution notifications.
 
+The daemon binary owns the runtime-config coordinator that serializes SIGHUP,
+runtime CRUD, and config transactions. `PlanConfigTransaction` is a
+PeerManager-backed validate-only path that reads the live runtime config
+snapshot and returns an optimistic snapshot token. `ApplyConfigTransaction` and
+the confirmed-commit controls run under the same coordinator lock used by
+SIGHUP and runtime CRUD, so mutation paths share one ordering point before they
+stage the runtime snapshot, apply live effects, wait for persistence
+acknowledgement, and release the lock. The API crate exposes the gRPC surface;
+the binary owns the actual executors because rollback needs binary-only
+channels to the PeerManager, FIB reconciler, and config persistence bridge.
+
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
 │ PeerSession │     │ PeerSession │     │ PeerSession │
@@ -110,6 +121,7 @@ Each component is the single source of truth for its domain. No overlapping auth
 | **Transport** | Socket I/O, wire framing | TCP connections, message encode/decode, session runtime |
 | **FIB runtime** | Kernel forwarding state (`src/fib_runtime.rs`) | Which unicast routes are installed in Linux and their owned-state across restart; the sole owner of netlink route programming |
 | **BFD actor** | BFD session liveness (`src/bfd_runtime.rs`) | Whether each BFD-tracked peer's forwarding path is up; the sole owner of BFD sockets, timers, and discriminators (drives RFC 5882 coupling) |
+| **Config transaction controller** | Transaction execution, confirmed-commit state, rollback orchestration | Which candidate TOML changes can commit atomically and when runtime config mutations are fenced |
 | **API** | Request/response adaptation | Nothing — it translates gRPC into commands and queries |
 
 The API layer is explicitly *not* a source of truth. It is an adapter between gRPC callers and the authoritative components.
@@ -288,6 +300,33 @@ gRPC request
    at reload time. The runtime listener config for `grpc_tcp` / `grpc_uds`
    is pinned back to the live values so subsequent diffs keep flagging
    the drift until an actual restart happens.
+
+### Config Transactions
+
+1. `PlanConfigTransaction` sends the full candidate TOML and expected runtime
+   snapshot token to the PeerManager. The PeerManager parses and validates the
+   candidate, compares it with its live runtime snapshot, and classifies each
+   changed section as supported, unsupported, or restart-required for the v1
+   transaction model.
+2. `ApplyConfigTransaction` is handled in the daemon binary. It takes the
+   runtime-config coordinator lock shared with SIGHUP and runtime CRUD,
+   validates the optimistic snapshot token, stages the candidate snapshot in the
+   PeerManager, applies the one supported runtime family, waits for the config
+   persistence acknowledgement, and only then releases the lock.
+3. Rollback is executor-specific and LIFO. FIB-table, dynamic-neighbor,
+   static-neighbor, catalog-only, and live-policy-impact transactions restore
+   their prior runtime state and previous PeerManager config snapshot on
+   apply/persist failure. Rollback failures are surfaced to the caller and
+   logged as `error!`; silent partial rollback is not an acceptable outcome.
+4. Commit-confirmed mode stores a singleton pending transaction with the
+   captured pre-commit snapshot. `ConfirmConfigTransaction` makes it permanent;
+   `AbortConfigTransaction` or timer expiry re-applies the captured snapshot
+   through the same transaction executor. While a transaction is applying or
+   pending confirmation, other persisted runtime config mutators return
+   `FAILED_PRECONDITION`.
+5. Transaction state is process-local. A daemon restart during the confirm
+   window leaves the already-persisted candidate live and clears the in-memory
+   auto-revert timer; operators must re-plan after restart.
 
 ### Graceful Shutdown
 

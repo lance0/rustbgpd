@@ -104,9 +104,13 @@ breadth and additional performance work stay measurement- or demand-shaped.
   Re-stand the proof loop that makes the v0.x posture credible: a continuous
   churn/soak shape, automated or easy-to-trigger Criterion comparisons on the
   `[self-hosted, rustbgpd-bench]` runner, and a fixed high-N memory harness for
-  regressions that `memory_profile` no longer scales to. Exit: one repeatable
-  soak result operators can inspect, bench comparison receipts for perf PRs, and
-  memory tracking that covers full-table scale without relying only on bgperf2.
+  regressions that `memory_profile` no longer scales to. Add bounded lifecycle
+  metrics for rare config-transaction rollback / abort / auto-revert failures so
+  operators can alert without log scraping; keep labels coarse (`operation`,
+  `outcome`), never `confirm_id` or candidate content. Exit: one repeatable soak
+  result operators can inspect, bench comparison receipts for perf PRs, memory
+  tracking that covers full-table scale without relying only on bgperf2, and
+  alertable counters for transaction safety failures.
 
 ### Later
 

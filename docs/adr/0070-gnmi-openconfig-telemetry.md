@@ -64,7 +64,7 @@ internal snapshot, never from CLI text.
 | `Capabilities` | Advertise gNMI version `0.10.0`, the **OpenConfig modules** (name / organization / version, via `ModelData`) backing the supported paths, and encodings `JSON` + `JSON_IETF`. `ModelData` is module-level, not per-path — the path subset is enforced at `Get` / `Subscribe`, not advertised here. |
 | `Get` | OpenConfig BGP operational-state subset (below). |
 | `Subscribe` | `ONCE`, `POLL`, and `STREAM` with `SAMPLE`. `STREAM` + `ON_CHANGE` v1 covers only `neighbor[neighbor-address=*]/state/session-state` (see Deferred). |
-| `Set` | Always returns a stable `Unimplemented` status. gNMI requires an explicit answer; rustbgpd has no config-transaction model, so mutation stays closed. |
+| `Set` | Always returns a stable `Unimplemented` status. gNMI requires an explicit answer; rustbgpd does not yet map OpenConfig payloads onto the ADR-0076 transaction model, so gNMI mutation stays closed. |
 
 ### OpenConfig path scope — a supported *subset*, not full OpenConfig BGP
 
@@ -256,14 +256,16 @@ Grounded against the current checkout:
 - The main implementation cost is the OpenConfig `PathElem` parser + the
   snapshot→OpenConfig-leaf renderer; the per-AFI / capability data plumbing is
   deliberately deferred rather than faked.
-- This work pulls on two adjacent roadmap items: P1 durable event history
-  (the prerequisite for honest `ON_CHANGE`) and P2 config transaction model
-  (the prerequisite for any future `Set`).
+- This work pulled on two adjacent roadmap items: durable event history (now the
+  basis for neighbor `ON_CHANGE`) and the ADR-0076 config transaction model. Any
+  future `Set` should map OpenConfig changes onto that transaction model rather
+  than bypass it.
 
 ## Deferred
 
-- **gNMI `Set` / config datastore** — needs the ADR-0064-gated config
-  transaction model (roadmap P2). v1 `Set` returns `Unimplemented`.
+- **gNMI `Set` / config datastore** — needs an OpenConfig-to-candidate-TOML
+  mapping onto the ADR-0064-gated ADR-0076 transaction model. v1 `Set` returns
+  `Unimplemented`.
 - **`Subscribe ON_CHANGE`** — needs loss-free, path-diffed leaf events.
   **Unblocked by [ADR-0072](0072-durable-event-history.md);** ships
   once the durable outbox lands and provides restart-survivable change
@@ -300,5 +302,5 @@ Grounded against the current checkout:
   <https://gnmic.openconfig.net/>
 - ADR-0064 — gRPC tier authorization (the `SensitiveRead` tier + enforcement).
 - ADR-0037 — gRPC API foundation.
-- `ROADMAP.md` — P0 (this adapter), P1 (durable event history → `ON_CHANGE`),
-  P2 (config transaction model → future `Set`).
+- `ROADMAP.md` — read-only OpenConfig telemetry, durable event history /
+  `ON_CHANGE`, and ADR-0076 transaction-backed future `Set`.
