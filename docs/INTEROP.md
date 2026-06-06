@@ -339,13 +339,15 @@ Config: `tests/interop/configs/rustbgpd-frr-badopen.toml` — rustbgpd expects
 |-------|--------|---------|
 | NOTIFICATION sent | PASS | Code 2 (Open Message), Subcode 2 (Bad Peer AS) |
 | TCP closed after NOTIFICATION | PASS | Connection torn down immediately |
-| No hot reconnect loop | PASS | Deferred reconnect timer (30s) prevents rapid cycling |
-| Reconnect fires on schedule | PASS | Second attempt exactly 30s after first rejection |
+| No hot reconnect loop | PASS | Deferred reconnect timer (`connect_retry_secs`, default 5s) prevents rapid cycling |
+| Reconnect fires on schedule | PASS | Second attempt follows `connect_retry_secs` after first rejection |
 
 Previously this scenario caused a hot loop (29K+ cycles / 10s) because
 auto-reconnect injected `ManualStart` synchronously. Fixed by adding a
 `reconnect_timer` to `PeerSession` that defers reconnection by
-`connect_retry_secs`.
+`connect_retry_secs`. This malformed-OPEN path uses the fixed Idle reconnect
+guard; TCP-level connection refusals use the separate fast-retry /
+exponential-backoff path.
 
 ---
 
@@ -449,8 +451,9 @@ Automated test: `bash tests/interop/scripts/test-m1-frr.sh` — **15 passed, 0 f
 | RIB repopulated after restart | PASS | 3/3 routes restored |
 
 Note: Test 4 (peer restart) relies on watchfrr auto-restarting bgpd after
-`killall -9`. rustbgpd reconnects after `connect_retry_secs` (default 5s, with
-exponential backoff on repeated failures).
+`killall -9`. rustbgpd reconnects after `connect_retry_secs` (default 5s);
+repeated TCP-level connection refusals use the separate fast-retry /
+exponential-backoff path.
 
 ---
 

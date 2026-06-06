@@ -47,8 +47,10 @@ resolved.
   consistently rejected OPENs (e.g., ASN mismatch), auto-reconnect fired
   `ManualStart` immediately as a synchronous follow-up, causing 29K+ cycles
   in 10 seconds. Fixed by introducing a deferred reconnect timer that waits
-  `connect_retry_secs` (default 5s, exponential backoff) before reconnecting. Discovered during
-  malformed OPEN interop testing against FRR.
+  `connect_retry_secs` (default 5s) before reconnecting. TCP-level connection
+  refusals use the separate fast-retry / exponential-backoff path; persistent
+  OPEN rejection deliberately uses the fixed Idle reconnect guard. Discovered
+  during malformed OPEN interop testing against FRR.
 
 - **Unknown NOTIFICATION codes mapped to Cease (fixed).** The wire decoder
   silently converted unrecognized NOTIFICATION error codes to `Cease`,
