@@ -2591,7 +2591,7 @@ remote_asn = 65010
         ack_task.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn confirmed_timeout_auto_reverts_previous_snapshot() {
         let previous_toml = base_toml("");
         let candidate_toml = base_toml(
@@ -2628,6 +2628,9 @@ remote_asn = 65010
             .apply(confirmed_dynamic_request(candidate_toml, "deploy-1", 1))
             .await
             .expect("confirmed apply must succeed");
+        // Virtual time (start_paused): auto-advances past the 1s confirm
+        // timeout so the spawned timer fires and runs auto-revert to completion,
+        // deterministically and with no real wall-clock cost.
         tokio::time::sleep(Duration::from_millis(1_100)).await;
 
         let status = controller.status().await.expect("status must succeed");

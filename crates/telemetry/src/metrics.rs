@@ -1238,6 +1238,14 @@ impl BgpMetrics {
     /// - `operation`: `"confirm"`, `"abort"`, or `"auto_revert"`.
     /// - `outcome`: `"success"` or `"failure"`.
     pub fn record_config_transaction_lifecycle(&self, operation: &str, outcome: &str) {
+        debug_assert!(
+            matches!(operation, "confirm" | "abort" | "auto_revert"),
+            "unbounded config-transaction lifecycle operation label: {operation:?}"
+        );
+        debug_assert!(
+            matches!(outcome, "success" | "failure"),
+            "unbounded config-transaction lifecycle outcome label: {outcome:?}"
+        );
         self.config_transaction_lifecycle
             .with_label_values(&[operation, outcome])
             .inc();
