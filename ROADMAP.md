@@ -86,6 +86,15 @@ demand-shaped** (deferred until operator signal). The current priority call is
 to finish the transaction surface and improve operational proof. Protocol
 breadth and additional performance work stay measurement- or demand-shaped.
 
+Prioritization is **technical-merit first, pilot-aware second**: lead with work
+that deepens rustbgpd's existing identity (a programmable BGP control plane),
+and use real-operator credibility only as a tie-breaker between
+technically-equal options — never as a reason to chase breadth rustbgpd doesn't
+need. Every major feature should leave behind **pilot-grade evidence** (interop,
+soak, or bench receipts), because credibility is a technical artifact, not
+marketing. Concretely: no speculative service-provider breadth just because FRR
+has it, no broad performance sprints without profile evidence.
+
 ### Next
 
 - **Config transaction coverage + OpenConfig bridge** *(highest priority,
@@ -113,6 +122,19 @@ breadth and additional performance work stay measurement- or demand-shaped.
   Exit: one repeatable soak result operators can inspect, bench comparison
   receipts for perf PRs, and memory tracking that covers full-table scale
   without relying only on bgperf2.
+- **MPLS / VPN / BGP-LS address-family ADR** *(research only — no
+  implementation this cycle).* Draw the address-family-expansion boundaries
+  while the substrate is still small, before any code lands. Scope the ADR to a
+  control-plane story: an AFI/SAFI route-key model that can carry VPNv4/v6
+  (RFC 4364), labeled-unicast (RFC 8277), and BGP-LS (RFC 7752), with BGP-LS
+  *export* and route-reflector-only VPN families as the on-identity entry points
+  (controller-feed / RR, not a forwarding plane). **Explicit non-goal, stated up
+  front: rustbgpd does not install MPLS labels in the dataplane** — these are
+  BGP-carried families, not a step toward a full MPLS router (see Non-goals).
+  Also specify how the ORF Address-Prefix decoder extends past IPv4/IPv6 unicast
+  safely. Exit: a merged ADR fixing the route-key shape, proto/API story, and
+  the dataplane non-goal; implementation stays deferred + demand-shaped (see
+  *Out-of-niche address families* under Maybe) until after the ADR.
 
 ### Later
 
