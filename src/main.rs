@@ -1979,6 +1979,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 config_mutation_gate: None,
                 startup_tables: config.fib_tables.clone(),
             },
+            metrics.clone(),
         );
     let config_mutation_gate = config_transaction_controller.mutation_gate_fn();
     let serve_config = ServeConfig {

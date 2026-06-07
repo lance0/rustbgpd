@@ -9,6 +9,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Config transaction lifecycle metric.**
+  `bgp_config_transaction_lifecycle_total{operation, outcome}` now counts
+  confirmed-transaction confirm, abort, and auto-revert lifecycle transitions
+  with bounded labels. `operation` is `confirm`, `abort`, or `auto_revert`;
+  `outcome` is `success` or `failure`, so operators can alert on failed abort /
+  timer rollback without scraping logs or exposing `confirm_id` / candidate
+  content as metric labels.
+
 ## [0.36.0] — 2026-06-05
 
 ### Added

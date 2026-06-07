@@ -46,6 +46,7 @@ pub struct BgpMetrics {
     event_stream_lagged: IntCounterVec,
     event_stream_subscribers: IntGaugeVec,
     grpc_authz_decisions: IntCounterVec,
+    config_transaction_lifecycle: IntCounterVec,
 
     // ── Policy ──────────────────────────────────────────────────
     max_prefix_exceeded: IntCounterVec,
@@ -298,6 +299,15 @@ impl BgpMetrics {
                 "ADR-0064 gRPC authorization tier decisions by bounded listener and decision labels.",
             ),
             &["tier", "result", "authn", "access_mode"],
+        )
+        .expect("valid metric definition");
+
+        let config_transaction_lifecycle = IntCounterVec::new(
+            Opts::new(
+                "bgp_config_transaction_lifecycle_total",
+                "Confirmed config transaction lifecycle transitions by bounded operation and outcome labels.",
+            ),
+            &["operation", "outcome"],
         )
         .expect("valid metric definition");
 
@@ -817,6 +827,9 @@ impl BgpMetrics {
             .register(Box::new(grpc_authz_decisions.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(config_transaction_lifecycle.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(max_prefix_exceeded.clone()))
             .expect("metric not already registered");
         registry
@@ -996,6 +1009,7 @@ impl BgpMetrics {
             event_stream_lagged,
             event_stream_subscribers,
             grpc_authz_decisions,
+            config_transaction_lifecycle,
             max_prefix_exceeded,
             outbound_route_drops,
             blackhole_discard_installed,
@@ -1215,6 +1229,25 @@ impl BgpMetrics {
     ) {
         self.grpc_authz_decisions
             .with_label_values(&[tier, result, authn, access_mode])
+            .inc();
+    }
+
+    /// Record a confirmed config transaction lifecycle transition.
+    ///
+    /// Labels are deliberately bounded:
+    /// - `operation`: `"confirm"`, `"abort"`, or `"auto_revert"`.
+    /// - `outcome`: `"success"` or `"failure"`.
+    pub fn record_config_transaction_lifecycle(&self, operation: &str, outcome: &str) {
+        debug_assert!(
+            matches!(operation, "confirm" | "abort" | "auto_revert"),
+            "unbounded config-transaction lifecycle operation label: {operation:?}"
+        );
+        debug_assert!(
+            matches!(outcome, "success" | "failure"),
+            "unbounded config-transaction lifecycle outcome label: {outcome:?}"
+        );
+        self.config_transaction_lifecycle
+            .with_label_values(&[operation, outcome])
             .inc();
     }
 
@@ -1834,6 +1867,39 @@ mod tests {
         let text = gather_text(&m);
         assert!(text.contains("bgp_grpc_authz_decisions_total"));
         assert!(!text.contains("rustbgpd.v1.ControlService"));
+    }
+
+    #[test]
+    fn config_transaction_lifecycle_counter_uses_bounded_labels() {
+        let m = BgpMetrics::new();
+        m.record_config_transaction_lifecycle("confirm", "success");
+        m.record_config_transaction_lifecycle("abort", "failure");
+        m.record_config_transaction_lifecycle("auto_revert", "success");
+
+        assert_eq!(
+            m.config_transaction_lifecycle
+                .with_label_values(&["confirm", "success"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.config_transaction_lifecycle
+                .with_label_values(&["abort", "failure"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.config_transaction_lifecycle
+                .with_label_values(&["auto_revert", "success"])
+                .get(),
+            1
+        );
+
+        let text = gather_text(&m);
+        assert!(text.contains("bgp_config_transaction_lifecycle_total"));
+        assert!(text.contains(r#"operation="confirm""#));
+        assert!(text.contains(r#"outcome="failure""#));
+        assert!(!text.contains("confirm_id"));
     }
 
     #[test]
