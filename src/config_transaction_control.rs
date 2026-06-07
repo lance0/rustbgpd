@@ -1221,7 +1221,7 @@ async fn send_apply_policy_impact_snapshot(
         .await
         .map_err(|_| {
             ConfigTransactionApplyError::Unavailable(
-                "peer manager dropped resolved-policy reply".to_string(),
+                "peer manager dropped policy-impact reply".to_string(),
             )
         })?
         .map_err(ConfigTransactionApplyError::Internal)
