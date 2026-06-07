@@ -6929,12 +6929,12 @@ peer_group = "edge"
 }
 
 #[test]
-fn transaction_v1_rejects_catalog_policy_change_feeding_dynamic_range() {
+fn transaction_v1_classifies_catalog_policy_change_feeding_dynamic_range_as_live_impact() {
     // A policy-definition edit reaches an established dynamic session through
     // its peer group's chain, even with no static neighbor referencing it.
-    // SIGHUP live-reconciles dynamic peers, so the catalog gate must surface the
-    // range as dynamic live-policy impact and reject the transaction until the
-    // dynamic executor consumes accepted-range attribution.
+    // SIGHUP live-reconciles dynamic peers, so the transaction planner must
+    // surface the range as live-policy impact rather than treating the edit as
+    // catalog-only.
     let config = |action: &str| {
         format!(
             r#"
@@ -6968,15 +6968,12 @@ remote_asn = 65030
     let diff = diff_config(&old, &new);
     let class = classify_config_transaction_v1(&diff);
 
-    assert!(!class.is_committable());
-    assert_eq!(class.supported_sections, vec!["[policy] definitions"]);
-    assert!(
-        class
-            .unsupported_sections
-            .contains(&"[[dynamic_neighbors]] live policy impact".to_string()),
-        "{:?}",
-        class.unsupported_sections
+    assert!(class.is_committable(), "{class:?}");
+    assert_eq!(
+        class.supported_sections,
+        vec!["[policy] definitions", "[policy] live impact"]
     );
+    assert!(class.unsupported_sections.is_empty(), "{class:?}");
     assert_eq!(
         diff.effective_neighbor_impact
             .iter()

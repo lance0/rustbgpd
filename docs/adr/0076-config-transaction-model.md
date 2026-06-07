@@ -68,17 +68,15 @@ section executors behind that public contract.
    "Catalog-only" means the diff has no `effective_neighbor_impact`: no static
    neighbor's or dynamic range's resolved runtime import/export policy or
    inherited peer-group state changes. A
-   static-neighbor live-policy impact is committable only when the impact is a
-   pure resolved import/export `PolicyChain` move — no transport-config reshape
-   and no peer-group reassignment. The impact check spans both static
+   live-policy impact is committable only when the impact is a pure resolved
+   import/export `PolicyChain` move — no transport-config reshape and no
+   peer-group reassignment. The impact check spans both static
    `[[neighbors]]` and `[[dynamic_neighbors]]` ranges. Established dynamic peers
-   retain the canonical longest-prefix-match range that accepted them so a later
-   executor can target only the affected sessions. The planner distinguishes pure
-   dynamic-range policy moves as `[[dynamic_neighbors]] live policy impact`, but
-   still rejects them until the rollback-capable executor consumes that
-   attribution. Global hot-applied flags, restart-required sections,
-   dynamic-range session reshapes, and peer-group edits that require session
-   reconfiguration remain rejected until they have explicit executors.
+   retain the canonical longest-prefix-match range that accepted them so the
+   live-policy executor can target only the affected dynamic sessions. Global
+   hot-applied flags, restart-required sections, dynamic-range session reshapes,
+   and peer-group edits that require session reconfiguration remain rejected
+   until they have explicit executors.
 5. **Apply execution is one pure runtime family at a time.** V1 commits pure
    full-set `[[fib_tables]]`, pure full-set `[[dynamic_neighbors]]`, static
    `[[neighbors]]` add/delete/modify, catalog-only snapshot candidates, or the
@@ -92,16 +90,19 @@ section executors behind that public contract.
    live peer runtime mutation: they stage and persist the snapshot so future
    peers or later neighbor transactions can reference the catalog objects. The
    live-policy impact executor stages the snapshot, re-applies each affected
-   static neighbor's resolved import/export chains to the live session through
-   the peer manager, captures prior chains as a rollback token, persists with an
-   acknowledgement, and restores live chains plus the snapshot on persistence
-   failure. Re-evaluating an affected Established peer's already-received routes
-   under the new import policy is driven by Route Refresh (RFC 2918) — rustbgpd
-   does not keep a pre-policy soft-reconfiguration copy — so a live-policy impact
-   transaction **requires that every impacted Established peer negotiated the
-   Route Refresh capability**; if one did not, the apply is rejected and rolled
-   back cleanly (the refresh during rollback is best-effort, so a non-RR peer
-   yields a single clear rejection, not a compound rollback error).
+   static neighbor's or accepted dynamic peer's resolved import/export chains to
+   the live session through the peer manager, captures prior chains as a rollback
+   token, persists with an acknowledgement, and restores live chains plus the
+   snapshot on persistence failure. Dynamic peers are selected by their stored
+   accepted-range attribution, not by re-running longest-prefix-match against a
+   possibly changed matcher. Re-evaluating an affected Established peer's
+   already-received routes under the new import policy is driven by Route Refresh
+   (RFC 2918) — rustbgpd does not keep a pre-policy soft-reconfiguration copy —
+   so a live-policy impact transaction **requires that every impacted
+   Established peer negotiated the Route Refresh capability**; if one did not,
+   the apply is rejected and rolled back cleanly (the refresh during rollback is
+   best-effort, so a non-RR peer yields a single clear rejection, not a compound
+   rollback error).
 6. **Confirmed-commit is singleton and process-local.** A caller can set
    `confirm_id` on `ApplyConfigTransaction` to enter commit-confirmed mode.
    The candidate still goes through the same plan/apply/persist executor first;
@@ -155,9 +156,10 @@ section executors behind that public contract.
 - Catalog-only policy/peer-group/global-chain transactions stage reusable config
   objects before static neighbors or dynamic ranges depend on them. If the same
   policy, neighbor-set, peer-group, or global-chain edit changes only a static
-  neighbor's resolved import/export `PolicyChain`, the live-policy impact
-  executor can commit it by re-applying the resolved chains in place. Edits that
-  reshape peer transport/session config, reassign peer groups, or change a
+  neighbor's or dynamic range's resolved import/export `PolicyChain`, the
+  live-policy impact executor can commit it by re-applying the resolved chains
+  in place. Edits that reshape peer transport/session config, reassign peer
+  groups, or change a
   dynamic range's resolved policy remain rejected until their own rollback-capable
   live executors exist.
 - Follow-up executors should preserve the established pattern:

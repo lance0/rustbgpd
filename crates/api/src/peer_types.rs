@@ -340,6 +340,23 @@ pub enum ImportValidationDependency {
     Aspa,
 }
 
+/// Canonical `[[dynamic_neighbors]]` range whose accepted live peers need their
+/// resolved policy chains re-applied.
+///
+/// Carried by [`PeerManagerCommand::ApplyPolicyImpactSnapshot`]. The peer
+/// manager expands these selectors against its live `ManagedPeer` map so
+/// dynamic-range transaction apply/rollback targets the exact dynamic sessions
+/// that were accepted by the impacted range.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DynamicRangePolicyTarget {
+    /// Canonical network address of the accepted dynamic range.
+    pub addr: IpAddr,
+    /// Prefix length of the accepted dynamic range.
+    pub prefix_len: u8,
+    /// Peer group inherited by sessions accepted by this range.
+    pub peer_group: String,
+}
+
 /// Resolved import/export policy chains for one live peer session.
 ///
 /// Carried by [`PeerManagerCommand::ApplyResolvedPolicySnapshot`]. The same
@@ -475,6 +492,22 @@ pub enum PeerManagerCommand {
     ApplyResolvedPolicySnapshot {
         /// Resolved chains to apply, one entry per concrete live peer.
         targets: Vec<ResolvedPeerPolicy>,
+        /// Reply returns the captured prior chains (the rollback token).
+        reply: oneshot::Sender<Result<Vec<ResolvedPeerPolicy>, String>>,
+    },
+    /// Atomically apply resolved import/export policy chains for a live-impact
+    /// transaction that may include static neighbors and dynamic ranges.
+    ///
+    /// `static_targets` are already resolved by the transaction controller.
+    /// `dynamic_ranges` are expanded inside the peer-manager actor against live
+    /// dynamic peers whose stored accepted-range attribution matches the target.
+    /// The expanded concrete target set is then committed through the same
+    /// atomic apply/restore path as [`PeerManagerCommand::ApplyResolvedPolicySnapshot`].
+    ApplyPolicyImpactSnapshot {
+        /// Concrete static-neighbor targets.
+        static_targets: Vec<ResolvedPeerPolicy>,
+        /// Dynamic-range selectors to expand against live dynamic peers.
+        dynamic_ranges: Vec<DynamicRangePolicyTarget>,
         /// Reply returns the captured prior chains (the rollback token).
         reply: oneshot::Sender<Result<Vec<ResolvedPeerPolicy>, String>>,
     },

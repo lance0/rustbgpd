@@ -23,13 +23,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from `[[dynamic_neighbors]]` now retain the canonical longest-prefix-match
   range that accepted them internally. This does not change peer matching,
   `PeerInfo`, or the public API; it gives the config-transaction planner and
-  executor a stable target key for future dynamic-range live-policy commits.
+  executor a stable target key for dynamic-range live-policy commits.
 
-- **Dynamic-range live-policy transaction classification.** Config transaction
-  planning now reports pure dynamic-range policy impact under the precise
-  `[[dynamic_neighbors]] live policy impact` unsupported section instead of the
-  generic inheritance-impact bucket. The executor remains deferred, so these
-  candidates still reject without mutation.
+- **Dynamic-range live-policy config transactions.** `ApplyConfigTransaction`
+  can now commit policy definitions, neighbor sets, peer groups, and global
+  named policy-chain edits that move live dynamic peers' resolved import/export
+  chains through their accepting `[[dynamic_neighbors]]` range. The executor
+  expands the affected ranges to currently managed dynamic peers, reuses the
+  same Route Refresh, captured-prior, persistence-ack, and rollback path as
+  static live-policy transactions, and keeps peer-group/session reshapes
+  rejected until a dedicated reconfigure executor exists.
 
 ## [0.36.0] — 2026-06-05
 
