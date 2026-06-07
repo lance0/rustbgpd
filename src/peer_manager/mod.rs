@@ -37,7 +37,7 @@ mod policy;
 mod reconcile;
 mod snapshot;
 
-use dynamic::{DeadLetteredPending, DynamicRange};
+use dynamic::{AcceptedDynamicRange, DeadLetteredPending, DynamicRange};
 
 const DEFAULT_HOLD_TIME: u16 = 90;
 const DEFAULT_CONNECT_RETRY_SECS: u32 = 5;
@@ -97,6 +97,12 @@ struct ManagedPeer {
     /// True for peers auto-created from a `[[dynamic_neighbors]]` range.
     /// Dynamic peers are ephemeral: removed when session falls to Idle.
     is_dynamic: bool,
+    /// Canonical `[[dynamic_neighbors]]` range that accepted this peer.
+    ///
+    /// Static peers are `None`. Dynamic peers keep the accepted range even if
+    /// the live matcher changes later, giving transaction planning a stable
+    /// target key for established dynamic sessions.
+    accepted_dynamic_range: Option<AcceptedDynamicRange>,
     /// Tracks unfired Route Refresh intent across calls. Set in any
     /// of three places that can leave a refresh undelivered:
     /// (1) `soft_reset_in` returned Err (session not reachable for

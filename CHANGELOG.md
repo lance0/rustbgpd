@@ -19,6 +19,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   timer rollback without scraping logs or exposing `confirm_id` / candidate
   content as metric labels.
 
+- **Dynamic-neighbor accepted-range attribution.** Established peers created
+  from `[[dynamic_neighbors]]` now retain the canonical longest-prefix-match
+  range that accepted them internally. This does not change peer matching,
+  `PeerInfo`, or the public API; it gives the config-transaction planner and
+  executor a stable target key for future dynamic-range live-policy commits.
+
 ## [0.36.0] — 2026-06-05
 
 ### Added

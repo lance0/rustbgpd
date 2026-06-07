@@ -17,6 +17,18 @@ pub(super) struct DynamicRange {
     pub(super) description: Option<String>,
 }
 
+/// Canonical dynamic range that accepted a live peer.
+///
+/// Stored on `ManagedPeer` for future transaction targeting. It deliberately
+/// uses the effective prefix key instead of the literal TOML prefix, so host-bit
+/// or formatting variants cannot split attribution for the same address set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct AcceptedDynamicRange {
+    pub(super) addr: IpAddr,
+    pub(super) prefix_len: u8,
+    pub(super) peer_group: String,
+}
+
 impl DynamicRange {
     /// True when `addr` falls within this range's prefix.
     fn covers(&self, addr: IpAddr) -> bool {
@@ -44,6 +56,15 @@ impl DynamicRange {
                 (u128::from(peer) & mask) == (u128::from(net) & mask)
             }
             _ => false, // IPv4/IPv6 mismatch
+        }
+    }
+
+    pub(super) fn accepted_attribution(&self) -> AcceptedDynamicRange {
+        let (addr, prefix_len) = crate::config::effective_prefix(self.addr, self.prefix_len);
+        AcceptedDynamicRange {
+            addr,
+            prefix_len,
+            peer_group: self.peer_group.clone(),
         }
     }
 }
@@ -310,7 +331,7 @@ impl PeerManager {
 mod tests {
     use std::net::IpAddr;
 
-    use super::{DynamicRange, select_dynamic_range};
+    use super::{AcceptedDynamicRange, DynamicRange, select_dynamic_range};
 
     fn range(prefix: &str, group: &str) -> DynamicRange {
         let (addr, len) = prefix.split_once('/').expect("prefix has a '/'");
@@ -326,6 +347,11 @@ mod tests {
     fn matched_group(ranges: &[DynamicRange], addr: &str) -> Option<String> {
         select_dynamic_range(ranges, addr.parse::<IpAddr>().expect("valid IP"))
             .map(|r| r.peer_group.clone())
+    }
+
+    fn matched_attribution(ranges: &[DynamicRange], addr: &str) -> Option<AcceptedDynamicRange> {
+        select_dynamic_range(ranges, addr.parse::<IpAddr>().expect("valid IP"))
+            .map(DynamicRange::accepted_attribution)
     }
 
     #[test]
@@ -358,6 +384,19 @@ mod tests {
         assert_eq!(
             matched_group(&ranges, "203.0.113.9").as_deref(),
             Some("any")
+        );
+    }
+
+    #[test]
+    fn accepted_attribution_uses_effective_prefix_key() {
+        let ranges = vec![range("10.0.0.9/24", "ix-members")];
+        assert_eq!(
+            matched_attribution(&ranges, "10.0.0.77"),
+            Some(AcceptedDynamicRange {
+                addr: "10.0.0.0".parse().unwrap(),
+                prefix_len: 24,
+                peer_group: "ix-members".to_string(),
+            })
         );
     }
 

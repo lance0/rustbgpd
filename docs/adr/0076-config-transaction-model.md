@@ -71,11 +71,13 @@ section executors behind that public contract.
    static-neighbor live-policy impact is committable only when the impact is a
    pure resolved import/export `PolicyChain` move — no transport-config reshape
    and no peer-group reassignment. The impact check spans both static
-   `[[neighbors]]` and `[[dynamic_neighbors]]` ranges; dynamic-range impact still
-   rejects because safe live apply needs longest-prefix-match accept attribution
-   for established dynamic peers. Global hot-applied flags, restart-required
-   sections, dynamic-range policy impact, and peer-group edits that require
-   session reconfiguration remain rejected until they have explicit executors.
+   `[[neighbors]]` and `[[dynamic_neighbors]]` ranges. Established dynamic peers
+   retain the canonical longest-prefix-match range that accepted them so a later
+   executor can target only the affected sessions, but dynamic-range impact still
+   rejects until the planner and rollback-capable executor consume that
+   attribution. Global hot-applied flags, restart-required sections,
+   dynamic-range policy impact, and peer-group edits that require session
+   reconfiguration remain rejected until they have explicit executors.
 5. **Apply execution is one pure runtime family at a time.** V1 commits pure
    full-set `[[fib_tables]]`, pure full-set `[[dynamic_neighbors]]`, static
    `[[neighbors]]` add/delete/modify, catalog-only snapshot candidates, or the

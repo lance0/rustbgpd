@@ -196,6 +196,7 @@ impl PeerManager {
                 export_policy,
                 pending_inbound: None,
                 is_dynamic: false,
+                accepted_dynamic_range: None,
                 pending_refresh: false,
                 pending_export_apply: false,
                 advertise_graceful_shutdown: false,

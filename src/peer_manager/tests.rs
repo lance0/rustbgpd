@@ -709,6 +709,7 @@ fn insert_test_managed_peer_with_asn(
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            accepted_dynamic_range: None,
             pending_refresh,
             pending_export_apply: false,
             advertise_graceful_shutdown: false,
@@ -747,6 +748,7 @@ fn insert_test_scoped_managed_peer(
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
             advertise_graceful_shutdown: false,
@@ -2502,6 +2504,7 @@ async fn pending_refresh_re_arms_when_peer_still_not_established() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            accepted_dynamic_range: None,
             pending_refresh: true,
             pending_export_apply: false,
             advertise_graceful_shutdown: false,
@@ -3714,6 +3717,7 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
             advertise_graceful_shutdown: false,
@@ -3879,6 +3883,7 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
             advertise_graceful_shutdown: false,
@@ -4054,6 +4059,7 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
             advertise_graceful_shutdown: false,
@@ -4248,6 +4254,7 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
             advertise_graceful_shutdown: false,
@@ -4467,6 +4474,7 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
             advertise_graceful_shutdown: false,
@@ -4622,6 +4630,7 @@ async fn stale_query_state_re_arms_pending_refresh() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
             advertise_graceful_shutdown: false,
@@ -5350,6 +5359,70 @@ async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
         "dynamic peer should be removed when it goes idle"
     );
     assert!(mgr.peers.is_empty(), "dynamic peer table should be empty");
+
+    drop(client_stream);
+}
+
+#[tokio::test]
+async fn dynamic_inbound_peer_records_most_specific_accepted_range() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut config = make_dynamic_manager_config();
+    config.peer_groups.insert(
+        "narrow-members".to_string(),
+        crate::config::PeerGroupConfig {
+            families: vec!["ipv4_unicast".to_string()],
+            ..Default::default()
+        },
+    );
+    config.dynamic_neighbors = vec![
+        crate::config::DynamicNeighborConfig {
+            prefix: "127.0.0.0/8".to_string(),
+            peer_group: "ix-members".to_string(),
+            remote_asn: 0,
+            description: Some("wide".to_string()),
+        },
+        crate::config::DynamicNeighborConfig {
+            prefix: "127.0.0.9/24".to_string(),
+            peer_group: "narrow-members".to_string(),
+            remote_asn: 0,
+            description: Some("narrow".to_string()),
+        },
+    ];
+    let mut mgr = PeerManager::new_with_config(
+        rx,
+        mpsc::unbounded_channel().1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, remote_addr) = listener.accept().await.unwrap();
+    let client_stream = client.await.unwrap();
+    let peer_addr = remote_addr.ip();
+
+    mgr.handle_inbound(server_stream, sock(peer_addr)).await;
+
+    let managed = mgr.peers.get(&key(peer_addr)).unwrap();
+    assert!(managed.is_dynamic);
+    assert_eq!(managed.peer_group.as_deref(), Some("narrow-members"));
+    let accepted = managed
+        .accepted_dynamic_range
+        .as_ref()
+        .expect("dynamic peer should record accepted range");
+    assert_eq!(accepted.addr, IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)));
+    assert_eq!(accepted.prefix_len, 24);
+    assert_eq!(accepted.peer_group, "narrow-members");
 
     drop(client_stream);
 }
