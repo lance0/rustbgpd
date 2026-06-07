@@ -92,17 +92,13 @@ breadth and additional performance work stay measurement- or demand-shaped.
   ADR-0076 foundation shipped).* Native gRPC now has validate-only planning,
   optimistic snapshot tokens, commit/apply/confirm/abort/status, persistence
   acknowledgement, and rollback for the v1 committable families. The next useful
-  slices are the two remaining hot-reload executors whose rollback semantics are
-  ready: dynamic-range live-policy impact and peer-group/session reshapes with
-  captured rollback state. **Done:** established dynamic peers now keep the
-  canonical longest-prefix-match range that accepted them, giving the
-  dynamic-range planner/executor work a stable target key without public API
-  churn; the planner now classifies pure dynamic-range policy moves under a
-  precise `[[dynamic_neighbors]] live policy impact` unsupported section. Next
-  dynamic-range step: reuse the resolved-policy live executor with Route Refresh
-  gating and captured rollback state. After that, gNMI `Set` should map
-  OpenConfig changes into candidate TOML and feed this transaction model rather
-  than inventing a
+  slice is the remaining hot-reload executor whose rollback semantics are ready:
+  peer-group/session reshapes with captured rollback state. **Done:**
+  established dynamic peers now keep the canonical longest-prefix-match range
+  that accepted them, and pure dynamic-range policy moves now reuse the
+  resolved-policy live executor with Route Refresh gating and captured rollback
+  state. Next, gNMI `Set` should map OpenConfig changes into candidate TOML and
+  feed this transaction model rather than inventing a
   parallel commit primitive. Exit: atomic commit where supported, explicit
   restart-required/rejected surfaces, rollback/receipt model, no partial silent
   drift. Gated by ADR-0064 tier authz.
@@ -495,12 +491,12 @@ branch is between features.
   `INVALID_ARGUMENT`, or similar API-visible classes.
 - [x] **Config transaction live-impact policy / peer-group executor.**
   Policy definitions, `neighbor_sets`, `peer_groups`, and global named
-  policy-chain edits that move existing static neighbors' resolved import/export
-  policy chains now commit as transactions: stage the candidate snapshot,
-  re-apply resolved chains to affected live sessions with captured priors,
-  persist with ack, and restore live chains plus the snapshot on failure.
-  Dynamic-range policy impact and peer-group/session reshapes remain rejected
-  until dedicated executors exist.
+  policy-chain edits that move existing static neighbors' or accepted dynamic
+  peers' resolved import/export policy chains now commit as transactions: stage
+  the candidate snapshot, re-apply resolved chains to affected live sessions
+  with captured priors, persist with ack, and restore live chains plus the
+  snapshot on failure. Peer-group/session reshapes remain rejected until a
+  dedicated reconfigure executor exists.
 - [x] **Config transaction commit-confirmed core.**
   `ApplyConfigTransaction` can now enter a singleton pending-confirm state with
   `confirm_id` and a bounded confirm timer. Confirm makes the change permanent;
@@ -515,8 +511,8 @@ branch is between features.
   catalog-only policy definitions, policy `neighbor_sets`, `peer_groups`, and
   global named policy-chain assignments under the same
   reserve/stage/persist-ack/rollback ordering used by full-snapshot
-  dynamic-neighbor transactions, while rejecting candidates with effective
-  static-neighbor or dynamic-range inheritance impact.
+  dynamic-neighbor transactions, while routing pure resolved-policy impact to
+  the live-policy executor and rejecting broader inheritance/session impact.
 - [x] **Config transaction static-neighbor resolution scaling.**
   Static-neighbor add/modify transactions now resolve only the touched
   `[[neighbors]]` entries through the same single-neighbor inheritance path,

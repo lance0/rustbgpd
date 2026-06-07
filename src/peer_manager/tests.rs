@@ -1,6 +1,8 @@
 use super::*;
 use bytes::BytesMut;
-use rustbgpd_api::peer_types::{ImportValidationDependency, PeerKey, SessionLifecycleEventType};
+use rustbgpd_api::peer_types::{
+    DynamicRangePolicyTarget, ImportValidationDependency, PeerKey, SessionLifecycleEventType,
+};
 use rustbgpd_fsm::SessionState;
 use rustbgpd_transport::PeerSessionState;
 use rustbgpd_wire::{
@@ -3054,6 +3056,95 @@ async fn apply_resolved_policy_snapshot_skips_non_live_targets() {
     assert_eq!(
         format!("{:?}", mgr.peers.get(&key(live)).unwrap().import_policy),
         format!("{:?}", Some(new_chain))
+    );
+}
+
+#[tokio::test]
+async fn apply_policy_impact_snapshot_expands_dynamic_range_targets() {
+    let mut mgr = live_policy_test_manager();
+    let candidate = crate::config::Config::load_toml_with_diagnostics(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[peer_groups.ix]
+import_policy_chain = ["deny-import"]
+
+[policy.definitions.deny-import]
+default_action = "deny"
+
+[[dynamic_neighbors]]
+prefix = "10.30.0.0/16"
+peer_group = "ix"
+remote_asn = 65030
+"#,
+        "dynamic policy candidate",
+    )
+    .expect("test config must parse");
+    mgr.current_config = candidate;
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 30, 0, 7));
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer,
+        65030,
+        acking_policy_handle(peer, SessionState::Idle),
+        false,
+    );
+    let prior = validation_policy_chain(ImportValidationDependency::Rpki);
+    {
+        let managed = mgr.peers.get_mut(&key(peer)).unwrap();
+        managed.is_dynamic = true;
+        managed.peer_group = Some("ix".to_string());
+        managed.description = "dynamic:ix".to_string();
+        managed.accepted_dynamic_range = Some(AcceptedDynamicRange {
+            addr: IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
+            prefix_len: 16,
+            peer_group: "ix".to_string(),
+        });
+        managed.import_policy = Some(prior.clone());
+    }
+
+    let priors = mgr
+        .apply_policy_impact_snapshot(
+            Vec::new(),
+            vec![DynamicRangePolicyTarget {
+                addr: IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
+                prefix_len: 16,
+                peer_group: "ix".to_string(),
+            }],
+        )
+        .await
+        .expect("dynamic policy impact apply must succeed");
+
+    assert_eq!(priors.len(), 1);
+    assert_eq!(priors[0].address, peer);
+    assert_eq!(
+        format!("{:?}", priors[0].import_policy),
+        format!("{:?}", Some(prior)),
+        "rollback token must capture the peer's prior import policy"
+    );
+    let applied_action = mgr
+        .peers
+        .get(&key(peer))
+        .unwrap()
+        .import_policy
+        .as_ref()
+        .and_then(|chain| chain.policies.first())
+        .map(|policy| policy.default_action);
+    assert_eq!(
+        applied_action,
+        Some(rustbgpd_policy::PolicyAction::Deny),
+        "dynamic peer must resolve the candidate peer-group policy"
     );
 }
 

@@ -1,7 +1,8 @@
 use std::net::IpAddr;
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, ImportValidationDependency, PeerKey, PeerManagerNeighborConfig, ResolvedPeerPolicy,
+    ConfigEvent, DynamicRangePolicyTarget, ImportValidationDependency, PeerKey,
+    PeerManagerNeighborConfig, ResolvedPeerPolicy,
 };
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
@@ -177,6 +178,84 @@ impl PeerManager {
             .into_iter()
             .map(|captured| captured.policy)
             .collect())
+    }
+
+    /// Apply a live-impact transaction that may include static neighbors and
+    /// dynamic ranges. Dynamic ranges are expanded inside the peer manager
+    /// against the accepted-range attribution captured on each live dynamic
+    /// peer, then the full concrete target list is committed by the existing
+    /// atomic resolved-policy snapshot path.
+    pub(super) async fn apply_policy_impact_snapshot(
+        &mut self,
+        mut static_targets: Vec<ResolvedPeerPolicy>,
+        dynamic_ranges: Vec<DynamicRangePolicyTarget>,
+    ) -> Result<Vec<ResolvedPeerPolicy>, String> {
+        let mut dynamic_targets = self.resolve_dynamic_policy_targets(&dynamic_ranges)?;
+        static_targets.append(&mut dynamic_targets);
+        self.apply_resolved_policy_snapshot(static_targets).await
+    }
+
+    fn resolve_dynamic_policy_targets(
+        &self,
+        dynamic_ranges: &[DynamicRangePolicyTarget],
+    ) -> Result<Vec<ResolvedPeerPolicy>, String> {
+        if dynamic_ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut peer_keys: Vec<PeerKey> = self.peers.keys().cloned().collect();
+        peer_keys.sort();
+        let mut targets = Vec::new();
+        for peer_key in peer_keys {
+            let Some(managed) = self.peers.get(&peer_key) else {
+                continue;
+            };
+            if !managed.is_dynamic {
+                continue;
+            }
+            let Some(accepted) = managed.accepted_dynamic_range.as_ref() else {
+                continue;
+            };
+            let Some(target_range) = dynamic_ranges.iter().find(|target| {
+                target.addr == accepted.addr
+                    && target.prefix_len == accepted.prefix_len
+                    && target.peer_group == accepted.peer_group
+            }) else {
+                continue;
+            };
+            let Some(group) = self
+                .current_config
+                .peer_groups
+                .get(&target_range.peer_group)
+            else {
+                return Err(format!(
+                    "dynamic range {}/{} references missing peer_group {:?}",
+                    target_range.addr, target_range.prefix_len, target_range.peer_group
+                ));
+            };
+            let resolved = self
+                .current_config
+                .resolve_dynamic_neighbor(
+                    peer_key.address,
+                    managed.remote_asn,
+                    &managed.description,
+                    group,
+                    &target_range.peer_group,
+                )
+                .map_err(|error| {
+                    format!(
+                        "failed to resolve dynamic peer {} for range {}/{}: {error}",
+                        peer_key, target_range.addr, target_range.prefix_len
+                    )
+                })?;
+            targets.push(ResolvedPeerPolicy {
+                address: peer_key.address,
+                interface: peer_key.interface.clone(),
+                import_policy: resolved.import_policy,
+                export_policy: resolved.export_policy,
+            });
+        }
+        Ok(targets)
     }
 
     /// Re-apply captured prior chains (reverse of application order) to restore

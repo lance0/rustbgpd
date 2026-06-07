@@ -11,8 +11,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, PeerKey, PeerManagerCommand, PeerManagerNeighborConfig, ResolvedPeerPolicy,
-    RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus, StageConfigSnapshotError,
+    ConfigEvent, DynamicRangePolicyTarget, PeerKey, PeerManagerCommand, PeerManagerNeighborConfig,
+    ResolvedPeerPolicy, RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus,
+    StageConfigSnapshotError,
 };
 use rustbgpd_api::proto;
 use rustbgpd_api::server::{
@@ -1100,7 +1101,7 @@ async fn commit_live_policy_impact_locked(
         }
     };
 
-    let priors = match send_apply_resolved_policy_snapshot(peer_mgr_tx, targets).await {
+    let priors = match send_apply_policy_impact_snapshot(peer_mgr_tx, targets).await {
         Ok(priors) => priors,
         Err(error) => {
             // The peer-manager command self-heals its live mutations on a
@@ -1117,30 +1118,63 @@ async fn commit_live_policy_impact_locked(
     Ok(priors.len())
 }
 
-/// Build the resolved-chain apply set from a live-impact diff: every static
-/// neighbor whose resolved import/export policy moved
-/// (`policy_chain_only && !is_dynamic_range`).
+#[derive(Default)]
+struct LivePolicyTargets {
+    static_targets: Vec<ResolvedPeerPolicy>,
+    dynamic_ranges: Vec<DynamicRangePolicyTarget>,
+}
+
+/// Build the resolved-chain apply set from a live-impact diff:
+/// every static neighbor whose resolved import/export policy moved and every
+/// dynamic range whose accepted live peers need candidate policy resolution.
 fn resolve_live_policy_targets(
     previous: &Config,
     candidate: &Config,
-) -> Result<Vec<ResolvedPeerPolicy>, ConfigTransactionApplyError> {
+) -> Result<LivePolicyTargets, ConfigTransactionApplyError> {
     let diff = diff_config(previous, candidate);
     let candidate_by_addr: std::collections::HashMap<&str, &Neighbor> = candidate
         .neighbors
         .iter()
         .map(|neighbor| (neighbor.address.as_str(), neighbor))
         .collect();
-    let mut targets = Vec::new();
+    let dynamic_range_by_key: std::collections::HashMap<_, _> = candidate
+        .dynamic_neighbors
+        .iter()
+        .filter_map(|range| {
+            crate::config::effective_prefix_str(&range.prefix).map(|key| (key, range))
+        })
+        .collect();
+    let mut targets = LivePolicyTargets::default();
     for impact in &diff.effective_neighbor_impact {
-        if impact.is_dynamic_range || !impact.policy_chain_only {
+        if !impact.policy_chain_only {
             // A committable live-impact plan only carries policy-chain-only
-            // impacts for static neighbors; anything else (field reshape /
-            // dynamic range) is an internal inconsistency — fail closed rather
-            // than silently skip.
+            // impacts; anything else is an internal inconsistency — fail closed
+            // rather than silently skip.
             return Err(ConfigTransactionApplyError::Internal(format!(
                 "live-policy executor received an unsupported impact for {}",
                 impact.address
             )));
+        }
+        if impact.is_dynamic_range {
+            let Some((addr, prefix_len)) = crate::config::effective_prefix_str(&impact.address)
+            else {
+                return Err(ConfigTransactionApplyError::Internal(format!(
+                    "live-policy impact references invalid dynamic range {}",
+                    impact.address
+                )));
+            };
+            let Some(range) = dynamic_range_by_key.get(&(addr, prefix_len)) else {
+                return Err(ConfigTransactionApplyError::Internal(format!(
+                    "live-policy impact references dynamic range {} absent from the candidate",
+                    impact.address
+                )));
+            };
+            targets.dynamic_ranges.push(DynamicRangePolicyTarget {
+                addr,
+                prefix_len,
+                peer_group: range.peer_group.clone(),
+            });
+            continue;
         }
         let Some(neighbor) = candidate_by_addr.get(impact.address.as_str()) else {
             return Err(ConfigTransactionApplyError::Internal(format!(
@@ -1157,7 +1191,7 @@ fn resolve_live_policy_targets(
         let resolved = candidate
             .resolve_neighbor(neighbor)
             .map_err(|error| ConfigTransactionApplyError::InvalidArgument(error.to_string()))?;
-        targets.push(ResolvedPeerPolicy {
+        targets.static_targets.push(ResolvedPeerPolicy {
             address,
             interface: neighbor.interface.clone(),
             import_policy: resolved.import_policy,
@@ -1167,8 +1201,34 @@ fn resolve_live_policy_targets(
     Ok(targets)
 }
 
+/// Send `ApplyPolicyImpactSnapshot` and return the captured prior chains.
+async fn send_apply_policy_impact_snapshot(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    targets: LivePolicyTargets,
+) -> Result<Vec<ResolvedPeerPolicy>, ConfigTransactionApplyError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(PeerManagerCommand::ApplyPolicyImpactSnapshot {
+            static_targets: targets.static_targets,
+            dynamic_ranges: targets.dynamic_ranges,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable("peer manager is unavailable".to_string())
+        })?;
+    reply_rx
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable(
+                "peer manager dropped resolved-policy reply".to_string(),
+            )
+        })?
+        .map_err(ConfigTransactionApplyError::Internal)
+}
+
 /// Send `ApplyResolvedPolicySnapshot` and return the captured prior chains.
-/// Also used in reverse to restore those priors during rollback.
+/// Used in reverse to restore captured priors during rollback.
 async fn send_apply_resolved_policy_snapshot(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     targets: Vec<ResolvedPeerPolicy>,
@@ -1998,6 +2058,7 @@ peer_group = "edge"
     /// A config with one static neighbor whose import chain resolves to a
     /// named policy whose `default_action` is `action`. Diffing permit vs deny
     /// produces a pure static-neighbor policy-chain impact (`policy_chain_only`).
+    /// Dynamic-range transaction tests use `dynamic_live_policy_toml`.
     fn live_policy_toml(action: &str) -> String {
         format!(
             r#"
@@ -2024,12 +2085,42 @@ import_policy_chain = ["f"]
         )
     }
 
+    fn dynamic_live_policy_toml(action: &str) -> String {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[peer_groups.ix]
+import_policy_chain = ["f"]
+
+[policy.definitions.f]
+default_action = "{action}"
+
+[[dynamic_neighbors]]
+prefix = "10.30.0.9/16"
+peer_group = "ix"
+remote_asn = 65030
+"#
+        )
+    }
+
     /// Fake peer manager for live-impact executor tests: serves the plan, swaps
-    /// the snapshot on `StageConfigSnapshot`, and drives each
-    /// `ApplyResolvedPolicySnapshot` from `apply_results` (Ok returns the next
+    /// the snapshot on `StageConfigSnapshot`, and drives each policy-impact or
+    /// resolved-policy apply from `apply_results` (Ok returns the next
     /// `captured_priors` entry, falling back to echoing targets when the test
     /// does not care about the returned prior payload; Err simulates a mid-fanout
-    /// failure). Records every apply call's targets in `apply_calls`.
+    /// failure). Records static targets in `apply_calls` and dynamic selectors
+    /// in `dynamic_calls`.
     async fn fake_live_policy_peer_manager(
         mut rx: mpsc::Receiver<PeerManagerCommand>,
         plan: RuntimeConfigTransactionPlan,
@@ -2037,6 +2128,7 @@ import_policy_chain = ["f"]
         apply_results: Arc<Mutex<VecDeque<Result<(), String>>>>,
         captured_priors: Arc<Mutex<VecDeque<Vec<ResolvedPeerPolicy>>>>,
         apply_calls: Arc<Mutex<Vec<Vec<ResolvedPeerPolicy>>>>,
+        dynamic_calls: Arc<Mutex<Vec<Vec<DynamicRangePolicyTarget>>>>,
     ) {
         while let Some(cmd) = rx.recv().await {
             match cmd {
@@ -2052,8 +2144,30 @@ import_policy_chain = ["f"]
                     *snapshot = candidate_toml;
                     let _ = reply.send(Ok(previous));
                 }
+                PeerManagerCommand::ApplyPolicyImpactSnapshot {
+                    static_targets,
+                    dynamic_ranges,
+                    reply,
+                } => {
+                    apply_calls.lock().await.push(static_targets.clone());
+                    dynamic_calls.lock().await.push(dynamic_ranges);
+                    match apply_results.lock().await.pop_front().unwrap_or(Ok(())) {
+                        Ok(()) => {
+                            let priors = captured_priors
+                                .lock()
+                                .await
+                                .pop_front()
+                                .unwrap_or_else(|| static_targets.clone());
+                            let _ = reply.send(Ok(priors));
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                        }
+                    }
+                }
                 PeerManagerCommand::ApplyResolvedPolicySnapshot { targets, reply } => {
                     apply_calls.lock().await.push(targets.clone());
+                    dynamic_calls.lock().await.push(Vec::new());
                     match apply_results.lock().await.pop_front().unwrap_or(Ok(())) {
                         Ok(()) => {
                             let priors = captured_priors
@@ -2814,6 +2928,7 @@ default_action = "permit"
             .expect("candidate config must parse");
         resolve_live_policy_targets(&previous, &candidate)
             .expect("live policy targets must resolve")
+            .static_targets
     }
 
     fn import_default_action(target: &ResolvedPeerPolicy) -> PolicyAction {
@@ -2823,6 +2938,35 @@ default_action = "permit"
             .and_then(|chain| chain.policies.first())
             .map(|policy| policy.default_action)
             .expect("test target must carry one import policy")
+    }
+
+    fn resolved_dynamic_policy_target(toml: &str, address: &str) -> ResolvedPeerPolicy {
+        let config =
+            Config::load_toml_with_diagnostics(toml, "dynamic policy config").expect("valid TOML");
+        let range = config
+            .dynamic_neighbors
+            .first()
+            .expect("test config must define a dynamic range");
+        let group = config
+            .peer_groups
+            .get(&range.peer_group)
+            .expect("test config must define the range peer group");
+        let address = address.parse().expect("valid test address");
+        let resolved = config
+            .resolve_dynamic_neighbor(
+                address,
+                range.remote_asn,
+                "dynamic:ix",
+                group,
+                &range.peer_group,
+            )
+            .expect("dynamic policy must resolve");
+        ResolvedPeerPolicy {
+            address,
+            interface: None,
+            import_policy: resolved.import_policy,
+            export_policy: resolved.export_policy,
+        }
     }
 
     #[tokio::test]
@@ -2836,6 +2980,7 @@ default_action = "permit"
         let snapshot_toml = Arc::new(Mutex::new(previous_toml));
         let apply_results = Arc::new(Mutex::new(VecDeque::from([Ok(())])));
         let apply_calls = Arc::new(Mutex::new(Vec::new()));
+        let dynamic_calls = Arc::new(Mutex::new(Vec::new()));
         let (peer_tx, peer_rx) = mpsc::channel(8);
         tokio::spawn(fake_live_policy_peer_manager(
             peer_rx,
@@ -2844,6 +2989,7 @@ default_action = "permit"
             apply_results,
             captured_priors,
             apply_calls.clone(),
+            dynamic_calls.clone(),
         ));
         let (config_tx, mut config_rx) = mpsc::channel(8);
         tokio::spawn(async move {
@@ -2883,6 +3029,79 @@ default_action = "permit"
         assert_eq!(calls[0].len(), 1, "one impacted static neighbor");
         assert_eq!(calls[0][0].address.to_string(), "10.0.0.2");
         assert_eq!(import_default_action(&calls[0][0]), PolicyAction::Deny);
+        assert_eq!(
+            dynamic_calls.lock().await.as_slice(),
+            &[Vec::<DynamicRangePolicyTarget>::new()],
+            "static live-policy impact must not send dynamic selectors"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_commits_dynamic_range_live_policy_impact_after_persist_ack() {
+        let previous_toml = dynamic_live_policy_toml("permit");
+        let candidate_toml = dynamic_live_policy_toml("deny");
+        let captured_priors = Arc::new(Mutex::new(VecDeque::from([vec![
+            resolved_dynamic_policy_target(&previous_toml, "10.30.0.7"),
+        ]])));
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let apply_results = Arc::new(Mutex::new(VecDeque::from([Ok(())])));
+        let apply_calls = Arc::new(Mutex::new(Vec::new()));
+        let dynamic_calls = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_live_policy_peer_manager(
+            peer_rx,
+            live_impact_plan(),
+            snapshot_toml.clone(),
+            apply_results,
+            captured_priors,
+            apply_calls.clone(),
+            dynamic_calls.clone(),
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+                config_rx.recv().await
+            {
+                let _ = ack.send(Ok(()));
+            }
+        });
+
+        let response = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml: candidate_toml.clone(),
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        assert_eq!(
+            response.committed_sections,
+            vec!["[policy] definitions", "[policy] live impact"]
+        );
+        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        assert!(response.human_text.contains("1 live session"));
+        let calls = apply_calls.lock().await;
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].is_empty(),
+            "dynamic-only live-policy impact must not send static targets"
+        );
+        let dynamic_calls = dynamic_calls.lock().await;
+        assert_eq!(dynamic_calls.len(), 1);
+        assert_eq!(dynamic_calls[0].len(), 1);
+        assert_eq!(dynamic_calls[0][0].addr.to_string(), "10.30.0.0");
+        assert_eq!(dynamic_calls[0][0].prefix_len, 16);
+        assert_eq!(dynamic_calls[0][0].peer_group, "ix");
     }
 
     #[tokio::test]
@@ -2897,6 +3116,7 @@ default_action = "permit"
         // commit apply succeeds; the rollback restore apply also succeeds.
         let apply_results = Arc::new(Mutex::new(VecDeque::from([Ok(()), Ok(())])));
         let apply_calls = Arc::new(Mutex::new(Vec::new()));
+        let dynamic_calls = Arc::new(Mutex::new(Vec::new()));
         let (peer_tx, peer_rx) = mpsc::channel(8);
         tokio::spawn(fake_live_policy_peer_manager(
             peer_rx,
@@ -2905,6 +3125,7 @@ default_action = "permit"
             apply_results,
             captured_priors,
             apply_calls.clone(),
+            dynamic_calls,
         ));
         let (config_tx, mut config_rx) = mpsc::channel(8);
         tokio::spawn(async move {
@@ -2961,6 +3182,7 @@ default_action = "permit"
         )])));
         let captured_priors = Arc::new(Mutex::new(VecDeque::new()));
         let apply_calls = Arc::new(Mutex::new(Vec::new()));
+        let dynamic_calls = Arc::new(Mutex::new(Vec::new()));
         let (peer_tx, peer_rx) = mpsc::channel(8);
         tokio::spawn(fake_live_policy_peer_manager(
             peer_rx,
@@ -2969,6 +3191,7 @@ default_action = "permit"
             apply_results,
             captured_priors,
             apply_calls.clone(),
+            dynamic_calls,
         ));
         let (config_tx, mut config_rx) = mpsc::channel(8);
         tokio::spawn(async move {
@@ -3019,6 +3242,7 @@ default_action = "permit"
             Err("restore failed".to_string()),
         ])));
         let apply_calls = Arc::new(Mutex::new(Vec::new()));
+        let dynamic_calls = Arc::new(Mutex::new(Vec::new()));
         let (peer_tx, peer_rx) = mpsc::channel(8);
         tokio::spawn(fake_live_policy_peer_manager(
             peer_rx,
@@ -3027,6 +3251,7 @@ default_action = "permit"
             apply_results,
             captured_priors,
             apply_calls,
+            dynamic_calls,
         ));
         let (config_tx, mut config_rx) = mpsc::channel(8);
         tokio::spawn(async move {

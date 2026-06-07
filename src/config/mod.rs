@@ -1063,8 +1063,6 @@ const TRANSACTION_POLICY_DEFINITIONS_SECTION: &str = "[policy] definitions";
 const TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION: &str = "[policy] neighbor_sets";
 const TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION: &str = "[policy] global chains";
 const TRANSACTION_POLICY_LIVE_IMPACT_SECTION: &str = "[policy] live impact";
-const TRANSACTION_DYNAMIC_LIVE_POLICY_IMPACT_SECTION: &str =
-    "[[dynamic_neighbors]] live policy impact";
 
 /// Test-only auto-inject for the v0.24.0 `enforcement = "tier"`
 /// default flip. When compiled with `#[cfg(test)]` and the supplied
@@ -1439,9 +1437,9 @@ pub struct EffectiveNeighborImpact {
     /// `tcp_ao`, role, …) change and no peer-group reassignment. For static
     /// neighbors this means the current live-impact executor can commit the
     /// change by re-applying chains in place. For `[[dynamic_neighbors]]`
-    /// ranges this is policy-only but still not committable until the dynamic
-    /// executor consumes accepted-range attribution. Not serialized into
-    /// `--diff`; an internal classification hint.
+    /// ranges this is policy-only and can be committed by expanding live peers'
+    /// accepted-range attribution. Not serialized into `--diff`; an internal
+    /// classification hint.
     #[serde(skip)]
     pub policy_chain_only: bool,
     /// True when `address` identifies a `[[dynamic_neighbors]]` range rather
@@ -1701,37 +1699,25 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
     }
     if !diff.effective_neighbor_impact.is_empty() {
         // A live-impact transaction is committable only when every impacted
-        // entry is a pure resolved-policy-chain move on a static neighbor (the
-        // current executor re-applies resolved chains in place). Dynamic-range
-        // policy moves are now distinguishable, but remain rejected until the
-        // dynamic executor consumes accepted-range attribution.
-        let all_static_policy_chain_only = diff
+        // entry is a pure resolved-policy-chain move. Static neighbors are
+        // applied directly; dynamic ranges are expanded to live peers by
+        // accepted-range attribution in the transaction executor.
+        let all_policy_chain_only = diff
             .effective_neighbor_impact
             .iter()
-            .all(|impact| impact.policy_chain_only && !impact.is_dynamic_range);
-        if all_static_policy_chain_only {
+            .all(|impact| impact.policy_chain_only);
+        if all_policy_chain_only {
             class
                 .supported_sections
                 .push(TRANSACTION_POLICY_LIVE_IMPACT_SECTION.to_string());
-        } else {
-            if diff
-                .effective_neighbor_impact
-                .iter()
-                .any(|impact| impact.is_dynamic_range && impact.policy_chain_only)
-            {
-                class
-                    .unsupported_sections
-                    .push(TRANSACTION_DYNAMIC_LIVE_POLICY_IMPACT_SECTION.to_string());
-            }
-            if diff
-                .effective_neighbor_impact
-                .iter()
-                .any(|impact| !impact.policy_chain_only)
-            {
-                class
-                    .unsupported_sections
-                    .push("effective neighbor inheritance impact".to_string());
-            }
+        } else if diff
+            .effective_neighbor_impact
+            .iter()
+            .any(|impact| !impact.policy_chain_only)
+        {
+            class
+                .unsupported_sections
+                .push("effective neighbor inheritance impact".to_string());
         }
     }
     if !transaction_sections_are_one_family(&class.supported_sections) {
