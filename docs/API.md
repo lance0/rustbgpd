@@ -273,7 +273,9 @@ presence.
   static neighbors or dynamic ranges, and pure static-neighbor live
   policy-chain impact).
 - `unsupported_sections`: hot-reloadable sections v1 refuses until an atomic
-  executor exists.
+  executor exists. Dynamic-range policy-only impact is reported precisely as
+  `[[dynamic_neighbors]] live policy impact`; broader inheritance/session
+  reshapes continue to report `effective neighbor inheritance impact`.
 - `restart_required_sections`: sections that still require daemon restart.
 
 The planner is intentionally stricter than SIGHUP: "reload-applied" does not
@@ -438,10 +440,12 @@ rollback, persists with an acknowledgement, and restores both live policy chains
 and the snapshot on failure. Re-evaluating already-received routes under a new
 import chain requires Route Refresh, so every impacted Established peer must have
 negotiated the Route Refresh capability; otherwise the apply is rejected and
-rolled back without committing the candidate. Dynamic-range policy impact,
-peer-group reassignment, and peer-group field edits that reshape
-transport/session config still report `effective neighbor inheritance impact`
-and reject until their own rollback-capable executors exist.
+rolled back without committing the candidate. Pure dynamic-range policy impact
+now reports `[[dynamic_neighbors]] live policy impact` and remains rejected until
+the dynamic executor consumes accepted-range attribution. Peer-group
+reassignment and peer-group field edits that reshape transport/session config
+still report `effective neighbor inheritance impact` and reject until their own
+rollback-capable executors exist.
 
 CLI equivalent:
 
