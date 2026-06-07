@@ -144,6 +144,7 @@ impl PeerManager {
                     .clone()
                     .unwrap_or_else(|| format!("dynamic:{}", range.peer_group));
                 let peer_group_name = range.peer_group.clone();
+                let accepted_dynamic_range = range.accepted_attribution();
 
                 // Resolve the dynamic neighbor config from the peer group
                 let resolved = match self.current_config.resolve_dynamic_neighbor(
@@ -210,6 +211,7 @@ impl PeerManager {
                     export_policy,
                     pending_inbound: None,
                     is_dynamic: true,
+                    accepted_dynamic_range: Some(accepted_dynamic_range),
                     pending_refresh: false,
                     pending_export_apply: false,
                     advertise_graceful_shutdown,
@@ -226,8 +228,15 @@ impl PeerManager {
                 // TCP flap doesn't silently lose a SetPolicy edit.
                 self.restore_dead_lettered_pending(peer_ip);
 
+                let accepted = self
+                    .peers
+                    .get(&peer_key)
+                    .and_then(|managed| managed.accepted_dynamic_range.as_ref())
+                    .expect("dynamic peer should carry accepted range attribution");
                 info!(
                     %peer_ip,
+                    accepted_prefix = %format_args!("{}/{}", accepted.addr, accepted.prefix_len),
+                    accepted_peer_group = %accepted.peer_group,
                     "accepted dynamic neighbor from configured range"
                 );
                 return;

@@ -93,10 +93,14 @@ breadth and additional performance work stay measurement- or demand-shaped.
   optimistic snapshot tokens, commit/apply/confirm/abort/status, persistence
   acknowledgement, and rollback for the v1 committable families. The next useful
   slices are the two remaining hot-reload executors whose rollback semantics are
-  ready: dynamic-range live-policy impact (deferred pending
-  longest-prefix-match accept attribution) and peer-group/session reshapes with
-  captured rollback state. After that, gNMI `Set` should map OpenConfig changes
-  into candidate TOML and feed this transaction model rather than inventing a
+  ready: dynamic-range live-policy impact and peer-group/session reshapes with
+  captured rollback state. **Done:** established dynamic peers now keep the
+  canonical longest-prefix-match range that accepted them, giving the
+  dynamic-range planner/executor work a stable target key without public API
+  churn. Next dynamic-range steps: classify impact from that attribution, then
+  reuse the resolved-policy live executor with Route Refresh gating and captured
+  rollback state. After that, gNMI `Set` should map OpenConfig changes into
+  candidate TOML and feed this transaction model rather than inventing a
   parallel commit primitive. Exit: atomic commit where supported, explicit
   restart-required/rejected surfaces, rollback/receipt model, no partial silent
   drift. Gated by ADR-0064 tier authz.
