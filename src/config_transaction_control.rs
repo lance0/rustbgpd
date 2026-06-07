@@ -19,6 +19,7 @@ use rustbgpd_api::server::{
     ConfigMutationGateFn, ConfigTransactionAbortFn, ConfigTransactionApplyError,
     ConfigTransactionApplyFn, ConfigTransactionConfirmFn, ConfigTransactionStatusFn,
 };
+use rustbgpd_telemetry::BgpMetrics;
 use tracing::{error, info};
 
 use crate::config::{Config, Neighbor, diff_config, diff_neighbors};
@@ -45,6 +46,7 @@ const POLICY_LIVE_IMPACT_SECTION: &str = "[policy] live impact";
 #[derive(Clone)]
 pub struct ConfigTransactionController {
     deps: Arc<FibTableControlDeps>,
+    metrics: BgpMetrics,
     state: Arc<Mutex<ConfirmedState>>,
 }
 
@@ -86,9 +88,10 @@ struct ConfirmedApplyMode {
 
 impl ConfigTransactionController {
     #[must_use]
-    pub fn new(deps: FibTableControlDeps) -> Self {
+    pub fn new(deps: FibTableControlDeps, metrics: BgpMetrics) -> Self {
         Self {
             deps: Arc::new(deps),
+            metrics,
             state: Arc::new(Mutex::new(ConfirmedState::default())),
         }
     }
@@ -286,6 +289,8 @@ impl ConfigTransactionController {
         };
         let confirmation = record_confirmation_proto(&record);
         self.set_last_record(record).await;
+        self.metrics
+            .record_config_transaction_lifecycle("confirm", "success");
         Ok(proto::ConfirmConfigTransactionResponse {
             confirmation: Some(confirmation),
             human_text: "Confirmed config transaction committed permanently.\n".to_string(),
@@ -322,6 +327,8 @@ impl ConfigTransactionController {
                     "Aborted confirmed config transaction and restored the previous runtime config.",
                 )
                 .await;
+                self.metrics
+                    .record_config_transaction_lifecycle("abort", "success");
                 Ok(proto::AbortConfigTransactionResponse {
                     confirmation: self.last_confirmation().await,
                     runtime_snapshot_token: response.runtime_snapshot_token,
@@ -338,6 +345,8 @@ impl ConfigTransactionController {
                     "Abort requested, but rollback of the confirmed config transaction failed.",
                 )
                 .await;
+                self.metrics
+                    .record_config_transaction_lifecycle("abort", "failure");
                 Err(confirm_abort_rollback_error(&confirm_id, &error))
             }
         }
@@ -478,6 +487,8 @@ impl ConfigTransactionController {
                         "Confirmed config transaction timed out and was automatically rolled back.",
                     )
                     .await;
+                    self.metrics
+                        .record_config_transaction_lifecycle("auto_revert", "success");
                     info!(confirm_id, "confirmed config transaction auto-reverted");
                     Ok(())
                 }
@@ -489,6 +500,8 @@ impl ConfigTransactionController {
                         "Confirmed config transaction timed out, but automatic rollback failed.",
                     )
                     .await;
+                    self.metrics
+                        .record_config_transaction_lifecycle("auto_revert", "failure");
                     Err(error)
                 }
             }
@@ -1608,6 +1621,46 @@ remote_asn = 65002
         )
     }
 
+    fn config_transaction_lifecycle_metric(
+        controller: &ConfigTransactionController,
+        operation: &str,
+        outcome: &str,
+    ) -> f64 {
+        controller
+            .metrics
+            .registry()
+            .gather()
+            .iter()
+            .find(|family| family.name() == "bgp_config_transaction_lifecycle_total")
+            .and_then(|family| {
+                family.metric.iter().find(|metric| {
+                    let label_value = |name| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .find(|label| label.name() == name)
+                            .map(prometheus::proto::LabelPair::value)
+                    };
+                    label_value("operation") == Some(operation)
+                        && label_value("outcome") == Some(outcome)
+                })
+            })
+            .map_or(0.0, |metric| metric.get_counter().value())
+    }
+
+    fn assert_config_transaction_lifecycle_metric(
+        controller: &ConfigTransactionController,
+        operation: &str,
+        outcome: &str,
+        expected: f64,
+    ) {
+        let actual = config_transaction_lifecycle_metric(controller, operation, outcome);
+        assert!(
+            (actual - expected).abs() < f64::EPSILON,
+            "metric operation={operation} outcome={outcome}: got {actual}, expected {expected}"
+        );
+    }
+
     fn table(name: &str, table_id: u32) -> FibTableConfig {
         FibTableConfig {
             name: name.to_string(),
@@ -2224,12 +2277,10 @@ remote_asn = 65010
         ));
         let (config_tx, config_rx) = mpsc::channel(8);
         let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
-        let controller = ConfigTransactionController::new(deps_value(
-            None,
-            peer_tx,
-            Some(config_tx),
-            Vec::new(),
-        ));
+        let controller = ConfigTransactionController::new(
+            deps_value(None, peer_tx, Some(config_tx), Vec::new()),
+            BgpMetrics::new(),
+        );
 
         let response = controller
             .clone()
@@ -2312,6 +2363,8 @@ remote_asn = 65010
             confirmed.confirmation.unwrap().status,
             proto::ConfigTransactionConfirmationStatus::Confirmed as i32
         );
+        assert_config_transaction_lifecycle_metric(&controller, "confirm", "success", 1.0);
+        assert_config_transaction_lifecycle_metric(&controller, "confirm", "failure", 0.0);
         controller
             .clone()
             .auto_revert("deploy-1".to_string())
@@ -2361,6 +2414,8 @@ remote_asn = 65010
             aborted.confirmation.unwrap().status,
             proto::ConfigTransactionConfirmationStatus::Aborted as i32
         );
+        assert_config_transaction_lifecycle_metric(&controller, "abort", "success", 1.0);
+        assert_config_transaction_lifecycle_metric(&controller, "abort", "failure", 0.0);
         assert_snapshot_matches_config(&snapshot_toml.lock().await, &previous_toml);
         ack_task.abort();
     }
@@ -2401,6 +2456,11 @@ remote_asn = 65010
             proto::ConfigTransactionConfirmationStatus::Pending as i32
         );
         assert_eq!(confirmation.confirm_id, "deploy-1");
+        assert!(
+            (config_transaction_lifecycle_metric(&controller, "confirm", "failure") - 0.0).abs()
+                < f64::EPSILON,
+            "precondition/id-mismatch errors are not lifecycle transitions"
+        );
         let gate_err = controller
             .reject_if_pending("test mutation")
             .await
@@ -2483,12 +2543,10 @@ remote_asn = 65010
         ));
         let (config_tx, config_rx) = mpsc::channel(8);
         let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
-        let controller = ConfigTransactionController::new(deps_value(
-            None,
-            peer_tx,
-            Some(config_tx),
-            Vec::new(),
-        ));
+        let controller = ConfigTransactionController::new(
+            deps_value(None, peer_tx, Some(config_tx), Vec::new()),
+            BgpMetrics::new(),
+        );
 
         controller
             .clone()
@@ -2525,6 +2583,8 @@ remote_asn = 65010
             proto::ConfigTransactionConfirmationStatus::AbortFailed as i32
         );
         assert_eq!(confirmation.confirm_id, "deploy-1");
+        assert_config_transaction_lifecycle_metric(&controller, "abort", "failure", 1.0);
+        assert_config_transaction_lifecycle_metric(&controller, "abort", "success", 0.0);
         controller
             .reject_if_pending("test mutation")
             .await
@@ -2533,7 +2593,7 @@ remote_asn = 65010
         ack_task.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn confirmed_timeout_auto_reverts_previous_snapshot() {
         let previous_toml = base_toml("");
         let candidate_toml = base_toml(
@@ -2560,18 +2620,19 @@ remote_asn = 65010
         ));
         let (config_tx, config_rx) = mpsc::channel(8);
         let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
-        let controller = ConfigTransactionController::new(deps_value(
-            None,
-            peer_tx,
-            Some(config_tx),
-            Vec::new(),
-        ));
+        let controller = ConfigTransactionController::new(
+            deps_value(None, peer_tx, Some(config_tx), Vec::new()),
+            BgpMetrics::new(),
+        );
 
         controller
             .clone()
             .apply(confirmed_dynamic_request(candidate_toml, "deploy-1", 1))
             .await
             .expect("confirmed apply must succeed");
+        // Virtual time (start_paused): auto-advances past the 1s confirm
+        // timeout so the spawned timer fires and runs auto-revert to completion,
+        // deterministically and with no real wall-clock cost.
         tokio::time::sleep(Duration::from_millis(1_100)).await;
 
         let status = controller.status().await.expect("status must succeed");
@@ -2579,7 +2640,83 @@ remote_asn = 65010
             status.confirmation.unwrap().status,
             proto::ConfigTransactionConfirmationStatus::AutoReverted as i32
         );
+        assert_config_transaction_lifecycle_metric(&controller, "auto_revert", "success", 1.0);
+        assert_config_transaction_lifecycle_metric(&controller, "auto_revert", "failure", 0.0);
         assert_snapshot_matches_config(&snapshot_toml.lock().await, &previous_toml);
+        ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn auto_revert_failure_records_lifecycle_metric() {
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[peer_groups.ix-members]
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix-members"
+remote_asn = 65010
+"#,
+        );
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let stage_results = Arc::new(Mutex::new(VecDeque::from([
+            Ok(()),
+            Err(StageConfigSnapshotError::InvalidCandidate(
+                "stage rollback failed".to_string(),
+            )),
+        ])));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager_with_stage_results(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[dynamic_neighbors]]".to_string()],
+            ),
+            snapshot_toml.clone(),
+            peers,
+            stage_results,
+        ));
+        let (config_tx, config_rx) = mpsc::channel(8);
+        let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
+        let controller = ConfigTransactionController::new(
+            deps_value(None, peer_tx, Some(config_tx), Vec::new()),
+            BgpMetrics::new(),
+        );
+
+        controller
+            .clone()
+            .apply(confirmed_dynamic_request(
+                candidate_toml.clone(),
+                "deploy-1",
+                1,
+            ))
+            .await
+            .expect("confirmed apply must succeed");
+        {
+            let mut state = controller.state.lock().await;
+            state
+                .pending
+                .as_mut()
+                .expect("confirmed apply should be pending")
+                .deadline = tokio::time::Instant::now();
+        }
+        controller
+            .clone()
+            .auto_revert("deploy-1".to_string())
+            .await
+            .expect_err("auto-revert rollback should fail");
+
+        let status = controller.status().await.expect("status must succeed");
+        let confirmation = status.confirmation.unwrap();
+        assert_eq!(
+            confirmation.status,
+            proto::ConfigTransactionConfirmationStatus::AutoRevertFailed as i32
+        );
+        assert_config_transaction_lifecycle_metric(&controller, "auto_revert", "failure", 1.0);
+        assert_config_transaction_lifecycle_metric(&controller, "auto_revert", "success", 0.0);
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
         ack_task.abort();
     }
 

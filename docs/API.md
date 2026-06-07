@@ -349,6 +349,11 @@ abort/auto-revert attempts when rollback itself could not complete.
 | `..._ABORT_FAILED` | Abort requested but the rollback re-apply failed; manual correction required. |
 
 (Each value is prefixed `CONFIG_TRANSACTION_CONFIRMATION_STATUS_` in the proto.)
+Confirmed lifecycle transitions are also exposed through the bounded Prometheus
+counter `bgp_config_transaction_lifecycle_total{operation, outcome}`:
+`operation` is `confirm`, `abort`, or `auto_revert`; `outcome` is `success` or
+`failure`. The metric deliberately does not include `confirm_id`, candidate
+TOML, peer labels, or error strings.
 
 Apply a pure full-set `[[fib_tables]]` transaction:
 

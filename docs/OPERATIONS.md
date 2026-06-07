@@ -629,6 +629,19 @@ owned-state.
 | `bfd_session_up{peer}` | Per-peer BFD session state (1 = Up, 0 = not Up) |
 | `bfd_session_flaps_total{peer}` | BFD session flaps (transitions out of Up) per peer |
 
+### Config transactions
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `bgp_config_transaction_lifecycle_total{operation, outcome}` | Confirmed config transaction lifecycle transitions. `operation` is `confirm`, `abort`, or `auto_revert`; `outcome` is `success` or `failure`. |
+
+Alert on `outcome="failure"`: it means an operator abort or timer-driven
+auto-revert attempted rollback but could not complete, and
+`GetConfigTransactionStatus` / `rbgp config status` will hold the redacted last
+failed lifecycle record for triage. The counter intentionally omits
+`confirm_id`, candidate content, peer labels, and free-form error text; those
+details stay in the structured daemon log and RPC status.
+
 ### RPKI / ASPA validation
 
 | Metric | What it tells you |

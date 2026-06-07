@@ -159,6 +159,9 @@ bench = false
 tempfile.workspace = true
 tower.workspace = true
 criterion.workspace = true
+# Enables Tokio's paused-clock test harness (`start_paused`) for deterministic,
+# wall-clock-free timer tests (e.g. the confirm-timeout auto-revert).
+tokio = { workspace = true, features = ["test-util"] }
 
 [[bench]]
 name = "fib_projection"
