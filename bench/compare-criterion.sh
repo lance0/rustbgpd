@@ -165,24 +165,24 @@ fi
 # The bench host is shared between this workflow and the soak runner;
 # letting both run at once would corrupt every reading from both. The
 # soak harnesses under `tests/soak/` acquire the same lock via
-# `tests/soak/host-lock.sh`; the path and semantics here must stay in
-# sync with that helper. Look for the shared lock under XDG state
-# (works for non-root user `lance` on the dedicated host) and skip
-# locking when the directory isn't present (local dev boxes not
-# shared with soaks).
-host_lock=""
-if [[ -d "${HOME:-/}/.local/state" ]] || [[ -n "${RUSTBGPD_HOST_LOCK:-}" ]]; then
-  host_lock="${RUSTBGPD_HOST_LOCK:-${HOME}/.local/state/rustbgpd-host.lock}"
-  mkdir -p "$(dirname "$host_lock")"
-  touch "$host_lock"
-  exec {host_lock_fd}>"$host_lock"
-  if ! flock -n "$host_lock_fd"; then
-    echo "error: ${host_lock} is held by another process (soak or bench)" >&2
-    echo "       wait for it to finish or remove the lock if stale" >&2
-    exit 1
-  fi
-  echo "acquired host lock: ${host_lock}"
+# `tests/soak/host-lock.sh`; the path and acquisition here must stay in
+# sync with that helper. Always lock (creating the lock dir if needed):
+# an earlier "skip when ${HOME}/.local/state is absent" gate silently
+# disabled the mutex on the shared box, where that dir did not exist, so
+# a soak and the nightly bench ran unprotected. The soak runner and this
+# bench runner run as the same user, so the per-user default path
+# resolves to one shared file. Exit 75 (EX_TEMPFAIL — host busy) on
+# contention so an unattended caller can skip rather than fail red.
+host_lock="${RUSTBGPD_HOST_LOCK:-${HOME}/.local/state/rustbgpd-host.lock}"
+mkdir -p "$(dirname "$host_lock")"
+touch "$host_lock"
+exec {host_lock_fd}>"$host_lock"
+if ! flock -n "$host_lock_fd"; then
+  echo "error: ${host_lock} is held by another process (soak or bench)" >&2
+  echo "       wait for it to finish or remove the lock if stale" >&2
+  exit 75
 fi
+echo "acquired host lock: ${host_lock}"
 
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-${base_short}-vs-${head_short}-${package}-${bench_name}"
 case "$out_root" in

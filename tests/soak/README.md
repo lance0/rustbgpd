@@ -32,9 +32,14 @@ shared host is:
       bash tests/soak/run-<gate>-soak.sh
   ```
 
-Local dev boxes without `$HOME/.local/state` skip the locking entirely,
-so this is transparent for laptops / dev boxes that aren't shared with
-a bench runner.
+The lock is **always** taken (the lock directory is created if missing).
+An earlier version skipped locking when `$HOME/.local/state` did not
+exist — which silently disabled the mutex on the shared soak/bench host,
+where that directory was absent, so a soak and the nightly bench could
+run unprotected. An uncontended lock is free, so always taking it is
+transparent on laptops / dev boxes too. On contention the entrypoint
+exits `75` (`EX_TEMPFAIL`, "host busy") so an unattended caller — the
+nightly bench workflow — can skip cleanly rather than fail.
 
 ---
 

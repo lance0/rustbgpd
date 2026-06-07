@@ -96,6 +96,7 @@ jobs:
           echo "Nightly baseline: $base  (head: HEAD = $(git rev-parse --short=12 HEAD))"
 
       - name: Run Criterion comparison (HEAD vs latest release tag)
+        id: compare
         # Inputs via env, never interpolated into shell text (injection-safe even
         # though this trigger is privileged).
         env:
@@ -104,7 +105,13 @@ jobs:
           CORE: ${{ inputs.core || '0' }}
           ATTEMPTS: ${{ inputs.attempts || '4' }}
         run: |
-          set -euo pipefail
+          # No `-e`: compare-criterion.sh exits 75 (EX_TEMPFAIL) when a soak
+          # holds the shared host lock. That single self-hosted box also runs
+          # unattended soaks; a soak and this A/B would corrupt both, so on a
+          # held lock we skip green rather than fail red. Any other non-zero is
+          # a real failure and propagates.
+          set -uo pipefail
+          rc=0
           bench/compare-criterion.sh \
             --base "$BASE_REF" \
             --head "HEAD" \
@@ -112,14 +119,33 @@ jobs:
             --bench "$BENCH" \
             --core "$CORE" \
             --attempts "$ATTEMPTS" \
-            --out-dir "target/bench-compare"
+            --out-dir "target/bench-compare" || rc=$?
+          if [ "$rc" -eq 75 ]; then
+            echo "soak_skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::host lock held by an active soak — skipping nightly bench (advisory, non-gating)"
+            exit 0
+          fi
+          exit "$rc"
           # require_performance is intentionally NOT set — the VPS CPU is
           # virtualized and exposes no cpufreq governor (see bench.yml).
 
       - name: Publish summary
         if: always()
+        env:
+          SOAK_SKIP: ${{ steps.compare.outputs.soak_skip }}
         run: |
           set -euo pipefail
+          if [ "${SOAK_SKIP:-}" = "true" ]; then
+            {
+              echo "## Nightly criterion tripwire — SKIPPED (soak active)"
+              echo
+              echo "A soak holds the shared host lock, so the nightly bench skipped"
+              echo "to avoid CPU contention corrupting both readings. Advisory and"
+              echo "non-gating — run a manual A/B via workflow_dispatch once the"
+              echo "soak ends."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           {
             echo "## Nightly criterion tripwire — advisory only (non-gating)"
             echo

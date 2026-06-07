@@ -15,12 +15,17 @@
 # bench/compare-criterion.sh):
 #
 #   - Path: ${RUSTBGPD_HOST_LOCK:-${HOME}/.local/state/rustbgpd-host.lock}.
-#   - Skip locking entirely when ${HOME}/.local/state does not exist
-#     AND RUSTBGPD_HOST_LOCK is unset. This is the "local dev box,
-#     not shared with bench" escape hatch and matches how the bench
-#     side decides whether to lock.
+#   - Always lock; create the lock dir if missing. (An earlier
+#     "skip when ${HOME}/.local/state is absent" escape hatch silently
+#     disabled the mutex on the shared soak/bench box, where that dir
+#     did not exist — soak and nightly bench then ran unprotected. An
+#     uncontended lock is free, so always taking it is harmless on a
+#     local dev box and correct on the shared host.) The soak runner
+#     and the GitHub Actions bench runner both run as the same user, so
+#     the per-user default path resolves to one shared file.
 #   - Use `flock -n` so the wait is the operator's problem to resolve,
-#     not the script's. A held lock fails fast with a clear message.
+#     not the script's. A held lock fails fast (return 75 — "host
+#     busy") with a clear message.
 #   - The fd is allocated to the caller's shell (`exec {fd}>...`),
 #     so the lock lives for the rest of the caller's process and is
 #     released automatically on exit. The caller does not need to
@@ -43,18 +48,15 @@
 #   See tests/soak/README.md ("Host mutex") for the full rationale.
 
 acquire_rustbgpd_host_lock() {
-    local host_lock=""
-    if [[ -d "${HOME:-/}/.local/state" ]] || [[ -n "${RUSTBGPD_HOST_LOCK:-}" ]]; then
-        host_lock="${RUSTBGPD_HOST_LOCK:-${HOME}/.local/state/rustbgpd-host.lock}"
-        mkdir -p "$(dirname "$host_lock")"
-        touch "$host_lock"
-        # shellcheck disable=SC1083  # bash {fd} redirection is intentional
-        exec {RUSTBGPD_HOST_LOCK_FD}>"$host_lock"
-        if ! flock -n "$RUSTBGPD_HOST_LOCK_FD"; then
-            echo "error: ${host_lock} is held by another process (soak or bench)" >&2
-            echo "       wait for it to finish or remove the lock if stale" >&2
-            return 1
-        fi
-        echo "acquired host lock: ${host_lock}"
+    local host_lock="${RUSTBGPD_HOST_LOCK:-${HOME}/.local/state/rustbgpd-host.lock}"
+    mkdir -p "$(dirname "$host_lock")"
+    touch "$host_lock"
+    # shellcheck disable=SC1083  # bash {fd} redirection is intentional
+    exec {RUSTBGPD_HOST_LOCK_FD}>"$host_lock"
+    if ! flock -n "$RUSTBGPD_HOST_LOCK_FD"; then
+        echo "error: ${host_lock} is held by another process (soak or bench)" >&2
+        echo "       wait for it to finish or remove the lock if stale" >&2
+        return 75 # EX_TEMPFAIL — host busy, retry later
     fi
+    echo "acquired host lock: ${host_lock}"
 }
