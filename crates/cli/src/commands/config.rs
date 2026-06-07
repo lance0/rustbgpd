@@ -482,6 +482,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_rejects_too_long_confirm_id_before_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let confirm_id = "x".repeat(MAX_CONFIRM_ID_CHARS + 1);
+
+        let err = apply(
+            connection,
+            ApplyOptions {
+                from_file: "/does/not/matter.toml",
+                expected_runtime_snapshot_token: "kv1:old:1",
+                client_request_id: None,
+                comment: None,
+                confirm_id: Some(confirm_id.as_str()),
+                confirm_timeout_seconds: Some(120),
+            },
+            true,
+        )
+        .await
+        .expect_err("over-limit confirm_id must fail before RPC");
+
+        assert!(
+            matches!(err, CliError::Argument(ref message) if message == "confirm_id must be at most 128 characters"),
+            "{err:?}"
+        );
+        assert_eq!(server.state.config_apply_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn apply_rejects_control_char_confirm_id_before_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let err = apply(
+            connection,
+            ApplyOptions {
+                from_file: "/does/not/matter.toml",
+                expected_runtime_snapshot_token: "kv1:old:1",
+                client_request_id: None,
+                comment: None,
+                confirm_id: Some("bad\nid"),
+                confirm_timeout_seconds: Some(120),
+            },
+            true,
+        )
+        .await
+        .expect_err("control-character confirm_id must fail before RPC");
+
+        assert!(
+            matches!(err, CliError::Argument(ref message) if message == "confirm_id must not contain control characters"),
+            "{err:?}"
+        );
+        assert_eq!(server.state.config_apply_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn apply_rejects_confirm_timeout_without_confirm_id_before_rpc() {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
@@ -652,6 +707,22 @@ mod tests {
 
         assert!(
             matches!(err, CliError::Argument(ref message) if message == "confirm_id must be at most 128 characters"),
+            "{err:?}"
+        );
+        assert_eq!(server.state.config_abort_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn abort_rejects_control_char_confirm_id_before_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let err = abort(connection, "bad\nid", true)
+            .await
+            .expect_err("control-character confirm_id must fail before RPC");
+
+        assert!(
+            matches!(err, CliError::Argument(ref message) if message == "confirm_id must not contain control characters"),
             "{err:?}"
         );
         assert_eq!(server.state.config_abort_calls.load(Ordering::SeqCst), 0);
