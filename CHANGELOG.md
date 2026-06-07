@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Config transaction lifecycle metric.**
+  `bgp_config_transaction_lifecycle_total{operation, outcome}` now counts
+  confirmed-transaction confirm, abort, and auto-revert lifecycle transitions
+  with bounded labels. `operation` is `confirm`, `abort`, or `auto_revert`;
+  `outcome` is `success` or `failure`, so operators can alert on failed abort /
+  timer rollback without scraping logs or exposing `confirm_id` / candidate
+  content as metric labels.
+
 - **Dynamic-neighbor accepted-range attribution.** Established peers created
   from `[[dynamic_neighbors]]` now retain the canonical longest-prefix-match
   range that accepted them internally. This does not change peer matching,
