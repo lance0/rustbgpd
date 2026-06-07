@@ -6836,7 +6836,7 @@ default_action = "{default_action}"
     assert!(
         diff.effective_neighbor_impact
             .iter()
-            .all(|impact| impact.policy_chain_only),
+            .all(|impact| impact.policy_chain_only && !impact.is_dynamic_range),
         "{:?}",
         diff.effective_neighbor_impact
     );
@@ -6933,8 +6933,8 @@ fn transaction_v1_rejects_catalog_policy_change_feeding_dynamic_range() {
     // A policy-definition edit reaches an established dynamic session through
     // its peer group's chain, even with no static neighbor referencing it.
     // SIGHUP live-reconciles dynamic peers, so the catalog gate must surface the
-    // range as effective neighbor inheritance impact and reject the transaction
-    // rather than committing it as catalog-only.
+    // range as dynamic live-policy impact and reject the transaction until the
+    // dynamic executor consumes accepted-range attribution.
     let config = |action: &str| {
         format!(
             r#"
@@ -6973,7 +6973,7 @@ remote_asn = 65030
     assert!(
         class
             .unsupported_sections
-            .contains(&"effective neighbor inheritance impact".to_string()),
+            .contains(&"[[dynamic_neighbors]] live policy impact".to_string()),
         "{:?}",
         class.unsupported_sections
     );
@@ -6985,7 +6985,140 @@ remote_asn = 65030
         vec!["10.30.0.0/16".to_string()],
         "the dynamic range inheriting the changed policy must be flagged"
     );
+    assert!(
+        diff.effective_neighbor_impact
+            .iter()
+            .all(|impact| impact.policy_chain_only && impact.is_dynamic_range),
+        "{:?}",
+        diff.effective_neighbor_impact
+    );
     assert!(class.restart_required_sections.is_empty());
+}
+
+#[test]
+fn transaction_v1_rejects_dynamic_range_peer_group_field_reshape_as_inheritance_impact() {
+    // A dynamic range whose peer-group policy did not move but whose inherited
+    // session settings did move is not a dynamic live-policy impact; it still
+    // needs the generic inheritance/session-reshape rejection.
+    let config = |hold: u32| {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[peer_groups.ix]
+hold_time = {hold}
+
+[[dynamic_neighbors]]
+prefix = "10.30.0.0/16"
+peer_group = "ix"
+remote_asn = 65030
+"#
+        )
+    };
+    let old = parse(&config(90)).unwrap();
+    let new = parse(&config(45)).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(!class.is_committable());
+    assert!(
+        class
+            .unsupported_sections
+            .contains(&"effective neighbor inheritance impact".to_string()),
+        "{:?}",
+        class.unsupported_sections
+    );
+    assert!(
+        !class
+            .unsupported_sections
+            .contains(&"[[dynamic_neighbors]] live policy impact".to_string()),
+        "{:?}",
+        class.unsupported_sections
+    );
+    assert!(
+        diff.effective_neighbor_impact
+            .iter()
+            .all(|impact| !impact.policy_chain_only && impact.is_dynamic_range),
+        "{:?}",
+        diff.effective_neighbor_impact
+    );
+}
+
+#[test]
+fn transaction_v1_rejects_dynamic_range_combined_transport_and_policy_change_as_inheritance_impact()
+{
+    // A peer-group edit that moves BOTH the resolved policy chain AND a
+    // transport/session field (hold_time) for a dynamic range is not a pure
+    // policy-chain move: the live-impact executor reconfigures policy via a
+    // Route Refresh but cannot reconfigure the session transport. It must be
+    // rejected as inheritance impact, never mis-classified as a committable
+    // dynamic live-policy move (which would silently drop the reconfigure).
+    let config = |hold: u32, action: &str| {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[peer_groups.ix]
+hold_time = {hold}
+import_policy_chain = ["filter"]
+
+[policy.definitions.filter]
+default_action = "{action}"
+
+[[dynamic_neighbors]]
+prefix = "10.30.0.0/16"
+peer_group = "ix"
+remote_asn = 65030
+"#
+        )
+    };
+    let old = parse(&config(90, "permit")).unwrap();
+    let new = parse(&config(45, "deny")).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(!class.is_committable(), "{class:?}");
+    assert!(
+        class
+            .unsupported_sections
+            .contains(&"effective neighbor inheritance impact".to_string()),
+        "{:?}",
+        class.unsupported_sections
+    );
+    assert!(
+        !class
+            .unsupported_sections
+            .contains(&"[[dynamic_neighbors]] live policy impact".to_string()),
+        "{:?}",
+        class.unsupported_sections
+    );
+    assert!(
+        diff.effective_neighbor_impact
+            .iter()
+            .all(|impact| !impact.policy_chain_only && impact.is_dynamic_range),
+        "{:?}",
+        diff.effective_neighbor_impact
+    );
 }
 
 #[test]

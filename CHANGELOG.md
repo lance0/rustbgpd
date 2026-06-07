@@ -25,6 +25,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `PeerInfo`, or the public API; it gives the config-transaction planner and
   executor a stable target key for future dynamic-range live-policy commits.
 
+- **Dynamic-range live-policy transaction classification.** Config transaction
+  planning now reports pure dynamic-range policy impact under the precise
+  `[[dynamic_neighbors]] live policy impact` unsupported section instead of the
+  generic inheritance-impact bucket. The executor remains deferred, so these
+  candidates still reject without mutation.
+
 ## [0.36.0] — 2026-06-05
 
 ### Added

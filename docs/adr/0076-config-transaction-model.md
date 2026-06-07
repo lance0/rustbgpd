@@ -73,10 +73,11 @@ section executors behind that public contract.
    and no peer-group reassignment. The impact check spans both static
    `[[neighbors]]` and `[[dynamic_neighbors]]` ranges. Established dynamic peers
    retain the canonical longest-prefix-match range that accepted them so a later
-   executor can target only the affected sessions, but dynamic-range impact still
-   rejects until the planner and rollback-capable executor consume that
+   executor can target only the affected sessions. The planner distinguishes pure
+   dynamic-range policy moves as `[[dynamic_neighbors]] live policy impact`, but
+   still rejects them until the rollback-capable executor consumes that
    attribution. Global hot-applied flags, restart-required sections,
-   dynamic-range policy impact, and peer-group edits that require session
+   dynamic-range session reshapes, and peer-group edits that require session
    reconfiguration remain rejected until they have explicit executors.
 5. **Apply execution is one pure runtime family at a time.** V1 commits pure
    full-set `[[fib_tables]]`, pure full-set `[[dynamic_neighbors]]`, static

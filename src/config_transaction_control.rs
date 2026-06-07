@@ -1118,7 +1118,8 @@ async fn commit_live_policy_impact_locked(
 }
 
 /// Build the resolved-chain apply set from a live-impact diff: every static
-/// neighbor whose resolved import/export policy moved (`policy_chain_only`).
+/// neighbor whose resolved import/export policy moved
+/// (`policy_chain_only && !is_dynamic_range`).
 fn resolve_live_policy_targets(
     previous: &Config,
     candidate: &Config,
@@ -1131,12 +1132,13 @@ fn resolve_live_policy_targets(
         .collect();
     let mut targets = Vec::new();
     for impact in &diff.effective_neighbor_impact {
-        if !impact.policy_chain_only {
+        if impact.is_dynamic_range || !impact.policy_chain_only {
             // A committable live-impact plan only carries policy-chain-only
-            // impacts; anything else (field reshape / dynamic range) is an
-            // internal inconsistency — fail closed rather than silently skip.
+            // impacts for static neighbors; anything else (field reshape /
+            // dynamic range) is an internal inconsistency — fail closed rather
+            // than silently skip.
             return Err(ConfigTransactionApplyError::Internal(format!(
-                "live-policy executor received a non-policy-chain impact for {}",
+                "live-policy executor received an unsupported impact for {}",
                 impact.address
             )));
         }

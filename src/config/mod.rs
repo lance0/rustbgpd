@@ -1063,6 +1063,8 @@ const TRANSACTION_POLICY_DEFINITIONS_SECTION: &str = "[policy] definitions";
 const TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION: &str = "[policy] neighbor_sets";
 const TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION: &str = "[policy] global chains";
 const TRANSACTION_POLICY_LIVE_IMPACT_SECTION: &str = "[policy] live impact";
+const TRANSACTION_DYNAMIC_LIVE_POLICY_IMPACT_SECTION: &str =
+    "[[dynamic_neighbors]] live policy impact";
 
 /// Test-only auto-inject for the v0.24.0 `enforcement = "tier"`
 /// default flip. When compiled with `#[cfg(test)]` and the supplied
@@ -1432,17 +1434,22 @@ pub struct ConfigDiff {
 pub struct EffectiveNeighborImpact {
     pub address: String,
     pub reasons: Vec<String>,
-    /// True when the live-impact policy transaction executor can commit this
-    /// impact by re-applying resolved chains to the live session: a static
-    /// neighbor whose impact is *exclusively* a resolved import/export
+    /// True when this impact is exclusively a resolved import/export
     /// `PolicyChain` move — no transport-config (`hold_time`, families, `md5`,
-    /// `tcp_ao`, role, …) change and no peer-group reassignment. False for
-    /// peer-group field reshapes (need a session reconfigure) and for
-    /// `[[dynamic_neighbors]]` ranges (live-apply needs longest-match accept
-    /// attribution — deferred to a v2 follow-up). Not serialized into `--diff`;
-    /// an internal classification hint.
+    /// `tcp_ao`, role, …) change and no peer-group reassignment. For static
+    /// neighbors this means the current live-impact executor can commit the
+    /// change by re-applying chains in place. For `[[dynamic_neighbors]]`
+    /// ranges this is policy-only but still not committable until the dynamic
+    /// executor consumes accepted-range attribution. Not serialized into
+    /// `--diff`; an internal classification hint.
     #[serde(skip)]
     pub policy_chain_only: bool,
+    /// True when `address` identifies a `[[dynamic_neighbors]]` range rather
+    /// than a static neighbor. Skipped from `--diff`; used only to keep
+    /// transaction classification precise while dynamic live-policy execution
+    /// remains staged behind its own executor.
+    #[serde(skip)]
+    pub is_dynamic_range: bool,
 }
 
 /// Serializable neighbor diff summary (`NeighborDiff` uses `IpAddr` which is fine,
@@ -1695,21 +1702,36 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
     if !diff.effective_neighbor_impact.is_empty() {
         // A live-impact transaction is committable only when every impacted
         // entry is a pure resolved-policy-chain move on a static neighbor (the
-        // live-impact executor re-applies the resolved chains in place). Any
-        // peer-group field reshape or dynamic-range impact (not `policy_chain_
-        // only`) still needs a session reconfigure / SIGHUP and is rejected.
-        if diff
+        // current executor re-applies resolved chains in place). Dynamic-range
+        // policy moves are now distinguishable, but remain rejected until the
+        // dynamic executor consumes accepted-range attribution.
+        let all_static_policy_chain_only = diff
             .effective_neighbor_impact
             .iter()
-            .all(|impact| impact.policy_chain_only)
-        {
+            .all(|impact| impact.policy_chain_only && !impact.is_dynamic_range);
+        if all_static_policy_chain_only {
             class
                 .supported_sections
                 .push(TRANSACTION_POLICY_LIVE_IMPACT_SECTION.to_string());
         } else {
-            class
-                .unsupported_sections
-                .push("effective neighbor inheritance impact".to_string());
+            if diff
+                .effective_neighbor_impact
+                .iter()
+                .any(|impact| impact.is_dynamic_range && impact.policy_chain_only)
+            {
+                class
+                    .unsupported_sections
+                    .push(TRANSACTION_DYNAMIC_LIVE_POLICY_IMPACT_SECTION.to_string());
+            }
+            if diff
+                .effective_neighbor_impact
+                .iter()
+                .any(|impact| !impact.policy_chain_only)
+            {
+                class
+                    .unsupported_sections
+                    .push("effective neighbor inheritance impact".to_string());
+            }
         }
     }
     if !transaction_sections_are_one_family(&class.supported_sections) {
@@ -2857,6 +2879,7 @@ fn compute_effective_neighbor_impact(
                 policy_chain_only: (import_moved || export_moved)
                     && !transport_changed
                     && !peer_group_reassigned,
+                is_dynamic_range: false,
             });
         }
     }
@@ -2875,10 +2898,18 @@ fn compute_effective_neighbor_impact(
 /// peer-group / chain edit. A catalog-only transaction stages such an edit
 /// without that live reconcile, so a range whose resolved import/export policy
 /// moves is not actually "catalog-only" and must surface as effective impact.
-/// Ranges are matched by prefix; a changed range record itself is a
-/// `[[dynamic_neighbors]]` family edit handled by the dynamic-neighbor executor,
-/// not here. The prefix's network address is a faithful stand-in for resolution
-/// (it only picks the address family, which does not affect policy chains).
+///
+/// Ranges are paired by prefix (the stable key); a prefix that was added or
+/// removed is a `[[dynamic_neighbors]]` family edit handled by the
+/// dynamic-neighbor executor, not here. For a range whose prefix is unchanged,
+/// only a pure policy-chain move is `policy_chain_only`: a peer-group
+/// reassignment or a transport/session change is reported as non-committable so
+/// it routes to a reconfigure rather than a live policy refresh. (The executor
+/// expands a range to its live peers by the peer's *accepted* peer group, so a
+/// reassignment cannot be live-applied to already-established sessions.)
+///
+/// The prefix's network address is a faithful stand-in for resolution (it only
+/// picks the address family, which does not affect policy chains).
 fn dynamic_range_effective_impact(
     old: &Config,
     new: &Config,
@@ -2922,16 +2953,34 @@ fn dynamic_range_effective_impact(
             continue;
         };
 
+        let import_moved = format!("{:?}", old_resolved.import_policy)
+            != format!("{:?}", new_resolved.import_policy);
+        let export_moved = format!("{:?}", old_resolved.export_policy)
+            != format!("{:?}", new_resolved.export_policy);
+        let peer_group_reassigned = old_range.peer_group != new_range.peer_group;
+        // A non-policy resolved change (hold_time, families, md5, tcp_ao, role,
+        // …) lives in transport_config and cannot be live-applied by a policy
+        // refresh — it needs a session reconfigure. Mirror the static-neighbor
+        // classifier so a combined transport + policy edit is not mistaken for a
+        // pure policy-chain move and silently committed without the reconfigure.
+        let transport_changed = old_resolved.transport_config != new_resolved.transport_config;
+
         let mut reasons: Vec<String> = Vec::new();
-        if format!("{:?}", old_resolved.import_policy)
-            != format!("{:?}", new_resolved.import_policy)
-        {
+        if import_moved {
             reasons.push("dynamic-range import policy resolved differently".to_string());
         }
-        if format!("{:?}", old_resolved.export_policy)
-            != format!("{:?}", new_resolved.export_policy)
-        {
+        if export_moved {
             reasons.push("dynamic-range export policy resolved differently".to_string());
+        }
+        if peer_group_reassigned {
+            reasons.push(format!(
+                "dynamic-range peer_group resolved as {:?} (was {:?})",
+                new_range.peer_group, old_range.peer_group
+            ));
+        }
+        if transport_changed {
+            reasons
+                .push("dynamic-range transport/session settings resolved differently".to_string());
         }
         if pg_changed.contains(old_range.peer_group.as_str()) {
             reasons.push(format!("peer_group {:?} changed", old_range.peer_group));
@@ -2940,12 +2989,10 @@ fn dynamic_range_effective_impact(
             out.push(EffectiveNeighborImpact {
                 address: old_range.prefix.clone(),
                 reasons,
-                // Live-applying a range's moved policy to its established
-                // sessions needs longest-prefix-match accept attribution to
-                // avoid mis-applying an overlapping range's policy. Until that
-                // v2 lands, a dynamic-range impact is not committable by the
-                // live-impact executor — it stays rejected (routed via SIGHUP).
-                policy_chain_only: false,
+                policy_chain_only: (import_moved || export_moved)
+                    && !transport_changed
+                    && !peer_group_reassigned,
+                is_dynamic_range: true,
             });
         }
     }
