@@ -2898,10 +2898,18 @@ fn compute_effective_neighbor_impact(
 /// peer-group / chain edit. A catalog-only transaction stages such an edit
 /// without that live reconcile, so a range whose resolved import/export policy
 /// moves is not actually "catalog-only" and must surface as effective impact.
-/// Ranges are matched by prefix; a changed range record itself is a
-/// `[[dynamic_neighbors]]` family edit handled by the dynamic-neighbor executor,
-/// not here. The prefix's network address is a faithful stand-in for resolution
-/// (it only picks the address family, which does not affect policy chains).
+///
+/// Ranges are paired by prefix (the stable key); a prefix that was added or
+/// removed is a `[[dynamic_neighbors]]` family edit handled by the
+/// dynamic-neighbor executor, not here. For a range whose prefix is unchanged,
+/// only a pure policy-chain move is `policy_chain_only`: a peer-group
+/// reassignment or a transport/session change is reported as non-committable so
+/// it routes to a reconfigure rather than a live policy refresh. (The executor
+/// expands a range to its live peers by the peer's *accepted* peer group, so a
+/// reassignment cannot be live-applied to already-established sessions.)
+///
+/// The prefix's network address is a faithful stand-in for resolution (it only
+/// picks the address family, which does not affect policy chains).
 fn dynamic_range_effective_impact(
     old: &Config,
     new: &Config,
@@ -2950,6 +2958,12 @@ fn dynamic_range_effective_impact(
         let export_moved = format!("{:?}", old_resolved.export_policy)
             != format!("{:?}", new_resolved.export_policy);
         let peer_group_reassigned = old_range.peer_group != new_range.peer_group;
+        // A non-policy resolved change (hold_time, families, md5, tcp_ao, role,
+        // …) lives in transport_config and cannot be live-applied by a policy
+        // refresh — it needs a session reconfigure. Mirror the static-neighbor
+        // classifier so a combined transport + policy edit is not mistaken for a
+        // pure policy-chain move and silently committed without the reconfigure.
+        let transport_changed = old_resolved.transport_config != new_resolved.transport_config;
 
         let mut reasons: Vec<String> = Vec::new();
         if import_moved {
@@ -2964,6 +2978,10 @@ fn dynamic_range_effective_impact(
                 new_range.peer_group, old_range.peer_group
             ));
         }
+        if transport_changed {
+            reasons
+                .push("dynamic-range transport/session settings resolved differently".to_string());
+        }
         if pg_changed.contains(old_range.peer_group.as_str()) {
             reasons.push(format!("peer_group {:?} changed", old_range.peer_group));
         }
@@ -2971,7 +2989,9 @@ fn dynamic_range_effective_impact(
             out.push(EffectiveNeighborImpact {
                 address: old_range.prefix.clone(),
                 reasons,
-                policy_chain_only: (import_moved || export_moved) && !peer_group_reassigned,
+                policy_chain_only: (import_moved || export_moved)
+                    && !transport_changed
+                    && !peer_group_reassigned,
                 is_dynamic_range: true,
             });
         }

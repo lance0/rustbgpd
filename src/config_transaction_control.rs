@@ -1105,7 +1105,7 @@ async fn commit_live_policy_impact_locked(
 }
 
 /// Build the resolved-chain apply set from a live-impact diff: every static
-/// static neighbor whose resolved import/export policy moved
+/// neighbor whose resolved import/export policy moved
 /// (`policy_chain_only && !is_dynamic_range`).
 fn resolve_live_policy_targets(
     previous: &Config,

@@ -228,17 +228,21 @@ impl PeerManager {
                 // TCP flap doesn't silently lose a SetPolicy edit.
                 self.restore_dead_lettered_pending(peer_ip);
 
-                let accepted = self
+                // Report which range accepted the peer by borrowing the stored
+                // attribution (no clone). This read also keeps the field live;
+                // the transaction executor is its other consumer.
+                if let Some(accepted) = self
                     .peers
                     .get(&peer_key)
                     .and_then(|managed| managed.accepted_dynamic_range.as_ref())
-                    .expect("dynamic peer should carry accepted range attribution");
-                info!(
-                    %peer_ip,
-                    accepted_prefix = %format_args!("{}/{}", accepted.addr, accepted.prefix_len),
-                    accepted_peer_group = %accepted.peer_group,
-                    "accepted dynamic neighbor from configured range"
-                );
+                {
+                    info!(
+                        %peer_ip,
+                        accepted_prefix = %format_args!("{}/{}", accepted.addr, accepted.prefix_len),
+                        accepted_peer_group = %accepted.peer_group,
+                        "accepted dynamic neighbor from configured range"
+                    );
+                }
                 return;
             }
 
