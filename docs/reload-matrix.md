@@ -90,19 +90,19 @@ the old neighbor is torn down, the new one starts fresh.
 | `import_policy_chain` | live | Named-chain reference; same re-evaluation behavior. |
 | `export_policy_chain` | live | Named-chain reference; same re-evaluation behavior. |
 
-## `[[peer_groups]]`
+## `[peer_groups.<name>]`
 
 Peer-group fields mirror `[[neighbors]]` minus the identity triple
-(`address`, `interface`, `remote_asn`) and the policy fields, which
-neighbors override at the per-neighbor level. Inheritance is resolved at
-each reconcile.
+(`address`, `interface`, `remote_asn`) and TCP-AO. Inheritance is resolved at
+each reconcile. Neighbor-level policy fields override inherited peer-group
+policy fields. TCP-AO remains a static-neighbor-only field because
+dynamic-neighbor TCP-AO needs a separate wildcard-MKT design.
 
 | Field | Class | Notes |
 |---|---|---|
 | `hold_time` | live (effective next session) | Same as neighbor. |
 | `max_prefixes` | live | Same as neighbor. |
 | `md5_password` | live (effective next session) | Same as neighbor — pinned by group, applied to the inheriting peer's next socket. |
-| `tcp_ao` | restart-required | Group-level TCP-AO pins the same way per-neighbor TCP-AO does — via `pin_tcp_ao_startup_only_runtime`. |
 | `bfd` | restart-required | Pinned. |
 | `ttl_security` | live (effective next session) | |
 | `families` | live (effective next session) | |
@@ -119,6 +119,10 @@ each reconcile.
 | `remove_private_as` | live | |
 | `add_path` | live (effective next session) | |
 | `log_level` | live | |
+| `import_policy` | live | Inline import statements inherited by peers that do not set their own import policy / chain. |
+| `export_policy` | live | Inline export statements inherited by peers that do not set their own export policy / chain. |
+| `import_policy_chain` | live | Named-chain reference inherited by peers that do not set their own import policy / chain. |
+| `export_policy_chain` | live | Named-chain reference inherited by peers that do not set their own export policy / chain. |
 
 ## `[[dynamic_neighbors]]`
 
