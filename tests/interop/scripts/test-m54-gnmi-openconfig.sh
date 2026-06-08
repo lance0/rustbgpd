@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M54 interop test — ADR-0070 read-only gNMI / OpenConfig over mTLS.
+# M54 interop test — ADR-0070 gNMI / OpenConfig over mTLS.
 #
 # Validates the collector-facing path with gnmic, not an in-process
 # client:
@@ -8,7 +8,10 @@
 #      JSON / JSON_IETF encodings.
 #   2. Get reads the supported OpenConfig global + neighbor state
 #      subset over the mTLS TCP listener.
-#   3. Subscribe STREAM/SAMPLE emits repeated snapshots for a supported
+#   3. Set can add/delete a static numbered neighbor through the
+#      transaction-backed OpenConfig config subset.
+#   4. Set commit-confirmed can confirm and cancel a pending mutation.
+#   5. Subscribe STREAM/SAMPLE emits repeated snapshots for a supported
 #      OpenConfig leaf.
 #
 # Prerequisites:
@@ -71,7 +74,7 @@ assert_jq() {
 
 assert_contains() {
     local desc=$1 haystack=$2 needle=$3
-    if printf '%s' "$haystack" | grep -Fq "$needle"; then
+    if printf '%s' "$haystack" | grep -Fq -- "$needle"; then
         ok "$desc"
     else
         fail "$desc (missing: $needle)"
@@ -79,16 +82,96 @@ assert_contains() {
     fi
 }
 
+assert_not_contains() {
+    local desc=$1 haystack=$2 needle=$3
+    if printf '%s' "$haystack" | grep -Fq -- "$needle"; then
+        fail "$desc (unexpected: $needle)"
+        printf '  output:\n%s\n' "$haystack" >&2
+    else
+        ok "$desc"
+    fi
+}
+
 assert_count_at_least() {
     local desc=$1 haystack=$2 needle=$3 want=$4
     local got
-    got=$( (printf '%s' "$haystack" | grep -Fo "$needle" || true) | wc -l | tr -d ' ')
+    got=$( (printf '%s' "$haystack" | grep -Fo -- "$needle" || true) | wc -l | tr -d ' ')
     if [ "$got" -ge "$want" ]; then
         ok "$desc"
     else
         fail "$desc (wanted >= $want occurrences of $needle, got $got)"
         printf '  output:\n%s\n' "$haystack" >&2
     fi
+}
+
+gnmic_set_ok() {
+    local desc=$1 output rc
+    shift
+    set +e
+    output=$(gnmic_mtls_timeout 30s set "$@")
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+        return 0
+    fi
+    fail "$desc (gnmic set failed with rc=$rc)"
+    printf '  output:\n%s\n' "$output" >&2
+    print_summary
+    exit 1
+}
+
+gnmic_get_ok() {
+    local desc=$1 output rc
+    shift
+    set +e
+    output=$(gnmic_mtls_timeout 30s get "$@")
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+        printf '%s' "$output"
+        return 0
+    fi
+    fail "$desc (gnmic get failed with rc=$rc)"
+    printf '  output:\n%s\n' "$output" >&2
+    print_summary
+    exit 1
+}
+
+# gnmic over mTLS as a caller-chosen client identity, for authz/negative
+# assertions. --debug forces the server status code onto stderr even when
+# --format json would otherwise hide it: gnmic surfaces rpc errors only in
+# debug log lines in default format mode.
+gnmic_mtls_as() {
+    local cert=$1
+    shift
+    timeout 30s gnmic \
+        --address "$GRPC_ADDR" \
+        --tls-ca "$CERT_DIR/ca.pem" \
+        --tls-cert "$CERT_DIR/${cert}.pem" \
+        --tls-key "$CERT_DIR/${cert}.key" \
+        --tls-server-name "$SERVER_NAME" \
+        --format json \
+        --no-prefix \
+        --debug \
+        "$@" 2>&1
+}
+
+# Assert a gnmic Set is REJECTED carrying a specific gRPC status code
+# (e.g. PermissionDenied, Unimplemented). A Set that unexpectedly
+# succeeds is itself a failure.
+gnmic_set_rejected() {
+    local desc=$1 want_code=$2 cert=$3 output rc
+    shift 3
+    set +e
+    output=$(gnmic_mtls_as "$cert" set "$@")
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+        fail "$desc (expected $want_code, but Set succeeded)"
+        printf '  output:\n%s\n' "$output" >&2
+        return
+    fi
+    assert_contains "$desc" "$output" "$want_code"
 }
 
 start_rustbgpd_gnmi() {
@@ -144,7 +227,7 @@ main() {
 
     log "Checking OpenConfig BGP global state via Get..."
     local global
-    global=$(gnmic_mtls get \
+    global=$(gnmic_get_ok "Get global state" \
         --encoding json_ietf \
         --type STATE \
         --path "$OC_BGP/global/state")
@@ -153,12 +236,97 @@ main() {
 
     log "Checking OpenConfig BGP neighbor state via Get..."
     local neighbor
-    neighbor=$(gnmic_mtls get \
+    neighbor=$(gnmic_get_ok "Get neighbor state" \
         --encoding json_ietf \
         --type STATE \
         --path "$OC_BGP/neighbors/neighbor[neighbor-address=10.0.0.2]/state")
     assert_contains "Get neighbor state includes neighbor address" "$neighbor" '10.0.0.2'
     assert_contains "Get neighbor state includes peer AS" "$neighbor" '65002'
+
+    log "Checking OpenConfig BGP static-neighbor Set add/delete via gnmic..."
+    local set_peer="10.0.0.3"
+    local set_peer_path="$OC_BGP/neighbors/neighbor[neighbor-address=$set_peer]"
+    gnmic_set_ok "Set add static neighbor" \
+        --update "$set_peer_path/config/peer-as:::uint:::65003"
+    local after_set
+    after_set=$(gnmic_get_ok "Get neighbors after Set add" \
+        --encoding json_ietf \
+        --type STATE \
+        --path "$OC_BGP/neighbors")
+    assert_contains "Set add surfaces new neighbor through Get" "$after_set" "$set_peer"
+    assert_contains "Set add surfaces new peer AS through Get" "$after_set" '65003'
+
+    gnmic_set_ok "Set delete static neighbor" --delete "$set_peer_path"
+    local after_delete
+    after_delete=$(gnmic_get_ok "Get neighbors after Set delete" \
+        --encoding json_ietf \
+        --type STATE \
+        --path "$OC_BGP/neighbors")
+    assert_not_contains "Set delete removes neighbor from Get" "$after_delete" "$set_peer"
+
+    log "Checking OpenConfig BGP commit-confirmed Set confirm via gnmic..."
+    local confirm_peer="10.0.0.4"
+    local confirm_peer_path="$OC_BGP/neighbors/neighbor[neighbor-address=$confirm_peer]"
+    gnmic_set_ok "Commit-confirmed Set request" \
+        --commit-id m54-confirm \
+        --commit-request \
+        --rollback-duration 120s \
+        --update "$confirm_peer_path/config/peer-as:::uint:::65004"
+    gnmic_set_ok "Commit-confirmed Set confirm" \
+        --commit-id m54-confirm \
+        --commit-confirm
+    local after_confirm
+    after_confirm=$(gnmic_get_ok "Get neighbors after commit confirm" \
+        --encoding json_ietf \
+        --type STATE \
+        --path "$OC_BGP/neighbors")
+    assert_contains "Commit-confirmed Set confirm keeps neighbor" "$after_confirm" "$confirm_peer"
+    assert_contains "Commit-confirmed Set confirm keeps peer AS" "$after_confirm" '65004'
+
+    log "Checking OpenConfig BGP commit-confirmed Set cancel via gnmic..."
+    local cancel_peer="10.0.0.5"
+    local cancel_peer_path="$OC_BGP/neighbors/neighbor[neighbor-address=$cancel_peer]"
+    gnmic_set_ok "Commit-confirmed Set request before cancel" \
+        --commit-id m54-cancel \
+        --commit-request \
+        --rollback-duration 120s \
+        --update "$cancel_peer_path/config/peer-as:::uint:::65005"
+    local pending_cancel
+    pending_cancel=$(gnmic_get_ok "Get neighbors before commit cancel" \
+        --encoding json_ietf \
+        --type STATE \
+        --path "$OC_BGP/neighbors")
+    assert_contains "Commit-confirmed Set request exposes pending neighbor" "$pending_cancel" "$cancel_peer"
+    gnmic_set_ok "Commit-confirmed Set cancel" \
+        --commit-id m54-cancel \
+        --commit-cancel
+    local after_cancel
+    after_cancel=$(gnmic_get_ok "Get neighbors after commit cancel" \
+        --encoding json_ietf \
+        --type STATE \
+        --path "$OC_BGP/neighbors")
+    assert_not_contains "Commit-confirmed Set cancel rolls back neighbor" "$after_cancel" "$cancel_peer"
+
+    log "Checking gNMI Set authorization + unsupported-path rejection..."
+    # observer maps to the read-tier observer role; gNMI Set is operator_only,
+    # so the tier gate must deny it before any mutation reaches the bridge.
+    local denied_peer="10.0.0.6"
+    local denied_path="$OC_BGP/neighbors/neighbor[neighbor-address=$denied_peer]"
+    gnmic_set_rejected "observer principal CANNOT Set static neighbor (PermissionDenied)" \
+        "PermissionDenied" observer \
+        --update "$denied_path/config/peer-as:::uint:::65006"
+    local after_denied
+    after_denied=$(gnmic_get_ok "Get neighbors after denied Set" \
+        --encoding json_ietf \
+        --type STATE \
+        --path "$OC_BGP/neighbors")
+    assert_not_contains "Denied Set did not mutate config" "$after_denied" "$denied_peer"
+
+    # operator is authorized, but local-as is not a transaction-backed Set
+    # leaf yet — the bridge must reject it as Unimplemented, not apply it.
+    gnmic_set_rejected "operator Set of unsupported leaf is Unimplemented" \
+        "Unimplemented" operator \
+        --update "$OC_BGP/neighbors/neighbor[neighbor-address=10.0.0.2]/config/local-as:::uint:::65099"
 
     log "Checking Subscribe STREAM/SAMPLE..."
     local stream rc

@@ -250,6 +250,57 @@ gnmic \
   --path "$OC_BGP/neighbors/neighbor[neighbor-address=10.0.0.2]/state"
 ```
 
+Add and delete a static numbered neighbor:
+
+```bash
+gnmic \
+  --address "$RUSTBGPD_GNMI_ADDR" \
+  --tls-ca "$RUSTBGPD_TLS_CA" \
+  --tls-cert "$RUSTBGPD_TLS_CERT" \
+  --tls-key "$RUSTBGPD_TLS_KEY" \
+  --tls-server-name "$RUSTBGPD_TLS_SERVER_NAME" \
+  set \
+  --update "$OC_BGP/neighbors/neighbor[neighbor-address=10.0.0.3]/config/peer-as:::uint:::65003"
+
+gnmic \
+  --address "$RUSTBGPD_GNMI_ADDR" \
+  --tls-ca "$RUSTBGPD_TLS_CA" \
+  --tls-cert "$RUSTBGPD_TLS_CERT" \
+  --tls-key "$RUSTBGPD_TLS_KEY" \
+  --tls-server-name "$RUSTBGPD_TLS_SERVER_NAME" \
+  set \
+  --delete "$OC_BGP/neighbors/neighbor[neighbor-address=10.0.0.3]"
+```
+
+Commit-confirmed Set:
+
+```bash
+gnmic \
+  --address "$RUSTBGPD_GNMI_ADDR" \
+  --tls-ca "$RUSTBGPD_TLS_CA" \
+  --tls-cert "$RUSTBGPD_TLS_CERT" \
+  --tls-key "$RUSTBGPD_TLS_KEY" \
+  --tls-server-name "$RUSTBGPD_TLS_SERVER_NAME" \
+  set \
+  --commit-id deploy-42 \
+  --commit-request \
+  --rollback-duration 120s \
+  --update "$OC_BGP/neighbors/neighbor[neighbor-address=10.0.0.4]/config/peer-as:::uint:::65004"
+
+gnmic \
+  --address "$RUSTBGPD_GNMI_ADDR" \
+  --tls-ca "$RUSTBGPD_TLS_CA" \
+  --tls-cert "$RUSTBGPD_TLS_CERT" \
+  --tls-key "$RUSTBGPD_TLS_KEY" \
+  --tls-server-name "$RUSTBGPD_TLS_SERVER_NAME" \
+  set \
+  --commit-id deploy-42 \
+  --commit-confirm
+```
+
+To abort the pending change before the timeout, use `--commit-cancel` with the
+same `--commit-id`.
+
 Sampled stream:
 
 ```bash
@@ -280,11 +331,13 @@ above one hour is capped at the 1-hour ceiling.
 | `UNIMPLEMENTED` for a path | The path is valid OpenConfig but outside rustbgpd's supported whitelist. This is expected for per-AFI counters, negotiated capabilities, `last-established`, and unsupported subtrees. |
 | `INVALID_ARGUMENT` | The path is malformed, uses unsupported key syntax, or omits required keys such as `network-instance`, `protocol`, or `neighbor-address`. |
 | `NOT_FOUND` | The requested keyed object does not exist, such as a neighbor address that is not configured. |
-| `Set` returns `UNIMPLEMENTED` | Expected for an authorized operator-tier principal until a supported OpenConfig config subset is wired to ADR-0076 transactions. The bridge foundation is present, but production mutation remains closed without a daemon-owned Set hook. |
+| `Set` returns `UNIMPLEMENTED` | The path or extension is outside the supported Set subset, such as unsupported neighbor leaves, `union_replace`, `CommitSetRollbackDuration`, or a non-Commit extension. |
 
 ## Interop Proof
 
-M54 validates this surface with the real `gnmic` client over mTLS:
+M54 validates this surface with the real `gnmic` client over mTLS, including
+Capabilities, Get, Set add/delete, commit-confirmed Set confirm/cancel, and
+Subscribe SAMPLE:
 
 ```bash
 bash tests/interop/scripts/gen-m54-certs.sh

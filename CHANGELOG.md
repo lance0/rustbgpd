@@ -22,7 +22,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the same confirmed transaction lifecycle; unsupported paths and rollback-timer
   reset still return `UNIMPLEMENTED`. Set payloads are redacted in gRPC audit
   summaries, and delete / replace / update requests are prefix-expanded and
-  normalized in gNMI application order.
+  normalized in gNMI application order. The M54 `gnmic` interop smoke now proves
+  Set add/delete plus commit-confirmed confirm/cancel over mTLS, and that a
+  read-tier principal is denied `Set` (`PermissionDenied`) while an unsupported
+  leaf is rejected (`Unimplemented`).
 
 - **ADR-0077 MPLS/VPN/BGP-LS address-family boundary.** Added a
   research-backed control-plane scope for future labeled-unicast, VPNv4/v6,
