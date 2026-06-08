@@ -333,9 +333,9 @@ has it, no broad performance sprints without profile evidence.
 
 - **TCP-AO dynamic / rotation polish.** Static TCP-AO + BIRD interop (M43) are
   shipped. Dynamic-neighbor wildcard-MKT design, runtime key rotation /
-  multi-key rollover, and accepted-socket inspection / observability matter to
-  some route-server / security operators but are demand-shaped, not core-feature
-  blockers.
+  multi-key rollover, and public accepted-socket inspection / observability
+  matter to some route-server / security operators but are demand-shaped, not
+  core-feature blockers.
 - **ORF / Outbound Route Filtering follow-ups.** Receive-side Address-Prefix ORF
   (capability code 3, type 64; ADR-0075) is shipped and closes the IX
   route-server control-plane gap for clients pushing filters to rustbgpd.

@@ -1290,6 +1290,35 @@ tcp_ao = { key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha1)" }
 }
 
 #[test]
+fn peer_group_tcp_ao_is_rejected() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.secure]
+tcp_ao = { key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha1)" }
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "secure"
+"#;
+    let err = parse(toml_str).unwrap_err();
+    let ConfigError::Parse(parse_err) = err else {
+        panic!("peer-group tcp_ao must be rejected by TOML schema, got {err:?}");
+    };
+    let message = parse_err.to_string();
+    assert!(message.contains("unknown field"), "{message}");
+    assert!(message.contains("tcp_ao"), "{message}");
+}
+
+#[test]
 fn neighbor_tcp_ao_rejects_invalid_key_and_algorithm() {
     let base = r#"
 [global]
@@ -8631,13 +8660,12 @@ const RELOAD_MATRIX_NEIGHBOR_FIELDS: &[&str] = &[
 ];
 
 /// All `PeerGroupConfig` field names. Mirror of the `Neighbor` list
-/// minus the identity triple (`address`, `interface`, `remote_asn`)
-/// and policy fields (which neighbors own at the per-neighbor level).
+/// minus the identity triple (`address`, `interface`, `remote_asn`) and
+/// TCP-AO.
 const RELOAD_MATRIX_PEER_GROUP_FIELDS: &[&str] = &[
     "hold_time",
     "max_prefixes",
     "md5_password",
-    "tcp_ao",
     "bfd",
     "ttl_security",
     "families",
@@ -8650,9 +8678,14 @@ const RELOAD_MATRIX_PEER_GROUP_FIELDS: &[&str] = &[
     "route_server_client",
     "role",
     "strict_role",
+    "prefix_orf_receive",
     "remove_private_as",
     "add_path",
     "log_level",
+    "import_policy",
+    "export_policy",
+    "import_policy_chain",
+    "export_policy_chain",
 ];
 
 fn load_reload_matrix() -> String {

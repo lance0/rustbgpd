@@ -192,8 +192,8 @@ the route and does not re-establish within the fail-closed window. The
 hosted `kernel-dataplane` workflow includes M43, and the current hosted
 runner advertises `CONFIG_TCP_AO=y` and runs the topology. The workflow keeps a
 warning-only skip guard for future runner kernels without TCP-AO support.
-Dynamic-neighbor TCP-AO, runtime key rotation, multi-key rollover, and richer
-accepted-socket inspection remain deferred.
+Dynamic-neighbor TCP-AO, runtime key rotation, multi-key rollover, and public
+API/CLI/metrics exposure of accepted-socket inspection remain deferred.
 
 ## Linux EVPN VTEP — `CAP_NET_ADMIN` requirement
 
@@ -289,7 +289,7 @@ the roadmap:
   only the durable in-daemon sink remains deferred until file/syslog
   backpressure and failure semantics are designed.
 - TCP-AO (RFC 5925) dynamic-neighbor support, runtime key rotation,
-  multi-key rollover, and accepted-socket inspection for BGP session
+  multi-key rollover, and public accepted-socket inspection for BGP session
   protection
 
 ## Current gaps

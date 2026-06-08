@@ -61,6 +61,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   static live-policy transactions. Dynamic-range session reshapes remain
   rejected until a dedicated reconfigure executor exists.
 
+### Fixed
+
+- **Peer-group reload-matrix docs drift.** The reload matrix and its structural
+  test now match the schema: `[peer_groups.<name>]` includes policy and ORF
+  inheritance fields, while `tcp_ao` remains static-neighbor-only and is not
+  inherited from peer groups. Security and roadmap wording now distinguish
+  shipped internal accepted-socket TCP-AO inspection/logging from the
+  still-deferred public API/CLI/metrics surface.
+
 ## [0.36.0] — 2026-06-05
 
 ### Added
