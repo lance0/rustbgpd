@@ -10,8 +10,10 @@
 #      subset over the mTLS TCP listener.
 #   3. Set can add/delete a static numbered neighbor through the
 #      transaction-backed OpenConfig config subset.
-#   4. Set commit-confirmed can confirm and cancel a pending mutation.
-#   5. Subscribe STREAM/SAMPLE emits repeated snapshots for a supported
+#   4. Set can create/delete peer-group objects and dynamic-neighbor
+#      prefix ranges, with durable TOML persistence.
+#   5. Set commit-confirmed can confirm and cancel a pending mutation.
+#   6. Subscribe STREAM/SAMPLE emits repeated snapshots for a supported
 #      OpenConfig leaf.
 #
 # Prerequisites:
@@ -90,6 +92,22 @@ assert_not_contains() {
     else
         ok "$desc"
     fi
+}
+
+config_toml() {
+    docker exec "$RUSTBGPD" sh -c 'cat /etc/rustbgpd/config.toml'
+}
+
+assert_config_contains() {
+    local desc=$1 needle=$2 config
+    config=$(config_toml)
+    assert_contains "$desc" "$config" "$needle"
+}
+
+assert_config_not_contains() {
+    local desc=$1 needle=$2 config
+    config=$(config_toml)
+    assert_not_contains "$desc" "$config" "$needle"
 }
 
 assert_count_at_least() {
@@ -263,6 +281,38 @@ main() {
         --type STATE \
         --path "$OC_BGP/neighbors")
     assert_not_contains "Set delete removes neighbor from Get" "$after_delete" "$set_peer"
+
+    log "Checking OpenConfig BGP peer-group Set via gnmic..."
+    local pg_name="m54-dyn"
+    local pg_path="$OC_BGP/peer-groups/peer-group[peer-group-name=$pg_name]"
+    gnmic_set_ok "Set create peer-group object" \
+        --update "$pg_path/config/peer-group-name:::string:::$pg_name" \
+        --update "$pg_path/timers/config/hold-time:::uint:::45"
+    assert_config_contains "Peer-group Set persists group table" "[peer_groups.$pg_name]"
+    assert_config_contains "Peer-group Set persists hold_time" "hold_time = 45"
+
+    log "Checking OpenConfig BGP dynamic-neighbor-prefix Set via gnmic..."
+    local dyn_prefix="198.51.100.0/24"
+    local dyn_path="$OC_BGP/global/dynamic-neighbor-prefixes/dynamic-neighbor-prefix[prefix=$dyn_prefix]"
+    gnmic_set_ok "Set create dynamic-neighbor-prefix" \
+        --update "$dyn_path/config/prefix:::string:::$dyn_prefix" \
+        --update "$dyn_path/config/peer-group:::string:::$pg_name"
+    assert_config_contains "Dynamic-neighbor Set persists range prefix" "prefix = \"$dyn_prefix\""
+    assert_config_contains "Dynamic-neighbor Set persists peer-group reference" "peer_group = \"$pg_name\""
+    assert_config_contains "Dynamic-neighbor Set defaults remote_asn to accept-any" "remote_asn = 0"
+
+    local bad_dyn_prefix="198.51.101.0/24"
+    local bad_dyn_path="$OC_BGP/global/dynamic-neighbor-prefixes/dynamic-neighbor-prefix[prefix=$bad_dyn_prefix]"
+    gnmic_set_rejected "operator Set of dynamic-neighbor-prefix with undefined peer-group is InvalidArgument" \
+        "InvalidArgument" operator \
+        --update "$bad_dyn_path/config/prefix:::string:::$bad_dyn_prefix" \
+        --update "$bad_dyn_path/config/peer-group:::string:::missing-m54-group"
+    assert_config_not_contains "Rejected dynamic-neighbor Set did not persist range" "$bad_dyn_prefix"
+
+    gnmic_set_ok "Set delete dynamic-neighbor-prefix" --delete "$dyn_path"
+    assert_config_not_contains "Set delete removes dynamic-neighbor range" "$dyn_prefix"
+    gnmic_set_ok "Set delete peer-group object" --delete "$pg_path"
+    assert_config_not_contains "Set delete removes peer-group object" "[peer_groups.$pg_name]"
 
     log "Checking OpenConfig BGP commit-confirmed Set confirm via gnmic..."
     local confirm_peer="10.0.0.4"

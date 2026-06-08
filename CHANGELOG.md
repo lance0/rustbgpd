@@ -23,10 +23,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rollback timer with `CommitSetRollbackDuration`; unsupported paths still
   return `UNIMPLEMENTED`. Set payloads are redacted in gRPC audit summaries, and
   delete / replace / update requests are prefix-expanded and normalized in gNMI
-  application order. The M54 `gnmic` interop smoke now proves Set add/delete
-  plus commit-confirmed confirm/cancel over mTLS, and that a read-tier principal
-  is denied `Set` (`PermissionDenied`) while an unsupported leaf is rejected
-  (`Unimplemented`).
+  application order. The M54 `gnmic` interop smoke now proves
+  static-neighbor Set add/delete, peer-group and dynamic-neighbor-prefix Set
+  persistence, commit-confirmed confirm/cancel, read-tier `Set` denial
+  (`PermissionDenied`), and unsupported-path rejection (`Unimplemented`) over
+  mTLS.
 
 - **gNMI Set peer-group object subset.** The OpenConfig Set bridge can now
   create/update/delete BGP peer-group list entries through ADR-0076 catalog
@@ -45,7 +46,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   native `remote_asn = 0` (accept the peer ASN from OPEN) and no description.
   Native validation still enforces defined peer-group references, duplicate
   effective-prefix rejection, prefix bounds, and the existing dynamic-neighbor
-  BFD restriction.
+  BFD restriction. M54 now proves the supported path through the real `gnmic`
+  client and asserts an undefined peer-group reference is rejected.
 
 - **ADR-0077 MPLS/VPN/BGP-LS address-family boundary.** Added a
   research-backed control-plane scope for future labeled-unicast, VPNv4/v6,
