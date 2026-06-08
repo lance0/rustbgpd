@@ -75,6 +75,175 @@ pub(crate) trait DaemonEvpnRuntimeConverger: Send + Sync {
     ) -> DaemonEvpnRuntimeConvergeFuture<'a>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EvpnRuntimeReloadOutcome {
+    Noop,
+    Committed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvpnRuntimeReloadApplyResult {
+    pub(crate) outcome: EvpnRuntimeReloadOutcome,
+    pub(crate) message: String,
+}
+
+pub(crate) struct EvpnRuntimeReloadAttempt {
+    pub(crate) baseline: Config,
+    pub(crate) result: Result<Option<EvpnRuntimeReloadApplyResult>, GrpcEvpnRuntimeApplyError>,
+}
+
+#[derive(Clone)]
+pub(crate) struct EvpnRuntimeReloadApply {
+    coordinator: Arc<Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>>,
+    apply_lock: Arc<tokio::sync::Mutex<()>>,
+    converger: Arc<dyn DaemonEvpnRuntimeConverger>,
+    committed_config: Arc<Mutex<Config>>,
+}
+
+impl EvpnRuntimeReloadApply {
+    pub(crate) fn new<C>(
+        coordinator: Arc<Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>>,
+        apply_lock: Arc<tokio::sync::Mutex<()>>,
+        converger: Arc<C>,
+        committed_config: Config,
+    ) -> Self
+    where
+        C: DaemonEvpnRuntimeConverger + 'static,
+    {
+        Self {
+            coordinator,
+            apply_lock,
+            converger,
+            committed_config: Arc::new(Mutex::new(committed_config)),
+        }
+    }
+
+    fn committed_config_locked(&self) -> Config {
+        match self.committed_config.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn set_committed_config(&self, config: &Config) {
+        match self.committed_config.lock() {
+            Ok(mut guard) => *guard = config.clone(),
+            Err(poisoned) => *poisoned.into_inner() = config.clone(),
+        }
+    }
+
+    pub(crate) async fn apply_request(
+        &self,
+        request: &proto::ApplyEvpnRuntimeRequest,
+    ) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
+        let candidate = Config::load_toml_with_diagnostics(
+            &request.candidate_toml,
+            "candidate EVPN runtime config",
+        )
+        .map_err(|err| GrpcEvpnRuntimeApplyError::InvalidArgument(err.clone()))?;
+        self.apply_candidate_config(&candidate, request.validate_only)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn apply_config(
+        &self,
+        config: &Config,
+    ) -> Result<EvpnRuntimeReloadApplyResult, GrpcEvpnRuntimeApplyError> {
+        let response = self.apply_candidate_config(config, false).await?;
+        let outcome = response_to_reload_outcome(response.outcome)?;
+        Ok(EvpnRuntimeReloadApplyResult {
+            outcome,
+            message: response.message,
+        })
+    }
+
+    async fn apply_candidate_config(
+        &self,
+        config: &Config,
+        validate_only: bool,
+    ) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
+        let _apply_guard = self.apply_lock.lock().await;
+        let response = self
+            .apply_candidate_config_locked(config, validate_only)
+            .await?;
+        if !validate_only
+            && matches!(
+                response.outcome,
+                value if value == proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyNoop as i32
+                    || value == proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyCommitted as i32
+            )
+        {
+            self.set_committed_config(config);
+        }
+        Ok(response)
+    }
+
+    pub(crate) async fn apply_config_if_changed<F>(
+        &self,
+        config: &Config,
+        changed: F,
+    ) -> EvpnRuntimeReloadAttempt
+    where
+        F: FnOnce(&Config, &Config) -> bool,
+    {
+        let _apply_guard = self.apply_lock.lock().await;
+        let baseline = self.committed_config_locked();
+        if !changed(config, &baseline) {
+            return EvpnRuntimeReloadAttempt {
+                baseline,
+                result: Ok(None),
+            };
+        }
+
+        let result = match self.apply_candidate_config_locked(config, false).await {
+            Ok(response) => response_to_reload_outcome(response.outcome).map(|outcome| {
+                Some(EvpnRuntimeReloadApplyResult {
+                    outcome,
+                    message: response.message,
+                })
+            }),
+            Err(error) => Err(error),
+        };
+        if matches!(result, Ok(Some(_))) {
+            self.set_committed_config(config);
+        }
+
+        EvpnRuntimeReloadAttempt { baseline, result }
+    }
+
+    async fn apply_candidate_config_locked(
+        &self,
+        config: &Config,
+        validate_only: bool,
+    ) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
+        let candidate = evpn_runtime_candidate_from_config(config)?;
+        apply_evpn_runtime_candidate_locked(
+            candidate,
+            validate_only,
+            &self.coordinator,
+            self.converger.as_ref(),
+        )
+        .await
+    }
+}
+
+fn response_to_reload_outcome(
+    outcome: i32,
+) -> Result<EvpnRuntimeReloadOutcome, GrpcEvpnRuntimeApplyError> {
+    match outcome {
+        value if value == proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyNoop as i32 => {
+            Ok(EvpnRuntimeReloadOutcome::Noop)
+        }
+        value if value == proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyCommitted as i32 => {
+            Ok(EvpnRuntimeReloadOutcome::Committed)
+        }
+        value => Err(GrpcEvpnRuntimeApplyError::Internal(format!(
+            "EVPN runtime reload returned unexpected outcome value {value}"
+        ))),
+    }
+}
+
 struct PreconvergedRuntimeConverger;
 
 impl rustbgpd_evpn::EvpnRuntimeConverger for PreconvergedRuntimeConverger {
@@ -2077,6 +2246,7 @@ fn validate_ethernet_segment_member_vnis_present(
     Ok(())
 }
 
+#[cfg(test)]
 fn evpn_runtime_candidate_from_toml(
     candidate_toml: &str,
 ) -> Result<rustbgpd_evpn::EvpnRuntimeCandidate, GrpcEvpnRuntimeApplyError> {
@@ -2088,6 +2258,12 @@ fn evpn_runtime_candidate_from_toml(
     let candidate =
         Config::load_toml_with_diagnostics(candidate_toml, "candidate EVPN runtime config")
             .map_err(GrpcEvpnRuntimeApplyError::InvalidArgument)?;
+    evpn_runtime_candidate_from_config(&candidate)
+}
+
+fn evpn_runtime_candidate_from_config(
+    candidate: &Config,
+) -> Result<rustbgpd_evpn::EvpnRuntimeCandidate, GrpcEvpnRuntimeApplyError> {
     let instances = candidate
         .resolve_evpn_instances()
         .map_err(|err| GrpcEvpnRuntimeApplyError::InvalidArgument(err.to_string()))?;
@@ -2104,6 +2280,7 @@ fn evpn_runtime_candidate_from_toml(
     ))
 }
 
+#[cfg(test)]
 pub(crate) async fn apply_evpn_runtime_request<C>(
     request: &proto::ApplyEvpnRuntimeRequest,
     coordinator: &Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
@@ -2114,8 +2291,40 @@ where
     C: DaemonEvpnRuntimeConverger + ?Sized,
 {
     let candidate = evpn_runtime_candidate_from_toml(&request.candidate_toml)?;
-    let _apply_guard = apply_lock.lock().await;
+    apply_evpn_runtime_candidate(
+        candidate,
+        request.validate_only,
+        coordinator,
+        apply_lock,
+        converger,
+    )
+    .await
+}
 
+#[cfg(test)]
+async fn apply_evpn_runtime_candidate<C>(
+    candidate: rustbgpd_evpn::EvpnRuntimeCandidate,
+    validate_only: bool,
+    coordinator: &Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
+    apply_lock: &tokio::sync::Mutex<()>,
+    converger: &C,
+) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError>
+where
+    C: DaemonEvpnRuntimeConverger + ?Sized,
+{
+    let _apply_guard = apply_lock.lock().await;
+    apply_evpn_runtime_candidate_locked(candidate, validate_only, coordinator, converger).await
+}
+
+async fn apply_evpn_runtime_candidate_locked<C>(
+    candidate: rustbgpd_evpn::EvpnRuntimeCandidate,
+    validate_only: bool,
+    coordinator: &Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
+    converger: &C,
+) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError>
+where
+    C: DaemonEvpnRuntimeConverger + ?Sized,
+{
     let (current, plan, snapshot) = {
         let coordinator = coordinator.lock().map_err(|_| {
             GrpcEvpnRuntimeApplyError::Internal(
@@ -2131,7 +2340,7 @@ where
         (current, plan, snapshot)
     };
 
-    if request.validate_only {
+    if validate_only {
         return Ok(proto::ApplyEvpnRuntimeResponse {
             outcome: proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyValidated as i32,
             runtime: Some(runtime_snapshot_to_proto(&snapshot)),

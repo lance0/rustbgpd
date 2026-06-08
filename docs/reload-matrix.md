@@ -215,16 +215,22 @@ chains all add/change/remove cleanly via reload.
 
 ## `[[evpn_instances]]`, `[[evpn_ip_vrfs]]`, `[[ethernet_segments]]`
 
-All pinned in `reload.rs` and logged at `ERROR` if changed. The EVPN
-runtime structures (EVI, IP-VRF, ES) are resolved once and threaded
-through the daemon — runtime mutation is an ADR-0063 topic, not in
-scope for SIGHUP reload today.
+SIGHUP reuses the ADR-0063 EVPN runtime coordinator for the same supported
+live shapes as `EvpnService.ApplyEvpnRuntime`: single L2VNI/IP-VRF/ES
+add/delete/redefine within the documented identity bounds, atomic tenant
+teardown, and `ip_vrf` relink. The runtime snapshot advances only after the
+coordinator and daemon actor converger accept the candidate. Unsupported
+shapes, missing EVPN actors, or actor convergence failure are pinned back to
+the committed runtime model and logged at `ERROR`, so repeated SIGHUPs keep
+surfacing the drift. Static `rustbgpd --diff` remains conservative for EVPN
+table edits because acceptance depends on the candidate shape and runtime actor
+availability.
 
 | Section | Class | Notes |
 |---|---|---|
-| `[[evpn_instances]]` | restart-required | Pinned. |
-| `[[evpn_ip_vrfs]]` | restart-required | Pinned. |
-| `[[ethernet_segments]]` | restart-required | Pinned. |
+| `[[evpn_instances]]` | coordinator-gated | Supported ADR-0063 L2VNI shapes hot-apply; unsupported mixed edits, missing actors, or convergence failure pin/log. |
+| `[[evpn_ip_vrfs]]` | coordinator-gated | Supported IP-VRF add/delete/redefine and `ip_vrf` relink hot-apply; L3VNI/device/table identity changes stay restart-required. |
+| `[[ethernet_segments]]` | coordinator-gated | Supported ES add/delete/redefine and atomic tenant teardown hot-apply when the segment actor can converge. |
 
 ## `[[fib_tables]]` and FIB runtime
 

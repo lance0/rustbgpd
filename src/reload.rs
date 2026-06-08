@@ -15,6 +15,7 @@ use tracing::{error, info, warn};
 
 use crate::config::{self, Config};
 use crate::config_persister::ConfigMutation;
+use crate::evpn_runtime_converger::EvpnRuntimeReloadApply;
 use crate::fib_runtime::FibRuntimeCommand;
 use crate::peer_manager::InternalCommand;
 use crate::policy_admin::{self, apply_config_event};
@@ -92,6 +93,20 @@ impl Deref for ReloadedConfig {
     fn deref(&self) -> &Self::Target {
         &self.runtime
     }
+}
+
+fn evpn_runtime_changed(new_config: &Config, current: &Config) -> bool {
+    new_config.evpn_instances != current.evpn_instances
+        || new_config.evpn_ip_vrfs != current.evpn_ip_vrfs
+        || new_config.ethernet_segments != current.ethernet_segments
+}
+
+fn copy_evpn_runtime_fields(target: &mut Config, source: &Config) {
+    target.evpn_instances.clone_from(&source.evpn_instances);
+    target.evpn_ip_vrfs.clone_from(&source.evpn_ip_vrfs);
+    target
+        .ethernet_segments
+        .clone_from(&source.ethernet_segments);
 }
 
 /// Send a single `PeerManagerCommand` and await its `Result<(), String>`
@@ -403,6 +418,7 @@ pub(crate) async fn reload_config(
     live_grpc_uds: Option<&config::GrpcUdsListenerConfig>,
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     fib_cmd_tx: Option<&mpsc::Sender<FibRuntimeCommand>>,
+    evpn_runtime_apply: Option<&EvpnRuntimeReloadApply>,
 ) -> Option<ReloadedConfig> {
     let desired_config = match Config::load_with_diagnostics(config_path) {
         Ok(c) => c,
@@ -471,46 +487,37 @@ pub(crate) async fn reload_config(
         new_config.global.telemetry.grpc_uds = live_grpc_uds.cloned();
     }
 
-    // [[evpn_instances]] follows the gRPC-listener pinning pattern.
-    // The Phase-2 foundation slice (ADR-0052) shares the resolved
-    // `EvpnInstanceTable` to gRPC via an `Arc` built once at startup;
-    // there is no swap surface yet, so a SIGHUP can't apply edits.
-    // Without pinning, the in-memory `current` config would silently
-    // advance to the new declaration on reload, the next reload would
-    // see "no change", and drift would become invisible. Pin
-    // new_config.evpn_instances back to current.evpn_instances so
-    // (a) the gRPC `EvpnInstanceTable` stays consistent with the
-    // returned snapshot and (b) drift detection remains observable
-    // across every reload until the daemon is actually restarted.
-    if new_config.evpn_instances != current.evpn_instances {
+    if let Some(apply) = evpn_runtime_apply {
+        let attempt = apply
+            .apply_config_if_changed(&desired_config, evpn_runtime_changed)
+            .await;
+        match attempt.result {
+            Ok(Some(result)) => {
+                info!(
+                    outcome = ?result.outcome,
+                    message = %result.message,
+                    "reload: EVPN runtime model hot-applied through ADR-0063 coordinator"
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                error!(
+                    error = ?error,
+                    "reload: EVPN runtime model differs but the ADR-0063 coordinator \
+                     rejected the candidate; runtime EVPN snapshot unchanged. \
+                     Split unsupported mixed edits or restart rustbgpd for \
+                     restart-required EVPN identity changes."
+                );
+                copy_evpn_runtime_fields(&mut new_config, &attempt.baseline);
+            }
+        }
+    } else if evpn_runtime_changed(&new_config, current) {
         error!(
-            "[[evpn_instances]] differs from the live config: the \
-             gRPC EvpnService is still serving the startup snapshot. \
-             Restart rustbgpd to apply EVPN instance edits. Reload-time \
-             mutation lands with the kernel-reconciliation slice (Gate 7b \
-             — see docs/evpn-enablement.md)."
+            "EVPN runtime config differs but the ADR-0063 coordinator is unavailable; \
+             restart rustbgpd to apply [[evpn_instances]], [[evpn_ip_vrfs]], or \
+             [[ethernet_segments]] edits."
         );
-        new_config
-            .evpn_instances
-            .clone_from(&current.evpn_instances);
-    }
-    if new_config.evpn_ip_vrfs != current.evpn_ip_vrfs {
-        error!(
-            "[[evpn_ip_vrfs]] differs from the live config: Gate 9 \
-             IP-VRF/L3VNI state is resolved from the startup snapshot. \
-             Restart rustbgpd to apply EVPN IP-VRF edits."
-        );
-        new_config.evpn_ip_vrfs.clone_from(&current.evpn_ip_vrfs);
-    }
-    if new_config.ethernet_segments != current.ethernet_segments {
-        error!(
-            "[[ethernet_segments]] differs from the live config: the \
-             EVPN segment orchestrator resolved the startup snapshot. \
-             Restart rustbgpd to apply Ethernet Segment edits."
-        );
-        new_config
-            .ethernet_segments
-            .clone_from(&current.ethernet_segments);
+        copy_evpn_runtime_fields(&mut new_config, current);
     }
     if new_config.apply_bum_enforcement != current.apply_bum_enforcement {
         error!(
@@ -644,6 +651,10 @@ pub(crate) async fn reload_config(
     // prior state" to "matching live state", which is the practical
     // step short of true rollback.
     let mut working_config = current.clone();
+    // EVPN runtime edits are applied before the staged peer-manager/FIB
+    // sequence. Carry their accepted-or-pinned state into partial snapshots
+    // returned by halt_partial paths.
+    copy_evpn_runtime_fields(&mut working_config, &new_config);
 
     // ADR-0073: `working_config` starts from `current` and only absorbs
     // the reconciled (hot-applied) ConfigEvents, none of which touch
@@ -1493,6 +1504,134 @@ mod tests {
         std::env::temp_dir().join(format!("rustbgpd-{name}-{suffix}.toml"))
     }
 
+    #[derive(Clone)]
+    struct TestEvpnRuntimeConverger {
+        results: std::sync::Arc<
+            std::sync::Mutex<
+                std::collections::VecDeque<
+                    Result<(), crate::evpn_runtime_converger::DaemonEvpnRuntimeConvergeError>,
+                >,
+            >,
+        >,
+    }
+
+    impl crate::evpn_runtime_converger::DaemonEvpnRuntimeConverger for TestEvpnRuntimeConverger {
+        fn converge<'a>(
+            &'a self,
+            _current: &'a rustbgpd_evpn::EvpnRuntimeModel,
+            _candidate: &'a rustbgpd_evpn::EvpnRuntimeCandidate,
+            _plan: &'a rustbgpd_evpn::EvpnRuntimePlan,
+        ) -> crate::evpn_runtime_converger::DaemonEvpnRuntimeConvergeFuture<'a> {
+            let result = self.results.lock().unwrap().pop_front().unwrap_or(Ok(()));
+            Box::pin(async move { result })
+        }
+    }
+
+    fn evpn_reload_apply(
+        initial: &Config,
+        result: Result<(), crate::evpn_runtime_converger::DaemonEvpnRuntimeConvergeError>,
+    ) -> (
+        crate::evpn_runtime_converger::EvpnRuntimeReloadApply,
+        std::sync::Arc<std::sync::Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>>,
+    ) {
+        evpn_reload_apply_sequence(initial, vec![result])
+    }
+
+    fn evpn_reload_apply_sequence(
+        initial: &Config,
+        results: Vec<Result<(), crate::evpn_runtime_converger::DaemonEvpnRuntimeConvergeError>>,
+    ) -> (
+        crate::evpn_runtime_converger::EvpnRuntimeReloadApply,
+        std::sync::Arc<std::sync::Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>>,
+    ) {
+        let coordinator = std::sync::Arc::new(std::sync::Mutex::new(
+            rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+                initial.resolve_evpn_instances().unwrap(),
+                initial.resolve_evpn_ip_vrfs().unwrap(),
+                initial.resolve_ethernet_segments().unwrap(),
+            ),
+        ));
+        let apply_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let converger = std::sync::Arc::new(TestEvpnRuntimeConverger {
+            results: std::sync::Arc::new(std::sync::Mutex::new(results.into())),
+        });
+        (
+            crate::evpn_runtime_converger::EvpnRuntimeReloadApply::new(
+                coordinator.clone(),
+                apply_lock,
+                converger,
+                initial.clone(),
+            ),
+            coordinator,
+        )
+    }
+
+    const EVPN_VNI_100_TOML: &str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+"#;
+
+    const EVPN_VNI_100_200_TOML: &str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+"#;
+
+    const EVPN_VNI_100_200_300_TOML: &str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 300
+rd = "65000:300"
+route_targets = ["65000:300"]
+local_vtep_ip = "10.0.0.1"
+"#;
+
     #[tokio::test]
     async fn sighup_runtime_baseline_reads_peer_manager_snapshot_after_stage() {
         let initial = load_config_from_toml("runtime-baseline-initial", baseline_toml());
@@ -1642,6 +1781,7 @@ hold_time = 90
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
             None,
+            None,
         )
         .await
         .expect("reload should return a config even when grpc_tcp drifts");
@@ -1670,14 +1810,12 @@ hold_time = 90
         std::fs::remove_file(&ca).ok();
     }
 
-    /// SIGHUP that edits `[[evpn_instances]]` must NOT advance the
-    /// in-memory config's `evpn_instances` field — the gRPC
-    /// `EvpnService` is still serving the startup `Arc<EvpnInstanceTable>`
-    /// (no swap surface yet, ADR-0052). Without pinning, the next
-    /// reload would compare against the already-mutated snapshot and
-    /// the drift error would silently stop firing — operators would
-    /// believe their edits had taken effect when in fact the gRPC
-    /// surface is still on the prior instance set.
+    /// If the ADR-0063 coordinator is not available to SIGHUP, edits to
+    /// `[[evpn_instances]]` must NOT advance the in-memory config's
+    /// `evpn_instances` field. Without pinning, the next reload would
+    /// compare against the already-mutated snapshot and the drift error
+    /// would silently stop firing — operators would believe their edits
+    /// had taken effect when the EVPN runtime stayed on the prior set.
     #[tokio::test]
     async fn reload_pins_evpn_instances_to_startup_snapshot() {
         let path = unique_temp_path("reload-evpn-pin");
@@ -1710,9 +1848,9 @@ local_vtep_ip = "10.0.0.1"
         assert_eq!(initial.evpn_instances[0].vni, 100);
 
         // Operator rewrites the file: VNI changes, RTs expand, a new
-        // instance appears. None of this can take effect on a SIGHUP
-        // in the foundation slice, but the reload path must surface
-        // the drift and pin the snapshot.
+        // instance appears. With no coordinator hook supplied to
+        // `reload_config`, the reload path must surface the drift and pin
+        // the snapshot.
         std::fs::write(
             &path,
             r#"
@@ -1747,6 +1885,7 @@ local_vtep_ip = "10.0.0.1"
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
             None,
+            None,
         )
         .await
         .expect("reload should return a config even when only evpn_instances drift");
@@ -1773,11 +1912,405 @@ local_vtep_ip = "10.0.0.1"
         std::fs::remove_file(&path).ok();
     }
 
+    #[tokio::test]
+    async fn reload_hot_applies_evpn_runtime_when_coordinator_accepts() {
+        let path = unique_temp_path("reload-evpn-hot-apply");
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        let (apply, coordinator) = evpn_reload_apply(&initial, Ok(()));
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            Some(&apply),
+        )
+        .await
+        .expect("reload should hot-apply coordinator-supported EVPN runtime edits");
+
+        let added = rustbgpd_evpn::EvpnInstanceId::new(200).unwrap();
+        assert_eq!(
+            returned.evpn_instances.len(),
+            2,
+            "accepted EVPN runtime apply should advance the returned runtime snapshot"
+        );
+        assert!(
+            coordinator
+                .lock()
+                .unwrap()
+                .model()
+                .instances()
+                .get(added)
+                .is_some(),
+            "EVPN coordinator should commit the SIGHUP candidate"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn reload_retains_hot_applied_evpn_runtime_with_later_steps() {
+        let path = unique_temp_path("reload-evpn-hot-apply-plus-honor");
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        let (apply, coordinator) = evpn_reload_apply(&initial, Ok(()));
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+honor_graceful_shutdown = true
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+        let peer_mgr = tokio::spawn(async move {
+            match peer_mgr_rx.recv().await {
+                Some(PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply }) => {
+                    let _ = reply.send(Ok(()));
+                    enabled
+                }
+                _ => panic!("expected SetHonorGracefulShutdown command"),
+            }
+        });
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            Some(&apply),
+        )
+        .await
+        .expect("reload should keep earlier EVPN runtime apply in the final snapshot");
+
+        let added = rustbgpd_evpn::EvpnInstanceId::new(200).unwrap();
+        assert!(
+            returned.global.honor_graceful_shutdown,
+            "later hot-applied reload steps should still advance"
+        );
+        assert_eq!(
+            returned.evpn_instances.len(),
+            2,
+            "final reload snapshot must retain the already-committed EVPN runtime apply"
+        );
+        assert!(
+            coordinator
+                .lock()
+                .unwrap()
+                .model()
+                .instances()
+                .get(added)
+                .is_some(),
+            "coordinator should commit the EVPN candidate"
+        );
+        assert!(
+            peer_mgr.await.unwrap(),
+            "peer manager command must carry enabled=true"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn reload_pins_evpn_runtime_when_coordinator_rejects() {
+        let path = unique_temp_path("reload-evpn-hot-apply-reject");
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        let (apply, coordinator) = evpn_reload_apply(
+            &initial,
+            Err(
+                crate::evpn_runtime_converger::DaemonEvpnRuntimeConvergeError::Unsupported(
+                    "split unsupported mixed edits".to_string(),
+                ),
+            ),
+        );
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            Some(&apply),
+        )
+        .await
+        .expect("reload returns a config even when EVPN runtime apply is rejected");
+
+        let added = rustbgpd_evpn::EvpnInstanceId::new(200).unwrap();
+        assert_eq!(
+            returned.evpn_instances, initial.evpn_instances,
+            "rejected EVPN runtime apply must keep the returned runtime snapshot pinned"
+        );
+        assert!(
+            coordinator
+                .lock()
+                .unwrap()
+                .model()
+                .instances()
+                .get(added)
+                .is_none(),
+            "EVPN coordinator must not commit the rejected SIGHUP candidate"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn reload_compares_evpn_against_committed_runtime_baseline() {
+        let path = unique_temp_path("reload-evpn-committed-baseline");
+        std::fs::write(&path, EVPN_VNI_100_TOML).unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        let (apply, coordinator) = evpn_reload_apply(&initial, Ok(()));
+        let runtime_config = load_config_from_toml("runtime-evpn-add", EVPN_VNI_100_200_TOML);
+        apply
+            .apply_config(&runtime_config)
+            .await
+            .expect("test runtime apply should commit VNI 200");
+
+        std::fs::write(&path, EVPN_VNI_100_TOML).unwrap();
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            Some(&apply),
+        )
+        .await
+        .expect("reload should compare against the accepted EVPN runtime baseline");
+
+        let removed = rustbgpd_evpn::EvpnInstanceId::new(200).unwrap();
+        assert_eq!(
+            returned.evpn_instances, initial.evpn_instances,
+            "SIGHUP should not skip EVPN reconciliation just because the peer-manager snapshot is stale"
+        );
+        assert!(
+            coordinator
+                .lock()
+                .unwrap()
+                .model()
+                .instances()
+                .get(removed)
+                .is_none(),
+            "SIGHUP file state should converge the committed EVPN runtime model"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn reload_rejected_evpn_candidate_pins_to_committed_runtime_baseline() {
+        let path = unique_temp_path("reload-evpn-reject-committed-baseline");
+        std::fs::write(&path, EVPN_VNI_100_TOML).unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        let (apply, coordinator) = evpn_reload_apply_sequence(
+            &initial,
+            vec![
+                Ok(()),
+                Err(
+                    crate::evpn_runtime_converger::DaemonEvpnRuntimeConvergeError::Failed(
+                        rustbgpd_evpn::EvpnRuntimeConvergeError::new(
+                            "test convergence failure after committed baseline",
+                        ),
+                    ),
+                ),
+            ],
+        );
+        let runtime_config =
+            load_config_from_toml("runtime-evpn-add-for-reject", EVPN_VNI_100_200_TOML);
+        apply
+            .apply_config(&runtime_config)
+            .await
+            .expect("test runtime apply should commit VNI 200");
+
+        std::fs::write(&path, EVPN_VNI_100_200_300_TOML).unwrap();
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            Some(&apply),
+        )
+        .await
+        .expect("reload should pin when the committed-baseline candidate fails to converge");
+
+        let committed = rustbgpd_evpn::EvpnInstanceId::new(200).unwrap();
+        let rejected = rustbgpd_evpn::EvpnInstanceId::new(300).unwrap();
+        assert_eq!(
+            returned.evpn_instances, runtime_config.evpn_instances,
+            "rejected EVPN reload must pin to the coordinator's committed config, not stale startup tables"
+        );
+        assert!(
+            coordinator
+                .lock()
+                .unwrap()
+                .model()
+                .instances()
+                .get(committed)
+                .is_some(),
+            "previously committed EVPN runtime state should stay committed"
+        );
+        assert!(
+            coordinator
+                .lock()
+                .unwrap()
+                .model()
+                .instances()
+                .get(rejected)
+                .is_none(),
+            "failed EVPN reload candidate must not commit"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
     /// SIGHUP that edits `[[evpn_ip_vrfs]]` must not advance the
-    /// in-memory snapshot. Gate 9 currently validates IP-VRF schema
-    /// at startup only; letting reload adopt the new table would make
-    /// the next reload stop reporting drift even though no Type 5 /
-    /// L3VNI runtime state changed.
+    /// in-memory snapshot when the ADR-0063 coordinator hook is absent.
+    /// Letting reload adopt the new table would make the next reload stop
+    /// reporting drift even though no Type 5 / L3VNI runtime state changed.
     #[tokio::test]
     async fn reload_pins_evpn_ip_vrfs_to_startup_snapshot() {
         let path = unique_temp_path("reload-evpn-ip-vrf-pin");
@@ -1857,6 +2390,7 @@ table_id = 5001
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
             None,
+            None,
         )
         .await
         .expect("reload should return a config even when only evpn_ip_vrfs drift");
@@ -1879,11 +2413,11 @@ table_id = 5001
         std::fs::remove_file(&path).ok();
     }
 
-    /// SIGHUP must also pin Gate 8 startup-only EVPN surfaces that
-    /// feed long-lived actors: the Ethernet Segment table and the
-    /// kernel-enforcement opt-in. Otherwise a reload would advance
-    /// `current`, the actor would still be on its startup state, and
-    /// the next reload would stop reporting drift.
+    /// SIGHUP must still pin EVPN surfaces that remain startup-only or
+    /// lack an ADR-0063 coordinator hook: the Ethernet Segment table in
+    /// this test and the kernel-enforcement opt-in. Otherwise a reload
+    /// would advance `current`, the actor would still be on its startup
+    /// state, and the next reload would stop reporting drift.
     ///
     /// Drives the diff by flipping `apply_bum_enforcement` from
     /// explicit `false` (operator opt-out) to the v0.23.0 default
@@ -1958,6 +2492,7 @@ originator_ip = "10.0.0.1"
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            None,
             None,
         )
         .await
@@ -2044,6 +2579,7 @@ hold_time = 90
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
             None,
+            None,
         )
         .await
         .expect("reload should hot-apply honor_graceful_shutdown");
@@ -2123,6 +2659,7 @@ hold_time = 90
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            None,
             None,
         )
         .await
@@ -2216,6 +2753,7 @@ metric = 200
             uds.as_ref(),
             &peer_mgr_tx,
             Some(&fib_tx),
+            None,
         )
         .await
         .expect("reload should hot-apply fib_tables");
@@ -2313,6 +2851,7 @@ metric = 200
             uds.as_ref(),
             &peer_mgr_tx,
             Some(&fib_tx),
+            None,
         )
         .await
         .expect("reload should remove the FIB reference and then delete the peer group");
@@ -2357,6 +2896,7 @@ metric = 200
             uds.as_ref(),
             &peer_mgr_tx,
             Some(&fib_tx),
+            None,
         )
         .await
         .expect("reload returns a config even when the FIB actor is unreachable");
@@ -2388,6 +2928,7 @@ metric = 200
             tcp.as_ref(),
             uds.as_ref(),
             &peer_mgr_tx,
+            None,
             None,
         )
         .await
@@ -2432,6 +2973,7 @@ log_format = "json"
             uds.as_ref(),
             &peer_mgr_tx,
             None,
+            None,
         )
         .await
         .expect("reload returns a config when FIB must be started from empty");
@@ -2469,6 +3011,7 @@ log_format = "json"
             uds.as_ref(),
             &peer_mgr_tx,
             Some(&fib_tx),
+            None,
         )
         .await
         .expect("reload returns a config even when the actor reports failure");
@@ -2538,6 +3081,7 @@ hold_time = 90
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            None,
             None,
         )
         .await
@@ -2625,6 +3169,7 @@ hold_time = 90
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            None,
             None,
         )
         .await
@@ -2752,6 +3297,7 @@ hold_time = 90
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            None,
             None,
         )
         .await;
@@ -3212,6 +3758,7 @@ peer_group = "secure"
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            None,
             None,
         )
         .await;
@@ -3954,6 +4501,7 @@ remote_asn = 65002
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            None,
             None,
         )
         .await

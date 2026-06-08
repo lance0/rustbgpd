@@ -1594,8 +1594,8 @@ IP-VRF path. The originators and dataplane actors bypass this gRPC
 surface; they translate kernel/RIB events directly into reconcile
 inputs and `RibUpdate::InjectEvpn` / `WithdrawEvpn` against the RIB.
 See ADR-0052 for the original boundary, ADR-0054/ADR-0055 for the
-dataplane + origination boundaries, and ADR-0063 for the required
-future runtime mutation semantics.
+dataplane + origination boundaries, and ADR-0063 for the runtime mutation
+semantics used by both `ApplyEvpnRuntime` and SIGHUP reload.
 
 | RPC | Description |
 |-----|-------------|
@@ -1652,11 +1652,14 @@ unsupported shape is a capability gap, not an operational failure, so
 a supported shape starts converging but an actor command fails midway,
 the apply rolls back the partial work, returns `FAILED_PRECONDITION`,
 and marks the runtime degraded. Remaining shapes are tracked in
-[issue #210](https://github.com/lance0/rustbgpd/issues/210).
+[issue #268](https://github.com/lance0/rustbgpd/issues/268).
 
-Operators configure instances via the `[[evpn_instances]]` TOML
-block; SIGHUP that edits any instance is restart-required (see
-[KNOWN_ISSUES.md](../KNOWN_ISSUES.md)).
+Operators configure instances via the `[[evpn_instances]]` TOML block.
+SIGHUP reload submits EVPN table edits through the same coordinator for
+supported ADR-0063 shapes. Unsupported mixed edits, L3VNI/device/table IP-VRF
+identity changes, missing EVPN actors, or actor convergence failure are pinned
+back to the committed runtime model and logged instead of silently advancing
+the config snapshot.
 
 ### Get EVPN runtime status
 
