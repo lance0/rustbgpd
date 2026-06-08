@@ -117,13 +117,16 @@ section executors behind that public contract.
    confirm timer (default 600 seconds, maximum 86400). `ConfirmConfigTransaction`
    with the same `confirm_id` makes the committed candidate permanent.
    `AbortConfigTransaction` rolls back immediately by re-applying the captured
-   pre-commit snapshot through the same transaction executor. If the timer
-   expires, the daemon performs the same rollback automatically. V1 allows only
-   one pending confirmed transaction daemon-wide. While one is applying or
-   pending, persisted runtime config mutators are rejected with
-   `FAILED_PRECONDITION` so timeout rollback cannot overwrite a later ad hoc
-   config write. Pending confirmed state is not persisted across daemon restart;
-   after restart, clients must re-plan and re-apply. The confirm timer is
+   pre-commit snapshot through the same transaction executor. The gNMI
+   `CommitSetRollbackDuration` extension can reset the pending timer to a new
+   positive whole-second duration; it overwrites the timer rather than appending
+   time. If the timer expires, the daemon performs the same rollback
+   automatically. V1 allows only one pending confirmed transaction daemon-wide.
+   While one is applying or pending, persisted runtime config mutators are
+   rejected with `FAILED_PRECONDITION` so timeout rollback cannot overwrite a
+   later ad hoc config write. Pending confirmed state is not persisted across
+   daemon restart; after restart, clients must re-plan and re-apply. The confirm
+   timer is
    in-memory, so a restart during the confirm window leaves the already-committed
    candidate live (effectively confirmed-by-restart) and the auto-revert never
    fires: the timer is a safety net against a bad-but-running config, not against

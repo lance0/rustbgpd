@@ -58,6 +58,7 @@ pub struct ConfigTransactionController {
 struct ConfirmedState {
     applying_confirm_id: Option<String>,
     pending: Option<PendingConfirmedTransaction>,
+    timer: Option<tokio::task::JoinHandle<()>>,
     last: Option<ConfirmedTransactionRecord>,
 }
 
@@ -219,6 +220,20 @@ impl ConfigTransactionController {
                         .map_err(apply_error_to_gnmi_set_error)?;
                     return Ok(GnmiSetOutcome::default());
                 }
+                Some(GnmiSetCommitAction::SetRollbackDuration {
+                    confirm_id,
+                    confirm_timeout_seconds,
+                }) => {
+                    let confirm_id =
+                        validate_confirm_id(&confirm_id).map_err(apply_error_to_gnmi_set_error)?;
+                    let confirm_timeout_seconds =
+                        validate_confirm_timeout_seconds(confirm_timeout_seconds)
+                            .map_err(apply_error_to_gnmi_set_error)?;
+                    self.reset_rollback_duration_locked(confirm_id, confirm_timeout_seconds)
+                        .await
+                        .map_err(apply_error_to_gnmi_set_error)?;
+                    return Ok(GnmiSetOutcome::default());
+                }
                 Some(GnmiSetCommitAction::Commit { .. }) | None => {
                     self.reject_if_pending("gnmi.gNMI/Set")
                         .await
@@ -239,9 +254,11 @@ impl ConfigTransactionController {
                     confirm_id,
                     confirm_timeout_seconds,
                 }) => (confirm_id, confirm_timeout_seconds),
-                Some(GnmiSetCommitAction::Confirm { .. } | GnmiSetCommitAction::Cancel { .. }) => {
-                    unreachable!("confirm/cancel handled before candidate generation")
-                }
+                Some(
+                    GnmiSetCommitAction::Confirm { .. }
+                    | GnmiSetCommitAction::Cancel { .. }
+                    | GnmiSetCommitAction::SetRollbackDuration { .. },
+                ) => unreachable!("commit-control actions handled before candidate generation"),
                 None => (String::new(), 0),
             };
             let request = proto::ApplyConfigTransactionRequest {
@@ -341,7 +358,7 @@ impl ConfigTransactionController {
             "Confirmed config transaction is pending confirmation.",
         );
         self.install_pending_confirmed_transaction(pending).await;
-        self.spawn_confirm_timeout(confirmed.confirm_id);
+        self.spawn_confirm_timeout(confirmed.confirm_id).await;
         response.confirmation = Some(confirmation);
         response.human_text.push_str(
             "Confirmed transaction pending; call ConfirmConfigTransaction before the timeout or it will be rolled back.\n",
@@ -413,12 +430,13 @@ impl ConfigTransactionController {
         match self.rollback_pending_locked(&pending).await {
             Ok(response) => {
                 self.remove_pending_after_rollback(
-                    &confirm_id,
-                    proto::ConfigTransactionConfirmationStatus::Aborted,
-                    response.runtime_snapshot_token.clone(),
-                    "Aborted confirmed config transaction and restored the previous runtime config.",
-                )
-                .await;
+                        &confirm_id,
+                        proto::ConfigTransactionConfirmationStatus::Aborted,
+                        response.runtime_snapshot_token.clone(),
+                        "Aborted confirmed config transaction and restored the previous runtime config.",
+                        true,
+                    )
+                    .await;
                 self.metrics
                     .record_config_transaction_lifecycle("abort", "success");
                 Ok(proto::AbortConfigTransactionResponse {
@@ -435,6 +453,7 @@ impl ConfigTransactionController {
                     proto::ConfigTransactionConfirmationStatus::AbortFailed,
                     pending.runtime_snapshot_token.clone(),
                     "Abort requested, but rollback of the confirmed config transaction failed.",
+                    true,
                 )
                 .await;
                 self.metrics
@@ -442,6 +461,38 @@ impl ConfigTransactionController {
                 Err(confirm_abort_rollback_error(&confirm_id, &error))
             }
         }
+    }
+
+    async fn reset_rollback_duration_locked(
+        &self,
+        confirm_id: String,
+        timeout_seconds: u32,
+    ) -> Result<(), ConfigTransactionApplyError> {
+        let timeout = Duration::from_secs(u64::from(timeout_seconds));
+        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline_unix_seconds = SystemTime::now()
+            .checked_add(timeout)
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_secs());
+        {
+            let mut state = self.state.lock().await;
+            let Some(pending) = state.pending.as_mut() else {
+                return Err(ConfigTransactionApplyError::FailedPrecondition(
+                    "no confirmed config transaction is pending".to_string(),
+                ));
+            };
+            if pending.confirm_id != confirm_id {
+                return Err(ConfigTransactionApplyError::FailedPrecondition(format!(
+                    "confirmed config transaction id mismatch: pending {:?}",
+                    pending.confirm_id
+                )));
+            }
+            pending.timeout_seconds = timeout_seconds;
+            pending.deadline = deadline;
+            pending.deadline_unix_seconds = deadline_unix_seconds;
+        }
+        self.spawn_confirm_timeout(confirm_id).await;
+        Ok(())
     }
 
     async fn status(
@@ -520,6 +571,9 @@ impl ConfigTransactionController {
 
     async fn install_pending_confirmed_transaction(&self, pending: PendingConfirmedTransaction) {
         let mut state = self.state.lock().await;
+        if let Some(timer) = state.timer.take() {
+            timer.abort();
+        }
         if let Some(existing) = &state.pending {
             error!(
                 existing_confirm_id = %existing.confirm_id,
@@ -536,29 +590,42 @@ impl ConfigTransactionController {
         state.pending = Some(pending);
     }
 
-    fn spawn_confirm_timeout(&self, confirm_id: String) {
+    async fn spawn_confirm_timeout(&self, confirm_id: String) {
         let controller = self.clone();
-        tokio::spawn(async move {
+        let task_confirm_id = confirm_id.clone();
+        let handle = tokio::spawn(async move {
             let deadline = {
                 let state = controller.state.lock().await;
                 state
                     .pending
                     .as_ref()
-                    .filter(|pending| pending.confirm_id == confirm_id)
+                    .filter(|pending| pending.confirm_id == task_confirm_id)
                     .map(|pending| pending.deadline)
             };
             let Some(deadline) = deadline else {
                 return;
             };
             tokio::time::sleep_until(deadline).await;
-            if let Err(error) = controller.auto_revert(confirm_id.clone()).await {
+            if let Err(error) = controller.auto_revert(task_confirm_id.clone()).await {
                 error!(
-                    confirm_id,
+                    confirm_id = %task_confirm_id,
                     error = %error,
                     "confirmed config transaction auto-revert failed"
                 );
             }
         });
+        let mut state = self.state.lock().await;
+        if state
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.confirm_id == confirm_id)
+        {
+            if let Some(previous) = state.timer.replace(handle) {
+                previous.abort();
+            }
+        } else {
+            handle.abort();
+        }
     }
 
     async fn auto_revert(self, confirm_id: String) -> Result<(), ConfigTransactionApplyError> {
@@ -577,6 +644,7 @@ impl ConfigTransactionController {
                         proto::ConfigTransactionConfirmationStatus::AutoReverted,
                         response.runtime_snapshot_token,
                         "Confirmed config transaction timed out and was automatically rolled back.",
+                        false,
                     )
                     .await;
                     self.metrics
@@ -590,6 +658,7 @@ impl ConfigTransactionController {
                         proto::ConfigTransactionConfirmationStatus::AutoRevertFailed,
                         pending.runtime_snapshot_token.clone(),
                         "Confirmed config transaction timed out, but automatic rollback failed.",
+                        false,
                     )
                     .await;
                     self.metrics
@@ -650,6 +719,9 @@ impl ConfigTransactionController {
                 "confirmed config transaction id mismatch: pending {pending_id:?}"
             )));
         }
+        if let Some(timer) = state.timer.take() {
+            timer.abort();
+        }
         Ok(pending)
     }
 
@@ -679,6 +751,7 @@ impl ConfigTransactionController {
         status: proto::ConfigTransactionConfirmationStatus,
         runtime_snapshot_token: String,
         human_text: &'static str,
+        abort_timer: bool,
     ) {
         let mut state = self.state.lock().await;
         let Some(pending) = state.pending.take() else {
@@ -687,6 +760,10 @@ impl ConfigTransactionController {
         if pending.confirm_id != confirm_id {
             state.pending = Some(pending);
             return;
+        }
+        let timer = state.timer.take();
+        if abort_timer && let Some(timer) = timer {
+            timer.abort();
         }
         state.last = Some(ConfirmedTransactionRecord {
             confirm_id: pending.confirm_id,
@@ -742,15 +819,27 @@ fn parse_confirmed_apply_mode(
     } else {
         request.confirm_timeout_seconds
     };
+    let timeout_seconds = validate_confirm_timeout_seconds(timeout_seconds)?;
+    Ok(Some(ConfirmedApplyMode {
+        confirm_id,
+        timeout_seconds,
+    }))
+}
+
+fn validate_confirm_timeout_seconds(
+    timeout_seconds: u32,
+) -> Result<u32, ConfigTransactionApplyError> {
+    if timeout_seconds == 0 {
+        return Err(ConfigTransactionApplyError::InvalidArgument(
+            "confirm_timeout_seconds must be positive".to_string(),
+        ));
+    }
     if timeout_seconds > MAX_CONFIRM_TIMEOUT_SECONDS {
         return Err(ConfigTransactionApplyError::InvalidArgument(format!(
             "confirm_timeout_seconds must be <= {MAX_CONFIRM_TIMEOUT_SECONDS}"
         )));
     }
-    Ok(Some(ConfirmedApplyMode {
-        confirm_id,
-        timeout_seconds,
-    }))
+    Ok(timeout_seconds)
 }
 
 fn validate_confirm_id(confirm_id: &str) -> Result<String, ConfigTransactionApplyError> {
@@ -2173,6 +2262,22 @@ remote_asn = 65002
         }
     }
 
+    fn gnmi_set_rollback_duration(
+        confirm_id: &str,
+        timeout_seconds: u32,
+    ) -> rustbgpd_api::server::GnmiSetTransaction {
+        rustbgpd_api::server::GnmiSetTransaction {
+            prefix: None,
+            operations: Vec::new(),
+            commit_action: Some(
+                rustbgpd_api::server::GnmiSetCommitAction::SetRollbackDuration {
+                    confirm_id: confirm_id.to_string(),
+                    confirm_timeout_seconds: timeout_seconds,
+                },
+            ),
+        }
+    }
+
     fn gnmi_update(
         path: rustbgpd_api::gnmi::Path,
         value: rustbgpd_api::gnmi::typed_value::Value,
@@ -3368,6 +3473,107 @@ remote_asn = 65010
         assert_config_transaction_lifecycle_metric(&controller, "auto_revert", "success", 1.0);
         assert_config_transaction_lifecycle_metric(&controller, "auto_revert", "failure", 0.0);
         assert_snapshot_matches_config(&snapshot_toml.lock().await, &previous_toml);
+        ack_task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gnmi_set_rollback_duration_reset_shortens_timer() {
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[peer_groups.ix-members]
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix-members"
+remote_asn = 65010
+"#,
+        );
+        let (controller, snapshot_toml, ack_task) =
+            confirmed_dynamic_controller(previous_toml.clone(), candidate_toml).await;
+
+        controller
+            .clone()
+            .apply_gnmi_set(gnmi_set_rollback_duration("deploy-1", 1))
+            .await
+            .expect("rollback-duration reset must succeed");
+
+        let status = controller.status().await.expect("status must succeed");
+        let confirmation = status.confirmation.unwrap();
+        assert_eq!(
+            confirmation.status,
+            proto::ConfigTransactionConfirmationStatus::Pending as i32
+        );
+        assert_eq!(confirmation.timeout_seconds, 1);
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+        let status = controller.status().await.expect("status must succeed");
+        assert_eq!(
+            status.confirmation.unwrap().status,
+            proto::ConfigTransactionConfirmationStatus::AutoReverted as i32
+        );
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &previous_toml);
+        ack_task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gnmi_set_rollback_duration_reset_extends_timer() {
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[peer_groups.ix-members]
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix-members"
+remote_asn = 65010
+"#,
+        );
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[dynamic_neighbors]]".to_string()],
+            ),
+            snapshot_toml,
+            peers,
+        ));
+        let (config_tx, config_rx) = mpsc::channel(8);
+        let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
+        let controller = ConfigTransactionController::new(
+            deps_value(None, peer_tx, Some(config_tx), Vec::new()),
+            BgpMetrics::new(),
+        );
+        controller
+            .clone()
+            .apply(confirmed_dynamic_request(candidate_toml, "deploy-1", 1))
+            .await
+            .expect("confirmed apply must succeed");
+
+        controller
+            .clone()
+            .apply_gnmi_set(gnmi_set_rollback_duration("deploy-1", 10))
+            .await
+            .expect("rollback-duration reset must succeed");
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+        let status = controller.status().await.expect("status must succeed");
+        let confirmation = status.confirmation.unwrap();
+        assert_eq!(
+            confirmation.status,
+            proto::ConfigTransactionConfirmationStatus::Pending as i32
+        );
+        assert_eq!(confirmation.timeout_seconds, 10);
+
+        controller
+            .clone()
+            .apply_gnmi_set(gnmi_set_commit_confirm("deploy-1"))
+            .await
+            .expect("confirm after timer extension must succeed");
         ack_task.abort();
     }
 
@@ -4629,6 +4835,75 @@ remote_asn = 65003
             GnmiSetError::InvalidArgument(ref message)
                 if message.contains("must not contain control characters")
         ));
+    }
+
+    #[tokio::test]
+    async fn gnmi_set_rollback_duration_rejects_missing_pending_wrong_id_and_zero_timeout() {
+        let controller = ConfigTransactionController::new(
+            deps_value(None, mpsc::channel(1).0, None, Vec::new()),
+            BgpMetrics::new(),
+        );
+        let Err(err) = controller
+            .clone()
+            .apply_gnmi_set(gnmi_set_rollback_duration("deploy-1", 120))
+            .await
+        else {
+            panic!("rollback-duration reset without pending transaction must reject");
+        };
+        assert!(matches!(
+            err,
+            GnmiSetError::FailedPrecondition(ref message)
+                if message.contains("no confirmed config transaction is pending")
+        ));
+
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[peer_groups.ix-members]
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix-members"
+remote_asn = 65010
+"#,
+        );
+        let (controller, _snapshot_toml, ack_task) =
+            confirmed_dynamic_controller(previous_toml, candidate_toml).await;
+
+        let Err(err) = controller
+            .clone()
+            .apply_gnmi_set(gnmi_set_rollback_duration("wrong-id", 120))
+            .await
+        else {
+            panic!("rollback-duration reset with wrong id must reject");
+        };
+        assert!(matches!(
+            err,
+            GnmiSetError::FailedPrecondition(ref message)
+                if message.contains("confirmed config transaction id mismatch")
+        ));
+
+        let Err(err) = controller
+            .clone()
+            .apply_gnmi_set(gnmi_set_rollback_duration("deploy-1", 0))
+            .await
+        else {
+            panic!("rollback-duration reset with zero timeout must reject");
+        };
+        assert!(matches!(
+            err,
+            GnmiSetError::InvalidArgument(ref message)
+                if message.contains("confirm_timeout_seconds must be positive")
+        ));
+
+        let status = controller.status().await.expect("status must succeed");
+        let confirmation = status.confirmation.unwrap();
+        assert_eq!(
+            confirmation.status,
+            proto::ConfigTransactionConfirmationStatus::Pending as i32
+        );
+        assert_eq!(confirmation.timeout_seconds, 60);
+        ack_task.abort();
     }
 
     #[tokio::test]

@@ -19,13 +19,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   committed through ADR-0076 `PlanConfigTransaction` /
   `ApplyConfigTransaction`, including persistence acknowledgement and rollback;
   the standard gNMI commit-confirmed extension can start, confirm, and cancel
-  the same confirmed transaction lifecycle; unsupported paths and rollback-timer
-  reset still return `UNIMPLEMENTED`. Set payloads are redacted in gRPC audit
-  summaries, and delete / replace / update requests are prefix-expanded and
-  normalized in gNMI application order. The M54 `gnmic` interop smoke now proves
-  Set add/delete plus commit-confirmed confirm/cancel over mTLS, and that a
-  read-tier principal is denied `Set` (`PermissionDenied`) while an unsupported
-  leaf is rejected (`Unimplemented`).
+  the same confirmed transaction lifecycle, and can reset a pending transaction's
+  rollback timer with `CommitSetRollbackDuration`; unsupported paths still
+  return `UNIMPLEMENTED`. Set payloads are redacted in gRPC audit summaries, and
+  delete / replace / update requests are prefix-expanded and normalized in gNMI
+  application order. The M54 `gnmic` interop smoke now proves Set add/delete
+  plus commit-confirmed confirm/cancel over mTLS, and that a read-tier principal
+  is denied `Set` (`PermissionDenied`) while an unsupported leaf is rejected
+  (`Unimplemented`).
 
 - **gNMI Set peer-group object subset.** The OpenConfig Set bridge can now
   create/update/delete BGP peer-group list entries through ADR-0076 catalog
