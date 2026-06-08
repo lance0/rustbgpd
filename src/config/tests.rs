@@ -7069,6 +7069,11 @@ import_policy_chain = ["filter"]
         "{:?}",
         diff.effective_neighbor_impact
     );
+    let json = super::config_diff_json_value(&diff);
+    assert_eq!(
+        json["reload_applied"]["effective_neighbor_impact"][0]["kind"],
+        serde_json::json!("session_reshape")
+    );
 }
 
 #[test]
