@@ -195,8 +195,10 @@ suite implementation.
     OpenConfig BGP operational-state subset: `Capabilities`, `Get`, and
     `Subscribe` (ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE for
     neighbor `session-state` when `[event_history]` is enabled) over UDS or
-    mTLS TCP; `Set` returns `Unimplemented`. M54 verifies the path with
-    `gnmic`; M56 covers the ON_CHANGE flow. FRR's OpenConfig story is
+    mTLS TCP, plus an operator-tier `Set` subset — transaction-backed static
+    numbered-neighbor create/update/delete and the commit-confirmed extension
+    via ADR-0076, with unsupported paths returning `Unimplemented`. M54 verifies
+    both read and Set with `gnmic`; M56 covers the ON_CHANGE flow. FRR's OpenConfig story is
     through broader management frameworks such as `mgmtd` / SONiC-style
     northbound layers rather than a clean per-`bgpd` gNMI service.
 

@@ -3,8 +3,10 @@
 rustbgpd exposes eleven native `rustbgpd.v1` gRPC services (Global, Config,
 Neighbor, Policy, PeerGroup, Rib, BFD, Event, Injection, Control, Evpn) plus the
 `gnmi.gNMI` OpenConfig service over one or more configured listeners. The
-current gNMI production surface is telemetry-only until a supported Set subset
-is wired to the transaction controller. The default listener is a local Unix
+gNMI surface is read-only telemetry (`Capabilities` / `Get` / `Subscribe`) plus an
+operator-tier `Set` subset — transaction-backed create/update/delete of static
+numbered neighbors and the commit-confirmed extension, committed through
+ADR-0076; unsupported `Set` paths return `UNIMPLEMENTED`. The default listener is a local Unix
 domain socket at
 `/var/lib/rustbgpd/grpc.sock`.
 
@@ -159,7 +161,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `EventService` | All RPCs | None |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`, `GetIpVrf` | `ClearDuplicateMacQuarantine`, `ApplyEvpnRuntime` |
 | `BfdService` | `GetBfdSessions` | None |
-| `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (operator-only; returns `UNIMPLEMENTED` until a supported OpenConfig config subset is wired to ADR-0076 transactions) |
+| `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (operator-only; transaction-backed OpenConfig subset — static numbered-neighbor `neighbor-address`/`peer-as`/`description`/`peer-group` create/update/delete and the commit-confirmed extension via ADR-0076; unsupported paths return `UNIMPLEMENTED`) |
 | `InjectionService` | None | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` |
 | `ControlService` | `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
 

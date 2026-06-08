@@ -246,7 +246,7 @@ with a separate read-only `gnmi.gNMI` service for OpenConfig BGP telemetry:
 | `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection |
 | `ControlService` | `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`, `GetIpVrf`, `ClearDuplicateMacQuarantine`, `ApplyEvpnRuntime` | Local EVPN VTEP instance state, ADR-0059 FDB-nexthop ownership, symmetric IRB (Type-5 / L3VNI) IP-VRF readiness / route counters, duplicate-MAC quarantine clear, and ADR-0063 runtime model status / apply |
-| `gnmi.gNMI` | `Capabilities`, `Get`, `Set`, `Subscribe` | Read-only OpenConfig BGP telemetry subset; `Set` returns `UNIMPLEMENTED`; served on UDS and mTLS TCP listeners |
+| `gnmi.gNMI` | `Capabilities`, `Get`, `Set`, `Subscribe` | OpenConfig BGP telemetry subset (`Get` / `Subscribe`) plus a transaction-backed `Set` subset (static numbered-neighbor create/update/delete + commit-confirmed via ADR-0076; unsupported paths `UNIMPLEMENTED`); served on UDS and mTLS TCP listeners |
 
 ```bash
 # Stream route changes in real time over the default UDS listener
