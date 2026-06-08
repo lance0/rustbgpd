@@ -18,8 +18,8 @@ use rustbgpd_api::peer_types::{
 use rustbgpd_api::proto;
 use rustbgpd_api::server::{
     ConfigMutationGateFn, ConfigTransactionAbortFn, ConfigTransactionApplyError,
-    ConfigTransactionApplyFn, ConfigTransactionConfirmFn, ConfigTransactionStatusFn, GnmiSetError,
-    GnmiSetFn, GnmiSetOutcome,
+    ConfigTransactionApplyFn, ConfigTransactionConfirmFn, ConfigTransactionStatusFn,
+    GnmiSetCommitAction, GnmiSetError, GnmiSetFn, GnmiSetOutcome,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use tracing::{error, info};
@@ -202,9 +202,29 @@ impl ConfigTransactionController {
     ) -> Result<GnmiSetOutcome, GnmiSetError> {
         let join = tokio::spawn(async move {
             let _guard = self.deps.lock.lock().await;
-            self.reject_if_pending("gnmi.gNMI/Set")
-                .await
-                .map_err(apply_error_to_gnmi_set_error)?;
+            match transaction.commit_action.clone() {
+                Some(GnmiSetCommitAction::Confirm { confirm_id }) => {
+                    let confirm_id =
+                        validate_confirm_id(&confirm_id).map_err(apply_error_to_gnmi_set_error)?;
+                    self.confirm_locked(confirm_id)
+                        .await
+                        .map_err(apply_error_to_gnmi_set_error)?;
+                    return Ok(GnmiSetOutcome::default());
+                }
+                Some(GnmiSetCommitAction::Cancel { confirm_id }) => {
+                    let confirm_id =
+                        validate_confirm_id(&confirm_id).map_err(apply_error_to_gnmi_set_error)?;
+                    self.abort_locked(confirm_id)
+                        .await
+                        .map_err(apply_error_to_gnmi_set_error)?;
+                    return Ok(GnmiSetOutcome::default());
+                }
+                Some(GnmiSetCommitAction::Commit { .. }) | None => {
+                    self.reject_if_pending("gnmi.gNMI/Set")
+                        .await
+                        .map_err(apply_error_to_gnmi_set_error)?;
+                }
+            }
             let current = runtime_config_snapshot(&self.deps.peer_mgr_tx)
                 .await
                 .map_err(GnmiSetError::Unavailable)?;
@@ -214,22 +234,39 @@ impl ConfigTransactionController {
                     "failed to serialize gNMI Set candidate config: {error}"
                 ))
             })?;
-            // The coordinator lock serializes this internal gNMI Set path, and
-            // the candidate was just built from the live runtime snapshot. Let
-            // the shared apply executor do the single authoritative plan.
-            let response = apply_config_transaction_locked(
-                &self.deps,
-                proto::ApplyConfigTransactionRequest {
-                    candidate_toml,
-                    expected_runtime_snapshot_token: String::new(),
-                    client_request_id: "gnmi-set".to_string(),
-                    comment: String::new(),
-                    confirm_id: String::new(),
-                    confirm_timeout_seconds: 0,
-                },
-            )
-            .await
-            .map_err(apply_error_to_gnmi_set_error)?;
+            let (confirm_id, confirm_timeout_seconds) = match transaction.commit_action {
+                Some(GnmiSetCommitAction::Commit {
+                    confirm_id,
+                    confirm_timeout_seconds,
+                }) => (confirm_id, confirm_timeout_seconds),
+                Some(GnmiSetCommitAction::Confirm { .. } | GnmiSetCommitAction::Cancel { .. }) => {
+                    unreachable!("confirm/cancel handled before candidate generation")
+                }
+                None => (String::new(), 0),
+            };
+            let request = proto::ApplyConfigTransactionRequest {
+                candidate_toml,
+                expected_runtime_snapshot_token: String::new(),
+                client_request_id: "gnmi-set".to_string(),
+                comment: String::new(),
+                confirm_id,
+                confirm_timeout_seconds,
+            };
+            let confirmed =
+                parse_confirmed_apply_mode(&request).map_err(apply_error_to_gnmi_set_error)?;
+            let response = if confirmed.is_some() {
+                self.apply_locked(request, confirmed)
+                    .await
+                    .map_err(apply_error_to_gnmi_set_error)?
+            } else {
+                // The coordinator lock serializes this internal gNMI Set path,
+                // and the candidate was just built from the live runtime
+                // snapshot. Let the shared apply executor do the single
+                // authoritative plan.
+                apply_config_transaction_locked(&self.deps, request)
+                    .await
+                    .map_err(apply_error_to_gnmi_set_error)?
+            };
             gnmi_set_outcome_from_apply_response(response)
         });
 
@@ -2064,7 +2101,41 @@ remote_asn = 65002
                 gnmi_neighbor_config_path(address, "peer-as"),
                 rustbgpd_api::gnmi::typed_value::Value::UintVal(remote_asn),
             ))],
-            extensions: Vec::new(),
+            commit_action: None,
+        }
+    }
+
+    fn gnmi_set_add_neighbor_confirmed(
+        address: &str,
+        remote_asn: u64,
+        confirm_id: &str,
+        timeout_seconds: u32,
+    ) -> rustbgpd_api::server::GnmiSetTransaction {
+        let mut transaction = gnmi_set_add_neighbor(address, remote_asn);
+        transaction.commit_action = Some(rustbgpd_api::server::GnmiSetCommitAction::Commit {
+            confirm_id: confirm_id.to_string(),
+            confirm_timeout_seconds: timeout_seconds,
+        });
+        transaction
+    }
+
+    fn gnmi_set_commit_confirm(confirm_id: &str) -> rustbgpd_api::server::GnmiSetTransaction {
+        rustbgpd_api::server::GnmiSetTransaction {
+            prefix: None,
+            operations: Vec::new(),
+            commit_action: Some(rustbgpd_api::server::GnmiSetCommitAction::Confirm {
+                confirm_id: confirm_id.to_string(),
+            }),
+        }
+    }
+
+    fn gnmi_set_commit_cancel(confirm_id: &str) -> rustbgpd_api::server::GnmiSetTransaction {
+        rustbgpd_api::server::GnmiSetTransaction {
+            prefix: None,
+            operations: Vec::new(),
+            commit_action: Some(rustbgpd_api::server::GnmiSetCommitAction::Cancel {
+                confirm_id: confirm_id.to_string(),
+            }),
         }
     }
 
@@ -4187,6 +4258,259 @@ remote_asn = 65003
         let persisted = persisted.lock().await;
         assert!(persisted.contains("10.0.0.3"));
         assert_eq!(*snapshot_toml.lock().await, *persisted);
+    }
+
+    #[tokio::test]
+    async fn gnmi_set_commit_request_enters_confirmed_pending() {
+        let previous_toml = base_toml("");
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[neighbors]] add".to_string()],
+            ),
+            snapshot_toml,
+            peers.clone(),
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+                config_rx.recv().await
+            {
+                let _ = ack.send(Ok(()));
+            }
+        });
+        let controller = ConfigTransactionController::new(
+            deps_value(None, peer_tx, Some(config_tx), Vec::new()),
+            BgpMetrics::new(),
+        );
+
+        controller
+            .clone()
+            .apply_gnmi_set(gnmi_set_add_neighbor_confirmed(
+                "10.0.0.3",
+                65003,
+                "deploy-42",
+                120,
+            ))
+            .await
+            .unwrap();
+
+        let status = controller.status().await.unwrap();
+        let confirmation = status.confirmation.unwrap();
+        assert_eq!(
+            confirmation.status,
+            proto::ConfigTransactionConfirmationStatus::Pending as i32
+        );
+        assert_eq!(confirmation.confirm_id, "deploy-42");
+        assert_eq!(confirmation.timeout_seconds, 120);
+        assert_eq!(peers.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn gnmi_set_commit_confirm_finalizes_pending_transaction() {
+        let previous_toml = base_toml("");
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[neighbors]] add".to_string()],
+            ),
+            snapshot_toml,
+            peers,
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+                config_rx.recv().await
+            {
+                let _ = ack.send(Ok(()));
+            }
+        });
+        let controller = ConfigTransactionController::new(
+            deps_value(None, peer_tx, Some(config_tx), Vec::new()),
+            BgpMetrics::new(),
+        );
+        controller
+            .clone()
+            .apply_gnmi_set(gnmi_set_add_neighbor_confirmed(
+                "10.0.0.3",
+                65003,
+                "deploy-42",
+                120,
+            ))
+            .await
+            .unwrap();
+
+        controller
+            .clone()
+            .apply_gnmi_set(gnmi_set_commit_confirm("deploy-42"))
+            .await
+            .unwrap();
+
+        let status = controller.status().await.unwrap();
+        let confirmation = status.confirmation.unwrap();
+        assert_eq!(
+            confirmation.status,
+            proto::ConfigTransactionConfirmationStatus::Confirmed as i32
+        );
+        assert_eq!(confirmation.confirm_id, "deploy-42");
+    }
+
+    #[tokio::test]
+    async fn gnmi_set_commit_cancel_rolls_back_pending_transaction() {
+        let previous_toml = base_toml("");
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[neighbors]] add".to_string()],
+            ),
+            snapshot_toml,
+            peers,
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+                config_rx.recv().await
+            {
+                let _ = ack.send(Ok(()));
+            }
+        });
+        let controller = ConfigTransactionController::new(
+            deps_value(None, peer_tx, Some(config_tx), Vec::new()),
+            BgpMetrics::new(),
+        );
+        controller
+            .clone()
+            .apply_gnmi_set(gnmi_set_add_neighbor_confirmed(
+                "10.0.0.3",
+                65003,
+                "deploy-42",
+                120,
+            ))
+            .await
+            .unwrap();
+
+        controller
+            .clone()
+            .apply_gnmi_set(gnmi_set_commit_cancel("deploy-42"))
+            .await
+            .unwrap();
+
+        let status = controller.status().await.unwrap();
+        let confirmation = status.confirmation.unwrap();
+        assert_eq!(
+            confirmation.status,
+            proto::ConfigTransactionConfirmationStatus::Aborted as i32
+        );
+        assert_eq!(confirmation.confirm_id, "deploy-42");
+    }
+
+    #[tokio::test]
+    async fn gnmi_set_confirm_and_cancel_validate_confirm_id() {
+        let previous_toml = base_toml("");
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[neighbors]] add".to_string()],
+            ),
+            snapshot_toml,
+            peers,
+        ));
+        let controller = ConfigTransactionController::new(
+            deps_value(None, peer_tx, None, Vec::new()),
+            BgpMetrics::new(),
+        );
+
+        let Err(err) = controller
+            .clone()
+            .apply_gnmi_set(gnmi_set_commit_confirm("bad\nid"))
+            .await
+        else {
+            panic!("malformed gNMI confirm id must reject");
+        };
+        assert!(matches!(
+            err,
+            GnmiSetError::InvalidArgument(ref message)
+                if message.contains("must not contain control characters")
+        ));
+
+        let Err(err) = controller
+            .apply_gnmi_set(gnmi_set_commit_cancel("bad\nid"))
+            .await
+        else {
+            panic!("malformed gNMI cancel id must reject");
+        };
+        assert!(matches!(
+            err,
+            GnmiSetError::InvalidArgument(ref message)
+                if message.contains("must not contain control characters")
+        ));
+    }
+
+    #[tokio::test]
+    async fn gnmi_set_rejects_normal_set_while_confirmed_pending() {
+        let previous_toml = base_toml("");
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[neighbors]] add".to_string()],
+            ),
+            snapshot_toml,
+            peers,
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+                config_rx.recv().await
+            {
+                let _ = ack.send(Ok(()));
+            }
+        });
+        let controller = ConfigTransactionController::new(
+            deps_value(None, peer_tx, Some(config_tx), Vec::new()),
+            BgpMetrics::new(),
+        );
+        controller
+            .clone()
+            .apply_gnmi_set(gnmi_set_add_neighbor_confirmed(
+                "10.0.0.3",
+                65003,
+                "deploy-42",
+                120,
+            ))
+            .await
+            .unwrap();
+
+        let Err(err) = controller
+            .apply_gnmi_set(gnmi_set_add_neighbor("10.0.0.4", 65004))
+            .await
+        else {
+            panic!("normal gNMI Set must reject while confirmed transaction is pending");
+        };
+        assert!(matches!(
+            err,
+            GnmiSetError::FailedPrecondition(ref message)
+                if message.contains("gnmi.gNMI/Set")
+        ));
     }
 
     #[tokio::test]

@@ -133,8 +133,10 @@ section executors behind that public contract.
    gNMI service can normalize Set requests, redact Set audit summaries, and
    delegate to a daemon-owned bridge hook. The first supported slice translates
    static, numbered BGP neighbor config leaves into candidate TOML and commits
-   through this ADR-0076 controller. This ADR does not define a full OpenConfig
-   config datastore.
+   through this ADR-0076 controller. The standard gNMI commit-confirmed
+   extension maps to the same confirm / abort lifecycle; gNMI does not get a
+   separate pending-transaction store. This ADR does not define a full
+   OpenConfig config datastore.
 
 ## Consequences
 

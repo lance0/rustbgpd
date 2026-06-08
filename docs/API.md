@@ -192,8 +192,10 @@ default network instance. `Set` is operator-only and supports the first durable
 config subset: static, numbered BGP neighbor create/update/delete for
 `neighbor-address`, `peer-as`, `description`, and `peer-group`. Supported Set
 edits are translated into full candidate TOML and fed through
-`PlanConfigTransaction` / `ApplyConfigTransaction`; unsupported paths return
-`UNIMPLEMENTED` instead of bypassing the transaction model. See
+`PlanConfigTransaction` / `ApplyConfigTransaction`; the standard gNMI
+commit-confirmed extension maps to the same confirm / abort lifecycle as native
+config transactions. Unsupported paths return `UNIMPLEMENTED` instead of
+bypassing the transaction model. See
 [GNMI.md](GNMI.md) for the full `ON_CHANGE` v1 scope (initial sync,
 reconnect-no-replay, lag → `DATA_LOSS`) and Set path matrix.
 

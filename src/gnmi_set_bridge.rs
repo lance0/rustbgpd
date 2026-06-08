@@ -522,7 +522,7 @@ description = "old"
         GnmiSetTransaction {
             prefix: None,
             operations,
-            extensions: Vec::new(),
+            commit_action: None,
         }
     }
 
