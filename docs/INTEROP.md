@@ -9,6 +9,10 @@ are called out explicitly.
 > quick-start with `m0-frr.clab.yml` is in there), see
 > [`deployment.md`](deployment.md).
 
+> For the consolidated operator-facing proof index that rolls interop,
+> dataplane, benchmark, memory, and soak receipts together, see
+> [`OPERATIONAL_PROOF.md`](OPERATIONAL_PROOF.md).
+
 ---
 
 ## Test Matrix

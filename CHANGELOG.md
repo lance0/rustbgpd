@@ -69,6 +69,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bench/compare-rib-memory.sh` for base/head CSV and Markdown summaries under
   the shared bench/soak host mutex.
 
+- **Operational proof receipts page.** Added `docs/OPERATIONAL_PROOF.md` as
+  the consolidated operator-facing index for CI interop, hosted kernel
+  dataplane, benchmark, high-N memory, and archived 24 h soak receipts.
+
 - **Peer reshape snapshot foundation.** The peer manager now has an atomic
   internal command that reconfigures a set of concrete static peers, returns
   their prior configs as a rollback token, and restores already-changed peers on

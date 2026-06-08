@@ -135,6 +135,9 @@ has it, no broad performance sprints without profile evidence.
   machine-readable rows for Adj-RIB-In, Full-RIB, and RR/route-server fanout
   shapes at 100k/500k/900k prefixes, and `bench/compare-rib-memory.sh` produces
   A/B CSV + Markdown receipts under the shared bench/soak host mutex.
+  **Done:** `docs/OPERATIONAL_PROOF.md` now consolidates CI interop, hosted
+  kernel dataplane, benchmark, high-N memory, and archived 24 h soak receipts
+  into one operator-facing proof index.
   Exit: one repeatable soak result operators can inspect, bench comparison
   receipts for perf PRs, and memory tracking that covers full-table scale
   without relying only on bgperf2.
@@ -664,6 +667,9 @@ If you need these features, combine rustbgpd with purpose-built tools.
   kernel-dataplane smokes (EVPN VTEP / IRB, FIB, BFD, TCP-AO — M36–M53) run in
   the hosted `kernel-dataplane` workflow; large-scale churn (M33) is a manual
   soak harness under `tests/soak/`.
+- **[docs/OPERATIONAL_PROOF.md](docs/OPERATIONAL_PROOF.md)** — the consolidated
+  operator-facing receipt index for CI interop, hosted dataplane, benchmarks,
+  high-N memory profiles, and archived 24 h soaks.
 - **[docs/COMPARISON.md](docs/COMPARISON.md)** + **[docs/gobgp-parity.md](docs/gobgp-parity.md)**
   — the detailed competitive / parity tables vs FRR, BIRD, GoBGP, OpenBGPD.
 - **[docs/evpn-enablement.md](docs/evpn-enablement.md)** — the EVPN enablement

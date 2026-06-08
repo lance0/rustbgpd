@@ -3,6 +3,9 @@
 Micro-benchmarks using [Criterion](https://github.com/bheisler/criterion.rs) 0.8,
 compiled with `--release` (LTO, codegen-units=1). Numbers below are meant
 for relative comparison and regression tracking, not absolute guarantees.
+For the consolidated operator-facing proof index that rolls benchmark, memory,
+interop, dataplane, and soak receipts together, see
+[`OPERATIONAL_PROOF.md`](OPERATIONAL_PROOF.md).
 
 **Last measured:** RIB Operations pinned A/B: 2026-05-29; same-host
 current-main reconfirmation, distribution-fanout baseline, and memory
