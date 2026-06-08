@@ -1054,6 +1054,141 @@ async fn reconfigure_peer_restores_previous_peer_when_replacement_add_fails() {
 }
 
 #[tokio::test]
+async fn apply_peer_reshape_snapshot_returns_priors_and_can_replay_them() {
+    let mut mgr = test_peer_manager();
+    let addr1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let addr2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    mgr.add_peer(make_config(addr1, 65002), false)
+        .await
+        .unwrap();
+    mgr.add_peer(make_config(addr2, 65003), false)
+        .await
+        .unwrap();
+    mgr.disable_peer(key(addr2), None).await.unwrap();
+
+    let mut replacement1 = make_config(addr1, 65002);
+    replacement1.hold_time = Some(45);
+    let mut replacement2 = make_config(addr2, 65003);
+    replacement2.hold_time = Some(30);
+
+    let priors = mgr
+        .apply_peer_reshape_snapshot(vec![replacement1, replacement2])
+        .await
+        .unwrap();
+
+    assert_eq!(priors.len(), 2);
+    assert_eq!(priors[0].hold_time, Some(90));
+    assert_eq!(priors[1].hold_time, Some(90));
+    assert_eq!(
+        mgr.peers.get(&key(addr1)).expect("peer 1").hold_time,
+        Some(45)
+    );
+    let peer2 = mgr.peers.get(&key(addr2)).expect("peer 2");
+    assert_eq!(peer2.hold_time, Some(30));
+    assert!(!peer2.enabled);
+
+    let rollback_priors = mgr.apply_peer_reshape_snapshot(priors).await.unwrap();
+    assert_eq!(rollback_priors.len(), 2);
+    assert_eq!(
+        mgr.peers.get(&key(addr1)).expect("peer 1").hold_time,
+        Some(90)
+    );
+    let peer2 = mgr.peers.get(&key(addr2)).expect("peer 2");
+    assert_eq!(peer2.hold_time, Some(90));
+    assert!(!peer2.enabled);
+}
+
+#[tokio::test]
+async fn apply_peer_reshape_snapshot_rejects_duplicate_targets_without_mutation() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+
+    let mut replacement = make_config(addr, 65002);
+    replacement.hold_time = Some(45);
+    let mut duplicate = replacement.clone();
+    duplicate.description = "duplicate target".to_string();
+
+    let Err(error) = mgr
+        .apply_peer_reshape_snapshot(vec![replacement, duplicate])
+        .await
+    else {
+        panic!("duplicate targets must be rejected before mutation");
+    };
+
+    assert!(error.contains("appears more than once"), "{error}");
+    let managed = mgr.peers.get(&key(addr)).expect("unchanged peer");
+    assert_eq!(managed.hold_time, Some(90));
+    assert_eq!(managed.description, format!("test-peer-{addr}"));
+}
+
+#[tokio::test]
+async fn apply_peer_reshape_snapshot_rejects_tcp_ao_delta_without_mutation() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+
+    let mut replacement = make_config(addr, 65002);
+    replacement.hold_time = Some(45);
+    replacement.tcp_ao = Some(rustbgpd_transport::TcpAoConfig {
+        key: "secret".to_string(),
+        send_id: 1,
+        recv_id: 1,
+        algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+        preferred: false,
+        deprecated: false,
+    });
+
+    let Err(error) = mgr.apply_peer_reshape_snapshot(vec![replacement]).await else {
+        panic!("TCP-AO deltas must be rejected before mutation");
+    };
+
+    assert!(error.contains("changes tcp_ao"), "{error}");
+    let managed = mgr.peers.get(&key(addr)).expect("unchanged peer");
+    assert_eq!(managed.hold_time, Some(90));
+    assert!(managed.transport_config.tcp_ao.is_none());
+}
+
+#[tokio::test]
+async fn apply_peer_reshape_snapshot_rolls_back_prior_peers_on_later_failure() {
+    let mut mgr = test_peer_manager();
+    let addr1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    mgr.add_peer(make_config(addr1, 65002), false)
+        .await
+        .unwrap();
+
+    let addr2 = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2));
+    let interface = "rustbgpd-test-missing0";
+    let mut original2 = make_config(addr2, 65003);
+    original2.interface = Some(interface.to_string());
+    original2.scope_id = Some(42);
+    mgr.add_peer(original2, false).await.unwrap();
+
+    let mut replacement1 = make_config(addr1, 65002);
+    replacement1.hold_time = Some(45);
+    let mut invalid_replacement2 = make_config(addr2, 65003);
+    invalid_replacement2.interface = Some(interface.to_string());
+    invalid_replacement2.description = "should not survive failed reshape".to_string();
+
+    let Err(error) = mgr
+        .apply_peer_reshape_snapshot(vec![replacement1, invalid_replacement2])
+        .await
+    else {
+        panic!("later invalid target must fail and roll back earlier peers");
+    };
+
+    assert!(error.contains("prior peers restored"), "{error}");
+    let peer1 = mgr.peers.get(&key(addr1)).expect("restored peer 1");
+    assert_eq!(peer1.hold_time, Some(90));
+    let peer2 = mgr
+        .peers
+        .get(&scoped_key(addr2, interface))
+        .expect("restored peer 2");
+    assert_eq!(peer2.description, format!("test-peer-{addr2}"));
+    assert_eq!(peer2.hold_time, Some(90));
+}
+
+#[tokio::test]
 async fn reconcile_changed_peer_preserves_disabled_state() {
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);

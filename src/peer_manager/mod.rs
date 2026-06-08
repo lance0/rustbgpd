@@ -634,6 +634,10 @@ impl PeerManager {
                                 .await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::ApplyPeerReshapeSnapshot { targets, reply } => {
+                            let result = self.apply_peer_reshape_snapshot(targets).await;
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::StageFibTables { tables, reply } => {
                             let result = self.stage_fib_tables_candidate(&tables);
                             let _ = reply.send(result);

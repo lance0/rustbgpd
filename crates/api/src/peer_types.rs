@@ -511,6 +511,24 @@ pub enum PeerManagerCommand {
         /// Reply returns the captured prior chains (the rollback token).
         reply: oneshot::Sender<Result<Vec<ResolvedPeerPolicy>, String>>,
     },
+    /// Atomically reconfigure a set of live static peers and return each peer's
+    /// PRIOR neighbor config for rollback.
+    ///
+    /// Used by the config-transaction peer-group/session reshape executor. Each
+    /// target is a fully resolved replacement config. The command reuses the
+    /// same delete/re-add semantics as [`PeerManagerCommand::ReconfigurePeer`],
+    /// including disabled-state and graceful-shutdown preservation. On the first
+    /// per-peer failure, peers already changed by this command are restored in
+    /// reverse order and the command returns `Err`. On success, replaying the
+    /// returned prior configs through this same command rolls back a later
+    /// persistence failure. Never mutates `current_config`; snapshot staging
+    /// owns the config-token advance.
+    ApplyPeerReshapeSnapshot {
+        /// Fully resolved replacement configs, one entry per concrete live peer.
+        targets: Vec<PeerManagerNeighborConfig>,
+        /// Reply returns captured prior configs (the rollback token).
+        reply: oneshot::Sender<Result<Vec<PeerManagerNeighborConfig>, String>>,
+    },
     /// Atomically validate a candidate `[[fib_tables]]` set against the live
     /// runtime config (peer-group references, reserved/duplicate table ids,
     /// families, ECMP caps) and, on success, stage it into

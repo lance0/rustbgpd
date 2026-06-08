@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use rustbgpd_api::peer_types::{
     ConfigEvent, PeerKey, PeerManagerNeighborConfig, SessionLifecycleEventType, SetGshutError,
 };
@@ -307,6 +309,60 @@ impl PeerManager {
         }
 
         Ok(previous)
+    }
+
+    pub(super) async fn apply_peer_reshape_snapshot(
+        &mut self,
+        targets: Vec<PeerManagerNeighborConfig>,
+    ) -> Result<Vec<PeerManagerNeighborConfig>, String> {
+        let mut seen = BTreeSet::new();
+        for target in &targets {
+            let peer = PeerKey::new(target.address, target.interface.clone());
+            if !seen.insert(peer.clone()) {
+                return Err(format!("peer reshape target {peer} appears more than once"));
+            }
+            let managed = self
+                .peers
+                .get(&peer)
+                .ok_or_else(|| format!("peer reshape target {peer} is not managed"))?;
+            if managed.transport_config.tcp_ao != target.tcp_ao {
+                return Err(format!(
+                    "peer reshape target {peer} changes tcp_ao; TCP-AO changes require a daemon restart"
+                ));
+            }
+        }
+
+        let mut priors = Vec::with_capacity(targets.len());
+        for target in targets {
+            let peer = PeerKey::new(target.address, target.interface.clone());
+            match self.reconfigure_peer(target).await {
+                Ok(previous) => priors.push(previous),
+                Err(error) => {
+                    return match self.restore_peer_reshape_priors(priors).await {
+                        Ok(()) => Err(format!(
+                            "failed to reconfigure peer {peer}: {error}; prior peers restored"
+                        )),
+                        Err(restore_error) => Err(format!(
+                            "failed to reconfigure peer {peer}: {error}; restore prior peers failed: {restore_error}"
+                        )),
+                    };
+                }
+            }
+        }
+        Ok(priors)
+    }
+
+    async fn restore_peer_reshape_priors(
+        &mut self,
+        priors: Vec<PeerManagerNeighborConfig>,
+    ) -> Result<(), String> {
+        for prior in priors.into_iter().rev() {
+            let peer = PeerKey::new(prior.address, prior.interface.clone());
+            self.reconfigure_peer(prior)
+                .await
+                .map_err(|error| format!("peer reshape rollback failed for {peer}: {error}"))?;
+        }
+        Ok(())
     }
 
     async fn restore_reconfigured_peer(
