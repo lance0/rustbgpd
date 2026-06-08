@@ -10,12 +10,12 @@ use rustbgpd_api::gnmi;
 use rustbgpd_api::server::{GnmiSetError, GnmiSetOperation, GnmiSetTransaction};
 use serde_json::Value;
 
-use crate::config::{Config, Neighbor};
+use crate::config::{Config, Neighbor, PeerGroupConfig};
 
 const DEFAULT_NETWORK_INSTANCE: &str = "DEFAULT";
 const DEFAULT_PROTOCOL_NAME: &str = "BGP";
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 enum SetPath {
     Neighbor {
         address: IpAddr,
@@ -23,6 +23,13 @@ enum SetPath {
     NeighborConfigLeaf {
         address: IpAddr,
         leaf: NeighborConfigLeaf,
+    },
+    PeerGroup {
+        name: String,
+    },
+    PeerGroupConfigLeaf {
+        name: String,
+        leaf: PeerGroupConfigLeaf,
     },
 }
 
@@ -32,6 +39,14 @@ enum NeighborConfigLeaf {
     PeerAs,
     Description,
     PeerGroup,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum PeerGroupConfigLeaf {
+    PeerGroupName,
+    AuthPassword,
+    RemovePrivateAs,
+    HoldTime,
 }
 
 #[derive(Clone)]
@@ -49,29 +64,34 @@ pub(crate) fn apply_transaction_to_config(
     mut config: Config,
     transaction: &GnmiSetTransaction,
 ) -> Result<Config, GnmiSetError> {
-    let mut drafts = config
-        .neighbors
+    let mut drafts = std::mem::take(&mut config.neighbors)
         .into_iter()
         .map(|neighbor| NeighborDraft {
             neighbor,
             has_remote_asn: true,
         })
         .collect::<Vec<_>>();
+    let mut peer_groups = std::mem::take(&mut config.peer_groups);
 
     for operation in &transaction.operations {
         match operation {
-            GnmiSetOperation::Delete(path) => apply_delete(&mut drafts, path)?,
+            GnmiSetOperation::Delete(path) => apply_delete(&mut drafts, &mut peer_groups, path)?,
             GnmiSetOperation::Replace(update) | GnmiSetOperation::Update(update) => {
-                apply_update(&mut drafts, update)?;
+                apply_update(&mut drafts, &mut peer_groups, update)?;
             }
         }
     }
 
     config.neighbors = finalize_neighbors(drafts)?;
+    config.peer_groups = peer_groups;
     Ok(config)
 }
 
-fn apply_delete(drafts: &mut Vec<NeighborDraft>, path: &gnmi::Path) -> Result<(), GnmiSetError> {
+fn apply_delete(
+    drafts: &mut Vec<NeighborDraft>,
+    peer_groups: &mut std::collections::HashMap<String, PeerGroupConfig>,
+    path: &gnmi::Path,
+) -> Result<(), GnmiSetError> {
     match parse_set_path(path)? {
         SetPath::Neighbor { address } => {
             if let Some(index) = neighbor_index(drafts, address)? {
@@ -82,26 +102,40 @@ fn apply_delete(drafts: &mut Vec<NeighborDraft>, path: &gnmi::Path) -> Result<()
         SetPath::NeighborConfigLeaf { .. } => Err(GnmiSetError::Unimplemented(
             "gNMI Set currently supports deleting whole static neighbor entries only".to_string(),
         )),
+        SetPath::PeerGroup { name } => {
+            peer_groups.remove(&name);
+            Ok(())
+        }
+        SetPath::PeerGroupConfigLeaf { .. } => Err(GnmiSetError::Unimplemented(
+            "gNMI Set currently supports deleting whole peer-group entries only".to_string(),
+        )),
     }
 }
 
 fn apply_update(
     drafts: &mut Vec<NeighborDraft>,
+    peer_groups: &mut std::collections::HashMap<String, PeerGroupConfig>,
     update: &gnmi::Update,
 ) -> Result<(), GnmiSetError> {
     let path = update.path.as_ref().ok_or_else(|| {
         GnmiSetError::InvalidArgument("gNMI Set update requires a path".to_string())
     })?;
-    let SetPath::NeighborConfigLeaf { address, leaf } = parse_set_path(path)? else {
-        return Err(GnmiSetError::Unimplemented(
-            "gNMI Set update/replace currently supports static neighbor config leaves only"
-                .to_string(),
-        ));
-    };
+    let set_path = parse_set_path(path)?;
     let value = typed_value_to_json(update.val.as_ref().ok_or_else(|| {
         GnmiSetError::InvalidArgument("gNMI Set update requires a TypedValue".to_string())
     })?)?;
-    apply_neighbor_leaf(drafts, address, leaf, value)
+    match set_path {
+        SetPath::NeighborConfigLeaf { address, leaf } => {
+            apply_neighbor_leaf(drafts, address, leaf, value)
+        }
+        SetPath::PeerGroupConfigLeaf { name, leaf } => {
+            apply_peer_group_leaf(peer_groups, &name, leaf, value)
+        }
+        SetPath::Neighbor { .. } | SetPath::PeerGroup { .. } => Err(GnmiSetError::Unimplemented(
+            "gNMI Set update/replace currently supports OpenConfig BGP config leaves only"
+                .to_string(),
+        )),
+    }
 }
 
 fn apply_neighbor_leaf(
@@ -130,6 +164,37 @@ fn apply_neighbor_leaf(
         }
         NeighborConfigLeaf::PeerGroup => {
             draft.neighbor.peer_group = Some(parse_string_value(value, "peer-group")?);
+        }
+    }
+    Ok(())
+}
+
+fn apply_peer_group_leaf(
+    peer_groups: &mut std::collections::HashMap<String, PeerGroupConfig>,
+    name: &str,
+    leaf: PeerGroupConfigLeaf,
+    value: Value,
+) -> Result<(), GnmiSetError> {
+    let group = peer_groups
+        .entry(name.to_string())
+        .or_insert_with(empty_peer_group);
+    match leaf {
+        PeerGroupConfigLeaf::PeerGroupName => {
+            let configured = parse_string_value(value, "peer-group-name")?;
+            if configured != name {
+                return Err(GnmiSetError::InvalidArgument(format!(
+                    "peer-group-name value {configured:?} does not match peer-group key {name:?}"
+                )));
+            }
+        }
+        PeerGroupConfigLeaf::AuthPassword => {
+            group.md5_password = Some(parse_string_value(value, "auth-password")?);
+        }
+        PeerGroupConfigLeaf::RemovePrivateAs => {
+            group.remove_private_as = Some(parse_remove_private_as_value(value)?);
+        }
+        PeerGroupConfigLeaf::HoldTime => {
+            group.hold_time = Some(parse_u16_value(value, "hold-time")?);
         }
     }
     Ok(())
@@ -215,6 +280,10 @@ fn empty_neighbor(address: IpAddr) -> Neighbor {
     }
 }
 
+fn empty_peer_group() -> PeerGroupConfig {
+    PeerGroupConfig::default()
+}
+
 fn parse_set_path(path: &gnmi::Path) -> Result<SetPath, GnmiSetError> {
     #[allow(deprecated)]
     if !path.element.is_empty() {
@@ -229,7 +298,7 @@ fn parse_set_path(path: &gnmi::Path) -> Result<SetPath, GnmiSetError> {
         )));
     }
     let elem = &path.elem;
-    if elem.len() < 7 {
+    if elem.len() < 6 {
         return Err(GnmiSetError::Unimplemented(
             "unsupported OpenConfig Set path".to_string(),
         ));
@@ -244,21 +313,36 @@ fn parse_set_path(path: &gnmi::Path) -> Result<SetPath, GnmiSetError> {
     expect_no_keys(&elem[2], "protocols")?;
     expect_protocol_key(&elem[3])?;
     expect_no_keys(&elem[4], "bgp")?;
-    expect_no_keys(&elem[5], "neighbors")?;
-    let address = expect_neighbor_key(&elem[6])?;
+    match elem[5].name.as_str() {
+        "neighbors" => parse_neighbor_set_path(&elem[5..]),
+        "peer-groups" => parse_peer_group_set_path(&elem[5..]),
+        _ => Err(GnmiSetError::Unimplemented(
+            "unsupported OpenConfig BGP Set path".to_string(),
+        )),
+    }
+}
+
+fn parse_neighbor_set_path(elem: &[gnmi::PathElem]) -> Result<SetPath, GnmiSetError> {
+    if elem.len() < 2 {
+        return Err(GnmiSetError::Unimplemented(
+            "unsupported OpenConfig BGP neighbor Set path".to_string(),
+        ));
+    }
+    expect_no_keys(&elem[0], "neighbors")?;
+    let address = expect_neighbor_key(&elem[1])?;
     reject_link_local(address)?;
 
-    match elem.get(7).map(|tail| tail.name.as_str()) {
+    match elem.get(2).map(|tail| tail.name.as_str()) {
         None => Ok(SetPath::Neighbor { address }),
         Some("config") => {
-            ensure_no_extra_leaf_keys(&elem[7])?;
-            let Some(leaf) = elem.get(8) else {
+            ensure_no_extra_leaf_keys(&elem[2])?;
+            let Some(leaf) = elem.get(3) else {
                 return Err(GnmiSetError::Unimplemented(
                     "gNMI Set currently supports neighbor config leaves, not config container replace/update"
                         .to_string(),
                 ));
             };
-            if elem.len() != 9 {
+            if elem.len() != 4 {
                 return Err(GnmiSetError::Unimplemented(
                     "unsupported OpenConfig BGP neighbor config subtree".to_string(),
                 ));
@@ -291,6 +375,79 @@ fn parse_set_path(path: &gnmi::Path) -> Result<SetPath, GnmiSetError> {
         }
         _ => Err(GnmiSetError::Unimplemented(
             "unsupported OpenConfig BGP neighbor Set path".to_string(),
+        )),
+    }
+}
+
+fn parse_peer_group_set_path(elem: &[gnmi::PathElem]) -> Result<SetPath, GnmiSetError> {
+    if elem.len() < 2 {
+        return Err(GnmiSetError::Unimplemented(
+            "unsupported OpenConfig BGP peer-group Set path".to_string(),
+        ));
+    }
+    expect_no_keys(&elem[0], "peer-groups")?;
+    let name = expect_peer_group_key(&elem[1])?;
+
+    match elem.get(2).map(|tail| tail.name.as_str()) {
+        None => Ok(SetPath::PeerGroup { name }),
+        Some("config") => {
+            ensure_no_extra_leaf_keys(&elem[2])?;
+            let Some(leaf) = elem.get(3) else {
+                return Err(GnmiSetError::Unimplemented(
+                    "gNMI Set currently supports peer-group config leaves, not config container replace/update"
+                        .to_string(),
+                ));
+            };
+            if elem.len() != 4 {
+                return Err(GnmiSetError::Unimplemented(
+                    "unsupported OpenConfig BGP peer-group config subtree".to_string(),
+                ));
+            }
+            ensure_no_extra_leaf_keys(leaf)?;
+            let leaf = match leaf.name.as_str() {
+                "peer-group-name" => PeerGroupConfigLeaf::PeerGroupName,
+                "auth-password" => PeerGroupConfigLeaf::AuthPassword,
+                "remove-private-as" => PeerGroupConfigLeaf::RemovePrivateAs,
+                "peer-as"
+                | "local-as"
+                | "peer-type"
+                | "send-community"
+                | "send-community-type"
+                | "description" => {
+                    return Err(GnmiSetError::Unimplemented(format!(
+                        "OpenConfig peer-group config/{} is not supported by gNMI Set yet",
+                        leaf.name
+                    )));
+                }
+                _ => {
+                    return Err(GnmiSetError::Unimplemented(
+                        "unsupported OpenConfig BGP peer-group config leaf".to_string(),
+                    ));
+                }
+            };
+            Ok(SetPath::PeerGroupConfigLeaf { name, leaf })
+        }
+        Some("timers") => {
+            ensure_no_extra_leaf_keys(&elem[2])?;
+            if elem.len() != 5 {
+                return Err(GnmiSetError::Unimplemented(
+                    "unsupported OpenConfig BGP peer-group timers subtree".to_string(),
+                ));
+            }
+            expect_no_keys(&elem[3], "config")?;
+            ensure_no_extra_leaf_keys(&elem[4])?;
+            match elem[4].name.as_str() {
+                "hold-time" => Ok(SetPath::PeerGroupConfigLeaf {
+                    name,
+                    leaf: PeerGroupConfigLeaf::HoldTime,
+                }),
+                _ => Err(GnmiSetError::Unimplemented(
+                    "unsupported OpenConfig BGP peer-group timers config leaf".to_string(),
+                )),
+            }
+        }
+        _ => Err(GnmiSetError::Unimplemented(
+            "unsupported OpenConfig BGP peer-group Set path".to_string(),
         )),
     }
 }
@@ -381,6 +538,26 @@ fn expect_neighbor_key(elem: &gnmi::PathElem) -> Result<IpAddr, GnmiSetError> {
         .map_err(|_| GnmiSetError::InvalidArgument(format!("invalid neighbor-address key {raw}")))
 }
 
+fn expect_peer_group_key(elem: &gnmi::PathElem) -> Result<String, GnmiSetError> {
+    if elem.name != "peer-group" {
+        return Err(GnmiSetError::Unimplemented(
+            "unsupported OpenConfig BGP peer-groups Set path".to_string(),
+        ));
+    }
+    if elem.key.len() != 1 || !elem.key.contains_key("peer-group-name") {
+        return Err(GnmiSetError::InvalidArgument(
+            "peer-group requires only the peer-group-name key".to_string(),
+        ));
+    }
+    let name = elem.key["peer-group-name"].trim();
+    if name.is_empty() || name == "*" {
+        return Err(GnmiSetError::InvalidArgument(
+            "peer-group-name key must be a non-empty literal".to_string(),
+        ));
+    }
+    Ok(name.to_string())
+}
+
 fn ensure_no_extra_leaf_keys(elem: &gnmi::PathElem) -> Result<(), GnmiSetError> {
     if elem.key.is_empty() {
         Ok(())
@@ -424,7 +601,7 @@ fn typed_value_to_json(value: &gnmi::TypedValue) -> Result<Value, GnmiSetError> 
             })
         }
         _ => Err(GnmiSetError::InvalidArgument(
-            "unsupported gNMI Set TypedValue for OpenConfig BGP neighbor config".to_string(),
+            "unsupported gNMI Set TypedValue for OpenConfig BGP config".to_string(),
         )),
     }
 }
@@ -461,6 +638,34 @@ fn parse_u32_value(value: Value, leaf: &str) -> Result<u32, GnmiSetError> {
     }
 }
 
+fn parse_u16_value(value: Value, leaf: &str) -> Result<u16, GnmiSetError> {
+    match value {
+        Value::Number(number) => number
+            .as_u64()
+            .and_then(|value| u16::try_from(value).ok())
+            .ok_or_else(|| {
+                GnmiSetError::InvalidArgument(format!("{leaf} requires a uint16 value"))
+            }),
+        Value::String(value) => value
+            .parse::<u16>()
+            .map_err(|_| GnmiSetError::InvalidArgument(format!("{leaf} requires a uint16 value"))),
+        _ => Err(GnmiSetError::InvalidArgument(format!(
+            "{leaf} requires a uint16 value"
+        ))),
+    }
+}
+
+fn parse_remove_private_as_value(value: Value) -> Result<String, GnmiSetError> {
+    let raw = parse_string_value(value, "remove-private-as")?;
+    let identity = raw.rsplit(':').next().unwrap_or(&raw);
+    match identity.to_ascii_uppercase().as_str() {
+        "PRIVATE_AS_REMOVE" | "REMOVE" => Ok("remove".to_string()),
+        "PRIVATE_AS_REMOVE_ALL" | "REMOVE_ALL" | "ALL" => Ok("all".to_string()),
+        "PRIVATE_AS_REPLACE_ALL" | "REPLACE_ALL" | "REPLACE" => Ok("replace".to_string()),
+        _ => Ok(raw),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,16 +693,34 @@ description = "old"
         .unwrap()
     }
 
-    fn path(address: &str, tail: &[&str]) -> gnmi::Path {
-        let mut elem = vec![
+    fn bgp_prefix_elem() -> Vec<gnmi::PathElem> {
+        vec![
             pe("network-instances"),
             keyed_pe("network-instance", "name", "DEFAULT"),
             pe("protocols"),
             protocol_pe(),
             pe("bgp"),
-            pe("neighbors"),
-            keyed_pe("neighbor", "neighbor-address", address),
-        ];
+        ]
+    }
+
+    fn path(address: &str, tail: &[&str]) -> gnmi::Path {
+        let mut elem = bgp_prefix_elem();
+        elem.push(pe("neighbors"));
+        elem.push(keyed_pe("neighbor", "neighbor-address", address));
+        elem.extend(tail.iter().map(|name| pe(name)));
+        gnmi::Path {
+            #[allow(deprecated)]
+            element: Vec::new(),
+            origin: String::new(),
+            elem,
+            target: String::new(),
+        }
+    }
+
+    fn peer_group_path(name: &str, tail: &[&str]) -> gnmi::Path {
+        let mut elem = bgp_prefix_elem();
+        elem.push(pe("peer-groups"));
+        elem.push(keyed_pe("peer-group", "peer-group-name", name));
         elem.extend(tail.iter().map(|name| pe(name)));
         gnmi::Path {
             #[allow(deprecated)]
@@ -511,6 +734,16 @@ description = "old"
     fn update(address: &str, leaf: &str, value: TypedValue) -> GnmiSetOperation {
         GnmiSetOperation::Update(gnmi::Update {
             path: Some(path(address, &["config", leaf])),
+            #[allow(deprecated)]
+            value: None,
+            val: Some(gnmi::TypedValue { value: Some(value) }),
+            duplicates: 0,
+        })
+    }
+
+    fn peer_group_update(name: &str, tail: &[&str], value: TypedValue) -> GnmiSetOperation {
+        GnmiSetOperation::Update(gnmi::Update {
+            path: Some(peer_group_path(name, tail)),
             #[allow(deprecated)]
             value: None,
             val: Some(gnmi::TypedValue { value: Some(value) }),
@@ -661,5 +894,114 @@ description = "old"
 
         assert!(matches!(error, GnmiSetError::Unimplemented(_)));
         assert!(error.to_string().contains("link-local"));
+    }
+
+    #[test]
+    fn set_peer_group_name_creates_peer_group() {
+        let candidate = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![peer_group_update(
+                "rs-clients",
+                &["config", "peer-group-name"],
+                TypedValue::StringVal("rs-clients".to_string()),
+            )]),
+        )
+        .unwrap();
+
+        assert!(candidate.peer_groups.contains_key("rs-clients"));
+    }
+
+    #[test]
+    fn set_peer_group_updates_supported_config_leaves() {
+        let candidate = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![
+                peer_group_update(
+                    "rs-clients",
+                    &["config", "auth-password"],
+                    TypedValue::StringVal("secret".to_string()),
+                ),
+                peer_group_update(
+                    "rs-clients",
+                    &["config", "remove-private-as"],
+                    TypedValue::StringVal("PRIVATE_AS_REMOVE_ALL".to_string()),
+                ),
+                peer_group_update(
+                    "rs-clients",
+                    &["timers", "config", "hold-time"],
+                    TypedValue::UintVal(45),
+                ),
+            ]),
+        )
+        .unwrap();
+
+        let group = candidate.peer_groups.get("rs-clients").unwrap();
+        assert_eq!(group.md5_password.as_deref(), Some("secret"));
+        assert_eq!(group.remove_private_as.as_deref(), Some("all"));
+        assert_eq!(group.hold_time, Some(45));
+    }
+
+    #[test]
+    fn set_peer_group_delete_removes_entry() {
+        let mut config = base_config();
+        config
+            .peer_groups
+            .insert("rs-clients".to_string(), empty_peer_group());
+
+        let candidate = apply_transaction_to_config(
+            config,
+            &transaction(vec![GnmiSetOperation::Delete(peer_group_path(
+                "rs-clients",
+                &[],
+            ))]),
+        )
+        .unwrap();
+
+        assert!(!candidate.peer_groups.contains_key("rs-clients"));
+    }
+
+    #[test]
+    fn set_peer_group_delete_missing_is_silent() {
+        let candidate = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![GnmiSetOperation::Delete(peer_group_path(
+                "missing",
+                &[],
+            ))]),
+        )
+        .unwrap();
+
+        assert!(candidate.peer_groups.is_empty());
+    }
+
+    #[test]
+    fn set_rejects_peer_group_name_mismatch() {
+        let error = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![peer_group_update(
+                "rs-clients",
+                &["config", "peer-group-name"],
+                TypedValue::StringVal("other".to_string()),
+            )]),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("does not match peer-group key"));
+    }
+
+    #[test]
+    fn set_rejects_peer_group_peer_as_until_native_model_exists() {
+        let error = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![peer_group_update(
+                "rs-clients",
+                &["config", "peer-as"],
+                TypedValue::UintVal(65002),
+            )]),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, GnmiSetError::Unimplemented(_)));
+        assert!(error.to_string().contains("peer-as"));
     }
 }

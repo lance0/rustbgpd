@@ -6,8 +6,8 @@ speak gNMI/OpenConfig.
 
 This is not a full OpenConfig router model. The v1 surface is deliberately
 narrow: `Capabilities`, `Get`, and `Subscribe` for BGP global and neighbor
-state, plus a small `Set` subset for durable static BGP neighbor config. `Set`
-maps supported OpenConfig mutations onto the ADR-0076 transaction model:
+state, plus a small `Set` subset for durable static BGP neighbor and peer-group
+config. `Set` maps supported OpenConfig mutations onto the ADR-0076 transaction model:
 payloads are redacted in audit logs, delete / replace / update operations are
 normalized into gNMI application order, and successful mutations build full
 candidate TOML before using the same plan/apply/persist/rollback path as native
@@ -52,7 +52,7 @@ are `sensitive_read`; `Set` is `operator_only`.
 | `Capabilities` | Returns gNMI version `0.10.0`, the OpenConfig modules backing the supported paths, and `JSON` / `JSON_IETF` encodings. |
 | `Get` | Returns the supported OpenConfig BGP global and neighbor `state` subset. |
 | `Subscribe` | Supports `ONCE`, `POLL`, `STREAM SAMPLE`, and `STREAM ON_CHANGE` (the last is scoped to the neighbor session-state leaf — see below). |
-| `Set` | Operator-only. Supports the static-neighbor config subset below through ADR-0076 transactions; unsupported paths return `UNIMPLEMENTED`, malformed values return `INVALID_ARGUMENT`, and transaction precondition failures return `FAILED_PRECONDITION`. Lower-tier callers receive `PERMISSION_DENIED` before the handler runs. |
+| `Set` | Operator-only. Supports the static-neighbor and peer-group config subsets below through ADR-0076 transactions; unsupported paths return `UNIMPLEMENTED`, malformed values return `INVALID_ARGUMENT`, and transaction precondition failures return `FAILED_PRECONDITION`. Lower-tier callers receive `PERMISSION_DENIED` before the handler runs. |
 
 ### `Set` static-neighbor scope
 
@@ -97,8 +97,50 @@ Transaction and validation behavior:
 - IPv6 link-local / BGP unnumbered neighbor Set is deferred because OpenConfig's
   `neighbor-address` key does not carry the interface identity rustbgpd needs to
   identify those peers safely.
-- `peer-group` references must name an existing rustbgpd peer group; peer-group
-  object creation via OpenConfig Set is deferred.
+- `peer-group` references must name an existing rustbgpd peer group.
+- Create a peer group in its own Set transaction before referencing it from a
+  new neighbor. ADR-0076 still rejects mixed-family candidates such as
+  "create peer group and add neighbor" in one Set when the combined diff cannot
+  be classified as one supported transaction family.
+
+### `Set` peer-group scope
+
+The supported peer-group config surface is under:
+
+```text
+/network-instances/network-instance[name=DEFAULT]/protocols/protocol[identifier=BGP][name=BGP]/bgp/peer-groups/peer-group[peer-group-name=NAME]
+```
+
+Supported operations:
+
+- `update` / `replace` `.../config/peer-group-name`. The value must match the
+  `peer-group[peer-group-name=NAME]` key; setting it creates an empty native
+  `[peer_groups.NAME]` entry when one does not already exist.
+- `update` / `replace` `.../config/auth-password`, mapped to native
+  `md5_password`.
+- `update` / `replace` `.../config/remove-private-as`, mapped to native
+  `remove_private_as`. The bridge accepts rustbgpd's native values
+  (`remove`, `all`, `replace`) and common OpenConfig identity spellings such as
+  `PRIVATE_AS_REMOVE_ALL`.
+- `update` / `replace` `.../timers/config/hold-time`, mapped to native
+  `hold_time`.
+- Delete a whole peer-group list entry by deleting
+  `.../peer-groups/peer-group[peer-group-name=NAME]`. Per gNMI, deleting a
+  missing entry is silently accepted.
+
+Transaction and validation behavior:
+
+- Peer-group Set changes use the same candidate-TOML transaction path as native
+  config changes. Unused peer-group catalog edits commit as catalog-only
+  transactions; edits that affect static live sessions use ADR-0076's existing
+  peer-group/session reshape executor.
+- If a candidate peer-group edit would affect a dynamic-neighbor range in a
+  way that the current transaction model cannot safely reshape, the transaction
+  is rejected by the native planner rather than silently drifting.
+- OpenConfig peer-group leaves without a native inherited config model remain
+  unsupported, including `config/peer-as`, `config/local-as`,
+  `config/peer-type`, `config/send-community-type`, and `config/description`.
+  Dynamic-neighbor Set is still deferred.
 
 ### `Set` commit-confirmed workflow
 

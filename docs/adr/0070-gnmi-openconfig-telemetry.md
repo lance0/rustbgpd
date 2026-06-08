@@ -68,7 +68,7 @@ committed through the existing transaction model.
 | `Capabilities` | Advertise gNMI version `0.10.0`, the **OpenConfig modules** (name / organization / version, via `ModelData`) backing the supported paths, and encodings `JSON` + `JSON_IETF`. `ModelData` is module-level, not per-path — the path subset is enforced at `Get` / `Subscribe`, not advertised here. |
 | `Get` | OpenConfig BGP operational-state subset (below). |
 | `Subscribe` | `ONCE`, `POLL`, and `STREAM` with `SAMPLE`. `STREAM` + `ON_CHANGE` v1 covers only `neighbor[neighbor-address=*]/state/session-state` (see Deferred). |
-| `Set` | Operator-only. Supports static numbered BGP neighbor create/update/delete for `neighbor-address`, `peer-as`, `description`, and `peer-group`, translated into candidate TOML and committed through ADR-0076. The standard commit-confirmed extension can start, confirm, and cancel the same confirmed transaction lifecycle. Unsupported paths and extensions return `Unimplemented`. |
+| `Set` | Operator-only. Supports static numbered BGP neighbor create/update/delete for `neighbor-address`, `peer-as`, `description`, and `peer-group`, plus a narrow peer-group object subset for `peer-group-name`, `auth-password`, `remove-private-as`, and `hold-time`. Supported mutations translate into candidate TOML and commit through ADR-0076. The standard commit-confirmed extension can start, confirm, and cancel the same confirmed transaction lifecycle. Unsupported paths and extensions return `Unimplemented`. |
 
 ### OpenConfig path scope — a supported *subset*, not full OpenConfig BGP
 
@@ -220,7 +220,7 @@ User-facing setup, supported-path, `gnmic`, and troubleshooting guidance lives i
 | PR2 — `Get` OpenConfig BGP global + neighbors | Landed (PR #276) |
 | PR3 — `Subscribe` ONCE / POLL / SAMPLE | Landed (PR #277) |
 | M54 — hosted `gnmic` smoke over native mTLS | Landed: `Capabilities`, `Get`, `Subscribe STREAM/SAMPLE`, Set add/delete, commit-confirmed Set confirm/cancel, Set authz denial, and unsupported-path rejection are exercised by a real OpenConfig client |
-| Set transaction bridge + static-neighbor subset | Landed: Set payload audit redaction, delete / replace / update normalization, response shaping, daemon hook wiring, static numbered BGP neighbor create/update/delete for `neighbor-address`, `peer-as`, `description`, and `peer-group`, plus standard commit-confirmed `commit` / `confirm` / `cancel`; unsupported paths remain `Unimplemented` |
+| Set transaction bridge + static-neighbor / peer-group subset | Landed: Set payload audit redaction, delete / replace / update normalization, response shaping, daemon hook wiring, static numbered BGP neighbor create/update/delete for `neighbor-address`, `peer-as`, `description`, and `peer-group`, a narrow peer-group object subset for `peer-group-name`, `auth-password`, `remove-private-as`, and `hold-time`, plus standard commit-confirmed `commit` / `confirm` / `cancel`; unsupported paths remain `Unimplemented` |
 | PR4 — counters / capabilities / non-BGP telemetry | Deferred |
 
 ## Repo seams
@@ -252,12 +252,12 @@ Grounded against the current checkout:
 
 - rustbgpd becomes a drop-in OpenConfig BGP target for `gnmic` /
   `gnmi-gateway` / OpenConfig collector pipelines, with a narrow operator Set
-  bridge for durable static-neighbor config — a differentiator over GoBGP
+  bridge for durable static-neighbor and peer-group config — a differentiator over GoBGP
   (gRPC-only) and FRR-`bgpd` (no native per-daemon gNMI).
 - The production daemon remains intentionally narrow for OpenConfig config:
   `Set` is wired only for static, numbered BGP neighbor create/update/delete
-  on durable leaves that can be represented in rustbgpd TOML and committed
-  through ADR-0076. Unsupported config paths stay `UNIMPLEMENTED`.
+  and peer-group object leaves that can be represented in rustbgpd TOML and
+  committed through ADR-0076. Unsupported config paths stay `UNIMPLEMENTED`.
 - `Capabilities` must advertise an honest, narrow subset; over-claiming models,
   encodings, or paths breaks collectors, so the whitelist and the deferral list
   are part of the contract, not an afterthought.
@@ -271,10 +271,11 @@ Grounded against the current checkout:
 
 ## Deferred
 
-- **gNMI `Set` / config datastore** — the first static-neighbor subset now
+- **gNMI `Set` / config datastore** — the first static-neighbor and peer-group
+  subsets now
   handles OpenConfig-to-candidate-TOML mapping and commits through the
   ADR-0064-gated ADR-0076 transaction model. Remaining config work includes
-  broader neighbor leaves, peer-group object mutation, dynamic-neighbor Set,
+  broader neighbor leaves, broader peer-group subtrees, dynamic-neighbor Set,
   and commit-confirmed rollback-duration reset. Do not add a second commit path.
 - **`Subscribe ON_CHANGE`** — needs loss-free, path-diffed leaf events.
   **Unblocked by [ADR-0072](0072-durable-event-history.md);** ships

@@ -27,6 +27,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   read-tier principal is denied `Set` (`PermissionDenied`) while an unsupported
   leaf is rejected (`Unimplemented`).
 
+- **gNMI Set peer-group object subset.** The OpenConfig Set bridge can now
+  create/update/delete BGP peer-group list entries through ADR-0076 catalog
+  transactions. The supported peer-group leaves are deliberately narrow and map
+  to existing native TOML fields: `config/peer-group-name`,
+  `config/auth-password`, `config/remove-private-as`, and
+  `timers/config/hold-time`. Peer-group leaves without a native inherited model
+  such as `config/peer-as`, `config/local-as`, `config/peer-type`,
+  `config/send-community-type`, and `config/description` continue to return
+  `UNIMPLEMENTED`.
+
 - **ADR-0077 MPLS/VPN/BGP-LS address-family boundary.** Added a
   research-backed control-plane scope for future labeled-unicast, VPNv4/v6,
   Route Target Constraints, and BGP-LS work. The ADR keeps `Prefix` scoped to

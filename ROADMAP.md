@@ -112,7 +112,11 @@ has it, no broad performance sprints without profile evidence.
   daemon hook wiring, and a first static numbered BGP neighbor subset for
   `neighbor-address` / `peer-as` / `description` / `peer-group`; the standard
   gNMI commit-confirmed extension now maps `commit` / `confirm` / `cancel`
-  onto ADR-0076's confirmed transaction lifecycle; M54 now proves the supported
+  onto ADR-0076's confirmed transaction lifecycle. **Done:** peer-group object
+  Set can now create/update/delete native peer-group catalog entries for the
+  OpenConfig leaves with exact rustbgpd mappings (`peer-group-name`,
+  `auth-password`, `remove-private-as`, and `timers/config/hold-time`); leaves without
+  a native inherited model stay `UNIMPLEMENTED`. M54 now proves the supported
   Set and commit-confirmed flows with `gnmic` over mTLS. Exit: atomic commit
   where supported, explicit restart-required/rejected surfaces,
   rollback/receipt model, no partial silent drift. Gated by ADR-0064 tier authz.

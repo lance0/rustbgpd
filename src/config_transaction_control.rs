@@ -2139,6 +2139,20 @@ remote_asn = 65002
         }
     }
 
+    fn gnmi_set_peer_group_hold_time(
+        name: &str,
+        hold_time: u64,
+    ) -> rustbgpd_api::server::GnmiSetTransaction {
+        rustbgpd_api::server::GnmiSetTransaction {
+            prefix: None,
+            operations: vec![rustbgpd_api::server::GnmiSetOperation::Update(gnmi_update(
+                gnmi_peer_group_path(name, &["timers", "config", "hold-time"]),
+                rustbgpd_api::gnmi::typed_value::Value::UintVal(hold_time),
+            ))],
+            commit_action: None,
+        }
+    }
+
     fn gnmi_update(
         path: rustbgpd_api::gnmi::Path,
         value: rustbgpd_api::gnmi::typed_value::Value,
@@ -2168,6 +2182,26 @@ remote_asn = 65002
                 gnmi_pe("config"),
                 gnmi_pe(leaf),
             ],
+            target: String::new(),
+        }
+    }
+
+    fn gnmi_peer_group_path(name: &str, tail: &[&str]) -> rustbgpd_api::gnmi::Path {
+        let mut elem = vec![
+            gnmi_pe("network-instances"),
+            gnmi_keyed_pe("network-instance", "name", "DEFAULT"),
+            gnmi_pe("protocols"),
+            gnmi_protocol_pe(),
+            gnmi_pe("bgp"),
+            gnmi_pe("peer-groups"),
+            gnmi_keyed_pe("peer-group", "peer-group-name", name),
+        ];
+        elem.extend(tail.iter().map(|name| gnmi_pe(name)));
+        rustbgpd_api::gnmi::Path {
+            #[allow(deprecated)]
+            element: Vec::new(),
+            origin: String::new(),
+            elem,
             target: String::new(),
         }
     }
@@ -4257,6 +4291,50 @@ remote_asn = 65003
         assert_eq!(peers[0].remote_asn, 65003);
         let persisted = persisted.lock().await;
         assert!(persisted.contains("10.0.0.3"));
+        assert_eq!(*snapshot_toml.lock().await, *persisted);
+    }
+
+    #[tokio::test]
+    async fn gnmi_set_hook_commits_peer_group_catalog_through_transactions() {
+        let previous_toml = base_toml("");
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[peer_groups] catalog".to_string()],
+            ),
+            snapshot_toml.clone(),
+            peers,
+        ));
+        let persisted = Arc::new(Mutex::new(String::new()));
+        let persisted_task = Arc::clone(&persisted);
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted {
+                candidate_toml,
+                ack: Some(ack),
+            }) = config_rx.recv().await
+            {
+                *persisted_task.lock().await = candidate_toml;
+                let _ = ack.send(Ok(()));
+            }
+        });
+        let controller = ConfigTransactionController::new(
+            deps_value(None, peer_tx, Some(config_tx), Vec::new()),
+            BgpMetrics::new(),
+        );
+
+        controller
+            .apply_gnmi_set(gnmi_set_peer_group_hold_time("rs-clients", 45))
+            .await
+            .unwrap();
+
+        let persisted = persisted.lock().await;
+        assert!(persisted.contains("[peer_groups.rs-clients]"));
+        assert!(persisted.contains("hold_time = 45"));
         assert_eq!(*snapshot_toml.lock().await, *persisted);
     }
 
