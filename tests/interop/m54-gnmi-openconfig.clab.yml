@@ -1,8 +1,16 @@
-# Containerlab topology: rustbgpd read-only gNMI / OpenConfig smoke.
+# Containerlab topology: rustbgpd gNMI / OpenConfig smoke (read + Set).
 #
 # Single rustbgpd node with native mTLS on the gRPC listener. No BGP
 # peer is needed: the test exercises the gNMI collector-facing
-# telemetry surface using gnmic.
+# telemetry surface plus the transaction-backed OpenConfig Set subset
+# (static-neighbor add/delete, commit-confirmed confirm/cancel) using
+# gnmic.
+#
+# The config is mounted read-only as a template and copied to a
+# container-local writable path so the gNMI Set / ADR-0076 atomic
+# config persist (write `.config.toml.tmp` + rename over `config.toml`)
+# succeeds — renaming over a single read-only bind-mounted file fails
+# with EBUSY.
 #
 # Usage:
 #   docker build -t rustbgpd:dev .
@@ -20,8 +28,13 @@ topology:
       image: rustbgpd:dev
       cmd: sleep infinity
       binds:
-        - ./configs/rustbgpd-m54-gnmi.toml:/etc/rustbgpd/config.toml:ro
+        - ./configs/rustbgpd-m54-gnmi.toml:/etc/rustbgpd/config.template.toml:ro
         - ./configs/m54-certs:/etc/rustbgpd/certs:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        # Copy the read-only template to a writable container-local path so the
+        # gNMI Set / ADR-0076 atomic config persist (temp + rename) works; see
+        # the header note.
+        - cp /etc/rustbgpd/config.template.toml /etc/rustbgpd/config.toml
       env:
         RUST_LOG: info,rustbgpd_api=debug
