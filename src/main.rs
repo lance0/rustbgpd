@@ -13,7 +13,7 @@
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
-#[cfg(feature = "jemalloc")]
+#[cfg(all(feature = "jemalloc", not(feature = "dhat-heap")))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 

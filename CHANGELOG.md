@@ -15,12 +15,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `[[evpn_instances]]`, `[[evpn_ip_vrfs]]`, and `[[ethernet_segments]]`
   candidates through the ADR-0063 EVPN runtime coordinator for the same
   supported live shapes as `EvpnService.ApplyEvpnRuntime` (single
-  L2VNI/IP-VRF/ES add/delete/redefine, atomic tenant teardown, and `ip_vrf`
-  relink). The runtime snapshot advances only after the daemon actor converger
-  accepts the candidate; unsupported mixed edits, L3VNI/device/table IP-VRF
-  identity changes, missing EVPN actors, actor convergence failure, and
-  `apply_bum_enforcement` remain fail-closed and are pinned back to the
-  committed model.
+  L2VNI/IP-VRF/ES add/delete/redefine, additive build-up, atomic tenant
+  teardown, and `ip_vrf` relink). The runtime snapshot advances only after the
+  daemon actor converger accepts the candidate; generic mixed add/delete/redefine
+  edits, L3VNI/device/table IP-VRF identity changes, missing EVPN actors, actor
+  convergence failure, and `apply_bum_enforcement` remain fail-closed and are
+  pinned back to the committed model.
+
+- **ADR-0063 EVPN runtime convergence — additive build-up.**
+  `EvpnService.ApplyEvpnRuntime` and SIGHUP reload can now commit pure add-only
+  multi-row or multi-domain EVPN candidates, such as adding a linked L2VNI, its
+  IP-VRF, and its Ethernet Segment in one request. The daemon converger validates
+  that no delete/redefine or existing-L2VNI relink is mixed in, originates Type 3
+  IMET for each added L2VNI, republishes candidate snapshots to dataplane, Type 2,
+  SVI, segment, and Type 5 actors, and rolls all touched actors plus speculative
+  IMET back to the committed model on failure. Generic add+delete/redefine
+  composers remain fail-closed and tracked as future #268 work.
 
 - **gNMI Set transaction bridge and static-neighbor config subset.** The gNMI
   service now supports the first durable OpenConfig config mutations:

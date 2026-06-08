@@ -402,10 +402,11 @@ landing, tracked here for visibility)
   ES-member L2VNI + Ethernet Segment and/or linked IP-VRF in one pass, and
   `ip_vrf` relink (ordered drain/replay across IMET, MAC-only / MAC+IP / SVI
   Type 2, Type 5 / IP-VRF, segment actor, and Linux owned dataplane state, with
-  rollback). Only two shapes remain non-live, by design: L3VNI/device/table
+  rollback). SIGHUP file-driven reloads reuse the same coordinator for those
+  shapes. Only two shapes remain non-live, by design: L3VNI/device/table
   IP-VRF identity changes (restart-required — kernel VRF lifecycle) and
-  non-teardown mixed edits (fail closed with a "split the request" error).
-  SIGHUP file-driven EVPN edits stay restart-required.
+  generic mixed add/delete/redefine edits (fail closed with a "split the
+  request" error).
 
 ## Field-readiness gates
 

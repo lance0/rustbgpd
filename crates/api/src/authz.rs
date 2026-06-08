@@ -859,11 +859,11 @@ mod tests {
         );
         // DELIBERATE PIN (ADR-0073 audit, WS2): ApplyEvpnRuntime was the
         // first `Mutating` method that programs the kernel dataplane. It stays
-        // `Mutating` on purpose — ADR-0063 v1 is a single validated, additive
-        // L2VNI/IP-VRF apply (the EVPN sibling of AddNeighbor), and moving it
-        // to `operator_only` would force EVPN automation to over-grant
-        // Operator credentials. Do not flip this to "fix" it; if its scope
-        // widens past single-add (issue #210), change the tier via a
+        // `Mutating` on purpose — ADR-0063 accepts only validated
+        // shape-bounded EVPN runtime candidates, and moving it to
+        // `operator_only` would force EVPN automation to over-grant Operator
+        // credentials. Do not flip this to "fix" it; if its scope widens past
+        // ADR-0063's bounded shape set (issue #268), change the tier via a
         // deliberate ADR update — not by editing this assertion. See the
         // dataplane-programming RPC guardrail in docs/RELEASE_CHECKLIST.md.
         assert_eq!(

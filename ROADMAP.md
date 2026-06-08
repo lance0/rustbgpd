@@ -180,9 +180,10 @@ has it, no broad performance sprints without profile evidence.
   backup-path pre-install (proactive receive-side backup VTEP next-hop so
   failover is sub-second instead of waiting for BGP reconvergence — single-active
   is correct today, just reconvergence-speed); a cross-vendor preference-DF smoke
-  against FRR; runtime mixed-edit composer (the remaining non-teardown
-  add+delete/redefine shape that fails closed today); shape-aware EVPN `--diff`
-  classification so the static diff can distinguish coordinator-supported
+  against FRR; generalized runtime mixed-edit composer for add+delete/redefine
+  candidates (pure additive build-up now commits live; generic mixed shapes still
+  fail closed today); shape-aware EVPN `--diff` classification so the static diff
+  can distinguish coordinator-supported
   SIGHUP applies from restart-required identity changes (today it stays
   conservative because actor availability and candidate shape are runtime
   checks). Demand-shaped; keep as follow-up inventory.

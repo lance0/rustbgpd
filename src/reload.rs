@@ -1998,6 +1998,141 @@ local_vtep_ip = "10.0.0.1"
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "reload hot-apply test keeps initial/candidate EVPN TOML fixtures inline"
+    )]
+    async fn reload_hot_applies_additive_evpn_runtime_build_up() {
+        let path = unique_temp_path("reload-evpn-additive-hot-apply");
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+ip_vrf = "tenant-blue"
+advertise_svi_mac = true
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        let (apply, coordinator) = evpn_reload_apply(&initial, Ok(()));
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+ip_vrf = "tenant-blue"
+advertise_svi_mac = true
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+ip_vrf = "tenant-green"
+advertise_svi_mac = true
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+
+[[evpn_ip_vrfs]]
+name = "tenant-green"
+vni = 6000
+rd = "65000:6000"
+route_targets = ["65000:6000"]
+local_vtep_ip = "10.0.0.101"
+router_mac = "02:00:00:00:00:02"
+vrf_device = "vrf-green"
+l3vxlan_device = "vni6000"
+table_id = 6000
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.1"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:02"
+member_vnis = [200]
+originator_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            Some(&apply),
+        )
+        .await
+        .expect("reload should hot-apply additive EVPN runtime build-up");
+
+        let added = rustbgpd_evpn::EvpnInstanceId::new(200).unwrap();
+        assert_eq!(returned.evpn_instances.len(), 2);
+        assert_eq!(returned.evpn_ip_vrfs.len(), 2);
+        assert_eq!(returned.ethernet_segments.len(), 2);
+        let guard = coordinator.lock().unwrap();
+        assert!(guard.model().instances().get(added).is_some());
+        assert!(guard.model().ip_vrfs().get("tenant-green").is_some());
+        assert_eq!(guard.model().ethernet_segments().len(), 2);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
     async fn reload_retains_hot_applied_evpn_runtime_with_later_steps() {
         let path = unique_temp_path("reload-evpn-hot-apply-plus-honor");
         std::fs::write(
