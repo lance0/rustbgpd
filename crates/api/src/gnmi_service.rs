@@ -1,4 +1,4 @@
-//! Read-only `OpenConfig` gNMI surface.
+//! `OpenConfig` gNMI surface: read-only telemetry plus a transaction-backed Set subset.
 
 use std::collections::HashMap;
 use std::future::Future;
