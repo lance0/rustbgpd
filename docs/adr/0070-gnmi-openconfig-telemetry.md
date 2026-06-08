@@ -184,10 +184,10 @@ listener model rather than adding a new one:
   because they disclose topology, neighbor, and routing state. They are governed
   automatically by the per-listener `max_tier` cap and per-principal role
   enforcement once their method paths are added to the authz matrix.
-- `Set` is closed (`Unimplemented`) but still classified as **`OperatorOnly`**
-  in the authz matrix because it is mutation-shaped and must remain future-safe.
-  A future implemented `Set` would stay `Mutating` / `OperatorOnly` and be gated
-  on a daemon-wide config-transaction model.
+- `Set` is classified as **`OperatorOnly`** in the authz matrix because it is
+  mutation-shaped. The production daemon wires only the supported durable config
+  subset through ADR-0076; unsupported OpenConfig config paths remain
+  `Unimplemented`.
 
 > **Load-bearing wiring note.** Authorization fails closed: any method path not
 > present in the static authz matrix is treated as `OperatorOnly` and denied. The
@@ -216,7 +216,7 @@ User-facing setup, supported-path, `gnmic`, and troubleshooting guidance lives i
 | PR2 — `Get` OpenConfig BGP global + neighbors | Landed (PR #276) |
 | PR3 — `Subscribe` ONCE / POLL / SAMPLE | Landed (PR #277) |
 | M54 — hosted `gnmic` smoke over native mTLS | Landed: `Capabilities`, `Get`, and `Subscribe STREAM/SAMPLE` are exercised by a real OpenConfig collector client |
-| Set transaction-bridge foundation | Landed: Set payload audit redaction, delete / replace / update normalization, response shaping, and an optional daemon hook exist; production still starts with no hook, so authorized Set calls remain `Unimplemented` |
+| Set transaction bridge + static-neighbor subset | Landed: Set payload audit redaction, delete / replace / update normalization, response shaping, daemon hook wiring, and static numbered BGP neighbor create/update/delete for `neighbor-address`, `peer-as`, `description`, and `peer-group`; unsupported paths remain `Unimplemented` |
 | PR4 — counters / capabilities / non-BGP telemetry | Deferred |
 
 ## Repo seams
@@ -249,9 +249,10 @@ Grounded against the current checkout:
 - rustbgpd becomes a drop-in read-only OpenConfig BGP target for `gnmic` /
   `gnmi-gateway` / OpenConfig collector pipelines — a differentiator over GoBGP
   (gRPC-only) and FRR-`bgpd` (no native per-daemon gNMI).
-- The production daemon remains telemetry-only for OpenConfig until a supported
-  Set subset is wired to ADR-0076 transactions. The Set bridge foundation adds
-  audit redaction and normalization plumbing, but no successful mutation path.
+- The production daemon remains intentionally narrow for OpenConfig config:
+  `Set` is wired only for static, numbered BGP neighbor create/update/delete
+  on durable leaves that can be represented in rustbgpd TOML and committed
+  through ADR-0076. Unsupported config paths stay `UNIMPLEMENTED`.
 - `Capabilities` must advertise an honest, narrow subset; over-claiming models,
   encodings, or paths breaks collectors, so the whitelist and the deferral list
   are part of the contract, not an afterthought.
@@ -259,18 +260,18 @@ Grounded against the current checkout:
   snapshot→OpenConfig-leaf renderer; the per-AFI / capability data plumbing is
   deliberately deferred rather than faked.
 - This work pulled on two adjacent roadmap items: durable event history (now the
-  basis for neighbor `ON_CHANGE`) and the ADR-0076 config transaction model. Any
-  future `Set` should map OpenConfig changes onto that transaction model rather
-  than bypass it.
+  basis for neighbor `ON_CHANGE`) and the ADR-0076 config transaction model.
+  Additional `Set` slices should keep mapping OpenConfig changes onto that
+  transaction model rather than bypass it.
 
 ## Deferred
 
-- **gNMI `Set` / config datastore** — the bridge foundation now handles
-  redacted audit summaries, delete / replace / update normalization, and the
-  daemon-owned hook boundary. The remaining work is the
-  OpenConfig-to-candidate-TOML mapping for supported leaves and wiring that hook
-  to the ADR-0064-gated ADR-0076 transaction model. Do not add a second commit
-  path.
+- **gNMI `Set` / config datastore** — the first static-neighbor subset now
+  handles OpenConfig-to-candidate-TOML mapping and commits through the
+  ADR-0064-gated ADR-0076 transaction model. Remaining config work includes
+  broader neighbor leaves, peer-group object mutation, dynamic-neighbor Set,
+  standard commit-confirmed extensions, and real-client operator proof. Do not
+  add a second commit path.
 - **`Subscribe ON_CHANGE`** — needs loss-free, path-diffed leaf events.
   **Unblocked by [ADR-0072](0072-durable-event-history.md);** ships
   once the durable outbox lands and provides restart-survivable change
@@ -308,4 +309,4 @@ Grounded against the current checkout:
 - ADR-0064 — gRPC tier authorization (the `SensitiveRead` tier + enforcement).
 - ADR-0037 — gRPC API foundation.
 - `ROADMAP.md` — read-only OpenConfig telemetry, durable event history /
-  `ON_CHANGE`, and ADR-0076 transaction-backed future `Set`.
+  `ON_CHANGE`, and ADR-0076 transaction-backed `Set`.

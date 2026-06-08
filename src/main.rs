@@ -33,6 +33,7 @@ mod fib;
 mod fib_common;
 mod fib_runtime;
 mod fib_table_control;
+mod gnmi_set_bridge;
 mod looking_glass;
 mod metrics_server;
 mod peer_manager;
@@ -2137,7 +2138,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 startup_tables: config.fib_tables.clone(),
             },
         )),
-        gnmi_set: None,
+        gnmi_set: Some(config_transaction_controller.gnmi_set_fn()),
         config_transaction_apply: Some(config_transaction_controller.apply_fn()),
         config_transaction_confirm: Some(config_transaction_controller.confirm_fn()),
         config_transaction_abort: Some(config_transaction_controller.abort_fn()),
