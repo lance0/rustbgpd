@@ -39,7 +39,7 @@ diversity scripts remain local / manual gates. See
 - **API-first control plane** -- full gRPC control surface across 11 services plus a thin CLI (`rbgp`; compatible `rustbgpctl` spelling also ships) with colored tables, dynamic column alignment, and human-readable uptimes. Dynamic peer management, dynamic-neighbor and FIB-table CRUD, route injection, policy CRUD, peer groups, BFD inspection, EVPN instance queries, streaming events, and daemon control without restarts.
 - **Explicit architecture** -- pure FSM with no I/O, single-owner RIB with no locks, bounded channels between tasks. No `Arc<RwLock>` on routing state. See [ARCHITECTURE.md](ARCHITECTURE.md).
 - **Dual-stack and modern protocol support** -- MP-BGP, Add-Path, Extended Next Hop, Extended Messages, GR/LLGR/Notification GR, Route Refresh/Enhanced Route Refresh, receive-side Prefix ORF, FlowSpec, Route Reflector, large and extended communities.
-- **Operational visibility** -- Prometheus metrics, read-only gNMI / OpenConfig BGP telemetry (`Capabilities` / `Get` / `Subscribe`, RFC 7951 JSON over mTLS), BMP export to collectors, MRT TABLE_DUMP_V2 snapshots, birdwatcher-compatible looking glass REST API, structured JSON logging, per-peer counters, best-path explain.
+- **Operational visibility** -- Prometheus metrics, gNMI / OpenConfig BGP telemetry (`Capabilities` / `Get` / `Subscribe`, RFC 7951 JSON over mTLS) plus a transaction-backed `Set` subset for static numbered-neighbor config, BMP export to collectors, MRT TABLE_DUMP_V2 snapshots, birdwatcher-compatible looking glass REST API, structured JSON logging, per-peer counters, best-path explain.
 - **Evidence-driven correctness** -- fuzz targets on the wire decoder, property tests on the FSM, automated containerlab interop primarily against FRR plus GoBGP / StayRTR and documented BIRD coverage, extensive workspace tests, architecture decision records for every protocol and design choice.
 - **Reusable wire codec** -- `rustbgpd-wire` has zero internal dependencies and is independently publishable. Anyone building BGP tooling in Rust can use it without the daemon.
 
@@ -231,7 +231,8 @@ Or use systemd with [`examples/systemd/rustbgpd.service`](examples/systemd/rustb
 ## gRPC API
 
 Eleven native `rustbgpd.v1` services cover the daemon's operational surface,
-with a separate read-only `gnmi.gNMI` service for OpenConfig BGP telemetry:
+with a separate `gnmi.gNMI` service for OpenConfig BGP telemetry and the first
+transaction-backed config subset:
 
 | Service | RPCs | Purpose |
 |---------|------|---------|

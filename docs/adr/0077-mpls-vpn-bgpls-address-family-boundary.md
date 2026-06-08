@@ -318,5 +318,5 @@ These are out of scope for this ADR and for any first implementation slice:
 
 See also ADR-0023 (Prefix enum and AFI-agnostic RIB), ADR-0054 (EVPN Linux
 dataplane boundary), ADR-0061 (unicast Linux FIB integration), ADR-0070
-(read-only gNMI / OpenConfig telemetry adapter), and ADR-0075 (receive-side
+(gNMI / OpenConfig telemetry and Set adapter), and ADR-0075 (receive-side
 Address-Prefix ORF).

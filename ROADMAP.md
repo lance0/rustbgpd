@@ -48,7 +48,7 @@ those.
 | Policy: prefix lists, named chains, actions, community/AS_PATH/validation match | Shipped | GoBGP-style chain evaluation |
 | BFD single-hop async + RFC 5882 coupling | Shipped | M51 |
 | Observability & API: gRPC (11 services), Prometheus, structured logs, durable event history | Shipped | ADR-0072 outbox + `SubscribeFromEvent` |
-| gNMI / OpenConfig telemetry (read-only) | Partial | `Get` / `Subscribe`, BGP state subset; `Set` planned (M54/M56) |
+| gNMI / OpenConfig telemetry + Set subset | Partial | `Get` / `Subscribe`, BGP state subset; static numbered-neighbor `Set` + commit-confirmed; broader OpenConfig config/state deferred |
 | BMP exporter (7854), MRT dump (6396) | Shipped | EVPN + unicast |
 | FlowSpec (8955/8956, IPv4/IPv6) | Shipped | All 13 component types |
 
@@ -442,10 +442,10 @@ an ADR "Deferred" section that points back here. Tightened, not dropped.
   (RFC §5 scopes it to AFI 1/2 SAFI 1; the egress hook would land in the
   FlowSpec / EVPN attribute-prep paths if a future RFC extends it).
 
-- **gNMI / OpenConfig follow-ups** *(ADR-0070 counterpart).* v1 ships read-only
+- **gNMI / OpenConfig follow-ups** *(ADR-0070 counterpart).* v1 ships
   `Capabilities` / `Get` / `Subscribe` (`ONCE` / `POLL` / `STREAM SAMPLE`) over
-  the strict OpenConfig BGP state subset, plus `ON_CHANGE` for the neighbor
-  session-state leaf (M54/M56), plus a first transaction-backed `Set` subset for
+  the strict OpenConfig BGP state subset, `ON_CHANGE` for the neighbor
+  session-state leaf (M54/M56), and a first transaction-backed `Set` subset for
   static numbered BGP neighbor config. Deferred until the underlying snapshot
   exposes the data or demand appears: broader `Set` config subsets beyond static
   neighbors; per-AFI-SAFI prefix counters; per-neighbor

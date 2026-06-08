@@ -40,7 +40,7 @@ const MAX_CONCURRENT_SUBSCRIPTIONS: usize = 64;
 type PeerSnapshotFuture = Pin<Box<dyn Future<Output = Result<Vec<PeerInfo>, Status>> + Send>>;
 type PeerSnapshotFn = Arc<dyn Fn() -> PeerSnapshotFuture + Send + Sync>;
 
-/// Read-only gNMI target for the supported `OpenConfig` operational-state subset.
+/// gNMI target for the supported `OpenConfig` telemetry and Set subset.
 #[derive(Clone)]
 pub struct GnmiService {
     asn: u32,
@@ -54,8 +54,8 @@ pub struct GnmiService {
     /// started cleanly. `Subscribe ON_CHANGE` is the only consumer
     /// today; it returns `FailedPrecondition` when this is `None`.
     event_history: Option<EventHistoryHandle>,
-    /// Optional daemon-owned transaction bridge for gNMI Set. PR1 leaves this
-    /// unwired in production so Set remains closed until PR2 adds a real
+    /// Optional daemon-owned transaction bridge for gNMI Set. When unset, Set
+    /// remains fail-closed with `UNIMPLEMENTED`; production wires this to the
     /// OpenConfig-to-candidate-TOML bridge.
     set_handler: Option<GnmiSetFn>,
 }

@@ -440,12 +440,13 @@ If `[bmp]` is configured, rustbgpd opens a TCP session to the BMP
 collector and exports per-peer Adj-RIB-In + Peer Up / Peer Down
 events. See [`CONFIGURATION.md`](CONFIGURATION.md#bmp) for the schema.
 
-### gNMI (read-only)
+### gNMI
 
 If `[global.telemetry.grpc_tcp]` or `[global.telemetry.grpc_uds]` is
 configured with TLS / mTLS, the gNMI adapter (ADR-0070) exposes
-`Capabilities` / `Get` / `Subscribe` over the same socket. RFC 7951
-JSON encoding. See [`GNMI.md`](GNMI.md) for the path namespace.
+`Capabilities` / `Get` / `Subscribe` telemetry plus the static numbered-neighbor
+`Set` subset over the same socket. RFC 7951 JSON encoding. See
+[`GNMI.md`](GNMI.md) for the path namespace and supported mutation leaves.
 
 ### CLI introspection
 

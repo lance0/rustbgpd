@@ -99,7 +99,7 @@ For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 | Streaming path injection | Yes | No | AddPathStream |
 | List paths (Adj-In/Loc/Adj-Out) | Yes | Yes | |
 | Watch events (streaming) | Yes | Yes | WatchRoutes |
-| gNMI / OpenConfig telemetry | No | Partial | Read-only `Capabilities` / `Get` / `Subscribe` (ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE v1 for neighbor `session-state` when `[event_history]` is enabled) on a strict OpenConfig BGP state subset; `Set` commits a transaction-backed OpenConfig subset (static numbered-neighbor create/update/delete + commit-confirmed via ADR-0076; unsupported paths `Unimplemented`). ADR-0070 / M54; ON_CHANGE wired in ADR-0072 / M56. |
+| gNMI / OpenConfig telemetry | No | Partial | `Capabilities` / `Get` / `Subscribe` (ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE v1 for neighbor `session-state` when `[event_history]` is enabled) on a strict OpenConfig BGP state subset; `Set` commits a transaction-backed OpenConfig subset (static numbered-neighbor create/update/delete + commit-confirmed via ADR-0076; unsupported paths `Unimplemented`). ADR-0070 / M54; ON_CHANGE wired in ADR-0072 / M56. |
 | Table statistics | Yes | Partial | Health endpoint |
 | VRF management | Yes | No | |
 | Policy CRUD via API | Yes | Yes | Named policy definition CRUD plus global/per-neighbor chain assignment |
@@ -123,7 +123,7 @@ For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 | MRT dump (RFC 6396) | Yes | Yes | `TABLE_DUMP_V2` periodic + on-demand; gzip optional (ADR-0044) |
 | WatchEvent streaming | Yes | Yes | `WatchRoutes` + `WatchEvents` (legacy broadcast) plus `SubscribeFromEvent` with a durable monotonic-`event_id` cursor that survives daemon restart and post-incident reconnect; backed by the SQLite-WAL event outbox (ADR-0072). `rustbgpctl events watch --from-event-id N` and the `examples/event-bridge` reference binary consume the cursor. |
 | Durable event history / cursor replay | No | Yes | ADR-0072: producers across RIB, EVPN, PeerManager session lifecycle, policy, BFD, and dataplane FIB / blackhole all enqueue durable events; the `[event_history]` config block controls retention by count + bytes. `bgp_event_outbox_cursor_gap_total` counts subscribe requests where the requested cursor was older than the retention floor. |
-| gNMI / OpenConfig telemetry | No | Yes | Read-only `gnmi.gNMI` target for a strict OpenConfig BGP state subset (`Capabilities`, `Get`, `Subscribe` ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE v1 for neighbor `session-state` when `[event_history]` is enabled). `Set` commits a transaction-backed OpenConfig subset (static numbered-neighbor create/update/delete + commit-confirmed via ADR-0076; unsupported paths `Unimplemented`). Served on mTLS TCP or local UDS; M54 + M56 validate with `gnmic` |
+| gNMI / OpenConfig telemetry | No | Yes | Native `gnmi.gNMI` target for a strict OpenConfig BGP state subset (`Capabilities`, `Get`, `Subscribe` ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE v1 for neighbor `session-state` when `[event_history]` is enabled). `Set` commits a transaction-backed OpenConfig subset (static numbered-neighbor create/update/delete + commit-confirmed via ADR-0076; unsupported paths `Unimplemented`). Served on mTLS TCP or local UDS; M54 + M56 validate with `gnmic` |
 | Sentry integration | Yes | No | |
 
 ## Security
@@ -180,7 +180,7 @@ For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 | Core protocol | 14 | 14 | 100% |
 | Path attributes | 13 | 9 | ~69% |
 | Policy engine | 18 | 18 | 100% |
-| gRPC RPCs | ~55 | 83 | 100%+ (79 `rustbgpd.v1` RPCs plus read-only gNMI) |
+| gRPC RPCs | ~55 | 83 | 100%+ (79 `rustbgpd.v1` RPCs plus gNMI) |
 | Monitoring | 5 | 6 | 100%+ |
 | Security | 4 | 5 | 100%+ |
 | Best-path steps | 11 | 11 | 100% except AIGP |
@@ -212,7 +212,7 @@ Competing head-to-head with GoBGP for all use cases:
 - EVPN RR + bidirectional VTEP shipped (Phase 1 ADR-0050; Phase 2 ADR-0052/0054/0055/0056 — MAC-only Type 2 + Type 3 IMET in v0.15.0, MAC+IP Type 2 via ARP/ND suppression in v0.16.0 under the FRR replace model). EVPN multi-homing (ESI, Type-1/Type-4) plus BUM-flood suppression + DF election (v0.17.0+) add alpha multi-homing execution: DF election, Type 1/4 origination, production-default kernel BUM-port enforcement with opt-out config (RFC 7432 §8.5), ESI-aware Type 2 origination, RFC 7432 §14 aliasing receive-side projection, and RFC 7432 §8.4 mass-withdraw filtering. EVPN symmetric IRB (Type-5 / L3VNI), Interface-less, shipped end-to-end in v0.18.0 (IP-VRF schema, Type 5 origination + remote import + L3 FIB programming with four-phase apply ordering, sub-second `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rustbgpctl evpn vrfs` CLI + `ListIpVrfs`/`GetIpVrf` gRPC, M39 smoke). ADR-0059 aliasing dataplane ECMP shipped via FDB nexthop groups, M40 FRR smoke. Auto-derived RTs, Type 5 gRPC injection including non-zero Gateway Address, receive-side RFC 9135 overlay-index recursion, duplicate-MAC remote suppression + manual clear, and production-default DF/non-DF BUM suppression + aliasing ECMP all shipped. Still missing: VXLAN local-bias split-horizon (ASIC/offload-dependent on the Linux softswitch — ADR-0065, the remaining all-active correctness gate), native overlay-index local origination / recursion-path interop, the two remaining ADR-0063 runtime shapes (L3VNI/device/table IP-VRF identity redefine — restart-required by design; non-teardown mixed edits — fail closed; relink + teardown + single shapes all commit live), single-active backup-path pre-install, EVPN over MPLS/PBB, and EVPN route types 6-11
 - VPNv4/v6 and labeled unicast missing
 - No confederation support limits SP deployments
-- gRPC API exposes a broader operator surface than GoBGP's raw API count, shaped differently: BFD inspection via `GetBfdSessions`, EVPN IP-VRF visibility via `ListIpVrfs` / `GetIpVrf`, dynamic-neighbor query via `ListDynamicNeighbors`, and a read-only OpenConfig/gNMI target for existing telemetry collectors
+- gRPC API exposes a broader operator surface than GoBGP's raw API count, shaped differently: BFD inspection via `GetBfdSessions`, EVPN IP-VRF visibility via `ListIpVrfs` / `GetIpVrf`, dynamic-neighbor query via `ListDynamicNeighbors`, and an OpenConfig/gNMI target for existing telemetry collectors plus the first transaction-backed config subset
 - Linux FIB integration is scoped and opt-in: RFC 7999 discard routes and ADR-0061 configured-table unicast installs exist, and ADR-0066/0068 now cover unicast multipath / ECMP FIB including per-class caps, `multipath_relax`, and Link Bandwidth weighted multipath. It is still not a Zebra-compatible full routing-suite backend or redistribution manager
 
 ## Advantages Over GoBGP
@@ -227,7 +227,7 @@ Competing head-to-head with GoBGP for all use cases:
   verification, best-path step 0.7, and import/export policy matching; GoBGP has
   no ASPA support
 - **Unicast FIB ECMP beyond Add-Path** — rustbgpd installs kernel `RTA_MULTIPATH` routes with `maximum_paths`, per-class eBGP/iBGP caps, `multipath_relax`, and Link Bandwidth weighted multipath
-- **Read-only gNMI / OpenConfig telemetry** — rustbgpd exposes a native `gnmi.gNMI` service for OpenConfig BGP operational state (`Capabilities`, `Get`, `Subscribe` SAMPLE/POLL/ONCE, plus STREAM ON_CHANGE v1 for neighbor `session-state`), verified with `gnmic`; GoBGP exposes its own gRPC API but not an OpenConfig/gNMI target
+- **gNMI / OpenConfig telemetry + Set subset** — rustbgpd exposes a native `gnmi.gNMI` service for OpenConfig BGP operational state (`Capabilities`, `Get`, `Subscribe` SAMPLE/POLL/ONCE, plus STREAM ON_CHANGE v1 for neighbor `session-state`) and a transaction-backed static-neighbor `Set` subset, verified with `gnmic`; GoBGP exposes its own gRPC API but not an OpenConfig/gNMI target
 - **Import-policy explain** — `ExplainImportPolicy` RPC + `rustbgpctl policy explain` answer "why didn't this prefix come in?" from a per-session import-decision cache that records both permits and denies at the transport eval site (ADR-0073); GoBGP has no per-prefix import-decision diagnostic
 - **Config persistence** — gRPC mutations atomically persisted to TOML; GoBGP doesn't persist runtime changes
 - **Operator packaging** — systemd unit, example configs, operations guide, release checklist, container image CI out of the box
@@ -254,7 +254,7 @@ capability.
 ### DC Fabric / Whitebox BGP Speaker (~95% parity)
 
 BGP unnumbered, scoped link-local FIB installs, ECMP / weighted multipath, BFD,
-read-only gNMI, and EVPN RR / VTEP work make this a first-class deployment
+gNMI / OpenConfig, and EVPN RR / VTEP work make this a first-class deployment
 target. Remaining gaps are narrower:
 
 1. **BGP unnumbered autodiscovery** — rustbgpd v1 requires static

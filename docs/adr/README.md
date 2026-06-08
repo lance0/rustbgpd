@@ -78,7 +78,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0067](0067-bfd-single-hop.md) | Single-hop asynchronous BFD for BGP | Accepted | 2026-05-24 |
 | [0068](0068-weighted-multipath.md) | Weighted (unequal-cost) multipath via Link Bandwidth | Accepted | 2026-05-24 |
 | [0069](0069-bgp-unnumbered.md) | BGP unnumbered and IPv6 link-local peering | Accepted | 2026-05-25 |
-| [0070](0070-gnmi-openconfig-telemetry.md) | Read-only gNMI / OpenConfig telemetry adapter | Accepted | 2026-05-25 |
+| [0070](0070-gnmi-openconfig-telemetry.md) | gNMI / OpenConfig telemetry and Set adapter | Accepted | 2026-05-25 |
 | [0071](0071-bgp-roles-otc.md) | BGP Roles and Only-to-Customer (RFC 9234) | Accepted | 2026-05-26 |
 | [0072](0072-durable-event-history.md) | Durable event history (local outbox) | Accepted | 2026-05-26 |
 | [0073](0073-import-policy-explain.md) | Import policy explain via per-session decision cache | Accepted | 2026-05-28 |

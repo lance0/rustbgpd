@@ -197,7 +197,7 @@ shape itself does not raise the tier.
 |-----|------|-------|
 | `Capabilities` | `sensitive_read` | OpenConfig/gNMI model inventory and supported encodings. Discloses management-plane capabilities and telemetry shape. |
 | `Get` | `sensitive_read` | Read-only OpenConfig BGP telemetry subset. Exposes AS/router-id, neighbor identity/state, counters, and other operational topology. |
-| `Set` | `operator_only` | Always returns `UNIMPLEMENTED`; classify defensively because any future implementation would mutate configuration or operational state. |
+| `Set` | `operator_only` | Transaction-backed OpenConfig config subset for static numbered-neighbor create/update/delete plus commit-confirmed control; unsupported paths and extensions return `UNIMPLEMENTED`. Operator-only because successful calls mutate durable config. |
 | `Subscribe` (stream) | `sensitive_read` | Read-only OpenConfig BGP telemetry stream. Streaming shape; same disclosure class as `Get`. |
 
 ## Totals

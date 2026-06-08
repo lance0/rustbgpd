@@ -1,4 +1,4 @@
-# ADR-0070: Read-only gNMI / OpenConfig telemetry adapter
+# ADR-0070: gNMI / OpenConfig telemetry and Set adapter
 
 **Status:** Accepted
 **Date:** 2026-05-25
@@ -18,14 +18,15 @@ Prometheus metrics but does **not** speak OpenConfig/gNMI. **FRR** can carry
 OpenConfig models, but only through `mgmtd` / SONiC-style management frameworks
 layered on top — its per-daemon (`bgpd`) gNMI story is experimental and uneven,
 and the upstream `mgmtd` northbound currently fronts CLI with RESTCONF/NETCONF
-as future work. A *native*, read-only OpenConfig BGP gNMI target inside the BGP
-daemon itself is therefore a genuine edge for the route-reflector / SDN / data
+as future work. A *native* OpenConfig BGP gNMI target inside the BGP daemon
+itself — initially telemetry-only, then extended with a narrow ADR-0076-backed
+Set bridge — is therefore a genuine edge for the route-reflector / SDN / data
 center-fabric use case.
 
 gNMI itself constrains the design (spec v0.10.0):
 
 - The service is always four RPCs — `Capabilities`, `Get`, `Set`, `Subscribe`.
-  Even a read-only server must answer `Set` explicitly; it is not optional.
+  Even a telemetry-only server must answer `Set` explicitly; it is not optional.
 - `Capabilities` is the discovery point: `CapabilityResponse` returns the
   `gNMI_version`, the `supported_models`, and the `supported_encodings`. It is
   not a hidden debug endpoint — collectors negotiate against it, so the
@@ -43,19 +44,22 @@ Two existing rustbgpd facts shape what we can honestly ship:
   `Read < SensitiveRead < Mutating < OperatorOnly`, enforced by a Tower layer
   over every listener plus a static per-method matrix. Read-only telemetry that
   discloses topology/RIB/neighbor state maps cleanly onto the existing
-  `SensitiveRead` tier.
+  `SensitiveRead` tier, while successful config `Set` calls are
+  `OperatorOnly`.
 - **Typed snapshots are already plumbed** through `ServeConfig` (RIB query
   channel, peer-manager command channel, FIB / BFD / EVPN snapshot closures), so
-  a read-only service can consume them without new channels. But the event
+  telemetry rendering can consume them without new channels. But the event
   streams are bounded and lossy, and several OpenConfig leaves are not currently
   sourceable per-family (see "What v1 does not expose").
 
 ## Decision
 
-Build a **read-only gNMI target inside rustbgpd**, backed by the existing typed
-snapshots and services. It is **not** a config datastore, **not** a general YANG
-engine, and **not** a CLI-scraper — every value is rendered from a typed
-internal snapshot, never from CLI text.
+Build a **native gNMI target inside rustbgpd**, backed by the existing typed
+snapshots and services for telemetry and by ADR-0076 for the supported config
+subset. It is **not** a general config datastore, **not** a general YANG engine,
+and **not** a CLI-scraper — every value is rendered from a typed internal
+snapshot, and every supported mutation is translated into candidate TOML and
+committed through the existing transaction model.
 
 ### Service surface (v1)
 
@@ -64,7 +68,7 @@ internal snapshot, never from CLI text.
 | `Capabilities` | Advertise gNMI version `0.10.0`, the **OpenConfig modules** (name / organization / version, via `ModelData`) backing the supported paths, and encodings `JSON` + `JSON_IETF`. `ModelData` is module-level, not per-path — the path subset is enforced at `Get` / `Subscribe`, not advertised here. |
 | `Get` | OpenConfig BGP operational-state subset (below). |
 | `Subscribe` | `ONCE`, `POLL`, and `STREAM` with `SAMPLE`. `STREAM` + `ON_CHANGE` v1 covers only `neighbor[neighbor-address=*]/state/session-state` (see Deferred). |
-| `Set` | Always returns a stable `Unimplemented` status. gNMI requires an explicit answer; rustbgpd does not yet map OpenConfig payloads onto the ADR-0076 transaction model, so gNMI mutation stays closed. |
+| `Set` | Operator-only. Supports static numbered BGP neighbor create/update/delete for `neighbor-address`, `peer-as`, `description`, and `peer-group`, translated into candidate TOML and committed through ADR-0076. The standard commit-confirmed extension can start, confirm, and cancel the same confirmed transaction lifecycle. Unsupported paths and extensions return `Unimplemented`. |
 
 ### OpenConfig path scope — a supported *subset*, not full OpenConfig BGP
 
@@ -200,7 +204,7 @@ listener model rather than adding a new one:
 
 | PR | Scope | Verification |
 |----|-------|--------------|
-| **PR1** | Vendor `gnmi.proto` (+ `gnmi_ext.proto`), wire codegen, add `GnmiService`; implement `Capabilities`; `Get`/`Subscribe` return `Unimplemented`; `Set` returns a stable `Unimplemented`. Register on the UDS listener and on the TCP listener **only when mTLS is configured** (both `.add_service` chains in `server.rs`). Add the gNMI methods to the ADR-0064 authz matrix + `grpc-method-inventory.json` (`Capabilities` / `Get` / `Subscribe` as `SensitiveRead`, `Set` as `OperatorOnly`) and fix the count tests. | `gnmic capabilities` returns version `0.10.0`, the advertised model subset, and `JSON`/`JSON_IETF`. |
+| **PR1** | Vendor `gnmi.proto` (+ `gnmi_ext.proto`), wire codegen, add `GnmiService`; implement `Capabilities`; `Get`/`Subscribe` return `Unimplemented`; `Set` returns a stable `Unimplemented` for the initial telemetry slice. Register on the UDS listener and on the TCP listener **only when mTLS is configured** (both `.add_service` chains in `server.rs`). Add the gNMI methods to the ADR-0064 authz matrix + `grpc-method-inventory.json` (`Capabilities` / `Get` / `Subscribe` as `SensitiveRead`, `Set` as `OperatorOnly`) and fix the count tests. | `gnmic capabilities` returns version `0.10.0`, the advertised model subset, and `JSON`/`JSON_IETF`. |
 | **PR2** | `Get` for the OpenConfig BGP global + neighbor subset above. Structured `PathElem` parser (not legacy string elements), strict supported-path whitelist. Error mapping: `INVALID_ARGUMENT` for malformed paths, `UNIMPLEMENTED` for valid-but-unsupported OpenConfig paths, `NOT_FOUND` for valid-but-absent keyed objects. | `gnmic get` against global + a keyed neighbor renders correct JSON_IETF. |
 | **PR3** | `Subscribe` `ONCE` / `POLL` / `STREAM SAMPLE` reusing the PR2 snapshot renderer; stream limits + sample-interval floors; no full route-table dumps. | `gnmic subscribe --mode once`, `--mode poll`, and stream/sample against the subset. |
 | **PR4** (post-v1) | Per-AFI-SAFI counters once per-family counts are plumbed; `supported-capabilities` once the peer snapshot is extended; BFD / FIB / EVPN OpenConfig-adjacent (or native-origin) telemetry. | — |
@@ -215,7 +219,7 @@ User-facing setup, supported-path, `gnmic`, and troubleshooting guidance lives i
 | PR1 — proto + codegen + `Capabilities` + `Set`-closed | Landed (PR #275) |
 | PR2 — `Get` OpenConfig BGP global + neighbors | Landed (PR #276) |
 | PR3 — `Subscribe` ONCE / POLL / SAMPLE | Landed (PR #277) |
-| M54 — hosted `gnmic` smoke over native mTLS | Landed: `Capabilities`, `Get`, and `Subscribe STREAM/SAMPLE` are exercised by a real OpenConfig collector client |
+| M54 — hosted `gnmic` smoke over native mTLS | Landed: `Capabilities`, `Get`, `Subscribe STREAM/SAMPLE`, Set add/delete, commit-confirmed Set confirm/cancel, Set authz denial, and unsupported-path rejection are exercised by a real OpenConfig client |
 | Set transaction bridge + static-neighbor subset | Landed: Set payload audit redaction, delete / replace / update normalization, response shaping, daemon hook wiring, static numbered BGP neighbor create/update/delete for `neighbor-address`, `peer-as`, `description`, and `peer-group`, plus standard commit-confirmed `commit` / `confirm` / `cancel`; unsupported paths remain `Unimplemented` |
 | PR4 — counters / capabilities / non-BGP telemetry | Deferred |
 
@@ -242,12 +246,13 @@ Grounded against the current checkout:
   `crates/api/src/neighbor_service.rs` (`peer_info_to_proto`).
 - **Snapshot/provider closures:** `ServeConfig` in `crates/api/src/server.rs`
   (RIB query channel, peer-manager channel, FIB / BFD / EVPN snapshots) — a
-  read-only gNMI service consumes these directly; no new channels.
+  telemetry side consumes these directly; no new channels.
 
 ## Consequences
 
-- rustbgpd becomes a drop-in read-only OpenConfig BGP target for `gnmic` /
-  `gnmi-gateway` / OpenConfig collector pipelines — a differentiator over GoBGP
+- rustbgpd becomes a drop-in OpenConfig BGP target for `gnmic` /
+  `gnmi-gateway` / OpenConfig collector pipelines, with a narrow operator Set
+  bridge for durable static-neighbor config — a differentiator over GoBGP
   (gRPC-only) and FRR-`bgpd` (no native per-daemon gNMI).
 - The production daemon remains intentionally narrow for OpenConfig config:
   `Set` is wired only for static, numbered BGP neighbor create/update/delete
@@ -270,8 +275,7 @@ Grounded against the current checkout:
   handles OpenConfig-to-candidate-TOML mapping and commits through the
   ADR-0064-gated ADR-0076 transaction model. Remaining config work includes
   broader neighbor leaves, peer-group object mutation, dynamic-neighbor Set,
-  commit-confirmed rollback-duration reset, and real-client operator proof. Do
-  not add a second commit path.
+  and commit-confirmed rollback-duration reset. Do not add a second commit path.
 - **`Subscribe ON_CHANGE`** — needs loss-free, path-diffed leaf events.
   **Unblocked by [ADR-0072](0072-durable-event-history.md);** ships
   once the durable outbox lands and provides restart-survivable change
@@ -308,5 +312,5 @@ Grounded against the current checkout:
   <https://gnmic.openconfig.net/>
 - ADR-0064 — gRPC tier authorization (the `SensitiveRead` tier + enforcement).
 - ADR-0037 — gRPC API foundation.
-- `ROADMAP.md` — read-only OpenConfig telemetry, durable event history /
-  `ON_CHANGE`, and ADR-0076 transaction-backed `Set`.
+- `ROADMAP.md` — OpenConfig telemetry, durable event history / `ON_CHANGE`, and
+  ADR-0076 transaction-backed `Set`.

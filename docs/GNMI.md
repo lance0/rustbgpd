@@ -336,8 +336,8 @@ above one hour is capped at the 1-hour ceiling.
 ## Interop Proof
 
 M54 validates this surface with the real `gnmic` client over mTLS, including
-Capabilities, Get, Set add/delete, commit-confirmed Set confirm/cancel, and
-Subscribe SAMPLE:
+Capabilities, Get, Set add/delete, commit-confirmed Set confirm/cancel,
+read-tier Set denial, unsupported-path rejection, and Subscribe SAMPLE:
 
 ```bash
 bash tests/interop/scripts/gen-m54-certs.sh

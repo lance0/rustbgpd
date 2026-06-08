@@ -191,7 +191,7 @@ suite implementation.
     unnumbered neighbor model (numeric-IP neighbors only), although it does
     support the RFC 8950 next-hop encoding itself.
 
-[^gnmi]: rustbgpd ships a native read-only `gnmi.gNMI` target for a strict
+[^gnmi]: rustbgpd ships a native `gnmi.gNMI` target for a strict
     OpenConfig BGP operational-state subset: `Capabilities`, `Get`, and
     `Subscribe` (ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE for
     neighbor `session-state` when `[event_history]` is enabled) over UDS or
