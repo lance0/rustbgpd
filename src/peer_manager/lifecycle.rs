@@ -330,6 +330,15 @@ impl PeerManager {
                     "peer reshape target {peer} changes tcp_ao; TCP-AO changes require a daemon restart"
                 ));
             }
+            // Defense in depth: the transaction executor already gates dynamic
+            // ranges out of reshape targets, but reconfigure's delete/re-add
+            // semantics are wrong for an ephemeral dynamic peer (it would change
+            // `is_dynamic` lifecycle/persistence), so refuse one here too.
+            if managed.is_dynamic {
+                return Err(format!(
+                    "peer reshape target {peer} is a dynamic peer; reshape transactions reconfigure static neighbors only"
+                ));
+            }
         }
 
         let mut priors = Vec::with_capacity(targets.len());
@@ -356,6 +365,10 @@ impl PeerManager {
         &mut self,
         priors: Vec<PeerManagerNeighborConfig>,
     ) -> Result<(), String> {
+        // Replays the captured prior configs in reverse of the apply order.
+        // `reconfigure_peer` re-reads the live enabled / graceful-shutdown state
+        // and re-applies it, so rollback preserves the peer's current admin and
+        // GShut state rather than resurrecting a stale transient toggle.
         for prior in priors.into_iter().rev() {
             let peer = PeerKey::new(prior.address, prior.interface.clone());
             self.reconfigure_peer(prior)

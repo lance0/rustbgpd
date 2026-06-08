@@ -1324,6 +1324,12 @@ fn resolve_peer_session_reshape_targets(
                 impact.address
             )));
         };
+        // Defense in depth: two neighbors sharing an address would make the
+        // resolve target ambiguous. The config loader forbids this today —
+        // `interface` is only valid for IPv6 link-local, and a link-local
+        // address may not repeat across interfaces — so this branch is
+        // unreachable via a loadable config, but we fail closed rather than
+        // reshape an arbitrarily-chosen session if that ever changes.
         if matches.next().is_some() {
             return Err(ConfigTransactionApplyError::Internal(format!(
                 "peer-session reshape impact for {} is ambiguous across multiple scoped neighbors",

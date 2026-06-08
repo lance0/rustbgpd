@@ -1446,6 +1446,15 @@ impl EffectiveNeighborImpactKind {
     pub const fn is_policy_chain(self) -> bool {
         matches!(self, Self::PolicyChain)
     }
+
+    /// Stable `snake_case` label (matches the serde rename) for human-readable
+    /// rendering and the `--diff` JSON.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PolicyChain => "policy_chain",
+            Self::SessionReshape => "session_reshape",
+        }
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -2077,7 +2086,13 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
         if !diff.effective_neighbor_impact.is_empty() {
             out.push_str("  Effectively impacted neighbors (via inheritance):\n");
             for impact in &diff.effective_neighbor_impact {
-                let _ = writeln!(out, "    {} {}:", style.change_marker, impact.address);
+                let _ = writeln!(
+                    out,
+                    "    {} {} [{}]:",
+                    style.change_marker,
+                    impact.address,
+                    impact.kind.as_str()
+                );
                 for reason in &impact.reasons {
                     let _ = writeln!(out, "        {reason}");
                 }

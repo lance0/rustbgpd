@@ -526,7 +526,9 @@ pub enum PeerManagerCommand {
     ApplyPeerReshapeSnapshot {
         /// Fully resolved replacement configs, one entry per concrete live peer.
         targets: Vec<PeerManagerNeighborConfig>,
-        /// Reply returns captured prior configs (the rollback token).
+        /// Reply returns captured prior configs (the rollback token), in the
+        /// same order as `targets` — replaying them as a fresh
+        /// `ApplyPeerReshapeSnapshot` restores the pre-apply state.
         reply: oneshot::Sender<Result<Vec<PeerManagerNeighborConfig>, String>>,
     },
     /// Atomically validate a candidate `[[fib_tables]]` set against the live
