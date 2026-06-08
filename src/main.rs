@@ -2137,6 +2137,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 startup_tables: config.fib_tables.clone(),
             },
         )),
+        gnmi_set: None,
         config_transaction_apply: Some(config_transaction_controller.apply_fn()),
         config_transaction_confirm: Some(config_transaction_controller.confirm_fn()),
         config_transaction_abort: Some(config_transaction_controller.abort_fn()),

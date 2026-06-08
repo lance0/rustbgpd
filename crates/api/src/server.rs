@@ -91,6 +91,88 @@ impl std::fmt::Display for ConfigTransactionApplyError {
 
 impl std::error::Error for ConfigTransactionApplyError {}
 
+/// Error returned by the daemon-owned gNMI Set bridge hook.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GnmiSetError {
+    /// The Set request is malformed or carries an invalid value.
+    InvalidArgument(String),
+    /// The path or operation is valid gNMI/OpenConfig but outside rustbgpd's
+    /// supported Set surface.
+    Unimplemented(String),
+    /// A runtime precondition, such as a pending confirmed transaction, failed.
+    FailedPrecondition(String),
+    /// Required runtime actor or persistence channel is unavailable.
+    Unavailable(String),
+    /// Internal actor/rollback failure.
+    Internal(String),
+}
+
+impl GnmiSetError {
+    pub(crate) fn into_status(self) -> Status {
+        match self {
+            Self::InvalidArgument(message) => Status::invalid_argument(message),
+            Self::Unimplemented(message) => Status::unimplemented(message),
+            Self::FailedPrecondition(message) => Status::failed_precondition(message),
+            Self::Unavailable(message) => Status::unavailable(message),
+            Self::Internal(message) => Status::internal(message),
+        }
+    }
+}
+
+impl std::fmt::Display for GnmiSetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidArgument(message)
+            | Self::Unimplemented(message)
+            | Self::FailedPrecondition(message)
+            | Self::Unavailable(message)
+            | Self::Internal(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for GnmiSetError {}
+
+/// One normalized gNMI Set operation in the wire-mandated application order.
+#[derive(Clone, PartialEq)]
+pub enum GnmiSetOperation {
+    /// Delete the subtree at this path.
+    Delete(crate::gnmi::Path),
+    /// Replace the path/value carried in this update.
+    Replace(crate::gnmi::Update),
+    /// Merge/update the path/value carried in this update.
+    Update(crate::gnmi::Update),
+}
+
+/// A normalized gNMI Set request passed to the daemon-owned transaction bridge.
+#[derive(Clone, PartialEq)]
+pub struct GnmiSetTransaction {
+    /// Common prefix from the original request.
+    pub prefix: Option<crate::gnmi::Path>,
+    /// Operations after prefix expansion and gNMI operation ordering.
+    pub operations: Vec<GnmiSetOperation>,
+    /// Top-level gNMI extensions. PR1 rejects non-empty extensions before
+    /// invoking the hook; PR3 will use this field for commit-confirmed support.
+    pub extensions: Vec<crate::gnmi_ext::Extension>,
+}
+
+/// Successful gNMI Set bridge result.
+#[derive(Clone, Default, PartialEq)]
+pub struct GnmiSetOutcome {
+    /// Response extensions to attach to `SetResponse`.
+    pub extensions: Vec<crate::gnmi_ext::Extension>,
+}
+
+/// Future returned by the daemon-owned gNMI Set bridge hook.
+pub type GnmiSetFuture =
+    Pin<Box<dyn std::future::Future<Output = Result<GnmiSetOutcome, GnmiSetError>> + Send>>;
+
+/// Daemon-owned hook for `gnmi.gNMI/Set`.
+///
+/// The binary crate owns this because `OpenConfig` Set must translate into
+/// complete candidate TOML and then use the ADR-0076 transaction controller.
+pub type GnmiSetFn = Arc<dyn Fn(GnmiSetTransaction) -> GnmiSetFuture + Send + Sync + 'static>;
+
 /// Future returned by the daemon-owned config transaction apply hook.
 pub type ConfigTransactionApplyFuture = Pin<
     Box<
@@ -260,6 +342,9 @@ pub struct ServeConfig {
     /// (they return `FAILED_PRECONDITION`). Wired in `main.rs` where the
     /// FIB actor sender, validator, and config persistence are visible.
     pub fib_table_control: Option<crate::rib_service::FibTableControlFn>,
+    /// Daemon hook for gNMI Set. `None` keeps gNMI Set closed with
+    /// `UNIMPLEMENTED`.
+    pub gnmi_set: Option<GnmiSetFn>,
     /// Daemon hook for config transaction apply. `None` fails closed with
     /// `FAILED_PRECONDITION`.
     pub config_transaction_apply: Option<ConfigTransactionApplyFn>,
@@ -597,6 +682,7 @@ async fn run_listener(
     let blackhole_discard_snapshot = config.blackhole_discard_snapshot;
     let fib_route_snapshot = config.fib_route_snapshot;
     let fib_table_control = config.fib_table_control;
+    let gnmi_set = config.gnmi_set;
     let config_transaction_apply = config.config_transaction_apply;
     let config_transaction_confirm = config.config_transaction_confirm;
     let config_transaction_abort = config.config_transaction_abort;
@@ -650,6 +736,7 @@ async fn run_listener(
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
                 fib_table_control,
+                gnmi_set,
                 config_transaction_apply,
                 config_transaction_confirm,
                 config_transaction_abort,
@@ -698,6 +785,7 @@ async fn run_listener(
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
                 fib_table_control,
+                gnmi_set,
                 config_transaction_apply,
                 config_transaction_confirm,
                 config_transaction_abort,
@@ -753,6 +841,7 @@ async fn run_tcp_listener(
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
     fib_table_control: Option<crate::rib_service::FibTableControlFn>,
+    gnmi_set: Option<GnmiSetFn>,
     config_transaction_apply: Option<ConfigTransactionApplyFn>,
     config_transaction_confirm: Option<ConfigTransactionConfirmFn>,
     config_transaction_abort: Option<ConfigTransactionAbortFn>,
@@ -911,6 +1000,7 @@ async fn run_tcp_listener(
     if tls_enabled {
         routes.add_service(GNmiServer::with_interceptor(
             GnmiService::new(asn, router_id.clone(), peer_mgr_tx.clone())
+                .with_set_handler(gnmi_set.clone())
                 .with_event_history(event_history.clone()),
             interceptor.clone(),
         ));
@@ -957,6 +1047,7 @@ async fn run_uds_listener(
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
     fib_table_control: Option<crate::rib_service::FibTableControlFn>,
+    gnmi_set: Option<GnmiSetFn>,
     config_transaction_apply: Option<ConfigTransactionApplyFn>,
     config_transaction_confirm: Option<ConfigTransactionConfirmFn>,
     config_transaction_abort: Option<ConfigTransactionAbortFn>,
@@ -1094,6 +1185,7 @@ async fn run_uds_listener(
     ));
     routes.add_service(GNmiServer::with_interceptor(
         GnmiService::new(asn, router_id, peer_mgr_tx.clone())
+            .with_set_handler(gnmi_set)
             .with_event_history(event_history.clone()),
         interceptor,
     ));

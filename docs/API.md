@@ -2,8 +2,10 @@
 
 rustbgpd exposes eleven native `rustbgpd.v1` gRPC services (Global, Config,
 Neighbor, Policy, PeerGroup, Rib, BFD, Event, Injection, Control, Evpn) plus the
-read-only `gnmi.gNMI` OpenConfig telemetry service over one or more configured
-listeners. The default listener is a local Unix domain socket at
+`gnmi.gNMI` OpenConfig service over one or more configured listeners. The
+current gNMI production surface is telemetry-only until a supported Set subset
+is wired to the transaction controller. The default listener is a local Unix
+domain socket at
 `/var/lib/rustbgpd/grpc.sock`.
 
 For same-host administration, prefer UDS:
@@ -157,7 +159,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `EventService` | All RPCs | None |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListIpVrfs`, `GetIpVrf` | `ClearDuplicateMacQuarantine`, `ApplyEvpnRuntime` |
 | `BfdService` | `GetBfdSessions` | None |
-| `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (always returns `UNIMPLEMENTED`) |
+| `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (operator-only; returns `UNIMPLEMENTED` until a supported OpenConfig config subset is wired to ADR-0076 transactions) |
 | `InjectionService` | None | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` |
 | `ControlService` | `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
 
@@ -181,16 +183,20 @@ The API uses gRPC status codes consistently across services:
 
 ## gnmi.gNMI
 
-Read-only OpenConfig BGP telemetry surface (ADR-0070). The supported subset is
+OpenConfig BGP telemetry surface (ADR-0070). The supported subset is
 deliberately narrow: `Capabilities`, `Get`, and `Subscribe` (`ONCE`, `POLL`,
 `STREAM SAMPLE`, and `STREAM ON_CHANGE` — the last is scoped to the neighbor
 session-state leaf, requires `[event_history]` enabled, and returns
 `FAILED_PRECONDITION` otherwise) for global and neighbor `state` under the
-default network instance; `Set` is present because gNMI requires it, but always
-returns `UNIMPLEMENTED`. Future `Set` support should translate OpenConfig edits
-into candidate TOML and feed `PlanConfigTransaction` / `ApplyConfigTransaction`,
-not bypass the transaction model. See [GNMI.md](GNMI.md) for the full
-`ON_CHANGE` v1 scope (initial sync, reconnect-no-replay, lag → `DATA_LOSS`).
+default network instance. `Set` is present because gNMI requires it and is
+classified as operator-only, but the daemon still returns `UNIMPLEMENTED` until
+a supported OpenConfig config subset is wired to ADR-0076 transactions. The API
+foundation already redacts Set payloads, validates/normalizes delete / replace /
+update ordering, and exposes a daemon-owned hook so future `Set` support can
+translate OpenConfig edits into candidate TOML and feed
+`PlanConfigTransaction` / `ApplyConfigTransaction`, not bypass the transaction
+model. See [GNMI.md](GNMI.md) for the full `ON_CHANGE` v1 scope (initial sync,
+reconnect-no-replay, lag → `DATA_LOSS`) and Set bridge constraints.
 
 Network gNMI is served only on mTLS TCP listeners. The UDS listener also exposes
 the service as a local-only extension.

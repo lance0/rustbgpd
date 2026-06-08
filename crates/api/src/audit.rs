@@ -140,6 +140,20 @@ pub(crate) fn get_config_transaction_status_summary() -> GrpcRequestSummary {
     GrpcRequestSummary::new("request=empty")
 }
 
+/// Summary for `gnmi.gNMI/Set`. Set payloads can carry future secret-bearing
+/// config values, so log only operation counts and extension count.
+pub(crate) fn gnmi_set_summary(request: &crate::gnmi::SetRequest) -> GrpcRequestSummary {
+    debug_assert!(CREDENTIAL_MASK_TABLE.contains(&"gnmi.SetRequest.values"));
+    GrpcRequestSummary::new(format!(
+        "delete_count={} replace_count={} update_count={} union_replace_count={} extension_count={} values={REDACTED}",
+        request.delete.len(),
+        request.replace.len(),
+        request.update.len(),
+        request.union_replace.len(),
+        request.extension.len()
+    ))
+}
+
 /// Summary for `ApplyEvpnRuntime`. Candidate TOML has the same
 /// credential risk as `DiffRuntimeConfig`, so log only size and mode.
 pub(crate) fn apply_evpn_runtime_summary(
@@ -183,6 +197,7 @@ pub(crate) const CREDENTIAL_MASK_TABLE: &[&str] = &[
     "ApplyEvpnRuntimeRequest.candidate_toml",
     "PeerGroupDefinition.md5_password",
     "candidate_toml:tcp_ao.key",
+    "gnmi.SetRequest.values",
 ];
 
 #[cfg(test)]
@@ -261,6 +276,33 @@ mod tests {
     }
 
     #[test]
+    fn gnmi_set_summary_redacts_values() {
+        let summary = gnmi_set_summary(&crate::gnmi::SetRequest {
+            prefix: None,
+            delete: vec![crate::gnmi::Path::default()],
+            replace: vec![crate::gnmi::Update {
+                path: Some(crate::gnmi::Path::default()),
+                #[allow(deprecated)]
+                value: None,
+                val: Some(crate::gnmi::TypedValue {
+                    value: Some(crate::gnmi::typed_value::Value::JsonIetfVal(
+                        br#"{"md5_password":"secret"}"#.to_vec(),
+                    )),
+                }),
+                duplicates: 0,
+            }],
+            update: Vec::new(),
+            extension: Vec::new(),
+            union_replace: Vec::new(),
+        });
+        assert!(summary.as_str().contains("delete_count=1"));
+        assert!(summary.as_str().contains("replace_count=1"));
+        assert!(summary.as_str().contains("values=<redacted>"));
+        assert!(!summary.as_str().contains("secret"));
+        assert!(!summary.as_str().contains("md5_password"));
+    }
+
+    #[test]
     fn set_peer_group_summary_never_contains_md5_secret() {
         let summary = set_peer_group_summary("rs-clients", true, None);
         assert_eq!(
@@ -278,5 +320,6 @@ mod tests {
         assert!(CREDENTIAL_MASK_TABLE.contains(&"ApplyEvpnRuntimeRequest.candidate_toml"));
         assert!(CREDENTIAL_MASK_TABLE.contains(&"PeerGroupDefinition.md5_password"));
         assert!(CREDENTIAL_MASK_TABLE.contains(&"candidate_toml:tcp_ao.key"));
+        assert!(CREDENTIAL_MASK_TABLE.contains(&"gnmi.SetRequest.values"));
     }
 }
