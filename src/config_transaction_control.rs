@@ -18,7 +18,8 @@ use rustbgpd_api::peer_types::{
 use rustbgpd_api::proto;
 use rustbgpd_api::server::{
     ConfigMutationGateFn, ConfigTransactionAbortFn, ConfigTransactionApplyError,
-    ConfigTransactionApplyFn, ConfigTransactionConfirmFn, ConfigTransactionStatusFn,
+    ConfigTransactionApplyFn, ConfigTransactionConfirmFn, ConfigTransactionStatusFn, GnmiSetError,
+    GnmiSetFn, GnmiSetOutcome,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use tracing::{error, info};
@@ -27,6 +28,7 @@ use crate::config::{Config, EffectiveNeighborImpactKind, Neighbor, diff_config, 
 use crate::fib_table_control::{
     FibTableControlDeps, commit_fib_tables_locked, runtime_unavailable_error,
 };
+use crate::gnmi_set_bridge;
 use crate::reload::runtime_config_snapshot;
 
 const PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -108,6 +110,15 @@ impl ConfigTransactionController {
     }
 
     #[must_use]
+    pub fn gnmi_set_fn(&self) -> GnmiSetFn {
+        let controller = self.clone();
+        Arc::new(move |transaction| {
+            let controller = controller.clone();
+            Box::pin(async move { controller.apply_gnmi_set(transaction).await })
+        })
+    }
+
+    #[must_use]
     pub fn confirm_fn(&self) -> ConfigTransactionConfirmFn {
         let controller = self.clone();
         Arc::new(move |request| {
@@ -182,6 +193,48 @@ impl ConfigTransactionController {
             ConfigTransactionApplyError::Internal(
                 "config transaction apply task did not complete".to_string(),
             )
+        })?
+    }
+
+    async fn apply_gnmi_set(
+        self,
+        transaction: rustbgpd_api::server::GnmiSetTransaction,
+    ) -> Result<GnmiSetOutcome, GnmiSetError> {
+        let join = tokio::spawn(async move {
+            let _guard = self.deps.lock.lock().await;
+            self.reject_if_pending("gnmi.gNMI/Set")
+                .await
+                .map_err(apply_error_to_gnmi_set_error)?;
+            let current = runtime_config_snapshot(&self.deps.peer_mgr_tx)
+                .await
+                .map_err(GnmiSetError::Unavailable)?;
+            let candidate = gnmi_set_bridge::apply_transaction_to_config(current, &transaction)?;
+            let candidate_toml = toml::to_string_pretty(&candidate).map_err(|error| {
+                GnmiSetError::Internal(format!(
+                    "failed to serialize gNMI Set candidate config: {error}"
+                ))
+            })?;
+            // The coordinator lock serializes this internal gNMI Set path, and
+            // the candidate was just built from the live runtime snapshot. Let
+            // the shared apply executor do the single authoritative plan.
+            let response = apply_config_transaction_locked(
+                &self.deps,
+                proto::ApplyConfigTransactionRequest {
+                    candidate_toml,
+                    expected_runtime_snapshot_token: String::new(),
+                    client_request_id: "gnmi-set".to_string(),
+                    comment: String::new(),
+                    confirm_id: String::new(),
+                    confirm_timeout_seconds: 0,
+                },
+            )
+            .await
+            .map_err(apply_error_to_gnmi_set_error)?;
+            gnmi_set_outcome_from_apply_response(response)
+        });
+
+        join.await.map_err(|_| {
+            GnmiSetError::Internal("gNMI Set transaction task did not complete".to_string())
         })?
     }
 
@@ -1768,6 +1821,44 @@ fn plan_error_to_status(error: RuntimeConfigTransactionPlanError) -> ConfigTrans
     }
 }
 
+fn apply_error_to_gnmi_set_error(error: ConfigTransactionApplyError) -> GnmiSetError {
+    match error {
+        ConfigTransactionApplyError::InvalidArgument(message) => {
+            GnmiSetError::InvalidArgument(message)
+        }
+        ConfigTransactionApplyError::FailedPrecondition(message) => {
+            GnmiSetError::FailedPrecondition(message)
+        }
+        ConfigTransactionApplyError::Unavailable(message) => GnmiSetError::Unavailable(message),
+        ConfigTransactionApplyError::Internal(message) => GnmiSetError::Internal(message),
+    }
+}
+
+fn gnmi_set_outcome_from_apply_response(
+    response: proto::ConfigTransactionApplyResponse,
+) -> Result<GnmiSetOutcome, GnmiSetError> {
+    match proto::ConfigTransactionPlanStatus::try_from(response.status) {
+        Ok(
+            proto::ConfigTransactionPlanStatus::Noop
+            | proto::ConfigTransactionPlanStatus::Committable,
+        ) => Ok(GnmiSetOutcome::default()),
+        Ok(proto::ConfigTransactionPlanStatus::Rejected) => {
+            let message = if response.human_text.is_empty() {
+                "gNMI Set transaction was rejected".to_string()
+            } else {
+                response.human_text
+            };
+            Err(GnmiSetError::FailedPrecondition(message))
+        }
+        Ok(proto::ConfigTransactionPlanStatus::Unspecified) | Err(_) => {
+            Err(GnmiSetError::Internal(format!(
+                "gNMI Set transaction returned unexpected status {}",
+                response.status
+            )))
+        }
+    }
+}
+
 fn stage_config_snapshot_error_to_apply_error(
     error: StageConfigSnapshotError,
 ) -> ConfigTransactionApplyError {
@@ -1848,7 +1939,7 @@ mod tests {
     };
     use rustbgpd_api::rib_service::FibTableControlError;
     use rustbgpd_policy::PolicyAction;
-    use std::collections::{BTreeSet, VecDeque};
+    use std::collections::{BTreeSet, HashMap, VecDeque};
     use tokio::sync::Mutex;
 
     fn base_toml(extra: &str) -> String {
@@ -1961,6 +2052,77 @@ remote_asn = 65002
             neighbor.export_policy.as_ref(),
             neighbor.peer_group.clone(),
         )
+    }
+
+    fn gnmi_set_add_neighbor(
+        address: &str,
+        remote_asn: u64,
+    ) -> rustbgpd_api::server::GnmiSetTransaction {
+        rustbgpd_api::server::GnmiSetTransaction {
+            prefix: None,
+            operations: vec![rustbgpd_api::server::GnmiSetOperation::Update(gnmi_update(
+                gnmi_neighbor_config_path(address, "peer-as"),
+                rustbgpd_api::gnmi::typed_value::Value::UintVal(remote_asn),
+            ))],
+            extensions: Vec::new(),
+        }
+    }
+
+    fn gnmi_update(
+        path: rustbgpd_api::gnmi::Path,
+        value: rustbgpd_api::gnmi::typed_value::Value,
+    ) -> rustbgpd_api::gnmi::Update {
+        rustbgpd_api::gnmi::Update {
+            path: Some(path),
+            #[allow(deprecated)]
+            value: None,
+            val: Some(rustbgpd_api::gnmi::TypedValue { value: Some(value) }),
+            duplicates: 0,
+        }
+    }
+
+    fn gnmi_neighbor_config_path(address: &str, leaf: &str) -> rustbgpd_api::gnmi::Path {
+        rustbgpd_api::gnmi::Path {
+            #[allow(deprecated)]
+            element: Vec::new(),
+            origin: String::new(),
+            elem: vec![
+                gnmi_pe("network-instances"),
+                gnmi_keyed_pe("network-instance", "name", "DEFAULT"),
+                gnmi_pe("protocols"),
+                gnmi_protocol_pe(),
+                gnmi_pe("bgp"),
+                gnmi_pe("neighbors"),
+                gnmi_keyed_pe("neighbor", "neighbor-address", address),
+                gnmi_pe("config"),
+                gnmi_pe(leaf),
+            ],
+            target: String::new(),
+        }
+    }
+
+    fn gnmi_pe(name: &str) -> rustbgpd_api::gnmi::PathElem {
+        rustbgpd_api::gnmi::PathElem {
+            name: name.to_string(),
+            key: HashMap::new(),
+        }
+    }
+
+    fn gnmi_keyed_pe(name: &str, key: &str, value: &str) -> rustbgpd_api::gnmi::PathElem {
+        rustbgpd_api::gnmi::PathElem {
+            name: name.to_string(),
+            key: HashMap::from([(key.to_string(), value.to_string())]),
+        }
+    }
+
+    fn gnmi_protocol_pe() -> rustbgpd_api::gnmi::PathElem {
+        rustbgpd_api::gnmi::PathElem {
+            name: "protocol".to_string(),
+            key: HashMap::from([
+                ("identifier".to_string(), "BGP".to_string()),
+                ("name".to_string(), "BGP".to_string()),
+            ]),
+        }
     }
 
     #[test]
@@ -3978,6 +4140,53 @@ remote_asn = 65003
         let peers = peers.lock().await;
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].address.to_string(), "10.0.0.3");
+    }
+
+    #[tokio::test]
+    async fn gnmi_set_hook_commits_static_neighbor_add_through_transactions() {
+        let previous_toml = base_toml("");
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[neighbors]] add".to_string()],
+            ),
+            snapshot_toml.clone(),
+            peers.clone(),
+        ));
+        let persisted = Arc::new(Mutex::new(String::new()));
+        let persisted_task = Arc::clone(&persisted);
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted {
+                candidate_toml,
+                ack: Some(ack),
+            }) = config_rx.recv().await
+            {
+                *persisted_task.lock().await = candidate_toml;
+                let _ = ack.send(Ok(()));
+            }
+        });
+        let controller = ConfigTransactionController::new(
+            deps_value(None, peer_tx, Some(config_tx), Vec::new()),
+            BgpMetrics::new(),
+        );
+
+        controller
+            .apply_gnmi_set(gnmi_set_add_neighbor("10.0.0.3", 65003))
+            .await
+            .unwrap();
+
+        let peers = peers.lock().await;
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].address.to_string(), "10.0.0.3");
+        assert_eq!(peers[0].remote_asn, 65003);
+        let persisted = persisted.lock().await;
+        assert!(persisted.contains("10.0.0.3"));
+        assert_eq!(*snapshot_toml.lock().await, *persisted);
     }
 
     #[tokio::test]

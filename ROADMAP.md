@@ -105,13 +105,14 @@ has it, no broad performance sprints without profile evidence.
   that accepted them, pure dynamic-range policy moves now reuse the
   resolved-policy live executor with Route Refresh gating and captured rollback
   state, and static peer-group/session reshapes now rebuild affected sessions
-  with captured prior configs. Next, gNMI `Set` should map OpenConfig changes
-  into candidate TOML and feed this transaction model rather than inventing a
-  parallel commit primitive. **Done:** the Set bridge foundation now provides
-  redacted audit summaries, delete / replace / update normalization, response
-  shaping, and the daemon hook boundary while production remains fail-closed
-  without a wired hook. Next slice: map a supported OpenConfig subset to
-  candidate TOML and invoke ADR-0076. Exit: atomic commit where supported,
+  with captured prior configs. **Done:** the gNMI `Set` bridge now maps
+  supported OpenConfig changes into candidate TOML and feeds this transaction
+  model rather than inventing a parallel commit primitive; it provides redacted
+  audit summaries, delete / replace / update normalization, response shaping,
+  daemon hook wiring, and a first static numbered BGP neighbor subset for
+  `neighbor-address` / `peer-as` / `description` / `peer-group`. Next slices:
+  standard gNMI commit-confirmed extension handling and operator proof with
+  `gnmic` examples / smoke coverage. Exit: atomic commit where supported,
   explicit restart-required/rejected surfaces, rollback/receipt model, no
   partial silent drift. Gated by ADR-0064 tier authz.
 - **Operational proof / scale automation** *(parallel priority, small slices).*
@@ -443,10 +444,10 @@ an ADR "Deferred" section that points back here. Tightened, not dropped.
 - **gNMI / OpenConfig follow-ups** *(ADR-0070 counterpart).* v1 ships read-only
   `Capabilities` / `Get` / `Subscribe` (`ONCE` / `POLL` / `STREAM SAMPLE`) over
   the strict OpenConfig BGP state subset, plus `ON_CHANGE` for the neighbor
-  session-state leaf (M54/M56). Deferred until the underlying snapshot exposes
-  the data or demand appears: supported `Set` config subsets beyond the bridge
-  foundation (OpenConfig-to-candidate-TOML mapping onto the transaction model);
-  per-AFI-SAFI prefix counters; per-neighbor
+  session-state leaf (M54/M56), plus a first transaction-backed `Set` subset for
+  static numbered BGP neighbor config. Deferred until the underlying snapshot
+  exposes the data or demand appears: broader `Set` config subsets beyond static
+  neighbors; per-AFI-SAFI prefix counters; per-neighbor
   installed/accepted split; `supported-capabilities` + negotiated AFI-SAFI;
   global total-prefixes/total-paths; absolute `last-established`; `PROTO` /
   `ASCII` encodings, multicast / VPN AFIs, full OpenConfig coverage; BFD / FIB /

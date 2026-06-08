@@ -11,14 +11,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **gNMI Set transaction-bridge foundation.** The gNMI service now has the
-  internal Set bridge needed for future OpenConfig config support: Set payloads
-  are redacted in gRPC audit summaries, delete / replace / update requests are
-  prefix-expanded and normalized in gNMI application order, response operation
-  shaping is implemented, and the API crate exposes a daemon-owned hook for
-  ADR-0076-backed commits. The production daemon still starts without that hook,
-  so authorized Set calls continue to return `UNIMPLEMENTED` until a supported
-  OpenConfig-to-candidate-TOML mapping lands.
+- **gNMI Set transaction bridge and static-neighbor config subset.** The gNMI
+  service now supports the first durable OpenConfig config mutations:
+  operator-tier `Set` can create/update/delete static, numbered BGP neighbors
+  for `neighbor-address`, `peer-as`, `description`, and `peer-group`. Supported
+  edits are translated from OpenConfig paths into full candidate TOML and
+  committed through ADR-0076 `PlanConfigTransaction` /
+  `ApplyConfigTransaction`, including persistence acknowledgement and rollback;
+  unsupported paths still return `UNIMPLEMENTED`. Set payloads are redacted in
+  gRPC audit summaries, and delete / replace / update requests are
+  prefix-expanded and normalized in gNMI application order.
 
 - **ADR-0077 MPLS/VPN/BGP-LS address-family boundary.** Added a
   research-backed control-plane scope for future labeled-unicast, VPNv4/v6,

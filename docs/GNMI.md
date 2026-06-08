@@ -6,12 +6,12 @@ speak gNMI/OpenConfig.
 
 This is not a full OpenConfig router model. The v1 surface is deliberately
 narrow: `Capabilities`, `Get`, and `Subscribe` for BGP global and neighbor
-state. `Set` is present because gNMI defines it, but the daemon still returns
-`UNIMPLEMENTED` after authorization until a supported OpenConfig config subset
-maps onto the ADR-0076 transaction model. The Set bridge foundation now
-redacts Set payloads in audit logs, normalizes delete / replace / update into
-gNMI application order, and keeps production closed when no daemon-owned
-transaction hook is installed.
+state, plus a small `Set` subset for durable static BGP neighbor config. `Set`
+maps supported OpenConfig mutations onto the ADR-0076 transaction model:
+payloads are redacted in audit logs, delete / replace / update operations are
+normalized into gNMI application order, and successful mutations build full
+candidate TOML before using the same plan/apply/persist/rollback path as native
+config transactions.
 
 Design details live in [ADR-0070](adr/0070-gnmi-openconfig-telemetry.md). The
 complete native gRPC reference remains [API.md](API.md).
@@ -43,8 +43,7 @@ tls_client_ca_file = "/etc/rustbgpd/certs/ca.pem"
 principal is derived from the verified client certificate in ADR-0064 order:
 `rustbgpd:` URI SAN, then email SAN, then Subject CN. The principal must have a
 matching `[security.grpc.roles]` entry. `Capabilities`, `Get`, and `Subscribe`
-are `sensitive_read`; `Set` is `operator_only` even while production support is
-unimplemented.
+are `sensitive_read`; `Set` is `operator_only`.
 
 ## Supported RPCs
 
@@ -53,13 +52,29 @@ unimplemented.
 | `Capabilities` | Returns gNMI version `0.10.0`, the OpenConfig modules backing the supported paths, and `JSON` / `JSON_IETF` encodings. |
 | `Get` | Returns the supported OpenConfig BGP global and neighbor `state` subset. |
 | `Subscribe` | Supports `ONCE`, `POLL`, `STREAM SAMPLE`, and `STREAM ON_CHANGE` (the last is scoped to the neighbor session-state leaf — see below). |
-| `Set` | Returns `UNIMPLEMENTED` for an authorized operator-tier principal until a supported OpenConfig config subset is wired to ADR-0076 transactions. Lower-tier callers receive `PERMISSION_DENIED` before the handler runs. |
+| `Set` | Operator-only. Supports the static-neighbor config subset below through ADR-0076 transactions; unsupported paths return `UNIMPLEMENTED`, malformed values return `INVALID_ARGUMENT`, and transaction precondition failures return `FAILED_PRECONDITION`. Lower-tier callers receive `PERMISSION_DENIED` before the handler runs. |
 
-### `Set` foundation scope
+### `Set` static-neighbor scope
 
-Current release behavior remains fail-closed: the daemon starts with no gNMI Set
-transaction hook, so authorized Set calls return `UNIMPLEMENTED`. The internal
-service contract is in place for the next implementation slices:
+The first supported config surface is static, numbered BGP neighbors under:
+
+```text
+/network-instances/network-instance[name=DEFAULT]/protocols/protocol[identifier=BGP][name=BGP]/bgp/neighbors/neighbor[neighbor-address=X]/config
+```
+
+Supported operations:
+
+- `update` / `replace` the leaf values `neighbor-address`, `peer-as`,
+  `description`, and `peer-group`.
+- Create a new static neighbor by setting `peer-as` under a concrete
+  `neighbor[neighbor-address=X]` entry. The list key supplies the durable
+  `[[neighbors]].address`; if `config/neighbor-address` is also supplied, it
+  must match the key.
+- Delete a whole static neighbor list entry by deleting
+  `.../neighbors/neighbor[neighbor-address=X]`. Per gNMI, deleting a missing
+  entry is silently accepted.
+
+Transaction and validation behavior:
 
 - Set payloads are summarized as operation counts only; values are redacted
   before `grpc_authz` audit logging because future OpenConfig config leaves can
@@ -70,9 +85,17 @@ service contract is in place for the next implementation slices:
   rejected with `INVALID_ARGUMENT`.
 - non-empty `union_replace` and request extensions return `UNIMPLEMENTED` until
   dedicated support ships.
-- future successful Set handling must translate the supported OpenConfig subset
-  into candidate TOML and call the ADR-0076 transaction controller. There is no
-  parallel commit path.
+- supported changes translate the live runtime config snapshot into candidate
+  TOML and call the ADR-0076 transaction controller. There is no parallel commit
+  path.
+- unsupported config leaves, including `enabled`, `local-as`, auth, timers,
+  transport, BFD, AFI-SAFI, policy, route-reflector/client,
+  route-server-client, and Add-Path settings, return `UNIMPLEMENTED`.
+- IPv6 link-local / BGP unnumbered neighbor Set is deferred because OpenConfig's
+  `neighbor-address` key does not carry the interface identity rustbgpd needs to
+  identify those peers safely.
+- `peer-group` references must name an existing rustbgpd peer group; peer-group
+  object creation via OpenConfig Set is deferred.
 
 ### `STREAM ON_CHANGE` v1 scope
 

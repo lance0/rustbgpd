@@ -188,15 +188,14 @@ deliberately narrow: `Capabilities`, `Get`, and `Subscribe` (`ONCE`, `POLL`,
 `STREAM SAMPLE`, and `STREAM ON_CHANGE` — the last is scoped to the neighbor
 session-state leaf, requires `[event_history]` enabled, and returns
 `FAILED_PRECONDITION` otherwise) for global and neighbor `state` under the
-default network instance. `Set` is present because gNMI requires it and is
-classified as operator-only, but the daemon still returns `UNIMPLEMENTED` until
-a supported OpenConfig config subset is wired to ADR-0076 transactions. The API
-foundation already redacts Set payloads, validates/normalizes delete / replace /
-update ordering, and exposes a daemon-owned hook so future `Set` support can
-translate OpenConfig edits into candidate TOML and feed
-`PlanConfigTransaction` / `ApplyConfigTransaction`, not bypass the transaction
-model. See [GNMI.md](GNMI.md) for the full `ON_CHANGE` v1 scope (initial sync,
-reconnect-no-replay, lag → `DATA_LOSS`) and Set bridge constraints.
+default network instance. `Set` is operator-only and supports the first durable
+config subset: static, numbered BGP neighbor create/update/delete for
+`neighbor-address`, `peer-as`, `description`, and `peer-group`. Supported Set
+edits are translated into full candidate TOML and fed through
+`PlanConfigTransaction` / `ApplyConfigTransaction`; unsupported paths return
+`UNIMPLEMENTED` instead of bypassing the transaction model. See
+[GNMI.md](GNMI.md) for the full `ON_CHANGE` v1 scope (initial sync,
+reconnect-no-replay, lag → `DATA_LOSS`) and Set path matrix.
 
 Network gNMI is served only on mTLS TCP listeners. The UDS listener also exposes
 the service as a local-only extension.
