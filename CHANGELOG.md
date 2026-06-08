@@ -37,6 +37,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `config/send-community-type`, and `config/description` continue to return
   `UNIMPLEMENTED`.
 
+- **gNMI Set dynamic-neighbor-prefix subset.** The OpenConfig Set bridge can
+  now create/update/delete dynamic BGP neighbor prefix ranges under
+  `bgp/global/dynamic-neighbor-prefixes`. The supported leaves are
+  `config/prefix` and `config/peer-group`; OpenConfig-created ranges use
+  native `remote_asn = 0` (accept the peer ASN from OPEN) and no description.
+  Native validation still enforces defined peer-group references, duplicate
+  effective-prefix rejection, prefix bounds, and the existing dynamic-neighbor
+  BFD restriction.
+
 - **ADR-0077 MPLS/VPN/BGP-LS address-family boundary.** Added a
   research-backed control-plane scope for future labeled-unicast, VPNv4/v6,
   Route Target Constraints, and BGP-LS work. The ADR keeps `Prefix` scoped to
