@@ -23,6 +23,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the first per-peer failure. This is the rollback substrate for peer-group /
   session-reshape config transactions.
 
+- **Static peer-group/session reshape config transactions.**
+  `ApplyConfigTransaction` can now commit peer-group field edits and
+  static-neighbor peer-group reassignments that reshape existing static
+  sessions. The executor stages the candidate snapshot, reconfigures affected
+  peers with captured prior configs, persists with an acknowledgement, and
+  restores live peers plus the snapshot on failure. Dynamic-range session
+  reshapes remain rejected until accepted dynamic sessions can be targeted with
+  equivalent rollback semantics.
+
 - **Config transaction lifecycle metric.**
   `bgp_config_transaction_lifecycle_total{operation, outcome}` now counts
   confirmed-transaction confirm, abort, and auto-revert lifecycle transitions
@@ -43,7 +52,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chains through their accepting `[[dynamic_neighbors]]` range. The executor
   expands the affected ranges to currently managed dynamic peers, reuses the
   same Route Refresh, captured-prior, persistence-ack, and rollback path as
-  static live-policy transactions, and keeps peer-group/session reshapes
+  static live-policy transactions. Dynamic-range session reshapes remain
   rejected until a dedicated reconfigure executor exists.
 
 ## [0.36.0] — 2026-06-05

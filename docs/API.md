@@ -149,7 +149,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | Service | Read-only RPCs | Mutating RPCs rejected on `read_only` |
 |---------|----------------|---------------------------------------|
 | `GlobalService` | `GetGlobal` | `SetGlobal` |
-| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `GetConfigTransactionStatus` | `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain changes, or pure live policy-chain impact for static neighbors and accepted dynamic peers; mixed or unsupported candidates rejected without mutation), `ConfirmConfigTransaction`, `AbortConfigTransaction` |
+| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `GetConfigTransactionStatus` | `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain changes, pure live policy-chain impact for static neighbors and accepted dynamic peers, or static peer-group/session reshape impact; mixed or unsupported candidates rejected without mutation), `ConfirmConfigTransaction`, `AbortConfigTransaction` |
 | `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
@@ -248,7 +248,7 @@ and receive only redacted diff / plan output.
 |-----|-------------|
 | `DiffRuntimeConfig` | Validate candidate TOML and compare it against the daemon's live runtime config snapshot |
 | `PlanConfigTransaction` | Validate candidate TOML, return a runtime snapshot token, and classify v1 transaction support without mutating daemon state |
-| `ApplyConfigTransaction` | Operator-tier commit entry point for ADR-0076 config transactions; currently commits one pure runtime family at a time: full-set `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify changes, catalog-only policy/neighbor-set/peer-group/global-chain changes, or pure live policy-chain impact for static neighbors and accepted dynamic peers |
+| `ApplyConfigTransaction` | Operator-tier commit entry point for ADR-0076 config transactions; currently commits one pure runtime family at a time: full-set `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify changes, catalog-only policy/neighbor-set/peer-group/global-chain changes, pure live policy-chain impact for static neighbors and accepted dynamic peers, or static peer-group/session reshape impact |
 | `ConfirmConfigTransaction` | Confirm a pending confirmed transaction before its timer expires |
 | `AbortConfigTransaction` | Abort a pending confirmed transaction and roll back immediately |
 | `GetConfigTransactionStatus` | Return redacted confirmed-transaction lifecycle state |
@@ -270,11 +270,12 @@ presence.
 - `supported_sections`: sections the v1 transaction model can commit
   (`[[fib_tables]]`, `[[dynamic_neighbors]]`, static neighbor add/delete/modify,
   catalog-only `[policy]` / `[peer_groups]` changes with no effective impact on
-  static neighbors or dynamic ranges, and pure live policy-chain impact for
-  static neighbors or accepted dynamic peers).
+  static neighbors or dynamic ranges, pure live policy-chain impact for
+  static neighbors or accepted dynamic peers, and static peer-group/session
+  reshape impact).
 - `unsupported_sections`: hot-reloadable sections v1 refuses until an atomic
-  executor exists. Inheritance/session reshapes continue to report
-  `effective neighbor inheritance impact`.
+  executor exists. Dynamic-range session reshapes and mixed policy/session
+  effective impact continue to report `effective neighbor inheritance impact`.
 - `restart_required_sections`: sections that still require daemon restart.
 
 `redacted_diff.reload_applied.effective_neighbor_impact[]` includes a
@@ -286,9 +287,9 @@ required.
 The planner is intentionally stricter than SIGHUP: "reload-applied" does not
 mean "transaction-committable" unless the section appears in
 `supported_sections`. `ApplyConfigTransaction` commits one pure runtime family
-at a time. Cross-family candidates, peer-group edits that reshape
-transport/session config, and other valid-but-unsupported sections return
-`REJECTED` without mutation until their section executor lands.
+at a time. Cross-family candidates, dynamic-range session reshapes, mixed
+policy/session effective impacts, and other valid-but-unsupported sections
+return `REJECTED` without mutation until their section executor lands.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
@@ -452,10 +453,16 @@ are selected by the canonical `[[dynamic_neighbors]]` range that accepted them,
 not by a public API field. Re-evaluating already-received routes under a new
 import chain requires Route Refresh, so every impacted Established peer must
 have negotiated the Route Refresh capability; otherwise the apply is rejected
-and rolled back without committing the candidate. Peer-group
-reassignment and peer-group field edits that reshape transport/session config
-still report `effective neighbor inheritance impact` and reject until their own
-rollback-capable executors exist.
+and rolled back without committing the candidate.
+
+Static peer-group/session reshape transactions commit peer-group field edits or
+static-neighbor peer-group reassignments that rebuild existing static sessions.
+The executor stages the snapshot, reconfigures affected peers with the same
+delete/re-add semantics as SIGHUP, captures prior peer configs for rollback,
+persists with an acknowledgement, and restores both live peers and the snapshot
+on failure. Dynamic-range session reshapes remain rejected until a dynamic peer
+reshape executor can target accepted sessions with equivalent rollback
+semantics.
 
 CLI equivalent:
 

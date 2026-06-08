@@ -1063,6 +1063,7 @@ const TRANSACTION_POLICY_DEFINITIONS_SECTION: &str = "[policy] definitions";
 const TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION: &str = "[policy] neighbor_sets";
 const TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION: &str = "[policy] global chains";
 const TRANSACTION_POLICY_LIVE_IMPACT_SECTION: &str = "[policy] live impact";
+const TRANSACTION_SESSION_RESHAPE_SECTION: &str = "effective neighbor session reshape";
 
 /// Test-only auto-inject for the v0.24.0 `enforcement = "tier"`
 /// default flip. When compiled with `#[cfg(test)]` and the supplied
@@ -1712,9 +1713,11 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
     }
     if !diff.effective_neighbor_impact.is_empty() {
         // A live-impact transaction is committable only when every impacted
-        // entry is a pure resolved-policy-chain move. Static neighbors are
-        // applied directly; dynamic ranges are expanded to live peers by
-        // accepted-range attribution in the transaction executor.
+        // entry belongs to one executor family. Pure resolved-policy-chain
+        // moves use the live-policy executor. Static-only session reshapes use
+        // the peer reconfigure executor. Dynamic session reshapes and mixed
+        // policy/session impacts remain rejected until they have a combined
+        // rollback story.
         let all_policy_chain = diff
             .effective_neighbor_impact
             .iter()
@@ -1723,6 +1726,10 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             class
                 .supported_sections
                 .push(TRANSACTION_POLICY_LIVE_IMPACT_SECTION.to_string());
+        } else if static_session_reshape_transaction(diff) {
+            class
+                .supported_sections
+                .push(TRANSACTION_SESSION_RESHAPE_SECTION.to_string());
         } else if diff
             .effective_neighbor_impact
             .iter()
@@ -1820,6 +1827,29 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
     class
 }
 
+fn static_session_reshape_transaction(diff: &ConfigDiff) -> bool {
+    if !diff.neighbors.added.is_empty() || !diff.neighbors.removed.is_empty() {
+        return false;
+    }
+    if !diff.effective_neighbor_impact.iter().all(|impact| {
+        impact.kind == EffectiveNeighborImpactKind::SessionReshape && !impact.is_dynamic_range
+    }) {
+        return false;
+    }
+    if diff.neighbors.changed.is_empty() {
+        return true;
+    }
+    let impacted: HashSet<&str> = diff
+        .effective_neighbor_impact
+        .iter()
+        .map(|impact| impact.address.as_str())
+        .collect();
+    diff.neighbors
+        .changed
+        .iter()
+        .all(|neighbor| impacted.contains(neighbor.address.as_str()))
+}
+
 fn transaction_sections_are_one_family(sections: &[String]) -> bool {
     let mut has_fib = false;
     let mut has_dynamic = false;
@@ -1844,7 +1874,14 @@ fn transaction_sections_are_one_family(sections: &[String]) -> bool {
             | TRANSACTION_POLICY_LIVE_IMPACT_SECTION => {
                 has_catalog = true;
             }
-            _ => {}
+            _ => {
+                // `TRANSACTION_SESSION_RESHAPE_SECTION` is a family-neutral
+                // modifier: it can stem from catalog inheritance (peer-group
+                // field edit) or from a direct static neighbor peer-group
+                // reassignment, so the underlying changed section decides the
+                // family. Unknown sections are ignored here and rejected later
+                // by the apply-family dispatcher if they ever reach apply.
+            }
         }
     }
     u8::from(has_fib)

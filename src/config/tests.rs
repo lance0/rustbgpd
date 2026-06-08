@@ -6713,7 +6713,11 @@ peer_group = "ix-members"
     assert!(!class.is_committable());
     assert_eq!(
         class.supported_sections,
-        vec!["[[neighbors]] modify", "[peer_groups] catalog"]
+        vec![
+            "[[neighbors]] modify",
+            "[peer_groups] catalog",
+            "effective neighbor session reshape",
+        ]
     );
     assert!(
         class
@@ -6887,10 +6891,10 @@ default_action = "{default_action}"
 }
 
 #[test]
-fn transaction_v1_rejects_peer_group_field_reshape_with_live_neighbor_impact() {
+fn transaction_v1_classifies_peer_group_field_reshape_with_live_neighbor_impact() {
     // A peer-group hold_time edit reshapes the resolved transport_config of its
     // member neighbor — that needs a session reconfigure, not an in-place chain
-    // re-apply, so it stays rejected as a session reshape.
+    // re-apply, so it routes to the session-reshape executor.
     let with_hold = |hold: u32| {
         format!(
             r#"
@@ -6921,6 +6925,128 @@ peer_group = "edge"
     let diff = diff_config(&old, &new);
     let class = classify_config_transaction_v1(&diff);
 
+    assert!(class.is_committable(), "{class:?}");
+    assert_eq!(
+        class.supported_sections,
+        vec![
+            "[peer_groups] catalog",
+            "effective neighbor session reshape",
+        ]
+    );
+    assert!(class.unsupported_sections.is_empty(), "{class:?}");
+    assert!(
+        class.restart_required_sections.is_empty(),
+        "{:?}",
+        class.restart_required_sections
+    );
+    assert!(
+        diff.effective_neighbor_impact
+            .iter()
+            .any(|impact| impact.kind == EffectiveNeighborImpactKind::SessionReshape),
+        "{:?}",
+        diff.effective_neighbor_impact
+    );
+    let json = super::config_diff_json_value(&diff);
+    assert_eq!(
+        json["reload_applied"]["effective_neighbor_impact"][0]["kind"],
+        serde_json::json!("session_reshape")
+    );
+}
+
+#[test]
+fn transaction_v1_classifies_static_peer_group_reassignment_as_session_reshape() {
+    let config = |group: &str| {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[peer_groups.edge]
+hold_time = 90
+
+[peer_groups.core]
+hold_time = 45
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "{group}"
+"#
+        )
+    };
+    let old = parse(&config("edge")).unwrap();
+    let new = parse(&config("core")).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(class.is_committable(), "{class:?}");
+    assert_eq!(
+        class.supported_sections,
+        vec!["[[neighbors]] modify", "effective neighbor session reshape",]
+    );
+    assert!(class.unsupported_sections.is_empty(), "{class:?}");
+    assert!(
+        diff.effective_neighbor_impact
+            .iter()
+            .all(|impact| impact.kind == EffectiveNeighborImpactKind::SessionReshape),
+        "{:?}",
+        diff.effective_neighbor_impact
+    );
+}
+
+#[test]
+fn transaction_v1_rejects_mixed_policy_and_session_reshape_impact() {
+    // A candidate that only needs a policy refresh for one peer and a session
+    // rebuild for another requires a combined executor. The planner must not
+    // route this to the session-reshape executor and silently skip the
+    // policy-only peer.
+    let config = |hold: u32, action: &str| {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[peer_groups.rebuild]
+hold_time = {hold}
+
+[policy.definitions.filter]
+default_action = "{action}"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "rebuild"
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+import_policy_chain = ["filter"]
+"#
+        )
+    };
+    let old = parse(&config(90, "permit")).unwrap();
+    let new = parse(&config(45, "deny")).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
     assert!(!class.is_committable(), "{class:?}");
     assert!(
         class
@@ -6928,6 +7054,13 @@ peer_group = "edge"
             .contains(&"effective neighbor inheritance impact".to_string()),
         "{:?}",
         class.unsupported_sections
+    );
+    assert!(
+        diff.effective_neighbor_impact
+            .iter()
+            .any(|impact| impact.kind == EffectiveNeighborImpactKind::PolicyChain),
+        "{:?}",
+        diff.effective_neighbor_impact
     );
     assert!(
         diff.effective_neighbor_impact

@@ -100,14 +100,13 @@ has it, no broad performance sprints without profile evidence.
 - **Config transaction coverage + OpenConfig bridge** *(highest priority,
   ADR-0076 foundation shipped).* Native gRPC now has validate-only planning,
   optimistic snapshot tokens, commit/apply/confirm/abort/status, persistence
-  acknowledgement, and rollback for the v1 committable families. The next useful
-  slice is the remaining hot-reload executor whose rollback semantics are ready:
-  peer-group/session reshapes with captured rollback state. **Done:**
+  acknowledgement, and rollback for the v1 committable families. **Done:**
   established dynamic peers now keep the canonical longest-prefix-match range
-  that accepted them, and pure dynamic-range policy moves now reuse the
+  that accepted them, pure dynamic-range policy moves now reuse the
   resolved-policy live executor with Route Refresh gating and captured rollback
-  state. Next, gNMI `Set` should map OpenConfig changes into candidate TOML and
-  feed this transaction model rather than inventing a
+  state, and static peer-group/session reshapes now rebuild affected sessions
+  with captured prior configs. Next, gNMI `Set` should map OpenConfig changes
+  into candidate TOML and feed this transaction model rather than inventing a
   parallel commit primitive. Exit: atomic commit where supported, explicit
   restart-required/rejected surfaces, rollback/receipt model, no partial silent
   drift. Gated by ADR-0064 tier authz.
@@ -517,8 +516,14 @@ branch is between features.
   peers' resolved import/export policy chains now commit as transactions: stage
   the candidate snapshot, re-apply resolved chains to affected live sessions
   with captured priors, persist with ack, and restore live chains plus the
-  snapshot on failure. Peer-group/session reshapes remain rejected until a
-  dedicated reconfigure executor exists.
+  snapshot on failure.
+- [x] **Config transaction static peer-group/session reshape executor.**
+  Peer-group field edits and static-neighbor peer-group reassignments that
+  reshape existing static sessions now commit as transactions: stage the
+  candidate snapshot, reconfigure affected peers with captured prior configs,
+  persist with ack, and restore live peers plus the snapshot on failure.
+  Dynamic-range session reshapes remain deferred until accepted dynamic sessions
+  can be targeted with equivalent rollback semantics.
 - [x] **Config transaction commit-confirmed core.**
   `ApplyConfigTransaction` can now enter a singleton pending-confirm state with
   `confirm_id` and a bounded confirm timer. Confirm makes the change permanent;
