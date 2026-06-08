@@ -36,6 +36,36 @@ bench/compare-criterion.sh \
   --bench codec
 ```
 
+## RIB memory compare
+
+`compare-rib-memory.sh` runs the ignored high-N RIB structural memory profile
+at two git refs and writes a Markdown summary, CSV, logs, and metadata under
+`target/rib-memory-compare/`. It measures allocator-tracked live heap for three
+RIB shapes: one-peer Adj-RIB-In, two-peer Adj-RIB-In + Loc-RIB, and a
+route-server / route-reflector fanout shape with two Adj-RIB-Out peers.
+
+Requirements: `bash`, `git`, `cargo`, and `python3`. The compared refs must
+already include the structured `memory_profile_high_n` harness.
+
+```bash
+bench/compare-rib-memory.sh \
+  --base origin/main \
+  --head HEAD \
+  --profile quick
+```
+
+Profiles:
+
+| Profile | Prefix counts | Use |
+|---|---:|---|
+| `quick` | 10k, 100k | Mechanics check / small PR review |
+| `full` | 100k, 500k, 900k | Full-table memory review on a large host |
+
+The summary flags a row for review only when head grows by at least **+5%**
+and **+32 MiB** for the same shape/size. Smaller movement is recorded but
+treated as allocator/map-capacity noise unless the PR is explicitly
+memory-targeted.
+
 ## Multiple attempts (recommended on noisy hosts)
 
 `--attempts N` runs the full base+head comparison N times. Odd attempts run
@@ -98,18 +128,18 @@ is written.
 When the bench runner shares a host with the soak runner, both
 workloads acquire an exclusive `flock` on
 `${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}` before
-doing real work — the bench script directly, the soak harnesses via
-the shared `tests/soak/host-lock.sh` helper. If the lock is already
-held the script exits with a clear error rather than producing useless
-numbers next to a busy soak (and vice versa). Local dev boxes without
-that XDG state directory skip the locking entirely. See
+doing real work — the Criterion and RIB-memory compare scripts directly,
+the soak harnesses via the shared `tests/soak/host-lock.sh` helper. If
+the lock is already held the script exits with a clear error rather than
+producing useless numbers next to a busy soak (and vice versa). See
 `tests/soak/README.md` ("Host mutex") for the sudo / `$HOME` trap —
 running soak as root moves the lock under `/root/...` and bypasses
 the guard.
 
-The output summary is designed to be pasted into a PR comment. Keep the raw
+The output summaries are designed to be pasted into PR comments. Keep the raw
 artifact directory when reviewing regressions; Criterion's HTML report remains
-the source for distribution details.
+the source for distribution details on timing benches, and the RIB-memory CSV is
+the source for structural memory rows.
 
 The same entrypoint is exposed through the manual `Criterion Bench Compare`
 GitHub Actions workflow. That workflow expects a self-hosted runner labeled

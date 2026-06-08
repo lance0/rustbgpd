@@ -6,7 +6,8 @@ for relative comparison and regression tracking, not absolute guarantees.
 
 **Last measured:** RIB Operations pinned A/B: 2026-05-29; same-host
 current-main reconfirmation, distribution-fanout baseline, and memory
-attribution correction: 2026-06-02.
+attribution correction: 2026-06-02; structured high-N RIB memory profile:
+2026-06-08.
 
 | Field | Value |
 |-------|-------|
@@ -457,19 +458,32 @@ the lookup-heavy churn path).
 ## Memory Footprint
 
 Measured using a tracking global allocator that counts every `alloc` and
-`dealloc`. Run with:
-`cargo test -p rustbgpd-rib --test memory_profile -- --nocapture`
+`dealloc`. The normal test compiles and schema-checks the harness; the ignored
+high-N profile emits JSONL rows for the comparison script.
+
+```bash
+# Compile/schema guard
+cargo test -p rustbgpd-rib --features bench-internals --test memory_profile
+
+# Manual full profile (100k / 500k / 900k)
+RUSTBGPD_RIB_MEMORY_PROFILE=full \
+  cargo test -p rustbgpd-rib --features bench-internals \
+  --test memory_profile memory_profile_high_n -- --ignored --nocapture
+
+# A/B summary against another ref
+bench/compare-rib-memory.sh --base origin/main --head HEAD --profile quick
+```
 
 ### Type Sizes (stack)
 
 | Type | Size |
 |------|------|
-| `Route` | 120 bytes |
+| `Route` | 128 bytes |
 | `Prefix` | 18 bytes |
 | `PathAttribute` | 112 bytes |
 | `AsPath` | 24 bytes |
 | `AsPathSegment` | 32 bytes |
-| `AdjRibIn` | 280 bytes |
+| `AdjRibIn` | 1032 bytes |
 | `LocRib` | 96 bytes |
 
 `PathAttribute` grew from 72 to 112 bytes since the v0.30-era figures (new
@@ -491,40 +505,34 @@ each having their own copy.
 
 | Attribute set | Heap | Stack | Total |
 |---------------|------|-------|-------|
-| Typical (6 attrs, 3-ASN path, 2 communities) | 764 B | 120 B | 884 B |
-| Rich (8 attrs, 5-ASN+SET path, 5 communities, ORIGINATOR_ID, CLUSTER_LIST) | 1056 B | 120 B | 1176 B |
+| Typical (6 attrs, 3-ASN path, 2 communities) | 764 B | 128 B | 892 B |
+| Rich (8 attrs, 5-ASN+SET path, 5 communities, ORIGINATOR_ID, CLUSTER_LIST) | 1056 B | 128 B | 1184 B |
 
 These are per-unique-attribute-set costs. With interning, routes sharing the
-same attributes pay only the 120-byte `Route` stack cost plus an 8-byte `Arc`
+same attributes pay only the 128-byte `Route` stack cost plus an 8-byte `Arc`
 pointer.
 
 ### AdjRibIn at Scale (single peer, typical attrs)
 
-| Routes | Resident | Per-route |
-|--------|----------|-----------|
-| 10,000 | 3.0 MB | 318 B |
-| 100,000 | 24.3 MB | 254 B |
+| Routes | Live heap | Per-route | Route-map capacity | Prefix-index bytes |
+|--------|----------:|----------:|-------------------:|-------------------:|
+| 100,000 | 22.3 MiB | 233 B | 114,688 | 3.1 MiB |
+| 500,000 | 165.5 MiB | 347 B | 917,504 | 12.5 MiB |
+| 900,000 | 178.0 MiB | 207 B | 917,504 | 25.0 MiB |
 
-Per-route cost is ~250-320 bytes including HashMap overhead, prefix index, and
-intern table. At 100k the resident set is ~9% lower than the v0.30-era 26.7 MB,
-from the inlined `SmallVec` prefix index (no per-prefix `HashSet`). Attribute
-interning shares one ~764-byte allocation across all routes with identical
-attributes; a typical peer's full table has only a handful of unique attribute
-sets (~50-200), so the attribute heap cost is amortized to near zero per route.
-
-> **Harness limitation (high N):** the `memory_profile` test does not scale
-> cleanly past ~100k in its current form — its 500k and 900k cases report
-> near-identical resident (a measurement artifact, not a RIB property; the
-> v0.30-era 500k/900k figures had the same non-scaling). The 10k/100k rows are
-> the trustworthy structural numbers; fixing the harness to scale is tracked as
-> a separate perf-infra task. For real full-table memory at scale, see the
-> bgperf2 end-to-end RSS below.
+Per-route cost includes route-map overhead, the trie-backed prefix index, and
+the intern table. The non-smooth 500k/900k curve is expected: hash-map
+capacity grows in large steps, so a 500k profile can sit on the same route-map
+capacity plateau as 900k. The structured harness reports capacities so reviews
+can separate those cliffs from real storage regressions.
 
 ### Full RIB: 2 Peers + LocRib (typical attrs)
 
-| Prefixes | Total memory | Per-prefix |
-|----------|-------------|------------|
-| 100,000 | 60.6 MB | 635 B |
+| Prefixes | Live heap | Per-prefix | Route copies | Route-map capacity |
+|----------|----------:|-----------:|-------------:|-------------------:|
+| 100,000 | 63.6 MiB | 667 B | 300,000 | 344,064 |
+| 500,000 | 484.0 MiB | 1015 B | 1,500,000 | 2,752,512 |
+| 900,000 | 509.0 MiB | 593 B | 2,700,000 | 2,752,512 |
 
 (Was 66.6 MB / 698 B before the trie-backed prefix indexes landed — see the
 *prefix-index migration* note below.) This is the **RIB-only, allocator-tracked**
@@ -534,9 +542,22 @@ across copies, and attribute interning within each `AdjRibIn` shares one
 allocation across routes with identical attributes. It is **distinct from the
 full-process RSS** below — it excludes the daemon's operational surfaces
 (event-history, gRPC, telemetry, BFD, the tokio runtime, allocator arenas).
-500k/900k are omitted under the harness limitation noted above; this RIB-only
-profile remains the regression-tracking surface for RIB data-structure changes,
-while bgperf2 RSS (below) is the operator-facing full-daemon number.
+
+### RR / Route-Server Fanout Shape: 2 In + LocRib + 2 Out
+
+| Prefixes | Live heap | Per-prefix | Route copies | Route-map capacity |
+|----------|----------:|-----------:|-------------:|-------------------:|
+| 100,000 | 108.1 MiB | 1133 B | 500,000 | 573,440 |
+| 500,000 | 815.0 MiB | 1709 B | 2,500,000 | 4,587,520 |
+| 900,000 | 865.0 MiB | 1007 B | 4,500,000 | 4,587,520 |
+
+This is the structural memory shape closest to the dhat finding below: received
+routes, best paths, and advertised-route maps are all present. It still excludes
+full-daemon surfaces and allocator RSS behavior, so bgperf2 remains the
+operator-facing process-memory number. The A/B review rule for this harness is
+deliberately coarse: flag a row for review only when head grows by at least
+**+5% and +32 MiB** for the same shape/size; smaller movement is recorded but
+treated as allocator/map-capacity noise unless the PR is memory-targeted.
 
 > **Correction (whole-daemon dhat profile, 2026-06-02).** A full-daemon dhat
 > heap profile at 2 peers × 100k (`profile='dhat'` bgperf2 build, SIGTERM at the

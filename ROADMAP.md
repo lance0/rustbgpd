@@ -127,10 +127,14 @@ has it, no broad performance sprints without profile evidence.
   Re-stand the proof loop that makes the v0.x posture credible: a continuous
   churn/soak shape, automated or easy-to-trigger Criterion comparisons on the
   `[self-hosted, rustbgpd-bench]` runner, and a fixed high-N memory harness for
-  regressions that `memory_profile` no longer scales to. **Done:** bounded
+  regressions. **Done:** bounded
   `bgp_config_transaction_lifecycle_total{operation,outcome}` exposes confirmed
   transaction confirm / abort / auto-revert failures without unbounded labels
   (`confirm_id`, candidate content, and error text stay out of Prometheus).
+  **Done:** the ignored high-N RIB structural memory profile now emits
+  machine-readable rows for Adj-RIB-In, Full-RIB, and RR/route-server fanout
+  shapes at 100k/500k/900k prefixes, and `bench/compare-rib-memory.sh` produces
+  A/B CSV + Markdown receipts under the shared bench/soak host mutex.
   Exit: one repeatable soak result operators can inspect, bench comparison
   receipts for perf PRs, and memory tracking that covers full-table scale
   without relying only on bgperf2.

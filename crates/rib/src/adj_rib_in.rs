@@ -158,6 +158,45 @@ impl AdjRibIn {
         self.routes.len()
     }
 
+    /// Return the backing capacity of the unicast route map.
+    ///
+    /// Exposed only to benchmark / memory-profile harnesses so they can
+    /// distinguish route-count growth from hash-table capacity cliffs.
+    #[cfg(feature = "bench-internals")]
+    #[must_use]
+    pub fn bench_route_capacity(&self) -> usize {
+        self.routes.capacity()
+    }
+
+    /// Return the number of exact prefixes in the secondary unicast index.
+    #[cfg(feature = "bench-internals")]
+    #[must_use]
+    pub fn bench_prefix_index_len(&self) -> usize {
+        self.prefix_index.len()
+    }
+
+    /// Return the prefix trie's structural memory, excluding stored values'
+    /// own heap allocations.
+    #[cfg(feature = "bench-internals")]
+    #[must_use]
+    pub fn bench_prefix_index_mem_size(&self) -> usize {
+        self.prefix_index.mem_size()
+    }
+
+    /// Return the number of interned attribute sets.
+    #[cfg(feature = "bench-internals")]
+    #[must_use]
+    pub fn bench_attr_intern_len(&self) -> usize {
+        self.attr_intern.len()
+    }
+
+    /// Return the backing capacity of the attribute intern table.
+    #[cfg(feature = "bench-internals")]
+    #[must_use]
+    pub fn bench_attr_intern_capacity(&self) -> usize {
+        self.attr_intern.capacity()
+    }
+
     /// Return `true` if no unicast routes are stored.
     #[must_use]
     pub fn is_empty(&self) -> bool {

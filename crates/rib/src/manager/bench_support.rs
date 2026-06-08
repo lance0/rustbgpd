@@ -62,6 +62,7 @@ impl RibManager {
                 is_rr_client,
                 Vec::new(), // no Add-Path send
                 0,
+                Vec::new(), // no negotiated receive-side ORF
             );
             // Drain the initial-table dump's End-of-RIB marker so the channel
             // starts empty for the measured fanout pass.

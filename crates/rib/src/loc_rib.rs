@@ -76,6 +76,16 @@ impl LocRib {
         self.routes.len()
     }
 
+    /// Return the backing capacity of the unicast best-path map.
+    ///
+    /// Exposed only to benchmark / memory-profile harnesses so they can
+    /// distinguish route-count growth from hash-table capacity cliffs.
+    #[cfg(feature = "bench-internals")]
+    #[must_use]
+    pub fn bench_route_capacity(&self) -> usize {
+        self.routes.capacity()
+    }
+
     /// Return `true` if no best routes are stored.
     #[must_use]
     pub fn is_empty(&self) -> bool {

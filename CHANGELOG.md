@@ -63,6 +63,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   decision explicit for future peer-group reshape executors and operator JSON
   tooling.
 
+- **High-N RIB structural memory harness.** The RIB memory profile now has an
+  ignored high-N JSONL mode that measures Adj-RIB-In, Full-RIB, and
+  RR/route-server fanout shapes at 100k/500k/900k prefixes, plus
+  `bench/compare-rib-memory.sh` for base/head CSV and Markdown summaries under
+  the shared bench/soak host mutex.
+
 - **Peer reshape snapshot foundation.** The peer manager now has an atomic
   internal command that reconfigures a set of concrete static peers, returns
   their prior configs as a rollback token, and restores already-changed peers on

@@ -50,6 +50,16 @@ fn v6_net(p: Ipv6Prefix) -> Ipv6Net {
 }
 
 impl<V> FamilyPrefixMap<V> {
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn len(&self) -> usize {
+        self.v4.len() + self.v6.len()
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn mem_size(&self) -> usize {
+        self.v4.mem_size() + self.v6.mem_size()
+    }
+
     pub(crate) fn get(&self, prefix: &Prefix) -> Option<&V> {
         match prefix {
             Prefix::V4(p) => self.v4.get(&v4_net(*p)),
