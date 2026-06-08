@@ -20,6 +20,9 @@ tls_client_ca_file = "/etc/rustbgpd/certs/ca.pem"
 
 [security.grpc.roles]
 "rustbgpd://operator/ci" = "operator"
+# observer is a read-tier (sensitive_read) role: the M54 smoke uses it to
+# prove gNMI Set (operator_only) is denied for a lower-privilege principal.
+"rustbgpd://observer/ci" = "observer"
 
 [[neighbors]]
 address = "10.0.0.2"
