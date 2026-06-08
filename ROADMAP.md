@@ -115,9 +115,12 @@ has it, no broad performance sprints without profile evidence.
   onto ADR-0076's confirmed transaction lifecycle. **Done:** peer-group object
   Set can now create/update/delete native peer-group catalog entries for the
   OpenConfig leaves with exact rustbgpd mappings (`peer-group-name`,
-  `auth-password`, `remove-private-as`, and `timers/config/hold-time`); leaves without
-  a native inherited model stay `UNIMPLEMENTED`. M54 now proves the supported
-  Set and commit-confirmed flows with `gnmic` over mTLS. Exit: atomic commit
+  `auth-password`, `remove-private-as`, and `timers/config/hold-time`); leaves
+  without a native inherited model stay `UNIMPLEMENTED`. **Done:**
+  dynamic-neighbor prefix Set maps OpenConfig `prefix` + `peer-group` ranges to
+  native `[[dynamic_neighbors]]` with `remote_asn = 0` and native validation
+  gates. M54 now proves the supported Set and commit-confirmed flows with
+  `gnmic` over mTLS. Exit: atomic commit
   where supported, explicit restart-required/rejected surfaces,
   rollback/receipt model, no partial silent drift. Gated by ADR-0064 tier authz.
 - **Operational proof / scale automation** *(parallel priority, small slices).*

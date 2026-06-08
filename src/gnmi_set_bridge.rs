@@ -4,13 +4,14 @@
 //! daemon-local OpenConfig-to-rustbgpd candidate mapping because it needs the
 //! runtime config snapshot and the config transaction controller.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
 
 use rustbgpd_api::gnmi;
 use rustbgpd_api::server::{GnmiSetError, GnmiSetOperation, GnmiSetTransaction};
 use serde_json::Value;
 
-use crate::config::{Config, Neighbor, PeerGroupConfig};
+use crate::config::{Config, DynamicNeighborConfig, Neighbor, PeerGroupConfig};
 
 const DEFAULT_NETWORK_INSTANCE: &str = "DEFAULT";
 const DEFAULT_PROTOCOL_NAME: &str = "BGP";
@@ -31,6 +32,13 @@ enum SetPath {
         name: String,
         leaf: PeerGroupConfigLeaf,
     },
+    DynamicNeighbor {
+        prefix: String,
+    },
+    DynamicNeighborConfigLeaf {
+        prefix: String,
+        leaf: DynamicNeighborConfigLeaf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -49,10 +57,22 @@ enum PeerGroupConfigLeaf {
     HoldTime,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum DynamicNeighborConfigLeaf {
+    Prefix,
+    PeerGroup,
+}
+
 #[derive(Clone)]
 struct NeighborDraft {
     neighbor: Neighbor,
     has_remote_asn: bool,
+}
+
+#[derive(Clone)]
+struct DynamicNeighborDraft {
+    range: DynamicNeighborConfig,
+    has_peer_group: bool,
 }
 
 /// Apply a normalized gNMI Set transaction to a full runtime config snapshot.
@@ -72,24 +92,35 @@ pub(crate) fn apply_transaction_to_config(
         })
         .collect::<Vec<_>>();
     let mut peer_groups = std::mem::take(&mut config.peer_groups);
+    let mut dynamic_drafts = std::mem::take(&mut config.dynamic_neighbors)
+        .into_iter()
+        .map(|range| DynamicNeighborDraft {
+            has_peer_group: !range.peer_group.is_empty(),
+            range,
+        })
+        .collect::<Vec<_>>();
 
     for operation in &transaction.operations {
         match operation {
-            GnmiSetOperation::Delete(path) => apply_delete(&mut drafts, &mut peer_groups, path)?,
+            GnmiSetOperation::Delete(path) => {
+                apply_delete(&mut drafts, &mut peer_groups, &mut dynamic_drafts, path)?;
+            }
             GnmiSetOperation::Replace(update) | GnmiSetOperation::Update(update) => {
-                apply_update(&mut drafts, &mut peer_groups, update)?;
+                apply_update(&mut drafts, &mut peer_groups, &mut dynamic_drafts, update)?;
             }
         }
     }
 
     config.neighbors = finalize_neighbors(drafts)?;
     config.peer_groups = peer_groups;
+    config.dynamic_neighbors = finalize_dynamic_neighbors(dynamic_drafts)?;
     Ok(config)
 }
 
 fn apply_delete(
     drafts: &mut Vec<NeighborDraft>,
-    peer_groups: &mut std::collections::HashMap<String, PeerGroupConfig>,
+    peer_groups: &mut HashMap<String, PeerGroupConfig>,
+    dynamic_drafts: &mut Vec<DynamicNeighborDraft>,
     path: &gnmi::Path,
 ) -> Result<(), GnmiSetError> {
     match parse_set_path(path)? {
@@ -109,12 +140,23 @@ fn apply_delete(
         SetPath::PeerGroupConfigLeaf { .. } => Err(GnmiSetError::Unimplemented(
             "gNMI Set currently supports deleting whole peer-group entries only".to_string(),
         )),
+        SetPath::DynamicNeighbor { prefix } => {
+            if let Some(index) = dynamic_neighbor_index(dynamic_drafts, &prefix) {
+                dynamic_drafts.remove(index);
+            }
+            Ok(())
+        }
+        SetPath::DynamicNeighborConfigLeaf { .. } => Err(GnmiSetError::Unimplemented(
+            "gNMI Set currently supports deleting whole dynamic-neighbor-prefix entries only"
+                .to_string(),
+        )),
     }
 }
 
 fn apply_update(
     drafts: &mut Vec<NeighborDraft>,
-    peer_groups: &mut std::collections::HashMap<String, PeerGroupConfig>,
+    peer_groups: &mut HashMap<String, PeerGroupConfig>,
+    dynamic_drafts: &mut Vec<DynamicNeighborDraft>,
     update: &gnmi::Update,
 ) -> Result<(), GnmiSetError> {
     let path = update.path.as_ref().ok_or_else(|| {
@@ -131,10 +173,15 @@ fn apply_update(
         SetPath::PeerGroupConfigLeaf { name, leaf } => {
             apply_peer_group_leaf(peer_groups, &name, leaf, value)
         }
-        SetPath::Neighbor { .. } | SetPath::PeerGroup { .. } => Err(GnmiSetError::Unimplemented(
-            "gNMI Set update/replace currently supports OpenConfig BGP config leaves only"
-                .to_string(),
-        )),
+        SetPath::DynamicNeighborConfigLeaf { prefix, leaf } => {
+            apply_dynamic_neighbor_leaf(dynamic_drafts, &prefix, leaf, value)
+        }
+        SetPath::Neighbor { .. } | SetPath::PeerGroup { .. } | SetPath::DynamicNeighbor { .. } => {
+            Err(GnmiSetError::Unimplemented(
+                "gNMI Set update/replace currently supports OpenConfig BGP config leaves only"
+                    .to_string(),
+            ))
+        }
     }
 }
 
@@ -170,7 +217,7 @@ fn apply_neighbor_leaf(
 }
 
 fn apply_peer_group_leaf(
-    peer_groups: &mut std::collections::HashMap<String, PeerGroupConfig>,
+    peer_groups: &mut HashMap<String, PeerGroupConfig>,
     name: &str,
     leaf: PeerGroupConfigLeaf,
     value: Value,
@@ -200,6 +247,38 @@ fn apply_peer_group_leaf(
     Ok(())
 }
 
+fn apply_dynamic_neighbor_leaf(
+    dynamic_drafts: &mut Vec<DynamicNeighborDraft>,
+    prefix: &str,
+    leaf: DynamicNeighborConfigLeaf,
+    value: Value,
+) -> Result<(), GnmiSetError> {
+    let index = ensure_dynamic_neighbor_draft(dynamic_drafts, prefix);
+    let draft = &mut dynamic_drafts[index];
+    match leaf {
+        DynamicNeighborConfigLeaf::Prefix => {
+            let configured = parse_string_value(value, "prefix")?;
+            if configured != prefix {
+                return Err(GnmiSetError::InvalidArgument(format!(
+                    "dynamic-neighbor-prefix value {configured:?} does not match prefix key {prefix:?}"
+                )));
+            }
+        }
+        DynamicNeighborConfigLeaf::PeerGroup => {
+            let peer_group = parse_string_value(value, "peer-group")?;
+            let peer_group = peer_group.trim();
+            if peer_group.is_empty() {
+                return Err(GnmiSetError::InvalidArgument(
+                    "peer-group requires a non-empty string value".to_string(),
+                ));
+            }
+            draft.range.peer_group = peer_group.to_string();
+            draft.has_peer_group = true;
+        }
+    }
+    Ok(())
+}
+
 fn finalize_neighbors(drafts: Vec<NeighborDraft>) -> Result<Vec<Neighbor>, GnmiSetError> {
     let mut neighbors = Vec::with_capacity(drafts.len());
     for draft in drafts {
@@ -214,6 +293,22 @@ fn finalize_neighbors(drafts: Vec<NeighborDraft>) -> Result<Vec<Neighbor>, GnmiS
     Ok(neighbors)
 }
 
+fn finalize_dynamic_neighbors(
+    drafts: Vec<DynamicNeighborDraft>,
+) -> Result<Vec<DynamicNeighborConfig>, GnmiSetError> {
+    let mut ranges = Vec::with_capacity(drafts.len());
+    for draft in drafts {
+        if !draft.has_peer_group {
+            return Err(GnmiSetError::InvalidArgument(format!(
+                "dynamic-neighbor-prefix {} requires config/peer-group",
+                draft.range.prefix
+            )));
+        }
+        ranges.push(draft.range);
+    }
+    Ok(ranges)
+}
+
 fn ensure_neighbor_draft(
     drafts: &mut Vec<NeighborDraft>,
     address: IpAddr,
@@ -226,6 +321,21 @@ fn ensure_neighbor_draft(
         has_remote_asn: false,
     });
     Ok(drafts.len() - 1)
+}
+
+fn ensure_dynamic_neighbor_draft(drafts: &mut Vec<DynamicNeighborDraft>, prefix: &str) -> usize {
+    if let Some(index) = dynamic_neighbor_index(drafts, prefix) {
+        return index;
+    }
+    drafts.push(DynamicNeighborDraft {
+        range: empty_dynamic_neighbor(prefix),
+        has_peer_group: false,
+    });
+    drafts.len() - 1
+}
+
+fn dynamic_neighbor_index(drafts: &[DynamicNeighborDraft], prefix: &str) -> Option<usize> {
+    drafts.iter().position(|draft| draft.range.prefix == prefix)
 }
 
 fn neighbor_index(
@@ -244,6 +354,15 @@ fn neighbor_index(
         }
     }
     Ok(None)
+}
+
+fn empty_dynamic_neighbor(prefix: &str) -> DynamicNeighborConfig {
+    DynamicNeighborConfig {
+        prefix: prefix.to_string(),
+        peer_group: String::new(),
+        remote_asn: 0,
+        description: None,
+    }
 }
 
 fn empty_neighbor(address: IpAddr) -> Neighbor {
@@ -315,9 +434,57 @@ fn parse_set_path(path: &gnmi::Path) -> Result<SetPath, GnmiSetError> {
     expect_no_keys(&elem[4], "bgp")?;
     match elem[5].name.as_str() {
         "neighbors" => parse_neighbor_set_path(&elem[5..]),
+        "global" => parse_global_set_path(&elem[5..]),
         "peer-groups" => parse_peer_group_set_path(&elem[5..]),
         _ => Err(GnmiSetError::Unimplemented(
             "unsupported OpenConfig BGP Set path".to_string(),
+        )),
+    }
+}
+
+fn parse_global_set_path(elem: &[gnmi::PathElem]) -> Result<SetPath, GnmiSetError> {
+    if elem.len() < 3 {
+        return Err(GnmiSetError::Unimplemented(
+            "unsupported OpenConfig BGP global Set path".to_string(),
+        ));
+    }
+    expect_no_keys(&elem[0], "global")?;
+    expect_no_keys(&elem[1], "dynamic-neighbor-prefixes")?;
+    let prefix = expect_dynamic_neighbor_prefix_key(&elem[2])?;
+
+    match elem.get(3).map(|tail| tail.name.as_str()) {
+        None => Ok(SetPath::DynamicNeighbor { prefix }),
+        Some("config") => {
+            ensure_no_extra_leaf_keys(&elem[3])?;
+            let Some(leaf) = elem.get(4) else {
+                return Err(GnmiSetError::Unimplemented(
+                    "gNMI Set currently supports dynamic-neighbor-prefix config leaves, not config container replace/update"
+                        .to_string(),
+                ));
+            };
+            if elem.len() != 5 {
+                return Err(GnmiSetError::Unimplemented(
+                    "unsupported OpenConfig BGP dynamic-neighbor-prefix config subtree".to_string(),
+                ));
+            }
+            ensure_no_extra_leaf_keys(leaf)?;
+            let leaf = match leaf.name.as_str() {
+                "prefix" => DynamicNeighborConfigLeaf::Prefix,
+                "peer-group" => DynamicNeighborConfigLeaf::PeerGroup,
+                _ => {
+                    return Err(GnmiSetError::Unimplemented(
+                        "unsupported OpenConfig BGP dynamic-neighbor-prefix config leaf"
+                            .to_string(),
+                    ));
+                }
+            };
+            Ok(SetPath::DynamicNeighborConfigLeaf { prefix, leaf })
+        }
+        Some("state") => Err(GnmiSetError::Unimplemented(
+            "OpenConfig dynamic-neighbor-prefix state is not supported by gNMI Set".to_string(),
+        )),
+        _ => Err(GnmiSetError::Unimplemented(
+            "unsupported OpenConfig BGP dynamic-neighbor-prefix Set path".to_string(),
         )),
     }
 }
@@ -538,6 +705,26 @@ fn expect_neighbor_key(elem: &gnmi::PathElem) -> Result<IpAddr, GnmiSetError> {
         .map_err(|_| GnmiSetError::InvalidArgument(format!("invalid neighbor-address key {raw}")))
 }
 
+fn expect_dynamic_neighbor_prefix_key(elem: &gnmi::PathElem) -> Result<String, GnmiSetError> {
+    if elem.name != "dynamic-neighbor-prefix" {
+        return Err(GnmiSetError::Unimplemented(
+            "unsupported OpenConfig BGP dynamic-neighbor-prefixes Set path".to_string(),
+        ));
+    }
+    if elem.key.len() != 1 || !elem.key.contains_key("prefix") {
+        return Err(GnmiSetError::InvalidArgument(
+            "dynamic-neighbor-prefix requires only the prefix key".to_string(),
+        ));
+    }
+    let prefix = elem.key["prefix"].trim();
+    if prefix.is_empty() || prefix == "*" {
+        return Err(GnmiSetError::InvalidArgument(
+            "dynamic-neighbor-prefix key must be a non-empty literal".to_string(),
+        ));
+    }
+    Ok(prefix.to_string())
+}
+
 fn expect_peer_group_key(elem: &gnmi::PathElem) -> Result<String, GnmiSetError> {
     if elem.name != "peer-group" {
         return Err(GnmiSetError::Unimplemented(
@@ -731,6 +918,21 @@ description = "old"
         }
     }
 
+    fn dynamic_neighbor_path(prefix: &str, tail: &[&str]) -> gnmi::Path {
+        let mut elem = bgp_prefix_elem();
+        elem.push(pe("global"));
+        elem.push(pe("dynamic-neighbor-prefixes"));
+        elem.push(keyed_pe("dynamic-neighbor-prefix", "prefix", prefix));
+        elem.extend(tail.iter().map(|name| pe(name)));
+        gnmi::Path {
+            #[allow(deprecated)]
+            element: Vec::new(),
+            origin: String::new(),
+            elem,
+            target: String::new(),
+        }
+    }
+
     fn update(address: &str, leaf: &str, value: TypedValue) -> GnmiSetOperation {
         GnmiSetOperation::Update(gnmi::Update {
             path: Some(path(address, &["config", leaf])),
@@ -744,6 +946,16 @@ description = "old"
     fn peer_group_update(name: &str, tail: &[&str], value: TypedValue) -> GnmiSetOperation {
         GnmiSetOperation::Update(gnmi::Update {
             path: Some(peer_group_path(name, tail)),
+            #[allow(deprecated)]
+            value: None,
+            val: Some(gnmi::TypedValue { value: Some(value) }),
+            duplicates: 0,
+        })
+    }
+
+    fn dynamic_neighbor_update(prefix: &str, tail: &[&str], value: TypedValue) -> GnmiSetOperation {
+        GnmiSetOperation::Update(gnmi::Update {
+            path: Some(dynamic_neighbor_path(prefix, tail)),
             #[allow(deprecated)]
             value: None,
             val: Some(gnmi::TypedValue { value: Some(value) }),
@@ -1003,5 +1215,139 @@ description = "old"
 
         assert!(matches!(error, GnmiSetError::Unimplemented(_)));
         assert!(error.to_string().contains("peer-as"));
+    }
+
+    #[test]
+    fn set_dynamic_neighbor_creates_range_with_accept_any_asn_default() {
+        let candidate = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![
+                dynamic_neighbor_update(
+                    "10.0.0.0/24",
+                    &["config", "prefix"],
+                    TypedValue::StringVal("10.0.0.0/24".to_string()),
+                ),
+                dynamic_neighbor_update(
+                    "10.0.0.0/24",
+                    &["config", "peer-group"],
+                    TypedValue::StringVal(" ix-members ".to_string()),
+                ),
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(candidate.dynamic_neighbors.len(), 1);
+        let range = &candidate.dynamic_neighbors[0];
+        assert_eq!(range.prefix, "10.0.0.0/24");
+        assert_eq!(range.peer_group, "ix-members");
+        assert_eq!(range.remote_asn, 0);
+        assert_eq!(range.description, None);
+    }
+
+    #[test]
+    fn set_dynamic_neighbor_updates_peer_group_preserving_native_fields() {
+        let mut config = base_config();
+        config.dynamic_neighbors.push(DynamicNeighborConfig {
+            prefix: "10.0.0.0/24".to_string(),
+            peer_group: "old".to_string(),
+            remote_asn: 65010,
+            description: Some("existing".to_string()),
+        });
+
+        let candidate = apply_transaction_to_config(
+            config,
+            &transaction(vec![dynamic_neighbor_update(
+                "10.0.0.0/24",
+                &["config", "peer-group"],
+                TypedValue::StringVal("new".to_string()),
+            )]),
+        )
+        .unwrap();
+
+        let range = &candidate.dynamic_neighbors[0];
+        assert_eq!(range.peer_group, "new");
+        assert_eq!(range.remote_asn, 65010);
+        assert_eq!(range.description.as_deref(), Some("existing"));
+    }
+
+    #[test]
+    fn set_dynamic_neighbor_delete_removes_range() {
+        let mut config = base_config();
+        config.dynamic_neighbors.push(DynamicNeighborConfig {
+            prefix: "10.0.0.0/24".to_string(),
+            peer_group: "ix-members".to_string(),
+            remote_asn: 0,
+            description: None,
+        });
+
+        let candidate = apply_transaction_to_config(
+            config,
+            &transaction(vec![GnmiSetOperation::Delete(dynamic_neighbor_path(
+                "10.0.0.0/24",
+                &[],
+            ))]),
+        )
+        .unwrap();
+
+        assert!(candidate.dynamic_neighbors.is_empty());
+    }
+
+    #[test]
+    fn set_dynamic_neighbor_delete_missing_is_silent() {
+        let candidate = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![GnmiSetOperation::Delete(dynamic_neighbor_path(
+                "10.0.0.0/24",
+                &[],
+            ))]),
+        )
+        .unwrap();
+
+        assert!(candidate.dynamic_neighbors.is_empty());
+    }
+
+    #[test]
+    fn set_rejects_dynamic_neighbor_prefix_mismatch() {
+        let error = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![dynamic_neighbor_update(
+                "10.0.0.0/24",
+                &["config", "prefix"],
+                TypedValue::StringVal("10.0.1.0/24".to_string()),
+            )]),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("does not match prefix key"));
+    }
+
+    #[test]
+    fn set_rejects_dynamic_neighbor_missing_peer_group() {
+        let error = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![dynamic_neighbor_update(
+                "10.0.0.0/24",
+                &["config", "prefix"],
+                TypedValue::StringVal("10.0.0.0/24".to_string()),
+            )]),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("requires config/peer-group"));
+    }
+
+    #[test]
+    fn set_rejects_dynamic_neighbor_state_path() {
+        let error = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![GnmiSetOperation::Delete(dynamic_neighbor_path(
+                "10.0.0.0/24",
+                &["state"],
+            ))]),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, GnmiSetError::Unimplemented(_)));
+        assert!(error.to_string().contains("state"));
     }
 }

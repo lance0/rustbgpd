@@ -140,7 +140,40 @@ Transaction and validation behavior:
 - OpenConfig peer-group leaves without a native inherited config model remain
   unsupported, including `config/peer-as`, `config/local-as`,
   `config/peer-type`, `config/send-community-type`, and `config/description`.
-  Dynamic-neighbor Set is still deferred.
+
+### `Set` dynamic-neighbor-prefix scope
+
+The supported dynamic-neighbor-prefix surface is under:
+
+```text
+/network-instances/network-instance[name=DEFAULT]/protocols/protocol[identifier=BGP][name=BGP]/bgp/global/dynamic-neighbor-prefixes/dynamic-neighbor-prefix[prefix=P]
+```
+
+Supported operations:
+
+- `update` / `replace` `.../config/prefix`. The value must match the
+  `dynamic-neighbor-prefix[prefix=P]` key.
+- `update` / `replace` `.../config/peer-group`, referencing an existing native
+  peer group.
+- Delete a whole dynamic-neighbor-prefix list entry by deleting
+  `.../dynamic-neighbor-prefix[prefix=P]`. Per gNMI, deleting a missing entry
+  is silently accepted.
+
+Transaction and validation behavior:
+
+- OpenConfig dynamic ranges expose `prefix` and `peer-group` only. rustbgpd maps
+  an OpenConfig-created range to native `[[dynamic_neighbors]]` with
+  `remote_asn = 0` (accept any ASN from the peer's OPEN) and no description.
+- Native config validation still applies: `peer-group` must exist, exact
+  duplicate effective prefixes are rejected, IPv4/IPv6 prefix lengths are
+  bounded, overlapping different-length ranges are allowed, and BFD-enabled
+  peer groups are rejected for dynamic ranges.
+- Dynamic range changes use the existing `[[dynamic_neighbors]]` full-set
+  transaction family. Creating a peer group and dynamic range in the same Set
+  may still be rejected as a mixed-family candidate; create the peer group
+  first, then apply the dynamic range.
+- Dynamic-neighbor state paths and native-only fields such as range
+  `description` or explicit `remote_asn` are not supported by OpenConfig Set.
 
 ### `Set` commit-confirmed workflow
 

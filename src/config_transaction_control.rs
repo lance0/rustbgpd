@@ -2153,6 +2153,26 @@ remote_asn = 65002
         }
     }
 
+    fn gnmi_set_dynamic_neighbor(
+        prefix: &str,
+        peer_group: &str,
+    ) -> rustbgpd_api::server::GnmiSetTransaction {
+        rustbgpd_api::server::GnmiSetTransaction {
+            prefix: None,
+            operations: vec![
+                rustbgpd_api::server::GnmiSetOperation::Update(gnmi_update(
+                    gnmi_dynamic_neighbor_path(prefix, &["config", "prefix"]),
+                    rustbgpd_api::gnmi::typed_value::Value::StringVal(prefix.to_string()),
+                )),
+                rustbgpd_api::server::GnmiSetOperation::Update(gnmi_update(
+                    gnmi_dynamic_neighbor_path(prefix, &["config", "peer-group"]),
+                    rustbgpd_api::gnmi::typed_value::Value::StringVal(peer_group.to_string()),
+                )),
+            ],
+            commit_action: None,
+        }
+    }
+
     fn gnmi_update(
         path: rustbgpd_api::gnmi::Path,
         value: rustbgpd_api::gnmi::typed_value::Value,
@@ -2195,6 +2215,27 @@ remote_asn = 65002
             gnmi_pe("bgp"),
             gnmi_pe("peer-groups"),
             gnmi_keyed_pe("peer-group", "peer-group-name", name),
+        ];
+        elem.extend(tail.iter().map(|name| gnmi_pe(name)));
+        rustbgpd_api::gnmi::Path {
+            #[allow(deprecated)]
+            element: Vec::new(),
+            origin: String::new(),
+            elem,
+            target: String::new(),
+        }
+    }
+
+    fn gnmi_dynamic_neighbor_path(prefix: &str, tail: &[&str]) -> rustbgpd_api::gnmi::Path {
+        let mut elem = vec![
+            gnmi_pe("network-instances"),
+            gnmi_keyed_pe("network-instance", "name", "DEFAULT"),
+            gnmi_pe("protocols"),
+            gnmi_protocol_pe(),
+            gnmi_pe("bgp"),
+            gnmi_pe("global"),
+            gnmi_pe("dynamic-neighbor-prefixes"),
+            gnmi_keyed_pe("dynamic-neighbor-prefix", "prefix", prefix),
         ];
         elem.extend(tail.iter().map(|name| gnmi_pe(name)));
         rustbgpd_api::gnmi::Path {
@@ -4335,6 +4376,56 @@ remote_asn = 65003
         let persisted = persisted.lock().await;
         assert!(persisted.contains("[peer_groups.rs-clients]"));
         assert!(persisted.contains("hold_time = 45"));
+        assert_eq!(*snapshot_toml.lock().await, *persisted);
+    }
+
+    #[tokio::test]
+    async fn gnmi_set_hook_commits_dynamic_neighbors_through_transactions() {
+        let previous_toml = base_toml(
+            r"
+[peer_groups.ix-members]
+",
+        );
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[dynamic_neighbors]]".to_string()],
+            ),
+            snapshot_toml.clone(),
+            peers,
+        ));
+        let persisted = Arc::new(Mutex::new(String::new()));
+        let persisted_task = Arc::clone(&persisted);
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted {
+                candidate_toml,
+                ack: Some(ack),
+            }) = config_rx.recv().await
+            {
+                *persisted_task.lock().await = candidate_toml;
+                let _ = ack.send(Ok(()));
+            }
+        });
+        let controller = ConfigTransactionController::new(
+            deps_value(None, peer_tx, Some(config_tx), Vec::new()),
+            BgpMetrics::new(),
+        );
+
+        controller
+            .apply_gnmi_set(gnmi_set_dynamic_neighbor("10.0.0.0/24", "ix-members"))
+            .await
+            .unwrap();
+
+        let persisted = persisted.lock().await;
+        assert!(persisted.contains("[[dynamic_neighbors]]"));
+        assert!(persisted.contains("prefix = \"10.0.0.0/24\""));
+        assert!(persisted.contains("peer_group = \"ix-members\""));
+        assert!(persisted.contains("remote_asn = 0"));
         assert_eq!(*snapshot_toml.lock().await, *persisted);
     }
 
