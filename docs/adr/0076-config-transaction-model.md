@@ -76,7 +76,9 @@ section executors behind that public contract.
    live-policy executor can target only the affected dynamic sessions. Global
    hot-applied flags, restart-required sections, dynamic-range session reshapes,
    and peer-group edits that require session reconfiguration remain rejected
-   until they have explicit executors.
+   until they have explicit executors. The redacted diff reports each effective
+   impact as `kind: policy_chain` or `kind: session_reshape` so the planner and
+   later executors do not infer committability from a lossy boolean.
 5. **Apply execution is one pure runtime family at a time.** V1 commits pure
    full-set `[[fib_tables]]`, pure full-set `[[dynamic_neighbors]]`, static
    `[[neighbors]]` add/delete/modify, catalog-only snapshot candidates, or the

@@ -1428,20 +1428,33 @@ pub struct ConfigDiff {
 /// can't apply them, so surfacing them under `effective_neighbor_impact`
 /// (which lands under "Reload-applied" in `--diff`) would mislead
 /// operators into expecting a reload to absorb a restart-only edit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectiveNeighborImpactKind {
+    /// The resolved import/export policy chain moved and can be handled by the
+    /// live-policy transaction executor.
+    PolicyChain,
+    /// Resolved transport/session state or peer-group membership moved. These
+    /// impacts need a rollback-capable session reconfigure executor.
+    SessionReshape,
+}
+
+impl EffectiveNeighborImpactKind {
+    /// True when this impact is a pure resolved import/export `PolicyChain`
+    /// move that can be applied without rebuilding the session.
+    pub const fn is_policy_chain(self) -> bool {
+        matches!(self, Self::PolicyChain)
+    }
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct EffectiveNeighborImpact {
     pub address: String,
     pub reasons: Vec<String>,
-    /// True when this impact is exclusively a resolved import/export
-    /// `PolicyChain` move — no transport-config (`hold_time`, families, `md5`,
-    /// `tcp_ao`, role, …) change and no peer-group reassignment. For static
-    /// neighbors this means the current live-impact executor can commit the
-    /// change by re-applying chains in place. For `[[dynamic_neighbors]]`
-    /// ranges this is policy-only and can be committed by expanding live peers'
-    /// accepted-range attribution. Not serialized into `--diff`; an internal
-    /// classification hint.
-    #[serde(skip)]
-    pub policy_chain_only: bool,
+    /// Operator-visible impact kind. `policy_chain` is currently committable by
+    /// the live-policy executor; `session_reshape` needs a dedicated session
+    /// reconfigure executor before transactions can commit it.
+    pub kind: EffectiveNeighborImpactKind,
     /// True when `address` identifies a `[[dynamic_neighbors]]` range rather
     /// than a static neighbor. Skipped from `--diff`; used only to keep
     /// transaction classification precise while dynamic live-policy execution
@@ -1702,18 +1715,18 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
         // entry is a pure resolved-policy-chain move. Static neighbors are
         // applied directly; dynamic ranges are expanded to live peers by
         // accepted-range attribution in the transaction executor.
-        let all_policy_chain_only = diff
+        let all_policy_chain = diff
             .effective_neighbor_impact
             .iter()
-            .all(|impact| impact.policy_chain_only);
-        if all_policy_chain_only {
+            .all(|impact| impact.kind.is_policy_chain());
+        if all_policy_chain {
             class
                 .supported_sections
                 .push(TRANSACTION_POLICY_LIVE_IMPACT_SECTION.to_string());
         } else if diff
             .effective_neighbor_impact
             .iter()
-            .any(|impact| !impact.policy_chain_only)
+            .any(|impact| !impact.kind.is_policy_chain())
         {
             class
                 .unsupported_sections
@@ -2818,9 +2831,9 @@ fn compute_effective_neighbor_impact(
         let export_moved = format!("{:?}", old_resolved.export_policy)
             != format!("{:?}", new_resolved.export_policy);
         // A non-policy resolved change (hold_time, families, md5, tcp_ao, role,
-        // add_path, …) lives in transport_config; a group reassignment changes
+        // add_path, ...) lives in transport_config; a group reassignment changes
         // the neighbor's raw record. Either means the impact is not a pure
-        // policy-chain move the live-impact executor can re-apply in place — it
+        // policy-chain move the live-impact executor can re-apply in place; it
         // must route through a session reconfigure instead.
         let transport_changed = old_resolved.transport_config != new_resolved.transport_config;
         let peer_group_reassigned = old_resolved.peer_group != new_resolved.peer_group;
@@ -2859,12 +2872,16 @@ fn compute_effective_neighbor_impact(
         }
 
         if !reasons.is_empty() {
+            let kind =
+                if (import_moved || export_moved) && !transport_changed && !peer_group_reassigned {
+                    EffectiveNeighborImpactKind::PolicyChain
+                } else {
+                    EffectiveNeighborImpactKind::SessionReshape
+                };
             out.push(EffectiveNeighborImpact {
                 address: old_neighbor.address.clone(),
                 reasons,
-                policy_chain_only: (import_moved || export_moved)
-                    && !transport_changed
-                    && !peer_group_reassigned,
+                kind,
                 is_dynamic_range: false,
             });
         }
@@ -2888,7 +2905,7 @@ fn compute_effective_neighbor_impact(
 /// Ranges are paired by prefix (the stable key); a prefix that was added or
 /// removed is a `[[dynamic_neighbors]]` family edit handled by the
 /// dynamic-neighbor executor, not here. For a range whose prefix is unchanged,
-/// only a pure policy-chain move is `policy_chain_only`: a peer-group
+/// only a pure policy-chain move is `EffectiveNeighborImpactKind::PolicyChain`: a peer-group
 /// reassignment or a transport/session change is reported as non-committable so
 /// it routes to a reconfigure rather than a live policy refresh. (The executor
 /// expands a range to its live peers by the peer's *accepted* peer group, so a
@@ -2945,8 +2962,8 @@ fn dynamic_range_effective_impact(
             != format!("{:?}", new_resolved.export_policy);
         let peer_group_reassigned = old_range.peer_group != new_range.peer_group;
         // A non-policy resolved change (hold_time, families, md5, tcp_ao, role,
-        // …) lives in transport_config and cannot be live-applied by a policy
-        // refresh — it needs a session reconfigure. Mirror the static-neighbor
+        // ...) lives in transport_config and cannot be live-applied by a policy
+        // refresh; it needs a session reconfigure. Mirror the static-neighbor
         // classifier so a combined transport + policy edit is not mistaken for a
         // pure policy-chain move and silently committed without the reconfigure.
         let transport_changed = old_resolved.transport_config != new_resolved.transport_config;
@@ -2972,12 +2989,16 @@ fn dynamic_range_effective_impact(
             reasons.push(format!("peer_group {:?} changed", old_range.peer_group));
         }
         if !reasons.is_empty() {
+            let kind =
+                if (import_moved || export_moved) && !transport_changed && !peer_group_reassigned {
+                    EffectiveNeighborImpactKind::PolicyChain
+                } else {
+                    EffectiveNeighborImpactKind::SessionReshape
+                };
             out.push(EffectiveNeighborImpact {
                 address: old_range.prefix.clone(),
                 reasons,
-                policy_chain_only: (import_moved || export_moved)
-                    && !transport_changed
-                    && !peer_group_reassigned,
+                kind,
                 is_dynamic_range: true,
             });
         }

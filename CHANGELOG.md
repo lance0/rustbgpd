@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Config transaction effective-impact kinds.** The redacted transaction diff
+  now labels each `effective_neighbor_impact` entry as `policy_chain` or
+  `session_reshape`, making the planner's live-policy versus session-reconfigure
+  decision explicit for future peer-group reshape executors and operator JSON
+  tooling.
+
 - **Config transaction lifecycle metric.**
   `bgp_config_transaction_lifecycle_total{operation, outcome}` now counts
   confirmed-transaction confirm, abort, and auto-revert lifecycle transitions

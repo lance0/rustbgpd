@@ -6836,9 +6836,17 @@ default_action = "{default_action}"
     assert!(
         diff.effective_neighbor_impact
             .iter()
-            .all(|impact| impact.policy_chain_only && !impact.is_dynamic_range),
+            .all(
+                |impact| impact.kind == EffectiveNeighborImpactKind::PolicyChain
+                    && !impact.is_dynamic_range
+            ),
         "{:?}",
         diff.effective_neighbor_impact
+    );
+    let json = super::config_diff_json_value(&diff);
+    assert_eq!(
+        json["reload_applied"]["effective_neighbor_impact"][0]["kind"],
+        serde_json::json!("policy_chain")
     );
 }
 
@@ -6871,7 +6879,9 @@ default_action = "{default_action}"
     let impact = super::compute_effective_neighbor_impact(&old, &new, &peer_groups, &policy);
 
     assert!(
-        impact.iter().any(|impact| !impact.policy_chain_only),
+        impact
+            .iter()
+            .any(|impact| impact.kind == EffectiveNeighborImpactKind::SessionReshape),
         "{impact:?}"
     );
 }
@@ -6880,7 +6890,7 @@ default_action = "{default_action}"
 fn transaction_v1_rejects_peer_group_field_reshape_with_live_neighbor_impact() {
     // A peer-group hold_time edit reshapes the resolved transport_config of its
     // member neighbor — that needs a session reconfigure, not an in-place chain
-    // re-apply, so it stays rejected (not `policy_chain_only`).
+    // re-apply, so it stays rejected as a session reshape.
     let with_hold = |hold: u32| {
         format!(
             r#"
@@ -6922,9 +6932,14 @@ peer_group = "edge"
     assert!(
         diff.effective_neighbor_impact
             .iter()
-            .any(|impact| !impact.policy_chain_only),
+            .any(|impact| impact.kind == EffectiveNeighborImpactKind::SessionReshape),
         "{:?}",
         diff.effective_neighbor_impact
+    );
+    let json = super::config_diff_json_value(&diff);
+    assert_eq!(
+        json["reload_applied"]["effective_neighbor_impact"][0]["kind"],
+        serde_json::json!("session_reshape")
     );
 }
 
@@ -6985,7 +7000,10 @@ remote_asn = 65030
     assert!(
         diff.effective_neighbor_impact
             .iter()
-            .all(|impact| impact.policy_chain_only && impact.is_dynamic_range),
+            .all(
+                |impact| impact.kind == EffectiveNeighborImpactKind::PolicyChain
+                    && impact.is_dynamic_range
+            ),
         "{:?}",
         diff.effective_neighbor_impact
     );
@@ -7045,7 +7063,10 @@ remote_asn = 65030
     assert!(
         diff.effective_neighbor_impact
             .iter()
-            .all(|impact| !impact.policy_chain_only && impact.is_dynamic_range),
+            .all(
+                |impact| impact.kind == EffectiveNeighborImpactKind::SessionReshape
+                    && impact.is_dynamic_range
+            ),
         "{:?}",
         diff.effective_neighbor_impact
     );
@@ -7112,7 +7133,10 @@ remote_asn = 65030
     assert!(
         diff.effective_neighbor_impact
             .iter()
-            .all(|impact| !impact.policy_chain_only && impact.is_dynamic_range),
+            .all(
+                |impact| impact.kind == EffectiveNeighborImpactKind::SessionReshape
+                    && impact.is_dynamic_range
+            ),
         "{:?}",
         diff.effective_neighbor_impact
     );

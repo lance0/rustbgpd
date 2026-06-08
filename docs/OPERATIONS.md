@@ -174,7 +174,10 @@ effective-impact view:
 - **Effectively impacted neighbors (via inheritance)** — every
   neighbor whose resolved import / export chain would move at reload,
   with the upstream change(s) responsible (peer-group / policy /
-  neighbor-set / global chain). Catches transitive references: a
+  neighbor-set / global chain). The JSON form carries `kind` as
+  `"policy_chain"` for pure live-policy impact or `"session_reshape"`
+  when inherited peer-group/session state changes.
+  Catches transitive references: a
   policy definition edit picked up via the global `import_chain`
   (chain list itself unchanged) or via a peer-group's chain
   (peer-group record unchanged) still flags every affected member.

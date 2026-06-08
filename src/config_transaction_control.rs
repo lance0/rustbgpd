@@ -1146,7 +1146,7 @@ fn resolve_live_policy_targets(
         .collect();
     let mut targets = LivePolicyTargets::default();
     for impact in &diff.effective_neighbor_impact {
-        if !impact.policy_chain_only {
+        if !impact.kind.is_policy_chain() {
             // A committable live-impact plan only carries policy-chain-only
             // impacts; anything else is an internal inconsistency — fail closed
             // rather than silently skip.
@@ -2057,7 +2057,7 @@ peer_group = "edge"
 
     /// A config with one static neighbor whose import chain resolves to a
     /// named policy whose `default_action` is `action`. Diffing permit vs deny
-    /// produces a pure static-neighbor policy-chain impact (`policy_chain_only`).
+    /// produces a pure static-neighbor policy-chain impact.
     /// Dynamic-range transaction tests use `dynamic_live_policy_toml`.
     fn live_policy_toml(action: &str) -> String {
         format!(

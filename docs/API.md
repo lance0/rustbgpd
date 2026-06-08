@@ -277,6 +277,12 @@ presence.
   `effective neighbor inheritance impact`.
 - `restart_required_sections`: sections that still require daemon restart.
 
+`redacted_diff.reload_applied.effective_neighbor_impact[]` includes a
+machine-readable `kind`: `policy_chain` for a pure resolved import/export chain
+move that the live-policy executor can commit, or `session_reshape` when
+inherited peer-group/session state changes and a session-reconfigure executor is
+required.
+
 The planner is intentionally stricter than SIGHUP: "reload-applied" does not
 mean "transaction-committable" unless the section appears in
 `supported_sections`. `ApplyConfigTransaction` commits one pure runtime family
