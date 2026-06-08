@@ -1811,15 +1811,19 @@ token; `ApplyConfigTransaction` commits one pure runtime family at a time:
 full-set `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, static
 `[[neighbors]]` add/delete/modify, catalog-only
 policy/neighbor-set/peer-group/global-chain changes, or pure live policy-chain
-impact for static neighbors and accepted dynamic peers. The apply path
-re-checks the token under the shared runtime-config coordinator, rejects mixed or
-unsupported candidates without mutation, applies live runtime state when the
-family has one, persists the exact accepted candidate with an acknowledgement,
-and rolls runtime state back if apply or persistence fails. Live policy-chain
-impact uses Route Refresh to re-evaluate already-received routes, so every
-impacted Established peer must have negotiated Route Refresh or the transaction
-is rejected and rolled back. Policy/peer-group edits that require session
-reconfiguration remain rejected until dedicated executors exist.
+impact for static neighbors and accepted dynamic peers. Static
+peer-group/session reshape impact is also committable when every affected peer
+is a concrete static neighbor, for example a peer-group `hold_time` edit or a
+static neighbor peer-group reassignment that requires the affected sessions to be
+rebuilt. The apply path re-checks the token under the shared runtime-config
+coordinator, rejects mixed or unsupported candidates without mutation, applies
+live runtime state when the family has one, persists the exact accepted
+candidate with an acknowledgement, and rolls runtime state back if apply or
+persistence fails. Live policy-chain impact uses Route Refresh to re-evaluate
+already-received routes, so every impacted Established peer must have negotiated
+Route Refresh or the transaction is rejected and rolled back. Dynamic-range
+session reshapes and mixed policy/session effective-impact candidates remain
+rejected until dedicated executors exist.
 Like SIGHUP and FIB CRUD, FIB transaction apply requires the FIB reconciler to
 already be running: a daemon that started with no `[[fib_tables]]` still needs a
 restart to enable the subsystem.

@@ -32,6 +32,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reshapes remain rejected until accepted dynamic sessions can be targeted with
   equivalent rollback semantics.
 
+- **Reload matrix transaction overlay.**
+  The operator reload matrix now distinguishes SIGHUP reload classes from
+  ADR-0076 transaction committability, including the newly committable static
+  peer-group/session reshape impact and the still-rejected dynamic-range or
+  mixed policy/session effective-impact shapes.
+
 - **Config transaction lifecycle metric.**
   `bgp_config_transaction_lifecycle_total{operation, outcome}` now counts
   confirmed-transaction confirm, abort, and auto-revert lifecycle transitions
