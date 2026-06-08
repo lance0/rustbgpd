@@ -75,20 +75,25 @@ section executors behind that public contract.
    retain the canonical longest-prefix-match range that accepted them so the
    live-policy executor can target only the affected dynamic sessions. Global
    hot-applied flags, restart-required sections, dynamic-range session reshapes,
-   and peer-group edits that require session reconfiguration remain rejected
-   until they have explicit executors. The redacted diff reports each effective
-   impact as `kind: policy_chain` or `kind: session_reshape` so the planner and
-   later executors do not infer committability from a lossy boolean.
+   and mixed policy/session effective impact remain rejected until they have
+   explicit executors. Static peer-group/session reshape impact is committable
+   when every affected peer is a concrete static neighbor: the transaction
+   executor rebuilds those sessions with captured prior configs. The redacted
+   diff reports each effective impact as `kind: policy_chain` or
+   `kind: session_reshape` so the planner and executors do not infer
+   committability from a lossy boolean.
 5. **Apply execution is one pure runtime family at a time.** V1 commits pure
    full-set `[[fib_tables]]`, pure full-set `[[dynamic_neighbors]]`, static
-   `[[neighbors]]` add/delete/modify, catalog-only snapshot candidates, or the
-   bounded live-policy impact family. It re-plans under the shared runtime-config
-   coordinator, rejects mixed-family or unsupported candidates without mutation,
-   stages the peer-manager snapshot, applies live runtime state when the family
-   has one, persists the exact accepted candidate with an acknowledgement, and
-   rolls back on every post-stage failure. Static-neighbor modifies use the same
-   delete/re-add session-reconfigure semantics as SIGHUP, but with transaction
-   rollback rather than best-effort reconcile. Catalog-only transactions have no
+   `[[neighbors]]` add/delete/modify, catalog-only snapshot candidates, the
+   bounded live-policy impact family, or static peer-group/session reshape
+   impact. It re-plans under the shared runtime-config coordinator, rejects
+   mixed-family or unsupported candidates without mutation, stages the
+   peer-manager snapshot, applies live runtime state when the family has one,
+   persists the exact accepted candidate with an acknowledgement, and rolls back
+   on every post-stage failure. Static-neighbor modifies and static
+   peer-group/session reshapes use the same delete/re-add session-reconfigure
+   semantics as SIGHUP, but with transaction rollback rather than best-effort
+   reconcile. Catalog-only transactions have no
    live peer runtime mutation: they stage and persist the snapshot so future
    peers or later neighbor transactions can reference the catalog objects. The
    live-policy impact executor stages the snapshot, re-applies each affected
@@ -160,10 +165,11 @@ section executors behind that public contract.
   policy, neighbor-set, peer-group, or global-chain edit changes only a static
   neighbor's or dynamic range's resolved import/export `PolicyChain`, the
   live-policy impact executor can commit it by re-applying the resolved chains
-  in place. Edits that reshape peer transport/session config, reassign peer
-  groups, or change a
-  dynamic range's resolved policy remain rejected until their own rollback-capable
-  live executors exist.
+  in place. Static peer-group/session reshapes can also commit when every
+  affected peer is a concrete static neighbor: the executor reconfigures those
+  sessions and uses captured prior peer configs for rollback. Dynamic-range
+  session reshapes and mixed policy/session effective impacts remain rejected
+  until their own rollback-capable live executors exist.
 - Follow-up executors should preserve the established pattern:
   validate candidate section against the live runtime snapshot, take the shared
   runtime-config coordinator, apply live mutation, persist with acknowledgement,

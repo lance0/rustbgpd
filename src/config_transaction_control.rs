@@ -23,7 +23,7 @@ use rustbgpd_api::server::{
 use rustbgpd_telemetry::BgpMetrics;
 use tracing::{error, info};
 
-use crate::config::{Config, Neighbor, diff_config, diff_neighbors};
+use crate::config::{Config, EffectiveNeighborImpactKind, Neighbor, diff_config, diff_neighbors};
 use crate::fib_table_control::{
     FibTableControlDeps, commit_fib_tables_locked, runtime_unavailable_error,
 };
@@ -43,6 +43,7 @@ const POLICY_DEFINITIONS_SECTION: &str = "[policy] definitions";
 const POLICY_NEIGHBOR_SETS_SECTION: &str = "[policy] neighbor_sets";
 const POLICY_GLOBAL_CHAINS_SECTION: &str = "[policy] global chains";
 const POLICY_LIVE_IMPACT_SECTION: &str = "[policy] live impact";
+const SESSION_RESHAPE_SECTION: &str = "effective neighbor session reshape";
 
 #[derive(Clone)]
 pub struct ConfigTransactionController {
@@ -843,6 +844,22 @@ async fn commit_apply_family(
                 ),
             ))
         }
+        ApplyFamily::PeerSessionReshape => {
+            let reconfigured = commit_peer_session_reshape_locked(
+                &deps.peer_mgr_tx,
+                config_tx,
+                candidate_toml,
+                &candidate,
+            )
+            .await?;
+            Ok(committable_response(
+                post_commit_runtime_snapshot_token,
+                supported_sections,
+                format!(
+                    "Committed peer-group/session reshape runtime config transaction.\n{reconfigured} live session(s) reconfigured.\n"
+                ),
+            ))
+        }
         ApplyFamily::StaticNeighbors => {
             commit_static_neighbors_locked(
                 &deps.peer_mgr_tx,
@@ -894,6 +911,7 @@ enum ApplyFamily {
     DynamicNeighbors,
     CatalogSnapshot,
     LivePolicyImpact,
+    PeerSessionReshape,
     StaticNeighbors,
 }
 
@@ -916,6 +934,19 @@ fn apply_family(sections: &[String]) -> Option<ApplyFamily> {
                 }) =>
         {
             Some(ApplyFamily::LivePolicyImpact)
+        }
+        sections
+            if sections.iter().any(|s| s == SESSION_RESHAPE_SECTION)
+                && sections.iter().all(|s| {
+                    s == SESSION_RESHAPE_SECTION
+                        || s == PEER_GROUP_CATALOG_SECTION
+                        || s == POLICY_DEFINITIONS_SECTION
+                        || s == POLICY_NEIGHBOR_SETS_SECTION
+                        || s == POLICY_GLOBAL_CHAINS_SECTION
+                        || s == NEIGHBOR_MODIFY_SECTION
+                }) =>
+        {
+            Some(ApplyFamily::PeerSessionReshape)
         }
         sections
             if !sections.is_empty()
@@ -1118,6 +1149,53 @@ async fn commit_live_policy_impact_locked(
     Ok(priors.len())
 }
 
+/// Commit a static peer-group/session reshape transaction: stage the candidate
+/// snapshot, reconfigure the affected concrete peers (capturing prior configs),
+/// persist, and roll back live peers + snapshot on failure.
+async fn commit_peer_session_reshape_locked(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    config_tx: &mpsc::Sender<ConfigEvent>,
+    candidate_toml: String,
+    candidate: &Config,
+) -> Result<usize, ConfigTransactionApplyError> {
+    let permit = reserve_persist_permit(config_tx).await?;
+    let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
+    let previous = match Config::load_toml_with_diagnostics(
+        &previous_toml,
+        "previous runtime config transaction snapshot",
+    ) {
+        Ok(previous) => previous,
+        Err(error) => {
+            let error = ConfigTransactionApplyError::Internal(error);
+            return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
+        }
+    };
+
+    let targets = match resolve_peer_session_reshape_targets(&previous, candidate) {
+        Ok(targets) => targets,
+        Err(error) => {
+            return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
+        }
+    };
+    let reconfigured = targets.len();
+
+    let priors = match send_apply_peer_reshape_snapshot(peer_mgr_tx, targets).await {
+        Ok(priors) => priors,
+        Err(error) => {
+            // The peer-manager command self-heals its live mutations on a
+            // mid-fanout failure, so only the staged snapshot needs rollback.
+            return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error).await);
+        }
+    };
+
+    if let Err(error) = persist_candidate_config(permit, candidate_toml).await {
+        return Err(
+            rollback_peer_reshape_and_snapshot(peer_mgr_tx, priors, previous_toml, error).await,
+        );
+    }
+    Ok(reconfigured)
+}
+
 #[derive(Default)]
 struct LivePolicyTargets {
     static_targets: Vec<ResolvedPeerPolicy>,
@@ -1201,6 +1279,71 @@ fn resolve_live_policy_targets(
     Ok(targets)
 }
 
+fn resolve_peer_session_reshape_targets(
+    previous: &Config,
+    candidate: &Config,
+) -> Result<Vec<PeerManagerNeighborConfig>, ConfigTransactionApplyError> {
+    let diff = diff_config(previous, candidate);
+    let neighbor_diff = diff_neighbors(&previous.neighbors, &candidate.neighbors);
+    if !neighbor_diff.added.is_empty() || !neighbor_diff.removed.is_empty() {
+        return Err(ConfigTransactionApplyError::Internal(
+            "peer-session reshape executor received add/delete neighbor changes".to_string(),
+        ));
+    }
+
+    let impacted: std::collections::HashSet<&str> = diff
+        .effective_neighbor_impact
+        .iter()
+        .map(|impact| impact.address.as_str())
+        .collect();
+    if neighbor_diff
+        .changed
+        .iter()
+        .any(|neighbor| !impacted.contains(neighbor.address.as_str()))
+    {
+        return Err(ConfigTransactionApplyError::Internal(
+            "peer-session reshape executor received non-reshape neighbor changes".to_string(),
+        ));
+    }
+
+    let mut targets = Vec::new();
+    for impact in &diff.effective_neighbor_impact {
+        if impact.kind != EffectiveNeighborImpactKind::SessionReshape || impact.is_dynamic_range {
+            return Err(ConfigTransactionApplyError::Internal(format!(
+                "peer-session reshape executor received unsupported impact for {}",
+                impact.address
+            )));
+        }
+        let mut matches = candidate
+            .neighbors
+            .iter()
+            .filter(|neighbor| neighbor.address == impact.address);
+        let Some(neighbor) = matches.next() else {
+            return Err(ConfigTransactionApplyError::Internal(format!(
+                "peer-session reshape impact references neighbor {} absent from the candidate",
+                impact.address
+            )));
+        };
+        if matches.next().is_some() {
+            return Err(ConfigTransactionApplyError::Internal(format!(
+                "peer-session reshape impact for {} is ambiguous across multiple scoped neighbors",
+                impact.address
+            )));
+        }
+        let resolved = candidate
+            .resolve_neighbor(neighbor)
+            .map_err(|error| ConfigTransactionApplyError::InvalidArgument(error.to_string()))?;
+        targets.push(crate::reload::build_peer_mgr_config(
+            &resolved.transport_config,
+            &resolved.label,
+            resolved.import_policy.as_ref(),
+            resolved.export_policy.as_ref(),
+            resolved.peer_group.clone(),
+        ));
+    }
+    Ok(targets)
+}
+
 /// Send `ApplyPolicyImpactSnapshot` and return the captured prior chains.
 async fn send_apply_policy_impact_snapshot(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
@@ -1253,6 +1396,30 @@ async fn send_apply_resolved_policy_snapshot(
         .map_err(ConfigTransactionApplyError::Internal)
 }
 
+async fn send_apply_peer_reshape_snapshot(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    targets: Vec<PeerManagerNeighborConfig>,
+) -> Result<Vec<PeerManagerNeighborConfig>, ConfigTransactionApplyError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(PeerManagerCommand::ApplyPeerReshapeSnapshot {
+            targets,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable("peer manager is unavailable".to_string())
+        })?;
+    reply_rx
+        .await
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable(
+                "peer manager dropped peer-reshape reply".to_string(),
+            )
+        })?
+        .map_err(ConfigTransactionApplyError::Internal)
+}
+
 async fn rollback_live_policy_and_snapshot(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     priors: Vec<ResolvedPeerPolicy>,
@@ -1268,6 +1435,27 @@ async fn rollback_live_policy_and_snapshot(
         (live_result, snapshot_result) => combine_rollback_errors(
             &original,
             "live policy rollback",
+            live_result.err(),
+            snapshot_result.err(),
+        ),
+    }
+}
+
+async fn rollback_peer_reshape_and_snapshot(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    priors: Vec<PeerManagerNeighborConfig>,
+    previous_toml: String,
+    original: ConfigTransactionApplyError,
+) -> ConfigTransactionApplyError {
+    let live_rollback = send_apply_peer_reshape_snapshot(peer_mgr_tx, priors)
+        .await
+        .map(|_| ());
+    let snapshot_rollback = rollback_config_snapshot(peer_mgr_tx, previous_toml).await;
+    match (live_rollback, snapshot_rollback) {
+        (Ok(()), Ok(())) => original,
+        (live_result, snapshot_result) => combine_rollback_errors(
+            &original,
+            "peer reshape rollback",
             live_result.err(),
             snapshot_result.err(),
         ),
@@ -1654,7 +1842,7 @@ mod tests {
     };
     use rustbgpd_api::rib_service::FibTableControlError;
     use rustbgpd_policy::PolicyAction;
-    use std::collections::VecDeque;
+    use std::collections::{BTreeSet, VecDeque};
     use tokio::sync::Mutex;
 
     fn base_toml(extra: &str) -> String {
@@ -1970,19 +2158,56 @@ peer_group = "edge"
                 }
                 PeerManagerCommand::ReconfigurePeer { config, reply } => {
                     let mut peers = peers.lock().await;
-                    let key = PeerKey::new(config.address, config.interface.clone());
-                    if let Some(index) = peers.iter().position(|existing| {
-                        PeerKey::new(existing.address, existing.interface.clone()) == key
-                    }) {
-                        let previous = std::mem::replace(&mut peers[index], config);
-                        let _ = reply.send(Ok(previous));
-                    } else {
-                        let _ = reply.send(Err(format!("peer {key} not found")));
-                    }
+                    let _ = reply.send(fake_replace_peer_config(&mut peers, config));
+                }
+                PeerManagerCommand::ApplyPeerReshapeSnapshot { targets, reply } => {
+                    let mut peers = peers.lock().await;
+                    let _ = reply.send(fake_apply_peer_reshape_snapshot(&mut peers, targets));
                 }
                 _ => panic!("unexpected peer-manager command in snapshot transaction test"),
             }
         }
+    }
+
+    fn fake_replace_peer_config(
+        peers: &mut [PeerManagerNeighborConfig],
+        config: PeerManagerNeighborConfig,
+    ) -> Result<PeerManagerNeighborConfig, String> {
+        let key = PeerKey::new(config.address, config.interface.clone());
+        if let Some(existing) = peers
+            .iter_mut()
+            .find(|existing| PeerKey::new(existing.address, existing.interface.clone()) == key)
+        {
+            Ok(std::mem::replace(existing, config))
+        } else {
+            Err(format!("peer {key} not found"))
+        }
+    }
+
+    fn fake_apply_peer_reshape_snapshot(
+        peers: &mut [PeerManagerNeighborConfig],
+        targets: Vec<PeerManagerNeighborConfig>,
+    ) -> Result<Vec<PeerManagerNeighborConfig>, String> {
+        let mut seen = BTreeSet::new();
+        for target in &targets {
+            let key = PeerKey::new(target.address, target.interface.clone());
+            if !seen.insert(key.clone()) {
+                return Err(format!("peer reshape target {key} appears more than once"));
+            }
+        }
+        let mut priors = Vec::with_capacity(targets.len());
+        for target in targets {
+            match fake_replace_peer_config(peers, target) {
+                Ok(prior) => priors.push(prior),
+                Err(error) => {
+                    for prior in priors.into_iter().rev() {
+                        let _ = fake_replace_peer_config(peers, prior);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(priors)
     }
 
     async fn fake_snapshot_peer_manager_with_stage_results(
@@ -2111,6 +2336,78 @@ prefix = "10.30.0.9/16"
 peer_group = "ix"
 remote_asn = 65030
 "#
+        )
+    }
+
+    fn peer_group_reshape_toml(hold_time: u32) -> String {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[peer_groups.edge]
+hold_time = {hold_time}
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "edge"
+"#
+        )
+    }
+
+    fn peer_group_reassignment_toml(group: &str) -> String {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[peer_groups.edge]
+hold_time = 90
+
+[peer_groups.core]
+hold_time = 45
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "{group}"
+"#
+        )
+    }
+
+    fn resolved_static_peer_configs(toml: &str) -> Vec<PeerManagerNeighborConfig> {
+        let config = Config::load_toml_with_diagnostics(toml, "peer reshape test config")
+            .expect("test config must load");
+        resolve_static_neighbors(&config, &config.neighbors)
+            .expect("test config peers must resolve")
+    }
+
+    fn peer_session_reshape_plan() -> RuntimeConfigTransactionPlan {
+        plan(
+            RuntimeConfigTransactionStatus::Committable,
+            vec![
+                "[peer_groups] catalog".to_string(),
+                "effective neighbor session reshape".to_string(),
+            ],
         )
     }
 
@@ -3102,6 +3399,172 @@ default_action = "permit"
         assert_eq!(dynamic_calls[0][0].addr.to_string(), "10.30.0.0");
         assert_eq!(dynamic_calls[0][0].prefix_len, 16);
         assert_eq!(dynamic_calls[0][0].peer_group, "ix");
+    }
+
+    #[tokio::test]
+    async fn apply_commits_peer_session_reshape_after_persist_ack() {
+        let previous_toml = peer_group_reshape_toml(90);
+        let candidate_toml = peer_group_reshape_toml(45);
+        let initial_peers = resolved_static_peer_configs(&previous_toml);
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(initial_peers));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            peer_session_reshape_plan(),
+            snapshot_toml.clone(),
+            peers.clone(),
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted {
+                candidate_toml,
+                ack: Some(ack),
+            }) = config_rx.recv().await
+            {
+                assert!(candidate_toml.contains("hold_time = 45"));
+                let _ = ack.send(Ok(()));
+            }
+        });
+
+        let response = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml: candidate_toml.clone(),
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        assert_eq!(
+            response.committed_sections,
+            vec![
+                "[peer_groups] catalog",
+                "effective neighbor session reshape",
+            ]
+        );
+        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        assert!(response.human_text.contains("1 live session"));
+        let peers = peers.lock().await;
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].hold_time, Some(45));
+    }
+
+    #[tokio::test]
+    async fn apply_commits_static_peer_group_reassignment_after_persist_ack() {
+        let previous_toml = peer_group_reassignment_toml("edge");
+        let candidate_toml = peer_group_reassignment_toml("core");
+        let initial_peers = resolved_static_peer_configs(&previous_toml);
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(initial_peers));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec![
+                    "[[neighbors]] modify".to_string(),
+                    "effective neighbor session reshape".to_string(),
+                ],
+            ),
+            snapshot_toml.clone(),
+            peers.clone(),
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted {
+                candidate_toml,
+                ack: Some(ack),
+            }) = config_rx.recv().await
+            {
+                assert!(candidate_toml.contains("peer_group = \"core\""));
+                let _ = ack.send(Ok(()));
+            }
+        });
+
+        let response = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml: candidate_toml.clone(),
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        assert_eq!(
+            response.committed_sections,
+            vec!["[[neighbors]] modify", "effective neighbor session reshape"]
+        );
+        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        let peers = peers.lock().await;
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].peer_group.as_deref(), Some("core"));
+        assert_eq!(peers[0].hold_time, Some(45));
+    }
+
+    #[tokio::test]
+    async fn peer_session_reshape_persistence_failure_rolls_back_live_and_snapshot() {
+        let previous_toml = peer_group_reshape_toml(90);
+        let candidate_toml = peer_group_reshape_toml(45);
+        let initial_peers = resolved_static_peer_configs(&previous_toml);
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+        let peers = Arc::new(Mutex::new(initial_peers));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            peer_session_reshape_plan(),
+            snapshot_toml.clone(),
+            peers.clone(),
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+                config_rx.recv().await
+            {
+                let _ = ack.send(Err("persist failed".to_string()));
+            }
+        });
+
+        let err = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml,
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref m) if m == "persist failed"),
+            "{err:?}"
+        );
+        assert_eq!(*snapshot_toml.lock().await, previous_toml);
+        let peers = peers.lock().await;
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].hold_time, Some(90));
     }
 
     #[tokio::test]
