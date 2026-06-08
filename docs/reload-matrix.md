@@ -34,6 +34,24 @@ row.
 
 ---
 
+## Transaction overlay
+
+The matrix above describes what SIGHUP reload or targeted runtime CRUD does with
+each config field. ADR-0076 config transactions add a stricter overlay:
+`PlanConfigTransaction` may reject a SIGHUP-hot-applied change unless the daemon
+has a rollback-capable transaction executor for that exact impact shape.
+
+Current transaction support includes pure `[[fib_tables]]`, pure
+`[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only
+policy / neighbor-set / peer-group / global-chain changes, pure live
+policy-chain impact for static neighbors or accepted dynamic peers, and static
+peer-group/session reshape impact. Static reshapes include peer-group field
+edits or static-neighbor peer-group reassignments that require affected static
+sessions to be rebuilt; the transaction executor captures prior peer configs and
+restores them if apply or persistence fails. Dynamic-range session reshapes and
+mixed policy/session effective-impact candidates remain rejected even though
+SIGHUP can hot-reconcile some of those shapes best-effort.
+
 ## `[[neighbors]]`
 
 The diff key is the `(address, interface, remote_asn)` triple. Changing
