@@ -2,7 +2,7 @@
 [2026-05-15T19:20:34Z]   duration=1h  sample=60s  flip=600s
 [2026-05-15T19:20:34Z]   churn_interval=2s  batch=50  pool=512 (target=256)
 [2026-05-15T19:20:34Z]   mobility=25%  ce_port=ce100a  vni=100
-[2026-05-15T19:20:34Z]   run_dir=/home/lance/projects/rustbgpd/tests/soak/runs/gate8b-mac-churn-20260515T192034Z
+[2026-05-15T19:20:34Z]   run_dir=<repo>/tests/soak/runs/gate8b-mac-churn-20260515T192034Z
 [2026-05-15T19:20:34Z]   git_rev=81dc33643f23af5838148d17c1a5f204e40a4f35 dirty=false kernel=5.15.0-177-generic
 [2026-05-15T19:20:34Z] warmup: waiting 120s for initial dataplane discovery
 [2026-05-15T19:22:34Z] waiting up to 300s for both PEs to reach BGP Established
@@ -15,6 +15,6 @@
 [2026-05-15T20:01:20Z] flip: starting PE2 daemon
 [2026-05-15T20:01:22Z] post-flip re-established: clab-gate8b-soak-pe2 established_total=1
 [2026-05-15T20:11:30Z] flip: stopping PE2 daemon (mode=term)
-[2026-05-15T20:20:48Z] soak loop completed; final samples in /home/lance/projects/rustbgpd/tests/soak/runs/gate8b-mac-churn-20260515T192034Z/samples.csv
+[2026-05-15T20:20:48Z] soak loop completed; final samples in <repo>/tests/soak/runs/gate8b-mac-churn-20260515T192034Z/samples.csv
 [2026-05-15T20:20:48Z] totals: adds=7562 dels=7200 moves=3849
 [2026-05-15T20:20:48Z] soak loop exiting; cleaning up background tasks

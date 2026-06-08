@@ -1,5 +1,5 @@
 [2026-05-10T15:24:51Z] Gate 8b soak starting — duration=24h sample=60s flip=600s
-[2026-05-10T15:24:51Z] run_dir=/home/lance/projects/rustbgpd/tests/soak/runs/gate8b-20260510T152451Z
+[2026-05-10T15:24:51Z] run_dir=<repo>/tests/soak/runs/gate8b-20260510T152451Z
 [2026-05-10T15:24:51Z] git_rev=34d787cba71e6d321dbce7fb20eb9ee4f4785347 dirty=false kernel=5.15.0-177-generic
 [2026-05-10T15:24:51Z] warmup: waiting 120s for initial dataplane discovery
 [2026-05-10T15:34:55Z] flip: stopping PE2
@@ -144,5 +144,5 @@
 [2026-05-11T15:02:06Z] flip: starting PE2
 [2026-05-11T15:12:12Z] flip: stopping PE2
 [2026-05-11T15:22:21Z] flip: starting PE2
-[2026-05-11T15:25:23Z] soak loop completed; final samples in /home/lance/projects/rustbgpd/tests/soak/runs/gate8b-20260510T152451Z/samples.csv
+[2026-05-11T15:25:23Z] soak loop completed; final samples in <repo>/tests/soak/runs/gate8b-20260510T152451Z/samples.csv
 [2026-05-11T15:25:23Z] soak loop exiting; cleaning up background tasks

@@ -10,5 +10,5 @@
   "warmup_sec": 300,
   "rustbgpd_container": "clab-m37-soak-rustbgpd",
   "consumer_container": "clab-m37-soak-consumer",
-  "topology": "/home/lance/projects/rustbgpd/tests/interop/m37-soak.clab.yml"
+  "topology": "<repo>/tests/interop/m37-soak.clab.yml"
 }

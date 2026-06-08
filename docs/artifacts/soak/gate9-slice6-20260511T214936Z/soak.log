@@ -1,7 +1,7 @@
 [2026-05-11T21:49:36Z] provisioning PE1 kernel topology
 [2026-05-11T21:49:36Z] starting PE1 daemon
 [2026-05-11T21:49:36Z] Gate 9 slice 6 soak starting — duration=24h sample=60s churn=30s
-[2026-05-11T21:49:36Z] run_dir=/home/lance/projects/rustbgpd/tests/soak/runs/gate9-slice6-20260511T214936Z
+[2026-05-11T21:49:36Z] run_dir=<repo>/tests/soak/runs/gate9-slice6-20260511T214936Z
 [2026-05-11T21:49:36Z] git_rev=5619aceffeb6e71a75ae76cc44d8f88835385509 dirty=false kernel=5.15.0-177-generic
 [2026-05-11T21:49:36Z] tenant=192.0.2.1/24 dev=lo-vrf1 vrf=vrf1 l3vni=100
 [2026-05-11T21:49:36Z] warmup: waiting 120s for initial BGP + IP-VRF discovery
@@ -1412,6 +1412,6 @@
 [2026-05-12T21:47:17Z] churn: removing tenant 192.0.2.1/24
 [2026-05-12T21:48:18Z] churn: re-adding tenant 192.0.2.1/24
 [2026-05-12T21:49:19Z] churn: removing tenant 192.0.2.1/24
-[2026-05-12T21:50:20Z] soak loop completed; final samples in /home/lance/projects/rustbgpd/tests/soak/runs/gate9-slice6-20260511T214936Z/samples.csv
+[2026-05-12T21:50:20Z] soak loop completed; final samples in <repo>/tests/soak/runs/gate9-slice6-20260511T214936Z/samples.csv
 [2026-05-12T21:50:20Z] total churn cycles: 703
 [2026-05-12T21:50:20Z] soak loop exiting; cleaning up background tasks

@@ -8,6 +8,6 @@
   "sample_interval_sec": 60,
   "flip_interval_sec": 600,
   "warmup_sec": 120,
-  "topology": "/home/lance/projects/rustbgpd/tests/soak/gate8b-soak.clab.yml",
-  "run_dir": "/home/lance/projects/rustbgpd/tests/soak/runs/gate8b-20260510T152451Z"
+  "topology": "<repo>/tests/soak/gate8b-soak.clab.yml",
+  "run_dir": "<repo>/tests/soak/runs/gate8b-20260510T152451Z"
 }

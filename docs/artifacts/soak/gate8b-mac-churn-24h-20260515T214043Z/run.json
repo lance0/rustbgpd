@@ -17,6 +17,6 @@
   "pool_max": 384,
   "ce_port": "ce100a",
   "vni": 100,
-  "topology": "/home/lance/projects/rustbgpd/tests/soak/gate8b-soak.clab.yml",
-  "run_dir": "/home/lance/projects/rustbgpd/tests/soak/runs/gate8b-mac-churn-20260515T214043Z"
+  "topology": "<repo>/tests/soak/gate8b-soak.clab.yml",
+  "run_dir": "<repo>/tests/soak/runs/gate8b-mac-churn-20260515T214043Z"
 }
