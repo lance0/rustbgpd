@@ -17,6 +17,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   decision explicit for future peer-group reshape executors and operator JSON
   tooling.
 
+- **Peer reshape snapshot foundation.** The peer manager now has an atomic
+  internal command that reconfigures a set of concrete static peers, returns
+  their prior configs as a rollback token, and restores already-changed peers on
+  the first per-peer failure. This is the rollback substrate for peer-group /
+  session-reshape config transactions.
+
 - **Config transaction lifecycle metric.**
   `bgp_config_transaction_lifecycle_total{operation, outcome}` now counts
   confirmed-transaction confirm, abort, and auto-revert lifecycle transitions
