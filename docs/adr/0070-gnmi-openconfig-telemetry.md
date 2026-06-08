@@ -216,6 +216,7 @@ User-facing setup, supported-path, `gnmic`, and troubleshooting guidance lives i
 | PR2 — `Get` OpenConfig BGP global + neighbors | Landed (PR #276) |
 | PR3 — `Subscribe` ONCE / POLL / SAMPLE | Landed (PR #277) |
 | M54 — hosted `gnmic` smoke over native mTLS | Landed: `Capabilities`, `Get`, and `Subscribe STREAM/SAMPLE` are exercised by a real OpenConfig collector client |
+| Set transaction-bridge foundation | Landed: Set payload audit redaction, delete / replace / update normalization, response shaping, and an optional daemon hook exist; production still starts with no hook, so authorized Set calls remain `Unimplemented` |
 | PR4 — counters / capabilities / non-BGP telemetry | Deferred |
 
 ## Repo seams
@@ -248,8 +249,9 @@ Grounded against the current checkout:
 - rustbgpd becomes a drop-in read-only OpenConfig BGP target for `gnmic` /
   `gnmi-gateway` / OpenConfig collector pipelines — a differentiator over GoBGP
   (gRPC-only) and FRR-`bgpd` (no native per-daemon gNMI).
-- It is strictly read-only and reuses existing snapshots, so it adds no config
-  risk and no new RIB/peer ownership or channels.
+- The production daemon remains telemetry-only for OpenConfig until a supported
+  Set subset is wired to ADR-0076 transactions. The Set bridge foundation adds
+  audit redaction and normalization plumbing, but no successful mutation path.
 - `Capabilities` must advertise an honest, narrow subset; over-claiming models,
   encodings, or paths breaks collectors, so the whitelist and the deferral list
   are part of the contract, not an afterthought.
@@ -263,9 +265,12 @@ Grounded against the current checkout:
 
 ## Deferred
 
-- **gNMI `Set` / config datastore** — needs an OpenConfig-to-candidate-TOML
-  mapping onto the ADR-0064-gated ADR-0076 transaction model. v1 `Set` returns
-  `Unimplemented`.
+- **gNMI `Set` / config datastore** — the bridge foundation now handles
+  redacted audit summaries, delete / replace / update normalization, and the
+  daemon-owned hook boundary. The remaining work is the
+  OpenConfig-to-candidate-TOML mapping for supported leaves and wiring that hook
+  to the ADR-0064-gated ADR-0076 transaction model. Do not add a second commit
+  path.
 - **`Subscribe ON_CHANGE`** — needs loss-free, path-diffed leaf events.
   **Unblocked by [ADR-0072](0072-durable-event-history.md);** ships
   once the durable outbox lands and provides restart-survivable change

@@ -1,15 +1,17 @@
 # gNMI / OpenConfig Telemetry
 
-rustbgpd exposes a read-only `gnmi.gNMI` service for a strict OpenConfig BGP
-operational-state subset. It is intended for collectors and tools such as
-`gnmic` that already speak gNMI/OpenConfig.
+rustbgpd exposes `gnmi.gNMI` for a strict OpenConfig BGP operational-state
+subset. It is intended for collectors and tools such as `gnmic` that already
+speak gNMI/OpenConfig.
 
 This is not a full OpenConfig router model. The v1 surface is deliberately
 narrow: `Capabilities`, `Get`, and `Subscribe` for BGP global and neighbor
-state. `Set` is present because gNMI defines it, but always returns
-`UNIMPLEMENTED` after authorization. ADR-0076 adds a native gRPC config
-transaction planner; it is not an OpenConfig datastore and does not change this
-read-only gNMI boundary.
+state. `Set` is present because gNMI defines it, but the daemon still returns
+`UNIMPLEMENTED` after authorization until a supported OpenConfig config subset
+maps onto the ADR-0076 transaction model. The Set bridge foundation now
+redacts Set payloads in audit logs, normalizes delete / replace / update into
+gNMI application order, and keeps production closed when no daemon-owned
+transaction hook is installed.
 
 Design details live in [ADR-0070](adr/0070-gnmi-openconfig-telemetry.md). The
 complete native gRPC reference remains [API.md](API.md).
@@ -41,7 +43,8 @@ tls_client_ca_file = "/etc/rustbgpd/certs/ca.pem"
 principal is derived from the verified client certificate in ADR-0064 order:
 `rustbgpd:` URI SAN, then email SAN, then Subject CN. The principal must have a
 matching `[security.grpc.roles]` entry. `Capabilities`, `Get`, and `Subscribe`
-are `sensitive_read`; `Set` is `operator_only` even though it is unimplemented.
+are `sensitive_read`; `Set` is `operator_only` even while production support is
+unimplemented.
 
 ## Supported RPCs
 
@@ -50,7 +53,26 @@ are `sensitive_read`; `Set` is `operator_only` even though it is unimplemented.
 | `Capabilities` | Returns gNMI version `0.10.0`, the OpenConfig modules backing the supported paths, and `JSON` / `JSON_IETF` encodings. |
 | `Get` | Returns the supported OpenConfig BGP global and neighbor `state` subset. |
 | `Subscribe` | Supports `ONCE`, `POLL`, `STREAM SAMPLE`, and `STREAM ON_CHANGE` (the last is scoped to the neighbor session-state leaf — see below). |
-| `Set` | Returns `UNIMPLEMENTED` for an authorized operator-tier principal. Lower-tier callers receive `PERMISSION_DENIED` before the handler runs. |
+| `Set` | Returns `UNIMPLEMENTED` for an authorized operator-tier principal until a supported OpenConfig config subset is wired to ADR-0076 transactions. Lower-tier callers receive `PERMISSION_DENIED` before the handler runs. |
+
+### `Set` foundation scope
+
+Current release behavior remains fail-closed: the daemon starts with no gNMI Set
+transaction hook, so authorized Set calls return `UNIMPLEMENTED`. The internal
+service contract is in place for the next implementation slices:
+
+- Set payloads are summarized as operation counts only; values are redacted
+  before `grpc_authz` audit logging because future OpenConfig config leaves can
+  carry credentials.
+- `delete`, `replace`, and `update` are prefix-expanded and forwarded in the
+  gNMI-specified application order: all deletes, then replaces, then updates.
+- `replace` and `update` require `TypedValue`; the deprecated `Value` field is
+  rejected with `INVALID_ARGUMENT`.
+- non-empty `union_replace` and request extensions return `UNIMPLEMENTED` until
+  dedicated support ships.
+- future successful Set handling must translate the supported OpenConfig subset
+  into candidate TOML and call the ADR-0076 transaction controller. There is no
+  parallel commit path.
 
 ### `STREAM ON_CHANGE` v1 scope
 
@@ -214,7 +236,7 @@ above one hour is capped at the 1-hour ceiling.
 | `UNIMPLEMENTED` for a path | The path is valid OpenConfig but outside rustbgpd's supported whitelist. This is expected for per-AFI counters, negotiated capabilities, `last-established`, and unsupported subtrees. |
 | `INVALID_ARGUMENT` | The path is malformed, uses unsupported key syntax, or omits required keys such as `network-instance`, `protocol`, or `neighbor-address`. |
 | `NOT_FOUND` | The requested keyed object does not exist, such as a neighbor address that is not configured. |
-| `Set` returns `UNIMPLEMENTED` | Expected for an authorized operator-tier principal. gNMI mutation is deferred until OpenConfig `Set` can map onto the ADR-0076 transaction model without a parallel commit path. |
+| `Set` returns `UNIMPLEMENTED` | Expected for an authorized operator-tier principal until a supported OpenConfig config subset is wired to ADR-0076 transactions. The bridge foundation is present, but production mutation remains closed without a daemon-owned Set hook. |
 
 ## Interop Proof
 

@@ -128,9 +128,13 @@ section executors behind that public contract.
    candidate live (effectively confirmed-by-restart) and the auto-revert never
    fires: the timer is a safety net against a bad-but-running config, not against
    a daemon crash.
-7. **gNMI Set remains out of scope.** gNMI mutation must map to this transaction
-   model rather than invent a parallel commit path, but this ADR does not
-   implement OpenConfig config datastores or `Set`.
+7. **gNMI Set is an adapter, not a second commit model.** gNMI mutation must
+   map to this transaction model rather than invent a parallel commit path. The
+   gNMI service can normalize Set requests, redact Set audit summaries, and
+   delegate to a daemon-owned bridge hook, but successful mutation still has to
+   translate supported OpenConfig config leaves into candidate TOML and commit
+   through this ADR-0076 controller. This ADR does not define a full OpenConfig
+   config datastore.
 
 ## Consequences
 
@@ -192,4 +196,4 @@ section executors behind that public contract.
 
 See also ADR-0043 (config persistence and SIGHUP reload), ADR-0061 (unicast FIB
 integration), ADR-0064 (gRPC authorization), ADR-0074 (FIB-table CRUD tier), and
-`docs/GNMI.md` for the read-only gNMI boundary.
+`docs/GNMI.md` for the current gNMI Set bridge boundary.

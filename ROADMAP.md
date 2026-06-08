@@ -107,9 +107,13 @@ has it, no broad performance sprints without profile evidence.
   state, and static peer-group/session reshapes now rebuild affected sessions
   with captured prior configs. Next, gNMI `Set` should map OpenConfig changes
   into candidate TOML and feed this transaction model rather than inventing a
-  parallel commit primitive. Exit: atomic commit where supported, explicit
-  restart-required/rejected surfaces, rollback/receipt model, no partial silent
-  drift. Gated by ADR-0064 tier authz.
+  parallel commit primitive. **Done:** the Set bridge foundation now provides
+  redacted audit summaries, delete / replace / update normalization, response
+  shaping, and the daemon hook boundary while production remains fail-closed
+  without a wired hook. Next slice: map a supported OpenConfig subset to
+  candidate TOML and invoke ADR-0076. Exit: atomic commit where supported,
+  explicit restart-required/rejected surfaces, rollback/receipt model, no
+  partial silent drift. Gated by ADR-0064 tier authz.
 - **Operational proof / scale automation** *(parallel priority, small slices).*
   Re-stand the proof loop that makes the v0.x posture credible: a continuous
   churn/soak shape, automated or easy-to-trigger Criterion comparisons on the
@@ -440,8 +444,8 @@ an ADR "Deferred" section that points back here. Tightened, not dropped.
   `Capabilities` / `Get` / `Subscribe` (`ONCE` / `POLL` / `STREAM SAMPLE`) over
   the strict OpenConfig BGP state subset, plus `ON_CHANGE` for the neighbor
   session-state leaf (M54/M56). Deferred until the underlying snapshot exposes
-  the data or demand appears: `Set` + config datastore (now gated on
-  OpenConfig-to-candidate-TOML mapping onto the transaction model);
+  the data or demand appears: supported `Set` config subsets beyond the bridge
+  foundation (OpenConfig-to-candidate-TOML mapping onto the transaction model);
   per-AFI-SAFI prefix counters; per-neighbor
   installed/accepted split; `supported-capabilities` + negotiated AFI-SAFI;
   global total-prefixes/total-paths; absolute `last-established`; `PROTO` /

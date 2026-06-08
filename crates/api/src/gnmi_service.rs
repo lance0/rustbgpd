@@ -15,9 +15,11 @@ use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
+use crate::audit::{gnmi_set_summary, set_request_summary};
 use crate::gnmi;
 use crate::peer_types::{PeerInfo, PeerManagerCommand};
 use crate::proto;
+use crate::server::{GnmiSetFn, GnmiSetOperation, GnmiSetTransaction};
 
 const GNMI_VERSION: &str = "0.10.0";
 const DEFAULT_NETWORK_INSTANCE: &str = "DEFAULT";
@@ -51,6 +53,10 @@ pub struct GnmiService {
     /// started cleanly. `Subscribe ON_CHANGE` is the only consumer
     /// today; it returns `FailedPrecondition` when this is `None`.
     event_history: Option<EventHistoryHandle>,
+    /// Optional daemon-owned transaction bridge for gNMI Set. PR1 leaves this
+    /// unwired in production so Set remains closed until PR2 adds a real
+    /// OpenConfig-to-candidate-TOML bridge.
+    set_handler: Option<GnmiSetFn>,
 }
 
 type SubscribeStream =
@@ -88,6 +94,7 @@ impl GnmiService {
             peer_snapshot: Arc::new(move || Box::pin(peer_snapshot())),
             subscribe_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SUBSCRIPTIONS)),
             event_history: None,
+            set_handler: None,
         }
     }
 
@@ -98,6 +105,13 @@ impl GnmiService {
     #[must_use]
     pub fn with_event_history(mut self, handle: Option<EventHistoryHandle>) -> Self {
         self.event_history = handle;
+        self
+    }
+
+    /// Install the daemon-owned gNMI Set transaction bridge.
+    #[must_use]
+    pub fn with_set_handler(mut self, handler: Option<GnmiSetFn>) -> Self {
+        self.set_handler = handler;
         self
     }
 
@@ -649,6 +663,154 @@ fn validate_encoding(raw: i32) -> Result<(), Status> {
             "gNMI encoding {} is not supported",
             encoding.as_str_name()
         ))),
+    }
+}
+
+fn normalize_set_request(request: gnmi::SetRequest) -> Result<GnmiSetTransaction, Status> {
+    let gnmi::SetRequest {
+        prefix,
+        delete,
+        replace,
+        update,
+        extension,
+        union_replace,
+    } = request;
+
+    let has_union_replace = !union_replace.is_empty();
+    let has_ordered_ops = !delete.is_empty() || !replace.is_empty() || !update.is_empty();
+    if has_union_replace && has_ordered_ops {
+        return Err(Status::invalid_argument(
+            "gNMI Set union_replace cannot be combined with delete, replace, or update",
+        ));
+    }
+    if has_union_replace {
+        return Err(Status::unimplemented(
+            "gNMI Set union_replace is not supported",
+        ));
+    }
+    if !extension.is_empty() {
+        return Err(Status::unimplemented(
+            "gNMI Set extensions are not supported yet",
+        ));
+    }
+
+    let mut operations = Vec::with_capacity(delete.len() + replace.len() + update.len());
+    for path in delete {
+        operations.push(GnmiSetOperation::Delete(normalize_set_path(
+            prefix.as_ref(),
+            &path,
+        )?));
+    }
+    for item in replace {
+        operations.push(GnmiSetOperation::Replace(normalize_set_update(
+            prefix.as_ref(),
+            item,
+            "replace",
+        )?));
+    }
+    for item in update {
+        operations.push(GnmiSetOperation::Update(normalize_set_update(
+            prefix.as_ref(),
+            item,
+            "update",
+        )?));
+    }
+    if operations.is_empty() {
+        return Err(Status::invalid_argument(
+            "gNMI Set requires at least one delete, replace, or update operation",
+        ));
+    }
+
+    Ok(GnmiSetTransaction {
+        prefix,
+        operations,
+        extensions: extension,
+    })
+}
+
+fn normalize_set_update(
+    prefix: Option<&gnmi::Path>,
+    mut update: gnmi::Update,
+    op_name: &str,
+) -> Result<gnmi::Update, Status> {
+    #[allow(deprecated)]
+    if update.value.is_some() {
+        return Err(Status::invalid_argument(format!(
+            "gNMI Set {op_name} uses deprecated Value; use TypedValue"
+        )));
+    }
+    let Some(value) = update.val.as_ref() else {
+        return Err(Status::invalid_argument(format!(
+            "gNMI Set {op_name} requires a TypedValue"
+        )));
+    };
+    if value.value.is_none() {
+        return Err(Status::invalid_argument(format!(
+            "gNMI Set {op_name} requires a TypedValue value"
+        )));
+    }
+    let path = update
+        .path
+        .take()
+        .ok_or_else(|| Status::invalid_argument(format!("gNMI Set {op_name} requires a path")))?;
+    update.path = Some(normalize_set_path(prefix, &path)?);
+    Ok(update)
+}
+
+fn normalize_set_path(
+    prefix: Option<&gnmi::Path>,
+    path: &gnmi::Path,
+) -> Result<gnmi::Path, Status> {
+    if !path.target.is_empty() {
+        return Err(Status::invalid_argument(
+            "gNMI path target is only supported on the prefix",
+        ));
+    }
+    let full_path = combine_paths(prefix, path)?;
+    if !full_path.origin.is_empty() && full_path.origin != "openconfig" {
+        return Err(Status::invalid_argument(format!(
+            "unsupported gNMI Set origin {}",
+            full_path.origin
+        )));
+    }
+    Ok(full_path)
+}
+
+fn set_response_from_operations(operations: &[GnmiSetOperation]) -> gnmi::SetResponse {
+    gnmi::SetResponse {
+        prefix: None,
+        response: operations
+            .iter()
+            .map(GnmiSetOperation::to_update_result)
+            .collect(),
+        #[allow(deprecated)]
+        message: None,
+        timestamp: 0,
+        extension: Vec::new(),
+    }
+}
+
+impl GnmiSetOperation {
+    fn to_update_result(&self) -> gnmi::UpdateResult {
+        let (path, op) = match self {
+            GnmiSetOperation::Delete(path) => {
+                (Some(path.clone()), gnmi::update_result::Operation::Delete)
+            }
+            GnmiSetOperation::Replace(update) => {
+                (update.path.clone(), gnmi::update_result::Operation::Replace)
+            }
+            GnmiSetOperation::Update(update) => {
+                (update.path.clone(), gnmi::update_result::Operation::Update)
+            }
+        };
+        gnmi::UpdateResult {
+            #[allow(deprecated)]
+            timestamp: 0,
+            path,
+            #[allow(deprecated)]
+            message: None,
+            op: op as i32,
+        }
     }
 }
 
@@ -1462,9 +1624,20 @@ impl gnmi::g_nmi_server::GNmi for GnmiService {
 
     async fn set(
         &self,
-        _request: Request<gnmi::SetRequest>,
+        request: Request<gnmi::SetRequest>,
     ) -> Result<Response<gnmi::SetResponse>, Status> {
-        Err(Status::unimplemented("gNMI Set is not supported"))
+        set_request_summary(&request, gnmi_set_summary(request.get_ref()));
+        let Some(set_handler) = &self.set_handler else {
+            return Err(Status::unimplemented("gNMI Set is not supported"));
+        };
+        let transaction = normalize_set_request(request.into_inner())?;
+        let mut response = set_response_from_operations(&transaction.operations);
+        let outcome = set_handler(transaction)
+            .await
+            .map_err(crate::server::GnmiSetError::into_status)?;
+        response.timestamp = now_nanos();
+        response.extension = outcome.extensions;
+        Ok(Response::new(response))
     }
 
     type SubscribeStream = SubscribeStream;
@@ -1546,6 +1719,7 @@ mod tests {
     use super::*;
     use gnmi::g_nmi_server::GNmi as _;
     use rustbgpd_transport::RemovePrivateAs;
+    use std::sync::{Arc, Mutex};
 
     fn test_service(peers: Vec<PeerInfo>) -> GnmiService {
         GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
@@ -1645,6 +1819,38 @@ mod tests {
         }
     }
 
+    fn relative_path(names: &[&str]) -> gnmi::Path {
+        gnmi::Path {
+            #[allow(deprecated)]
+            element: Vec::new(),
+            origin: String::new(),
+            target: String::new(),
+            elem: names.iter().map(|name| pe(name)).collect(),
+        }
+    }
+
+    fn set_update(path: gnmi::Path, json: &[u8]) -> gnmi::Update {
+        gnmi::Update {
+            path: Some(path),
+            #[allow(deprecated)]
+            value: None,
+            val: Some(gnmi::TypedValue {
+                value: Some(gnmi::typed_value::Value::JsonIetfVal(json.to_vec())),
+            }),
+            duplicates: 0,
+        }
+    }
+
+    fn empty_typed_set_update(path: gnmi::Path) -> gnmi::Update {
+        gnmi::Update {
+            path: Some(path),
+            #[allow(deprecated)]
+            value: None,
+            val: Some(gnmi::TypedValue { value: None }),
+            duplicates: 0,
+        }
+    }
+
     #[tokio::test]
     async fn capabilities_advertises_version_models_and_encodings() {
         let response = test_service(Vec::new())
@@ -1733,6 +1939,216 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unimplemented);
         assert!(err.message().contains("not supported"));
+    }
+
+    #[tokio::test]
+    async fn set_with_hook_normalizes_operations_and_builds_response() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let hook_captured = Arc::clone(&captured);
+        let hook: crate::server::GnmiSetFn = Arc::new(move |transaction| {
+            hook_captured.lock().unwrap().push(transaction);
+            Box::pin(async { Ok(crate::server::GnmiSetOutcome::default()) })
+        });
+        let prefix = mounted_path(&[]);
+        let response = test_service(Vec::new())
+            .with_set_handler(Some(hook))
+            .set(Request::new(gnmi::SetRequest {
+                prefix: Some(prefix.clone()),
+                delete: vec![relative_path(&["neighbors"])],
+                replace: vec![set_update(
+                    relative_path(&["neighbors", "neighbor", "config", "description"]),
+                    br#""ixp client""#,
+                )],
+                update: vec![set_update(
+                    relative_path(&["neighbors", "neighbor", "config", "peer-group"]),
+                    br#""rs-clients""#,
+                )],
+                extension: Vec::new(),
+                union_replace: Vec::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.response.len(), 3);
+        assert_eq!(
+            response.response[0].op,
+            gnmi::update_result::Operation::Delete as i32
+        );
+        assert_eq!(
+            response.response[1].op,
+            gnmi::update_result::Operation::Replace as i32
+        );
+        assert_eq!(
+            response.response[2].op,
+            gnmi::update_result::Operation::Update as i32
+        );
+        assert!(response.prefix.is_none());
+        assert!(response.extension.is_empty());
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let transaction = &captured[0];
+        assert_eq!(transaction.prefix, Some(prefix));
+        assert!(transaction.extensions.is_empty());
+        assert_eq!(transaction.operations.len(), 3);
+        match &transaction.operations[0] {
+            crate::server::GnmiSetOperation::Delete(path) => {
+                assert_eq!(path.elem[0].name, "network-instances");
+                assert_eq!(path.elem.last().unwrap().name, "neighbors");
+            }
+            _ => panic!("expected delete operation"),
+        }
+        match &transaction.operations[1] {
+            crate::server::GnmiSetOperation::Replace(update) => {
+                assert_eq!(
+                    update.path.as_ref().unwrap().elem.last().unwrap().name,
+                    "description"
+                );
+            }
+            _ => panic!("expected replace operation"),
+        }
+        match &transaction.operations[2] {
+            crate::server::GnmiSetOperation::Update(update) => {
+                assert_eq!(
+                    update.path.as_ref().unwrap().elem.last().unwrap().name,
+                    "peer-group"
+                );
+            }
+            _ => panic!("expected update operation"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_rejects_union_replace_before_hook() {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+            panic!("union_replace must reject before invoking the hook");
+        });
+        let err = test_service(Vec::new())
+            .with_set_handler(Some(hook))
+            .set(Request::new(gnmi::SetRequest {
+                prefix: None,
+                delete: Vec::new(),
+                replace: Vec::new(),
+                update: Vec::new(),
+                extension: Vec::new(),
+                union_replace: vec![set_update(relative_path(&["bgp"]), b"{}")],
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        assert!(err.message().contains("union_replace"));
+    }
+
+    #[tokio::test]
+    async fn set_rejects_empty_request_before_hook() {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+            panic!("empty Set request must reject before invoking the hook");
+        });
+        let err = test_service(Vec::new())
+            .with_set_handler(Some(hook))
+            .set(Request::new(gnmi::SetRequest {
+                prefix: None,
+                delete: Vec::new(),
+                replace: Vec::new(),
+                update: Vec::new(),
+                extension: Vec::new(),
+                union_replace: Vec::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("requires at least one"));
+    }
+
+    #[tokio::test]
+    async fn set_rejects_extensions_before_hook() {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+            panic!("extensions must reject before invoking the hook");
+        });
+        let err = test_service(Vec::new())
+            .with_set_handler(Some(hook))
+            .set(Request::new(gnmi::SetRequest {
+                prefix: None,
+                delete: Vec::new(),
+                replace: Vec::new(),
+                update: Vec::new(),
+                extension: vec![crate::gnmi_ext::Extension { ext: None }],
+                union_replace: Vec::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        assert!(err.message().contains("extensions"));
+    }
+
+    #[tokio::test]
+    async fn set_rejects_empty_typed_value_before_hook() {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+            panic!("empty typed value must reject before invoking the hook");
+        });
+        let err = test_service(Vec::new())
+            .with_set_handler(Some(hook))
+            .set(Request::new(gnmi::SetRequest {
+                prefix: None,
+                delete: Vec::new(),
+                replace: vec![empty_typed_set_update(relative_path(&["bgp"]))],
+                update: Vec::new(),
+                extension: Vec::new(),
+                union_replace: Vec::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("TypedValue value"));
+    }
+
+    #[tokio::test]
+    async fn set_rejects_non_openconfig_origin_before_hook() {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+            panic!("bad origin must reject before invoking the hook");
+        });
+        let mut path = relative_path(&["bgp"]);
+        path.origin = "vendor".to_string();
+        let err = test_service(Vec::new())
+            .with_set_handler(Some(hook))
+            .set(Request::new(gnmi::SetRequest {
+                prefix: None,
+                delete: vec![path],
+                replace: Vec::new(),
+                update: Vec::new(),
+                extension: Vec::new(),
+                union_replace: Vec::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("unsupported gNMI Set origin"));
+    }
+
+    #[tokio::test]
+    async fn set_hook_error_maps_to_grpc_status() {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+            Box::pin(async {
+                Err(crate::server::GnmiSetError::FailedPrecondition(
+                    "confirmed transaction pending".to_string(),
+                ))
+            })
+        });
+        let err = test_service(Vec::new())
+            .with_set_handler(Some(hook))
+            .set(Request::new(gnmi::SetRequest {
+                prefix: None,
+                delete: vec![relative_path(&["network-instances"])],
+                replace: Vec::new(),
+                update: Vec::new(),
+                extension: Vec::new(),
+                union_replace: Vec::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(err.message().contains("confirmed transaction pending"));
     }
 
     #[tokio::test]
