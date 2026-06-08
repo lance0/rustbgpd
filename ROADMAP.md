@@ -121,19 +121,19 @@ has it, no broad performance sprints without profile evidence.
   Exit: one repeatable soak result operators can inspect, bench comparison
   receipts for perf PRs, and memory tracking that covers full-table scale
   without relying only on bgperf2.
-- **MPLS / VPN / BGP-LS address-family ADR** *(research only — no
-  implementation this cycle).* Draw the address-family-expansion boundaries
-  while the substrate is still small, before any code lands. Scope the ADR to a
-  control-plane story: an AFI/SAFI route-key model that can carry VPNv4/v6
-  (RFC 4364), labeled-unicast (RFC 8277), and BGP-LS (RFC 7752), with BGP-LS
-  *export* and route-reflector-only VPN families as the on-identity entry points
-  (controller-feed / RR, not a forwarding plane). **Explicit non-goal, stated up
-  front: rustbgpd does not install MPLS labels in the dataplane** — these are
-  BGP-carried families, not a step toward a full MPLS router (see Non-goals).
-  Also specify how the ORF Address-Prefix decoder extends past IPv4/IPv6 unicast
-  safely. Exit: a merged ADR fixing the route-key shape, proto/API story, and
-  the dataplane non-goal; implementation stays deferred + demand-shaped (see
-  *Out-of-niche address families* under Maybe) until after the ADR.
+- **MPLS / VPN / BGP-LS address-family ADR** *(done — implementation remains
+  deferred).* ADR-0077 draws the address-family-expansion boundaries while the
+  substrate is still small: a control-plane AFI/SAFI route-key model for
+  VPNv4/v6 (RFC 4364 / RFC 4659), labeled-unicast (RFC 8277), Route Target
+  Constraints (RFC 4684), and BGP-LS (RFC 9552, which obsoletes RFC 7752), with
+  BGP-LS *export* and route-reflector-only VPN/MPLS families as the on-identity
+  entry points (controller-feed / RR, not a forwarding plane). **Explicit
+  non-goal, stated up front: rustbgpd does not install MPLS labels in the
+  dataplane** — these are BGP-carried families, not a step toward a full MPLS
+  router (see Non-goals). The ADR also preserves the ORF Address-Prefix guard:
+  only IPv4/IPv6 unicast entries are parsed today, and future VPN/MPLS-family
+  ORF support must be family-specific. Implementation stays demand-shaped (see
+  *Out-of-niche address families* under Maybe).
 
 ### Later
 
@@ -345,9 +345,10 @@ has it, no broad performance sprints without profile evidence.
 - **Confederation (RFC 5065).** Required for service-provider deployments, but
   SPs are not the initial target market. (Unblocks several deferred RFC 9234
   confederation-scope items and the RFC 8326 confederation gating.)
-- **Out-of-niche address families.** L3VPN (VPNv4/v6, RFC 4364), labeled-unicast
-  (RFC 8277), BGP-LS (RFC 7752), SR Policy / SRv6 (RFC 9514), IPv4/v6 multicast,
-  VPLS. This is the dominant AFI-count gap vs FRR / GoBGP (~4 of ~15 families),
+- **Out-of-niche address families.** L3VPN (VPNv4/v6, RFC 4364 / RFC 4659),
+  labeled-unicast (RFC 8277), Route Target Constraints (RFC 4684), BGP-LS
+  (RFC 9552, obsoleting RFC 7752 / RFC 9029), SR Policy / SRv6 (RFC 9514),
+  IPv4/v6 multicast, VPLS. This is the dominant AFI-count gap vs FRR / GoBGP,
   but it is entirely service-provider / traffic-engineering / full-router scope —
   outside rustbgpd's fabric / route-server / automation niche. Demand-shaped:
   pursuing them is a deliberate strategic pivot, not parity-chasing. (Of these,

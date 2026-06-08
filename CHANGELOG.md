@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0077 MPLS/VPN/BGP-LS address-family boundary.** Added a
+  research-backed control-plane scope for future labeled-unicast, VPNv4/v6,
+  Route Target Constraints, and BGP-LS work. The ADR keeps `Prefix` scoped to
+  IPv4/IPv6 unicast, requires future families to land as typed route-key/RIB/API
+  slices, identifies BGP-LS export and route-reflector-only VPN/MPLS families as
+  the on-identity entry points, and makes MPLS dataplane programming an explicit
+  non-goal.
+
 - **Config transaction effective-impact kinds.** The redacted transaction diff
   now labels each `effective_neighbor_impact` entry as `policy_chain` or
   `session_reshape`, making the planner's live-policy versus session-reconfigure
