@@ -86,8 +86,8 @@ Transaction and validation behavior:
 - non-empty `union_replace` returns `UNIMPLEMENTED` until dedicated support
   ships.
 - the standard gNMI commit-confirmed extension is supported for `commit`,
-  `confirm`, and `cancel` actions. Unsupported extension types and
-  `set_rollback_duration` return `UNIMPLEMENTED`.
+  `confirm`, `cancel`, and `set_rollback_duration` actions. Unsupported
+  extension types return `UNIMPLEMENTED`.
 - supported changes translate the live runtime config snapshot into candidate
   TOML and call the ADR-0076 transaction controller. There is no parallel commit
   path.
@@ -187,11 +187,14 @@ controller used by `rbgp config apply --confirm-id`:
   extension, with no delete / replace / update operations.
 - `CommitCancel` aborts and rolls back a pending transaction. It must also carry
   only the extension.
+- `CommitSetRollbackDuration` resets the rollback timer for the pending
+  transaction. Its `id` must match the pending transaction, it must include a
+  positive whole-second `rollback_duration`, and it overwrites the current timer
+  rather than appending time.
 
 Only one confirmed transaction may be pending at a time. While pending, normal
 Set mutations return `FAILED_PRECONDITION` until the transaction is confirmed,
-canceled, or auto-reverted. `CommitSetRollbackDuration` is deferred because the
-native controller does not yet expose a timer-reset API.
+canceled, or auto-reverted.
 
 ### `STREAM ON_CHANGE` v1 scope
 
@@ -406,7 +409,7 @@ above one hour is capped at the 1-hour ceiling.
 | `UNIMPLEMENTED` for a path | The path is valid OpenConfig but outside rustbgpd's supported whitelist. This is expected for per-AFI counters, negotiated capabilities, `last-established`, and unsupported subtrees. |
 | `INVALID_ARGUMENT` | The path is malformed, uses unsupported key syntax, or omits required keys such as `network-instance`, `protocol`, or `neighbor-address`. |
 | `NOT_FOUND` | The requested keyed object does not exist, such as a neighbor address that is not configured. |
-| `Set` returns `UNIMPLEMENTED` | The path or extension is outside the supported Set subset, such as unsupported neighbor leaves, `union_replace`, `CommitSetRollbackDuration`, or a non-Commit extension. |
+| `Set` returns `UNIMPLEMENTED` | The path or extension is outside the supported Set subset, such as unsupported neighbor leaves, `union_replace`, or a non-Commit extension. |
 
 ## Interop Proof
 

@@ -277,9 +277,8 @@ Grounded against the current checkout:
   and dynamic-neighbor-prefix subsets now handle
   OpenConfig-to-candidate-TOML mapping and commit through the
   ADR-0064-gated ADR-0076 transaction model. Remaining config work includes
-  broader neighbor leaves, broader peer-group subtrees, native-only dynamic
-  range fields, and commit-confirmed rollback-duration reset. Do not add a
-  second commit path.
+  broader neighbor leaves, broader peer-group subtrees, and native-only dynamic
+  range fields. Do not add a second commit path.
 - **`Subscribe ON_CHANGE`** — needs loss-free, path-diffed leaf events.
   **Unblocked by [ADR-0072](0072-durable-event-history.md);** ships
   once the durable outbox lands and provides restart-survivable change

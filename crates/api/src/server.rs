@@ -156,6 +156,11 @@ pub enum GnmiSetCommitAction {
     Confirm { confirm_id: String },
     /// Cancel and roll back a pending confirmed commit.
     Cancel { confirm_id: String },
+    /// Reset the rollback timer for a pending confirmed commit.
+    SetRollbackDuration {
+        confirm_id: String,
+        confirm_timeout_seconds: u32,
+    },
 }
 
 /// A normalized gNMI Set request passed to the daemon-owned transaction bridge.

@@ -761,9 +761,14 @@ fn parse_commit_extension(commit: gnmi_ext::Commit) -> Result<GnmiSetCommitActio
         }),
         gnmi_ext::commit::Action::Confirm(_) => Ok(GnmiSetCommitAction::Confirm { confirm_id }),
         gnmi_ext::commit::Action::Cancel(_) => Ok(GnmiSetCommitAction::Cancel { confirm_id }),
-        gnmi_ext::commit::Action::SetRollbackDuration(_) => Err(Status::unimplemented(
-            "gNMI commit-confirmed rollback-duration reset is not supported yet",
-        )),
+        gnmi_ext::commit::Action::SetRollbackDuration(request) => {
+            Ok(GnmiSetCommitAction::SetRollbackDuration {
+                confirm_id,
+                confirm_timeout_seconds: required_rollback_duration_seconds(
+                    request.rollback_duration,
+                )?,
+            })
+        }
     }
 }
 
@@ -781,6 +786,17 @@ fn rollback_duration_seconds(duration: Option<::prost_types::Duration>) -> Resul
     })
 }
 
+fn required_rollback_duration_seconds(
+    duration: Option<::prost_types::Duration>,
+) -> Result<u32, Status> {
+    let Some(duration) = duration else {
+        return Err(Status::invalid_argument(
+            "gNMI commit-confirmed rollback_duration is required",
+        ));
+    };
+    rollback_duration_seconds(Some(duration))
+}
+
 fn validate_commit_operation_shape(
     action: Option<&GnmiSetCommitAction>,
     operations_empty: bool,
@@ -792,13 +808,13 @@ fn validate_commit_operation_shape(
         Some(GnmiSetCommitAction::Commit { .. }) if operations_empty => Err(
             Status::invalid_argument("gNMI commit-confirmed request requires Set operations"),
         ),
-        Some(GnmiSetCommitAction::Confirm { .. } | GnmiSetCommitAction::Cancel { .. })
-            if !operations_empty =>
-        {
-            Err(Status::invalid_argument(
-                "gNMI commit-confirmed confirm/cancel requests must not include Set operations",
-            ))
-        }
+        Some(
+            GnmiSetCommitAction::Confirm { .. }
+            | GnmiSetCommitAction::Cancel { .. }
+            | GnmiSetCommitAction::SetRollbackDuration { .. },
+        ) if !operations_empty => Err(Status::invalid_argument(
+            "gNMI commit-confirmed confirm/cancel/rollback-duration requests must not include Set operations",
+        )),
         _ => Ok(()),
     }
 }
@@ -2258,6 +2274,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_with_commit_rollback_reset_forwards_empty_transaction_action() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let hook_captured = Arc::clone(&captured);
+        let hook: crate::server::GnmiSetFn = Arc::new(move |transaction| {
+            hook_captured.lock().unwrap().push(transaction);
+            Box::pin(async { Ok(crate::server::GnmiSetOutcome::default()) })
+        });
+        test_service(Vec::new())
+            .with_set_handler(Some(hook))
+            .set(Request::new(gnmi::SetRequest {
+                prefix: None,
+                delete: Vec::new(),
+                replace: Vec::new(),
+                update: Vec::new(),
+                extension: vec![commit_extension(
+                    crate::gnmi_ext::commit::Action::SetRollbackDuration(
+                        crate::gnmi_ext::CommitSetRollbackDuration {
+                            rollback_duration: Some(::prost_types::Duration {
+                                seconds: 180,
+                                nanos: 0,
+                            }),
+                        },
+                    ),
+                )],
+                union_replace: Vec::new(),
+            }))
+            .await
+            .unwrap();
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(
+            captured[0].commit_action,
+            Some(crate::server::GnmiSetCommitAction::SetRollbackDuration {
+                confirm_id: "deploy-42".to_string(),
+                confirm_timeout_seconds: 180,
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn set_rejects_unknown_extensions_before_hook() {
         let hook: crate::server::GnmiSetFn = Arc::new(|_| {
             panic!("extensions must reject before invoking the hook");
@@ -2318,12 +2374,9 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("must not include Set operations"));
-    }
 
-    #[tokio::test]
-    async fn set_rejects_unsupported_commit_rollback_reset_before_hook() {
         let hook: crate::server::GnmiSetFn = Arc::new(|_| {
-            panic!("unsupported commit action must reject before invoking the hook");
+            panic!("rollback-duration shape errors must reject before invoking the hook");
         });
         let err = test_service(Vec::new())
             .with_set_handler(Some(hook))
@@ -2331,7 +2384,7 @@ mod tests {
                 prefix: None,
                 delete: Vec::new(),
                 replace: Vec::new(),
-                update: Vec::new(),
+                update: vec![set_update(relative_path(&["bgp"]), b"{}")],
                 extension: vec![commit_extension(
                     crate::gnmi_ext::commit::Action::SetRollbackDuration(
                         crate::gnmi_ext::CommitSetRollbackDuration {
@@ -2346,8 +2399,35 @@ mod tests {
             }))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Unimplemented);
-        assert!(err.message().contains("rollback-duration reset"));
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("must not include Set operations"));
+    }
+
+    #[tokio::test]
+    async fn set_rejects_commit_rollback_reset_missing_duration_before_hook() {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+            panic!("rollback-duration validation errors must reject before invoking the hook");
+        });
+        let err = test_service(Vec::new())
+            .with_set_handler(Some(hook))
+            .set(Request::new(gnmi::SetRequest {
+                prefix: None,
+                delete: Vec::new(),
+                replace: Vec::new(),
+                update: Vec::new(),
+                extension: vec![commit_extension(
+                    crate::gnmi_ext::commit::Action::SetRollbackDuration(
+                        crate::gnmi_ext::CommitSetRollbackDuration {
+                            rollback_duration: None,
+                        },
+                    ),
+                )],
+                union_replace: Vec::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("rollback_duration is required"));
     }
 
     #[tokio::test]
