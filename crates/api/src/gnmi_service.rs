@@ -17,9 +17,10 @@ use tracing::debug;
 
 use crate::audit::{gnmi_set_summary, set_request_summary};
 use crate::gnmi;
+use crate::gnmi_ext;
 use crate::peer_types::{PeerInfo, PeerManagerCommand};
 use crate::proto;
-use crate::server::{GnmiSetFn, GnmiSetOperation, GnmiSetTransaction};
+use crate::server::{GnmiSetCommitAction, GnmiSetFn, GnmiSetOperation, GnmiSetTransaction};
 
 const GNMI_VERSION: &str = "0.10.0";
 const DEFAULT_NETWORK_INSTANCE: &str = "DEFAULT";
@@ -688,11 +689,7 @@ fn normalize_set_request(request: gnmi::SetRequest) -> Result<GnmiSetTransaction
             "gNMI Set union_replace is not supported",
         ));
     }
-    if !extension.is_empty() {
-        return Err(Status::unimplemented(
-            "gNMI Set extensions are not supported yet",
-        ));
-    }
+    let commit_action = parse_set_commit_action(extension)?;
 
     let mut operations = Vec::with_capacity(delete.len() + replace.len() + update.len());
     for path in delete {
@@ -715,17 +712,95 @@ fn normalize_set_request(request: gnmi::SetRequest) -> Result<GnmiSetTransaction
             "update",
         )?));
     }
-    if operations.is_empty() {
-        return Err(Status::invalid_argument(
-            "gNMI Set requires at least one delete, replace, or update operation",
-        ));
-    }
+    validate_commit_operation_shape(commit_action.as_ref(), operations.is_empty())?;
 
     Ok(GnmiSetTransaction {
         prefix,
         operations,
-        extensions: extension,
+        commit_action,
     })
+}
+
+fn parse_set_commit_action(
+    extension: Vec<gnmi_ext::Extension>,
+) -> Result<Option<GnmiSetCommitAction>, Status> {
+    if extension.is_empty() {
+        return Ok(None);
+    }
+    if extension.len() != 1 {
+        return Err(Status::invalid_argument(
+            "gNMI Set accepts at most one commit-confirmed extension",
+        ));
+    }
+    let extension = extension.into_iter().next().expect("checked length");
+    match extension.ext {
+        Some(gnmi_ext::extension::Ext::Commit(commit)) => parse_commit_extension(commit).map(Some),
+        Some(_) => Err(Status::unimplemented(
+            "gNMI Set supports only the commit-confirmed extension",
+        )),
+        None => Err(Status::invalid_argument(
+            "gNMI Set extension requires a value",
+        )),
+    }
+}
+
+fn parse_commit_extension(commit: gnmi_ext::Commit) -> Result<GnmiSetCommitAction, Status> {
+    let confirm_id = commit.id;
+    if confirm_id.trim().is_empty() {
+        return Err(Status::invalid_argument(
+            "gNMI commit-confirmed extension requires a non-empty id",
+        ));
+    }
+    let action = commit.action.ok_or_else(|| {
+        Status::invalid_argument("gNMI commit-confirmed extension requires an action")
+    })?;
+    match action {
+        gnmi_ext::commit::Action::Commit(request) => Ok(GnmiSetCommitAction::Commit {
+            confirm_id,
+            confirm_timeout_seconds: rollback_duration_seconds(request.rollback_duration)?,
+        }),
+        gnmi_ext::commit::Action::Confirm(_) => Ok(GnmiSetCommitAction::Confirm { confirm_id }),
+        gnmi_ext::commit::Action::Cancel(_) => Ok(GnmiSetCommitAction::Cancel { confirm_id }),
+        gnmi_ext::commit::Action::SetRollbackDuration(_) => Err(Status::unimplemented(
+            "gNMI commit-confirmed rollback-duration reset is not supported yet",
+        )),
+    }
+}
+
+fn rollback_duration_seconds(duration: Option<::prost_types::Duration>) -> Result<u32, Status> {
+    let Some(duration) = duration else {
+        return Ok(0);
+    };
+    if duration.seconds <= 0 || duration.nanos != 0 {
+        return Err(Status::invalid_argument(
+            "gNMI commit-confirmed rollback_duration must be positive whole seconds",
+        ));
+    }
+    u32::try_from(duration.seconds).map_err(|_| {
+        Status::invalid_argument("gNMI commit-confirmed rollback_duration is too large")
+    })
+}
+
+fn validate_commit_operation_shape(
+    action: Option<&GnmiSetCommitAction>,
+    operations_empty: bool,
+) -> Result<(), Status> {
+    match action {
+        None if operations_empty => Err(Status::invalid_argument(
+            "gNMI Set requires at least one delete, replace, or update operation",
+        )),
+        Some(GnmiSetCommitAction::Commit { .. }) if operations_empty => Err(
+            Status::invalid_argument("gNMI commit-confirmed request requires Set operations"),
+        ),
+        Some(GnmiSetCommitAction::Confirm { .. } | GnmiSetCommitAction::Cancel { .. })
+            if !operations_empty =>
+        {
+            Err(Status::invalid_argument(
+                "gNMI commit-confirmed confirm/cancel requests must not include Set operations",
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn normalize_set_update(
@@ -1851,6 +1926,17 @@ mod tests {
         }
     }
 
+    fn commit_extension(action: crate::gnmi_ext::commit::Action) -> crate::gnmi_ext::Extension {
+        crate::gnmi_ext::Extension {
+            ext: Some(crate::gnmi_ext::extension::Ext::Commit(
+                crate::gnmi_ext::Commit {
+                    id: "deploy-42".to_string(),
+                    action: Some(action),
+                },
+            )),
+        }
+    }
+
     #[tokio::test]
     async fn capabilities_advertises_version_models_and_encodings() {
         let response = test_service(Vec::new())
@@ -1990,7 +2076,7 @@ mod tests {
         assert_eq!(captured.len(), 1);
         let transaction = &captured[0];
         assert_eq!(transaction.prefix, Some(prefix));
-        assert!(transaction.extensions.is_empty());
+        assert!(transaction.commit_action.is_none());
         assert_eq!(transaction.operations.len(), 3);
         match &transaction.operations[0] {
             crate::server::GnmiSetOperation::Delete(path) => {
@@ -2062,7 +2148,117 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_rejects_extensions_before_hook() {
+    async fn set_with_commit_request_forwards_confirmed_apply_action() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let hook_captured = Arc::clone(&captured);
+        let hook: crate::server::GnmiSetFn = Arc::new(move |transaction| {
+            hook_captured.lock().unwrap().push(transaction);
+            Box::pin(async { Ok(crate::server::GnmiSetOutcome::default()) })
+        });
+        let response = test_service(Vec::new())
+            .with_set_handler(Some(hook))
+            .set(Request::new(gnmi::SetRequest {
+                prefix: None,
+                delete: Vec::new(),
+                replace: Vec::new(),
+                update: vec![set_update(relative_path(&["bgp"]), b"{}")],
+                extension: vec![commit_extension(crate::gnmi_ext::commit::Action::Commit(
+                    crate::gnmi_ext::CommitRequest {
+                        rollback_duration: Some(::prost_types::Duration {
+                            seconds: 120,
+                            nanos: 0,
+                        }),
+                    },
+                ))],
+                union_replace: Vec::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.response.len(), 1);
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].operations.len(), 1);
+        assert_eq!(
+            captured[0].commit_action,
+            Some(crate::server::GnmiSetCommitAction::Commit {
+                confirm_id: "deploy-42".to_string(),
+                confirm_timeout_seconds: 120,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn set_with_commit_confirm_forwards_empty_transaction_action() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let hook_captured = Arc::clone(&captured);
+        let hook: crate::server::GnmiSetFn = Arc::new(move |transaction| {
+            hook_captured.lock().unwrap().push(transaction);
+            Box::pin(async { Ok(crate::server::GnmiSetOutcome::default()) })
+        });
+        let response = test_service(Vec::new())
+            .with_set_handler(Some(hook))
+            .set(Request::new(gnmi::SetRequest {
+                prefix: None,
+                delete: Vec::new(),
+                replace: Vec::new(),
+                update: Vec::new(),
+                extension: vec![commit_extension(crate::gnmi_ext::commit::Action::Confirm(
+                    crate::gnmi_ext::CommitConfirm {},
+                ))],
+                union_replace: Vec::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(response.response.is_empty());
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert!(captured[0].operations.is_empty());
+        assert_eq!(
+            captured[0].commit_action,
+            Some(crate::server::GnmiSetCommitAction::Confirm {
+                confirm_id: "deploy-42".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn set_with_commit_cancel_forwards_empty_transaction_action() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let hook_captured = Arc::clone(&captured);
+        let hook: crate::server::GnmiSetFn = Arc::new(move |transaction| {
+            hook_captured.lock().unwrap().push(transaction);
+            Box::pin(async { Ok(crate::server::GnmiSetOutcome::default()) })
+        });
+        test_service(Vec::new())
+            .with_set_handler(Some(hook))
+            .set(Request::new(gnmi::SetRequest {
+                prefix: None,
+                delete: Vec::new(),
+                replace: Vec::new(),
+                update: Vec::new(),
+                extension: vec![commit_extension(crate::gnmi_ext::commit::Action::Cancel(
+                    crate::gnmi_ext::CommitCancel {},
+                ))],
+                union_replace: Vec::new(),
+            }))
+            .await
+            .unwrap();
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(
+            captured[0].commit_action,
+            Some(crate::server::GnmiSetCommitAction::Cancel {
+                confirm_id: "deploy-42".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn set_rejects_unknown_extensions_before_hook() {
         let hook: crate::server::GnmiSetFn = Arc::new(|_| {
             panic!("extensions must reject before invoking the hook");
         });
@@ -2078,8 +2274,80 @@ mod tests {
             }))
             .await
             .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("extension requires a value"));
+    }
+
+    #[tokio::test]
+    async fn set_rejects_commit_action_shape_errors_before_hook() {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+            panic!("commit action shape errors must reject before invoking the hook");
+        });
+        let err = test_service(Vec::new())
+            .with_set_handler(Some(hook.clone()))
+            .set(Request::new(gnmi::SetRequest {
+                prefix: None,
+                delete: Vec::new(),
+                replace: Vec::new(),
+                update: Vec::new(),
+                extension: vec![commit_extension(crate::gnmi_ext::commit::Action::Commit(
+                    crate::gnmi_ext::CommitRequest {
+                        rollback_duration: None,
+                    },
+                ))],
+                union_replace: Vec::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("requires Set operations"));
+
+        let err = test_service(Vec::new())
+            .with_set_handler(Some(hook))
+            .set(Request::new(gnmi::SetRequest {
+                prefix: None,
+                delete: Vec::new(),
+                replace: Vec::new(),
+                update: vec![set_update(relative_path(&["bgp"]), b"{}")],
+                extension: vec![commit_extension(crate::gnmi_ext::commit::Action::Cancel(
+                    crate::gnmi_ext::CommitCancel {},
+                ))],
+                union_replace: Vec::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("must not include Set operations"));
+    }
+
+    #[tokio::test]
+    async fn set_rejects_unsupported_commit_rollback_reset_before_hook() {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+            panic!("unsupported commit action must reject before invoking the hook");
+        });
+        let err = test_service(Vec::new())
+            .with_set_handler(Some(hook))
+            .set(Request::new(gnmi::SetRequest {
+                prefix: None,
+                delete: Vec::new(),
+                replace: Vec::new(),
+                update: Vec::new(),
+                extension: vec![commit_extension(
+                    crate::gnmi_ext::commit::Action::SetRollbackDuration(
+                        crate::gnmi_ext::CommitSetRollbackDuration {
+                            rollback_duration: Some(::prost_types::Duration {
+                                seconds: 120,
+                                nanos: 0,
+                            }),
+                        },
+                    ),
+                )],
+                union_replace: Vec::new(),
+            }))
+            .await
+            .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unimplemented);
-        assert!(err.message().contains("extensions"));
+        assert!(err.message().contains("rollback-duration reset"));
     }
 
     #[tokio::test]

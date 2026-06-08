@@ -83,8 +83,11 @@ Transaction and validation behavior:
   gNMI-specified application order: all deletes, then replaces, then updates.
 - `replace` and `update` require `TypedValue`; the deprecated `Value` field is
   rejected with `INVALID_ARGUMENT`.
-- non-empty `union_replace` and request extensions return `UNIMPLEMENTED` until
-  dedicated support ships.
+- non-empty `union_replace` returns `UNIMPLEMENTED` until dedicated support
+  ships.
+- the standard gNMI commit-confirmed extension is supported for `commit`,
+  `confirm`, and `cancel` actions. Unsupported extension types and
+  `set_rollback_duration` return `UNIMPLEMENTED`.
 - supported changes translate the live runtime config snapshot into candidate
   TOML and call the ADR-0076 transaction controller. There is no parallel commit
   path.
@@ -96,6 +99,24 @@ Transaction and validation behavior:
   identify those peers safely.
 - `peer-group` references must name an existing rustbgpd peer group; peer-group
   object creation via OpenConfig Set is deferred.
+
+### `Set` commit-confirmed workflow
+
+The gNMI `Commit` extension maps onto the same ADR-0076 commit-confirmed
+controller used by `rbgp config apply --confirm-id`:
+
+- `CommitRequest` starts a confirmed Set. It must include normal Set operations
+  and a non-empty `id`; the optional `rollback_duration` maps to the native
+  confirm timeout. If omitted, the native default timeout is used.
+- `CommitConfirm` confirms a pending transaction. It must carry only the
+  extension, with no delete / replace / update operations.
+- `CommitCancel` aborts and rolls back a pending transaction. It must also carry
+  only the extension.
+
+Only one confirmed transaction may be pending at a time. While pending, normal
+Set mutations return `FAILED_PRECONDITION` until the transaction is confirmed,
+canceled, or auto-reverted. `CommitSetRollbackDuration` is deferred because the
+native controller does not yet expose a timer-reset API.
 
 ### `STREAM ON_CHANGE` v1 scope
 

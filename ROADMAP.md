@@ -110,9 +110,10 @@ has it, no broad performance sprints without profile evidence.
   model rather than inventing a parallel commit primitive; it provides redacted
   audit summaries, delete / replace / update normalization, response shaping,
   daemon hook wiring, and a first static numbered BGP neighbor subset for
-  `neighbor-address` / `peer-as` / `description` / `peer-group`. Next slices:
-  standard gNMI commit-confirmed extension handling and operator proof with
-  `gnmic` examples / smoke coverage. Exit: atomic commit where supported,
+  `neighbor-address` / `peer-as` / `description` / `peer-group`; the standard
+  gNMI commit-confirmed extension now maps `commit` / `confirm` / `cancel`
+  onto ADR-0076's confirmed transaction lifecycle. Next slice: operator proof
+  with `gnmic` examples / smoke coverage. Exit: atomic commit where supported,
   explicit restart-required/rejected surfaces, rollback/receipt model, no
   partial silent drift. Gated by ADR-0064 tier authz.
 - **Operational proof / scale automation** *(parallel priority, small slices).*

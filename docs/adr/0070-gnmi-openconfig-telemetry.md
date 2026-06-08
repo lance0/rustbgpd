@@ -216,7 +216,7 @@ User-facing setup, supported-path, `gnmic`, and troubleshooting guidance lives i
 | PR2 — `Get` OpenConfig BGP global + neighbors | Landed (PR #276) |
 | PR3 — `Subscribe` ONCE / POLL / SAMPLE | Landed (PR #277) |
 | M54 — hosted `gnmic` smoke over native mTLS | Landed: `Capabilities`, `Get`, and `Subscribe STREAM/SAMPLE` are exercised by a real OpenConfig collector client |
-| Set transaction bridge + static-neighbor subset | Landed: Set payload audit redaction, delete / replace / update normalization, response shaping, daemon hook wiring, and static numbered BGP neighbor create/update/delete for `neighbor-address`, `peer-as`, `description`, and `peer-group`; unsupported paths remain `Unimplemented` |
+| Set transaction bridge + static-neighbor subset | Landed: Set payload audit redaction, delete / replace / update normalization, response shaping, daemon hook wiring, static numbered BGP neighbor create/update/delete for `neighbor-address`, `peer-as`, `description`, and `peer-group`, plus standard commit-confirmed `commit` / `confirm` / `cancel`; unsupported paths remain `Unimplemented` |
 | PR4 — counters / capabilities / non-BGP telemetry | Deferred |
 
 ## Repo seams
@@ -270,8 +270,8 @@ Grounded against the current checkout:
   handles OpenConfig-to-candidate-TOML mapping and commits through the
   ADR-0064-gated ADR-0076 transaction model. Remaining config work includes
   broader neighbor leaves, peer-group object mutation, dynamic-neighbor Set,
-  standard commit-confirmed extensions, and real-client operator proof. Do not
-  add a second commit path.
+  commit-confirmed rollback-duration reset, and real-client operator proof. Do
+  not add a second commit path.
 - **`Subscribe ON_CHANGE`** — needs loss-free, path-diffed leaf events.
   **Unblocked by [ADR-0072](0072-durable-event-history.md);** ships
   once the durable outbox lands and provides restart-survivable change

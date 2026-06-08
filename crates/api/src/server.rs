@@ -144,6 +144,20 @@ pub enum GnmiSetOperation {
     Update(crate::gnmi::Update),
 }
 
+/// Parsed gNMI commit-confirmed extension action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GnmiSetCommitAction {
+    /// Start a confirmed commit with the supplied ID and optional timeout.
+    Commit {
+        confirm_id: String,
+        confirm_timeout_seconds: u32,
+    },
+    /// Confirm a pending confirmed commit.
+    Confirm { confirm_id: String },
+    /// Cancel and roll back a pending confirmed commit.
+    Cancel { confirm_id: String },
+}
+
 /// A normalized gNMI Set request passed to the daemon-owned transaction bridge.
 #[derive(Clone, PartialEq)]
 pub struct GnmiSetTransaction {
@@ -151,9 +165,8 @@ pub struct GnmiSetTransaction {
     pub prefix: Option<crate::gnmi::Path>,
     /// Operations after prefix expansion and gNMI operation ordering.
     pub operations: Vec<GnmiSetOperation>,
-    /// Top-level gNMI extensions. PR1 rejects non-empty extensions before
-    /// invoking the hook; PR3 will use this field for commit-confirmed support.
-    pub extensions: Vec<crate::gnmi_ext::Extension>,
+    /// Optional parsed commit-confirmed extension action.
+    pub commit_action: Option<GnmiSetCommitAction>,
 }
 
 /// Successful gNMI Set bridge result.

@@ -18,9 +18,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   edits are translated from OpenConfig paths into full candidate TOML and
   committed through ADR-0076 `PlanConfigTransaction` /
   `ApplyConfigTransaction`, including persistence acknowledgement and rollback;
-  unsupported paths still return `UNIMPLEMENTED`. Set payloads are redacted in
-  gRPC audit summaries, and delete / replace / update requests are
-  prefix-expanded and normalized in gNMI application order.
+  the standard gNMI commit-confirmed extension can start, confirm, and cancel
+  the same confirmed transaction lifecycle; unsupported paths and rollback-timer
+  reset still return `UNIMPLEMENTED`. Set payloads are redacted in gRPC audit
+  summaries, and delete / replace / update requests are prefix-expanded and
+  normalized in gNMI application order.
 
 - **ADR-0077 MPLS/VPN/BGP-LS address-family boundary.** Added a
   research-backed control-plane scope for future labeled-unicast, VPNv4/v6,
