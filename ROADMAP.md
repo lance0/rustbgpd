@@ -517,9 +517,11 @@ branch is between features.
   re-exported `pub mod test_support` per crate) would centralize them.
 - [ ] **`unwrap()` audit on daemon-runtime paths.** Production-code unwraps
   outside `#[cfg(test)]` measure at ~5 sites after the v0.30 quality scan
-  (TLS-cert reads downstream of validated `is_some()`, one const `try_from`
-  cast, a few defensive parses of already-validated strings). Kept open as a
-  forcing function when these stragglers come up for refactor; not blocking.
+  (mostly startup metric-registration invariants, poisoned-lock guards, and a
+  few defensive parses of already-validated strings). The practical prefix-map
+  conversion, BFD socket-option setup, and BFD timer-pop sites have been cleaned
+  up; keep this open as a forcing function when the remaining invariants come up
+  for refactor.
 - [x] **`panic!` → typed-error sweep on the one production site.**
   `crates/bfd/src/discriminator.rs` now returns a typed discriminator-exhaustion
   error instead of panicking. The daemon logs and refuses to install the new BFD

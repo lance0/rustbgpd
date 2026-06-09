@@ -41,12 +41,22 @@ impl<V> Default for FamilyPrefixMap<V> {
 fn v4_net(p: Ipv4Prefix) -> Ipv4Net {
     let canonical = Ipv4Prefix::new(p.addr, p.len);
     debug_assert_eq!(p, canonical, "non-canonical IPv4 prefix reached RIB map");
-    Ipv4Net::new(canonical.addr, canonical.len).expect("Ipv4Prefix::new clamps IPv4 prefix length")
+    if let Ok(net) = Ipv4Net::new(canonical.addr, canonical.len) {
+        net
+    } else {
+        debug_assert!(false, "Ipv4Prefix::new must clamp IPv4 prefix length");
+        Ipv4Net::new_assert(canonical.addr, canonical.len.min(32))
+    }
 }
 fn v6_net(p: Ipv6Prefix) -> Ipv6Net {
     let canonical = Ipv6Prefix::new(p.addr, p.len);
     debug_assert_eq!(p, canonical, "non-canonical IPv6 prefix reached RIB map");
-    Ipv6Net::new(canonical.addr, canonical.len).expect("Ipv6Prefix::new clamps IPv6 prefix length")
+    if let Ok(net) = Ipv6Net::new(canonical.addr, canonical.len) {
+        net
+    } else {
+        debug_assert!(false, "Ipv6Prefix::new must clamp IPv6 prefix length");
+        Ipv6Net::new_assert(canonical.addr, canonical.len.min(128))
+    }
 }
 
 impl<V> FamilyPrefixMap<V> {
