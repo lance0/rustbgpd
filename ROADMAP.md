@@ -192,6 +192,67 @@ has it, no broad performance sprints without profile evidence.
   poll-only link inventory; learned-port-to-ESI disambiguation so one local VNI
   can participate in multiple Ethernet Segments. Low-priority operational polish
   once core convergence is complete.
+- **Kernel-state crash-restart reconciliation** *(from the 2026-06 deep
+  audit).* The unicast FIB's persisted owned-state pattern (re-adopt after an
+  unclean stop, remove routes withdrawn while down) needs porting to the other
+  dataplane writers, which track ownership in memory only: RFC 7999 blackhole
+  discard routes (a crash leaves a permanent kernel discard route invisible to
+  every status surface, and preflight then rejects re-owning the still-desired
+  row as `foreign_route_exists`); EVPN symmetric-IRB L3 state (VRF routes,
+  permanent neighbors, and L3VXLAN FDB rows are never reaped after an unclean
+  restart — a Type 5 withdrawn while the daemon was down keeps steering tenant
+  traffic into a dead tunnel); and single-dst `extern_learn` FDB rows
+  (ADR-0054 §7 promises next-startup cleanup that exists only for NHG-tagged
+  rows). Related: scope the unicast owned-state signature per table and
+  compare it set-wise so a crash plus any `[[fib_tables]]` edit — even stanza
+  reordering — doesn't quarantine-freeze stale kernel routes; batch the
+  blackhole reconciler's presence checks into one kernel dump per pass instead
+  of one full-table dump per candidate.
+- **EVPN runtime apply cancellation-safety.** The `ApplyEvpnRuntime` converge
+  + coordinator commit runs inline in the gRPC request future, so a client
+  disconnect mid-RPC can drop the converge at an internal await: half-applied
+  actor state with no rollback, no Degraded record, and a stale committed
+  baseline that makes the next SIGHUP of an unchanged file skip repair. Run
+  converge+commit on a detached task the RPC merely awaits (the FIB-CRUD
+  pattern); make the IMET controller self-heal on withdraw `not_found` (today
+  one dropped reply leaves the tracked key out of sync and every later
+  delete/redefine of that VNI rejects until restart); fence coordinated
+  shutdown's EVPN teardown with the apply lock so it cannot interleave with an
+  in-flight converge.
+- **Transport→RIB inbound backpressure contract.** `RoutesReceived` is
+  delivered with a lossy `try_send` — a full channel silently drops announce
+  and withdraw batches, leaving a permanently stale route or black-hole until
+  session reset, with `known_paths`, the import-explain cache, and counters
+  already advanced — while `PeerUp` / EoR / refresh markers block, so the same
+  full channel parks the session task and starves its own keepalive cadence.
+  Pick one coherent policy (bounded-block off the timer path, or drop + count
+  + self-issued Route Refresh resync); at minimum surface a per-peer drop
+  counter and defer the bookkeeping commit until the batch actually enqueued.
+- **Graceful-restart session-boundary hygiene.** GR flaps bypass `PeerDown`
+  cleanup, so per-session state leaks across the restart: installed ORF
+  filters and the ORF initial-advertisement gate survive into the new session
+  (a stale gate suppresses a family's flood indefinitely when the new session
+  didn't negotiate ORF; a ghost filter keeps filtering churn the new session
+  never asked for); EoR is sent immediately for ORF-gated families, telling an
+  RFC 4724 restarter to sweep retained routes before the gated flood arrives;
+  a GR peer that never re-establishes leaves an empty Adj-RIB-In plus identity
+  maps (and MRT peer-index entries) behind forever; and the configured LLGR
+  stale time is consumed at GR→LLGR promotion, so a peer re-establishing
+  during LLGR always gets the 360 s default.
+- **Peer lifecycle hardening.** Runtime-added neighbors are built by
+  `resolve_neighbor`, which never sets `cluster_id` — an RR client added via
+  gRPC runs without CLUSTER_LIST prepend or cluster-loop detection until
+  restart (needs a two-path transport-construction field-parity test);
+  `DeleteNeighbor` on a dynamic peer permanently leaks a
+  `dynamic_neighbor_limit` slot, and its persist-failure rollback resurrects
+  the peer as a persisted static neighbor; a BFD Down stops the primary
+  session but not a pending collision candidate, which `BackToIdle` promotion
+  then establishes over the BFD-down path; the inbound handler treats a
+  state-query timeout as Idle and replaces a possibly-Established session
+  instead of rejecting the new connection (RFC 4271 §6.8); per-peer Prometheus
+  label series are never reaped, so churning dynamic ranges grow scrape
+  cardinality without bound; and peer-group field edits still don't reach live
+  dynamic sessions (pairs with the deferred dynamic reconfigure executor).
 - **Policy / explain follow-ups** *(operator polish, not feature).* Stable
   `reason` labels across the remaining ingress filter paths; per-feature counter
   unit-test coverage; per-statement attribution within a matched import chain
@@ -545,6 +606,21 @@ branch is between features.
   `Result<_, String>`; keep that for one-status surfaces, but migrate to small
   typed enums when a caller needs to distinguish `ALREADY_EXISTS`, `NOT_FOUND`,
   `INVALID_ARGUMENT`, or similar API-visible classes.
+- [ ] **Catalog mutator persistence + lock convergence** *(from the 2026-06
+  deep audit).* The policy and peer-group gRPC mutators apply their runtime
+  change, then persist fire-and-forget outside the runtime-config coordinator
+  lock: a failed disk write is log-only (the RPC still returns OK and the next
+  SIGHUP or restart silently reverts the edit — e.g. a permit→deny policy
+  flip), and the unlocked mutation-gate check is check-then-act against
+  pending commit-confirmed transactions (an interleaved catalog write can
+  strand auto-revert on `StaleSnapshot`). `AddNeighbor`, FIB CRUD, and
+  `ApplyConfigTransaction` already implement the correct contract —
+  coordinator lock, acked persist, runtime rollback on persist failure —
+  converge the catalog mutators onto it. While there: make the direct
+  `SetPolicy` fan-out atomic via the resolved-policy-snapshot primitive
+  (mid-loop failures currently leave already-updated peers on the new
+  chains), and treat a non-committable rollback apply as a rollback failure
+  in confirmed-transaction abort/auto-revert instead of reporting success.
 - [x] **Config transaction live-impact policy / peer-group executor.**
   Policy definitions, `neighbor_sets`, `peer_groups`, and global named
   policy-chain edits that move existing static neighbors' or accepted dynamic
