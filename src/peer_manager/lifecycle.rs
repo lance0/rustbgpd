@@ -477,19 +477,22 @@ impl PeerManager {
 
     pub(super) async fn enable_peer(&mut self, peer: PeerKey) -> Result<(), PeerLifecycleError> {
         let address = peer.address;
-        if !self.peers.contains_key(&peer) {
+        let Some(managed) = self.peers.get_mut(&peer) else {
             return Err(PeerLifecycleError::NotFound(peer));
-        }
-        self.peers.get_mut(&peer).expect("peer present").enabled = true;
+        };
+        managed.enabled = true;
         // ADR-0067 step 4b: re-enabling a strict peer must re-apply the withhold
         // — start BGP only if BFD is already Up, else withhold until it is.
         // (A freshly-restarted BFD session begins Down with no transition, so an
         // unconditional start here would establish BGP with BFD down.)
         let withhold = self.bfd_should_withhold(&address);
         if !withhold {
-            self.peers
-                .get(&peer)
-                .expect("peer present")
+            let Some(managed) = self.peers.get(&peer) else {
+                return Err(PeerLifecycleError::Internal(format!(
+                    "peer {peer} disappeared while enabling"
+                )));
+            };
+            managed
                 .handle
                 .start()
                 .await

@@ -270,7 +270,10 @@ impl PeerManager {
         // add-time decision) so an established, BFD-up peer still accepts inbound
         // normally; the hold's eventual release starts the session via the
         // normal up→start path.
-        let peer_key = peer_key.expect("checked above");
+        let Some(peer_key) = peer_key else {
+            warn!(%peer_ip, "inbound peer lookup disappeared before BFD gate, dropping");
+            return;
+        };
         let peer_addr = peer_key.address;
         if self.bfd_withholding(&peer_addr) {
             info!(%peer_addr, "BFD — dropping inbound connection while BGP is held");
