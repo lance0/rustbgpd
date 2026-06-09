@@ -271,7 +271,7 @@ impl PeerManager {
         // normally; the hold's eventual release starts the session via the
         // normal up→start path.
         let Some(peer_key) = peer_key else {
-            warn!(%peer_ip, "inbound peer lookup disappeared before BFD gate, dropping");
+            warn!(%peer_ip, "inbound peer lookup missing before BFD gate, dropping");
             return;
         };
         let peer_addr = peer_key.address;
