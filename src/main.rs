@@ -1836,6 +1836,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         evpn_l3_originator_runtime_control,
         evpn_segment_runtime_control,
     ));
+    let evpn_runtime_reload_apply = evpn_runtime_converger::EvpnRuntimeReloadApply::new(
+        evpn_runtime_coordinator.clone(),
+        evpn_runtime_apply_lock.clone(),
+        evpn_runtime_converger.clone(),
+        config.clone(),
+    );
 
     // RFC 7999 BLACKHOLE kernel-discard reconciler (ADR-0060 FIB
     // slice). Completely opt-in: `install_blackhole_discard = true`
@@ -2042,22 +2048,11 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             })
         },
         evpn_runtime_apply: {
-            let coordinator = evpn_runtime_coordinator.clone();
-            let apply_lock = evpn_runtime_apply_lock.clone();
-            let converger = evpn_runtime_converger.clone();
+            let reload_apply = evpn_runtime_reload_apply.clone();
             Some(Arc::new(move |request| {
-                let coordinator = coordinator.clone();
-                let apply_lock = apply_lock.clone();
-                let converger = converger.clone();
-                Box::pin(async move {
-                    evpn_runtime_converger::apply_evpn_runtime_request(
-                        &request,
-                        coordinator.as_ref(),
-                        apply_lock.as_ref(),
-                        converger.as_ref(),
-                    )
-                    .await
-                }) as rustbgpd_api::evpn_service::EvpnRuntimeApplyFuture
+                let reload_apply = reload_apply.clone();
+                Box::pin(async move { reload_apply.apply_request(&request).await })
+                    as rustbgpd_api::evpn_service::EvpnRuntimeApplyFuture
             })
                 as rustbgpd_api::evpn_service::EvpnRuntimeApplyFn)
         },
@@ -2345,6 +2340,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 let live_uds = live_grpc_uds.clone();
                 let pm_tx = peer_mgr_tx.clone();
                 let fib_cmd = fib_cmd_tx.clone();
+                let evpn_runtime_reload_apply = evpn_runtime_reload_apply.clone();
                 // Hold the runtime-config coordinator lock across BOTH the
                 // reload and the outcome application (peer-manager +
                 // config-bridge snapshot refresh), so concurrent persisted
@@ -2383,6 +2379,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                         live_uds.as_ref(),
                         &pm_tx,
                         fib_cmd.as_ref(),
+                        Some(&evpn_runtime_reload_apply),
                     )
                     .await?;
                     Some(apply_reload_outcome(reloaded, &pm_internal, bridge_replace.as_ref()).await)

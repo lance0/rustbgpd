@@ -8,23 +8,25 @@ unchanged L3VNI/device/table identity, single Ethernet Segment
 add/delete/redefine, atomic tenant teardown (a delete-only plan that drops an
 ES-member L2VNI together with its Ethernet Segment (delete or member-shrink)
 and/or a linked IP-VRF in one pass), and `ip_vrf` relink (an L2VNI re-homed to a
-different IP-VRF) commit live via `EvpnService.ApplyEvpnRuntime`; ES add/redefine
-can bind member VNIs added by a prior live L2VNI add when the segment actor
-already exists. Two shapes remain non-live, by design: **L3VNI/device/table
-IP-VRF identity changes** are restart-required (kernel VRF lifecycle —
-`router_mac` is still live-redefinable), and **non-teardown mixed edits** (an add
-combined with a delete/redefine in one request) fail closed with a
-"split the request" error pending a generalized converge-to-candidate follow-up
-([#210](https://github.com/lance0/rustbgpd/issues/210)).
+different IP-VRF) commit live via `EvpnService.ApplyEvpnRuntime` and SIGHUP
+file-driven reload; ES add/redefine can bind member VNIs added by a prior live
+L2VNI add when the segment actor already exists. Two shapes remain non-live, by
+design: **L3VNI/device/table IP-VRF identity changes** are restart-required
+(kernel VRF lifecycle — `router_mac` is still live-redefinable), and
+**non-teardown mixed edits** (an add combined with a delete/redefine in one
+request) fail closed with a "split the request" error pending a generalized
+converge-to-candidate follow-up ([#268](https://github.com/lance0/rustbgpd/issues/268)).
 **Date:** 2026-05-17 (implementation completed through v0.27.0)
 
 ## Context
 
 `[[evpn_instances]]`, `[[evpn_ip_vrfs]]`, and `[[ethernet_segments]]`
-are startup-pinned today. `reload_config` logs restart-required drift
-and pins the in-memory snapshot back to the live values so repeated
-SIGHUPs keep surfacing the mismatch. `EvpnService` is read-only and is
-backed by an `Arc<EvpnInstanceTable>` built during daemon startup.
+now feed a daemon-owned runtime coordinator. `EvpnService.ApplyEvpnRuntime`
+and SIGHUP file-driven reload both submit a fully resolved candidate through
+that coordinator for supported live shapes. Unsupported shapes, missing EVPN
+actors, and actor convergence failures fail closed: `reload_config` logs the
+failure and pins the in-memory snapshot back to the committed runtime values so
+repeated SIGHUPs keep surfacing the mismatch.
 
 That was a safe boundary for Gate 7a, but the local EVPN table now feeds
 more than a read surface:
@@ -40,8 +42,8 @@ more than a read surface:
 
 Issue #133 asked for explicit delete/redefine semantics before a runtime
 mutation path could safely land. The design is now resolved and the
-`ApplyEvpnRuntime` full-candidate RPC commits the supported shapes, while
-SIGHUP and remaining unsupported shapes still fail closed under #210. A
+`ApplyEvpnRuntime` full-candidate RPC plus SIGHUP reload commit the supported
+shapes, while remaining unsupported shapes still fail closed under #268. A
 table swap alone would make the API view change before the originators,
 DF/segment orchestrator, and dataplane reconciler have drained or replayed
 their derived state.
@@ -158,14 +160,20 @@ add/delete/redefine as separate RPCs or a whole-model replace, but they
 must preserve the validation-first, generationed, idempotent drain model
 above.
 
-SIGHUP keeps its current restart-required behavior until the coordinator
-exists. Reload may parse and validate the new file, but it must not
-silently advance the live EVPN runtime model.
+SIGHUP reload is another coordinator client, not a separate mutation
+implementation. Reload may parse and validate the new file, but it must only
+advance the live EVPN runtime model after the coordinator and daemon actor
+converger accept the candidate. If the coordinator is unavailable, the runtime
+actors are missing, or the candidate is outside the supported shape set, reload
+must pin the runtime snapshot to the committed model and keep surfacing drift.
 
 ## Consequences
 
-- SIGHUP file-driven EVPN edits keep the current safe behavior: they remain
-  restart-required, and repeated SIGHUPs keep surfacing the drift.
+- SIGHUP file-driven EVPN edits now reuse the ADR-0063 coordinator for the
+  same supported live shapes as `ApplyEvpnRuntime`. Unsupported shapes,
+  unavailable actors, and convergence failures keep the safe behavior: reload
+  pins the EVPN runtime fields back to the committed model, logs the rejected
+  candidate, and repeated SIGHUPs keep surfacing the drift.
 - The runtime mutation implementation is larger than a shared-table swap, but
   it avoids split-brain between gRPC, BGP-originated routes, DF/ES state, and
   Linux owned state. The first increments — single L2VNI add, single L2VNI
@@ -229,16 +237,18 @@ silently advance the live EVPN runtime model.
   live-redefinable), and **non-teardown mixed edits** (an add combined with a
   delete/redefine in one request) fail closed with an operator-actionable
   "apply each as a separate request" error, pending a generalized
-  converge-to-candidate follow-up ([#210](https://github.com/lance0/rustbgpd/issues/210)).
+  converge-to-candidate follow-up ([#268](https://github.com/lance0/rustbgpd/issues/268)).
 - Issue #133 (design) is resolved and closed; the remaining implementation is
-  tracked in #210.
+  tracked in #268.
 
 ## Non-goals
 
 - No per-instance `AddEvpnInstance` / `DeleteEvpnInstance` protobuf surface;
   mutation is a whole-model apply via `EvpnService.ApplyEvpnRuntime`.
-- No hot SIGHUP apply for `[[evpn_instances]]`, `[[evpn_ip_vrfs]]`, or
-  `[[ethernet_segments]]`.
+- No hot SIGHUP apply outside the ADR-0063 supported shape set. In particular,
+  L3VNI/device/table IP-VRF identity changes, non-teardown mixed edits, and
+  runtime applies on daemons without the required EVPN actors remain
+  fail-closed.
 - No automatic Linux bridge, VXLAN, VRF, or Ethernet Segment netdev
   creation.
 - No change to EVPN dataplane defaults such as `apply_bum_enforcement` or

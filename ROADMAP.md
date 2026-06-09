@@ -181,8 +181,11 @@ has it, no broad performance sprints without profile evidence.
   failover is sub-second instead of waiting for BGP reconvergence — single-active
   is correct today, just reconvergence-speed); a cross-vendor preference-DF smoke
   against FRR; runtime mixed-edit composer (the remaining non-teardown
-  add+delete/redefine shape that fails closed today). Demand-shaped; keep as
-  follow-up inventory.
+  add+delete/redefine shape that fails closed today); shape-aware EVPN `--diff`
+  classification so the static diff can distinguish coordinator-supported
+  SIGHUP applies from restart-required identity changes (today it stays
+  conservative because actor availability and candidate shape are runtime
+  checks). Demand-shaped; keep as follow-up inventory.
 - **EVPN Linux VTEP hardening.** VLAN-aware bridge support; rustbgpd-managed
   bridge / VXLAN / VRF netdev creation; `RTNLGRP_LINK` eventing instead of
   poll-only link inventory; learned-port-to-ESI disambiguation so one local VNI

@@ -11,6 +11,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **SIGHUP EVPN runtime convergence.** File-driven reload now submits
+  `[[evpn_instances]]`, `[[evpn_ip_vrfs]]`, and `[[ethernet_segments]]`
+  candidates through the ADR-0063 EVPN runtime coordinator for the same
+  supported live shapes as `EvpnService.ApplyEvpnRuntime` (single
+  L2VNI/IP-VRF/ES add/delete/redefine, atomic tenant teardown, and `ip_vrf`
+  relink). The runtime snapshot advances only after the daemon actor converger
+  accepts the candidate; unsupported mixed edits, L3VNI/device/table IP-VRF
+  identity changes, missing EVPN actors, actor convergence failure, and
+  `apply_bum_enforcement` remain fail-closed and are pinned back to the
+  committed model.
+
 - **gNMI Set transaction bridge and static-neighbor config subset.** The gNMI
   service now supports the first durable OpenConfig config mutations:
   operator-tier `Set` can create/update/delete static, numbered BGP neighbors
