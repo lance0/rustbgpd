@@ -31,6 +31,8 @@ mod policy_helpers;
 mod policy_service;
 pub mod rib_service;
 pub mod server;
+#[cfg(test)]
+mod test_support;
 
 pub use evpn_service::EvpnService;
 

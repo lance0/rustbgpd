@@ -1808,8 +1808,8 @@ impl gnmi::g_nmi_server::GNmi for GnmiService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::peer_info;
     use gnmi::g_nmi_server::GNmi as _;
-    use rustbgpd_transport::RemovePrivateAs;
     use std::sync::{Arc, Mutex};
 
     fn test_service(peers: Vec<PeerInfo>) -> GnmiService {
@@ -1820,42 +1820,14 @@ mod tests {
     }
 
     fn test_peer(address: IpAddr) -> PeerInfo {
-        PeerInfo {
-            address,
-            interface: None,
-            remote_asn: 65002,
-            description: String::new(),
-            peer_group: None,
-            state: SessionState::Established,
-            enabled: true,
-            prefix_count: 0,
-            hold_time: None,
-            max_prefixes: None,
-            families: Vec::new(),
-            remove_private_as: RemovePrivateAs::Disabled,
-            route_server_client: false,
-            local_role: None,
-            strict_role: false,
-            remote_role: None,
-            role_negotiated: false,
-            add_path_receive: false,
-            add_path_send: false,
-            add_path_send_max: 1,
-            updates_received: 11,
-            updates_sent: 12,
-            notifications_received: 2,
-            notifications_sent: 3,
-            otc_routes_blocked: 0,
-            import_policy_routes_permitted: 0,
-            import_policy_routes_denied: 0,
-            export_policy_routes_permitted: 0,
-            export_policy_routes_denied: 0,
-            flap_count: 4,
-            uptime_secs: 0,
-            last_error: String::new(),
-            is_dynamic: false,
-            stale: false,
-        }
+        let mut peer = peer_info(address);
+        peer.add_path_send_max = 1;
+        peer.updates_received = 11;
+        peer.updates_sent = 12;
+        peer.notifications_received = 2;
+        peer.notifications_sent = 3;
+        peer.flap_count = 4;
+        peer
     }
 
     fn get_request(path: gnmi::Path) -> Request<gnmi::GetRequest> {

@@ -1034,6 +1034,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::peer_info;
     use proto::neighbor_service_server::NeighborService as _;
     use tokio::sync::mpsc::error::TryRecvError;
 
@@ -1646,8 +1647,6 @@ mod tests {
 
     #[tokio::test]
     async fn prefixes_sent_populated() {
-        use crate::peer_types::PeerInfo;
-
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
         let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
@@ -1657,42 +1656,11 @@ mod tests {
         // Spawn responders
         tokio::spawn(async move {
             if let Some(PeerManagerCommand::GetPeerState { reply, .. }) = peer_rx.recv().await {
-                let _ = reply.send(Some(PeerInfo {
-                    address: addr,
-                    interface: None,
-                    remote_asn: 65001,
-                    description: String::new(),
-                    peer_group: None,
-                    state: rustbgpd_fsm::SessionState::Established,
-                    enabled: true,
-                    prefix_count: 5,
-                    hold_time: None,
-                    max_prefixes: None,
-                    families: vec![(Afi::Ipv4, Safi::Unicast)],
-                    remove_private_as: RemovePrivateAs::Disabled,
-                    route_server_client: false,
-                    local_role: None,
-                    strict_role: false,
-                    remote_role: None,
-                    role_negotiated: false,
-                    add_path_receive: false,
-                    add_path_send: false,
-                    add_path_send_max: 0,
-                    updates_received: 0,
-                    updates_sent: 0,
-                    notifications_received: 0,
-                    notifications_sent: 0,
-                    otc_routes_blocked: 0,
-                    import_policy_routes_permitted: 0,
-                    import_policy_routes_denied: 0,
-                    export_policy_routes_permitted: 0,
-                    export_policy_routes_denied: 0,
-                    flap_count: 0,
-                    uptime_secs: 0,
-                    last_error: String::new(),
-                    is_dynamic: false,
-                    stale: false,
-                }));
+                let mut info = peer_info(addr);
+                info.remote_asn = 65001;
+                info.prefix_count = 5;
+                info.families = vec![(Afi::Ipv4, Safi::Unicast)];
+                let _ = reply.send(Some(info));
             }
         });
 
@@ -1730,42 +1698,19 @@ mod tests {
 
     #[test]
     fn peer_info_to_proto_includes_families() {
-        let info = PeerInfo {
-            address: "10.0.0.1".parse().unwrap(),
-            interface: None,
-            remote_asn: 65001,
-            description: String::new(),
-            peer_group: None,
-            state: rustbgpd_fsm::SessionState::Established,
-            enabled: true,
-            prefix_count: 0,
-            hold_time: None,
-            max_prefixes: None,
-            families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
-            remove_private_as: RemovePrivateAs::All,
-            route_server_client: false,
-            local_role: Some(BgpRole::RouteServer),
-            strict_role: true,
-            remote_role: Some(BgpRole::RouteServerClient),
-            role_negotiated: true,
-            add_path_receive: false,
-            add_path_send: false,
-            add_path_send_max: 0,
-            updates_received: 0,
-            updates_sent: 0,
-            notifications_received: 0,
-            notifications_sent: 0,
-            otc_routes_blocked: 3,
-            import_policy_routes_permitted: 11,
-            import_policy_routes_denied: 12,
-            export_policy_routes_permitted: 13,
-            export_policy_routes_denied: 14,
-            flap_count: 0,
-            uptime_secs: 0,
-            last_error: String::new(),
-            is_dynamic: false,
-            stale: false,
-        };
+        let mut info = peer_info("10.0.0.1".parse().unwrap());
+        info.remote_asn = 65001;
+        info.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        info.remove_private_as = RemovePrivateAs::All;
+        info.local_role = Some(BgpRole::RouteServer);
+        info.strict_role = true;
+        info.remote_role = Some(BgpRole::RouteServerClient);
+        info.role_negotiated = true;
+        info.otc_routes_blocked = 3;
+        info.import_policy_routes_permitted = 11;
+        info.import_policy_routes_denied = 12;
+        info.export_policy_routes_permitted = 13;
+        info.export_policy_routes_denied = 14;
         let state = peer_info_to_proto(&info);
         let config = state.config.unwrap();
         assert_eq!(config.families, vec!["ipv4_unicast", "ipv6_unicast"]);
