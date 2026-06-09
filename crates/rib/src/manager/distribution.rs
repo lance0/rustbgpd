@@ -22,7 +22,7 @@ use crate::event::{RouteEvent, RouteEventType};
 use crate::loc_rib::LocRib;
 use crate::update::{
     ExplainAdvertisedRoute, ExplainDecision, ExplainReason, NeighborPolicyStats,
-    OutboundRouteUpdate,
+    OutboundRouteUpdate, RibCommandError,
 };
 
 fn route_type(origin: crate::route::RouteOrigin) -> RouteType {
@@ -900,7 +900,7 @@ impl RibManager {
     pub(super) fn handle_inject_route(
         &mut self,
         route: crate::route::Route,
-        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
         let prefix = route.prefix;
         let rib = self
@@ -924,7 +924,7 @@ impl RibManager {
         &mut self,
         prefix: Prefix,
         path_id: u32,
-        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
         let rib = self
             .ribs
@@ -940,14 +940,16 @@ impl RibManager {
             self.distribute_changes(&changed, &affected);
             let _ = reply.send(Ok(()));
         } else {
-            let _ = reply.send(Err(format!("prefix {prefix} not found")));
+            let _ = reply.send(Err(RibCommandError::not_found(format!(
+                "prefix {prefix} not found"
+            ))));
         }
     }
 
     pub(super) fn handle_inject_flowspec(
         &mut self,
         route: crate::route::FlowSpecRoute,
-        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
         let rule = route.rule.clone();
         let rib = self
@@ -965,7 +967,7 @@ impl RibManager {
     pub(super) fn handle_withdraw_flowspec(
         &mut self,
         rule: FlowSpecRule,
-        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
         let rib = self
             .ribs
@@ -978,14 +980,16 @@ impl RibManager {
             self.recompute_and_distribute_flowspec(&fs_affected);
             let _ = reply.send(Ok(()));
         } else {
-            let _ = reply.send(Err(format!("FlowSpec rule {rule} not found")));
+            let _ = reply.send(Err(RibCommandError::not_found(format!(
+                "FlowSpec rule {rule} not found"
+            ))));
         }
     }
 
     pub(super) fn handle_inject_evpn(
         &mut self,
         route: crate::route::EvpnRibRoute,
-        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
         let key = route.key();
         let rib = self
@@ -1003,7 +1007,7 @@ impl RibManager {
     pub(super) fn handle_withdraw_evpn(
         &mut self,
         key: rustbgpd_wire::EvpnRouteKey,
-        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
         let rib = self
             .ribs
@@ -1016,7 +1020,9 @@ impl RibManager {
             self.recompute_and_distribute_evpn(&evpn_affected);
             let _ = reply.send(Ok(()));
         } else {
-            let _ = reply.send(Err(format!("EVPN route key {key:?} not found")));
+            let _ = reply.send(Err(RibCommandError::not_found(format!(
+                "EVPN route key {key:?} not found"
+            ))));
         }
     }
 

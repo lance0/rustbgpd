@@ -6,7 +6,7 @@ use prometheus::Encoder;
 use rustbgpd_evpn::{
     DuplicateMacAction, DuplicateMacConfig, EvpnInstance, EvpnInstanceTable, RouteTarget,
 };
-use rustbgpd_rib::route::RouteOrigin;
+use rustbgpd_rib::{RibCommandError, route::RouteOrigin};
 use rustbgpd_wire::{EvpnImet, EvpnMacIp, RouteDistinguisher};
 
 fn gather_metrics_text(metrics: &BgpMetrics) -> String {
@@ -1986,7 +1986,7 @@ async fn rib_rejection_increments_evpn_local_origination_error_counter() {
                     let _ = reply.send(vec![]);
                 }
                 RibUpdate::InjectEvpn { reply, .. } => {
-                    let _ = reply.send(Err("synthetic rejection".to_string()));
+                    let _ = reply.send(Err(RibCommandError::internal("synthetic rejection")));
                 }
                 _ => {}
             }

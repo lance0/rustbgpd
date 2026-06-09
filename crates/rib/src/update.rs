@@ -52,6 +52,37 @@ pub struct NeighborPolicyStats {
     pub export_policy_routes_denied: u64,
 }
 
+/// Typed error for API-visible RIB command replies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RibCommandError {
+    /// Requested RIB object does not exist.
+    NotFound(String),
+    /// Unexpected RIB command failure.
+    Internal(String),
+}
+
+impl RibCommandError {
+    #[must_use]
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::NotFound(message.into())
+    }
+
+    #[must_use]
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal(message.into())
+    }
+}
+
+impl std::fmt::Display for RibCommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(message) | Self::Internal(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for RibCommandError {}
+
 /// Structured explanation for whether a route would be advertised to a peer.
 #[derive(Debug, Clone)]
 pub struct ExplainAdvertisedRoute {
@@ -216,7 +247,7 @@ pub enum RibUpdate {
         /// The route to inject.
         route: Route,
         /// Completion reply.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), RibCommandError>>,
     },
     /// Withdraw a locally-injected route.
     WithdrawInjected {
@@ -225,7 +256,7 @@ pub enum RibUpdate {
         /// Add-Path path identifier (0 = default path).
         path_id: u32,
         /// Completion reply.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), RibCommandError>>,
     },
     /// Query: return all received routes, optionally filtered by peer.
     QueryReceivedRoutes {
@@ -457,14 +488,14 @@ pub enum RibUpdate {
         /// The `FlowSpec` route to inject.
         route: FlowSpecRoute,
         /// Completion reply.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), RibCommandError>>,
     },
     /// Withdraw a locally-injected `FlowSpec` route.
     WithdrawFlowSpec {
         /// The `FlowSpec` rule to withdraw.
         rule: FlowSpecRule,
         /// Completion reply.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), RibCommandError>>,
     },
     /// Inject a locally-originated EVPN route (RFC 7432).
     ///
@@ -477,14 +508,14 @@ pub enum RibUpdate {
         /// The EVPN route to inject.
         route: EvpnRibRoute,
         /// Completion reply.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), RibCommandError>>,
     },
     /// Withdraw a locally-injected EVPN route.
     WithdrawEvpn {
         /// The EVPN route key to withdraw.
         key: EvpnRouteKey,
         /// Completion reply.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), RibCommandError>>,
     },
     /// Query `FlowSpec` routes from the Loc-RIB.
     QueryFlowSpecRoutes {

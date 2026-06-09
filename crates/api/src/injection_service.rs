@@ -7,7 +7,7 @@ use tonic::{Request, Response, Status};
 
 use crate::proto;
 use crate::server::{AccessMode, read_only_rejection};
-use rustbgpd_rib::{EvpnRibRoute, FlowSpecRoute, RibUpdate, Route, RouteOrigin};
+use rustbgpd_rib::{EvpnRibRoute, FlowSpecRoute, RibCommandError, RibUpdate, Route, RouteOrigin};
 use rustbgpd_wire::{
     Afi, AsPath, AsPathSegment, BitmaskMatch, EthernetSegmentIdentifier, EthernetTagId, EvpnImet,
     EvpnIpPrefixRoute, EvpnIpPrefixValue, EvpnMacIp, EvpnRoute, EvpnRouteKey, ExtendedCommunity,
@@ -170,15 +170,13 @@ fn parse_unicast_nexthop(s: &str) -> Result<IpAddr, Status> {
     Ok(nh)
 }
 
-/// Map a RIB-side withdraw error string into the right gRPC status code.
-/// "not found" maps to `NotFound`; everything else stays `Internal`.
-/// Shared by `DeletePath`, `DeleteFlowSpec`, and `DeleteEvpnRoute` so
-/// the surface is consistent.
-fn map_withdraw_error(e: &str) -> Status {
-    if e.contains("not found") {
-        Status::not_found(e.to_string())
-    } else {
-        Status::internal(format!("withdraw failed: {e}"))
+/// Map a RIB-side command error into the right gRPC status code.
+fn map_rib_command_error(error: RibCommandError) -> Status {
+    match error {
+        RibCommandError::NotFound(message) => Status::not_found(message),
+        RibCommandError::Internal(message) => {
+            Status::internal(format!("RIB command failed: {message}"))
+        }
     }
 }
 
@@ -293,7 +291,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
-            .map_err(|e| Status::internal(format!("inject failed: {e}")))?;
+            .map_err(map_rib_command_error)?;
 
         Ok(Response::new(proto::AddPathResponse {}))
     }
@@ -342,7 +340,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
-            .map_err(|e| map_withdraw_error(&e))?;
+            .map_err(map_rib_command_error)?;
 
         Ok(Response::new(proto::DeletePathResponse {}))
     }
@@ -411,7 +409,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
-            .map_err(|e| Status::internal(format!("inject failed: {e}")))?;
+            .map_err(map_rib_command_error)?;
 
         Ok(Response::new(proto::AddFlowSpecResponse {}))
     }
@@ -444,7 +442,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
-            .map_err(|e| map_withdraw_error(&e))?;
+            .map_err(map_rib_command_error)?;
 
         Ok(Response::new(proto::DeleteFlowSpecResponse {}))
     }
@@ -501,7 +499,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
-            .map_err(|e| Status::internal(format!("inject failed: {e}")))?;
+            .map_err(map_rib_command_error)?;
 
         Ok(Response::new(proto::AddEvpnRouteResponse {}))
     }
@@ -583,7 +581,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
-            .map_err(|e| map_withdraw_error(&e))?;
+            .map_err(map_rib_command_error)?;
 
         Ok(Response::new(proto::DeleteEvpnRouteResponse {}))
     }
@@ -1284,6 +1282,22 @@ mod tests {
         FlowSpecRule {
             components: vec![FlowSpecComponent::Port(ops)],
         }
+    }
+
+    #[test]
+    fn rib_command_error_maps_not_found_without_string_matching() {
+        let err = map_rib_command_error(RibCommandError::NotFound("missing route".to_string()));
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(err.message(), "missing route");
+    }
+
+    #[test]
+    fn rib_command_error_maps_internal_without_string_matching() {
+        let err = map_rib_command_error(RibCommandError::Internal(
+            "storage not found during lookup".to_string(),
+        ));
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert!(err.message().contains("storage not found during lookup"));
     }
 
     #[tokio::test]

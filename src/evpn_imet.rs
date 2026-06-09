@@ -356,7 +356,7 @@ fn next_hop_path_attribute(vtep_ip: IpAddr) -> PathAttribute {
 mod tests {
     use super::*;
     use rustbgpd_evpn::{EvpnInstanceId, RouteTarget};
-    use rustbgpd_rib::route::RouteOrigin;
+    use rustbgpd_rib::{RibCommandError, route::RouteOrigin};
     use rustbgpd_wire::{PmsiTunnelIdentifier, PmsiTunnelType, RouteDistinguisher};
 
     fn vni(n: u32) -> EvpnInstanceId {
@@ -496,7 +496,7 @@ mod tests {
                 if let RibUpdate::InjectEvpn { reply, .. } = msg {
                     count += 1;
                     let result = if count == 1 {
-                        Err("simulated".to_string())
+                        Err(RibCommandError::internal("simulated"))
                     } else {
                         Ok(())
                     };
@@ -562,7 +562,7 @@ mod tests {
         let responder = tokio::spawn(async move {
             while let Some(msg) = rib_rx.recv().await {
                 if let RibUpdate::InjectEvpn { reply, .. } = msg {
-                    let _ = reply.send(Err("simulated".to_string()));
+                    let _ = reply.send(Err(RibCommandError::internal("simulated")));
                 }
             }
         });
@@ -667,7 +667,7 @@ mod tests {
                         let _ = reply.send(Ok(()));
                     }
                     RibUpdate::WithdrawEvpn { reply, .. } => {
-                        let _ = reply.send(Err("simulated".to_string()));
+                        let _ = reply.send(Err(RibCommandError::internal("simulated")));
                     }
                     _ => {}
                 }
