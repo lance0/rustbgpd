@@ -1042,7 +1042,10 @@ async fn reconfigure_peer_restores_previous_peer_when_replacement_add_fails() {
         panic!("invalid replacement should fail after internal restore");
     };
 
-    assert!(error.contains("previous peer restored"), "{error}");
+    assert!(
+        error.to_string().contains("previous peer restored"),
+        "{error}"
+    );
     let managed = mgr
         .peers
         .get(&scoped_key(addr, interface))
@@ -1116,7 +1119,10 @@ async fn apply_peer_reshape_snapshot_rejects_duplicate_targets_without_mutation(
         panic!("duplicate targets must be rejected before mutation");
     };
 
-    assert!(error.contains("appears more than once"), "{error}");
+    assert!(
+        error.to_string().contains("appears more than once"),
+        "{error}"
+    );
     let managed = mgr.peers.get(&key(addr)).expect("unchanged peer");
     assert_eq!(managed.hold_time, Some(90));
     assert_eq!(managed.description, format!("test-peer-{addr}"));
@@ -1143,7 +1149,7 @@ async fn apply_peer_reshape_snapshot_rejects_tcp_ao_delta_without_mutation() {
         panic!("TCP-AO deltas must be rejected before mutation");
     };
 
-    assert!(error.contains("changes tcp_ao"), "{error}");
+    assert!(error.to_string().contains("changes tcp_ao"), "{error}");
     let managed = mgr.peers.get(&key(addr)).expect("unchanged peer");
     assert_eq!(managed.hold_time, Some(90));
     assert!(managed.transport_config.tcp_ao.is_none());
@@ -1177,7 +1183,10 @@ async fn apply_peer_reshape_snapshot_rolls_back_prior_peers_on_later_failure() {
         panic!("later invalid target must fail and roll back earlier peers");
     };
 
-    assert!(error.contains("prior peers restored"), "{error}");
+    assert!(
+        error.to_string().contains("prior peers restored"),
+        "{error}"
+    );
     let peer1 = mgr.peers.get(&key(addr1)).expect("restored peer 1");
     assert_eq!(peer1.hold_time, Some(90));
     let peer2 = mgr
@@ -1910,7 +1919,7 @@ async fn delete_tcp_ao_peer_is_restart_required() {
         "TCP-AO peer deletion must be restart-required"
     );
     let err = result.err().unwrap();
-    assert!(err.contains("requires restart"), "{err}");
+    assert!(err.to_string().contains("requires restart"), "{err}");
 
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(PeerManagerCommand::ListPeers { reply: reply_tx })
