@@ -513,11 +513,12 @@ branch is between features.
   like `route_event`, `session_event`, `policy_event`, `lifecycle_event`, and
   the per-test config builders have drifted across `crates/api`, `crates/cli`,
   `crates/rib`, and `src/`. A field addition (e.g. `event_id`) forces touching
-  three or four copies. First slice: `crates/api` has a private `test_support`
-  module for repeated service-test `PeerInfo` and metrics fixtures. Remaining
-  work: event/route/config builders across `crates/cli`, `crates/rib`, and
-  `src/`, possibly via a single `rustbgpd-test-support` crate or per-crate
-  `test_support` modules.
+  three or four copies. `crates/api` now has a private `test_support` module for
+  repeated service-test `PeerInfo`, metrics, and event-stream fixtures,
+  including the event-service fake RIB / peer-manager harnesses. Remaining work:
+  route/config builders across `crates/cli`, `crates/rib`, and `src/`, possibly
+  via a single `rustbgpd-test-support` crate or per-crate `test_support`
+  modules.
 - [ ] **`unwrap()` audit on daemon-runtime paths.** Production-code unwraps
   outside `#[cfg(test)]` measure at ~5 sites after the v0.30 quality scan
   (mostly startup metric-registration invariants, poisoned-lock guards, and a
