@@ -85,6 +85,10 @@ pub struct BgpMetrics {
     // ── Validation-cache import refresh ───────────────────────
     validation_import_refreshes: IntCounterVec,
 
+    // ── Enhanced Route Refresh ────────────────────────────────
+    route_refresh_in_progress: IntGaugeVec,
+    route_refresh_stale_entries: IntGaugeVec,
+
     // ── EVPN ───────────────────────────────────────────────────
     evpn_local_originations: IntCounterVec,
     evpn_local_origination_errors: IntCounterVec,
@@ -492,6 +496,24 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let route_refresh_in_progress = IntGaugeVec::new(
+            Opts::new(
+                "bgp_route_refresh_in_progress",
+                "Active inbound Enhanced Route Refresh windows by peer and AFI/SAFI (1 = active, 0 = inactive).",
+            ),
+            &["peer", "afi_safi"],
+        )
+        .expect("valid metric definition");
+
+        let route_refresh_stale_entries = IntGaugeVec::new(
+            Opts::new(
+                "bgp_route_refresh_stale_entries",
+                "Routes still awaiting replacement during an inbound Enhanced Route Refresh window by peer and AFI/SAFI.",
+            ),
+            &["peer", "afi_safi"],
+        )
+        .expect("valid metric definition");
+
         let evpn_local_originations = IntCounterVec::new(
             Opts::new(
                 "evpn_local_originations_total",
@@ -893,6 +915,12 @@ impl BgpMetrics {
             .register(Box::new(validation_import_refreshes.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(route_refresh_in_progress.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(route_refresh_stale_entries.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(evpn_local_originations.clone()))
             .expect("metric not already registered");
         registry
@@ -1031,6 +1059,8 @@ impl BgpMetrics {
             rpki_vrp_count,
             aspa_records_total,
             validation_import_refreshes,
+            route_refresh_in_progress,
+            route_refresh_stale_entries,
             evpn_local_originations,
             evpn_local_origination_errors,
             evpn_local_observations_dropped,
@@ -1397,6 +1427,24 @@ impl BgpMetrics {
         self.validation_import_refreshes
             .with_label_values(&[dependency, outcome])
             .inc_by(count);
+    }
+
+    /// Set whether an inbound Enhanced Route Refresh window is active.
+    ///
+    /// `afi_safi` is expected to be a bounded family label such as
+    /// `"ipv4_unicast"`, `"ipv6_flowspec"`, or `"l2vpn_evpn"`.
+    pub fn set_route_refresh_in_progress(&self, peer: &str, afi_safi: &str, active: bool) {
+        self.route_refresh_in_progress
+            .with_label_values(&[peer, afi_safi])
+            .set(i64::from(active));
+    }
+
+    /// Set how many entries are still awaiting replacement in an inbound
+    /// Enhanced Route Refresh window.
+    pub fn set_route_refresh_stale_entries(&self, peer: &str, afi_safi: &str, count: i64) {
+        self.route_refresh_stale_entries
+            .with_label_values(&[peer, afi_safi])
+            .set(count);
     }
 
     /// Record a successful locally-originated EVPN Type 2 action.
@@ -1992,6 +2040,33 @@ mod tests {
         assert!(text.contains("bgp_validation_import_refreshes_total"));
         assert!(text.contains(r#"dependency="rpki""#));
         assert!(text.contains(r#"outcome="skipped_not_established""#));
+    }
+
+    #[test]
+    fn route_refresh_gauges_use_peer_and_family_labels() {
+        let m = BgpMetrics::new();
+        m.set_route_refresh_in_progress("10.0.0.1", "ipv4_unicast", true);
+        m.set_route_refresh_stale_entries("10.0.0.1", "ipv4_unicast", 42);
+        m.set_route_refresh_in_progress("10.0.0.1", "ipv4_unicast", false);
+        m.set_route_refresh_stale_entries("10.0.0.1", "ipv4_unicast", 0);
+
+        assert_eq!(
+            m.route_refresh_in_progress
+                .with_label_values(&["10.0.0.1", "ipv4_unicast"])
+                .get(),
+            0
+        );
+        assert_eq!(
+            m.route_refresh_stale_entries
+                .with_label_values(&["10.0.0.1", "ipv4_unicast"])
+                .get(),
+            0
+        );
+
+        let text = gather_text(&m);
+        assert!(text.contains("bgp_route_refresh_in_progress"));
+        assert!(text.contains("bgp_route_refresh_stale_entries"));
+        assert!(text.contains(r#"afi_safi="ipv4_unicast""#));
     }
 
     #[test]

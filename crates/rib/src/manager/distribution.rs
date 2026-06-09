@@ -527,6 +527,7 @@ impl RibManager {
             .cloned()
             .unwrap_or_default();
         let mut affected = HashSet::new();
+        let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
 
         let (rib_len, flowspec_len) = {
             let rib = self
@@ -539,10 +540,12 @@ impl RibManager {
                     debug!(%peer, %prefix, path_id, "withdrawn");
                     affected.insert(prefix);
                 }
-                if active_refresh.contains(&prefix_family(&prefix))
+                let family = prefix_family(&prefix);
+                if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_routes.get_mut(&peer)
+                    && stale.remove(&(prefix, path_id))
                 {
-                    stale.remove(&(prefix, path_id));
+                    *removed_stale_counts.entry(family).or_default() += 1;
                 }
             }
             rib.gc_intern_table();
@@ -556,6 +559,10 @@ impl RibManager {
             .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
         self.metrics
             .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
+        for ((afi, safi), count) in removed_stale_counts {
+            self.decrement_refresh_stale_count(peer, afi, safi, count);
+        }
+        self.update_peer_refresh_metrics(peer);
         if !affected.is_empty() {
             // Recompute Loc-RIB now — best-path, route events, and
             // partial-progress queries stay live mid-batch — but accumulate
@@ -575,6 +582,7 @@ impl RibManager {
             .unwrap_or_default();
         let vrp_table: Option<Arc<VrpTable>> = self.vrp_table.as_ref().map(Arc::clone);
         let mut affected = HashSet::new();
+        let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
 
         let (rib_len, flowspec_len) = {
             let rib = self
@@ -594,10 +602,12 @@ impl RibManager {
                 let prefix = route.prefix;
                 let path_id = route.path_id;
                 rib.insert(route);
-                if active_refresh.contains(&prefix_family(&prefix))
+                let family = prefix_family(&prefix);
+                if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_routes.get_mut(&peer)
+                    && stale.remove(&(prefix, path_id))
                 {
-                    stale.remove(&(prefix, path_id));
+                    *removed_stale_counts.entry(family).or_default() += 1;
                 }
             }
 
@@ -610,6 +620,10 @@ impl RibManager {
             .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
         self.metrics
             .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
+        for ((afi, safi), count) in removed_stale_counts {
+            self.decrement_refresh_stale_count(peer, afi, safi, count);
+        }
+        self.update_peer_refresh_metrics(peer);
         if !affected.is_empty() {
             // Recompute Loc-RIB now — best-path, route events, and
             // partial-progress queries stay live mid-batch — but accumulate
@@ -632,6 +646,7 @@ impl RibManager {
             .cloned()
             .unwrap_or_default();
         let mut fs_affected: HashSet<FlowSpecRule> = HashSet::new();
+        let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
 
         let (rib_len, flowspec_len) = {
             let rib = self
@@ -648,7 +663,15 @@ impl RibManager {
                     *safi == Safi::FlowSpec && matches!(afi, Afi::Ipv4 | Afi::Ipv6)
                 }) && let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer)
                 {
-                    stale.retain(|(_, stale_rule, _)| stale_rule != &rule);
+                    stale.retain(|(stale_afi, stale_rule, _)| {
+                        let keep = stale_rule != &rule;
+                        if !keep {
+                            *removed_stale_counts
+                                .entry((*stale_afi, Safi::FlowSpec))
+                                .or_default() += 1;
+                        }
+                        keep
+                    });
                 }
             }
 
@@ -661,6 +684,10 @@ impl RibManager {
             .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
         self.metrics
             .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
+        for ((afi, safi), count) in removed_stale_counts {
+            self.decrement_refresh_stale_count(peer, afi, safi, count);
+        }
+        self.update_peer_refresh_metrics(peer);
         if !fs_affected.is_empty() {
             self.recompute_and_distribute_flowspec(&fs_affected);
         }
@@ -678,6 +705,7 @@ impl RibManager {
             .unwrap_or_default();
         let evpn_refresh_active = active_refresh.contains(&(Afi::L2Vpn, Safi::Evpn));
         let mut affected: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::new();
+        let mut removed_stale_count = 0usize;
         let evpn_len = {
             let rib = self
                 .ribs
@@ -689,8 +717,9 @@ impl RibManager {
                     affected.insert(key);
                     if evpn_refresh_active
                         && let Some(stale) = self.refresh_stale_evpn.get_mut(&peer)
+                        && stale.remove(&key)
                     {
-                        stale.remove(&key);
+                        removed_stale_count += 1;
                     }
                 }
             }
@@ -698,6 +727,8 @@ impl RibManager {
         };
         self.metrics
             .set_rib_prefixes(&peer.to_string(), "evpn", gauge_val(evpn_len));
+        self.decrement_refresh_stale_count(peer, Afi::L2Vpn, Safi::Evpn, removed_stale_count);
+        self.update_peer_refresh_metrics(peer);
         if !affected.is_empty() {
             self.recompute_and_distribute_evpn(&affected);
         }
@@ -715,6 +746,7 @@ impl RibManager {
             .unwrap_or_default();
         let evpn_refresh_active = active_refresh.contains(&(Afi::L2Vpn, Safi::Evpn));
         let mut affected: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::new();
+        let mut removed_stale_count = 0usize;
         let evpn_len = {
             let rib = self
                 .ribs
@@ -727,14 +759,19 @@ impl RibManager {
                 rib.insert_evpn(route);
                 // Enhanced Route Refresh: re-advertised key removes from
                 // the stale set so EoRR's sweep doesn't withdraw it.
-                if evpn_refresh_active && let Some(stale) = self.refresh_stale_evpn.get_mut(&peer) {
-                    stale.remove(&key);
+                if evpn_refresh_active
+                    && let Some(stale) = self.refresh_stale_evpn.get_mut(&peer)
+                    && stale.remove(&key)
+                {
+                    removed_stale_count += 1;
                 }
             }
             rib.evpn_len()
         };
         self.metrics
             .set_rib_prefixes(&peer.to_string(), "evpn", gauge_val(evpn_len));
+        self.decrement_refresh_stale_count(peer, Afi::L2Vpn, Safi::Evpn, removed_stale_count);
+        self.update_peer_refresh_metrics(peer);
         if !affected.is_empty() {
             self.recompute_and_distribute_evpn(&affected);
         }
@@ -751,6 +788,7 @@ impl RibManager {
             .cloned()
             .unwrap_or_default();
         let mut fs_affected: HashSet<FlowSpecRule> = HashSet::new();
+        let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
 
         let (rib_len, flowspec_len) = {
             let rib = self
@@ -765,8 +803,11 @@ impl RibManager {
                 rib.insert_flowspec(route);
                 if active_refresh.contains(&(stale_key.0, Safi::FlowSpec))
                     && let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer)
+                    && stale.remove(&stale_key)
                 {
-                    stale.remove(&stale_key);
+                    *removed_stale_counts
+                        .entry((stale_key.0, Safi::FlowSpec))
+                        .or_default() += 1;
                 }
             }
 
@@ -779,6 +820,10 @@ impl RibManager {
             .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
         self.metrics
             .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
+        for ((afi, safi), count) in removed_stale_counts {
+            self.decrement_refresh_stale_count(peer, afi, safi, count);
+        }
+        self.update_peer_refresh_metrics(peer);
         if !fs_affected.is_empty() {
             self.recompute_and_distribute_flowspec(&fs_affected);
         }

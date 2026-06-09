@@ -11,6 +11,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Enhanced Route Refresh observability.** Prometheus now exposes
+  `bgp_route_refresh_in_progress{peer,afi_safi}` and
+  `bgp_route_refresh_stale_entries{peer,afi_safi}` so operators can see active
+  inbound RFC 7313 refresh windows and how many routes are still awaiting
+  replacement before EoRR or timeout. The sprint also corrected two roadmap
+  hypotheses: unknown FlowSpec component types are RFC 8955 malformed NLRI (not
+  a pass-through compatibility surface), and inbound BoRR/EoRR delivery already
+  backpressures with `send().await` rather than dropping on channel-full.
+
 - **SIGHUP EVPN runtime convergence.** File-driven reload now submits
   `[[evpn_instances]]`, `[[evpn_ip_vrfs]]`, and `[[ethernet_segments]]`
   candidates through the ADR-0063 EVPN runtime coordinator for the same

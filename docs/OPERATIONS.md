@@ -364,6 +364,8 @@ Prometheus gauge.
 | `bgp_rib_adj_out_prefixes{peer,afi_safi}` | Adj-RIB-Out size per peer + AFI/SAFI (advertised) |
 | `bgp_messages_received_total` | Inbound BGP messages by type |
 | `bgp_messages_sent_total` | Outbound BGP messages by type |
+| `bgp_route_refresh_in_progress{peer,afi_safi}` | Active inbound Enhanced Route Refresh window for a peer/family (1 = active, 0 = inactive) |
+| `bgp_route_refresh_stale_entries{peer,afi_safi}` | Routes still awaiting replacement before EoRR or timeout during an inbound Enhanced Route Refresh window |
 
 ### Event Streams
 

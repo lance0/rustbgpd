@@ -58,6 +58,21 @@ pub(super) fn prefix_family(prefix: &Prefix) -> (Afi, Safi) {
     }
 }
 
+#[must_use]
+pub(super) fn afi_safi_label(afi: Afi, safi: Safi) -> &'static str {
+    match (afi, safi) {
+        (Afi::Ipv4, Safi::Unicast) => "ipv4_unicast",
+        (Afi::Ipv6, Safi::Unicast) => "ipv6_unicast",
+        (Afi::Ipv4, Safi::FlowSpec) => "ipv4_flowspec",
+        (Afi::Ipv6, Safi::FlowSpec) => "ipv6_flowspec",
+        (Afi::L2Vpn, Safi::Evpn) => "l2vpn_evpn",
+        (Afi::Ipv4, Safi::Multicast) => "ipv4_multicast",
+        (Afi::Ipv6, Safi::Multicast) => "ipv6_multicast",
+        (Afi::Ipv4 | Afi::Ipv6, Safi::Evpn)
+        | (Afi::L2Vpn, Safi::Unicast | Safi::Multicast | Safi::FlowSpec) => "unsupported",
+    }
+}
+
 /// iBGP split-horizon / RFC 4456 reflection logic, extracted as a free
 /// function so it can be called when `self.adj_ribs_out` is mutably borrowed.
 ///
@@ -133,5 +148,18 @@ pub(super) fn validate_route_aspa(
     match route.as_path() {
         Some(path) => rustbgpd_rpki::aspa_verify::verify(path, table, route.aspa_context),
         None => AspaValidation::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn afi_safi_label_marks_impossible_pairs_as_unsupported() {
+        assert_eq!(afi_safi_label(Afi::Ipv4, Safi::Evpn), "unsupported");
+        assert_eq!(afi_safi_label(Afi::Ipv6, Safi::Evpn), "unsupported");
+        assert_eq!(afi_safi_label(Afi::L2Vpn, Safi::FlowSpec), "unsupported");
+        assert_eq!(afi_safi_label(Afi::L2Vpn, Safi::Evpn), "l2vpn_evpn");
     }
 }
