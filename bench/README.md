@@ -102,6 +102,22 @@ hosts anyway.
 `--attempts 1` (the default) keeps the simpler single-row table used by
 earlier versions.
 
+## Regression verdict mode
+
+`--fail-on-regression` turns the summary classifier into a tripwire. It exits
+non-zero only when a row is a confident regression:
+
+- completed attempts are at least `--verdict-min-attempts` (default: 3)
+- `min..max` is entirely above zero
+- `stddev` is below `--regression-max-stddev-pct` (default: 10)
+- `mean delta` is at least `--regression-threshold-pct` (default: 3)
+
+Rows that straddle zero are reported as `noise`; rows with too few completed
+attempts are `insufficient-attempts`, and rows with too much spread are
+`inconclusive-noisy`. The nightly workflow uses this mode against the latest
+release tag so real accumulated regressions go red without failing on noisy
+single-row movement.
+
 ## Tuning + safety
 
 Before taking numbers seriously, put the selected CPU into the
