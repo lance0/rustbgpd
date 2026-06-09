@@ -175,6 +175,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   re-dropped the same diff). Runtime gRPC dynamic-neighbor CRUD was
   unaffected.
 
+- **Catalog policy mutations now reach live dynamic peers.** `SetPolicy`,
+  neighbor-set, and global policy-chain edits (gRPC and SIGHUP alike)
+  previously skipped established dynamic-range sessions — they have no
+  `[[neighbors]]` record, so the per-peer fan-out never resolved their chains
+  and the sessions kept stale import/export policy until they flapped. The
+  fan-out now resolves dynamic peers through their accepted peer group (the
+  honor-knob pattern) and hot-applies with the usual Route Refresh on import
+  change. Orphaned dynamic peers with unresolvable chains are skipped with a
+  warning instead of failing the mutation.
+
 - **Typed policy/catalog command errors.** Policy definitions, neighbor sets,
   peer groups, global named policy chains, and per-neighbor policy/peer-group
   catalog mutations now return typed peer-manager errors for not-found,

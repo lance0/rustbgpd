@@ -2343,6 +2343,140 @@ async fn apply_policy_change_fans_out_to_scoped_peers() {
     rib_drainer.await.unwrap();
 }
 
+/// Like `acking_policy_handle`, but counting `QueryState` and Route Refresh
+/// sends so policy fan-out coverage can be asserted per peer.
+fn acking_counted_policy_handle(peer_addr: IpAddr, counters: Arc<FakePeerCounters>) -> PeerHandle {
+    use rustbgpd_transport::PeerCommand;
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        while let Some(cmd) = session_rx.recv().await {
+            match cmd {
+                PeerCommand::QueryState { reply } => {
+                    counters.query_state.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(PeerSessionState {
+                        fsm_state: SessionState::Established,
+                        peer_ip: peer_addr,
+                        peer_asn: None,
+                        prefix_count: 0,
+                        negotiated_hold_time: None,
+                        four_octet_as: None,
+                        remote_router_id: None,
+                        local_role: None,
+                        remote_role: None,
+                        role_negotiated: false,
+                        updates_received: 0,
+                        updates_sent: 0,
+                        notifications_received: 0,
+                        notifications_sent: 0,
+                        otc_routes_blocked: 0,
+                        import_policy_routes_permitted: 0,
+                        import_policy_routes_denied: 0,
+                        flap_count: 0,
+                        uptime_secs: 0,
+                        last_error: String::new(),
+                    });
+                }
+                PeerCommand::SendRouteRefresh { reply, .. } => {
+                    counters.route_refresh.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
+/// Regression: catalog policy mutations (`SetPolicy` / neighbor sets / global
+/// chains, gRPC and SIGHUP alike) must hot-apply resolved chains to live
+/// DYNAMIC peers. Dynamic peers have no `[[neighbors]]` record, and the
+/// per-peer loop previously skipped them entirely — a policy edit on a route
+/// server never reached established dynamic sessions until they flapped,
+/// running split-brain policy between sessions accepted before and after
+/// the edit.
+#[tokio::test]
+async fn apply_policy_change_reaches_live_dynamic_peers() {
+    use rustbgpd_api::peer_types::{NamedPolicyDefinition, PolicyStatementDefinition};
+
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let rib_drainer = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+
+    // Config: the dynamic peers' group resolves an import chain that
+    // references the named policy being edited.
+    let mut config = make_dynamic_manager_config();
+    if let Some(group) = config.peer_groups.get_mut("ix-members") {
+        group.import_policy_chain = vec!["ix-import".to_string()];
+    }
+    mgr.current_config = config;
+
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let counters = Arc::new(FakePeerCounters::default());
+    let handle = acking_counted_policy_handle(addr, counters.clone());
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+    let managed = mgr.peers.get_mut(&key(addr)).unwrap();
+    managed.is_dynamic = true;
+    managed.peer_group = Some("ix-members".to_string());
+
+    mgr.apply_policy_change(
+        ConfigEvent::SetPolicy {
+            name: "ix-import".to_string(),
+            definition: NamedPolicyDefinition {
+                default_action: "deny".to_string(),
+                statements: Vec::<PolicyStatementDefinition>::new(),
+            },
+        },
+        None,
+    )
+    .await
+    .unwrap();
+
+    // The dynamic peer must have been processed: chains resolved against the
+    // synthetic peer-group-backed neighbor, hot-applied to the session, and
+    // the import change refreshed.
+    assert_eq!(
+        counters.query_state.load(Ordering::SeqCst),
+        1,
+        "dynamic peer must not be skipped by catalog policy mutations"
+    );
+    assert_eq!(
+        counters.route_refresh.load(Ordering::SeqCst),
+        1,
+        "import-chain change on a dynamic peer must trigger Route Refresh"
+    );
+    assert!(
+        mgr.peers.get(&key(addr)).unwrap().import_policy.is_some(),
+        "resolved import chain must be recorded on the dynamic peer"
+    );
+
+    drop(mgr);
+    rib_drainer.await.unwrap();
+}
+
 #[tokio::test]
 async fn validation_cache_refresh_targets_matching_established_import_policies() {
     let mut mgr = test_peer_manager();

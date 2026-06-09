@@ -759,19 +759,48 @@ impl PeerManager {
         );
         let mut affected_peer_count = 0usize;
         for peer_key in peers {
-            if !self.peers.contains_key(&peer_key) {
-                continue;
-            }
-            let address = peer_key.address;
-            let Some(neighbor) = next_config.neighbors.iter().find(|neighbor| {
-                neighbor.address == address.to_string() && neighbor.interface == peer_key.interface
-            }) else {
+            let Some(managed) = self.peers.get(&peer_key) else {
                 continue;
             };
+            let is_dynamic = managed.is_dynamic;
+            let address = peer_key.address;
+            // Static neighbors resolve from their `[[neighbors]]` record.
+            // Dynamic peers have no record — resolve their chains through
+            // the synthetic peer-group-backed neighbor (the honor-knob
+            // pattern) instead of skipping them; otherwise catalog edits
+            // never reach live dynamic sessions until they flap, and a
+            // route server runs split-brain policy between sessions
+            // accepted before and after the edit.
+            let record = next_config.neighbors.iter().find(|neighbor| {
+                neighbor.address == address.to_string() && neighbor.interface == peer_key.interface
+            });
+            let neighbor = match record {
+                Some(neighbor) => neighbor.clone(),
+                None if is_dynamic => {
+                    Self::policy_resolution_neighbor(&next_config, address, managed)
+                }
+                None => continue,
+            };
+            let chains = next_config.effective_policy_chains_for_neighbor(&neighbor);
+            let (import_policy, export_policy) = match chains {
+                Ok(chains) => chains,
+                // An orphaned dynamic peer (accepted range deleted, then its
+                // peer group deleted) has no resolvable chains; its session
+                // keeps the chains it already runs. Don't fail the whole
+                // catalog mutation for it — static-resolution failures stay
+                // fatal because they indicate the event itself is broken.
+                Err(error) if is_dynamic => {
+                    warn!(
+                        peer = %address,
+                        %error,
+                        "catalog change: dynamic peer chains unresolvable; \
+                         session keeps its prior chains"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(catalog_config_error(error)),
+            };
             affected_peer_count += 1;
-            let (import_policy, export_policy) = next_config
-                .effective_policy_chains_for_neighbor(neighbor)
-                .map_err(catalog_config_error)?;
             self.update_runtime_policies_for_peer_key(
                 peer_key,
                 import_policy,
