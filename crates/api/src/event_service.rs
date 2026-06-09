@@ -636,7 +636,7 @@ mod tests {
         SessionNotificationEventType,
     };
     use crate::proto::event_service_server::EventService as EventServiceTrait;
-    use prometheus::Encoder;
+    use crate::test_support::metrics_text as gather_text;
     use rustbgpd_fsm::SessionState;
     use rustbgpd_rib::{EvpnRouteEvent, RouteEvent};
     use rustbgpd_wire::{
@@ -648,14 +648,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::sync::{broadcast, mpsc};
     use tokio_stream::StreamExt;
-
-    fn gather_text(metrics: &BgpMetrics) -> String {
-        let encoder = prometheus::TextEncoder::new();
-        let families = metrics.registry().gather();
-        let mut out = Vec::new();
-        encoder.encode(&families, &mut out).unwrap();
-        String::from_utf8(out).unwrap()
-    }
 
     fn route_event(prefix: Prefix, peer: IpAddr) -> RouteEvent {
         RouteEvent {

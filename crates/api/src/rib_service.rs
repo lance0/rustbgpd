@@ -1869,22 +1869,14 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::sync::Arc;
 
-    use prometheus::Encoder;
     use tokio::sync::broadcast;
     use tokio_stream::StreamExt;
 
     use rustbgpd_wire::{AsPath, Ipv4Prefix, Ipv6Prefix};
 
     use super::*;
+    use crate::test_support::metrics_text as gather_text;
     use proto::rib_service_server::RibService as _;
-
-    fn gather_text(metrics: &BgpMetrics) -> String {
-        let encoder = prometheus::TextEncoder::new();
-        let families = metrics.registry().gather();
-        let mut out = Vec::new();
-        encoder.encode(&families, &mut out).unwrap();
-        String::from_utf8(out).unwrap()
-    }
 
     fn make_service() -> RibService {
         let (tx, _rx) = mpsc::channel(16);

@@ -5,7 +5,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use prometheus::Encoder;
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa,
     Issuer, KeyPair, KeyUsagePurpose, SanType,
@@ -26,6 +25,7 @@ use super::*;
 use crate::audit::{GrpcAuditHandle, GrpcRequestSummary};
 use crate::authz::{AuthEnforcement, AuthTier, PrincipalRole};
 use crate::connect_info::{RustbgpdTcpConnectInfo, RustbgpdTcpStream};
+use crate::test_support::metrics_text as gather_text;
 
 #[derive(Clone)]
 struct EchoService;
@@ -84,14 +84,6 @@ impl Service<Request<Body>> for SummaryService {
             Ok(Response::new(Body::empty()))
         })
     }
-}
-
-fn gather_text(metrics: &BgpMetrics) -> String {
-    let encoder = prometheus::TextEncoder::new();
-    let families = metrics.registry().gather();
-    let mut buf = Vec::new();
-    encoder.encode(&families, &mut buf).unwrap();
-    String::from_utf8(buf).unwrap()
 }
 
 fn roles(entries: &[(&str, PrincipalRole)]) -> Arc<BTreeMap<String, PrincipalRole>> {

@@ -178,6 +178,7 @@ impl proto::control_service_server::ControlService for ControlService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::peer_info;
     use proto::control_service_server::ControlService as _;
 
     fn make_service() -> ControlService {
@@ -286,10 +287,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[expect(clippy::too_many_lines)]
     async fn active_peers_counts_only_established() {
-        use crate::peer_types::PeerInfo;
-
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
@@ -307,80 +305,12 @@ mod tests {
         // Spawn responders
         tokio::spawn(async move {
             if let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await {
-                let peers = vec![
-                    PeerInfo {
-                        address: "10.0.0.1".parse().unwrap(),
-                        interface: None,
-                        remote_asn: 65001,
-                        description: String::new(),
-                        peer_group: None,
-                        state: rustbgpd_fsm::SessionState::Established,
-                        enabled: true,
-                        prefix_count: 5,
-                        hold_time: None,
-                        max_prefixes: None,
-                        families: vec![],
-                        remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
-                        route_server_client: false,
-                        local_role: None,
-                        strict_role: false,
-                        remote_role: None,
-                        role_negotiated: false,
-                        add_path_receive: false,
-                        add_path_send: false,
-                        add_path_send_max: 0,
-                        updates_received: 0,
-                        updates_sent: 0,
-                        notifications_received: 0,
-                        notifications_sent: 0,
-                        otc_routes_blocked: 0,
-                        import_policy_routes_permitted: 0,
-                        import_policy_routes_denied: 0,
-                        export_policy_routes_permitted: 0,
-                        export_policy_routes_denied: 0,
-                        flap_count: 0,
-                        uptime_secs: 0,
-                        last_error: String::new(),
-                        is_dynamic: false,
-                        stale: false,
-                    },
-                    PeerInfo {
-                        address: "10.0.0.2".parse().unwrap(),
-                        interface: None,
-                        remote_asn: 65002,
-                        description: String::new(),
-                        peer_group: None,
-                        state: rustbgpd_fsm::SessionState::Active,
-                        enabled: true,
-                        prefix_count: 0,
-                        hold_time: None,
-                        max_prefixes: None,
-                        families: vec![],
-                        remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
-                        route_server_client: false,
-                        local_role: None,
-                        strict_role: false,
-                        remote_role: None,
-                        role_negotiated: false,
-                        add_path_receive: false,
-                        add_path_send: false,
-                        add_path_send_max: 0,
-                        updates_received: 0,
-                        updates_sent: 0,
-                        notifications_received: 0,
-                        notifications_sent: 0,
-                        otc_routes_blocked: 0,
-                        import_policy_routes_permitted: 0,
-                        import_policy_routes_denied: 0,
-                        export_policy_routes_permitted: 0,
-                        export_policy_routes_denied: 0,
-                        flap_count: 0,
-                        uptime_secs: 0,
-                        last_error: String::new(),
-                        is_dynamic: false,
-                        stale: false,
-                    },
-                ];
+                let mut established = peer_info("10.0.0.1".parse().unwrap());
+                established.remote_asn = 65001;
+                established.prefix_count = 5;
+                let mut active = peer_info("10.0.0.2".parse().unwrap());
+                active.state = rustbgpd_fsm::SessionState::Active;
+                let peers = vec![established, active];
                 let _ = reply.send(peers);
             }
         });
