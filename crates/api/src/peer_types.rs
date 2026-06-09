@@ -222,6 +222,48 @@ impl std::fmt::Display for SetGshutError {
 
 impl std::error::Error for SetGshutError {}
 
+/// Typed failure for static peer lifecycle/admin commands.
+///
+/// These commands are called by gRPC services, config transactions, and reload
+/// paths. Keeping the failure class in the reply avoids fragile substring
+/// checks when the caller needs to choose a stable gRPC status code.
+#[derive(Debug, Clone)]
+pub enum PeerLifecycleError {
+    /// Static peer already exists (gRPC callers map to `ALREADY_EXISTS`).
+    AlreadyExists(PeerKey),
+    /// Target peer is not managed (gRPC callers map to `NOT_FOUND`).
+    NotFound(PeerKey),
+    /// Operator supplied invalid peer/config input (gRPC callers map to
+    /// `INVALID_ARGUMENT`).
+    Invalid(String),
+    /// Operation requires daemon/session reconstruction outside this hot path
+    /// (gRPC callers map to `FAILED_PRECONDITION`).
+    RestartRequired(String),
+    /// Session, RIB, restore, or internal snapshot failure (gRPC callers map
+    /// to `INTERNAL`).
+    Internal(String),
+}
+
+impl PeerLifecycleError {
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal(message.into())
+    }
+}
+
+impl std::fmt::Display for PeerLifecycleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyExists(peer) => write!(f, "peer {peer} already exists"),
+            Self::NotFound(peer) => write!(f, "peer {peer} not found"),
+            Self::Invalid(message) | Self::RestartRequired(message) | Self::Internal(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+
+impl std::error::Error for PeerLifecycleError {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -382,7 +424,7 @@ pub enum PeerManagerCommand {
         /// Whether to update the live config snapshot.
         sync_config_snapshot: bool,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), PeerLifecycleError>>,
     },
     /// Remove an existing peer by address.
     DeletePeer {
@@ -391,7 +433,7 @@ pub enum PeerManagerCommand {
         /// Whether to update the live config snapshot.
         sync_config_snapshot: bool,
         /// Reply channel returning the removed config on success.
-        reply: oneshot::Sender<Result<PeerManagerNeighborConfig, String>>,
+        reply: oneshot::Sender<Result<PeerManagerNeighborConfig, PeerLifecycleError>>,
     },
     /// Reconfigure an existing static peer by replacing its live session with
     /// a newly resolved configuration.
@@ -399,7 +441,7 @@ pub enum PeerManagerCommand {
         /// Replacement neighbor configuration.
         config: PeerManagerNeighborConfig,
         /// Reply channel returning the previous config on success.
-        reply: oneshot::Sender<Result<PeerManagerNeighborConfig, String>>,
+        reply: oneshot::Sender<Result<PeerManagerNeighborConfig, PeerLifecycleError>>,
     },
     /// List all configured peers and their state.
     ListPeers {
@@ -529,7 +571,7 @@ pub enum PeerManagerCommand {
         /// Reply returns captured prior configs (the rollback token), in the
         /// same order as `targets` — replaying them as a fresh
         /// `ApplyPeerReshapeSnapshot` restores the pre-apply state.
-        reply: oneshot::Sender<Result<Vec<PeerManagerNeighborConfig>, String>>,
+        reply: oneshot::Sender<Result<Vec<PeerManagerNeighborConfig>, PeerLifecycleError>>,
     },
     /// Atomically validate a candidate `[[fib_tables]]` set against the live
     /// runtime config (peer-group references, reserved/duplicate table ids,
@@ -579,7 +621,7 @@ pub enum PeerManagerCommand {
         /// Peer identity to enable.
         peer: PeerKey,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), PeerLifecycleError>>,
     },
     /// Disable (stop) a peer, optionally with a shutdown reason.
     DisablePeer {
@@ -588,7 +630,7 @@ pub enum PeerManagerCommand {
         /// RFC 8203 shutdown communication reason (pre-encoded).
         reason: Option<Bytes>,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), PeerLifecycleError>>,
     },
     /// Trigger a soft inbound reset (route refresh) for the given families.
     SoftResetIn {
@@ -597,7 +639,7 @@ pub enum PeerManagerCommand {
         /// Families to refresh (empty = all configured).
         families: Vec<(Afi, Safi)>,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), PeerLifecycleError>>,
     },
     /// Trigger soft inbound reset for established peers whose resolved import
     /// policy depends on an external validation cache.

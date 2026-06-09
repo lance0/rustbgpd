@@ -44,7 +44,7 @@ impl PeerManager {
                 result.failures.push(ReconcileFailure {
                     kind: ReconcileFailureKind::Remove,
                     peer: addr.clone(),
-                    error: e,
+                    error: e.to_string(),
                 });
             }
         }
@@ -59,7 +59,7 @@ impl PeerManager {
                 result.failures.push(ReconcileFailure {
                     kind: ReconcileFailureKind::ChangeRemove,
                     peer: addr,
-                    error: e,
+                    error: e.to_string(),
                 });
                 continue;
             }
@@ -74,7 +74,7 @@ impl PeerManager {
                 result.failures.push(ReconcileFailure {
                     kind: ReconcileFailureKind::ChangeAdd,
                     peer: addr,
-                    error: e,
+                    error: e.to_string(),
                 });
             }
         }
@@ -105,7 +105,7 @@ impl PeerManager {
                 result.failures.push(ReconcileFailure {
                     kind: ReconcileFailureKind::Add,
                     peer: addr,
-                    error: e,
+                    error: e.to_string(),
                 });
             }
         }

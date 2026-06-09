@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, PeerKey, PeerManagerNeighborConfig, SessionLifecycleEventType, SetGshutError,
+    ConfigEvent, PeerKey, PeerLifecycleError, PeerManagerNeighborConfig, SessionLifecycleEventType,
+    SetGshutError,
 };
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_transport::{PeerHandle, SessionIdentity, TcpAoConfig};
@@ -56,7 +57,7 @@ impl PeerManager {
         &mut self,
         config: PeerManagerNeighborConfig,
         sync_config_snapshot: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), PeerLifecycleError> {
         self.add_peer_with_admin_state(config, sync_config_snapshot, true)
             .await
     }
@@ -70,32 +71,32 @@ impl PeerManager {
         config: PeerManagerNeighborConfig,
         sync_config_snapshot: bool,
         enabled: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), PeerLifecycleError> {
         let peer_key = PeerKey::new(config.address, config.interface.clone());
         let is_link_local = matches!(config.address, std::net::IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80);
         match (is_link_local, config.interface.as_ref()) {
             (true, None) => {
-                return Err(format!(
+                return Err(PeerLifecycleError::Invalid(format!(
                     "peer {peer_key} is IPv6 link-local and requires an interface"
-                ));
+                )));
             }
             (false, Some(_)) => {
-                return Err(format!(
+                return Err(PeerLifecycleError::Invalid(format!(
                     "peer {peer_key} has an interface but is not IPv6 link-local"
-                ));
+                )));
             }
             _ => {}
         }
         if self.peers.contains_key(&peer_key) {
-            return Err(format!("peer {peer_key} already exists"));
+            return Err(PeerLifecycleError::AlreadyExists(peer_key));
         }
         if let Some(interface) = &config.interface
             && config.scope_id.is_none()
             && let Err(error) = nix::net::if_::if_nametoindex(interface.as_str())
         {
-            return Err(format!(
+            return Err(PeerLifecycleError::Invalid(format!(
                 "peer {peer_key} interface {interface:?} cannot be resolved: {error}"
-            ));
+            )));
         }
 
         let (transport, label, peer_group, import_policy, export_policy, next_config) =
@@ -108,7 +109,7 @@ impl PeerManager {
                         ack: None,
                     },
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| PeerLifecycleError::Invalid(e.to_string()))?;
                 let neighbor = next_config
                     .neighbors
                     .iter()
@@ -117,11 +118,13 @@ impl PeerManager {
                             && neighbor.interface == config.interface
                     })
                     .ok_or_else(|| {
-                        format!("neighbor {peer_key} missing after config snapshot update")
+                        PeerLifecycleError::Internal(format!(
+                            "neighbor {peer_key} missing after config snapshot update"
+                        ))
                     })?;
                 let resolved = next_config
                     .resolve_neighbor(neighbor)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| PeerLifecycleError::Invalid(e.to_string()))?;
                 (
                     resolved.transport_config,
                     resolved.label,
@@ -178,7 +181,9 @@ impl PeerManager {
             && let Err(e) = handle.start().await
         {
             warn!(%address, error = %e, "failed to start peer session");
-            return Err(format!("failed to start peer: {e}"));
+            return Err(PeerLifecycleError::Internal(format!(
+                "failed to start peer: {e}"
+            )));
         }
 
         info!(%address, %remote_asn, "peer added dynamically");
@@ -235,7 +240,7 @@ impl PeerManager {
         &mut self,
         peer: PeerKey,
         sync_config_snapshot: bool,
-    ) -> Result<PeerManagerNeighborConfig, String> {
+    ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         self.delete_peer_checked(peer, sync_config_snapshot, None)
             .await
     }
@@ -244,7 +249,7 @@ impl PeerManager {
         &mut self,
         peer: PeerKey,
         next_tcp_ao: Option<&TcpAoConfig>,
-    ) -> Result<(), String> {
+    ) -> Result<(), PeerLifecycleError> {
         self.delete_peer_checked(peer, false, next_tcp_ao)
             .await
             .map(|_| ())
@@ -253,13 +258,13 @@ impl PeerManager {
     pub(super) async fn reconfigure_peer(
         &mut self,
         config: PeerManagerNeighborConfig,
-    ) -> Result<PeerManagerNeighborConfig, String> {
+    ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         let peer = PeerKey::new(config.address, config.interface.clone());
         let (was_enabled, graceful_shutdown) = self
             .peers
             .get(&peer)
             .map(|managed| (managed.enabled, managed.advertise_graceful_shutdown))
-            .ok_or_else(|| format!("peer {peer} not found"))?;
+            .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
 
         let previous = self
             .delete_peer_checked(peer.clone(), false, config.tcp_ao.as_ref())
@@ -277,12 +282,12 @@ impl PeerManager {
                 )
                 .await
             {
-                Ok(()) => Err(format!(
+                Ok(()) => Err(PeerLifecycleError::Internal(format!(
                     "failed to add reconfigured peer {peer}: {add_error}; previous peer restored"
-                )),
-                Err(restore_error) => Err(format!(
+                ))),
+                Err(restore_error) => Err(PeerLifecycleError::Internal(format!(
                     "failed to add reconfigured peer {peer}: {add_error}; restore previous peer failed: {restore_error}"
-                )),
+                ))),
             };
         }
 
@@ -299,12 +304,12 @@ impl PeerManager {
                 )
                 .await
             {
-                Ok(()) => Err(format!(
+                Ok(()) => Err(PeerLifecycleError::Internal(format!(
                     "failed to restore runtime state for reconfigured peer {peer}: {state_error}; previous peer restored"
-                )),
-                Err(restore_error) => Err(format!(
+                ))),
+                Err(restore_error) => Err(PeerLifecycleError::Internal(format!(
                     "failed to restore runtime state for reconfigured peer {peer}: {state_error}; restore previous peer failed: {restore_error}"
-                )),
+                ))),
             };
         }
 
@@ -314,30 +319,32 @@ impl PeerManager {
     pub(super) async fn apply_peer_reshape_snapshot(
         &mut self,
         targets: Vec<PeerManagerNeighborConfig>,
-    ) -> Result<Vec<PeerManagerNeighborConfig>, String> {
+    ) -> Result<Vec<PeerManagerNeighborConfig>, PeerLifecycleError> {
         let mut seen = BTreeSet::new();
         for target in &targets {
             let peer = PeerKey::new(target.address, target.interface.clone());
             if !seen.insert(peer.clone()) {
-                return Err(format!("peer reshape target {peer} appears more than once"));
+                return Err(PeerLifecycleError::Invalid(format!(
+                    "peer reshape target {peer} appears more than once"
+                )));
             }
             let managed = self
                 .peers
                 .get(&peer)
-                .ok_or_else(|| format!("peer reshape target {peer} is not managed"))?;
+                .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
             if managed.transport_config.tcp_ao != target.tcp_ao {
-                return Err(format!(
+                return Err(PeerLifecycleError::RestartRequired(format!(
                     "peer reshape target {peer} changes tcp_ao; TCP-AO changes require a daemon restart"
-                ));
+                )));
             }
             // Defense in depth: the transaction executor already gates dynamic
             // ranges out of reshape targets, but reconfigure's delete/re-add
             // semantics are wrong for an ephemeral dynamic peer (it would change
             // `is_dynamic` lifecycle/persistence), so refuse one here too.
             if managed.is_dynamic {
-                return Err(format!(
+                return Err(PeerLifecycleError::Invalid(format!(
                     "peer reshape target {peer} is a dynamic peer; reshape transactions reconfigure static neighbors only"
-                ));
+                )));
             }
         }
 
@@ -348,12 +355,12 @@ impl PeerManager {
                 Ok(previous) => priors.push(previous),
                 Err(error) => {
                     return match self.restore_peer_reshape_priors(priors).await {
-                        Ok(()) => Err(format!(
+                        Ok(()) => Err(PeerLifecycleError::Internal(format!(
                             "failed to reconfigure peer {peer}: {error}; prior peers restored"
-                        )),
-                        Err(restore_error) => Err(format!(
+                        ))),
+                        Err(restore_error) => Err(PeerLifecycleError::Internal(format!(
                             "failed to reconfigure peer {peer}: {error}; restore prior peers failed: {restore_error}"
-                        )),
+                        ))),
                     };
                 }
             }
@@ -364,16 +371,18 @@ impl PeerManager {
     async fn restore_peer_reshape_priors(
         &mut self,
         priors: Vec<PeerManagerNeighborConfig>,
-    ) -> Result<(), String> {
+    ) -> Result<(), PeerLifecycleError> {
         // Replays the captured prior configs in reverse of the apply order.
         // `reconfigure_peer` re-reads the live enabled / graceful-shutdown state
         // and re-applies it, so rollback preserves the peer's current admin and
         // GShut state rather than resurrecting a stale transient toggle.
         for prior in priors.into_iter().rev() {
             let peer = PeerKey::new(prior.address, prior.interface.clone());
-            self.reconfigure_peer(prior)
-                .await
-                .map_err(|error| format!("peer reshape rollback failed for {peer}: {error}"))?;
+            self.reconfigure_peer(prior).await.map_err(|error| {
+                PeerLifecycleError::Internal(format!(
+                    "peer reshape rollback failed for {peer}: {error}"
+                ))
+            })?;
         }
         Ok(())
     }
@@ -384,7 +393,7 @@ impl PeerManager {
         previous: PeerManagerNeighborConfig,
         was_enabled: bool,
         graceful_shutdown: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), PeerLifecycleError> {
         if self.peers.contains_key(&peer) {
             self.delete_peer_checked(peer.clone(), false, previous.tcp_ao.as_ref())
                 .await?;
@@ -399,7 +408,7 @@ impl PeerManager {
         &mut self,
         peer: PeerKey,
         graceful_shutdown: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), PeerLifecycleError> {
         // Graceful-shutdown replay is best-effort like normal GSHUT fan-out.
         // The enabled/disabled state itself is applied during add, before a
         // disabled peer can transiently start.
@@ -420,7 +429,7 @@ impl PeerManager {
         peer: PeerKey,
         sync_config_snapshot: bool,
         next_tcp_ao: Option<&TcpAoConfig>,
-    ) -> Result<PeerManagerNeighborConfig, String> {
+    ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         let address = peer.address;
         let current_tcp_ao = self
             .peers
@@ -431,15 +440,15 @@ impl PeerManager {
             .as_ref()
             .is_some_and(|current| next_tcp_ao != Some(current))
         {
-            return Err(format!(
+            return Err(PeerLifecycleError::RestartRequired(format!(
                 "peer {address} uses TCP-AO; removing protected peers requires restart until listener MKT deletion is implemented"
-            ));
+            )));
         }
 
         let mut managed = self
             .peers
             .remove(&peer)
-            .ok_or_else(|| format!("peer {peer} not found"))?;
+            .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
         let removed_config = Self::removed_peer_config(&peer, &managed);
         self.unregister_session(managed.session_id);
         if let Some(pending) = managed.pending_inbound.take() {
@@ -458,7 +467,7 @@ impl PeerManager {
                 &mut self.current_config,
                 &ConfigEvent::NeighborDeleted { peer, ack: None },
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| PeerLifecycleError::Invalid(e.to_string()))?;
         }
 
         // ADR-0067 step 4: drain the deleted peer's BFD session.
@@ -466,10 +475,10 @@ impl PeerManager {
         Ok(removed_config)
     }
 
-    pub(super) async fn enable_peer(&mut self, peer: PeerKey) -> Result<(), String> {
+    pub(super) async fn enable_peer(&mut self, peer: PeerKey) -> Result<(), PeerLifecycleError> {
         let address = peer.address;
         if !self.peers.contains_key(&peer) {
-            return Err(format!("peer {peer} not found"));
+            return Err(PeerLifecycleError::NotFound(peer));
         }
         self.peers.get_mut(&peer).expect("peer present").enabled = true;
         // ADR-0067 step 4b: re-enabling a strict peer must re-apply the withhold
@@ -484,7 +493,7 @@ impl PeerManager {
                 .handle
                 .start()
                 .await
-                .map_err(|e| format!("failed to start peer: {e}"))?;
+                .map_err(|e| PeerLifecycleError::Internal(format!("failed to start peer: {e}")))?;
         }
         self.publish_peer_lifecycle_event(
             &peer,
@@ -505,13 +514,13 @@ impl PeerManager {
         &mut self,
         peer: PeerKey,
         reason: Option<bytes::Bytes>,
-    ) -> Result<(), String> {
+    ) -> Result<(), PeerLifecycleError> {
         let address = peer.address;
         let pending = {
             let managed = self
                 .peers
                 .get_mut(&peer)
-                .ok_or_else(|| format!("peer {peer} not found"))?;
+                .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
             managed.enabled = false;
             managed.pending_inbound.take()
         };
@@ -522,12 +531,12 @@ impl PeerManager {
         let managed = self
             .peers
             .get_mut(&peer)
-            .ok_or_else(|| format!("peer {peer} not found"))?;
+            .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
         managed
             .handle
             .stop(reason)
             .await
-            .map_err(|e| format!("failed to stop peer: {e}"))?;
+            .map_err(|e| PeerLifecycleError::Internal(format!("failed to stop peer: {e}")))?;
         self.publish_peer_lifecycle_event(
             &peer,
             SessionLifecycleEventType::PeerDisabled,
@@ -672,12 +681,12 @@ impl PeerManager {
         &self,
         peer: PeerKey,
         families: Vec<(Afi, Safi)>,
-    ) -> Result<(), String> {
+    ) -> Result<(), PeerLifecycleError> {
         let address = peer.address;
         let managed = self
             .peers
             .get(&peer)
-            .ok_or_else(|| format!("not found: peer {peer}"))?;
+            .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
 
         // Determine which families to request refresh for
         let target_families = if families.is_empty() {
@@ -690,7 +699,9 @@ impl PeerManager {
         for (afi, safi) in &target_families {
             if let Err(e) = managed.handle.send_route_refresh(*afi, *safi).await {
                 warn!(%address, error = %e, "failed to send route refresh");
-                return Err(format!("send failed: route refresh to {address}: {e}"));
+                return Err(PeerLifecycleError::Internal(format!(
+                    "send failed: route refresh to {address}: {e}"
+                )));
             }
         }
 

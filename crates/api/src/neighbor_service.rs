@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
 use crate::peer_types::{
-    ConfigEvent, DynamicRangeError, PeerInfo, PeerKey, PeerManagerCommand,
+    ConfigEvent, DynamicRangeError, PeerInfo, PeerKey, PeerLifecycleError, PeerManagerCommand,
     PeerManagerNeighborConfig, RemovedDynamicRange,
 };
 use crate::proto;
@@ -170,6 +170,18 @@ fn dynamic_range_error_status(error: DynamicRangeError) -> Status {
     }
 }
 
+pub(crate) fn peer_lifecycle_error_status(error: PeerLifecycleError) -> Status {
+    match error {
+        PeerLifecycleError::AlreadyExists(peer) => {
+            Status::already_exists(format!("peer {peer} already exists"))
+        }
+        PeerLifecycleError::NotFound(peer) => Status::not_found(format!("peer {peer} not found")),
+        PeerLifecycleError::Invalid(message) => Status::invalid_argument(message),
+        PeerLifecycleError::RestartRequired(message) => Status::failed_precondition(message),
+        PeerLifecycleError::Internal(message) => Status::internal(message),
+    }
+}
+
 async fn add_dynamic_range(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     prefix: String,
@@ -212,7 +224,7 @@ async fn add_static_peer(
     reply_rx
         .await
         .map_err(|_| Status::internal("peer manager dropped reply"))?
-        .map_err(Status::already_exists)
+        .map_err(peer_lifecycle_error_status)
 }
 
 async fn delete_static_peer(
@@ -233,7 +245,7 @@ async fn delete_static_peer(
     reply_rx
         .await
         .map_err(|_| Status::internal("peer manager dropped reply"))?
-        .map_err(Status::not_found)
+        .map_err(peer_lifecycle_error_status)
 }
 
 async fn apply_peer_manager_config_event(
@@ -730,7 +742,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(Status::not_found)?;
+            .map_err(peer_lifecycle_error_status)?;
 
         Ok(Response::new(proto::EnableNeighborResponse {}))
     }
@@ -766,13 +778,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(|e| {
-                if e.starts_with("not found:") {
-                    Status::not_found(e)
-                } else {
-                    Status::internal(e)
-                }
-            })?;
+            .map_err(peer_lifecycle_error_status)?;
 
         Ok(Response::new(proto::SoftResetInResponse {}))
     }
@@ -808,7 +814,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(Status::not_found)?;
+            .map_err(peer_lifecycle_error_status)?;
 
         Ok(Response::new(proto::DisableNeighborResponse {}))
     }
@@ -1068,6 +1074,34 @@ mod tests {
             prefix_orf_receive: false,
             import_policy: None,
             export_policy: None,
+        }
+    }
+
+    #[test]
+    fn peer_lifecycle_errors_map_by_variant() {
+        let peer = PeerKey::new("10.0.0.2".parse().unwrap(), None);
+        let cases = [
+            (
+                PeerLifecycleError::AlreadyExists(peer.clone()),
+                tonic::Code::AlreadyExists,
+            ),
+            (PeerLifecycleError::NotFound(peer), tonic::Code::NotFound),
+            (
+                PeerLifecycleError::Invalid("bad input".to_string()),
+                tonic::Code::InvalidArgument,
+            ),
+            (
+                PeerLifecycleError::RestartRequired("restart required".to_string()),
+                tonic::Code::FailedPrecondition,
+            ),
+            (
+                PeerLifecycleError::Internal("session failed".to_string()),
+                tonic::Code::Internal,
+            ),
+        ];
+
+        for (error, code) in cases {
+            assert_eq!(peer_lifecycle_error_status(error).code(), code);
         }
     }
 

@@ -11,9 +11,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, DynamicRangePolicyTarget, PeerKey, PeerManagerCommand, PeerManagerNeighborConfig,
-    ResolvedPeerPolicy, RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus,
-    StageConfigSnapshotError,
+    ConfigEvent, DynamicRangePolicyTarget, PeerKey, PeerLifecycleError, PeerManagerCommand,
+    PeerManagerNeighborConfig, ResolvedPeerPolicy, RuntimeConfigTransactionPlanError,
+    RuntimeConfigTransactionStatus, StageConfigSnapshotError,
 };
 use rustbgpd_api::proto;
 use rustbgpd_api::server::{
@@ -1602,7 +1602,7 @@ async fn send_apply_peer_reshape_snapshot(
                 "peer manager dropped peer-reshape reply".to_string(),
             )
         })?
-        .map_err(ConfigTransactionApplyError::Internal)
+        .map_err(peer_lifecycle_error_to_apply_error)
 }
 
 async fn rollback_live_policy_and_snapshot(
@@ -1782,7 +1782,7 @@ async fn add_static_peer(
                 "peer manager dropped static-neighbor add reply".to_string(),
             )
         })?
-        .map_err(ConfigTransactionApplyError::FailedPrecondition)
+        .map_err(peer_lifecycle_error_to_apply_error)
 }
 
 async fn delete_static_peer(
@@ -1807,7 +1807,7 @@ async fn delete_static_peer(
                 "peer manager dropped static-neighbor delete reply".to_string(),
             )
         })?
-        .map_err(ConfigTransactionApplyError::FailedPrecondition)
+        .map_err(peer_lifecycle_error_to_apply_error)
 }
 
 async fn reconfigure_static_peer(
@@ -1831,7 +1831,7 @@ async fn reconfigure_static_peer(
                 "peer manager dropped static-neighbor reconfigure reply".to_string(),
             )
         })?
-        .map_err(ConfigTransactionApplyError::FailedPrecondition)
+        .map_err(peer_lifecycle_error_to_apply_error)
 }
 
 enum AppliedStaticOp {
@@ -1995,6 +1995,24 @@ fn stage_config_snapshot_error_to_apply_error(
         error @ StageConfigSnapshotError::SerializePreviousSnapshot(_) => {
             ConfigTransactionApplyError::Internal(error.to_string())
         }
+    }
+}
+
+fn peer_lifecycle_error_to_apply_error(error: PeerLifecycleError) -> ConfigTransactionApplyError {
+    match error {
+        PeerLifecycleError::AlreadyExists(peer) => {
+            ConfigTransactionApplyError::FailedPrecondition(format!("peer {peer} already exists"))
+        }
+        PeerLifecycleError::NotFound(peer) => {
+            ConfigTransactionApplyError::FailedPrecondition(format!("peer {peer} not found"))
+        }
+        PeerLifecycleError::Invalid(message) => {
+            ConfigTransactionApplyError::InvalidArgument(message)
+        }
+        PeerLifecycleError::RestartRequired(message) => {
+            ConfigTransactionApplyError::FailedPrecondition(message)
+        }
+        PeerLifecycleError::Internal(message) => ConfigTransactionApplyError::Internal(message),
     }
 }
 
@@ -2437,6 +2455,47 @@ peer_group = "edge"
     }
 
     #[test]
+    fn peer_lifecycle_errors_map_to_transaction_apply_classes() {
+        let peer = PeerKey::new("10.0.0.2".parse().unwrap(), None);
+        let duplicate =
+            peer_lifecycle_error_to_apply_error(PeerLifecycleError::AlreadyExists(peer.clone()));
+        assert!(matches!(
+            duplicate,
+            ConfigTransactionApplyError::FailedPrecondition(ref message)
+                if message.contains("already exists")
+        ));
+
+        let missing = peer_lifecycle_error_to_apply_error(PeerLifecycleError::NotFound(peer));
+        assert!(matches!(
+            missing,
+            ConfigTransactionApplyError::FailedPrecondition(ref message)
+                if message.contains("not found")
+        ));
+
+        let invalid =
+            peer_lifecycle_error_to_apply_error(PeerLifecycleError::Invalid("bad".to_string()));
+        assert!(matches!(
+            invalid,
+            ConfigTransactionApplyError::InvalidArgument(ref message) if message == "bad"
+        ));
+
+        let restart = peer_lifecycle_error_to_apply_error(PeerLifecycleError::RestartRequired(
+            "restart".to_string(),
+        ));
+        assert!(matches!(
+            restart,
+            ConfigTransactionApplyError::FailedPrecondition(ref message) if message == "restart"
+        ));
+
+        let internal =
+            peer_lifecycle_error_to_apply_error(PeerLifecycleError::Internal("boom".to_string()));
+        assert!(matches!(
+            internal,
+            ConfigTransactionApplyError::Internal(ref message) if message == "boom"
+        ));
+    }
+
+    #[test]
     fn transaction_plan_errors_map_without_string_matching() {
         let stale = plan_error_to_status(RuntimeConfigTransactionPlanError::StaleSnapshot {
             expected: "old".to_string(),
@@ -2559,7 +2618,7 @@ peer_group = "edge"
                         .iter()
                         .any(|peer| PeerKey::new(peer.address, peer.interface.clone()) == key)
                     {
-                        let _ = reply.send(Err(format!("peer {key} already exists")));
+                        let _ = reply.send(Err(PeerLifecycleError::AlreadyExists(key)));
                     } else {
                         peers.push(config);
                         let _ = reply.send(Ok(()));
@@ -2572,7 +2631,7 @@ peer_group = "edge"
                     }) {
                         let _ = reply.send(Ok(peers.remove(index)));
                     } else {
-                        let _ = reply.send(Err(format!("peer {peer} not found")));
+                        let _ = reply.send(Err(PeerLifecycleError::NotFound(peer)));
                     }
                 }
                 PeerManagerCommand::ReconfigurePeer { config, reply } => {
@@ -2591,7 +2650,7 @@ peer_group = "edge"
     fn fake_replace_peer_config(
         peers: &mut [PeerManagerNeighborConfig],
         config: PeerManagerNeighborConfig,
-    ) -> Result<PeerManagerNeighborConfig, String> {
+    ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         let key = PeerKey::new(config.address, config.interface.clone());
         if let Some(existing) = peers
             .iter_mut()
@@ -2599,19 +2658,21 @@ peer_group = "edge"
         {
             Ok(std::mem::replace(existing, config))
         } else {
-            Err(format!("peer {key} not found"))
+            Err(PeerLifecycleError::NotFound(key))
         }
     }
 
     fn fake_apply_peer_reshape_snapshot(
         peers: &mut [PeerManagerNeighborConfig],
         targets: Vec<PeerManagerNeighborConfig>,
-    ) -> Result<Vec<PeerManagerNeighborConfig>, String> {
+    ) -> Result<Vec<PeerManagerNeighborConfig>, PeerLifecycleError> {
         let mut seen = BTreeSet::new();
         for target in &targets {
             let key = PeerKey::new(target.address, target.interface.clone());
             if !seen.insert(key.clone()) {
-                return Err(format!("peer reshape target {key} appears more than once"));
+                return Err(PeerLifecycleError::Invalid(format!(
+                    "peer reshape target {key} appears more than once"
+                )));
             }
         }
         let mut priors = Vec::with_capacity(targets.len());
@@ -2666,7 +2727,7 @@ peer_group = "edge"
                         .iter()
                         .any(|peer| PeerKey::new(peer.address, peer.interface.clone()) == key)
                     {
-                        let _ = reply.send(Err(format!("peer {key} already exists")));
+                        let _ = reply.send(Err(PeerLifecycleError::AlreadyExists(key)));
                     } else {
                         peers.push(config);
                         let _ = reply.send(Ok(()));
@@ -2679,7 +2740,7 @@ peer_group = "edge"
                     }) {
                         let _ = reply.send(Ok(peers.remove(index)));
                     } else {
-                        let _ = reply.send(Err(format!("peer {peer} not found")));
+                        let _ = reply.send(Err(PeerLifecycleError::NotFound(peer)));
                     }
                 }
                 PeerManagerCommand::ReconfigurePeer { config, reply } => {
@@ -2691,7 +2752,7 @@ peer_group = "edge"
                         let previous = std::mem::replace(&mut peers[index], config);
                         let _ = reply.send(Ok(previous));
                     } else {
-                        let _ = reply.send(Err(format!("peer {key} not found")));
+                        let _ = reply.send(Err(PeerLifecycleError::NotFound(key)));
                     }
                 }
                 _ => panic!("unexpected peer-manager command in snapshot transaction test"),

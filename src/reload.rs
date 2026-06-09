@@ -3409,8 +3409,10 @@ hold_time = 90
                     | PeerManagerCommand::SetGlobalImportChain { reply, .. }
                     | PeerManagerCommand::SetGlobalExportChain { reply, .. }
                     | PeerManagerCommand::ClearGlobalImportChain { reply }
-                    | PeerManagerCommand::ClearGlobalExportChain { reply }
-                    | PeerManagerCommand::SoftResetIn { reply, .. } => {
+                    | PeerManagerCommand::ClearGlobalExportChain { reply } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerManagerCommand::SoftResetIn { reply, .. } => {
                         let _ = reply.send(Ok(()));
                     }
                     PeerManagerCommand::ReconcilePeers { reply, .. } => {

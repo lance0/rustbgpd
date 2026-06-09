@@ -140,6 +140,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Typed static-peer lifecycle command errors.** Static peer add/delete,
+  reconfigure, peer reshape, enable/disable, and soft-reset replies now carry a
+  typed lifecycle error instead of `String`, so gRPC and config-transaction
+  callers map duplicate, missing-peer, invalid-input, restart-required, and
+  internal failures to stable status classes without substring matching.
+
 - **Peer-group reload-matrix docs drift.** The reload matrix and its structural
   test now match the schema: `[peer_groups.<name>]` includes policy and ORF
   inheritance fields, while `tcp_ao` remains static-neighbor-only and is not

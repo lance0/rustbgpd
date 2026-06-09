@@ -645,7 +645,7 @@ impl PeerManager {
                         if let Some(managed) = self.peers.get_mut(&peer_key) {
                             managed.pending_refresh = true;
                         }
-                        return Err(error);
+                        return Err(error.to_string());
                     }
                     RefreshFailureHandling::BestEffortRearm => {
                         if let Some(managed) = self.peers.get_mut(&peer_key) {
@@ -1071,14 +1071,18 @@ impl PeerManager {
 
             if let Some(cfg) = next_peer_config.as_ref() {
                 self.delete_peer_for_reconfigure(peer_key, cfg.tcp_ao.as_ref())
-                    .await?;
+                    .await
+                    .map_err(|error| error.to_string())?;
             } else {
-                self.delete_peer(peer_key, false).await?;
+                self.delete_peer(peer_key, false)
+                    .await
+                    .map_err(|error| error.to_string())?;
             }
 
             if let Some(cfg) = next_peer_config {
                 self.add_peer_with_admin_state(cfg, false, was_enabled)
-                    .await?;
+                    .await
+                    .map_err(|error| error.to_string())?;
                 affected_peer_count += 1;
             }
         }
