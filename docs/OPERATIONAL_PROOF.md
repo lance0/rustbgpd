@@ -69,7 +69,7 @@ Useful commands and entry points:
 ```bash
 cargo test --workspace --no-fail-fast
 cargo clippy --workspace --all-targets -- -D warnings
-RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
+cargo doc --workspace --no-deps  # -D warnings pinned in .cargo/config.toml
 
 bench/compare-criterion.sh --package rustbgpd-rib --bench rib_ops
 bench/compare-rib-memory.sh --base origin/main --head HEAD --profile quick
