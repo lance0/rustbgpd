@@ -636,7 +636,9 @@ mod linux {
                 if d.at > now {
                     break;
                 }
-                let Reverse(d) = self.timers.pop().expect("peeked");
+                let Some(Reverse(d)) = self.timers.pop() else {
+                    break;
+                };
                 // Skip stale (cancelled or superseded) timers.
                 let Some(entry) = self.sessions.get_mut(&d.peer) else {
                     continue;
@@ -962,8 +964,10 @@ mod linux {
         } else {
             (libc::IPPROTO_IP, libc::IP_RECVTTL)
         };
-        let optlen = libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>())
-            .expect("c_int size fits socklen_t");
+        let Ok(optlen) = libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>()) else {
+            warn!("failed to enable BFD recv TTL: c_int size does not fit socklen_t");
+            return;
+        };
         // SAFETY: `fd` is a valid socket fd we own; `&on` points to a live
         // c_int of the declared length for the option's lifetime.
         let ret =

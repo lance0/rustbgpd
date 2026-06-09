@@ -146,6 +146,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   callers map duplicate, missing-peer, invalid-input, restart-required, and
   internal failures to stable status classes without substring matching.
 
+- **Runtime `expect` tail cleanup.** The RIB prefix-trie wrapper no longer
+  relies on `expect(...)` when converting canonical `Prefix` values to `ipnet`
+  trie keys. BFD runtime setup and timer processing now handle impossible
+  socket-length conversion and post-peek timer-pop failures as warnings or
+  no-op fallbacks instead of panicking. Normal behavior is unchanged.
+
 - **Peer-group reload-matrix docs drift.** The reload matrix and its structural
   test now match the schema: `[peer_groups.<name>]` includes policy and ORF
   inheritance fields, while `tcp_ao` remains static-neighbor-only and is not
