@@ -36,7 +36,8 @@ Options:
                           verdict; noisier rows stay inconclusive (default: 10).
   --verdict-min-attempts N
                           Minimum completed A/B attempts before verdicts can
-                          fail the run (default: 3).
+                          fail the run; must be at least 2 because verdicts use
+                          across-attempt stddev/min..max (default: 3).
   --keep-worktrees        Leave temporary git worktrees in the output directory
   -h, --help              Show this help
 
@@ -194,8 +195,8 @@ if ! [[ "$attempts" =~ ^[0-9]+$ ]] || [[ "$attempts" -lt 1 ]]; then
   echo "error: --attempts must be a positive integer (got '${attempts}')" >&2
   exit 1
 fi
-if ! [[ "$verdict_min_attempts" =~ ^[0-9]+$ ]] || [[ "$verdict_min_attempts" -lt 1 ]]; then
-  echo "error: --verdict-min-attempts must be a positive integer (got '${verdict_min_attempts}')" >&2
+if ! [[ "$verdict_min_attempts" =~ ^[0-9]+$ ]] || [[ "$verdict_min_attempts" -lt 2 ]]; then
+  echo "error: --verdict-min-attempts must be an integer >= 2 (got '${verdict_min_attempts}')" >&2
   exit 1
 fi
 if ! python3 - "$regression_threshold_pct" <<'PY'
