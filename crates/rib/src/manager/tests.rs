@@ -244,6 +244,44 @@ fn policy_metric_value(
         .map_or(0.0, |metric| metric.get_counter().value())
 }
 
+fn gauge_metric_value(metrics: &BgpMetrics, name: &str, labels: &[(&str, &str)]) -> f64 {
+    metrics
+        .registry()
+        .gather()
+        .iter()
+        .find(|family| family.name() == name)
+        .and_then(|family| {
+            family.metric.iter().find(|metric| {
+                labels.iter().all(|(expected_name, expected_value)| {
+                    metric.get_label().iter().any(|label| {
+                        label.name() == *expected_name && label.value() == *expected_value
+                    })
+                })
+            })
+        })
+        .map_or(0.0, |metric| metric.get_gauge().value())
+}
+
+fn assert_refresh_metrics(
+    metrics: &BgpMetrics,
+    peer: &str,
+    afi_safi: &str,
+    active: f64,
+    stale: f64,
+) {
+    let labels = &[("peer", peer), ("afi_safi", afi_safi)];
+    let observed_active = gauge_metric_value(metrics, "bgp_route_refresh_in_progress", labels);
+    let observed_stale = gauge_metric_value(metrics, "bgp_route_refresh_stale_entries", labels);
+    assert!(
+        (observed_active - active).abs() < f64::EPSILON,
+        "active refresh gauge mismatch: expected {active}, observed {observed_active}"
+    );
+    assert!(
+        (observed_stale - stale).abs() < f64::EPSILON,
+        "stale refresh gauge mismatch: expected {stale}, observed {observed_stale}"
+    );
+}
+
 fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
     Route {
         prefix: Prefix::V4(prefix),
@@ -4878,7 +4916,8 @@ async fn enhanced_route_refresh_replacement_preserves_refreshed_route() {
 #[tokio::test]
 async fn enhanced_route_refresh_eorr_sweeps_unreplaced_route() {
     let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let metrics = BgpMetrics::new();
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let handle = tokio::spawn(manager.run());
 
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -4911,6 +4950,7 @@ async fn enhanced_route_refresh_eorr_sweeps_unreplaced_route() {
         .await
         .unwrap();
     reply_rx.await.unwrap();
+    assert_refresh_metrics(&metrics, "10.0.0.1", "ipv4_unicast", 1.0, 2.0);
 
     tx.send(RibUpdate::RoutesReceived {
         peer,
@@ -4923,7 +4963,12 @@ async fn enhanced_route_refresh_eorr_sweeps_unreplaced_route() {
     })
     .await
     .unwrap();
-    tokio::task::yield_now().await;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryLocRibCount { reply: reply_tx })
+        .await
+        .unwrap();
+    reply_rx.await.unwrap();
+    assert_refresh_metrics(&metrics, "10.0.0.1", "ipv4_unicast", 1.0, 1.0);
 
     tx.send(RibUpdate::EndRouteRefresh {
         peer,
@@ -4940,6 +4985,7 @@ async fn enhanced_route_refresh_eorr_sweeps_unreplaced_route() {
     let received = query_received_routes(&tx, peer).await;
     assert_eq!(received.len(), 1);
     assert_eq!(received[0].prefix, Prefix::V4(prefix1));
+    assert_refresh_metrics(&metrics, "10.0.0.1", "ipv4_unicast", 0.0, 0.0);
 
     drop(tx);
     handle.await.unwrap();

@@ -83,6 +83,8 @@ pub struct RibManager {
     refresh_stale_flowspec: HashMap<IpAddr, HashSet<(Afi, FlowSpecRule, u32)>>,
     /// EVPN routes still awaiting replacement during an inbound refresh.
     refresh_stale_evpn: HashMap<IpAddr, HashSet<rustbgpd_wire::EvpnRouteKey>>,
+    /// O(1) per-peer/per-family stale-entry counts for refresh observability.
+    refresh_stale_counts: HashMap<(IpAddr, Afi, Safi), usize>,
     /// Peers currently undergoing graceful restart, keyed by peer address.
     /// Value is the set of (AFI, SAFI) families still awaiting End-of-RIB.
     gr_peers: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
@@ -396,6 +398,7 @@ impl RibManager {
             refresh_stale_routes: HashMap::new(),
             refresh_stale_flowspec: HashMap::new(),
             refresh_stale_evpn: HashMap::new(),
+            refresh_stale_counts: HashMap::new(),
             gr_peers: HashMap::new(),
             gr_stale_deadlines: HashMap::new(),
             gr_stale_routes_time: HashMap::new(),
@@ -485,6 +488,8 @@ impl RibManager {
         self.refresh_stale_routes.remove(&peer);
         self.refresh_stale_flowspec.remove(&peer);
         self.refresh_stale_evpn.remove(&peer);
+        self.refresh_stale_counts
+            .retain(|(stale_peer, _, _), _| *stale_peer != peer);
         self.refresh_deadlines
             .retain(|(stale_peer, _, _), _| *stale_peer != peer);
     }

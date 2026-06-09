@@ -478,16 +478,16 @@ an ADR "Deferred" section that points back here. Tightened, not dropped.
   helper aware of confederation sub-AS topology. The current gate is correct for
   the traditional EBGP/iBGP topology today.
 
-- **Wire / API strictness items.** Typed error variants for API deletion
-  handlers (today deletion matches `error.contains("still referenced")` —
-  fragile string coupling); unknown FlowSpec component forward-compatibility
-  (component types >13 hard-error today; should skip-to-allow future RFC
-  extensions); large-community duplicate normalization on receipt/encode (stored
-  and re-advertised unchanged today); ERR-window / pending-refresh-stale gauges;
-  inbound BoRR/EoRR retry on channel-full (dropped-with-warning today, unlike
-  outbound which has `pending_refresh` retry); MRT snapshot encode allocation
-  pressure on very large dumps; BMP periodic-stats scalability (serial
-  `query_state().await` per peer) and BMP client connect-loop shutdown
+- **Wire / API strictness items.** Continue typed error variants where
+  API-visible peer-manager / RIB boundaries still return opaque `String`
+  errors; large-community duplicate normalization on receipt/encode (stored and
+  re-advertised unchanged today); MRT snapshot encode allocation pressure on
+  very large dumps; BMP periodic-stats scalability (serial `query_state().await`
+  per peer) and BMP client connect-loop shutdown. FlowSpec unknown component
+  pass-through was investigated and rejected: RFC 8955 treats unknown component
+  types as malformed NLRI. Inbound BoRR/EoRR channel-full retry was also
+  investigated and rejected: the receive path already backpressures with
+  `send().await`.
   observation; SIGHUP reconcile rollback semantics (reports structured per-peer
   failures and keeps the prior snapshot, but does not roll back already-applied
   runtime peer changes); dynamic-neighbor `handle_inbound` split for readability;
