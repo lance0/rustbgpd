@@ -13,6 +13,14 @@ Brief description of what this PR does and why.
 - [ ] `cargo fmt --check` clean
 - [ ] Relevant interop test run (if protocol/transport change)
 
+## Docs / release notes
+
+- [ ] CHANGELOG.md updated, or intentionally not needed
+- [ ] ROADMAP.md updated, or intentionally not needed
+- [ ] User/operator docs updated, or intentionally not needed
+- [ ] If this PR touches a hot tracking doc, the edit follows the
+      low-conflict convention in CONTRIBUTING.md
+
 ## Related issues
 
 Closes #

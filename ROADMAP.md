@@ -501,13 +501,14 @@ Cross-cutting cleanups that don't move user-facing capability on their own but
 lower the cost of every future PR. None block a release — grab one when your
 branch is between features.
 
-- [ ] **Doc-collision discipline for `ROADMAP.md` / `CHANGELOG.md` /
+- [x] **Doc-collision discipline for `ROADMAP.md` / `CHANGELOG.md` /
   `docs/evpn-alpha-soak.md` / `docs/evpn-enablement.md`.** Multi-PR batches keep
-  conflicting on the same handful of rows. Lighter-touch fixes: append-only
-  convention for `[Unreleased]` (newest entry at the bottom of its subsection),
-  separate "shipped this PR" sentences rather than rewriting summary prose, one
-  row per concern in the roadmap. Heavier option if drift continues: a
-  structured manifest the docs are generated from.
+  conflicting on the same handful of rows. The lightweight convention is now
+  documented in `CONTRIBUTING.md`, prompted in the PR template, and checked in
+  `docs/RELEASE_CHECKLIST.md`: append `[Unreleased]` entries within their
+  subsection, keep one roadmap row per concern, and update exact tracking-doc
+  gates instead of rewriting unrelated summary prose. A generated manifest stays
+  deferred unless this process guidance fails to reduce drift.
 - [ ] **Test fixture extraction into a shared `test-support` surface.** Helpers
   like `route_event`, `session_event`, `policy_event`, `lifecycle_event`, and
   the per-test config builders have drifted across `crates/api`, `crates/cli`,

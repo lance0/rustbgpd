@@ -155,6 +155,26 @@ These are not guidelines — they are enforced invariants:
 - **New protocol behavior:** RFC citation and proposed interop test
 - **New features:** Update CHANGELOG.md and relevant docs
 
+### Documentation Update Discipline
+
+Multi-PR batches often touch the same release and roadmap files. Keep doc
+updates low-conflict and reviewable:
+
+- **CHANGELOG.md `[Unreleased]`:** append new entries to the bottom of the
+  relevant subsection (`Added`, `Changed`, `Fixed`, etc.) instead of rewriting
+  existing entries or resorting the whole block. Prefer one compact entry per
+  PR concern.
+- **ROADMAP.md:** use one row or checkbox per concern. When a PR ships one
+  slice of a broader item, update that row in place with a short "shipped /
+  remaining" sentence instead of rewriting surrounding roadmap prose.
+- **Feature tracking docs:** in `docs/evpn-alpha-soak.md`,
+  `docs/evpn-enablement.md`, and similar matrices, update the exact gate or row
+  your PR owns. Avoid broad summary rewrites unless the feature state actually
+  changed across the whole page.
+- **Process-only docs PRs:** do not add a CHANGELOG entry unless the process
+  change affects users or operators. The PR description should explain the
+  intentional no-op.
+
 ### What Requires Discussion First
 
 - Architectural changes (open an issue)

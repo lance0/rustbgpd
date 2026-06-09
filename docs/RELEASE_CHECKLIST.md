@@ -29,6 +29,22 @@ These run on every push and PR (`.github/workflows/ci.yml`,
       M29, M30, M34, M35, M35b, M35c against FRR 10.3.1 via
       containerlab
 
+## Documentation hygiene
+
+Before tagging, skim the release and tracking docs for the low-conflict
+convention in `CONTRIBUTING.md`:
+
+- [ ] `CHANGELOG.md` `[Unreleased]` entries are in the right subsections and
+      read as compact per-PR entries rather than broad rewrites of older
+      shipped text.
+- [ ] `ROADMAP.md` has one row or checkbox per remaining concern; shipped
+      slices say what landed and what remains.
+- [ ] Hot tracking docs such as `docs/evpn-alpha-soak.md` and
+      `docs/evpn-enablement.md` update exact gates/rows instead of rewriting
+      unrelated summary prose.
+- [ ] Process-only documentation changes intentionally omit CHANGELOG entries
+      unless they affect users or operators.
+
 ## gRPC authorization surface (per-release gate)
 
 The `crates/api/src/authz.rs` `METHODS` matrix is the code-level source
