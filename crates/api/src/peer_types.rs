@@ -229,16 +229,18 @@ impl std::error::Error for SetGshutError {}
 /// checks when the caller needs to choose a stable gRPC status code.
 #[derive(Debug, Clone)]
 pub enum PeerLifecycleError {
-    /// Static peer already exists (maps to `ALREADY_EXISTS`).
+    /// Static peer already exists (gRPC callers map to `ALREADY_EXISTS`).
     AlreadyExists(PeerKey),
-    /// Target peer is not managed (maps to `NOT_FOUND`).
+    /// Target peer is not managed (gRPC callers map to `NOT_FOUND`).
     NotFound(PeerKey),
-    /// Operator supplied invalid peer/config input (maps to `INVALID_ARGUMENT`).
+    /// Operator supplied invalid peer/config input (gRPC callers map to
+    /// `INVALID_ARGUMENT`).
     Invalid(String),
     /// Operation requires daemon/session reconstruction outside this hot path
-    /// (maps to `FAILED_PRECONDITION`).
+    /// (gRPC callers map to `FAILED_PRECONDITION`).
     RestartRequired(String),
-    /// Session, RIB, restore, or internal snapshot failure (maps to `INTERNAL`).
+    /// Session, RIB, restore, or internal snapshot failure (gRPC callers map
+    /// to `INTERNAL`).
     Internal(String),
 }
 
