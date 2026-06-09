@@ -96,26 +96,10 @@ impl RibManager {
             self.recompute_and_distribute_evpn(&evpn_affected);
         }
 
-        self.outbound_peers.remove(&peer);
-        self.adj_ribs_out.remove(&peer);
-        self.peer_export_policies.remove(&peer);
-        self.peer_sendable_families.remove(&peer);
-        self.peer_is_ebgp.remove(&peer);
-        self.peer_is_rr_client.remove(&peer);
-        self.peer_add_path_send_max.remove(&peer);
-        self.peer_add_path_send_families.remove(&peer);
-        self.dirty_peers.remove(&peer);
-        self.pending_eor.remove(&peer);
-        self.pending_route_batches.retain(|prb| prb.peer() != peer);
-        // Drop the per-peer export-policy aggregates alongside the rest
-        // of the outbound peer state. A GR-driven reconnect lands on a
-        // fresh PeerSession (import-side counters reset there too), so
-        // leaving the export totals would create a directional asymmetry
-        // and confuse `rustbgpctl neighbor show` ("import shows 0,
-        // export still carrying yesterday's counts"). Matches the
-        // PeerDown cleanup in handle_peer_down.
-        self.export_policy_stats.remove(&peer);
-        self.clear_peer_refresh_state(peer);
+        // Shared per-session outbound teardown (Adj-RIB-Out, export
+        // policies/stats, ORF filter + gate, refresh state, ...). Peer
+        // identity maps survive — the peer is expected back under GR.
+        self.clear_outbound_peer_state(peer);
 
         let deadline =
             tokio::time::Instant::now() + std::time::Duration::from_secs(u64::from(restart_time));

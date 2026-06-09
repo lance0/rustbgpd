@@ -157,6 +157,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Graceful-restart flaps no longer leak per-session ORF state.** The GR
+  teardown path kept the dead session's installed ORF filter set and RFC 5291
+  §6 initial-advertisement gate. A peer re-establishing without ORF inherited
+  the stale gate — its family flooded nothing indefinitely (a session that
+  never negotiated ORF has no reason to send the ROUTE-REFRESH that lifts a
+  gate) — or kept being constrained by the dead session's prefix filter. The
+  shared per-session outbound teardown is now one helper used by both the
+  `PeerDown` and GR paths, so the two cleanup lists can no longer drift.
+
 - **Loc-RIB now detects same-peer payload churn (unicast + FlowSpec).** A peer
   re-advertising the same prefix with a new next-hop or changed attributes
   (communities, equal-length AS_PATH content), or the same FlowSpec rule with a

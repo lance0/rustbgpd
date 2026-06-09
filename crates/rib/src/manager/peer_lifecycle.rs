@@ -54,40 +54,56 @@ impl RibManager {
             }
         }
 
-        self.adj_ribs_out.remove(&peer);
         self.metrics
             .set_adj_rib_out_prefixes(&peer.to_string(), "all", 0);
         self.metrics
             .set_adj_rib_out_prefixes(&peer.to_string(), "evpn", 0);
+        self.clear_outbound_peer_state(peer);
+        self.peer_asn.remove(&peer);
+        self.peer_group.remove(&peer);
+        self.peer_bgp_id.remove(&peer);
+        self.force_outbound_peers.remove(&peer);
+        self.clear_peer_refresh_metrics(peer);
+    }
+
+    /// Clear the per-session outbound state shared by the `PeerDown` and
+    /// graceful-restart teardown paths. Keeping ONE list prevents the two
+    /// cleanup sites from drifting — the GR path historically missed maps
+    /// added later (the ORF filter/gate leak). Peer-identity maps
+    /// (`peer_asn`/`peer_group`/`peer_bgp_id`) stay out: GR keeps them for
+    /// the returning peer; `PeerDown` removes them at its call site.
+    pub(super) fn clear_outbound_peer_state(&mut self, peer: IpAddr) {
         self.outbound_peers.remove(&peer);
+        self.adj_ribs_out.remove(&peer);
         self.peer_export_policies.remove(&peer);
         self.peer_sendable_families.remove(&peer);
         self.peer_is_ebgp.remove(&peer);
         self.peer_is_rr_client.remove(&peer);
         self.peer_add_path_send_max.remove(&peer);
         self.peer_add_path_send_families.remove(&peer);
+        // ORF state is per-session (RFC 5291): a surviving §6 gate can never
+        // be lifted by a reconnecting session that didn't negotiate ORF
+        // (suppressing the family's flood indefinitely), and a surviving
+        // filter keeps constraining churn the new session never asked to
+        // filter. `handle_peer_up` re-arms the gate from the new session's
+        // `negotiated_orf_recv`.
         self.peer_orf_filters.remove(&peer);
         self.peer_orf_pending.remove(&peer);
-        self.peer_asn.remove(&peer);
-        self.peer_group.remove(&peer);
-        self.peer_bgp_id.remove(&peer);
         self.dirty_peers.remove(&peer);
-        self.force_outbound_peers.remove(&peer);
         self.pending_eor.remove(&peer);
         self.pending_route_batches.retain(|prb| prb.peer() != peer);
-        self.clear_peer_refresh_metrics(peer);
-        self.clear_peer_refresh_state(peer);
         // Drop per-peer export-policy counters alongside the rest of the
         // per-peer state. Without this the HashMap grows unbounded as
         // peers come and go (especially under dynamic neighbors), and
         // stale aggregates leak across peer-identity reuse. The reset
         // also gives operators consistent semantics: the import-side
         // counters reset on session-down (they live on PeerSessionState),
-        // and now the export-side aggregates do too — same per-session
-        // contract in both directions. Operators that need
-        // across-flap totals can subtract Prometheus snapshots
+        // and the export-side aggregates do too — same per-session
+        // contract in both directions. Operators that need across-flap
+        // totals can subtract Prometheus snapshots
         // (`bgp_policy_routes_total` is monotonic per process).
         self.export_policy_stats.remove(&peer);
+        self.clear_peer_refresh_state(peer);
     }
 
     #[expect(clippy::too_many_arguments)]
