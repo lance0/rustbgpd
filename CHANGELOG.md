@@ -99,6 +99,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bench/compare-rib-memory.sh` for base/head CSV and Markdown summaries under
   the shared bench/soak host mutex.
 
+- **Criterion nightly confident-regression tripwire.**
+  `bench/compare-criterion.sh` now emits a per-row verdict and supports
+  `--fail-on-regression`, failing only when enough attempts completed,
+  `min..max` stays entirely above zero, stddev stays below the configured
+  ceiling, and mean delta crosses the configured threshold. The nightly
+  release-baseline workflow enables that mode so noisy straddle-zero/high-stddev
+  rows remain advisory while confirmed regressions go red.
+
 - **Operational proof receipts page.** Added `docs/OPERATIONAL_PROOF.md` as
   the consolidated operator-facing index for CI interop, hosted kernel
   dataplane, benchmark, high-N memory, and archived 24 h soak receipts.

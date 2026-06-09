@@ -9,17 +9,13 @@ name: Criterion Bench Nightly
 # noise floor and is meaningless, but a real regression accumulates past the
 # advisory band over a release cycle instead of hiding in per-commit noise.
 #
-# ADVISORY / NON-GATING — this workflow does NOT fail on a regression today.
-# `compare-criterion.sh` emits mean delta + stddev + min..max + a propagated
-# 95% CI, but has no verdict logic, and the noise floor is not yet re-measured
-# on a governor-controlled host (see bench.yml's header + docs/BENCHMARKS.md).
-# A naive ">=20% single row → fail" gate would false-fire whenever the
-# attempt range straddles zero. Until compare-criterion.sh grows an honest,
-# straddle-zero/stddev-aware classifier, nightly only publishes the summary
-# and uploads artifacts; flip the "Flag regressions" step to a hard failure
-# once that classifier lands. bgperf2 stays release-time `/bench` only — it is
-# too stateful (Docker, one-at-a-time, shared container names) for unattended
-# runs.
+# CONFIDENT-REGRESSION TRIPWIRE — still not a source of published benchmark
+# truth. The workflow fails only when compare-criterion.sh sees a row with
+# enough completed attempts, a min..max range entirely above zero, and a mean
+# delta above the configured regression threshold while stddev stays below the
+# configured noise ceiling. Straddle-zero or high-stddev rows remain
+# advisory/inconclusive. bgperf2 stays release-time `/bench` only — it is too
+# stateful (Docker, one-at-a-time, shared container names) for unattended runs.
 
 on:
   schedule:
@@ -119,6 +115,7 @@ jobs:
             --bench "$BENCH" \
             --core "$CORE" \
             --attempts "$ATTEMPTS" \
+            --fail-on-regression \
             --out-dir "target/bench-compare" || rc=$?
           if [ "$rc" -eq 75 ]; then
             echo "soak_skip=true" >> "$GITHUB_OUTPUT"
@@ -147,11 +144,13 @@ jobs:
             exit 0
           fi
           {
-            echo "## Nightly criterion tripwire — advisory only (non-gating)"
+            echo "## Nightly criterion tripwire"
             echo
-            echo "HEAD vs latest release tag (\`${BASE_REF:-?}\`). Read \`stddev\` and"
-            echo "\`min..max\` alongside \`mean delta\`: a delta whose range straddles"
-            echo "zero is noise, not a regression. See docs/BENCHMARKS.md."
+            echo "HEAD vs latest release tag (\`${BASE_REF:-?}\`). The job fails only"
+            echo "for confident regressions: enough attempts, \`min..max\` entirely"
+            echo "above zero, bounded stddev, and \`mean delta\` above the configured"
+            echo "threshold. Straddle-zero or high-stddev rows remain advisory."
+            echo "See docs/BENCHMARKS.md."
             echo
           } >> "$GITHUB_STEP_SUMMARY"
           summary="$(find target/bench-compare -name summary.md -print 2>/dev/null | sort | tail -n 1 || true)"
@@ -168,8 +167,3 @@ jobs:
           name: criterion-bench-nightly
           path: target/bench-compare/
           if-no-files-found: warn
-
-      # TODO(perf): once compare-criterion.sh exposes a straddle-zero/stddev-aware
-      # regression verdict (e.g. --fail-on with min..max not crossing zero AND
-      # mean delta beyond the re-measured band), add a "Flag regressions" step
-      # here that exits non-zero so the nightly goes red for human review.

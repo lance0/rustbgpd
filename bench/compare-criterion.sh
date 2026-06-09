@@ -23,6 +23,21 @@ Options:
   --allow-dirty           Allow a dirty worktree; refs still resolve to commits
   --no-taskset            Run without taskset pinning
   --require-performance   Fail if the selected CPU is not using performance governor
+  --fail-on-regression    Exit non-zero when any row is a confident regression:
+                          completed attempts >= --verdict-min-attempts,
+                          min..max entirely above zero, stddev below
+                          --regression-max-stddev-pct, and mean delta >=
+                          --regression-threshold-pct.
+  --regression-threshold-pct PCT
+                          Mean head-vs-base delta needed for a confident
+                          regression verdict (default: 3).
+  --regression-max-stddev-pct PCT
+                          Maximum across-attempt delta stddev for a confident
+                          verdict; noisier rows stay inconclusive (default: 10).
+  --verdict-min-attempts N
+                          Minimum completed A/B attempts before verdicts can
+                          fail the run; must be at least 2 because verdicts use
+                          across-attempt stddev/min..max (default: 3).
   --keep-worktrees        Leave temporary git worktrees in the output directory
   -h, --help              Show this help
 
@@ -56,6 +71,10 @@ allow_dirty=0
 use_taskset=1
 require_performance=0
 keep_worktrees=0
+fail_on_regression=0
+regression_threshold_pct="3"
+regression_max_stddev_pct="10"
+verdict_min_attempts=3
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -102,6 +121,22 @@ while [[ $# -gt 0 ]]; do
     --require-performance)
       require_performance=1
       shift
+      ;;
+    --fail-on-regression)
+      fail_on_regression=1
+      shift
+      ;;
+    --regression-threshold-pct)
+      regression_threshold_pct="${2:?missing value for --regression-threshold-pct}"
+      shift 2
+      ;;
+    --regression-max-stddev-pct)
+      regression_max_stddev_pct="${2:?missing value for --regression-max-stddev-pct}"
+      shift 2
+      ;;
+    --verdict-min-attempts)
+      verdict_min_attempts="${2:?missing value for --verdict-min-attempts}"
+      shift 2
       ;;
     --keep-worktrees)
       keep_worktrees=1
@@ -158,6 +193,34 @@ fi
 
 if ! [[ "$attempts" =~ ^[0-9]+$ ]] || [[ "$attempts" -lt 1 ]]; then
   echo "error: --attempts must be a positive integer (got '${attempts}')" >&2
+  exit 1
+fi
+if ! [[ "$verdict_min_attempts" =~ ^[0-9]+$ ]] || [[ "$verdict_min_attempts" -lt 2 ]]; then
+  echo "error: --verdict-min-attempts must be an integer >= 2 (got '${verdict_min_attempts}')" >&2
+  exit 1
+fi
+if ! python3 - "$regression_threshold_pct" <<'PY'
+import sys
+try:
+    threshold = float(sys.argv[1])
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if threshold > 0 else 1)
+PY
+then
+  echo "error: --regression-threshold-pct must be a positive number (got '${regression_threshold_pct}')" >&2
+  exit 1
+fi
+if ! python3 - "$regression_max_stddev_pct" <<'PY'
+import sys
+try:
+    threshold = float(sys.argv[1])
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if threshold > 0 else 1)
+PY
+then
+  echo "error: --regression-max-stddev-pct must be a positive number (got '${regression_max_stddev_pct}')" >&2
   exit 1
 fi
 
@@ -223,6 +286,10 @@ write_metadata() {
     echo "filter=${filter}"
     echo "core=${core}"
     echo "attempts=${attempts}"
+    echo "fail_on_regression=${fail_on_regression}"
+    echo "regression_threshold_pct=${regression_threshold_pct}"
+    echo "regression_max_stddev_pct=${regression_max_stddev_pct}"
+    echo "verdict_min_attempts=${verdict_min_attempts}"
     echo "governor=${governor}"
     echo "use_taskset=${use_taskset}"
     echo "target_dir=${target_dir}"
@@ -320,15 +387,24 @@ BASE_SHORT="$base_short" \
 HEAD_SHORT="$head_short" \
 RUN_ID="$run_id" \
 METADATA_FILE="$metadata_file" \
+FAIL_ON_REGRESSION="$fail_on_regression" \
+REGRESSION_THRESHOLD_PCT="$regression_threshold_pct" \
+REGRESSION_MAX_STDDEV_PCT="$regression_max_stddev_pct" \
+VERDICT_MIN_ATTEMPTS="$verdict_min_attempts" \
 python3 - <<'PY'
 import json
 import os
 import statistics
+import sys
 from pathlib import Path
 
 criterion_dir = Path(os.environ["CRITERION_DIR"])
 summary_file = Path(os.environ["SUMMARY_FILE"])
 attempts = int(os.environ["ATTEMPTS"])
+fail_on_regression = os.environ["FAIL_ON_REGRESSION"] == "1"
+regression_threshold_pct = float(os.environ["REGRESSION_THRESHOLD_PCT"])
+regression_max_stddev_pct = float(os.environ["REGRESSION_MAX_STDDEV_PCT"])
+verdict_min_attempts = int(os.environ["VERDICT_MIN_ATTEMPTS"])
 
 
 def fmt_ns(ns: float) -> str:
@@ -372,6 +448,22 @@ def propagated_ci_pct(base_est, head_est):
     return (lo, hi)
 
 
+def verdict(attempts_completed, mean_delta, stddev, minmax):
+    if attempts_completed < verdict_min_attempts or stddev is None or minmax is None:
+        return "insufficient-attempts"
+    if minmax[0] <= 0 <= minmax[1]:
+        return "noise"
+    if minmax[1] < 0:
+        return "improvement"
+    if stddev >= regression_max_stddev_pct:
+        return "inconclusive-noisy"
+    if minmax[0] > 0 and mean_delta >= regression_threshold_pct:
+        return "regression"
+    if minmax[0] > 0:
+        return "positive-under-threshold"
+    return "noise"
+
+
 # Discover bench_ids via attempt-1-base saved baselines.
 bench_ids = sorted({
     p.parent.parent.relative_to(criterion_dir).as_posix()
@@ -379,6 +471,7 @@ bench_ids = sorted({
 })
 
 rows = []
+regression_rows = []
 for bench_id in bench_ids:
     deltas_pct = []
     base_medians = []
@@ -404,8 +497,15 @@ for bench_id in bench_ids:
         last_ci = propagated_ci_pct(base_est, head_est)
 
     if attempts_completed == 0:
-        rows.append((bench_id, 0, None, None, None, None, None, None))
+        rows.append((bench_id, 0, None, None, None, None, None, None, "missing"))
         continue
+
+    mean_delta = statistics.mean(deltas_pct)
+    stddev = statistics.stdev(deltas_pct) if attempts_completed >= 2 else None
+    minmax = (min(deltas_pct), max(deltas_pct)) if attempts_completed >= 2 else None
+    row_verdict = verdict(attempts_completed, mean_delta, stddev, minmax)
+    if row_verdict == "regression":
+        regression_rows.append(bench_id)
 
     rows.append(
         (
@@ -413,10 +513,11 @@ for bench_id in bench_ids:
             attempts_completed,
             statistics.mean(base_medians),
             statistics.mean(head_medians),
-            statistics.mean(deltas_pct),
-            statistics.stdev(deltas_pct) if attempts_completed >= 2 else None,
-            (min(deltas_pct), max(deltas_pct)) if attempts_completed >= 2 else None,
+            mean_delta,
+            stddev,
+            minmax,
             last_ci,
+            row_verdict,
         )
     )
 
@@ -428,6 +529,10 @@ lines = [
     f"- Head: `{os.environ['HEAD_SHORT']}` (`{os.environ['HEAD_SHA']}`)",
     f"- Attempts: {attempts}"
     + (" (alternating order: odd = base-first, even = head-first)" if attempts >= 2 else ""),
+    f"- Verdict mode: {'fail on confident regression' if fail_on_regression else 'summary only'}",
+    f"- Regression threshold: mean delta >= {regression_threshold_pct:g}% "
+    f"and min..max entirely above zero, stddev < {regression_max_stddev_pct:g}%, "
+    f"with >= {verdict_min_attempts} completed attempts",
     f"- Metadata: `{os.environ['METADATA_FILE']}`",
     f"- Criterion artifacts: `{criterion_dir}`",
     "",
@@ -435,8 +540,8 @@ lines = [
 
 if attempts >= 2:
     lines.extend([
-        "| Benchmark | attempts | base median (mean) | head median (mean) | mean delta | stddev | min..max | last-run 95% CI |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Benchmark | attempts | base median (mean) | head median (mean) | mean delta | stddev | min..max | last-run 95% CI | verdict |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---|",
     ])
     for (
         bench_id,
@@ -447,10 +552,11 @@ if attempts >= 2:
         stddev,
         minmax,
         last_ci,
+        row_verdict,
     ) in rows:
         if base_med is None:
             lines.append(
-                f"| `{bench_id}` | 0/{attempts} | n/a | n/a | n/a | n/a | n/a | n/a |"
+                f"| `{bench_id}` | 0/{attempts} | n/a | n/a | n/a | n/a | n/a | n/a | {row_verdict} |"
             )
             continue
         attempts_cell = f"{n}/{attempts}"
@@ -466,12 +572,12 @@ if attempts >= 2:
         )
         lines.append(
             f"| `{bench_id}` | {attempts_cell} | {base_cell} | {head_cell} | "
-            f"{delta_cell} | {stddev_cell} | {minmax_cell} | {ci_cell} |"
+            f"{delta_cell} | {stddev_cell} | {minmax_cell} | {ci_cell} | {row_verdict} |"
         )
 else:
     lines.extend([
-        "| Benchmark | base median | head median | delta | 95% CI |",
-        "|---|---:|---:|---:|---:|",
+        "| Benchmark | base median | head median | delta | 95% CI | verdict |",
+        "|---|---:|---:|---:|---:|---|",
     ])
     for (
         bench_id,
@@ -482,9 +588,10 @@ else:
         _stddev,
         _minmax,
         last_ci,
+        row_verdict,
     ) in rows:
         if base_med is None:
-            lines.append(f"| `{bench_id}` | n/a | n/a | n/a | n/a |")
+            lines.append(f"| `{bench_id}` | n/a | n/a | n/a | n/a | {row_verdict} |")
             continue
         base_cell = fmt_ns(base_med)
         head_cell = fmt_ns(head_med)
@@ -493,18 +600,31 @@ else:
             f"{last_ci[0]:+.2f}%..{last_ci[1]:+.2f}%" if last_ci is not None else "n/a"
         )
         lines.append(
-            f"| `{bench_id}` | {base_cell} | {head_cell} | {delta_cell} | {ci_cell} |"
+            f"| `{bench_id}` | {base_cell} | {head_cell} | {delta_cell} | {ci_cell} | {row_verdict} |"
         )
 
 if not rows:
     # Column width must match whichever table header was emitted above.
     if attempts >= 2:
-        lines.append("| n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
+        lines.append("| n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | missing |")
     else:
-        lines.append("| n/a | n/a | n/a | n/a | n/a |")
+        lines.append("| n/a | n/a | n/a | n/a | n/a | missing |")
+
+lines.extend(["", "## Verdict", ""])
+if regression_rows:
+    lines.append(
+        "Confident regression rows: "
+        + ", ".join(f"`{bench_id}`" for bench_id in regression_rows)
+    )
+elif rows:
+    lines.append("No confident regressions by the configured verdict rule.")
+else:
+    lines.append("No benchmark rows were discovered.")
 
 summary_file.write_text("\n".join(lines) + "\n")
 print(summary_file.read_text())
+if fail_on_regression and regression_rows:
+    sys.exit(1)
 PY
 
 echo "Summary written to ${summary_file}"

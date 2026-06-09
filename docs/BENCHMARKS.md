@@ -182,6 +182,7 @@ these columns:
 | `stddev` | spread of the per-attempt deltas | **The confidence signal.** Single-digit-% stddev → the mean delta is trustworthy. Large stddev → the host was noisy; the mean is soft. |
 | `min..max` | range of per-attempt deltas | If this brackets `0` (e.g. `-3%..+4%`), the sign of the mean delta is not reliable — it's inside the noise. |
 | `last-run 95% CI` | conservatively propagated from the last attempt's saved median CIs | Wider than Criterion's own change CI by construction; a sanity bound, not the primary signal. |
+| `verdict` | optional script classifier for CI tripwires | `regression` only when enough attempts completed, `min..max` is entirely positive, stddev is below the configured ceiling, and mean delta crosses the configured threshold. Other informational labels are `noise`, `improvement`, `positive-under-threshold`, `inconclusive-noisy`, `insufficient-attempts`, and `missing`. |
 
 ### The grading rule (reviewer guidance, not a CI gate)
 
@@ -226,6 +227,14 @@ ONE benchmark row (attempts = N, N ≥ 3 recommended)
 > be accepted when the PR explains the tradeoff; regressions at or above
 > ~3%, or unexplained regressions in a hot path, should block pending
 > investigation.
+
+`bench/compare-criterion.sh --fail-on-regression` codifies the confident
+regression branch for unattended use. The nightly release-baseline workflow
+enables it with the default `--verdict-min-attempts 3` and
+`--regression-threshold-pct 3` plus `--regression-max-stddev-pct 10`: rows
+whose `min..max` straddles zero remain advisory/noise, high-stddev rows remain
+inconclusive, and a confirmed row at or above the threshold makes the workflow
+fail for human review.
 
 **Worked example** — the first multi-attempt comparison on the VPS
 runner (`rib_ops`, `v0.30.0` → `main`, 3 attempts; the span includes

@@ -86,7 +86,7 @@ bench/compare-criterion.sh \
 With `--attempts ≥ 2` the summary table reports an aggregate row per
 benchmark:
 
-| Benchmark | attempts | base median (mean) | head median (mean) | mean delta | stddev | min..max | last-run 95% CI |
+| Benchmark | attempts | base median (mean) | head median (mean) | mean delta | stddev | min..max | last-run 95% CI | verdict |
 
 The mean delta uses the head-vs-base sign convention (positive = head
 slower = regression) computed from each attempt's saved baseline medians,
@@ -101,6 +101,32 @@ hosts anyway.
 
 `--attempts 1` (the default) keeps the simpler single-row table used by
 earlier versions.
+
+## Regression verdict mode
+
+`--fail-on-regression` turns the summary classifier into a tripwire. It exits
+non-zero only when a row is a confident regression:
+
+- completed attempts are at least `--verdict-min-attempts` (default: 3)
+- `min..max` is entirely above zero
+- `stddev` is below `--regression-max-stddev-pct` (default: 10)
+- `mean delta` is at least `--regression-threshold-pct` (default: 3)
+
+Verdict labels are:
+
+- `regression`: confident regression; `--fail-on-regression` exits non-zero.
+- `noise`: `min..max` brackets zero, so the sign is not reliable.
+- `improvement`: the completed attempts are consistently faster.
+- `positive-under-threshold`: consistently slower, but below the configured
+  mean-delta threshold.
+- `inconclusive-noisy`: consistently slower, but stddev is above the configured
+  ceiling.
+- `insufficient-attempts`: not enough completed attempts, or no stddev/min..max
+  signal.
+- `missing`: no usable baseline pair was found for that row.
+
+The nightly workflow uses this mode against the latest release tag so real
+accumulated regressions go red without failing on noisy single-row movement.
 
 ## Tuning + safety
 
