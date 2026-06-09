@@ -2770,6 +2770,7 @@ where
 mod tests {
     use std::time::{Duration, Instant as StdInstant};
 
+    use rustbgpd_rib::RibCommandError;
     use rustbgpd_telemetry::BgpMetrics;
     use tokio::sync::{broadcast, watch};
 
@@ -7178,7 +7179,7 @@ table_id = 6000
                         let _ = reply.send(Ok(()));
                     }
                     RibUpdate::WithdrawEvpn { reply, .. } => {
-                        let _ = reply.send(Err("withdraw rejected".to_string()));
+                        let _ = reply.send(Err(RibCommandError::internal("withdraw rejected")));
                     }
                     _ => {}
                 }
@@ -7231,7 +7232,7 @@ table_id = 6000
         let _rib = tokio::spawn(async move {
             while let Some(msg) = rib_rx.recv().await {
                 if let RibUpdate::InjectEvpn { reply, .. } = msg {
-                    let _ = reply.send(Err("inject rejected".to_string()));
+                    let _ = reply.send(Err(RibCommandError::internal("inject rejected")));
                 }
             }
         });

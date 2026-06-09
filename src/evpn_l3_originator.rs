@@ -675,6 +675,7 @@ mod tests {
     use super::*;
     use rustbgpd_evpn::ip_vrf::IpVrfNotReady;
     use rustbgpd_evpn::{IpVrf, IpVrfId, MacAddress, RouteSource, RouteTarget};
+    use rustbgpd_rib::RibCommandError;
     use rustbgpd_telemetry::BgpMetrics;
     use rustbgpd_wire::{Ipv4Prefix, RouteDistinguisher};
     use std::collections::HashMap;
@@ -804,7 +805,7 @@ mod tests {
                         calls.push(RibCall::Inject(key));
                         let response = match mode.inject {
                             ReplyMode::Ok => Ok(()),
-                            ReplyMode::Reject => Err("test rejection".to_string()),
+                            ReplyMode::Reject => Err(RibCommandError::internal("test rejection")),
                         };
                         let _ = reply.send(response);
                     }
@@ -812,7 +813,7 @@ mod tests {
                         calls.push(RibCall::Withdraw(key));
                         let response = match mode.withdraw {
                             ReplyMode::Ok => Ok(()),
-                            ReplyMode::Reject => Err("test rejection".to_string()),
+                            ReplyMode::Reject => Err(RibCommandError::internal("test rejection")),
                         };
                         let _ = reply.send(response);
                     }

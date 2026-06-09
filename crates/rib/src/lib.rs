@@ -43,5 +43,6 @@ pub use route::{
 };
 pub use update::{
     BestPathCandidate, ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision, ExplainReason,
-    MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, OutboundRouteUpdate, RibUpdate,
+    MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, OutboundRouteUpdate, RibCommandError,
+    RibUpdate,
 };
