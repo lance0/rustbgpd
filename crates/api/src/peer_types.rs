@@ -264,6 +264,71 @@ impl std::fmt::Display for PeerLifecycleError {
 
 impl std::error::Error for PeerLifecycleError {}
 
+/// Typed failure for runtime catalog mutations.
+///
+/// These commands are surfaced by gRPC services. Keeping the failure class in
+/// the peer-manager reply lets API handlers choose stable status codes without
+/// parsing operator-facing error text.
+#[derive(Debug, Clone)]
+pub enum CatalogMutationError {
+    /// Target object or neighbor was not found (maps to gRPC `NOT_FOUND`).
+    NotFound(String),
+    /// Target object is still referenced and cannot be deleted
+    /// (maps to gRPC `FAILED_PRECONDITION`).
+    StillReferenced {
+        /// Human-readable catalog object kind.
+        kind: &'static str,
+        /// Object name.
+        name: String,
+        /// References blocking deletion.
+        references: Vec<String>,
+    },
+    /// Operator supplied invalid catalog data (maps to gRPC
+    /// `INVALID_ARGUMENT`).
+    Invalid(String),
+    /// Runtime/session failure while applying otherwise-valid catalog data
+    /// (maps to gRPC `INTERNAL`).
+    Internal(String),
+}
+
+impl CatalogMutationError {
+    #[must_use]
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::NotFound(message.into())
+    }
+
+    #[must_use]
+    pub fn invalid(message: impl Into<String>) -> Self {
+        Self::Invalid(message.into())
+    }
+
+    #[must_use]
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal(message.into())
+    }
+}
+
+impl std::fmt::Display for CatalogMutationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(message) | Self::Invalid(message) | Self::Internal(message) => {
+                f.write_str(message)
+            }
+            Self::StillReferenced {
+                kind,
+                name,
+                references,
+            } => write!(
+                f,
+                "{kind} {name} is still referenced by {}",
+                references.join(", ")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CatalogMutationError {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -736,14 +801,14 @@ pub enum PeerManagerCommand {
         /// Full replacement definition.
         definition: NamedPolicyDefinition,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// Delete a named policy definition.
     DeletePolicy {
         /// Policy definition name.
         name: String,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// List all named neighbor sets.
     ListNeighborSets {
@@ -764,14 +829,14 @@ pub enum PeerManagerCommand {
         /// Full replacement definition.
         definition: NeighborSetDefinition,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// Delete a named neighbor set.
     DeleteNeighborSet {
         /// Neighbor-set name.
         name: String,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// Query global named import/export chains.
     GetGlobalPolicyChains {
@@ -783,24 +848,24 @@ pub enum PeerManagerCommand {
         /// Ordered policy names.
         policy_names: Vec<String>,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// Replace the global export policy chain.
     SetGlobalExportChain {
         /// Ordered policy names.
         policy_names: Vec<String>,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// Clear the global import policy chain.
     ClearGlobalImportChain {
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// Clear the global export policy chain.
     ClearGlobalExportChain {
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// Hot-apply `[global] honor_graceful_shutdown` by recomputing
     /// effective runtime policies for EBGP peers.
@@ -832,7 +897,7 @@ pub enum PeerManagerCommand {
         /// Ordered policy names.
         policy_names: Vec<String>,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// Replace the per-neighbor export policy chain.
     SetNeighborExportChain {
@@ -841,21 +906,21 @@ pub enum PeerManagerCommand {
         /// Ordered policy names.
         policy_names: Vec<String>,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// Clear the per-neighbor import policy chain.
     ClearNeighborImportChain {
         /// Neighbor address.
         address: IpAddr,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// Clear the per-neighbor export policy chain.
     ClearNeighborExportChain {
         /// Neighbor address.
         address: IpAddr,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// List all peer groups.
     ListPeerGroups {
@@ -876,7 +941,7 @@ pub enum PeerManagerCommand {
         /// Full replacement definition.
         definition: PeerGroupDefinition,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// Create or replace a peer group while preserving the existing
     /// MD5 password atomically inside the peer-manager actor.
@@ -886,14 +951,14 @@ pub enum PeerManagerCommand {
         /// Full replacement definition except for the MD5 password.
         definition: PeerGroupDefinition,
         /// Reply channel returning the applied definition for persistence.
-        reply: oneshot::Sender<Result<PeerGroupDefinition, String>>,
+        reply: oneshot::Sender<Result<PeerGroupDefinition, CatalogMutationError>>,
     },
     /// Delete a peer group.
     DeletePeerGroup {
         /// Peer-group name.
         name: String,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// Assign a neighbor to a peer group.
     SetNeighborPeerGroup {
@@ -902,14 +967,14 @@ pub enum PeerManagerCommand {
         /// Peer-group name.
         peer_group: String,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// Clear a neighbor's peer-group membership.
     ClearNeighborPeerGroup {
         /// Neighbor address.
         address: IpAddr,
         /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// Shut down all peers and exit the peer manager task.
     Shutdown,

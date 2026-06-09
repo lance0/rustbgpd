@@ -233,6 +233,8 @@ fn config_peer_group_to_api(definition: &PeerGroupConfig) -> PeerGroupDefinition
     }
 }
 
+pub(crate) const NEIGHBOR_NOT_FOUND_REASON: &str = "neighbor not found";
+
 fn neighbor_mut(config: &mut Config, address: IpAddr) -> Result<&mut Neighbor, ConfigError> {
     let addr = address.to_string();
     config
@@ -241,7 +243,7 @@ fn neighbor_mut(config: &mut Config, address: IpAddr) -> Result<&mut Neighbor, C
         .find(|neighbor| neighbor.address == addr)
         .ok_or_else(|| ConfigError::InvalidNeighborAddress {
             value: addr,
-            reason: "neighbor not found".to_string(),
+            reason: NEIGHBOR_NOT_FOUND_REASON.to_string(),
         })
 }
 

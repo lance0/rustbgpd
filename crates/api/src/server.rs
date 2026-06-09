@@ -36,7 +36,7 @@ use crate::gnmi_service::GnmiService;
 use crate::injection_service::InjectionService;
 use crate::neighbor_service::NeighborService;
 use crate::peer_group_service::PeerGroupService;
-use crate::peer_types::{ConfigEvent, PeerManagerCommand};
+use crate::peer_types::{CatalogMutationError, ConfigEvent, PeerManagerCommand};
 use crate::policy_service::PolicyService;
 use crate::proto::bfd_service_server::BfdServiceServer;
 use crate::proto::config_service_server::ConfigServiceServer;
@@ -90,6 +90,17 @@ impl std::fmt::Display for ConfigTransactionApplyError {
 }
 
 impl std::error::Error for ConfigTransactionApplyError {}
+
+pub(crate) fn catalog_mutation_error_to_status(error: &CatalogMutationError) -> Status {
+    match error {
+        CatalogMutationError::NotFound(_) => Status::not_found(error.to_string()),
+        CatalogMutationError::StillReferenced { .. } => {
+            Status::failed_precondition(error.to_string())
+        }
+        CatalogMutationError::Invalid(_) => Status::invalid_argument(error.to_string()),
+        CatalogMutationError::Internal(_) => Status::internal(error.to_string()),
+    }
+}
 
 /// Error returned by the daemon-owned gNMI Set bridge hook.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1291,6 +1302,36 @@ mod tests {
         RuntimeAuthzConfig {
             enforcement: AuthEnforcement::Legacy,
             roles: empty_roles(),
+        }
+    }
+
+    #[test]
+    fn catalog_mutation_errors_map_by_variant() {
+        let cases = [
+            (
+                CatalogMutationError::not_found("missing policy"),
+                tonic::Code::NotFound,
+            ),
+            (
+                CatalogMutationError::StillReferenced {
+                    kind: "policy",
+                    name: "keep".into(),
+                    references: vec!["global import_chain".into()],
+                },
+                tonic::Code::FailedPrecondition,
+            ),
+            (
+                CatalogMutationError::invalid("bad policy"),
+                tonic::Code::InvalidArgument,
+            ),
+            (
+                CatalogMutationError::internal("runtime apply failed"),
+                tonic::Code::Internal,
+            ),
+        ];
+
+        for (error, code) in cases {
+            assert_eq!(catalog_mutation_error_to_status(&error).code(), code);
         }
     }
 

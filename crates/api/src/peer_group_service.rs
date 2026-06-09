@@ -16,7 +16,8 @@ use crate::peer_types::{
 use crate::policy_helpers::proto_statement_to_input;
 use crate::proto;
 use crate::server::{
-    AccessMode, ConfigMutationGateFn, check_config_mutation_gate, read_only_rejection,
+    AccessMode, ConfigMutationGateFn, catalog_mutation_error_to_status, check_config_mutation_gate,
+    read_only_rejection,
 };
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -318,7 +319,7 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             reply_rx
                 .await
                 .map_err(|_| Status::internal("peer manager dropped reply"))?
-                .map_err(Status::invalid_argument)?
+                .map_err(|error| catalog_mutation_error_to_status(&error))?
         } else {
             let persisted = definition.clone();
             let (reply_tx, reply_rx) = oneshot::channel();
@@ -333,7 +334,7 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             reply_rx
                 .await
                 .map_err(|_| Status::internal("peer manager dropped reply"))?
-                .map_err(Status::invalid_argument)?;
+                .map_err(|error| catalog_mutation_error_to_status(&error))?;
             persisted
         };
 
@@ -375,13 +376,7 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             .map_err(|_| Status::internal("peer manager dropped reply"))?
         {
             Ok(()) => {}
-            Err(error) if error.contains("still referenced") => {
-                return Err(Status::failed_precondition(error));
-            }
-            Err(error) if error.contains("not found") => {
-                return Err(Status::not_found(error));
-            }
-            Err(error) => return Err(Status::invalid_argument(error)),
+            Err(error) => return Err(catalog_mutation_error_to_status(&error)),
         }
 
         if let Some(permit) = persist_permit {
@@ -424,8 +419,7 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             .map_err(|_| Status::internal("peer manager dropped reply"))?
         {
             Ok(()) => {}
-            Err(error) if error.contains("not found") => return Err(Status::not_found(error)),
-            Err(error) => return Err(Status::invalid_argument(error)),
+            Err(error) => return Err(catalog_mutation_error_to_status(&error)),
         }
 
         if let Some(permit) = persist_permit {
@@ -467,8 +461,7 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             .map_err(|_| Status::internal("peer manager dropped reply"))?
         {
             Ok(()) => {}
-            Err(error) if error.contains("not found") => return Err(Status::not_found(error)),
-            Err(error) => return Err(Status::invalid_argument(error)),
+            Err(error) => return Err(catalog_mutation_error_to_status(&error)),
         }
 
         if let Some(permit) = persist_permit {

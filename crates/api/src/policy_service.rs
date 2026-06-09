@@ -14,7 +14,8 @@ use crate::peer_types::{
 use crate::policy_helpers::{proto_statement_to_input, validate_policy_action};
 use crate::proto;
 use crate::server::{
-    AccessMode, ConfigMutationGateFn, check_config_mutation_gate, read_only_rejection,
+    AccessMode, ConfigMutationGateFn, catalog_mutation_error_to_status, check_config_mutation_gate,
+    read_only_rejection,
 };
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -349,7 +350,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(Status::invalid_argument)?;
+            .map_err(|error| catalog_mutation_error_to_status(&error))?;
 
         if let (Some(permit), Some(definition)) = (persist_permit, persisted) {
             permit.send(ConfigEvent::SetPolicy {
@@ -390,11 +391,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .map_err(|_| Status::internal("peer manager dropped reply"))?
         {
             Ok(()) => {}
-            Err(error) if error.contains("still referenced") => {
-                return Err(Status::failed_precondition(error));
-            }
-            Err(error) if error.contains("not found") => return Err(Status::not_found(error)),
-            Err(error) => return Err(Status::invalid_argument(error)),
+            Err(error) => return Err(catalog_mutation_error_to_status(&error)),
         }
 
         if let Some(permit) = persist_permit {
@@ -498,7 +495,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(Status::invalid_argument)?;
+            .map_err(|error| catalog_mutation_error_to_status(&error))?;
 
         if let (Some(permit), Some(definition)) = (persist_permit, persisted) {
             permit.send(ConfigEvent::SetNeighborSet {
@@ -538,13 +535,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .map_err(|_| Status::internal("peer manager dropped reply"))?
         {
             Ok(()) => {}
-            Err(error) if error.contains("still referenced") => {
-                return Err(Status::failed_precondition(error));
-            }
-            Err(error) if error.contains("not found") => {
-                return Err(Status::not_found(error));
-            }
-            Err(error) => return Err(Status::invalid_argument(error)),
+            Err(error) => return Err(catalog_mutation_error_to_status(&error)),
         }
 
         if let Some(permit) = persist_permit {
@@ -596,7 +587,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(Status::invalid_argument)?;
+            .map_err(|error| catalog_mutation_error_to_status(&error))?;
 
         if let (Some(permit), Some(policy_names)) = (persist_permit, persisted) {
             permit.send(ConfigEvent::SetGlobalImportChain { policy_names });
@@ -629,7 +620,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(Status::invalid_argument)?;
+            .map_err(|error| catalog_mutation_error_to_status(&error))?;
 
         if let (Some(permit), Some(policy_names)) = (persist_permit, persisted) {
             permit.send(ConfigEvent::SetGlobalExportChain { policy_names });
@@ -656,7 +647,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(Status::invalid_argument)?;
+            .map_err(|error| catalog_mutation_error_to_status(&error))?;
 
         if let Some(permit) = persist_permit {
             permit.send(ConfigEvent::ClearGlobalImportChain);
@@ -683,7 +674,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(Status::invalid_argument)?;
+            .map_err(|error| catalog_mutation_error_to_status(&error))?;
 
         if let Some(permit) = persist_permit {
             permit.send(ConfigEvent::ClearGlobalExportChain);
@@ -751,8 +742,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .map_err(|_| Status::internal("peer manager dropped reply"))?
         {
             Ok(()) => {}
-            Err(error) if error.contains("not found") => return Err(Status::not_found(error)),
-            Err(error) => return Err(Status::invalid_argument(error)),
+            Err(error) => return Err(catalog_mutation_error_to_status(&error)),
         }
 
         if let (Some(permit), Some(policy_names)) = (persist_permit, persisted) {
@@ -796,8 +786,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .map_err(|_| Status::internal("peer manager dropped reply"))?
         {
             Ok(()) => {}
-            Err(error) if error.contains("not found") => return Err(Status::not_found(error)),
-            Err(error) => return Err(Status::invalid_argument(error)),
+            Err(error) => return Err(catalog_mutation_error_to_status(&error)),
         }
 
         if let (Some(permit), Some(policy_names)) = (persist_permit, persisted) {
@@ -839,8 +828,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .map_err(|_| Status::internal("peer manager dropped reply"))?
         {
             Ok(()) => {}
-            Err(error) if error.contains("not found") => return Err(Status::not_found(error)),
-            Err(error) => return Err(Status::invalid_argument(error)),
+            Err(error) => return Err(catalog_mutation_error_to_status(&error)),
         }
 
         if let Some(permit) = persist_permit {
@@ -879,8 +867,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .map_err(|_| Status::internal("peer manager dropped reply"))?
         {
             Ok(()) => {}
-            Err(error) if error.contains("not found") => return Err(Status::not_found(error)),
-            Err(error) => return Err(Status::invalid_argument(error)),
+            Err(error) => return Err(catalog_mutation_error_to_status(&error)),
         }
 
         if let Some(permit) = persist_permit {
@@ -967,7 +954,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peer_types::PolicyAsPathPrependConfig;
+    use crate::peer_types::{CatalogMutationError, PolicyAsPathPrependConfig};
     use crate::proto::policy_service_server::PolicyService as PolicyServiceRpc;
     use tokio::sync::mpsc::error::TryRecvError;
 
@@ -1238,9 +1225,11 @@ mod tests {
         tokio::spawn(async move {
             if let Some(PeerManagerCommand::DeletePolicy { name, reply }) = peer_rx.recv().await {
                 assert_eq!(name, "tag-internal");
-                let _ = reply.send(Err(
-                    "policy tag-internal is still referenced by global import_chain".into(),
-                ));
+                let _ = reply.send(Err(CatalogMutationError::StillReferenced {
+                    kind: "policy",
+                    name: "tag-internal".into(),
+                    references: vec!["global import_chain".into()],
+                }));
             }
         });
 

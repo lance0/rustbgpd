@@ -1,8 +1,8 @@
 use std::net::IpAddr;
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, DynamicRangePolicyTarget, ImportValidationDependency, PeerKey,
-    PeerManagerNeighborConfig, ResolvedPeerPolicy,
+    CatalogMutationError, ConfigEvent, DynamicRangePolicyTarget, ImportValidationDependency,
+    PeerKey, PeerManagerNeighborConfig, ResolvedPeerPolicy,
 };
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
@@ -11,12 +11,30 @@ use rustbgpd_telemetry::BgpMetrics;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
-use crate::config::Config;
+use crate::config::{Config, ConfigError};
 use crate::policy_admin::{
-    apply_config_event, neighbor_set_references, peer_group_references, policy_references,
+    NEIGHBOR_NOT_FOUND_REASON, apply_config_event, neighbor_set_references, peer_group_references,
+    policy_references,
 };
 
 use super::{ManagedPeer, PEER_POLICY_UPDATE_TIMEOUT, PEER_QUERY_TIMEOUT, PeerManager};
+
+fn catalog_config_error(error: ConfigError) -> CatalogMutationError {
+    match error {
+        ConfigError::InvalidNeighborAddress { value, reason }
+            if reason == NEIGHBOR_NOT_FOUND_REASON =>
+        {
+            CatalogMutationError::not_found(format!("neighbor {value} not found"))
+        }
+        ConfigError::UndefinedPolicy { name } => {
+            CatalogMutationError::not_found(format!("policy {name} not found"))
+        }
+        ConfigError::UndefinedPeerGroup { name } => {
+            CatalogMutationError::not_found(format!("peer group {name} not found"))
+        }
+        other => CatalogMutationError::invalid(other.to_string()),
+    }
+}
 
 /// How `update_runtime_policies_for_peer_key` reacts when the Route Refresh
 /// send fails after the session already acked the new policy.
@@ -705,28 +723,30 @@ impl PeerManager {
         &mut self,
         event: ConfigEvent,
         affected_peers: Option<Vec<IpAddr>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), CatalogMutationError> {
         if let ConfigEvent::DeletePolicy { name } = &event {
             let refs = policy_references(&self.current_config, name);
             if !refs.is_empty() {
-                return Err(format!(
-                    "policy {name} is still referenced by {}",
-                    refs.join(", ")
-                ));
+                return Err(CatalogMutationError::StillReferenced {
+                    kind: "policy",
+                    name: name.clone(),
+                    references: refs,
+                });
             }
         }
         if let ConfigEvent::DeleteNeighborSet { name } = &event {
             let refs = neighbor_set_references(&self.current_config, name);
             if !refs.is_empty() {
-                return Err(format!(
-                    "neighbor set {name} is still referenced by {}",
-                    refs.join(", ")
-                ));
+                return Err(CatalogMutationError::StillReferenced {
+                    kind: "neighbor set",
+                    name: name.clone(),
+                    references: refs,
+                });
             }
         }
 
         let mut next_config = self.current_config.clone();
-        apply_config_event(&mut next_config, &event).map_err(|e| e.to_string())?;
+        apply_config_event(&mut next_config, &event).map_err(catalog_config_error)?;
 
         let peers: Vec<PeerKey> = affected_peers.map_or_else(
             || self.peers.keys().cloned().collect(),
@@ -751,14 +771,15 @@ impl PeerManager {
             affected_peer_count += 1;
             let (import_policy, export_policy) = next_config
                 .effective_policy_chains_for_neighbor(neighbor)
-                .map_err(|e| e.to_string())?;
+                .map_err(catalog_config_error)?;
             self.update_runtime_policies_for_peer_key(
                 peer_key,
                 import_policy,
                 export_policy,
                 RefreshFailureHandling::Fatal,
             )
-            .await?;
+            .await
+            .map_err(CatalogMutationError::internal)?;
         }
 
         self.current_config = next_config;
@@ -1031,19 +1052,20 @@ impl PeerManager {
         &mut self,
         event: ConfigEvent,
         affected_peers: Vec<IpAddr>,
-    ) -> Result<(), String> {
+    ) -> Result<(), CatalogMutationError> {
         if let ConfigEvent::DeletePeerGroup { name } = &event {
             let refs = peer_group_references(&self.current_config, name);
             if !refs.is_empty() {
-                return Err(format!(
-                    "peer group {name} is still referenced by {}",
-                    refs.join(", ")
-                ));
+                return Err(CatalogMutationError::StillReferenced {
+                    kind: "peer group",
+                    name: name.clone(),
+                    references: refs,
+                });
             }
         }
 
         let mut next_config = self.current_config.clone();
-        apply_config_event(&mut next_config, &event).map_err(|e| e.to_string())?;
+        apply_config_event(&mut next_config, &event).map_err(catalog_config_error)?;
 
         let targets: Vec<PeerKey> = affected_peers
             .into_iter()
@@ -1063,7 +1085,7 @@ impl PeerManager {
                 }) {
                 let resolved = next_config
                     .resolve_neighbor(neighbor)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(catalog_config_error)?;
                 Some(Self::peer_manager_config_from_resolved(resolved, false))
             } else {
                 None
@@ -1072,17 +1094,17 @@ impl PeerManager {
             if let Some(cfg) = next_peer_config.as_ref() {
                 self.delete_peer_for_reconfigure(peer_key, cfg.tcp_ao.as_ref())
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| CatalogMutationError::internal(error.to_string()))?;
             } else {
                 self.delete_peer(peer_key, false)
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| CatalogMutationError::internal(error.to_string()))?;
             }
 
             if let Some(cfg) = next_peer_config {
                 self.add_peer_with_admin_state(cfg, false, was_enabled)
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| CatalogMutationError::internal(error.to_string()))?;
                 affected_peer_count += 1;
             }
         }
