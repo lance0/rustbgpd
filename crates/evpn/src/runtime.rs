@@ -5,11 +5,11 @@
 //! builds the public model from startup-resolved tables; the
 //! `EvpnService.ApplyEvpnRuntime` path drives this coordinator to commit
 //! narrow live mutation shapes — L2VNI / IP-VRF / Ethernet-Segment
-//! add/delete/redefine, atomic tenant teardown, and `ip_vrf` relink —
-//! while L3VNI/device/table IP-VRF identity redefine and non-teardown
-//! mixed edits fail closed. SIGHUP file-driven reloads reuse the same
-//! coordinator for supported shapes and pin the runtime snapshot on
-//! unsupported shapes or actor convergence failure (see issue #268).
+//! add/delete/redefine, additive multi-domain build-up, atomic tenant teardown,
+//! and `ip_vrf` relink — while L3VNI/device/table IP-VRF identity redefine and
+//! generic mixed add/delete/redefine edits fail closed. SIGHUP file-driven
+//! reloads reuse the same coordinator for supported shapes and pin the runtime
+//! snapshot on unsupported shapes or actor convergence failure (see issue #268).
 
 use std::{collections::BTreeMap, sync::Arc};
 

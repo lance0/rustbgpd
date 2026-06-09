@@ -989,11 +989,11 @@ to the plain capability they delivered.
   commits single L2VNI add/delete/redefine, single IP-VRF
   add/standalone-delete/redefine with unchanged L3VNI/device/table identity,
   single Ethernet Segment add/delete/redefine (including ES add/redefine over a
-  member VNI added by an earlier live L2VNI add), atomic tenant teardown
-  (M47/M48), and `ip_vrf` relink. Restart-required edits: L3VNI/device/table
-  IP-VRF identity changes (a kernel VRF lifecycle operation, restart-required by
-  design) and non-teardown mixed edits (an add combined with a delete/redefine —
-  fail closed with a "split the request" error, pending a generalized
+  member VNI added by an earlier live L2VNI add), additive build-up, atomic
+  tenant teardown (M47/M48), and `ip_vrf` relink. Restart-required/fail-closed
+  edits: L3VNI/device/table IP-VRF identity changes (a kernel VRF lifecycle
+  operation, restart-required by design) and generic mixed add/delete/redefine
+  edits (fail closed with a "split the request" error, pending a generalized
   converge-to-candidate follow-up).
 - **EVPN multi-homing — ESI, Type-1/Type-4** (v0.17.0, ADR-0057, M38/M46/M49) —
   observable DF election + Type 1/4 origination. Pure DF election state machine

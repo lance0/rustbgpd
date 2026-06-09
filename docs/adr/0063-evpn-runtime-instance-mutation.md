@@ -7,15 +7,16 @@ single IP-VRF add, single standalone IP-VRF delete, single IP-VRF redefine with
 unchanged L3VNI/device/table identity, single Ethernet Segment
 add/delete/redefine, atomic tenant teardown (a delete-only plan that drops an
 ES-member L2VNI together with its Ethernet Segment (delete or member-shrink)
-and/or a linked IP-VRF in one pass), and `ip_vrf` relink (an L2VNI re-homed to a
-different IP-VRF) commit live via `EvpnService.ApplyEvpnRuntime` and SIGHUP
+and/or a linked IP-VRF in one pass), additive multi-domain build-up (pure
+add-only L2VNI/IP-VRF/ES candidates), and `ip_vrf` relink (an L2VNI re-homed to
+a different IP-VRF) commit live via `EvpnService.ApplyEvpnRuntime` and SIGHUP
 file-driven reload; ES add/redefine can bind member VNIs added by a prior live
 L2VNI add when the segment actor already exists. Two shapes remain non-live, by
 design: **L3VNI/device/table IP-VRF identity changes** are restart-required
-(kernel VRF lifecycle — `router_mac` is still live-redefinable), and
-**non-teardown mixed edits** (an add combined with a delete/redefine in one
-request) fail closed with a "split the request" error pending a generalized
-converge-to-candidate follow-up ([#268](https://github.com/lance0/rustbgpd/issues/268)).
+(kernel VRF lifecycle — `router_mac` is still live-redefinable), and **generic
+mixed add/delete/redefine edits** fail closed with a "split the request" error
+pending a generalized converge-to-candidate follow-up
+([#268](https://github.com/lance0/rustbgpd/issues/268)).
 **Date:** 2026-05-17 (implementation completed through v0.27.0)
 
 ## Context
@@ -230,13 +231,22 @@ must pin the runtime snapshot to the committed model and keep surfacing drift.
   the only added primitive is the segment actor emitting Type 1/4 withdraws for a
   member VNI whose instance has already been removed (a withdraw needs only the
   route key, not the reference instance's path attributes).
+- Additive build-up commits a pure add-only multi-row or multi-domain candidate
+  (for example, adding a linked L2VNI, its IP-VRF, and its Ethernet Segment in
+  one request). The converger validates that no delete/redefine is present, that
+  any `ip_vrf` reference delta belongs only to newly added L2VNIs, and that
+  added ES member VNIs exist in the candidate model. It then originates Type 3
+  IMET for each added L2VNI and republishes candidate snapshots to the same
+  level-triggered consumers as the single-add paths: dataplane instances and
+  IP-VRF metadata, Type 2 originator, SVI, segment instances and segments, and
+  Type 5 originator. Rollback republishes the committed snapshots and withdraws
+  speculative IMET on any failed publish.
 - `ip_vrf` relink now commits live (dataplane-only, see above). The two shapes
   that remain non-live are by design: **L3VNI/device/table IP-VRF identity
   changes** stay restart-required (a kernel VRF lifecycle operation — a runtime
   drain/recreate would risk a dual-state window; `router_mac` is still
-  live-redefinable), and **non-teardown mixed edits** (an add combined with a
-  delete/redefine in one request) fail closed with an operator-actionable
-  "apply each as a separate request" error, pending a generalized
+  live-redefinable), and **generic mixed add/delete/redefine edits** fail closed
+  with an operator-actionable "apply each as a separate request" error, pending a generalized
   converge-to-candidate follow-up ([#268](https://github.com/lance0/rustbgpd/issues/268)).
 - Issue #133 (design) is resolved and closed; the remaining implementation is
   tracked in #268.
@@ -246,8 +256,8 @@ must pin the runtime snapshot to the committed model and keep surfacing drift.
 - No per-instance `AddEvpnInstance` / `DeleteEvpnInstance` protobuf surface;
   mutation is a whole-model apply via `EvpnService.ApplyEvpnRuntime`.
 - No hot SIGHUP apply outside the ADR-0063 supported shape set. In particular,
-  L3VNI/device/table IP-VRF identity changes, non-teardown mixed edits, and
-  runtime applies on daemons without the required EVPN actors remain
+  L3VNI/device/table IP-VRF identity changes, generic mixed add/delete/redefine
+  edits, and runtime applies on daemons without the required EVPN actors remain
   fail-closed.
 - No automatic Linux bridge, VXLAN, VRF, or Ethernet Segment netdev
   creation.

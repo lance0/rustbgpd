@@ -1995,12 +1995,11 @@ restart to take effect. ADR-0063's `EvpnService.ApplyEvpnRuntime`
 coordinator live-commits single L2VNI/IP-VRF/Ethernet-Segment
 add/delete/redefine (a redefine, including field flips such as
 `apply_aliasing_ecmp`, re-derives the per-VNI state via the
-`FdbNhg → SingleDst` dataplane transition), atomic tenant teardown, and
-`ip_vrf` relink. L3VNI/device/table IP-VRF identity changes are
-restart-required by design, and non-teardown mixed edits (an add combined
-with a delete/redefine) fail closed — apply each as a separate request
-(<https://github.com/lance0/rustbgpd/issues/210>). SIGHUP remains
-restart-required for EVPN table edits.
+`FdbNhg → SingleDst` dataplane transition), additive build-up, atomic
+tenant teardown, and `ip_vrf` relink through both gRPC and SIGHUP reload.
+L3VNI/device/table IP-VRF identity changes are restart-required by design,
+and generic mixed add/delete/redefine edits fail closed — apply each as a
+separate request (<https://github.com/lance0/rustbgpd/issues/268>).
 
 **Restart edge case**: if you flip `apply_aliasing_ecmp = false` and
 restart the daemon while tagged FDB nexthop groups from the prior run
@@ -2054,11 +2053,11 @@ remote Type 4 routes for the same ESI; the elected DF role drives
 Type 2 origination ESI tagging and the optional BUM-suppression
 filter (see `apply_bum_enforcement` in `[global]`).
 
-Restart-required on SIGHUP: `[[ethernet_segments]]` is pinned for
-config reloads. `EvpnService.ApplyEvpnRuntime` can live-commit a single
-Ethernet Segment add, delete, or redefine when the segment actor exists, and
-drops an Ethernet Segment (delete or member-shrink) as part of an atomic tenant
-teardown alongside its member L2VNI; non-teardown mixed edits still fail closed.
+SIGHUP reload and `EvpnService.ApplyEvpnRuntime` can live-commit a single
+Ethernet Segment add, delete, or redefine when the segment actor exists,
+additive build-up, and dropping an Ethernet Segment (delete or member-shrink)
+as part of an atomic tenant teardown alongside its member L2VNI. Generic mixed
+add/delete/redefine edits still fail closed.
 
 ---
 
