@@ -675,6 +675,24 @@ pub(crate) async fn reload_config(
     // returned by halt_partial paths.
     copy_evpn_runtime_fields(&mut working_config, &new_config);
 
+    // `[[dynamic_neighbors]]` edits are applied by the peer manager's
+    // accept-matcher rebuild when the returned snapshot is swapped in
+    // (`ReplaceConfigSnapshot` re-parses the ranges; see #338) — there is
+    // no per-range reconcile step below that can fail. Carry the new
+    // range set into the snapshot here; without this the swap re-parses
+    // the OLD ranges, the edit silently never takes effect, and every
+    // subsequent SIGHUP re-detects (and re-drops) the same diff.
+    if dynamic_neighbors_changed {
+        working_config
+            .dynamic_neighbors
+            .clone_from(&new_config.dynamic_neighbors);
+        info!(
+            ranges = new_config.dynamic_neighbors.len(),
+            "reload: [[dynamic_neighbors]] updated; accept-matcher rebuilds on the \
+             config snapshot swap"
+        );
+    }
+
     // ADR-0073: `working_config` starts from `current` and only absorbs
     // the reconciled (hot-applied) ConfigEvents, none of which touch
     // `[policy.explain]`. So on a mixed reload — explain changed
@@ -1827,6 +1845,105 @@ hold_time = 90
         std::fs::remove_file(&cert).ok();
         std::fs::remove_file(&key).ok();
         std::fs::remove_file(&ca).ok();
+    }
+
+    /// Regression: `[[dynamic_neighbors]]` edits must be carried into the
+    /// runtime snapshot returned by `reload_config`. The accept-matcher is
+    /// rebuilt from that snapshot when `apply_reload_outcome` swaps it into
+    /// the peer manager (#338) — previously the main reload path never
+    /// copied the new range set into `working_config`, so the swap
+    /// re-parsed the OLD ranges, the SIGHUP edit silently never took
+    /// effect, and every later SIGHUP re-detected (and re-dropped) the
+    /// same diff.
+    #[tokio::test]
+    async fn reload_carries_dynamic_neighbor_edits_into_runtime_snapshot() {
+        let path = unique_temp_path("reload-dynamic-neighbors");
+
+        let base = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.fabric]
+hold_time = 90
+"#;
+        std::fs::write(
+            &path,
+            format!(
+                r#"{base}
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "fabric"
+remote_asn = 65002
+"#
+            ),
+        )
+        .unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        assert_eq!(initial.dynamic_neighbors.len(), 1);
+
+        // Edit the existing range and add a second one.
+        std::fs::write(
+            &path,
+            format!(
+                r#"{base}
+[[dynamic_neighbors]]
+prefix = "192.0.3.0/24"
+peer_group = "fabric"
+remote_asn = 65002
+
+[[dynamic_neighbors]]
+prefix = "198.51.100.0/24"
+peer_group = "fabric"
+remote_asn = 65003
+"#
+            ),
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            None,
+            None,
+            &peer_mgr_tx,
+            None,
+            None,
+        )
+        .await
+        .expect("reload should produce a runtime snapshot");
+
+        assert_eq!(
+            returned.dynamic_neighbors.len(),
+            2,
+            "runtime snapshot must carry the edited [[dynamic_neighbors]] set"
+        );
+        assert_eq!(returned.dynamic_neighbors[0].prefix, "192.0.3.0/24");
+        assert_eq!(returned.dynamic_neighbors[1].prefix, "198.51.100.0/24");
+        // Convergence: a second reload diffing against the returned
+        // snapshot must see no remaining [[dynamic_neighbors]] delta.
+        let second = reload_config(
+            path.to_str().unwrap(),
+            &returned,
+            None,
+            None,
+            &peer_mgr_tx,
+            None,
+            None,
+        )
+        .await
+        .expect("second reload should succeed");
+        assert_eq!(
+            second.dynamic_neighbors, returned.dynamic_neighbors,
+            "second reload must converge with no dynamic-neighbor delta"
+        );
+
+        std::fs::remove_file(&path).ok();
     }
 
     /// If the ADR-0063 coordinator is not available to SIGHUP, edits to
