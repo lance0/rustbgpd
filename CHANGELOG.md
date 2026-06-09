@@ -157,6 +157,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Loc-RIB now detects same-peer payload churn (unicast + FlowSpec).** A peer
+  re-advertising the same prefix with a new next-hop or changed attributes
+  (communities, equal-length AS_PATH content), or the same FlowSpec rule with a
+  changed action (rate-limit/redirect extended communities), previously
+  compared equal in the Loc-RIB change detector and was silently dropped:
+  single-best downstream peers, newly-established sessions, and FIB install
+  candidates kept the stale payload while Add-Path peers saw the update. The
+  unicast and FlowSpec recompute paths now use the same payload-aware
+  comparison the EVPN table already had.
+
 - **Typed policy/catalog command errors.** Policy definitions, neighbor sets,
   peer groups, global named policy chains, and per-neighbor policy/peer-group
   catalog mutations now return typed peer-manager errors for not-found,

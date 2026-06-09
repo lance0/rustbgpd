@@ -52,10 +52,24 @@ impl LocRib {
 
         match best {
             Some(new_best) => {
-                let changed = self
-                    .routes
-                    .get(&prefix)
-                    .is_none_or(|old| best_path_cmp(old, &new_best) != std::cmp::Ordering::Equal);
+                // Detect preference-relevant changes AND same-peer payload
+                // churn. `best_path_cmp` compares only the fields that drive
+                // selection and tiebreaks on the peer address, so the same
+                // peer re-advertising the prefix with a new next-hop or
+                // changed attributes (communities, equal-length AS_PATH
+                // content, ...) would compare Equal and the stale payload
+                // would never be redistributed to single-best downstream
+                // peers or FIB install candidates. Mirrors the
+                // `recompute_evpn` payload comparison below.
+                let changed = self.routes.get(&prefix).is_none_or(|old| {
+                    best_path_cmp(old, &new_best) != std::cmp::Ordering::Equal
+                        || old.next_hop != new_best.next_hop
+                        || old.link_local_next_hop != new_best.link_local_next_hop
+                        || old.next_hop_scope != new_best.next_hop_scope
+                        || old.path_id != new_best.path_id
+                        || old.peer_router_id != new_best.peer_router_id
+                        || old.attributes != new_best.attributes
+                });
                 if changed {
                     self.routes.insert(prefix, new_best);
                 }
@@ -112,10 +126,20 @@ impl LocRib {
         let best = candidates.min_by(|a, b| flowspec_tiebreak(a, b)).cloned();
         match best {
             Some(new_best) => {
-                let changed = self
-                    .flowspec_routes
-                    .get(&rule)
-                    .is_none_or(|old| old.peer != new_best.peer || old.path_id != new_best.path_id);
+                // Same-peer attribute churn must count as change: a FlowSpec
+                // action lives in the extended communities (rate-limit,
+                // redirect, ...), so a peer updating only the action keeps
+                // `peer`/`path_id` identical. Comparing those two alone
+                // would silently swallow the new action. Mirrors the
+                // `recompute_evpn` payload comparison below.
+                let changed = self.flowspec_routes.get(&rule).is_none_or(|old| {
+                    old.peer != new_best.peer
+                        || old.path_id != new_best.path_id
+                        || old.is_stale != new_best.is_stale
+                        || old.is_llgr_stale != new_best.is_llgr_stale
+                        || old.peer_router_id != new_best.peer_router_id
+                        || old.attributes != new_best.attributes
+                });
                 if changed {
                     self.flowspec_routes.insert(rule, new_best);
                 }
@@ -813,6 +837,81 @@ mod tests {
         ]);
         let r_mm = make_evpn_type2(3, vec![mm]);
         assert_eq!(evpn_tiebreak_simple(&r_mm, &r_no), Ordering::Less);
+    }
+
+    /// Regression: `recompute` must report change when the same peer
+    /// re-advertises the same prefix with a new next-hop or changed
+    /// attributes. Previously the change detector was `best_path_cmp`
+    /// alone, which compares only preference-relevant fields and
+    /// tiebreaks on the peer address — so same-peer payload churn was
+    /// silently swallowed and never redistributed.
+    #[test]
+    fn unicast_same_peer_payload_churn_triggers_change() {
+        let v4 = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+        let prefix = Prefix::V4(v4);
+        let r1 = make_route(1, v4, 100);
+
+        // Same peer, same preference fields, new next-hop.
+        let mut r_nh = r1.clone();
+        r_nh.next_hop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99));
+
+        // Same peer, same preference fields, new community set.
+        let mut r_attr = r1.clone();
+        Arc::make_mut(&mut r_attr.attributes).push(PathAttribute::Communities(vec![0x0001_0001]));
+
+        let mut loc = LocRib::new();
+        // First install — always a change.
+        assert!(loc.recompute(prefix, [&r1].into_iter()));
+        // Identical re-announcement — no change, no event spam.
+        assert!(!loc.recompute(prefix, [&r1.clone()].into_iter()));
+        // Next-hop moved — must be detected.
+        assert!(
+            loc.recompute(prefix, [&r_nh].into_iter()),
+            "same-peer next-hop change must be detected"
+        );
+        assert_eq!(
+            loc.get(&prefix).unwrap().next_hop,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99))
+        );
+        // Attribute payload changed — must be detected.
+        assert!(
+            loc.recompute(prefix, [&r_attr].into_iter()),
+            "same-peer attribute change must be detected"
+        );
+        // Same input again — no change.
+        assert!(!loc.recompute(prefix, [&r_attr.clone()].into_iter()));
+    }
+
+    /// Regression: `recompute_flowspec` must report change when the same
+    /// peer re-advertises the same rule with a different action (the
+    /// action lives in the extended communities — rate-limit, redirect).
+    /// Previously only `peer` and `path_id` were compared, so a same-peer
+    /// action update was silently swallowed and the old action stayed
+    /// advertised (and installed, where enforcement applies).
+    #[test]
+    fn flowspec_same_peer_action_change_triggers_change() {
+        let rule = make_flowspec_rule();
+        let limit_1mbps =
+            PathAttribute::ExtendedCommunities(vec![ExtendedCommunity::new(u64::from_be_bytes([
+                0x80, 0x06, 0, 0, 0x49, 0x74, 0x24, 0x00,
+            ]))]);
+        let limit_drop =
+            PathAttribute::ExtendedCommunities(vec![ExtendedCommunity::new(u64::from_be_bytes([
+                0x80, 0x06, 0, 0, 0, 0, 0, 0,
+            ]))]);
+        let r1 = make_flowspec_route(1, 1, vec![limit_1mbps], RouteOrigin::Ebgp);
+        let r2 = make_flowspec_route(1, 1, vec![limit_drop], RouteOrigin::Ebgp);
+
+        let mut loc = LocRib::new();
+        // First install — always a change.
+        assert!(loc.recompute_flowspec(rule.clone(), [&r1].into_iter()));
+        // Same peer, action flipped from rate-limit to drop — must be detected.
+        assert!(
+            loc.recompute_flowspec(rule.clone(), [&r2].into_iter()),
+            "same-peer FlowSpec action change must be detected"
+        );
+        // Same input again — no change.
+        assert!(!loc.recompute_flowspec(rule.clone(), [&r2.clone()].into_iter()));
     }
 
     /// Regression: `recompute_evpn` must report change when the same
