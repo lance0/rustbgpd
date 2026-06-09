@@ -167,6 +167,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unicast and FlowSpec recompute paths now use the same payload-aware
   comparison the EVPN table already had.
 
+- **SIGHUP now delivers `[[dynamic_neighbors]]` edits.** The reload path
+  detected dynamic-neighbor range changes but never carried the new range set
+  into the runtime snapshot it returns, so the peer manager's accept-matcher
+  rebuild re-parsed the old ranges: TOML range edits applied via SIGHUP
+  silently never took effect (and every subsequent SIGHUP re-detected and
+  re-dropped the same diff). Runtime gRPC dynamic-neighbor CRUD was
+  unaffected.
+
 - **Typed policy/catalog command errors.** Policy definitions, neighbor sets,
   peer groups, global named policy chains, and per-neighbor policy/peer-group
   catalog mutations now return typed peer-manager errors for not-found,
