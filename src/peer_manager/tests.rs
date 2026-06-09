@@ -1,7 +1,8 @@
 use super::*;
 use bytes::BytesMut;
 use rustbgpd_api::peer_types::{
-    DynamicRangePolicyTarget, ImportValidationDependency, PeerKey, SessionLifecycleEventType,
+    CatalogMutationError, DynamicRangePolicyTarget, ImportValidationDependency, PeerKey,
+    SessionLifecycleEventType,
 };
 use rustbgpd_fsm::SessionState;
 use rustbgpd_transport::PeerSessionState;
@@ -2581,6 +2582,63 @@ async fn set_policy_does_not_error_on_idle_peers_when_import_changes() {
          Established or operator gRPC calls would fail every time a peer is mid-reconnect. \
          Got: {result:?}",
     );
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn missing_policy_catalog_references_return_not_found_errors() {
+    let (tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let handle = tokio::spawn(mgr.run());
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::SetGlobalImportChain {
+        policy_names: vec!["missing-policy".to_string()],
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        reply_rx.await.unwrap(),
+        Err(CatalogMutationError::NotFound(message)) if message.contains("missing-policy")
+    ));
+
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::AddPeer {
+        config: make_config(addr, 65002),
+        sync_config_snapshot: true,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    assert!(reply_rx.await.unwrap().is_ok(), "AddPeer must succeed");
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::SetNeighborPeerGroup {
+        address: addr,
+        peer_group: "missing-group".to_string(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        reply_rx.await.unwrap(),
+        Err(CatalogMutationError::NotFound(message)) if message.contains("missing-group")
+    ));
 
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     handle.await.unwrap();

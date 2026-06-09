@@ -865,10 +865,9 @@ impl PeerManager {
                                     .await
                                     .map(|()| applied_definition)
                                 }
-                                None => Err(
-                                    "has_md5_password cannot preserve a missing peer-group secret"
-                                        .to_string(),
-                                ),
+                                None => Err(rustbgpd_api::peer_types::CatalogMutationError::not_found(
+                                    format!("peer group {name} not found"),
+                                )),
                             };
                             let _ = reply.send(result);
                         }

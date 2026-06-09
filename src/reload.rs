@@ -4,10 +4,12 @@
 //! `main.rs`: gRPC config-event persistence, restart-required field pinning,
 //! and ordered peer-manager reconciliation.
 
+use std::fmt::Display;
 use std::ops::Deref;
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, FibTableSnapshot, PeerManagerCommand, PeerManagerNeighborConfig,
+    CatalogMutationError, ConfigEvent, FibTableSnapshot, PeerManagerCommand,
+    PeerManagerNeighborConfig,
 };
 use rustbgpd_policy::PolicyChain;
 use tokio::sync::{mpsc, oneshot};
@@ -109,6 +111,21 @@ fn copy_evpn_runtime_fields(target: &mut Config, source: &Config) {
         .clone_from(&source.ethernet_segments);
 }
 
+async fn send_pm_result_step<E: Display>(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    build: impl FnOnce(oneshot::Sender<Result<(), E>>) -> PeerManagerCommand,
+) -> Result<(), String> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if let Err(e) = peer_mgr_tx.send(build(reply_tx)).await {
+        return Err(format!("send to peer manager failed: {e}"));
+    }
+    match reply_rx.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(e) => Err(format!("peer manager dropped reply: {e}")),
+    }
+}
+
 /// Send a single `PeerManagerCommand` and await its `Result<(), String>`
 /// reply. Maps both channel-send and dropped-reply errors to a single
 /// `String` so callers can record one structured failure per step.
@@ -116,14 +133,16 @@ async fn send_pm_step(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     build: impl FnOnce(oneshot::Sender<Result<(), String>>) -> PeerManagerCommand,
 ) -> Result<(), String> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    if let Err(e) = peer_mgr_tx.send(build(reply_tx)).await {
-        return Err(format!("send to peer manager failed: {e}"));
-    }
-    match reply_rx.await {
-        Ok(result) => result,
-        Err(e) => Err(format!("peer manager dropped reply: {e}")),
-    }
+    send_pm_result_step(peer_mgr_tx, build).await
+}
+
+/// Send a catalog mutation command and convert its typed error to reload's
+/// existing string-shaped step failure.
+async fn send_catalog_pm_step(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    build: impl FnOnce(oneshot::Sender<Result<(), CatalogMutationError>>) -> PeerManagerCommand,
+) -> Result<(), String> {
+    send_pm_result_step(peer_mgr_tx, build).await
 }
 
 /// Read the peer manager's current runtime config snapshot.
@@ -734,7 +753,7 @@ pub(crate) async fn reload_config(
             definition: definition.clone(),
         };
         let cmd_name = name.clone();
-        match send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetNeighborSet {
+        match send_catalog_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetNeighborSet {
             name: cmd_name,
             definition,
             reply,
@@ -800,7 +819,7 @@ pub(crate) async fn reload_config(
             definition: definition.clone(),
         };
         let cmd_name = name.clone();
-        match send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetPolicy {
+        match send_catalog_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetPolicy {
             name: cmd_name,
             definition,
             reply,
@@ -866,7 +885,7 @@ pub(crate) async fn reload_config(
             definition: definition.clone(),
         };
         let cmd_name = name.clone();
-        match send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetPeerGroup {
+        match send_catalog_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetPeerGroup {
             name: cmd_name,
             definition,
             reply,
@@ -915,12 +934,12 @@ pub(crate) async fn reload_config(
             }
         };
         let res = if chain.is_empty() {
-            send_pm_step(peer_mgr_tx, |reply| {
+            send_catalog_pm_step(peer_mgr_tx, |reply| {
                 PeerManagerCommand::ClearGlobalImportChain { reply }
             })
             .await
         } else {
-            send_pm_step(peer_mgr_tx, |reply| {
+            send_catalog_pm_step(peer_mgr_tx, |reply| {
                 PeerManagerCommand::SetGlobalImportChain {
                     policy_names: chain,
                     reply,
@@ -968,12 +987,12 @@ pub(crate) async fn reload_config(
             }
         };
         let res = if chain.is_empty() {
-            send_pm_step(peer_mgr_tx, |reply| {
+            send_catalog_pm_step(peer_mgr_tx, |reply| {
                 PeerManagerCommand::ClearGlobalExportChain { reply }
             })
             .await
         } else {
-            send_pm_step(peer_mgr_tx, |reply| {
+            send_catalog_pm_step(peer_mgr_tx, |reply| {
                 PeerManagerCommand::SetGlobalExportChain {
                     policy_names: chain,
                     reply,
@@ -1326,7 +1345,7 @@ pub(crate) async fn reload_config(
     for name in &peer_group_diff.removed {
         let event = ConfigEvent::DeletePeerGroup { name: name.clone() };
         let cmd_name = name.clone();
-        match send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::DeletePeerGroup {
+        match send_catalog_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::DeletePeerGroup {
             name: cmd_name,
             reply,
         })
@@ -1364,7 +1383,7 @@ pub(crate) async fn reload_config(
     for name in &policy_diff.definitions_removed {
         let event = ConfigEvent::DeletePolicy { name: name.clone() };
         let cmd_name = name.clone();
-        match send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::DeletePolicy {
+        match send_catalog_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::DeletePolicy {
             name: cmd_name,
             reply,
         })
@@ -1402,7 +1421,7 @@ pub(crate) async fn reload_config(
     for name in &policy_diff.neighbor_sets_removed {
         let event = ConfigEvent::DeleteNeighborSet { name: name.clone() };
         let cmd_name = name.clone();
-        match send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::DeleteNeighborSet {
+        match send_catalog_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::DeleteNeighborSet {
             name: cmd_name,
             reply,
         })

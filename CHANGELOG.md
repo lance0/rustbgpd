@@ -140,6 +140,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Typed policy/catalog command errors.** Policy definitions, neighbor sets,
+  peer groups, global named policy chains, and per-neighbor policy/peer-group
+  catalog mutations now return typed peer-manager errors for not-found,
+  still-referenced, and invalid-input failures. The gRPC policy and peer-group
+  services map those variants directly to stable status codes instead of
+  parsing operator-facing error strings.
+
 - **Typed static-peer lifecycle command errors.** Static peer add/delete,
   reconfigure, peer reshape, enable/disable, and soft-reset replies now carry a
   typed lifecycle error instead of `String`, so gRPC and config-transaction

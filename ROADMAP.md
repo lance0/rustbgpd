@@ -536,8 +536,11 @@ branch is between features.
   strings. ADR-0076 transaction planning uses a typed stale-snapshot /
   invalid-candidate error for gRPC status mapping, and `StageConfigSnapshot`
   now returns typed candidate-validation vs previous-snapshot-serialization
-  errors to the transaction executor. Older peer-manager / RIB commands still
-  commonly return
+  errors to the transaction executor. Static-peer lifecycle/admin replies and
+  policy/catalog replies (policy definitions, neighbor sets, peer groups,
+  global named chains, and per-neighbor policy/peer-group membership) now also
+  use typed errors where callers need status-class distinctions. Older
+  peer-manager / RIB commands still commonly return
   `Result<_, String>`; keep that for one-status surfaces, but migrate to small
   typed enums when a caller needs to distinguish `ALREADY_EXISTS`, `NOT_FOUND`,
   `INVALID_ARGUMENT`, or similar API-visible classes.
