@@ -13,7 +13,10 @@ These run on every push and PR (`.github/workflows/ci.yml`,
 - [ ] `cargo fmt --check`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo test --workspace`
-- [ ] `cargo doc --workspace --lib --no-deps` with `RUSTDOCFLAGS="-D warnings"`
+- [ ] `cargo doc --workspace --lib --no-deps` (warning denial comes from
+      `.cargo/config.toml` `build.rustdocflags` — don't set a different
+      `RUSTDOCFLAGS` env, it forks the doc-cache fingerprint and forces a
+      full workspace re-doc on the next differently-flagged run)
 - [ ] **MSRV gate** — `cargo check --workspace --all-targets` at the
       declared `rust-version` (kept in lockstep with the Dockerfile
       builder version)

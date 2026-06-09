@@ -1,0 +1,10 @@
+# Pin rustdoc flags for the whole workspace so every `cargo doc`
+# invocation — pre-push hook, CI, manual release-checklist runs — shares
+# one build fingerprint. When only the pre-push hook exported
+# RUSTDOCFLAGS="-D warnings", any manual `cargo doc` (no env var) flipped
+# the rustdoc fingerprint and invalidated the entire workspace doc cache,
+# so the next push re-documented everything (~7 minutes) instead of
+# reusing it (~0.2 s). An env-var RUSTDOCFLAGS still overrides this; keep
+# any explicit override identical to these flags or the ping-pong returns.
+[build]
+rustdocflags = ["-D", "warnings"]

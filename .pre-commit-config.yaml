@@ -3,10 +3,16 @@
 # invocations adapted to this workspace's CI flags from
 # `.github/workflows/ci.yml` (cargo clippy --workspace --all-targets
 # -- -D warnings; cargo test --workspace; cargo doc --workspace --lib
-# --no-deps with RUSTDOCFLAGS=-D warnings).
+# --no-deps).
 #
 # `cargo test --lib` + rustdoc are at pre-push (not pre-commit) so commits
 # stay fast; cargo fmt + clippy run on every commit.
+#
+# Rustdoc warning denial comes from `.cargo/config.toml`
+# (build.rustdocflags), NOT an inline RUSTDOCFLAGS env: setting the env
+# var only here gave the hook's doc build a different fingerprint from
+# manual `cargo doc` runs, so each flavor invalidated the other's doc
+# cache and pushes paid a full workspace re-doc.
 #
 # Setup: see CONTRIBUTING.md "Pre-commit hooks".
 repos:
@@ -36,7 +42,7 @@ repos:
 
       - id: cargo-doc
         name: cargo doc
-        entry: sh -c 'RUSTDOCFLAGS="-D warnings" cargo doc --workspace --lib --no-deps'
+        entry: cargo doc --workspace --lib --no-deps
         language: system
         always_run: true
         pass_filenames: false
