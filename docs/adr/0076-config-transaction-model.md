@@ -109,7 +109,10 @@ section executors behind that public contract.
    Established peer negotiated the Route Refresh capability**; if one did not,
    the apply is rejected and rolled back cleanly (the refresh during rollback is
    best-effort, so a non-RR peer yields a single clear rejection, not a compound
-   rollback error).
+   rollback error). The direct gRPC catalog mutators (`SetPolicy` and the other
+   policy / neighbor-set / chain commands) commit their peer fan-out through
+   this same capturing snapshot primitive, so a mid-fanout failure there also
+   restores the already-updated peers instead of leaving split-brain chains.
 6. **Confirmed-commit is singleton and process-local.** A caller can set
    `confirm_id` on `ApplyConfigTransaction` to enter commit-confirmed mode.
    The candidate still goes through the same plan/apply/persist executor first;

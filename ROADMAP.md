@@ -634,13 +634,17 @@ branch is between features.
   stored secret). Confirmed-transaction abort/auto-revert also now treat a
   non-committable rollback re-apply as a rollback failure instead of
   reporting success.
-- [ ] **`SetPolicy` fan-out atomicity** *(remaining slice of the catalog
-  convergence item).* The peer manager's direct `SetPolicy` apply fans out
-  per-peer runtime-policy updates in a loop; a mid-loop failure leaves
-  already-updated peers on the new chains while later peers keep the old
-  ones. Make the fan-out atomic via the resolved-policy-snapshot primitive
+- [x] **`SetPolicy` fan-out atomicity** *(remaining slice of the catalog
+  convergence item).* The peer manager's direct `SetPolicy` apply fanned out
+  per-peer runtime-policy updates in a loop; a mid-loop failure left
+  already-updated peers on the new chains while later peers kept the old
+  ones. The catalog fan-out (`apply_policy_change`, shared by all 12 policy
+  / neighbor-set / chain mutators) now resolves every affected peer's chains
+  first, then commits the set through the resolved-policy-snapshot primitive
   (`ApplyResolvedPolicySnapshot`, the live-impact transaction executor's
-  capturing mechanism).
+  capturing mechanism): a mid-fanout failure restores the already-updated
+  peers to their captured priors and `current_config` does not advance.
+  Peer-group reshapes (session teardown/rebuild) remain a separate deferral.
 - [x] **Config transaction live-impact policy / peer-group executor.**
   Policy definitions, `neighbor_sets`, `peer_groups`, and global named
   policy-chain edits that move existing static neighbors' or accepted dynamic
