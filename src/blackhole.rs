@@ -660,12 +660,15 @@ async fn reap_or_report_adopted<F>(
             }
         }
         if !reapable {
-            statuses.push(BlackholeStatus {
-                prefix,
-                peer: unspecified_peer(prefix),
-                state: BlackholeState::Installed,
-                reason: "adopted_pending_reap".to_string(),
-            });
+            upsert_blackhole_status(
+                statuses,
+                BlackholeStatus {
+                    prefix,
+                    peer: unspecified_peer(prefix),
+                    state: BlackholeState::Installed,
+                    reason: "adopted_pending_reap".to_string(),
+                },
+            );
             continue;
         }
         match fib.remove(prefix).await {
@@ -680,14 +683,28 @@ async fn reap_or_report_adopted<F>(
             Err(e) => {
                 metrics.record_blackhole_discard_kernel_failure("remove");
                 warn!(%prefix, error = %e, "failed to reap adopted BLACKHOLE discard route");
-                statuses.push(BlackholeStatus {
-                    prefix,
-                    peer: unspecified_peer(prefix),
-                    state: BlackholeState::Failed,
-                    reason: "reap_failed".to_string(),
-                });
+                upsert_blackhole_status(
+                    statuses,
+                    BlackholeStatus {
+                        prefix,
+                        peer: unspecified_peer(prefix),
+                        state: BlackholeState::Failed,
+                        reason: "reap_failed".to_string(),
+                    },
+                );
             }
         }
+    }
+}
+
+fn upsert_blackhole_status(statuses: &mut Vec<BlackholeStatus>, status: BlackholeStatus) {
+    if let Some(existing) = statuses
+        .iter_mut()
+        .find(|existing| existing.prefix == status.prefix)
+    {
+        *existing = status;
+    } else {
+        statuses.push(status);
     }
 }
 
@@ -1904,6 +1921,85 @@ mod tests {
         assert!(statuses.is_empty());
         let reaped = plain_counter_value(&metrics, "bgp_blackhole_discard_reaped_total");
         assert!((reaped - 1.0).abs() < f64::EPSILON, "got {reaped}");
+    }
+
+    /// If a crash-leftover row matches a route that is currently
+    /// rejected by the BLACKHOLE preflight, publish one status row for
+    /// the prefix. While the marker exists, the kernel reality wins:
+    /// traffic is still being discarded until the deferral reaps it.
+    #[tokio::test]
+    async fn adopted_pending_replaces_rejected_status_for_same_prefix() {
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
+        let mut fib = FakeFib::default();
+        fib.installed.insert(prefix);
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut owned = HashMap::new();
+        let mut rejected = HashSet::new();
+        let mut adoption = deferred_adoption();
+
+        let statuses = reconcile_for_test_with_adoption(
+            vec![route(
+                prefix,
+                RouteOrigin::Ebgp,
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+            )],
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+        )
+        .await;
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].prefix, prefix);
+        assert_eq!(statuses[0].state, BlackholeState::Installed);
+        assert_eq!(statuses[0].reason, "adopted_pending_reap");
+        assert!(adoption.pending.contains(&prefix));
+        let rejected_total = counter_value(
+            &metrics,
+            "bgp_blackhole_discard_rejected_total",
+            "reason",
+            "broad_prefix",
+        );
+        assert!(
+            (rejected_total - 1.0).abs() < f64::EPSILON,
+            "got {rejected_total}"
+        );
+    }
+
+    /// After the deferral expires, the same rejected route keeps its
+    /// normal rejected status if the adopted marker is reaped cleanly.
+    #[tokio::test]
+    async fn reaped_rejected_prefix_keeps_rejected_status() {
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
+        let mut fib = FakeFib::default();
+        fib.installed.insert(prefix);
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut owned = HashMap::new();
+        let mut rejected = HashSet::new();
+        let mut adoption = reapable_adoption();
+
+        let statuses = reconcile_for_test_with_adoption(
+            vec![route(
+                prefix,
+                RouteOrigin::Ebgp,
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+            )],
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+        )
+        .await;
+
+        assert_eq!(fib.remove_calls, vec![prefix]);
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].prefix, prefix);
+        assert_eq!(statuses[0].state, BlackholeState::Rejected);
+        assert_eq!(statuses[0].reason, "broad_prefix");
+        assert!(adoption.pending.is_empty());
     }
 
     /// If an adopted row disappears before the reap deadline expires,
