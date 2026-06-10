@@ -4975,3 +4975,258 @@ async fn inbound_orf_malformed_group_resets_via_remove_all() {
         _ => panic!("expected RibUpdate::PeerOrfUpdate"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0078: inbound transport→RIB backpressure — block, never drop
+// ---------------------------------------------------------------------------
+
+fn counter_value(metrics: &BgpMetrics, name: &str, peer: &str) -> f64 {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == name)
+        .and_then(|family| {
+            family.get_metric().iter().find_map(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer)
+                    .then(|| {
+                        metric
+                            .get_counter()
+                            .as_ref()
+                            .map_or(0.0, prometheus::proto::Counter::value)
+                    })
+            })
+        })
+        .unwrap_or(0.0)
+}
+
+fn backpressure_test_session(
+    rib_capacity: usize,
+) -> (PeerSession, mpsc::Receiver<RibUpdate>, BgpMetrics) {
+    let peer_config = PeerConfig {
+        local_asn: 65001,
+        remote_asn: 65002,
+        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        hold_time: 90,
+        connect_retry_secs: 30,
+        families: vec![(Afi::Ipv4, Safi::Unicast)],
+        graceful_restart: false,
+        gr_restart_time: 120,
+        llgr_stale_time: 0,
+        add_path_receive: false,
+        add_path_send: false,
+        add_path_send_max: 0,
+        local_role: None,
+        strict_role: false,
+        prefix_orf_receive: false,
+    };
+    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let metrics = BgpMetrics::new();
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, rib_rx) = mpsc::channel(rib_capacity);
+    let session = PeerSession::new(
+        config,
+        metrics.clone(),
+        cmd_rx,
+        rib_tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    (session, rib_rx, metrics)
+}
+
+fn sample_update_message() -> bytes::BytesMut {
+    let update = rustbgpd_wire::UpdateMessage::build(
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+        }],
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        ],
+        true,
+        false,
+        rustbgpd_wire::Ipv4UnicastMode::Body,
+    );
+    rustbgpd_wire::encode_message(&Message::Update(update)).unwrap()
+}
+
+fn placeholder_routes_received() -> RibUpdate {
+    RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99)),
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    }
+}
+
+/// ADR-0078 rule 1: a full RIB channel parks the session task instead of
+/// dropping the batch — the routes arrive once the channel drains, and
+/// the saturation counter records the blocked send.
+#[tokio::test]
+async fn full_rib_channel_parks_session_and_never_drops_routes() {
+    let (mut session, mut rib_rx, metrics) = backpressure_test_session(1);
+    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast)];
+    // Fill the capacity-1 channel so the delivery must block.
+    session
+        .rib_tx
+        .try_send(placeholder_routes_received())
+        .unwrap();
+
+    session
+        .read_buf
+        .buf
+        .extend_from_slice(&sample_update_message());
+    let peer_label = session.peer_label.clone();
+    let process = session.process_read_buffer();
+    tokio::pin!(process);
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut process)
+            .await
+            .is_err(),
+        "processing must park on the full RIB channel, not drop the batch"
+    );
+
+    // Drain the pre-fill; the parked delivery completes.
+    let placeholder = rib_rx.recv().await.expect("pre-filled update");
+    assert!(matches!(
+        placeholder,
+        RibUpdate::RoutesReceived { peer, .. } if peer == IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99))
+    ));
+    tokio::time::timeout(Duration::from_secs(5), &mut process)
+        .await
+        .expect("processing must complete once the RIB drains");
+
+    match rib_rx.recv().await.expect("delivered batch") {
+        RibUpdate::RoutesReceived { announced, .. } => {
+            assert_eq!(announced.len(), 1);
+            assert_eq!(
+                announced[0].prefix,
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24))
+            );
+        }
+        _ => panic!("expected RoutesReceived"),
+    }
+
+    let blocked = counter_value(&metrics, "bgp_inbound_rib_backpressure_total", &peer_label);
+    assert!((blocked - 1.0).abs() < f64::EPSILON, "got {blocked}");
+}
+
+/// ADR-0078 rule 3: a hold-timer expiry with unprocessed bytes already
+/// in the read buffer re-arms instead of expiring — we were the
+/// bottleneck, not the peer.
+#[tokio::test]
+async fn hold_expiry_with_buffered_input_rearms_instead_of_expiring() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+
+    let keepalive = rustbgpd_wire::encode_message(&Message::Keepalive).unwrap();
+    session.read_buf.buf.extend_from_slice(&keepalive);
+    session.timers.hold = None; // the expiry the select loop observed
+
+    session.handle_hold_timer_expiry().await;
+
+    assert_eq!(
+        session.fsm.state(),
+        SessionState::Established,
+        "pending input must not let the hold timer tear the session down"
+    );
+    assert!(
+        session.timers.hold.is_some(),
+        "processing the buffered KEEPALIVE must re-arm the hold timer"
+    );
+    let rearmed = counter_value(
+        &session.metrics.clone(),
+        "bgp_hold_timer_rearmed_pending_input_total",
+        &session.peer_label,
+    );
+    assert!((rearmed - 1.0).abs() < f64::EPSILON, "got {rearmed}");
+}
+
+/// ADR-0078 rule 3, socket flavor: peer bytes sitting unread in the
+/// kernel receive buffer also count as liveness at hold expiry.
+#[tokio::test]
+async fn hold_expiry_with_unread_socket_data_rearms() {
+    use tokio::io::AsyncWriteExt;
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+
+    let keepalive = rustbgpd_wire::encode_message(&Message::Keepalive).unwrap();
+    server.write_all(&keepalive).await.unwrap();
+    server.flush().await.unwrap();
+    // Let the bytes land in the local receive buffer.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    session.timers.hold = None;
+
+    session.handle_hold_timer_expiry().await;
+
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert!(session.timers.hold.is_some());
+}
+
+/// A genuinely silent peer still expires: no buffered or readable input
+/// means the hold expiry stands and the session leaves Established.
+#[tokio::test]
+async fn hold_expiry_without_pending_input_expires() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+
+    session.timers.hold = None;
+    session.handle_hold_timer_expiry().await;
+
+    assert_ne!(
+        session.fsm.state(),
+        SessionState::Established,
+        "a silent peer must still expire the hold timer"
+    );
+}
+
+/// ADR-0078 rule 2: negotiating a session routes the KEEPALIVE cadence
+/// to the writer task (watch holds the negotiated interval) instead of
+/// arming the session-loop keepalive timer.
+#[tokio::test]
+async fn established_session_routes_keepalive_cadence_to_writer() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+
+    assert!(
+        session.timers.keepalive.is_none(),
+        "the session loop must not own the keepalive cadence"
+    );
+    let cadence = *session
+        .writer_keepalive_tx
+        .as_ref()
+        .expect("writer keepalive control must exist")
+        .borrow();
+    assert_eq!(
+        cadence,
+        Some(Duration::from_secs(30)),
+        "hold 90 negotiates a 30 s keepalive cadence owned by the writer"
+    );
+}

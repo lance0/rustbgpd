@@ -290,6 +290,35 @@ pub fn materialize_attrs(
 }
 
 impl PeerSession {
+    /// Deliver a `RoutesReceived` batch to the RIB manager — block, never
+    /// drop (ADR-0078). The fast path is a `try_send`; when the channel
+    /// is full the saturation counter increments and the session task
+    /// parks on `send().await`. Parking here is the contract: the select
+    /// loop stops reading the TCP socket, the kernel receive window
+    /// fills, and the sender is paced — overload is shed to the party
+    /// that can slow down instead of becoming a silently dropped batch
+    /// (a permanently missing route or a permanently stale one). The
+    /// peer's hold timer stays fed by the writer-owned KEEPALIVE
+    /// cadence while parked.
+    ///
+    /// `Err` means the RIB manager is gone (daemon shutdown) — the
+    /// caller should abandon the rest of its turn.
+    pub(super) async fn deliver_routes_to_rib(&self, update: RibUpdate) -> Result<(), ()> {
+        match self.rib_tx.try_send(update) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(update)) => {
+                self.metrics
+                    .record_inbound_rib_backpressure(&self.peer_label);
+                debug!(
+                    peer = %self.peer_label,
+                    "RIB channel full; session parks until the RIB drains (TCP backpressure)"
+                );
+                self.rib_tx.send(update).await.map_err(|_| ())
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(()),
+        }
+    }
+
     /// Check whether a prefix's address family is among the negotiated families.
     /// Negotiated maximum message length: 65535 if Extended Messages was
     /// negotiated, otherwise 4096.
@@ -621,19 +650,23 @@ impl PeerSession {
             for key in &loop_evpn_withdrawn {
                 self.known_evpn.remove(key);
             }
-            if !loop_withdrawn.is_empty()
+            if (!loop_withdrawn.is_empty()
                 || !loop_fs_withdrawn.is_empty()
-                || !loop_evpn_withdrawn.is_empty()
+                || !loop_evpn_withdrawn.is_empty())
+                && self
+                    .deliver_routes_to_rib(RibUpdate::RoutesReceived {
+                        peer: self.peer_ip,
+                        announced: vec![],
+                        withdrawn: loop_withdrawn,
+                        flowspec_announced: vec![],
+                        flowspec_withdrawn: loop_fs_withdrawn,
+                        evpn_announced: vec![],
+                        evpn_withdrawn: loop_evpn_withdrawn,
+                    })
+                    .await
+                    .is_err()
             {
-                let _ = self.rib_tx.try_send(RibUpdate::RoutesReceived {
-                    peer: self.peer_ip,
-                    announced: vec![],
-                    withdrawn: loop_withdrawn,
-                    flowspec_announced: vec![],
-                    flowspec_withdrawn: loop_fs_withdrawn,
-                    evpn_announced: vec![],
-                    evpn_withdrawn: loop_evpn_withdrawn,
-                });
+                return;
             }
             self.drive_fsm(Event::UpdateReceived).await;
             return;
@@ -698,19 +731,23 @@ impl PeerSession {
             for key in &loop_evpn_withdrawn {
                 self.known_evpn.remove(key);
             }
-            if !loop_withdrawn.is_empty()
+            if (!loop_withdrawn.is_empty()
                 || !loop_fs_withdrawn.is_empty()
-                || !loop_evpn_withdrawn.is_empty()
+                || !loop_evpn_withdrawn.is_empty())
+                && self
+                    .deliver_routes_to_rib(RibUpdate::RoutesReceived {
+                        peer: self.peer_ip,
+                        announced: vec![],
+                        withdrawn: loop_withdrawn,
+                        flowspec_announced: vec![],
+                        flowspec_withdrawn: loop_fs_withdrawn,
+                        evpn_announced: vec![],
+                        evpn_withdrawn: loop_evpn_withdrawn,
+                    })
+                    .await
+                    .is_err()
             {
-                let _ = self.rib_tx.try_send(RibUpdate::RoutesReceived {
-                    peer: self.peer_ip,
-                    announced: vec![],
-                    withdrawn: loop_withdrawn,
-                    flowspec_announced: vec![],
-                    flowspec_withdrawn: loop_fs_withdrawn,
-                    evpn_announced: vec![],
-                    evpn_withdrawn: loop_evpn_withdrawn,
-                });
+                return;
             }
             self.drive_fsm(Event::UpdateReceived).await;
             return;
@@ -1306,22 +1343,26 @@ impl PeerSession {
             return;
         }
 
-        if !announced.is_empty()
+        if (!announced.is_empty()
             || !withdrawn.is_empty()
             || !flowspec_announced.is_empty()
             || !flowspec_withdrawn.is_empty()
             || !evpn_announced.is_empty()
-            || !evpn_withdrawn.is_empty()
+            || !evpn_withdrawn.is_empty())
+            && self
+                .deliver_routes_to_rib(RibUpdate::RoutesReceived {
+                    peer: self.peer_ip,
+                    announced,
+                    withdrawn,
+                    flowspec_announced,
+                    flowspec_withdrawn,
+                    evpn_announced,
+                    evpn_withdrawn,
+                })
+                .await
+                .is_err()
         {
-            let _ = self.rib_tx.try_send(RibUpdate::RoutesReceived {
-                peer: self.peer_ip,
-                announced,
-                withdrawn,
-                flowspec_announced,
-                flowspec_withdrawn,
-                evpn_announced,
-                evpn_withdrawn,
-            });
+            return;
         }
 
         // 5. Tell FSM about the update (restarts hold timer)

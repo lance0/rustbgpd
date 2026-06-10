@@ -53,6 +53,8 @@ pub struct BgpMetrics {
 
     // ── RIB drops ───────────────────────────────────────────────
     outbound_route_drops: IntCounterVec,
+    inbound_rib_backpressure: IntCounterVec,
+    hold_timer_rearmed_pending_input: IntCounterVec,
     blackhole_discard_installed: IntCounter,
     blackhole_discard_withdrawn: IntCounter,
     blackhole_discard_adopted: IntCounter,
@@ -330,6 +332,26 @@ impl BgpMetrics {
             Opts::new(
                 "bgp_outbound_route_drops_total",
                 "Number of outbound route updates dropped due to full channel",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let inbound_rib_backpressure = IntCounterVec::new(
+            Opts::new(
+                "bgp_inbound_rib_backpressure_total",
+                "Inbound route batches that found the RIB channel full and blocked: the session \
+                 task parks and TCP receive-window backpressure paces the sender (ADR-0078).",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let hold_timer_rearmed_pending_input = IntCounterVec::new(
+            Opts::new(
+                "bgp_hold_timer_rearmed_pending_input_total",
+                "Hold-timer expiries converted to re-arms because unprocessed peer input was \
+                 pending — the local daemon was the bottleneck, not the peer (ADR-0078).",
             ),
             &["peer"],
         )
@@ -872,6 +894,12 @@ impl BgpMetrics {
             .register(Box::new(outbound_route_drops.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(inbound_rib_backpressure.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(hold_timer_rearmed_pending_input.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(blackhole_discard_installed.clone()))
             .expect("metric not already registered");
         registry
@@ -1060,6 +1088,8 @@ impl BgpMetrics {
             config_transaction_lifecycle,
             max_prefix_exceeded,
             outbound_route_drops,
+            inbound_rib_backpressure,
+            hold_timer_rearmed_pending_input,
             blackhole_discard_installed,
             blackhole_discard_withdrawn,
             blackhole_discard_adopted,
@@ -1311,6 +1341,22 @@ impl BgpMetrics {
     /// Record an outbound route update drop for a peer.
     pub fn record_outbound_route_drop(&self, peer: &str) {
         self.outbound_route_drops.with_label_values(&[peer]).inc();
+    }
+
+    /// Record an inbound route batch that blocked on a full RIB channel
+    /// (ADR-0078: the session parks instead of dropping).
+    pub fn record_inbound_rib_backpressure(&self, peer: &str) {
+        self.inbound_rib_backpressure
+            .with_label_values(&[peer])
+            .inc();
+    }
+
+    /// Record a hold-timer expiry converted to a re-arm because
+    /// unprocessed peer input was pending (ADR-0078).
+    pub fn record_hold_timer_rearmed_pending_input(&self, peer: &str) {
+        self.hold_timer_rearmed_pending_input
+            .with_label_values(&[peer])
+            .inc();
     }
 
     /// Record a successful RFC 7999 kernel discard install.

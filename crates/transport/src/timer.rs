@@ -18,13 +18,22 @@ pub struct Timers {
     pub connect_retry: Option<Pin<Box<Sleep>>>,
     /// Hold timer — session tears down if no KEEPALIVE/UPDATE within this window.
     pub hold: Option<Pin<Box<Sleep>>>,
-    /// Keepalive timer — fires periodically to send KEEPALIVE messages.
+    /// Keepalive timer slot. Unused since ADR-0078 moved the KEEPALIVE
+    /// cadence into the per-connection writer task; kept so
+    /// `TimerType::Keepalive` still maps to a slot.
     pub keepalive: Option<Pin<Box<Sleep>>>,
+    /// Interval of the most recent hold-timer start, so an expiry that
+    /// coincides with pending unprocessed input can re-arm at the
+    /// negotiated duration (ADR-0078).
+    pub last_hold_secs: Option<u32>,
 }
 
 impl Timers {
     /// Start (or restart) a timer with the given duration in seconds.
     pub fn start(&mut self, timer_type: TimerType, secs: u32) {
+        if timer_type == TimerType::Hold {
+            self.last_hold_secs = Some(secs);
+        }
         let slot = self.slot_mut(timer_type);
         *slot = Some(Box::pin(tokio::time::sleep(Duration::from_secs(
             u64::from(secs),
