@@ -1972,9 +1972,10 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         }) as rustbgpd_api::evpn_service::DuplicateMacClearFn
     });
     // Coordinator lock serializing persisted runtime config mutations with
-    // SIGHUP reload. FIB-table CRUD, dynamic-neighbor CRUD, and the SIGHUP
-    // reload path hold it across their read/apply/persist sequence so stale
-    // TOML snapshots cannot clobber accepted runtime changes.
+    // SIGHUP reload. FIB-table CRUD, dynamic-neighbor CRUD, policy/peer-group
+    // catalog CRUD, and the SIGHUP reload path hold it across their
+    // read/apply/persist sequence so stale TOML snapshots cannot clobber
+    // accepted runtime changes.
     let runtime_config_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let config_transaction_controller =
         config_transaction_control::ConfigTransactionController::new(

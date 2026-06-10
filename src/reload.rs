@@ -190,8 +190,23 @@ fn take_config_event_ack(event: &mut ConfigEvent) -> Option<oneshot::Sender<Resu
         | ConfigEvent::NeighborDeleted { ack, .. }
         | ConfigEvent::DynamicNeighborAdded { ack, .. }
         | ConfigEvent::DynamicNeighborDeleted { ack, .. }
-        | ConfigEvent::ConfigTransactionCommitted { ack, .. } => ack.take(),
-        _ => None,
+        | ConfigEvent::ConfigTransactionCommitted { ack, .. }
+        | ConfigEvent::SetPolicy { ack, .. }
+        | ConfigEvent::DeletePolicy { ack, .. }
+        | ConfigEvent::SetNeighborSet { ack, .. }
+        | ConfigEvent::DeleteNeighborSet { ack, .. }
+        | ConfigEvent::SetGlobalImportChain { ack, .. }
+        | ConfigEvent::SetGlobalExportChain { ack, .. }
+        | ConfigEvent::ClearGlobalImportChain { ack, .. }
+        | ConfigEvent::ClearGlobalExportChain { ack, .. }
+        | ConfigEvent::SetNeighborImportChain { ack, .. }
+        | ConfigEvent::SetNeighborExportChain { ack, .. }
+        | ConfigEvent::ClearNeighborImportChain { ack, .. }
+        | ConfigEvent::ClearNeighborExportChain { ack, .. }
+        | ConfigEvent::SetPeerGroup { ack, .. }
+        | ConfigEvent::DeletePeerGroup { ack, .. }
+        | ConfigEvent::SetNeighborPeerGroup { ack, .. }
+        | ConfigEvent::ClearNeighborPeerGroup { ack, .. } => ack.take(),
     }
 }
 
@@ -769,6 +784,7 @@ pub(crate) async fn reload_config(
         let event = ConfigEvent::SetNeighborSet {
             name: name.clone(),
             definition: definition.clone(),
+            ack: None,
         };
         let cmd_name = name.clone();
         match send_catalog_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetNeighborSet {
@@ -835,6 +851,7 @@ pub(crate) async fn reload_config(
         let event = ConfigEvent::SetPolicy {
             name: name.clone(),
             definition: definition.clone(),
+            ack: None,
         };
         let cmd_name = name.clone();
         match send_catalog_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetPolicy {
@@ -901,6 +918,7 @@ pub(crate) async fn reload_config(
         let event = ConfigEvent::SetPeerGroup {
             name: name.clone(),
             definition: definition.clone(),
+            ack: None,
         };
         let cmd_name = name.clone();
         match send_catalog_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetPeerGroup {
@@ -945,10 +963,11 @@ pub(crate) async fn reload_config(
     if policy_diff.import_chain_changed {
         let chain = new_config.policy.import_chain.clone();
         let event = if chain.is_empty() {
-            ConfigEvent::ClearGlobalImportChain
+            ConfigEvent::ClearGlobalImportChain { ack: None }
         } else {
             ConfigEvent::SetGlobalImportChain {
                 policy_names: chain.clone(),
+                ack: None,
             }
         };
         let res = if chain.is_empty() {
@@ -998,10 +1017,11 @@ pub(crate) async fn reload_config(
     if policy_diff.export_chain_changed {
         let chain = new_config.policy.export_chain.clone();
         let event = if chain.is_empty() {
-            ConfigEvent::ClearGlobalExportChain
+            ConfigEvent::ClearGlobalExportChain { ack: None }
         } else {
             ConfigEvent::SetGlobalExportChain {
                 policy_names: chain.clone(),
+                ack: None,
             }
         };
         let res = if chain.is_empty() {
@@ -1361,7 +1381,10 @@ pub(crate) async fn reload_config(
     //    were members; same for policy / neighbor-set deletes vs
     //    peer-group deletes.
     for name in &peer_group_diff.removed {
-        let event = ConfigEvent::DeletePeerGroup { name: name.clone() };
+        let event = ConfigEvent::DeletePeerGroup {
+            name: name.clone(),
+            ack: None,
+        };
         let cmd_name = name.clone();
         match send_catalog_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::DeletePeerGroup {
             name: cmd_name,
@@ -1399,7 +1422,10 @@ pub(crate) async fn reload_config(
         }
     }
     for name in &policy_diff.definitions_removed {
-        let event = ConfigEvent::DeletePolicy { name: name.clone() };
+        let event = ConfigEvent::DeletePolicy {
+            name: name.clone(),
+            ack: None,
+        };
         let cmd_name = name.clone();
         match send_catalog_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::DeletePolicy {
             name: cmd_name,
@@ -1437,7 +1463,10 @@ pub(crate) async fn reload_config(
         }
     }
     for name in &policy_diff.neighbor_sets_removed {
-        let event = ConfigEvent::DeleteNeighborSet { name: name.clone() };
+        let event = ConfigEvent::DeleteNeighborSet {
+            name: name.clone(),
+            ack: None,
+        };
         let cmd_name = name.clone();
         match send_catalog_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::DeleteNeighborSet {
             name: cmd_name,
@@ -4207,6 +4236,7 @@ peer_group = "secure"
                     default_action: "deny".to_string(),
                     statements: Vec::new(),
                 },
+                ack: None,
             })
             .await
             .unwrap();
@@ -4802,6 +4832,7 @@ remote_asn = 65002
                     default_action: "deny".to_string(),
                     statements: Vec::new(),
                 },
+                ack: None,
             })
             .await
             .unwrap();

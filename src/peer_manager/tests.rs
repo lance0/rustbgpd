@@ -1306,6 +1306,7 @@ peer_group = "edge"
                 import_policy_chain: Vec::new(),
                 export_policy_chain: Vec::new(),
             },
+            ack: None,
         },
         vec![addr],
     )
@@ -2331,6 +2332,7 @@ async fn apply_policy_change_fans_out_to_scoped_peers() {
                 remote_asns: vec![],
                 peer_groups: vec![],
             },
+            ack: None,
         },
         None,
     )
@@ -2449,6 +2451,7 @@ async fn apply_policy_change_reaches_live_dynamic_peers() {
                 default_action: "deny".to_string(),
                 statements: Vec::<PolicyStatementDefinition>::new(),
             },
+            ack: None,
         },
         None,
     )

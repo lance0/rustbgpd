@@ -1,5 +1,6 @@
 //! gRPC peer-group service — reusable neighbor defaults and membership.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
@@ -16,8 +17,9 @@ use crate::peer_types::{
 use crate::policy_helpers::proto_statement_to_input;
 use crate::proto;
 use crate::server::{
-    AccessMode, ConfigMutationGateFn, catalog_mutation_error_to_status, check_config_mutation_gate,
-    read_only_rejection,
+    AccessMode, ConfigMutationGateFn, apply_catalog_mutation, catalog_mutation_error_to_status,
+    peer_manager_request, persist_rollback_error, persist_runtime_config_event,
+    read_only_rejection, run_shielded_catalog_mutation,
 };
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -198,27 +200,63 @@ pub struct PeerGroupService {
     access_mode: AccessMode,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
+    runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
     config_mutation_gate: Option<ConfigMutationGateFn>,
 }
 
 impl PeerGroupService {
-    /// Create a new peer-group service with the given channels.
+    /// Create a new peer-group service with the given channels and a
+    /// private runtime-config lock (tests / embedded use).
+    #[cfg(test)]
     pub fn new(
         access_mode: AccessMode,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
         config_mutation_gate: Option<ConfigMutationGateFn>,
     ) -> Self {
-        Self {
+        Self::with_runtime_config_lock(
             access_mode,
             peer_mgr_tx,
             config_tx,
             config_mutation_gate,
+            Arc::new(tokio::sync::Mutex::new(())),
+        )
+    }
+
+    /// Create a peer-group service sharing the daemon-wide runtime-config
+    /// coordinator lock, so catalog mutations serialize with SIGHUP
+    /// reload, neighbor / FIB-table CRUD, and config transactions.
+    pub fn with_runtime_config_lock(
+        access_mode: AccessMode,
+        peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+        config_tx: Option<mpsc::Sender<ConfigEvent>>,
+        config_mutation_gate: Option<ConfigMutationGateFn>,
+        runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
+    ) -> Self {
+        Self {
+            access_mode,
+            peer_mgr_tx,
+            config_tx,
+            runtime_config_lock,
+            config_mutation_gate,
         }
     }
 
-    async fn check_mutation_gate(&self, operation: &'static str) -> Result<(), Status> {
-        check_config_mutation_gate(&self.config_mutation_gate, operation).await
+    /// Run `body` under the ADR-0080 detached-task shield with the
+    /// runtime-config lock held and the transaction gate checked inside
+    /// it (see `server::run_shielded_catalog_mutation`).
+    async fn run_mutation<F, Fut>(&self, operation: &'static str, body: F) -> Result<(), Status>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), Status>> + Send,
+    {
+        run_shielded_catalog_mutation(
+            self.runtime_config_lock.clone(),
+            self.config_mutation_gate.clone(),
+            operation,
+            body,
+        )
+        .await
     }
 }
 
@@ -296,8 +334,6 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
         if req.name.trim().is_empty() {
             return Err(Status::invalid_argument("name is required"));
         }
-        self.check_mutation_gate("PeerGroupService.SetPeerGroup")
-            .await?;
         let definition = req
             .definition
             .ok_or_else(|| Status::invalid_argument("definition is required"))?;
@@ -306,44 +342,76 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
         let definition = proto_definition_to_input(definition)?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
 
-        let persisted = if preserve_md5_password {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            self.peer_mgr_tx
-                .send(PeerManagerCommand::SetPeerGroupPreserveMd5 {
-                    name: req.name.clone(),
-                    definition,
-                    reply: reply_tx,
+        let peer_mgr_tx = self.peer_mgr_tx.clone();
+        let name = req.name;
+        self.run_mutation("PeerGroupService.SetPeerGroup", move || async move {
+            // Prior state is the unredacted stored definition (including
+            // md5_password) so a rollback restores the secret intact.
+            let prior =
+                peer_manager_request(&peer_mgr_tx, |reply| PeerManagerCommand::GetPeerGroup {
+                    name: name.clone(),
+                    reply,
                 })
-                .await
-                .map_err(|_| Status::internal("peer manager unavailable"))?;
-            reply_rx
-                .await
-                .map_err(|_| Status::internal("peer manager dropped reply"))?
-                .map_err(|error| catalog_mutation_error_to_status(&error))?
-        } else {
-            let persisted = definition.clone();
-            let (reply_tx, reply_rx) = oneshot::channel();
-            self.peer_mgr_tx
-                .send(PeerManagerCommand::SetPeerGroup {
-                    name: req.name.clone(),
-                    definition,
-                    reply: reply_tx,
-                })
-                .await
-                .map_err(|_| Status::internal("peer manager unavailable"))?;
-            reply_rx
-                .await
-                .map_err(|_| Status::internal("peer manager dropped reply"))?
-                .map_err(|error| catalog_mutation_error_to_status(&error))?;
-            persisted
-        };
+                .await?;
 
-        if let Some(permit) = persist_permit {
-            permit.send(ConfigEvent::SetPeerGroup {
-                name: req.name,
-                definition: persisted,
-            });
-        }
+            let persisted = if preserve_md5_password {
+                peer_manager_request(&peer_mgr_tx, |reply| {
+                    PeerManagerCommand::SetPeerGroupPreserveMd5 {
+                        name: name.clone(),
+                        definition,
+                        reply,
+                    }
+                })
+                .await?
+                .map_err(|error| catalog_mutation_error_to_status(&error))?
+            } else {
+                let persisted = definition.clone();
+                apply_catalog_mutation(&peer_mgr_tx, |reply| PeerManagerCommand::SetPeerGroup {
+                    name: name.clone(),
+                    definition,
+                    reply,
+                })
+                .await?;
+                persisted
+            };
+
+            if let Some(permit) = persist_permit
+                && let Err(error) =
+                    persist_runtime_config_event(permit, |ack| ConfigEvent::SetPeerGroup {
+                        name: name.clone(),
+                        definition: persisted,
+                        ack: Some(ack),
+                    })
+                    .await
+            {
+                // Plain SetPeerGroup (not preserve-md5): the prior is the
+                // full stored definition, secret included.
+                let rollback = match prior {
+                    Some(prior) => {
+                        apply_catalog_mutation(&peer_mgr_tx, |reply| {
+                            PeerManagerCommand::SetPeerGroup {
+                                name: name.clone(),
+                                definition: prior,
+                                reply,
+                            }
+                        })
+                        .await
+                    }
+                    None => {
+                        apply_catalog_mutation(&peer_mgr_tx, |reply| {
+                            PeerManagerCommand::DeletePeerGroup {
+                                name: name.clone(),
+                                reply,
+                            }
+                        })
+                        .await
+                    }
+                };
+                return Err(persist_rollback_error("peer-group set", error, rollback));
+            }
+            Ok(())
+        })
+        .await?;
 
         Ok(Response::new(proto::SetPeerGroupResponse {}))
     }
@@ -360,28 +428,50 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             return Err(Status::invalid_argument("name is required"));
         }
 
-        self.check_mutation_gate("PeerGroupService.DeletePeerGroup")
-            .await?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::DeletePeerGroup {
-                name: req.name.clone(),
-                reply: reply_tx,
+        let peer_mgr_tx = self.peer_mgr_tx.clone();
+        let name = req.name;
+        self.run_mutation("PeerGroupService.DeletePeerGroup", move || async move {
+            let prior =
+                peer_manager_request(&peer_mgr_tx, |reply| PeerManagerCommand::GetPeerGroup {
+                    name: name.clone(),
+                    reply,
+                })
+                .await?;
+            apply_catalog_mutation(&peer_mgr_tx, |reply| PeerManagerCommand::DeletePeerGroup {
+                name: name.clone(),
+                reply,
             })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-        match reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?
-        {
-            Ok(()) => {}
-            Err(error) => return Err(catalog_mutation_error_to_status(&error)),
-        }
+            .await?;
 
-        if let Some(permit) = persist_permit {
-            permit.send(ConfigEvent::DeletePeerGroup { name: req.name });
-        }
+            if let Some(permit) = persist_permit
+                && let Err(error) =
+                    persist_runtime_config_event(permit, |ack| ConfigEvent::DeletePeerGroup {
+                        name: name.clone(),
+                        ack: Some(ack),
+                    })
+                    .await
+            {
+                let rollback = match prior {
+                    Some(prior) => {
+                        apply_catalog_mutation(&peer_mgr_tx, |reply| {
+                            PeerManagerCommand::SetPeerGroup {
+                                name: name.clone(),
+                                definition: prior,
+                                reply,
+                            }
+                        })
+                        .await
+                    }
+                    // The delete succeeded, so the group existed; an
+                    // unexpectedly missing prior leaves nothing to restore.
+                    None => Ok(()),
+                };
+                return Err(persist_rollback_error("peer-group delete", error, rollback));
+            }
+            Ok(())
+        })
+        .await?;
 
         Ok(Response::new(proto::DeletePeerGroupResponse {}))
     }
@@ -402,32 +492,67 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             return Err(Status::invalid_argument("peer_group is required"));
         }
 
-        self.check_mutation_gate("PeerGroupService.SetNeighborPeerGroup")
-            .await?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::SetNeighborPeerGroup {
-                address,
-                peer_group: req.peer_group.clone(),
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-        match reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?
-        {
-            Ok(()) => {}
-            Err(error) => return Err(catalog_mutation_error_to_status(&error)),
-        }
+        let peer_mgr_tx = self.peer_mgr_tx.clone();
+        let peer_group = req.peer_group;
+        self.run_mutation(
+            "PeerGroupService.SetNeighborPeerGroup",
+            move || async move {
+                let prior = peer_manager_request(&peer_mgr_tx, |reply| {
+                    PeerManagerCommand::GetNeighborPeerGroupMembership { address, reply }
+                })
+                .await?;
+                apply_catalog_mutation(&peer_mgr_tx, |reply| {
+                    PeerManagerCommand::SetNeighborPeerGroup {
+                        address,
+                        peer_group: peer_group.clone(),
+                        reply,
+                    }
+                })
+                .await?;
 
-        if let Some(permit) = persist_permit {
-            permit.send(ConfigEvent::SetNeighborPeerGroup {
-                address,
-                peer_group: req.peer_group,
-            });
-        }
+                if let Some(permit) = persist_permit
+                    && let Err(error) = persist_runtime_config_event(permit, |ack| {
+                        ConfigEvent::SetNeighborPeerGroup {
+                            address,
+                            peer_group: peer_group.clone(),
+                            ack: Some(ack),
+                        }
+                    })
+                    .await
+                {
+                    let rollback = match prior {
+                        Some(Some(prior)) => {
+                            apply_catalog_mutation(&peer_mgr_tx, |reply| {
+                                PeerManagerCommand::SetNeighborPeerGroup {
+                                    address,
+                                    peer_group: prior,
+                                    reply,
+                                }
+                            })
+                            .await
+                        }
+                        Some(None) => {
+                            apply_catalog_mutation(&peer_mgr_tx, |reply| {
+                                PeerManagerCommand::ClearNeighborPeerGroup { address, reply }
+                            })
+                            .await
+                        }
+                        // The mutation succeeded, so the neighbor was
+                        // configured; an unexpectedly missing prior leaves
+                        // nothing to restore.
+                        None => Ok(()),
+                    };
+                    return Err(persist_rollback_error(
+                        "neighbor peer-group set",
+                        error,
+                        rollback,
+                    ));
+                }
+                Ok(())
+            },
+        )
+        .await?;
 
         Ok(Response::new(proto::SetNeighborPeerGroupResponse {}))
     }
@@ -445,28 +570,54 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
 
-        self.check_mutation_gate("PeerGroupService.ClearNeighborPeerGroup")
-            .await?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::ClearNeighborPeerGroup {
-                address,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-        match reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?
-        {
-            Ok(()) => {}
-            Err(error) => return Err(catalog_mutation_error_to_status(&error)),
-        }
+        let peer_mgr_tx = self.peer_mgr_tx.clone();
+        self.run_mutation(
+            "PeerGroupService.ClearNeighborPeerGroup",
+            move || async move {
+                let prior = peer_manager_request(&peer_mgr_tx, |reply| {
+                    PeerManagerCommand::GetNeighborPeerGroupMembership { address, reply }
+                })
+                .await?;
+                apply_catalog_mutation(&peer_mgr_tx, |reply| {
+                    PeerManagerCommand::ClearNeighborPeerGroup { address, reply }
+                })
+                .await?;
 
-        if let Some(permit) = persist_permit {
-            permit.send(ConfigEvent::ClearNeighborPeerGroup { address });
-        }
+                if let Some(permit) = persist_permit
+                    && let Err(error) = persist_runtime_config_event(permit, |ack| {
+                        ConfigEvent::ClearNeighborPeerGroup {
+                            address,
+                            ack: Some(ack),
+                        }
+                    })
+                    .await
+                {
+                    let rollback = match prior {
+                        Some(Some(prior)) => {
+                            apply_catalog_mutation(&peer_mgr_tx, |reply| {
+                                PeerManagerCommand::SetNeighborPeerGroup {
+                                    address,
+                                    peer_group: prior,
+                                    reply,
+                                }
+                            })
+                            .await
+                        }
+                        // No prior membership (or no neighbor) — the
+                        // cleared state is already the prior state.
+                        Some(None) | None => Ok(()),
+                    };
+                    return Err(persist_rollback_error(
+                        "neighbor peer-group clear",
+                        error,
+                        rollback,
+                    ));
+                }
+                Ok(())
+            },
+        )
+        .await?;
 
         Ok(Response::new(proto::ClearNeighborPeerGroupResponse {}))
     }
@@ -540,9 +691,31 @@ mod tests {
 
     #[tokio::test]
     async fn set_peer_group_preserves_redacted_md5_when_presence_flag_is_set() {
-        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
         let (config_tx, mut config_rx) = mpsc::channel(4);
         let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+
+        tokio::spawn(async move {
+            while let Some(cmd) = peer_rx.recv().await {
+                match cmd {
+                    PeerManagerCommand::GetPeerGroup { reply, .. } => {
+                        let _ = reply.send(None);
+                    }
+                    PeerManagerCommand::SetPeerGroupPreserveMd5 {
+                        name,
+                        mut definition,
+                        reply,
+                    } => {
+                        assert_eq!(name, "rs-clients");
+                        assert_eq!(definition.md5_password, None);
+                        assert_eq!(definition.families, vec!["ipv6_unicast"]);
+                        definition.md5_password = Some("secret".into());
+                        let _ = reply.send(Ok(definition));
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+        });
 
         let task = tokio::spawn(async move {
             PeerGroupServiceRpc::set_peer_group(
@@ -560,43 +733,26 @@ mod tests {
             .await
         });
 
-        let command = peer_rx
-            .recv()
-            .await
-            .expect("expected SetPeerGroupPreserveMd5 command");
-        match command {
-            PeerManagerCommand::SetPeerGroupPreserveMd5 {
+        match config_rx.recv().await {
+            Some(ConfigEvent::SetPeerGroup {
                 name,
-                mut definition,
-                reply,
-            } => {
+                definition,
+                ack,
+            }) => {
                 assert_eq!(name, "rs-clients");
-                assert_eq!(definition.md5_password, None);
+                assert_eq!(definition.md5_password.as_deref(), Some("secret"));
                 assert_eq!(definition.families, vec!["ipv6_unicast"]);
-                definition.md5_password = Some("secret".into());
-                reply
-                    .send(Ok(definition))
-                    .expect("service dropped SetPeerGroupPreserveMd5 reply");
+                ack.expect("persisted mutation must carry an ack")
+                    .send(Ok(()))
+                    .expect("service should await the persistence ack");
             }
-            _ => panic!("unexpected command"),
+            Some(_) => panic!("unexpected config event"),
+            None => panic!("missing config event"),
         }
 
         task.await
             .expect("SetPeerGroup task panicked")
             .expect("SetPeerGroup failed");
-
-        let persisted = config_rx
-            .recv()
-            .await
-            .expect("expected SetPeerGroup config event");
-        match persisted {
-            ConfigEvent::SetPeerGroup { name, definition } => {
-                assert_eq!(name, "rs-clients");
-                assert_eq!(definition.md5_password.as_deref(), Some("secret"));
-                assert_eq!(definition.families, vec!["ipv6_unicast"]);
-            }
-            _ => panic!("unexpected config event"),
-        }
     }
 
     #[tokio::test]
@@ -617,18 +773,22 @@ mod tests {
         let task =
             tokio::spawn(async move { PeerGroupServiceRpc::set_peer_group(&svc, request).await });
 
-        let command = peer_rx.recv().await.expect("expected SetPeerGroup command");
-        match command {
-            PeerManagerCommand::SetPeerGroup {
-                definition, reply, ..
-            } => {
-                assert_eq!(definition.md5_password.as_deref(), Some("super-secret"));
-                reply
-                    .send(Ok(()))
-                    .expect("service dropped SetPeerGroup reply");
+        tokio::spawn(async move {
+            while let Some(cmd) = peer_rx.recv().await {
+                match cmd {
+                    PeerManagerCommand::GetPeerGroup { reply, .. } => {
+                        let _ = reply.send(None);
+                    }
+                    PeerManagerCommand::SetPeerGroup {
+                        definition, reply, ..
+                    } => {
+                        assert_eq!(definition.md5_password.as_deref(), Some("super-secret"));
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
             }
-            _ => panic!("unexpected command"),
-        }
+        });
 
         task.await
             .expect("SetPeerGroup task panicked")
@@ -662,25 +822,26 @@ mod tests {
             .await
         });
 
-        let command = peer_rx
-            .recv()
-            .await
-            .expect("expected SetPeerGroupPreserveMd5 command");
-        match command {
-            PeerManagerCommand::SetPeerGroupPreserveMd5 {
-                name,
-                mut definition,
-                reply,
-            } => {
-                assert_eq!(name, "rs-clients");
-                assert_eq!(definition.md5_password, None);
-                definition.md5_password = Some("secret".into());
-                reply
-                    .send(Ok(definition))
-                    .expect("service dropped SetPeerGroupPreserveMd5 reply");
+        tokio::spawn(async move {
+            while let Some(cmd) = peer_rx.recv().await {
+                match cmd {
+                    PeerManagerCommand::GetPeerGroup { reply, .. } => {
+                        let _ = reply.send(None);
+                    }
+                    PeerManagerCommand::SetPeerGroupPreserveMd5 {
+                        name,
+                        mut definition,
+                        reply,
+                    } => {
+                        assert_eq!(name, "rs-clients");
+                        assert_eq!(definition.md5_password, None);
+                        definition.md5_password = Some("secret".into());
+                        let _ = reply.send(Ok(definition));
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
             }
-            _ => panic!("unexpected command"),
-        }
+        });
 
         task.await
             .expect("SetPeerGroup task panicked")
@@ -708,21 +869,25 @@ mod tests {
             .await
         });
 
-        let command = peer_rx.recv().await.expect("expected SetPeerGroup command");
-        match command {
-            PeerManagerCommand::SetPeerGroup {
-                name,
-                definition,
-                reply,
-            } => {
-                assert_eq!(name, "rs-clients");
-                assert_eq!(definition.md5_password, None);
-                reply
-                    .send(Ok(()))
-                    .expect("service dropped SetPeerGroup reply");
+        tokio::spawn(async move {
+            while let Some(cmd) = peer_rx.recv().await {
+                match cmd {
+                    PeerManagerCommand::GetPeerGroup { reply, .. } => {
+                        let _ = reply.send(None);
+                    }
+                    PeerManagerCommand::SetPeerGroup {
+                        name,
+                        definition,
+                        reply,
+                    } => {
+                        assert_eq!(name, "rs-clients");
+                        assert_eq!(definition.md5_password, None);
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
             }
-            _ => panic!("unexpected command"),
-        }
+        });
 
         task.await
             .expect("SetPeerGroup task panicked")
@@ -789,5 +954,210 @@ mod tests {
 
         assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
         assert!(matches!(config_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    /// ADR-0076 contract: a `NACKed` persist restores the captured prior
+    /// definition — including the stored MD5 secret, which read RPCs
+    /// redact but the rollback must not lose.
+    #[tokio::test]
+    async fn set_peer_group_rolls_back_runtime_when_persist_fails() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+
+        let mut prior = proto_definition_to_input(sample_definition()).unwrap();
+        prior.md5_password = Some("old-secret".into());
+        let prior_for_pm = prior.clone();
+        let set_definitions = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let set_definitions_pm = set_definitions.clone();
+        tokio::spawn(async move {
+            while let Some(cmd) = peer_rx.recv().await {
+                match cmd {
+                    PeerManagerCommand::GetPeerGroup { reply, .. } => {
+                        let _ = reply.send(Some(prior_for_pm.clone()));
+                    }
+                    PeerManagerCommand::SetPeerGroup {
+                        definition, reply, ..
+                    } => {
+                        set_definitions_pm.lock().await.push(definition);
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+        });
+
+        let call = tokio::spawn(async move {
+            PeerGroupServiceRpc::set_peer_group(
+                &svc,
+                Request::new(proto::SetPeerGroupRequest {
+                    name: "rs-clients".into(),
+                    definition: Some(proto::PeerGroupDefinition {
+                        md5_password: Some("new-secret".into()),
+                        families: vec!["ipv6_unicast".into()],
+                        ..Default::default()
+                    }),
+                }),
+            )
+            .await
+        });
+
+        match config_rx.recv().await {
+            Some(ConfigEvent::SetPeerGroup { ack, .. }) => {
+                ack.expect("persisted mutation must carry an ack")
+                    .send(Err("disk full".to_string()))
+                    .expect("service should await the persistence ack");
+            }
+            Some(_) => panic!("unexpected config event"),
+            None => panic!("missing config event"),
+        }
+
+        let error = call
+            .await
+            .expect("call task must not panic")
+            .expect_err("set_peer_group must fail when persistence fails");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(error.message().contains("config persistence failed"));
+
+        let sets = set_definitions.lock().await;
+        assert_eq!(sets.len(), 2, "mutation then rollback");
+        assert_eq!(sets[0].md5_password.as_deref(), Some("new-secret"));
+        assert_eq!(
+            sets[1].md5_password.as_deref(),
+            Some("old-secret"),
+            "rollback must restore the prior definition with its stored secret"
+        );
+        assert_eq!(sets[1], prior);
+    }
+
+    #[tokio::test]
+    async fn delete_peer_group_rolls_back_runtime_when_persist_fails() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+
+        let prior = proto_definition_to_input(sample_definition()).unwrap();
+        let prior_for_pm = prior.clone();
+        let set_definitions = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let set_definitions_pm = set_definitions.clone();
+        tokio::spawn(async move {
+            while let Some(cmd) = peer_rx.recv().await {
+                match cmd {
+                    PeerManagerCommand::GetPeerGroup { reply, .. } => {
+                        let _ = reply.send(Some(prior_for_pm.clone()));
+                    }
+                    PeerManagerCommand::DeletePeerGroup { name, reply } => {
+                        assert_eq!(name, "rs-clients");
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerManagerCommand::SetPeerGroup {
+                        definition, reply, ..
+                    } => {
+                        set_definitions_pm.lock().await.push(definition);
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+        });
+
+        let call = tokio::spawn(async move {
+            PeerGroupServiceRpc::delete_peer_group(
+                &svc,
+                Request::new(proto::DeletePeerGroupRequest {
+                    name: "rs-clients".into(),
+                }),
+            )
+            .await
+        });
+
+        match config_rx.recv().await {
+            Some(ConfigEvent::DeletePeerGroup { ack, .. }) => {
+                ack.expect("persisted mutation must carry an ack")
+                    .send(Err("disk full".to_string()))
+                    .expect("service should await the persistence ack");
+            }
+            Some(_) => panic!("unexpected config event"),
+            None => panic!("missing config event"),
+        }
+
+        let error = call
+            .await
+            .expect("call task must not panic")
+            .expect_err("delete_peer_group must fail when persistence fails");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+
+        let sets = set_definitions.lock().await;
+        assert_eq!(
+            sets.as_slice(),
+            &[prior],
+            "rollback must re-create the deleted peer group"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_neighbor_peer_group_rolls_back_runtime_when_persist_fails() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+
+        let memberships = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let memberships_pm = memberships.clone();
+        tokio::spawn(async move {
+            while let Some(cmd) = peer_rx.recv().await {
+                match cmd {
+                    PeerManagerCommand::GetNeighborPeerGroupMembership { reply, .. } => {
+                        let _ = reply.send(Some(Some("old-group".to_string())));
+                    }
+                    PeerManagerCommand::SetNeighborPeerGroup {
+                        peer_group, reply, ..
+                    } => {
+                        memberships_pm.lock().await.push(peer_group);
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+        });
+
+        let call = tokio::spawn(async move {
+            PeerGroupServiceRpc::set_neighbor_peer_group(
+                &svc,
+                Request::new(proto::SetNeighborPeerGroupRequest {
+                    address: "10.0.0.2".into(),
+                    peer_group: "rs-clients".into(),
+                }),
+            )
+            .await
+        });
+
+        match config_rx.recv().await {
+            Some(ConfigEvent::SetNeighborPeerGroup {
+                address,
+                peer_group,
+                ack,
+            }) => {
+                assert_eq!(address.to_string(), "10.0.0.2");
+                assert_eq!(peer_group, "rs-clients");
+                ack.expect("persisted mutation must carry an ack")
+                    .send(Err("disk full".to_string()))
+                    .expect("service should await the persistence ack");
+            }
+            Some(_) => panic!("unexpected config event"),
+            None => panic!("missing config event"),
+        }
+
+        let error = call
+            .await
+            .expect("call task must not panic")
+            .expect_err("set_neighbor_peer_group must fail when persistence fails");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+
+        let sets = memberships.lock().await;
+        assert_eq!(
+            sets.as_slice(),
+            &["rs-clients".to_string(), "old-group".to_string()],
+            "rollback must restore the prior membership"
+        );
     }
 }

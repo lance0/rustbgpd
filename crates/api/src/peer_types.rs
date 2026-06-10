@@ -976,6 +976,15 @@ pub enum PeerManagerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
+    /// Read a neighbor's current peer-group membership (used by the
+    /// persisted catalog CRUD paths to capture prior state for rollback).
+    GetNeighborPeerGroupMembership {
+        /// Neighbor address.
+        address: IpAddr,
+        /// Outer `None` = neighbor not configured; inner `None` = no
+        /// membership.
+        reply: oneshot::Sender<Option<Option<String>>>,
+    },
     /// Shut down all peers and exit the peer manager task.
     Shutdown,
     /// List configured dynamic neighbor ranges.
@@ -1387,11 +1396,17 @@ pub enum ConfigEvent {
         name: String,
         /// Full replacement definition.
         definition: NamedPolicyDefinition,
+        /// Optional persistence acknowledgement. Catalog CRUD paths hold
+        /// the shared runtime-config lock until this fires (see
+        /// `NeighborAdded`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     /// Delete a named policy definition.
     DeletePolicy {
         /// Policy definition name.
         name: String,
+        /// Optional persistence acknowledgement (see `SetPolicy`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     /// Create or replace a named neighbor set.
     SetNeighborSet {
@@ -1399,32 +1414,48 @@ pub enum ConfigEvent {
         name: String,
         /// Full replacement definition.
         definition: NeighborSetDefinition,
+        /// Optional persistence acknowledgement (see `SetPolicy`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     /// Delete a named neighbor set.
     DeleteNeighborSet {
         /// Neighbor-set name.
         name: String,
+        /// Optional persistence acknowledgement (see `SetPolicy`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     /// Replace the global import policy chain.
     SetGlobalImportChain {
         /// Ordered policy names.
         policy_names: Vec<String>,
+        /// Optional persistence acknowledgement (see `SetPolicy`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     /// Replace the global export policy chain.
     SetGlobalExportChain {
         /// Ordered policy names.
         policy_names: Vec<String>,
+        /// Optional persistence acknowledgement (see `SetPolicy`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     /// Clear the global import policy chain.
-    ClearGlobalImportChain,
+    ClearGlobalImportChain {
+        /// Optional persistence acknowledgement (see `SetPolicy`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
+    },
     /// Clear the global export policy chain.
-    ClearGlobalExportChain,
+    ClearGlobalExportChain {
+        /// Optional persistence acknowledgement (see `SetPolicy`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
+    },
     /// Replace the per-neighbor import policy chain.
     SetNeighborImportChain {
         /// Neighbor address.
         address: IpAddr,
         /// Ordered policy names.
         policy_names: Vec<String>,
+        /// Optional persistence acknowledgement (see `SetPolicy`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     /// Replace the per-neighbor export policy chain.
     SetNeighborExportChain {
@@ -1432,16 +1463,22 @@ pub enum ConfigEvent {
         address: IpAddr,
         /// Ordered policy names.
         policy_names: Vec<String>,
+        /// Optional persistence acknowledgement (see `SetPolicy`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     /// Clear the per-neighbor import policy chain.
     ClearNeighborImportChain {
         /// Neighbor address.
         address: IpAddr,
+        /// Optional persistence acknowledgement (see `SetPolicy`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     /// Clear the per-neighbor export policy chain.
     ClearNeighborExportChain {
         /// Neighbor address.
         address: IpAddr,
+        /// Optional persistence acknowledgement (see `SetPolicy`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     /// Create or replace a peer-group definition.
     SetPeerGroup {
@@ -1449,11 +1486,15 @@ pub enum ConfigEvent {
         name: String,
         /// Full replacement definition.
         definition: PeerGroupDefinition,
+        /// Optional persistence acknowledgement (see `SetPolicy`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     /// Delete a peer-group definition.
     DeletePeerGroup {
         /// Peer-group name.
         name: String,
+        /// Optional persistence acknowledgement (see `SetPolicy`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     /// Set a neighbor's peer-group membership.
     SetNeighborPeerGroup {
@@ -1461,11 +1502,15 @@ pub enum ConfigEvent {
         address: IpAddr,
         /// Peer-group name.
         peer_group: String,
+        /// Optional persistence acknowledgement (see `SetPolicy`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     /// Clear a neighbor's peer-group membership.
     ClearNeighborPeerGroup {
         /// Neighbor address.
         address: IpAddr,
+        /// Optional persistence acknowledgement (see `SetPolicy`).
+        ack: Option<oneshot::Sender<Result<(), String>>>,
     },
 }
 
