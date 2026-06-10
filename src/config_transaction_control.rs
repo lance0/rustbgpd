@@ -729,7 +729,7 @@ impl ConfigTransactionController {
         &self,
         pending: &PendingConfirmedTransaction,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
-        apply_config_transaction_locked(
+        let response = apply_config_transaction_locked(
             &self.deps,
             proto::ApplyConfigTransactionRequest {
                 candidate_toml: pending.rollback_toml.clone(),
@@ -742,7 +742,30 @@ impl ConfigTransactionController {
                 confirm_timeout_seconds: 0,
             },
         )
-        .await
+        .await?;
+        // A rollback whose re-apply plan did not commit leaves the
+        // aborted/expired candidate running — that is a rollback failure,
+        // not a success, and the caller must record AbortFailed /
+        // AutoRevertFailed. Noop is genuine success (the runtime already
+        // matches the rollback snapshot).
+        match proto::ConfigTransactionPlanStatus::try_from(response.status) {
+            Ok(
+                proto::ConfigTransactionPlanStatus::Noop
+                | proto::ConfigTransactionPlanStatus::Committable,
+            ) => Ok(response),
+            Ok(proto::ConfigTransactionPlanStatus::Rejected) => {
+                Err(ConfigTransactionApplyError::FailedPrecondition(format!(
+                    "confirmed-transaction rollback was rejected; the unconfirmed candidate is still running: {}",
+                    response.human_text.trim()
+                )))
+            }
+            Ok(proto::ConfigTransactionPlanStatus::Unspecified) | Err(_) => {
+                Err(ConfigTransactionApplyError::Internal(format!(
+                    "confirmed-transaction rollback returned unexpected plan status {}",
+                    response.status
+                )))
+            }
+        }
     }
 
     async fn remove_pending_after_rollback(
@@ -2690,6 +2713,47 @@ peer_group = "edge"
         Ok(priors)
     }
 
+    /// Like `fake_snapshot_peer_manager`, but answers each successive
+    /// `PlanConfigTransaction` with the next queued plan — lets a test give
+    /// the initial apply a Committable plan and the rollback re-apply a
+    /// Rejected one.
+    async fn fake_snapshot_peer_manager_with_plans(
+        mut rx: mpsc::Receiver<PeerManagerCommand>,
+        plans: Arc<Mutex<VecDeque<RuntimeConfigTransactionPlan>>>,
+        snapshot_toml: Arc<Mutex<String>>,
+        peers: Arc<Mutex<Vec<PeerManagerNeighborConfig>>>,
+    ) {
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                PeerManagerCommand::PlanConfigTransaction { reply, .. } => {
+                    let plan = plans
+                        .lock()
+                        .await
+                        .pop_front()
+                        .expect("test queued too few transaction plans");
+                    let _ = reply.send(Ok(plan));
+                }
+                PeerManagerCommand::StageConfigSnapshot {
+                    candidate_toml,
+                    reply,
+                } => {
+                    let mut snapshot = snapshot_toml.lock().await;
+                    let previous = snapshot.clone();
+                    *snapshot = candidate_toml;
+                    let _ = reply.send(Ok(previous));
+                }
+                PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
+                    let _ = reply.send(Ok(snapshot_toml.lock().await.clone()));
+                }
+                PeerManagerCommand::AddPeer { config, reply, .. } => {
+                    peers.lock().await.push(config);
+                    let _ = reply.send(Ok(()));
+                }
+                _ => panic!("unexpected peer-manager command in queued-plan transaction test"),
+            }
+        }
+    }
+
     async fn fake_snapshot_peer_manager_with_stage_results(
         mut rx: mpsc::Receiver<PeerManagerCommand>,
         plan: RuntimeConfigTransactionPlan,
@@ -3480,6 +3544,85 @@ remote_asn = 65010
             .reject_if_pending("test mutation")
             .await
             .expect("failed abort must clear the pending mutation gate");
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
+        ack_task.abort();
+    }
+
+    /// A rollback re-apply whose plan comes back `Rejected` returns `Ok`
+    /// at the RPC level but commits nothing — the aborted candidate is
+    /// still running. The abort must report `AbortFailed`, not record a
+    /// success while the runtime still holds the unconfirmed config.
+    #[tokio::test]
+    async fn confirmed_abort_with_rejected_rollback_records_abort_failed() {
+        let previous_toml = base_toml("");
+        let candidate_toml = base_toml(
+            r#"
+[peer_groups.ix-members]
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix-members"
+remote_asn = 65010
+"#,
+        );
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let plans = Arc::new(Mutex::new(VecDeque::from([
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[dynamic_neighbors]]".to_string()],
+            ),
+            plan(RuntimeConfigTransactionStatus::Rejected, Vec::new()),
+        ])));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager_with_plans(
+            peer_rx,
+            plans,
+            snapshot_toml.clone(),
+            peers,
+        ));
+        let (config_tx, config_rx) = mpsc::channel(8);
+        let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
+        let controller = ConfigTransactionController::new(
+            deps_value(None, peer_tx, Some(config_tx), Vec::new()),
+            BgpMetrics::new(),
+        );
+
+        controller
+            .clone()
+            .apply(confirmed_dynamic_request(
+                candidate_toml.clone(),
+                "deploy-1",
+                60,
+            ))
+            .await
+            .expect("confirmed apply must succeed");
+
+        let err = controller
+            .clone()
+            .abort(proto::AbortConfigTransactionRequest {
+                confirm_id: "deploy-1".to_string(),
+            })
+            .await
+            .expect_err("a rejected rollback re-apply must fail the abort");
+        assert!(
+            matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref message)
+                if message.contains("rollback failed")
+                    && message.contains("rejected")
+                    && message.contains("still running")),
+            "{err:?}"
+        );
+
+        let status = controller.status().await.expect("status must succeed");
+        let confirmation = status.confirmation.unwrap();
+        assert_eq!(
+            confirmation.status,
+            proto::ConfigTransactionConfirmationStatus::AbortFailed as i32
+        );
+        assert_config_transaction_lifecycle_metric(&controller, "abort", "failure", 1.0);
+        assert_config_transaction_lifecycle_metric(&controller, "abort", "success", 0.0);
+        // The candidate snapshot is untouched — the rejected rollback
+        // committed nothing.
         assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
         ack_task.abort();
     }

@@ -171,6 +171,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Commit-confirmed rollback no longer reports success when the rollback was
+  rejected.** Abort and auto-revert re-apply the captured pre-commit snapshot
+  through the transaction executor; a re-apply whose plan came back `Rejected`
+  returns cleanly at the RPC level but commits nothing — the unconfirmed
+  candidate is still running. That outcome was recorded as
+  `Aborted`/`AutoReverted` success. It now surfaces as
+  `AbortFailed`/`AutoRevertFailed` with a failure lifecycle metric, matching
+  what actually happened (a `Noop` rollback — runtime already at the snapshot —
+  still counts as success).
+
 - **EVPN runtime applies are cancellation-shielded (ADR-0080).** The
   `ApplyEvpnRuntime` converge + coordinator commit ran inline in the gRPC
   request future, so a client disconnect or RPC deadline mid-apply dropped the
