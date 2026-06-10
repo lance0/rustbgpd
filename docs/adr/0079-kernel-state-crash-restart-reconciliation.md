@@ -103,11 +103,13 @@ resolution state mid-reap.
 The **unicast FIB keeps its persisted owned-state file** — it ships, it
 works, and its value-match adoption discipline is stricter than a proto
 sweep. Two refinements are folded into this decision: the owned-state
-signature comparison becomes per-table and set-based (today any
-`[[fib_tables]]` edit across an unclean restart — even stanza
-reordering — quarantines the whole file and freezes stale routes as
-`foreign_route_exists`), and convergence of the unicast path onto the
-sweep model is left as a future simplification, not a requirement.
+signature comparison becomes per-table and set-based — shipped:
+previously any `[[fib_tables]]` edit across an unclean restart, even
+stanza reordering, quarantined the whole file and froze stale routes
+as `foreign_route_exists`; now only the edited or removed table's
+routes drop out of ownership, with a `.stale` evidence copy preserved
+beside the still-live file — and convergence of the unicast path onto
+the sweep model is left as a future simplification, not a requirement.
 
 ### Operational hazards recorded (not solved here)
 

@@ -140,10 +140,15 @@ owned state.
 
 The actor persists that owned state to
 `<runtime_state_dir>/fib-owned.json` after successful apply/drain
-operations. On startup, the file is usable only when its recorded
-stable table signature still equals the live startup config. Unsupported
-versions or stale signatures are quarantined to `fib-owned.json.stale`
-and ignored. Even then, the runtime still verifies the current kernel row before acting:
+operations. On startup, the recorded table signatures are compared
+per table and set-wise (ADR-0079 refinement): a persisted table's
+routes are adopted iff an identical signature still exists in the
+startup config, matched by `(table_id, metric)`. Stanza reordering
+and edits to other tables therefore don't invalidate a table's owned
+state; only the changed or removed table re-projects from scratch,
+and a `.stale` evidence copy is preserved beside the still-live file.
+A file with an unsupported (newer) version is renamed to
+`fib-owned.json.stale` and ignored entirely. Even then, the runtime still verifies the current kernel row before acting:
 replace/remove decisions require the live row to be `RTPROT_BGP` and to
 carry the exact next-hop value recorded by the previous rustbgpd
 instance. If the row is absent, it is repaired from current intent. If the

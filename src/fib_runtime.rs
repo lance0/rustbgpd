@@ -351,8 +351,9 @@ async fn run_loop<F>(
                         // Orphan guard: if any owned route is now OUTSIDE the new
                         // table set, a withdraw for a removed table failed (its
                         // route stays owned + in the kernel). Persisting the new
-                        // signature would make load_owned_state quarantine that
-                        // route on the next restart, stranding the kernel row.
+                        // signature set — which no longer contains that table —
+                        // would make load_owned_state drop the route on the next
+                        // restart, stranding the kernel row.
                         // (Per-route *install* failures within the new set are not
                         // orphans — they stay owned + best-effort-retried.)
                         let allowed: BTreeSet<FibTableKey> = config
@@ -1202,23 +1203,55 @@ fn load_owned_state(config: &FibRuntimeConfig) -> FibOwnedState {
         quarantine_owned_state_file(config, "unsupported_version");
         return FibOwnedState::default();
     }
-    if persisted.tables != table_signatures(&config.tables) {
-        warn!(
-            path = %path.display(),
-            "ignoring general FIB owned-state because [[fib_tables]] changed"
-        );
-        quarantine_owned_state_file(config, "config_mismatch");
-        return FibOwnedState::default();
-    }
-
-    let allowed_tables = config
+    // ADR-0079: per-table, set-wise signature comparison. A persisted
+    // table's routes survive iff an IDENTICAL signature still exists in
+    // the startup config — matched by `(table_id, metric)`, the same
+    // identity the routes themselves carry — so reordering
+    // `[[fib_tables]]` stanzas or editing/removing one table no longer
+    // quarantine-freezes every other table's rows. Only the changed
+    // table re-projects from scratch; its prior rows fall out of
+    // ownership exactly as a whole-file mismatch dropped them before.
+    let current_by_key: BTreeMap<FibTableKey, PersistedFibTableSignature> = config
         .tables
         .iter()
-        .map(|table| FibTableKey {
-            table_id: table.table_id,
-            metric: table.metric,
+        .map(|table| {
+            (
+                FibTableKey {
+                    table_id: table.table_id,
+                    metric: table.metric,
+                },
+                PersistedFibTableSignature::from(table),
+            )
         })
-        .collect::<BTreeSet<_>>();
+        .collect();
+    let mut valid_tables: BTreeSet<FibTableKey> = BTreeSet::new();
+    let mut dropped_tables: Vec<&str> = Vec::new();
+    for signature in &persisted.tables {
+        let key = FibTableKey {
+            table_id: signature.table_id,
+            metric: signature.metric,
+        };
+        if current_by_key.get(&key) == Some(signature) {
+            valid_tables.insert(key);
+        } else {
+            dropped_tables.push(signature.name.as_str());
+        }
+    }
+    if !dropped_tables.is_empty() {
+        warn!(
+            path = %path.display(),
+            tables = ?dropped_tables,
+            "dropping owned-state for [[fib_tables]] entries whose signature \
+             changed; unchanged tables keep their owned routes"
+        );
+        // Copy — not rename — the evidence aside: the surviving subset
+        // is still live state, and the original must stay loadable in
+        // case the daemon crashes again before the next persist
+        // overwrites it (a rename would strand the unchanged tables'
+        // rows as foreign on that second restart).
+        preserve_stale_owned_state_copy(config, "config_mismatch");
+    }
+
     let mut owned = FibOwnedState::default();
     for route in persisted.routes {
         let Some(route) = route.into_route() else {
@@ -1228,12 +1261,13 @@ fn load_owned_state(config: &FibRuntimeConfig) -> FibOwnedState {
             );
             continue;
         };
-        if !allowed_tables.contains(&route.key.table_key()) {
+        if !valid_tables.contains(&route.key.table_key()) {
             warn!(
                 path = %path.display(),
                 table_id = route.key.table_id,
                 metric = route.key.metric,
-                "skipping general FIB owned-state route outside configured table set"
+                "skipping general FIB owned-state route outside the \
+                 signature-matched table set"
             );
             continue;
         }
@@ -1282,6 +1316,34 @@ fn quarantine_owned_state_file(config: &FibRuntimeConfig, reason: &'static str) 
             stale_path = %stale_path.display(),
             reason,
             "quarantined stale general FIB owned-state"
+        );
+    }
+}
+
+/// Preserve a `.stale` copy of the owned-state file as operator
+/// evidence while leaving the original in place. Used for the
+/// per-table signature mismatch, where part of the file is still live
+/// state — contrast [`quarantine_owned_state_file`], which renames a
+/// file this build cannot use at all (unsupported version).
+fn preserve_stale_owned_state_copy(config: &FibRuntimeConfig, reason: &'static str) {
+    let Some(path) = &config.owned_state_path else {
+        return;
+    };
+    let stale_path = stale_owned_state_path(path);
+    if let Err(e) = std::fs::copy(path, &stale_path) {
+        warn!(
+            path = %path.display(),
+            stale_path = %stale_path.display(),
+            reason,
+            error = %e,
+            "failed to preserve stale general FIB owned-state copy"
+        );
+    } else {
+        warn!(
+            path = %path.display(),
+            stale_path = %stale_path.display(),
+            reason,
+            "preserved stale general FIB owned-state copy"
         );
     }
 }
@@ -2233,6 +2295,29 @@ mod tests {
         }
     }
 
+    /// `fib_route` with an explicit table identity, for the per-table
+    /// signature tests that need routes in more than one table.
+    fn fib_route_in(
+        table_name: &str,
+        table_id: u32,
+        metric: u32,
+        prefix: Prefix,
+        next_hop: IpAddr,
+    ) -> FibRoute {
+        FibRoute {
+            table_name: table_name.to_string(),
+            key: FibRouteKey {
+                table_id,
+                metric,
+                prefix,
+            },
+            target: FibRouteTarget::single(next_hop),
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        }
+    }
+
     /// Stand-in for the RIB's install-candidate handler: group best routes by
     /// prefix (first-seen is the best, index 0), append same-prefix routes as
     /// equal-cost siblings deduped by next-hop, capped at `max_paths`.
@@ -2860,9 +2945,97 @@ mod tests {
         let mut changed = config.clone();
         changed.tables[0].metric = 201;
         assert!(load_owned_state(&changed).routes.is_empty());
-        assert!(!path.exists());
+        // The mismatch preserves a `.stale` evidence copy but leaves the
+        // original in place: if the daemon crashes again before the next
+        // persist, a restart under the ORIGINAL config must still adopt
+        // the unchanged tables' routes instead of stranding them.
+        assert!(path.exists());
         assert!(stale_owned_state_path(&path).exists());
-        assert!(load_owned_state(&config).routes.is_empty());
+        assert_eq!(load_owned_state(&config), owned);
+    }
+
+    /// ADR-0079: reordering `[[fib_tables]]` stanzas is not a config
+    /// change — the signature comparison is per table and set-wise, so
+    /// every owned route survives and no quarantine evidence is written.
+    #[test]
+    fn reordering_fib_tables_preserves_owned_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let mut config = config();
+        config.tables = vec![
+            table("edge", 1000, 200, &["ipv4_unicast"]),
+            table("core", 2000, 300, &["ipv4_unicast"]),
+        ];
+        config.owned_state_path = Some(path.clone());
+        let mut owned = FibOwnedState::default();
+        let edge_route = fib_route(v4(24), ip("192.0.2.1"));
+        let core_route = fib_route_in("core", 2000, 300, v4(25), ip("192.0.2.2"));
+        owned.routes.insert(edge_route.key, edge_route);
+        owned.routes.insert(core_route.key, core_route);
+        write_owned_state(&path, &config.tables, &owned).unwrap();
+
+        let mut reordered = config.clone();
+        reordered.tables.reverse();
+        assert_eq!(load_owned_state(&reordered), owned);
+        assert!(!stale_owned_state_path(&path).exists());
+    }
+
+    /// ADR-0079: editing one table's signature drops only that table's
+    /// owned routes; the untouched table keeps crash-restart adoption.
+    /// A `.stale` evidence copy is preserved alongside the live file.
+    #[test]
+    fn editing_one_table_drops_only_its_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let mut config = config();
+        config.tables = vec![
+            table("edge", 1000, 200, &["ipv4_unicast"]),
+            table("core", 2000, 300, &["ipv4_unicast"]),
+        ];
+        config.owned_state_path = Some(path.clone());
+        let mut owned = FibOwnedState::default();
+        let edge_route = fib_route(v4(24), ip("192.0.2.1"));
+        let core_route = fib_route_in("core", 2000, 300, v4(25), ip("192.0.2.2"));
+        owned.routes.insert(edge_route.key, edge_route.clone());
+        owned.routes.insert(core_route.key, core_route);
+        write_owned_state(&path, &config.tables, &owned).unwrap();
+
+        let mut changed = config.clone();
+        changed.tables[1].max_routes = Some(10);
+        let loaded = load_owned_state(&changed);
+        assert_eq!(loaded.routes.len(), 1);
+        assert_eq!(loaded.routes.get(&edge_route.key), Some(&edge_route));
+        assert!(path.exists());
+        assert!(stale_owned_state_path(&path).exists());
+
+        // Removing the table entirely behaves the same way.
+        let mut removed = config.clone();
+        removed.tables.truncate(1);
+        let loaded = load_owned_state(&removed);
+        assert_eq!(loaded.routes.len(), 1);
+        assert_eq!(loaded.routes.get(&edge_route.key), Some(&edge_route));
+    }
+
+    /// ADR-0079: adding a new table is additive — every persisted table
+    /// still matches, so nothing is dropped and no evidence copy is
+    /// written.
+    #[test]
+    fn adding_a_table_preserves_existing_owned_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let mut config = config();
+        config.owned_state_path = Some(path.clone());
+        let route = fib_route(v4(24), ip("192.0.2.1"));
+        let mut owned = FibOwnedState::default();
+        owned.routes.insert(route.key, route);
+        write_owned_state(&path, &config.tables, &owned).unwrap();
+
+        let mut grown = config.clone();
+        grown
+            .tables
+            .push(table("core", 2000, 300, &["ipv4_unicast"]));
+        assert_eq!(load_owned_state(&grown), owned);
+        assert!(!stale_owned_state_path(&path).exists());
     }
 
     #[test]
