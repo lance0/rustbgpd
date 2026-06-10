@@ -1666,7 +1666,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         if Instant::now() < reap_after {
             return;
         }
-        for (vni, mac) in self.state.adopted_fdb.clone() {
+        // Snapshot the keys into a Vec so the loop body can mutate
+        // `adopted_fdb`; cheaper than cloning the tree structure.
+        let candidates: Vec<_> = self.state.adopted_fdb.iter().copied().collect();
+        for (vni, mac) in candidates {
             if desired.get(vni, mac).is_some() {
                 // Desired but not yet applied (instance NotReady, or
                 // a retry pending). Never reap a desired MAC — the
