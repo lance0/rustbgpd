@@ -4,8 +4,17 @@
 //! `crates/evpn-linux`: RTBH is a unicast/RIB feature, not part of the
 //! EVPN dataplane boundary. The actor subscribes to unicast best-route
 //! events, periodically re-queries the Loc-RIB as a level-triggered
-//! backstop, and owns only the kernel blackhole routes it successfully
-//! installed during this daemon lifetime.
+//! backstop, and owns the kernel blackhole routes it installed during
+//! this daemon lifetime plus marker-matching rows it adopted at startup.
+//!
+//! Crash-restart reconciliation follows ADR-0079: the first reconcile
+//! pass sweeps the kernel dump for rows carrying our ownership marker
+//! (`RTPROT_BGP` + `RTN_BLACKHOLE` in the main table) and adopts them —
+//! they keep discarding traffic and no longer block re-installation as
+//! foreign. A desired prefix re-claims its adopted row implicitly; rows
+//! still unclaimed after a deferral window (FRR zebra's `-K` analog) are
+//! reaped, so a discard route left behind by a crashed daemon can no
+//! longer blackhole traffic forever.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -24,6 +33,13 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 const ROUTE_EVENT_DEBOUNCE: Duration = Duration::from_millis(200);
 const RIB_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+// How long adopted-but-unclaimed rows keep discarding before the reap
+// (ADR-0079 rule 3: reap only after reconvergence). There is no explicit
+// converged-intent signal in this actor, so the bound matches FRR
+// zebra's graceful-restart route-sweep deferral default (`-K`, 500 s) —
+// long enough for peers to re-establish and re-announce a still-desired
+// blackhole, which re-claims the row and exempts it.
+const ADOPTION_REAP_DEFERRAL: Duration = Duration::from_secs(500);
 
 /// Runtime knobs resolved from `[global]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,11 +90,90 @@ struct RejectedBlackhole {
     reason: &'static str,
 }
 
+/// What the per-pass kernel dump says about one prefix in the main table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KernelRoutePresence {
     Absent,
-    Owned,
+    /// Only rows carrying our ownership marker (`RTPROT_BGP` +
+    /// `RTN_BLACKHOLE`) match the prefix. Whether the row is *owned* is
+    /// the reconciler's call, not the kernel's — a marker row may be
+    /// ours from this lifetime, a crash leftover, or operator-installed
+    /// `proto bgp` state (indistinguishable by design, ADR-0079).
+    Marker,
+    /// At least one non-marker row matches the prefix.
     Foreign,
+}
+
+/// One main-table kernel route, as parsed from the per-pass dump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KernelRouteEntry {
+    prefix: Prefix,
+    /// True when the row carries the ownership marker.
+    marker: bool,
+}
+
+/// ADR-0079 startup adoption sweep state.
+struct AdoptionSweep {
+    /// Whether the one-shot sweep over the first successful kernel dump
+    /// has run. Never reset within a process lifetime — marker rows
+    /// appearing later are claimed only if desired, never queued for
+    /// reaping (sweeps must not depend on prior-process state, and a
+    /// co-resident writer's rows are not ours to expire).
+    swept: bool,
+    /// Adopted marker rows not yet re-claimed by a desired prefix.
+    pending: HashSet<Prefix>,
+    /// When adopted-but-unclaimed rows become reapable.
+    reap_after: tokio::time::Instant,
+}
+
+impl AdoptionSweep {
+    fn new(reap_after: tokio::time::Instant) -> Self {
+        Self {
+            swept: false,
+            pending: HashSet::new(),
+            reap_after,
+        }
+    }
+}
+
+/// The reconciler's mutable per-lifetime state, threaded through every
+/// pass together.
+struct ReconcilerState {
+    owned: HashMap<Prefix, OwnedBlackhole>,
+    rejected: HashSet<RejectedBlackhole>,
+    adoption: AdoptionSweep,
+}
+
+impl ReconcilerState {
+    fn new(reap_after: tokio::time::Instant) -> Self {
+        Self {
+            owned: HashMap::new(),
+            rejected: HashSet::new(),
+            adoption: AdoptionSweep::new(reap_after),
+        }
+    }
+}
+
+/// Collapse the dump into per-prefix presence. A foreign row dominates:
+/// the kernel can hold several routes for one prefix (different
+/// metrics), and any non-marker row makes the prefix unsafe to claim.
+fn presence_by_prefix(entries: &[KernelRouteEntry]) -> HashMap<Prefix, KernelRoutePresence> {
+    let mut map = HashMap::with_capacity(entries.len());
+    for entry in entries {
+        let presence = if entry.marker {
+            KernelRoutePresence::Marker
+        } else {
+            KernelRoutePresence::Foreign
+        };
+        map.entry(entry.prefix)
+            .and_modify(|existing| {
+                if presence == KernelRoutePresence::Foreign {
+                    *existing = KernelRoutePresence::Foreign;
+                }
+            })
+            .or_insert(presence);
+    }
+    map
 }
 
 /// Join handle wrapper used by main shutdown.
@@ -171,8 +266,7 @@ async fn run_loop<F>(
 ) where
     F: BlackholeFib,
 {
-    let mut owned = HashMap::<Prefix, OwnedBlackhole>::new();
-    let mut rejected = HashSet::<RejectedBlackhole>::new();
+    let mut state = ReconcilerState::new(tokio::time::Instant::now() + ADOPTION_REAP_DEFERRAL);
     let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     interval.tick().await;
@@ -180,47 +274,26 @@ async fn run_loop<F>(
     let mut route_event_dirty = false;
 
     let mut route_events = subscribe_route_events(&rib_tx).await;
-    reconcile_once(
-        config,
-        &rib_tx,
-        &mut fib,
-        &metrics,
-        &status_tx,
-        &mut owned,
-        &mut rejected,
-    )
-    .await;
+    reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
 
     loop {
         tokio::select! {
             biased;
             () = shutdown.cancelled() => {
-                drain_owned(&mut fib, &metrics, &mut owned).await;
+                // Adopted-but-unclaimed rows are deliberately left in
+                // place: a clean shutdown inside the deferral window must
+                // not reap rows BGP never got the chance to re-claim. The
+                // next start re-adopts them (ADR-0079 rule 4).
+                drain_owned(&mut fib, &metrics, &mut state.owned).await;
                 status_tx.send_replace(Vec::new());
                 return;
             }
             _ = interval.tick() => {
-                reconcile_once(
-                    config,
-                    &rib_tx,
-                    &mut fib,
-                    &metrics,
-                    &status_tx,
-                    &mut owned,
-                    &mut rejected,
-                ).await;
+                reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
             }
             () = &mut event_debounce, if route_event_dirty => {
                 route_event_dirty = false;
-                reconcile_once(
-                    config,
-                    &rib_tx,
-                    &mut fib,
-                    &metrics,
-                    &status_tx,
-                    &mut owned,
-                    &mut rejected,
-                ).await;
+                reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
             }
             maybe_event = recv_route_event(&mut route_events) => {
                 match maybe_event {
@@ -304,7 +377,7 @@ async fn query_best_routes(rib_tx: &mpsc::Sender<RibUpdate>) -> Option<Vec<Route
 
 #[expect(
     clippy::too_many_lines,
-    reason = "single level-triggered reconcile pass keeps owned-status publication, install preflight, and counter transition accounting in one auditable order"
+    reason = "single level-triggered reconcile pass keeps owned-status publication, install preflight, adoption claim/reap, and counter transition accounting in one auditable order"
 )]
 async fn reconcile_once<F>(
     config: BlackholeConfig,
@@ -312,8 +385,7 @@ async fn reconcile_once<F>(
     fib: &mut F,
     metrics: &BgpMetrics,
     status_tx: &watch::Sender<Vec<BlackholeStatus>>,
-    owned: &mut HashMap<Prefix, OwnedBlackhole>,
-    rejected: &mut HashSet<RejectedBlackhole>,
+    state: &mut ReconcilerState,
 ) where
     F: BlackholeFib,
 {
@@ -330,8 +402,43 @@ async fn reconcile_once<F>(
         })
         .collect();
 
+    let ReconcilerState {
+        owned,
+        rejected,
+        adoption,
+    } = state;
     let mut statuses = Vec::with_capacity(derived.len() + owned.len());
     let mut current_rejected = HashSet::new();
+
+    // One kernel dump per pass replaces the previous per-candidate
+    // full-table lookups: presence for every candidate, the adoption
+    // sweep, and the reap all read this snapshot.
+    let presences = match fib.dump().await {
+        Ok(entries) => presence_by_prefix(&entries),
+        Err(e) => {
+            metrics.record_blackhole_discard_kernel_failure("dump");
+            warn!(
+                error = %e,
+                "failed to dump kernel routes for BLACKHOLE reconcile; pass degraded to removals only"
+            );
+            degraded_pass_without_dump(fib, metrics, status_tx, owned, rejected, derived).await;
+            return;
+        }
+    };
+
+    if !adoption.swept {
+        adoption.swept = true;
+        for (prefix, presence) in &presences {
+            if *presence == KernelRoutePresence::Marker && !owned.contains_key(prefix) {
+                adoption.pending.insert(*prefix);
+                metrics.record_blackhole_discard_adopted();
+                info!(
+                    %prefix,
+                    "adopted marker-matching BLACKHOLE discard route from a previous daemon lifetime"
+                );
+            }
+        }
+    }
 
     for (prefix, installed) in owned.clone() {
         if desired.contains_key(&prefix) {
@@ -375,9 +482,14 @@ async fn reconcile_once<F>(
             continue;
         }
 
+        let presence = presences
+            .get(&candidate.prefix)
+            .copied()
+            .unwrap_or(KernelRoutePresence::Absent);
+
         if owned.contains_key(&candidate.prefix) {
-            match fib.lookup(candidate.prefix).await {
-                Ok(KernelRoutePresence::Owned) => {
+            match presence {
+                KernelRoutePresence::Marker => {
                     statuses.push(BlackholeStatus {
                         prefix: candidate.prefix,
                         peer: candidate.route.peer,
@@ -386,7 +498,7 @@ async fn reconcile_once<F>(
                     });
                     continue;
                 }
-                Ok(KernelRoutePresence::Absent) => {
+                KernelRoutePresence::Absent => {
                     owned.remove(&candidate.prefix);
                     warn!(
                         prefix = %candidate.prefix,
@@ -394,7 +506,7 @@ async fn reconcile_once<F>(
                         "daemon-owned BLACKHOLE discard route disappeared from kernel; reinstalling"
                     );
                 }
-                Ok(KernelRoutePresence::Foreign) => {
+                KernelRoutePresence::Foreign => {
                     owned.remove(&candidate.prefix);
                     warn!(
                         prefix = %candidate.prefix,
@@ -409,28 +521,37 @@ async fn reconcile_once<F>(
                     });
                     continue;
                 }
-                Err(e) => {
-                    metrics.record_blackhole_discard_kernel_failure("lookup");
-                    warn!(
-                        prefix = %candidate.prefix,
-                        peer = %candidate.route.peer,
-                        error = %e,
-                        "failed to verify BLACKHOLE discard route liveness"
-                    );
-                    statuses.push(BlackholeStatus {
-                        prefix: candidate.prefix,
-                        peer: candidate.route.peer,
-                        state: BlackholeState::Failed,
-                        reason: "lookup_failed".to_string(),
-                    });
-                    continue;
-                }
             }
         }
 
-        match fib.lookup(candidate.prefix).await {
-            Ok(KernelRoutePresence::Absent) => {}
-            Ok(KernelRoutePresence::Owned | KernelRoutePresence::Foreign) => {
+        match presence {
+            KernelRoutePresence::Marker => {
+                // Implicit re-claim (ADR-0079 rule 2): the kernel row is
+                // byte-identical to what we would install, so a desired
+                // prefix claims it instead of failing as foreign. This
+                // covers crash leftovers (the adoption sweep) and any
+                // marker row the owned map lost track of.
+                adoption.pending.remove(&candidate.prefix);
+                owned.insert(
+                    candidate.prefix,
+                    OwnedBlackhole {
+                        peer: candidate.route.peer,
+                    },
+                );
+                info!(
+                    prefix = %candidate.prefix,
+                    peer = %candidate.route.peer,
+                    "claimed adopted BLACKHOLE discard route for desired prefix"
+                );
+                statuses.push(BlackholeStatus {
+                    prefix: candidate.prefix,
+                    peer: candidate.route.peer,
+                    state: BlackholeState::Installed,
+                    reason: "adopted".to_string(),
+                });
+                continue;
+            }
+            KernelRoutePresence::Foreign => {
                 statuses.push(BlackholeStatus {
                     prefix: candidate.prefix,
                     peer: candidate.route.peer,
@@ -439,21 +560,10 @@ async fn reconcile_once<F>(
                 });
                 continue;
             }
-            Err(e) => {
-                metrics.record_blackhole_discard_kernel_failure("lookup");
-                warn!(
-                    prefix = %candidate.prefix,
-                    peer = %candidate.route.peer,
-                    error = %e,
-                    "failed to preflight BLACKHOLE discard route install"
-                );
-                statuses.push(BlackholeStatus {
-                    prefix: candidate.prefix,
-                    peer: candidate.route.peer,
-                    state: BlackholeState::Failed,
-                    reason: "lookup_failed".to_string(),
-                });
-                continue;
+            KernelRoutePresence::Absent => {
+                // The adopted row is gone from the kernel; nothing left
+                // to claim or reap — fall through to a fresh install.
+                adoption.pending.remove(&candidate.prefix);
             }
         }
 
@@ -493,6 +603,146 @@ async fn reconcile_once<F>(
                     reason: e,
                 });
             }
+        }
+    }
+
+    reap_or_report_adopted(fib, metrics, owned, adoption, &desired, &mut statuses).await;
+
+    *rejected = current_rejected;
+    status_tx.send_replace(statuses);
+}
+
+/// Reap adopted-but-unclaimed rows after the deferral, or surface them
+/// as pending so a crash leftover is never invisible to the status
+/// surfaces while it keeps discarding traffic.
+async fn reap_or_report_adopted<F>(
+    fib: &mut F,
+    metrics: &BgpMetrics,
+    owned: &HashMap<Prefix, OwnedBlackhole>,
+    adoption: &mut AdoptionSweep,
+    desired: &HashMap<Prefix, &Route>,
+    statuses: &mut Vec<BlackholeStatus>,
+) where
+    F: BlackholeFib,
+{
+    if adoption.pending.is_empty() {
+        return;
+    }
+    let reapable = tokio::time::Instant::now() >= adoption.reap_after;
+    for prefix in adoption.pending.clone() {
+        if desired.contains_key(&prefix) || owned.contains_key(&prefix) {
+            // Claimed (or about to be) — never reap a desired prefix.
+            adoption.pending.remove(&prefix);
+            continue;
+        }
+        if !reapable {
+            statuses.push(BlackholeStatus {
+                prefix,
+                peer: unspecified_peer(prefix),
+                state: BlackholeState::Installed,
+                reason: "adopted_pending_reap".to_string(),
+            });
+            continue;
+        }
+        match fib.remove(prefix).await {
+            Ok(()) => {
+                adoption.pending.remove(&prefix);
+                metrics.record_blackhole_discard_reaped();
+                info!(
+                    %prefix,
+                    "reaped adopted BLACKHOLE discard route that no BGP route re-claimed"
+                );
+            }
+            Err(e) => {
+                metrics.record_blackhole_discard_kernel_failure("remove");
+                warn!(%prefix, error = %e, "failed to reap adopted BLACKHOLE discard route");
+                statuses.push(BlackholeStatus {
+                    prefix,
+                    peer: unspecified_peer(prefix),
+                    state: BlackholeState::Failed,
+                    reason: "reap_failed".to_string(),
+                });
+            }
+        }
+    }
+}
+
+/// Adopted rows have no announcing peer; status rows use the
+/// family-matching unspecified address.
+fn unspecified_peer(prefix: Prefix) -> IpAddr {
+    match prefix {
+        Prefix::V4(_) => IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        Prefix::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+    }
+}
+
+/// Fallback pass when the kernel dump failed: removals of no-longer-
+/// desired owned routes still run (`remove` is idempotent and needs no
+/// presence data), but installs, claims, and reaping are skipped and
+/// every installable candidate is surfaced as degraded.
+async fn degraded_pass_without_dump<F>(
+    fib: &mut F,
+    metrics: &BgpMetrics,
+    status_tx: &watch::Sender<Vec<BlackholeStatus>>,
+    owned: &mut HashMap<Prefix, OwnedBlackhole>,
+    rejected: &mut HashSet<RejectedBlackhole>,
+    derived: Vec<Candidate<'_>>,
+) where
+    F: BlackholeFib,
+{
+    let desired: HashSet<Prefix> = derived
+        .iter()
+        .filter_map(|candidate| candidate.installable.then_some(candidate.prefix))
+        .collect();
+    let mut statuses = Vec::with_capacity(derived.len() + owned.len());
+    let mut current_rejected = HashSet::new();
+
+    for (prefix, installed) in owned.clone() {
+        if desired.contains(&prefix) {
+            continue;
+        }
+        match fib.remove(prefix).await {
+            Ok(()) => {
+                owned.remove(&prefix);
+                metrics.record_blackhole_discard_withdrawn();
+                info!(%prefix, "removed BLACKHOLE discard route");
+            }
+            Err(e) => {
+                metrics.record_blackhole_discard_kernel_failure("remove");
+                warn!(%prefix, error = %e, "failed to remove BLACKHOLE discard route");
+                statuses.push(BlackholeStatus {
+                    prefix,
+                    peer: installed.peer,
+                    state: BlackholeState::Failed,
+                    reason: "remove_failed".to_string(),
+                });
+            }
+        }
+    }
+
+    for candidate in derived {
+        if candidate.installable {
+            statuses.push(BlackholeStatus {
+                prefix: candidate.prefix,
+                peer: candidate.route.peer,
+                state: BlackholeState::Failed,
+                reason: "dump_failed".to_string(),
+            });
+        } else {
+            let rejected_key = RejectedBlackhole {
+                prefix: candidate.prefix,
+                reason: candidate.reason,
+            };
+            current_rejected.insert(rejected_key);
+            if !rejected.contains(&rejected_key) {
+                metrics.record_blackhole_discard_rejected(candidate.reason);
+            }
+            statuses.push(BlackholeStatus {
+                prefix: candidate.prefix,
+                peer: candidate.route.peer,
+                state: BlackholeState::Rejected,
+                reason: candidate.reason.to_string(),
+            });
         }
     }
 
@@ -572,10 +822,10 @@ fn is_host_prefix(prefix: Prefix) -> bool {
 }
 
 trait BlackholeFib {
-    fn lookup(
+    /// Dump every main-table kernel route once per reconcile pass.
+    fn dump(
         &mut self,
-        prefix: Prefix,
-    ) -> Pin<Box<dyn Future<Output = Result<KernelRoutePresence, String>> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<KernelRouteEntry>, String>> + Send + '_>>;
     fn install(
         &mut self,
         prefix: Prefix,
@@ -603,11 +853,10 @@ impl LinuxBlackholeFib {
 
 #[cfg(target_os = "linux")]
 impl BlackholeFib for LinuxBlackholeFib {
-    fn lookup(
+    fn dump(
         &mut self,
-        prefix: Prefix,
-    ) -> Pin<Box<dyn Future<Output = Result<KernelRoutePresence, String>> + Send + '_>> {
-        Box::pin(async move { exact_route_presence(&self.handle, prefix).await })
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<KernelRouteEntry>, String>> + Send + '_>> {
+        Box::pin(async move { dump_main_table_routes(&self.handle).await })
     }
 
     fn install(
@@ -646,38 +895,35 @@ impl BlackholeFib for LinuxBlackholeFib {
     }
 }
 
+/// One v4 + one v6 netlink dump per pass, parsed into main-table
+/// entries. This replaces the previous per-candidate full-table scans —
+/// the route count parsed per pass is now independent of how many
+/// blackhole candidates exist.
 #[cfg(target_os = "linux")]
-async fn exact_route_presence(
+async fn dump_main_table_routes(
     handle: &rtnetlink::Handle,
-    prefix: Prefix,
-) -> Result<KernelRoutePresence, String> {
+) -> Result<Vec<KernelRouteEntry>, String> {
     use futures::TryStreamExt;
     use rtnetlink::RouteMessageBuilder;
 
-    let query = match prefix {
-        Prefix::V4(_) => RouteMessageBuilder::<std::net::Ipv4Addr>::new().build(),
-        Prefix::V6(_) => RouteMessageBuilder::<std::net::Ipv6Addr>::new().build(),
-    };
-    let mut stream = handle.route().get(query).execute();
-    let mut found_owned = false;
-    while let Some(route) = stream
-        .try_next()
-        .await
-        .map_err(|e| format!("kernel route lookup: {e}"))?
-    {
-        if route_matches_prefix(&route, prefix) {
-            if route_is_owned_blackhole(&route) {
-                found_owned = true;
-            } else {
-                return Ok(KernelRoutePresence::Foreign);
+    let mut entries = Vec::new();
+    let queries = [
+        RouteMessageBuilder::<std::net::Ipv4Addr>::new().build(),
+        RouteMessageBuilder::<std::net::Ipv6Addr>::new().build(),
+    ];
+    for query in queries {
+        let mut stream = handle.route().get(query).execute();
+        while let Some(route) = stream
+            .try_next()
+            .await
+            .map_err(|e| format!("kernel route dump: {e}"))?
+        {
+            if let Some(entry) = kernel_route_entry(&route) {
+                entries.push(entry);
             }
         }
     }
-    Ok(if found_owned {
-        KernelRoutePresence::Owned
-    } else {
-        KernelRoutePresence::Absent
-    })
+    Ok(entries)
 }
 
 #[cfg(target_os = "linux")]
@@ -710,10 +956,15 @@ fn build_blackhole_route(prefix: Prefix) -> netlink_packet_route::route::RouteMe
     msg
 }
 
+/// Parse one dumped kernel route into a main-table entry. Returns
+/// `None` for routes in other tables and for messages whose destination
+/// cannot be reconstructed (a missing `Destination` attribute is only
+/// valid for the default route).
 #[cfg(target_os = "linux")]
-fn route_matches_prefix(msg: &netlink_packet_route::route::RouteMessage, prefix: Prefix) -> bool {
+fn kernel_route_entry(msg: &netlink_packet_route::route::RouteMessage) -> Option<KernelRouteEntry> {
     use netlink_packet_route::AddressFamily;
     use netlink_packet_route::route::{RouteAddress, RouteAttribute};
+    use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix};
 
     const RT_TABLE_MAIN: u32 = 254;
 
@@ -725,52 +976,38 @@ fn route_matches_prefix(msg: &netlink_packet_route::route::RouteMessage, prefix:
             _ => None,
         })
         .unwrap_or(u32::from(msg.header.table));
-    if table != RT_TABLE_MAIN || msg.header.destination_prefix_length != prefix.prefix_len() {
-        return false;
+    if table != RT_TABLE_MAIN {
+        return None;
     }
 
-    match prefix {
-        Prefix::V4(prefix) => {
-            if msg.header.address_family != AddressFamily::Inet {
-                return false;
-            }
-            let has_destination = msg.attributes.iter().any(|attr| {
-                matches!(
-                    attr,
-                    RouteAttribute::Destination(RouteAddress::Inet(addr)) if *addr == prefix.addr
-                )
-            });
-            has_destination
-                || (prefix.len == 0
-                    && prefix.addr.is_unspecified()
-                    && msg
-                        .attributes
-                        .iter()
-                        .all(|attr| !matches!(attr, RouteAttribute::Destination(_))))
+    let len = msg.header.destination_prefix_length;
+    let destination = msg.attributes.iter().find_map(|attr| match attr {
+        RouteAttribute::Destination(addr) => Some(addr),
+        _ => None,
+    });
+    let prefix = match (msg.header.address_family, destination) {
+        (AddressFamily::Inet, Some(RouteAddress::Inet(addr))) => {
+            Prefix::V4(Ipv4Prefix::new(*addr, len))
         }
-        Prefix::V6(prefix) => {
-            if msg.header.address_family != AddressFamily::Inet6 {
-                return false;
-            }
-            let has_destination = msg.attributes.iter().any(|attr| {
-                matches!(
-                    attr,
-                    RouteAttribute::Destination(RouteAddress::Inet6(addr)) if *addr == prefix.addr
-                )
-            });
-            has_destination
-                || (prefix.len == 0
-                    && prefix.addr.is_unspecified()
-                    && msg
-                        .attributes
-                        .iter()
-                        .all(|attr| !matches!(attr, RouteAttribute::Destination(_))))
+        (AddressFamily::Inet6, Some(RouteAddress::Inet6(addr))) => {
+            Prefix::V6(Ipv6Prefix::new(*addr, len))
         }
-    }
+        (AddressFamily::Inet, None) if len == 0 => {
+            Prefix::V4(Ipv4Prefix::new(std::net::Ipv4Addr::UNSPECIFIED, 0))
+        }
+        (AddressFamily::Inet6, None) if len == 0 => {
+            Prefix::V6(Ipv6Prefix::new(std::net::Ipv6Addr::UNSPECIFIED, 0))
+        }
+        _ => return None,
+    };
+    Some(KernelRouteEntry {
+        prefix,
+        marker: route_has_ownership_marker(msg),
+    })
 }
 
 #[cfg(target_os = "linux")]
-fn route_is_owned_blackhole(msg: &netlink_packet_route::route::RouteMessage) -> bool {
+fn route_has_ownership_marker(msg: &netlink_packet_route::route::RouteMessage) -> bool {
     use netlink_packet_route::route::{RouteProtocol, RouteType};
 
     msg.header.protocol == RouteProtocol::Bgp && msg.header.kind == RouteType::BlackHole
@@ -803,36 +1040,44 @@ mod tests {
     };
     use std::time::Instant;
 
+    /// Fake kernel: `installed` holds marker rows (ours or crash
+    /// leftovers — the dump cannot tell), `foreign` holds non-marker
+    /// rows for the same table.
     #[derive(Default)]
     struct FakeFib {
         installed: HashSet<Prefix>,
         foreign: HashSet<Prefix>,
         fail_install: HashMap<Prefix, String>,
         fail_remove: HashMap<Prefix, String>,
-        fail_exists: HashMap<Prefix, String>,
+        fail_dump: Option<String>,
         install_calls: Vec<Prefix>,
         remove_calls: Vec<Prefix>,
-        exists_calls: Vec<Prefix>,
+        dump_calls: usize,
     }
 
     impl BlackholeFib for FakeFib {
-        fn lookup(
+        fn dump(
             &mut self,
-            prefix: Prefix,
-        ) -> Pin<Box<dyn Future<Output = Result<KernelRoutePresence, String>> + Send + '_>>
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<KernelRouteEntry>, String>> + Send + '_>>
         {
-            self.exists_calls.push(prefix);
+            self.dump_calls += 1;
             Box::pin(async move {
-                if let Some(error) = self.fail_exists.get(&prefix) {
+                if let Some(error) = &self.fail_dump {
                     return Err(error.clone());
                 }
-                if self.foreign.contains(&prefix) {
-                    Ok(KernelRoutePresence::Foreign)
-                } else if self.installed.contains(&prefix) {
-                    Ok(KernelRoutePresence::Owned)
-                } else {
-                    Ok(KernelRoutePresence::Absent)
-                }
+                let mut entries: Vec<KernelRouteEntry> = self
+                    .installed
+                    .iter()
+                    .map(|prefix| KernelRouteEntry {
+                        prefix: *prefix,
+                        marker: true,
+                    })
+                    .collect();
+                entries.extend(self.foreign.iter().map(|prefix| KernelRouteEntry {
+                    prefix: *prefix,
+                    marker: false,
+                }));
+                Ok(entries)
             })
         }
 
@@ -906,15 +1151,32 @@ mod tests {
         (tx, query_count, events_tx)
     }
 
-    async fn reconcile_for_test(
+    /// Adoption state whose reap deadline is far in the future — the
+    /// default for tests not exercising the reap.
+    fn deferred_adoption() -> AdoptionSweep {
+        AdoptionSweep::new(tokio::time::Instant::now() + Duration::from_hours(1))
+    }
+
+    /// Adoption state whose reap deadline has already passed.
+    fn reapable_adoption() -> AdoptionSweep {
+        AdoptionSweep::new(tokio::time::Instant::now())
+    }
+
+    async fn reconcile_for_test_with_adoption(
         routes: Vec<Route>,
         fib: &mut FakeFib,
         owned: &mut HashMap<Prefix, OwnedBlackhole>,
         rejected: &mut HashSet<RejectedBlackhole>,
         metrics: &BgpMetrics,
+        adoption: &mut AdoptionSweep,
     ) -> Vec<BlackholeStatus> {
         let rib_tx = rib_with_routes(routes);
         let (status_tx, status_rx) = watch::channel(Vec::new());
+        let mut state = ReconcilerState {
+            owned: std::mem::take(owned),
+            rejected: std::mem::take(rejected),
+            adoption: std::mem::replace(adoption, reapable_adoption()),
+        };
         reconcile_once(
             BlackholeConfig {
                 enabled: true,
@@ -924,11 +1186,24 @@ mod tests {
             fib,
             metrics,
             &status_tx,
-            owned,
-            rejected,
+            &mut state,
         )
         .await;
+        *owned = state.owned;
+        *rejected = state.rejected;
+        *adoption = state.adoption;
         status_rx.borrow().clone()
+    }
+
+    async fn reconcile_for_test(
+        routes: Vec<Route>,
+        fib: &mut FakeFib,
+        owned: &mut HashMap<Prefix, OwnedBlackhole>,
+        rejected: &mut HashSet<RejectedBlackhole>,
+        metrics: &BgpMetrics,
+    ) -> Vec<BlackholeStatus> {
+        let mut adoption = deferred_adoption();
+        reconcile_for_test_with_adoption(routes, fib, owned, rejected, metrics, &mut adoption).await
     }
 
     fn counter_value(metrics: &BgpMetrics, name: &str, label_name: &str, label_value: &str) -> f64 {
@@ -1098,21 +1373,54 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn route_match_treats_missing_destination_as_default_prefix_only() {
-        let default_v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0));
+    fn kernel_route_entry_parses_marker_and_default_routes() {
+        // A row built by our own install path parses back as a marker
+        // entry for the same prefix.
         let host_v4 = v4(32);
+        let msg = build_blackhole_route(host_v4);
+        let entry = kernel_route_entry(&msg).expect("main-table route should parse");
+        assert_eq!(entry.prefix, host_v4);
+        assert!(entry.marker);
+
+        // A default route without a Destination attribute parses as the
+        // unspecified /0 of its family; a non-zero length without a
+        // Destination attribute is unparseable and skipped.
+        let default_v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0));
         let mut default_route = build_blackhole_route(default_v4);
         default_route.attributes.clear();
-
-        assert!(route_matches_prefix(&default_route, default_v4));
-        assert!(!route_matches_prefix(&default_route, host_v4));
+        let entry = kernel_route_entry(&default_route).expect("default route should parse");
+        assert_eq!(entry.prefix, default_v4);
 
         let default_v6 = Prefix::V6(Ipv6Prefix::new(Ipv6Addr::UNSPECIFIED, 0));
         let mut default_route = build_blackhole_route(default_v6);
         default_route.attributes.clear();
+        let entry = kernel_route_entry(&default_route).expect("v6 default route should parse");
+        assert_eq!(entry.prefix, default_v6);
 
-        assert!(route_matches_prefix(&default_route, default_v6));
-        assert!(!route_matches_prefix(&default_route, v6(128)));
+        let mut headless_host = build_blackhole_route(host_v4);
+        headless_host.attributes.clear();
+        assert!(kernel_route_entry(&headless_host).is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kernel_route_entry_skips_other_tables_and_flags_foreign_rows() {
+        use netlink_packet_route::route::{RouteProtocol, RouteType};
+
+        let host_v4 = v4(32);
+        let mut other_table = build_blackhole_route(host_v4);
+        other_table.header.table = 100;
+        assert!(kernel_route_entry(&other_table).is_none());
+
+        let mut unicast = build_blackhole_route(host_v4);
+        unicast.header.kind = RouteType::Unicast;
+        let entry = kernel_route_entry(&unicast).expect("foreign row should still parse");
+        assert!(!entry.marker);
+
+        let mut static_blackhole = build_blackhole_route(host_v4);
+        static_blackhole.header.protocol = RouteProtocol::Static;
+        let entry = kernel_route_entry(&static_blackhole).expect("foreign row should still parse");
+        assert!(!entry.marker);
     }
 
     #[cfg(target_os = "linux")]
@@ -1416,5 +1724,338 @@ mod tests {
         assert!(owned.contains_key(&prefix));
         assert_eq!(statuses[0].state, BlackholeState::Installed);
         assert_eq!(statuses[0].reason, "installed");
+    }
+
+    fn plain_counter_value(metrics: &BgpMetrics, name: &str) -> f64 {
+        metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == name)
+            .and_then(|family| {
+                family.get_metric().first().map(|metric| {
+                    metric
+                        .get_counter()
+                        .as_ref()
+                        .map_or(0.0, prometheus::proto::Counter::value)
+                })
+            })
+            .unwrap_or(0.0)
+    }
+
+    /// ADR-0079: a crash-leftover marker row for a still-desired prefix
+    /// is claimed instead of blocking re-installation as foreign.
+    #[tokio::test]
+    async fn adoption_claims_marker_row_for_desired_prefix() {
+        let prefix = v4(32);
+        let mut fib = FakeFib::default();
+        fib.installed.insert(prefix); // crash leftover with our marker
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut owned = HashMap::new();
+        let mut rejected = HashSet::new();
+
+        let statuses = reconcile_for_test(
+            vec![route(
+                prefix,
+                RouteOrigin::Ebgp,
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+            )],
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+        )
+        .await;
+
+        assert!(
+            fib.install_calls.is_empty(),
+            "claiming must not re-write the identical kernel row"
+        );
+        assert!(owned.contains_key(&prefix));
+        assert_eq!(statuses[0].state, BlackholeState::Installed);
+        assert_eq!(statuses[0].reason, "adopted");
+        let adopted = plain_counter_value(&metrics, "bgp_blackhole_discard_adopted_total");
+        assert!((adopted - 1.0).abs() < f64::EPSILON, "got {adopted}");
+    }
+
+    /// ADR-0079: a claimed adopted row is owned like any other — a later
+    /// BGP withdraw removes it from the kernel.
+    #[tokio::test]
+    async fn claimed_adopted_route_is_removed_when_withdrawn() {
+        let prefix = v4(32);
+        let mut fib = FakeFib::default();
+        fib.installed.insert(prefix);
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut owned = HashMap::new();
+        let mut rejected = HashSet::new();
+        let mut adoption = deferred_adoption();
+
+        let _ = reconcile_for_test_with_adoption(
+            vec![route(
+                prefix,
+                RouteOrigin::Ebgp,
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+            )],
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+        )
+        .await;
+        assert!(owned.contains_key(&prefix));
+
+        let statuses = reconcile_for_test_with_adoption(
+            Vec::new(),
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+        )
+        .await;
+
+        assert_eq!(fib.remove_calls, vec![prefix]);
+        assert!(owned.is_empty());
+        assert!(!fib.installed.contains(&prefix));
+        assert!(statuses.is_empty());
+    }
+
+    /// ADR-0079 rule 3: an adopted-but-unclaimed row keeps discarding
+    /// (and stays visible on the status surface) until the deferral
+    /// deadline passes.
+    #[tokio::test]
+    async fn adopted_unclaimed_row_is_kept_and_visible_before_deadline() {
+        let prefix = v4(32);
+        let mut fib = FakeFib::default();
+        fib.installed.insert(prefix);
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut owned = HashMap::new();
+        let mut rejected = HashSet::new();
+        let mut adoption = deferred_adoption();
+
+        let statuses = reconcile_for_test_with_adoption(
+            Vec::new(),
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+        )
+        .await;
+
+        assert!(fib.remove_calls.is_empty(), "must not reap before deadline");
+        assert!(fib.installed.contains(&prefix));
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].state, BlackholeState::Installed);
+        assert_eq!(statuses[0].reason, "adopted_pending_reap");
+        assert!(adoption.pending.contains(&prefix));
+    }
+
+    /// ADR-0079 rule 3: once the deferral passes, an adopted row no BGP
+    /// route re-claimed is reaped from the kernel.
+    #[tokio::test]
+    async fn adopted_unclaimed_row_is_reaped_after_deadline() {
+        let prefix = v4(32);
+        let mut fib = FakeFib::default();
+        fib.installed.insert(prefix);
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut owned = HashMap::new();
+        let mut rejected = HashSet::new();
+        let mut adoption = reapable_adoption();
+
+        let statuses = reconcile_for_test_with_adoption(
+            Vec::new(),
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+        )
+        .await;
+
+        assert_eq!(fib.remove_calls, vec![prefix]);
+        assert!(!fib.installed.contains(&prefix));
+        assert!(adoption.pending.is_empty());
+        assert!(statuses.is_empty());
+        let reaped = plain_counter_value(&metrics, "bgp_blackhole_discard_reaped_total");
+        assert!((reaped - 1.0).abs() < f64::EPSILON, "got {reaped}");
+    }
+
+    /// Foreign (non-marker) kernel rows are never adopted, never reaped,
+    /// and still block installs for their prefix.
+    #[tokio::test]
+    async fn foreign_rows_are_never_adopted_or_reaped() {
+        let foreign_only = v4(32);
+        let mut fib = FakeFib::default();
+        fib.foreign.insert(foreign_only);
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut owned = HashMap::new();
+        let mut rejected = HashSet::new();
+        let mut adoption = reapable_adoption();
+
+        let _ = reconcile_for_test_with_adoption(
+            Vec::new(),
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+        )
+        .await;
+
+        assert!(fib.remove_calls.is_empty());
+        assert!(adoption.pending.is_empty());
+        let adopted = plain_counter_value(&metrics, "bgp_blackhole_discard_adopted_total");
+        assert!(adopted.abs() < f64::EPSILON, "got {adopted}");
+    }
+
+    /// A prefix with both a marker row and a foreign row is unsafe to
+    /// claim — foreign presence dominates.
+    #[tokio::test]
+    async fn marker_row_shadowed_by_foreign_row_is_not_claimed() {
+        let prefix = v4(32);
+        let mut fib = FakeFib::default();
+        fib.installed.insert(prefix);
+        fib.foreign.insert(prefix);
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut owned = HashMap::new();
+        let mut rejected = HashSet::new();
+
+        let statuses = reconcile_for_test(
+            vec![route(
+                prefix,
+                RouteOrigin::Ebgp,
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+            )],
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+        )
+        .await;
+
+        assert!(owned.is_empty());
+        assert!(fib.install_calls.is_empty());
+        assert_eq!(statuses[0].state, BlackholeState::Failed);
+        assert_eq!(statuses[0].reason, "foreign_route_exists");
+    }
+
+    /// The batching contract: one reconcile pass performs exactly one
+    /// kernel dump regardless of candidate count.
+    #[tokio::test]
+    async fn reconcile_performs_one_dump_per_pass() {
+        let mut fib = FakeFib::default();
+        fib.installed.insert(Prefix::V4(Ipv4Prefix::new(
+            Ipv4Addr::new(203, 0, 113, 9),
+            32,
+        )));
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut owned = HashMap::new();
+        let mut rejected = HashSet::new();
+
+        let routes = vec![
+            route(
+                v4(32),
+                RouteOrigin::Ebgp,
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+            ),
+            route(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 7), 32)),
+                RouteOrigin::Ebgp,
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+            ),
+            route(
+                v6(128),
+                RouteOrigin::Ebgp,
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+            ),
+        ];
+        let _ = reconcile_for_test(routes, &mut fib, &mut owned, &mut rejected, &metrics).await;
+
+        assert_eq!(fib.dump_calls, 1);
+        assert_eq!(owned.len(), 3);
+    }
+
+    /// A failed kernel dump degrades the pass: stale owned routes are
+    /// still removed, but installs/claims/reaps are skipped and every
+    /// installable candidate is surfaced as failed.
+    #[tokio::test]
+    async fn dump_failure_degrades_pass_without_unowning() {
+        let desired = v4(32);
+        let stale = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 9), 32));
+        let mut fib = FakeFib {
+            fail_dump: Some("netlink down".to_string()),
+            ..Default::default()
+        };
+        fib.installed.insert(desired);
+        fib.installed.insert(stale);
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let peer = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        let mut owned = HashMap::from([
+            (desired, OwnedBlackhole { peer }),
+            (stale, OwnedBlackhole { peer }),
+        ]);
+        let mut rejected = HashSet::new();
+        let mut adoption = deferred_adoption();
+
+        let statuses = reconcile_for_test_with_adoption(
+            vec![route(
+                desired,
+                RouteOrigin::Ebgp,
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+            )],
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+        )
+        .await;
+
+        assert_eq!(fib.remove_calls, vec![stale], "stale removal still runs");
+        assert!(owned.contains_key(&desired), "owned state must not churn");
+        assert!(fib.install_calls.is_empty());
+        assert!(!adoption.swept, "sweep must wait for a successful dump");
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].state, BlackholeState::Failed);
+        assert_eq!(statuses[0].reason, "dump_failed");
+        let failures = counter_value(
+            &metrics,
+            "bgp_blackhole_discard_kernel_failures_total",
+            "action",
+            "dump",
+        );
+        assert!((failures - 1.0).abs() < f64::EPSILON, "got {failures}");
+    }
+
+    /// ADR-0079 rule 4: a second sweep over the same kernel state (the
+    /// double-crash case) adopts the same rows again without harm.
+    #[tokio::test]
+    async fn repeated_adoption_sweep_is_idempotent() {
+        let prefix = v4(32);
+        let mut fib = FakeFib::default();
+        fib.installed.insert(prefix);
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut owned = HashMap::new();
+        let mut rejected = HashSet::new();
+
+        // Two fresh AdoptionSweep instances over identical kernel state
+        // model two consecutive crashed processes.
+        for _ in 0..2 {
+            let mut adoption = deferred_adoption();
+            let statuses = reconcile_for_test_with_adoption(
+                Vec::new(),
+                &mut fib,
+                &mut owned,
+                &mut rejected,
+                &metrics,
+                &mut adoption,
+            )
+            .await;
+            assert!(fib.installed.contains(&prefix));
+            assert_eq!(statuses[0].reason, "adopted_pending_reap");
+        }
+        assert!(fib.remove_calls.is_empty());
     }
 }
