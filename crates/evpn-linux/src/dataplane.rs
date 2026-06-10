@@ -325,6 +325,33 @@ pub trait Dataplane: Send {
         async { Some(IpVrfRouteDump::default()) }
     }
 
+    /// Dump crash-leftover L3 kernel state that carries our ADR-0079
+    /// ownership markers: `proto bgp` + onlink routes in configured
+    /// IP-VRF tables, `NUD_PERMANENT` + `extern_learn` neighbors on
+    /// managed L3VXLAN devices, and `extern_learn` L3VXLAN FDB rows.
+    /// The reconcile actor's one-shot L3 adoption sweep consumes this
+    /// to adopt rows whose in-memory ownership record died with a
+    /// previous process; re-claim happens implicitly through the
+    /// replace-semantics L3 apply path, and the deferred reap re-dumps
+    /// through the same method to confirm a row is still ours before
+    /// removing it.
+    ///
+    /// Returns `None` on any sub-dump failure — the caller must retry
+    /// on a later pass rather than latch onto a partial kernel view (a
+    /// partial view could mis-classify a still-marked row as vanished
+    /// and silently drop it from the reap set).
+    ///
+    /// Default returns `Some(L3AdoptionDump::default())` —
+    /// implementations without Gate 9 L3 support observe zero marker
+    /// rows, so the sweep adopts nothing and the trait extension stays
+    /// non-breaking.
+    fn dump_l3_adoption_candidates(
+        &mut self,
+        _ip_vrfs: &IpVrfTable,
+    ) -> impl Future<Output = Option<crate::l3_adoption::L3AdoptionDump>> + Send {
+        async { Some(crate::l3_adoption::L3AdoptionDump::default()) }
+    }
+
     /// Dump the current kernel FDB + link inventory.
     fn dump_snapshot(
         &mut self,

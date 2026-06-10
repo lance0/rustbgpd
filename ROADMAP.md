@@ -211,7 +211,11 @@ has it, no broad performance sprints without profile evidence.
   single-dst FDB — **done:** diff-level implicit re-claim (a marker row
   absent from the OwnedSet is a crash leftover, not a foreign entry) +
   startup adoption + deferred reap behind the ADR-0059 convergence gate —
-  then L3.
+  then L3 — **done:** marker-keyed adoption dump (proto-bgp+onlink VRF
+  routes, permanent extern_learn neighbors / L3VXLAN FDB rows on managed
+  devices), implicit re-claim through the replace-semantics apply path (no
+  diff change), and a deferred reap behind a clean-L3-pass gate that tears
+  down routes before their resolution rows.
   Related: scope the unicast owned-state signature per table and compare it
   set-wise so a crash plus any `[[fib_tables]]` edit — even stanza
   reordering — doesn't quarantine-freeze stale kernel routes — **done:**

@@ -58,12 +58,12 @@ owning subsystem has reconverged.** No new persisted owned-state files.
 Per subsystem, the ownership discriminator (all already written by our
 install paths today):
 
-| State | Marker |
-|---|---|
-| Blackhole discard routes | `RTPROT_BGP` + `RTN_BLACKHOLE` (table main) |
-| EVPN L3 VRF routes | `RTPROT_BGP` + onlink, in a configured `[[evpn_ip_vrfs]]` `table_id` |
-| EVPN L3 neighbors | `NUD_PERMANENT` + `NTF_EXT_LEARNED` on managed L3VXLAN devices |
-| EVPN FDB (single-dst + L3VXLAN) | `extern_learn` on managed VXLAN devices (non-NHG; NHG-tagged rows already have the ADR-0059 drift sweep) |
+| State | Marker | Status |
+|---|---|---|
+| Blackhole discard routes | `RTPROT_BGP` + `RTN_BLACKHOLE` (table main) | Implemented |
+| EVPN L3 VRF routes | `RTPROT_BGP` + onlink, in a configured `[[evpn_ip_vrfs]]` `table_id` | Implemented |
+| EVPN L3 neighbors | `NUD_PERMANENT` + `NTF_EXT_LEARNED` on managed L3VXLAN devices | Implemented |
+| EVPN FDB (single-dst + L3VXLAN) | `extern_learn` on managed VXLAN devices (non-NHG; NHG-tagged rows already have the ADR-0059 drift sweep) | Implemented |
 
 Sweep semantics, shared across subsystems:
 
@@ -87,6 +87,18 @@ Sweep semantics, shared across subsystems:
    re-install owned objects the kernel lost while the daemon was down
    (carrier-down neigh flush) — which the level-triggered reconcilers
    already do once ownership is adopted rather than refused.
+
+For the EVPN L3 sweep specifically, re-claim required no diff change at
+all: `compute_l3_diff` is purely desired-vs-owned and every L3 add
+(`ip route replace`, neighbor replace, FDB replace) applies with
+netlink replace semantics, so after a crash the empty owned state makes
+the diff re-emit installs for everything still desired and the
+re-install over the leftover row *is* the claim. The L3 reap also
+orders its removals most-dependent first — routes before the neighbor
+and L3VXLAN FDB resolution rows their forwarding depends on (the
+inverse of the install pipeline's resolution-before-route ordering) —
+so an unclaimed route never briefly forwards through torn-down
+resolution state mid-reap.
 
 The **unicast FIB keeps its persisted owned-state file** — it ships, it
 works, and its value-match adoption discipline is stricter than a proto
@@ -130,7 +142,8 @@ the sweep model is left as a future simplification, not a requirement.
 - Ship order: blackhole first (smallest surface, worst failure mode),
   then single-dst FDB (extends the existing drift sweep), then L3
   (largest). Each slice needs a kill-and-restart test proving
-  stale-state reaping and still-desired re-adoption.
+  stale-state reaping and still-desired re-adoption. All three slices
+  have shipped.
 - The per-table set-based unicast signature ends the
   quarantine-freeze-on-edit class without weakening the value-match
   adoption rule.

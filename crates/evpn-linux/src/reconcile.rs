@@ -39,7 +39,7 @@ use std::time::Duration;
 use rustbgpd_evpn::{
     AppliedOp, DataplaneIntent, DataplaneOpKind, DataplaneReport, EvpnInstanceTable, FailedOp,
     FdbNexthopDataplaneStatus, FdbNexthopGroupStatus, FdbNexthopMemberStatus, FdbNhgDriftCounters,
-    InstanceDataplaneStatus, InstanceState, RemoteMacTable,
+    InstanceDataplaneStatus, InstanceState, L3AdoptionCounters, RemoteMacTable,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior, sleep_until};
@@ -48,13 +48,14 @@ use tokio_util::sync::CancellationToken;
 use std::collections::{BTreeMap, BTreeSet};
 
 use rustbgpd_evpn::ip_vrf::IpVrfStatus;
-use rustbgpd_evpn::{EvpnInstanceId, IpVrfId, MacAddress};
+use rustbgpd_evpn::{EvpnInstanceId, EvpnIpPrefixValue, IpVrfId, MacAddress};
 
 use crate::backoff::RetrySchedule;
 use crate::dataplane::{Dataplane, DataplaneOp, KernelEvent};
 use crate::diff::{Plan, compute_diff};
 use crate::enforcement::build_bum_enforcement_status;
 use crate::error::FailureClass;
+use crate::l3_adoption::AdoptedL3Route;
 use crate::snapshot::{
     InstanceProbe, InstanceProbes, KernelSnapshot, OwnedEntry, OwnedEntryKind, OwnedSet,
 };
@@ -91,6 +92,13 @@ pub struct ReconcileActorConfig {
     /// still-desired MAC, whose re-install re-claims the row and
     /// exempts it. Tests inject a short / zero value.
     pub fdb_adoption_reap_deferral: Duration,
+    /// ADR-0079: how long adopted-but-unclaimed L3 rows (VRF routes,
+    /// L3 neighbors, L3VXLAN FDB) keep forwarding before the reap.
+    /// Same 500 s FRR-parity rationale as the FDB deferral — long
+    /// enough for BGP to re-establish and re-announce a still-desired
+    /// Type 5, whose replace-semantics re-install re-claims the rows
+    /// and exempts them. Tests inject a short / zero value.
+    pub l3_adoption_reap_deferral: Duration,
 }
 
 impl ReconcileActorConfig {
@@ -104,6 +112,7 @@ impl ReconcileActorConfig {
             skip_initial_dump: false,
             apply_bum_enforcement: false,
             fdb_adoption_reap_deferral: Duration::from_secs(500),
+            l3_adoption_reap_deferral: Duration::from_secs(500),
         }
     }
 
@@ -120,6 +129,7 @@ impl ReconcileActorConfig {
             // Production-length deferral by default; reap tests
             // override with zero to make the reap fire immediately.
             fdb_adoption_reap_deferral: Duration::from_secs(500),
+            l3_adoption_reap_deferral: Duration::from_secs(500),
         }
     }
 }
@@ -270,6 +280,38 @@ struct ActorState {
     /// state). A second crash inside the deferral window re-adopts
     /// harmlessly in the next process (ADR-0079 rule 4).
     fdb_adoption_reap_after: Option<Instant>,
+    /// ADR-0079 L3 sweep: crash-leftover VRF routes adopted from the
+    /// first successful `dump_l3_adoption_candidates` of this process
+    /// lifetime — marker rows (`proto bgp` + onlink in a configured
+    /// `table_id`) whose ownership record ([`crate::l3_diff::
+    /// L3OwnedState`]) died with the previous process. The value
+    /// caches the identity the eventual `RemoveRemoteIpRoute` needs.
+    /// Keys drop out when a desired prefix's replace-semantics
+    /// re-install claims the row, or when the deferred reap removes
+    /// it.
+    adopted_l3_routes: BTreeMap<(IpVrfId, EvpnIpPrefixValue), AdoptedL3Route>,
+    /// ADR-0079 L3 sweep: adopted crash-leftover L3 neighbor rows,
+    /// `(l3vxlan_ifindex, next_hop) → owning vrf_id` (the value is
+    /// the accounting tag the remove op carries). Same claim / reap
+    /// lifecycle as `adopted_l3_routes`.
+    adopted_l3_neighbors: BTreeMap<(u32, IpAddr), IpVrfId>,
+    /// ADR-0079 L3 sweep: adopted crash-leftover L3VXLAN FDB rows,
+    /// `(l3vxlan_ifindex, router_mac) → owning vrf_id`. Same claim /
+    /// reap lifecycle as `adopted_l3_routes`.
+    adopted_l3_fdb: BTreeMap<(u32, MacAddress), IpVrfId>,
+    /// When adopted-but-unclaimed L3 rows become reapable. `None`
+    /// until the one-shot sweep runs; `Some` doubles as the "swept"
+    /// latch and is never reset within a process lifetime — same
+    /// rationale as `fdb_adoption_reap_after` above (marker rows
+    /// appearing later are claimed only if desired, never queued for
+    /// reaping; a second crash inside the window re-adopts harmlessly
+    /// in the next process).
+    l3_adoption_reap_after: Option<Instant>,
+    /// L3 adoption / reap deltas accumulated since the last
+    /// [`DataplaneReport`]. Drained into the report alongside
+    /// `fdb_nhg_drift_since_report` so the daemon increments
+    /// Prometheus counters without coupling this crate to telemetry.
+    l3_adoption_since_report: L3AdoptionCounters,
     /// Last time the steady-state drift-recovery pass ran. ADR-0059
     /// slice 3.5 PR 2: every `periodic_dump` interval (≥ 60 s by
     /// default) after `adoption_done`, the actor re-dumps tagged
@@ -341,6 +383,11 @@ impl ActorState {
             adoption_done: false,
             adopted_fdb: BTreeSet::new(),
             fdb_adoption_reap_after: None,
+            adopted_l3_routes: BTreeMap::new(),
+            adopted_l3_neighbors: BTreeMap::new(),
+            adopted_l3_fdb: BTreeMap::new(),
+            l3_adoption_reap_after: None,
+            l3_adoption_since_report: L3AdoptionCounters::default(),
             last_drift_check: None,
             drift_disabled: false,
             fdb_nhg_drift_since_report: FdbNhgDriftCounters::default(),
@@ -891,6 +938,101 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     rustbgpd_evpn::ip_vrf::IpVrfStatus::NotReady { .. } => None,
                 })
                 .collect();
+
+            // ADR-0079 L3 sweep: one-shot adoption pass over kernel
+            // rows carrying our L3 ownership markers — `proto bgp` +
+            // onlink routes in configured `[[evpn_ip_vrfs]]` tables,
+            // `NUD_PERMANENT` + `extern_learn` neighbors and
+            // `extern_learn` FDB rows on managed L3VXLAN devices (the
+            // ADR-0079 marker table; the kernel never writes these
+            // marker shapes on its own). A marker row absent from
+            // `l3_owned` is a crash leftover: adopt it so it keeps
+            // forwarding, and queue it for the deferred reap unless a
+            // desired Type 5 re-claims it first. Re-claim needs no
+            // diff change — `compute_l3_diff` is purely desired-vs-
+            // owned, so after a crash (empty `l3_owned`) it re-emits
+            // Adds for everything desired, and every L3 add applies
+            // with netlink replace semantics: the re-install over the
+            // leftover row *is* the claim, landing in `l3_owned` via
+            // `record_l3_success` while the apply loop below drops
+            // the key from the adopted sets.
+            //
+            // Gated on a non-empty `ip_vrfs` table (the markers are
+            // only recognizable relative to configured tables /
+            // devices) — config arriving later runs the sweep on the
+            // first pass that sees it. A failed dump leaves the latch
+            // unset so the next pass retries; never sweep a partial
+            // kernel view.
+            if self.state.l3_adoption_reap_after.is_none() && !intent.ip_vrfs.is_empty() {
+                match self
+                    .dataplane
+                    .dump_l3_adoption_candidates(intent.ip_vrfs.as_ref())
+                    .await
+                {
+                    Some(dump) => {
+                        self.state.l3_adoption_reap_after =
+                            Some(Instant::now() + self.config.l3_adoption_reap_deferral);
+                        for (&(vrf_id, prefix), route) in &dump.routes {
+                            if !self.state.l3_owned.installs.contains_key(&(vrf_id, prefix)) {
+                                self.state
+                                    .adopted_l3_routes
+                                    .insert((vrf_id, prefix), *route);
+                                self.state.l3_adoption_since_report.routes_adopted += 1;
+                                tracing::info!(
+                                    vrf_id = vrf_id.as_u32(),
+                                    ?prefix,
+                                    next_hop = %route.next_hop,
+                                    "adopted proto-bgp onlink VRF route from a previous daemon lifetime"
+                                );
+                            }
+                        }
+                        for (&(ifindex, next_hop), &vrf_id) in &dump.neighbors {
+                            if !self
+                                .state
+                                .l3_owned
+                                .kernel_neighbors
+                                .contains_key(&(ifindex, next_hop))
+                            {
+                                self.state
+                                    .adopted_l3_neighbors
+                                    .insert((ifindex, next_hop), vrf_id);
+                                self.state.l3_adoption_since_report.neighbors_adopted += 1;
+                                tracing::info!(
+                                    vrf_id = vrf_id.as_u32(),
+                                    l3vxlan_ifindex = ifindex,
+                                    %next_hop,
+                                    "adopted extern_learn L3 neighbor from a previous daemon lifetime"
+                                );
+                            }
+                        }
+                        for (&(ifindex, router_mac), &vrf_id) in &dump.l3vxlan_fdb {
+                            if !self
+                                .state
+                                .l3_owned
+                                .kernel_fdb
+                                .contains_key(&(ifindex, router_mac))
+                            {
+                                self.state
+                                    .adopted_l3_fdb
+                                    .insert((ifindex, router_mac), vrf_id);
+                                self.state.l3_adoption_since_report.l3vxlan_fdb_adopted += 1;
+                                tracing::info!(
+                                    vrf_id = vrf_id.as_u32(),
+                                    l3vxlan_ifindex = ifindex,
+                                    %router_mac,
+                                    "adopted extern_learn L3VXLAN FDB row from a previous daemon lifetime"
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            "L3 adoption dump failed; sweep deferred to a later reconcile pass"
+                        );
+                    }
+                }
+            }
+
             let l3_plan = crate::l3_diff::compute_l3_diff(
                 intent.remote_ip_prefixes.as_ref(),
                 &self.state.l3_owned,
@@ -918,6 +1060,13 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 std::collections::HashSet::new();
             let mut failed_fdb_keys: std::collections::HashSet<(u32, MacAddress)> =
                 std::collections::HashSet::new();
+            // ADR-0079: did this L3 pass fully converge? Any apply
+            // failure — including a skipped route whose prerequisite
+            // resolution add failed, since that route never made it
+            // to the kernel — blocks the reap below; reaping off a
+            // non-converged pass is the known traffic-gap failure
+            // mode (same gate as the slice-2 FDB reap).
+            let mut l3_pass_had_failures = false;
             for op in &l3_plan.ops {
                 if let crate::dataplane::DataplaneOp::AddRemoteIpRoute {
                     l3vxlan_ifindex,
@@ -936,6 +1085,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                             fdb_failed,
                             "skipping AddRemoteIpRoute — prerequisite L3 resolution add failed in this pass; next reconcile will retry"
                         );
+                        l3_pass_had_failures = true;
                         continue;
                     }
                 }
@@ -948,6 +1098,39 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                             intent.ip_vrfs.as_ref(),
                             intent.remote_ip_prefixes.as_ref(),
                         );
+                        // ADR-0079 claim: a successful add over an
+                        // adopted key replaced the crash leftover
+                        // (every L3 add is a netlink REPLACE) — the
+                        // row is now tracked in `l3_owned` and must
+                        // never be reaped.
+                        match op {
+                            crate::dataplane::DataplaneOp::AddRemoteIpRoute {
+                                vrf_id,
+                                prefix,
+                                ..
+                            } => {
+                                self.state.adopted_l3_routes.remove(&(*vrf_id, *prefix));
+                            }
+                            crate::dataplane::DataplaneOp::AddL3Neighbor {
+                                l3vxlan_ifindex,
+                                next_hop,
+                                ..
+                            } => {
+                                self.state
+                                    .adopted_l3_neighbors
+                                    .remove(&(*l3vxlan_ifindex, *next_hop));
+                            }
+                            crate::dataplane::DataplaneOp::AddL3VxlanFdb {
+                                l3vxlan_ifindex,
+                                router_mac,
+                                ..
+                            } => {
+                                self.state
+                                    .adopted_l3_fdb
+                                    .remove(&(*l3vxlan_ifindex, *router_mac));
+                            }
+                            _ => {}
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -955,6 +1138,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                             ?op,
                             "L3 op failed; preserving owned state for next reconcile retry"
                         );
+                        l3_pass_had_failures = true;
                         match op {
                             crate::dataplane::DataplaneOp::AddL3Neighbor {
                                 l3vxlan_ifindex,
@@ -975,6 +1159,18 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     }
                 }
             }
+
+            // ADR-0079 L3 sweep: drop claimed keys from the adopted
+            // sets and, once the deferral has elapsed and this L3
+            // pass converged cleanly, reap adopted-but-unclaimed
+            // rows.
+            self.reap_adopted_l3(
+                intent.remote_ip_prefixes.as_ref(),
+                intent.ip_vrfs.as_ref(),
+                &ready_l3vxlan_ifindex,
+                l3_pass_had_failures,
+            )
+            .await;
         }
 
         let status = build_instance_status(&intent.instances, &probes);
@@ -1711,6 +1907,233 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         }
     }
 
+    /// ADR-0079 L3 reap: remove adopted crash-leftover L3 rows (VRF
+    /// routes, L3 neighbors, L3VXLAN FDB) that no Type 5 re-claimed,
+    /// once the deferral deadline has passed and the current L3 pass
+    /// had no failed ops (the same convergence gate as
+    /// [`Self::reap_adopted_fdb`] — reaping before BGP reconverges is
+    /// the known traffic-gap failure mode).
+    ///
+    /// Claims are implicit (ADR-0079 rule 2): every L3 add applies
+    /// with netlink replace semantics, so a desired prefix's
+    /// re-install lands in [`crate::l3_diff::L3OwnedState`] via
+    /// `record_l3_success` and the apply loop drops the key from the
+    /// adopted sets. This method additionally retain-sweeps against
+    /// `l3_owned` first so a claim through any path shrinks the sets.
+    /// Before the deadline, adopted-but-unclaimed rows are left
+    /// exactly as-is: they keep forwarding, which is the point. A
+    /// failed removal stays in its set and retries next pass.
+    ///
+    /// Reap order is routes → neighbors → FDB, most-dependent first:
+    /// a route's forwarding depends on its `(neighbor, FDB)`
+    /// resolution rows, so the route must leave the FIB before the
+    /// rows that resolve its inner DMAC / tunnel endpoint go away —
+    /// the inverse of the install pipeline's resolution-before-route
+    /// ordering.
+    #[allow(clippy::too_many_lines)] // three parallel reap surfaces; splitting obscures the shared gate/order
+    async fn reap_adopted_l3(
+        &mut self,
+        desired: &rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable,
+        ip_vrfs: &rustbgpd_evpn::ip_vrf::IpVrfTable,
+        ready_l3vxlan_ifindex: &BTreeMap<IpVrfId, u32>,
+        pass_had_failures: bool,
+    ) {
+        if self.state.adopted_l3_routes.is_empty()
+            && self.state.adopted_l3_neighbors.is_empty()
+            && self.state.adopted_l3_fdb.is_empty()
+        {
+            return;
+        }
+        {
+            let ActorState {
+                adopted_l3_routes,
+                adopted_l3_neighbors,
+                adopted_l3_fdb,
+                l3_owned,
+                ..
+            } = &mut self.state;
+            adopted_l3_routes.retain(|key, _| !l3_owned.installs.contains_key(key));
+            adopted_l3_neighbors.retain(|key, _| !l3_owned.kernel_neighbors.contains_key(key));
+            adopted_l3_fdb.retain(|key, _| !l3_owned.kernel_fdb.contains_key(key));
+        }
+        if pass_had_failures {
+            return;
+        }
+        let Some(reap_after) = self.state.l3_adoption_reap_after else {
+            return;
+        };
+        if Instant::now() < reap_after {
+            return;
+        }
+        // Re-dump before removing anything: a row that vanished, lost
+        // its markers, or was replaced by a foreign row since
+        // adoption is no longer ours to reap — kernel reality wins,
+        // and emitting a remove would risk deleting an operator's
+        // replacement row (same rationale as the slice-2 snapshot
+        // re-check). On dump failure, keep everything and retry next
+        // pass — never reap off a stale view.
+        let Some(fresh) = self.dataplane.dump_l3_adoption_candidates(ip_vrfs).await else {
+            return;
+        };
+        self.state
+            .adopted_l3_routes
+            .retain(|key, _| fresh.routes.contains_key(key));
+        self.state
+            .adopted_l3_neighbors
+            .retain(|key, _| fresh.neighbors.contains_key(key));
+        self.state
+            .adopted_l3_fdb
+            .retain(|key, _| fresh.l3vxlan_fdb.contains_key(key));
+
+        // Desired-exempt: never reap a key the current intent still
+        // wants — its claim arrives once the VRF is ready and the
+        // apply succeeds. Resolution keys are derived exactly as
+        // `compute_l3_diff` derives `desired_neighbors` /
+        // `desired_fdb`: per desired prefix with a Ready VRF,
+        // `(l3vxlan_ifindex, next_hop)` and `(l3vxlan_ifindex,
+        // router_mac)`.
+        let mut desired_route_keys: BTreeSet<(IpVrfId, EvpnIpPrefixValue)> = BTreeSet::new();
+        let mut desired_neighbor_keys: BTreeSet<(u32, IpAddr)> = BTreeSet::new();
+        let mut desired_fdb_keys: BTreeSet<(u32, MacAddress)> = BTreeSet::new();
+        for ((vrf_id, prefix), entry) in desired.iter() {
+            desired_route_keys.insert((*vrf_id, *prefix));
+            if let Some(ifindex) = ready_l3vxlan_ifindex.get(vrf_id) {
+                desired_neighbor_keys.insert((*ifindex, entry.next_hop));
+                desired_fdb_keys.insert((*ifindex, entry.router_mac));
+            }
+        }
+
+        // Snapshot the candidates into Vecs so the loop bodies can
+        // mutate the adopted sets; cheaper than cloning the trees.
+        let route_candidates: Vec<((IpVrfId, EvpnIpPrefixValue), AdoptedL3Route)> = self
+            .state
+            .adopted_l3_routes
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
+        for ((vrf_id, prefix), route) in route_candidates {
+            if desired_route_keys.contains(&(vrf_id, prefix)) {
+                // Desired but not yet applied (VRF NotReady, or a
+                // retry pending). Never reap a desired prefix — the
+                // eventual claim exempts it.
+                continue;
+            }
+            let op = DataplaneOp::RemoveRemoteIpRoute {
+                vrf_id,
+                prefix,
+                table_id: route.table_id,
+                l3vxlan_ifindex: route.l3vxlan_ifindex,
+                next_hop: route.next_hop,
+            };
+            match self.dataplane.apply(&op).await {
+                Ok(()) => {
+                    self.state.adopted_l3_routes.remove(&(vrf_id, prefix));
+                    self.state.l3_adoption_since_report.routes_reaped += 1;
+                    tracing::info!(
+                        vrf_id = vrf_id.as_u32(),
+                        ?prefix,
+                        "reaped adopted VRF route that no Type 5 re-claimed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        vrf_id = vrf_id.as_u32(),
+                        ?prefix,
+                        "failed to reap adopted VRF route; will retry next pass"
+                    );
+                }
+            }
+        }
+
+        let neighbor_candidates: Vec<((u32, IpAddr), IpVrfId)> = self
+            .state
+            .adopted_l3_neighbors
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
+        for ((ifindex, next_hop), vrf_id) in neighbor_candidates {
+            // A VRF absent from the Ready map contributed no entries
+            // to `desired_neighbor_keys` — its desired resolution
+            // keys can't be derived until its L3VXLAN resolves — so
+            // a desired-but-not-ready row would look unclaimed and
+            // get reaped. Skip the whole VRF's rows this pass; once
+            // it turns Ready the claim or the next reap pass decides.
+            if !ready_l3vxlan_ifindex.contains_key(&vrf_id) {
+                continue;
+            }
+            if desired_neighbor_keys.contains(&(ifindex, next_hop)) {
+                continue;
+            }
+            let op = DataplaneOp::RemoveL3Neighbor {
+                vrf_id,
+                l3vxlan_ifindex: ifindex,
+                next_hop,
+            };
+            match self.dataplane.apply(&op).await {
+                Ok(()) => {
+                    self.state.adopted_l3_neighbors.remove(&(ifindex, next_hop));
+                    self.state.l3_adoption_since_report.neighbors_reaped += 1;
+                    tracing::info!(
+                        vrf_id = vrf_id.as_u32(),
+                        l3vxlan_ifindex = ifindex,
+                        %next_hop,
+                        "reaped adopted L3 neighbor that no Type 5 re-claimed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        l3vxlan_ifindex = ifindex,
+                        %next_hop,
+                        "failed to reap adopted L3 neighbor; will retry next pass"
+                    );
+                }
+            }
+        }
+
+        let fdb_candidates: Vec<((u32, MacAddress), IpVrfId)> = self
+            .state
+            .adopted_l3_fdb
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
+        for ((ifindex, router_mac), vrf_id) in fdb_candidates {
+            // Same not-ready skip as the neighbor loop above.
+            if !ready_l3vxlan_ifindex.contains_key(&vrf_id) {
+                continue;
+            }
+            if desired_fdb_keys.contains(&(ifindex, router_mac)) {
+                continue;
+            }
+            let op = DataplaneOp::RemoveL3VxlanFdb {
+                vrf_id,
+                l3vxlan_ifindex: ifindex,
+                router_mac,
+            };
+            match self.dataplane.apply(&op).await {
+                Ok(()) => {
+                    self.state.adopted_l3_fdb.remove(&(ifindex, router_mac));
+                    self.state.l3_adoption_since_report.l3vxlan_fdb_reaped += 1;
+                    tracing::info!(
+                        vrf_id = vrf_id.as_u32(),
+                        l3vxlan_ifindex = ifindex,
+                        %router_mac,
+                        "reaped adopted L3VXLAN FDB row that no Type 5 re-claimed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        l3vxlan_ifindex = ifindex,
+                        %router_mac,
+                        "failed to reap adopted L3VXLAN FDB row; will retry next pass"
+                    );
+                }
+            }
+        }
+    }
+
     /// On successful apply, mirror state into `owned` so the next
     /// diff pass treats the entry as ours and the next failure
     /// schedule resets.
@@ -1851,6 +2274,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             }
         }
         let fdb_nhg_drift_counters = std::mem::take(&mut self.state.fdb_nhg_drift_since_report);
+        let l3_adoption_counters = std::mem::take(&mut self.state.l3_adoption_since_report);
 
         let report = DataplaneReport {
             intent_generation: self.state.last_intent_generation,
@@ -1864,6 +2288,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             ip_vrf_installed_routes,
             fdb_nexthops: build_fdb_nexthop_status(&self.state),
             fdb_nhg_drift_counters,
+            l3_adoption_counters,
         };
         if let Err(e) = self.report_tx.send(report).await {
             tracing::trace!(error = %e, "report receiver gone; report dropped");

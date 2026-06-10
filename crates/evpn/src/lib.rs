@@ -113,7 +113,7 @@ pub use dataplane::{
     BumEnforcementStatus, BumEnforcementTable, BumForwardingAction, DataplaneIntent,
     DataplaneOpKind, DataplaneReport, FailedOp, FdbNexthopDataplaneStatus, FdbNexthopGroupStatus,
     FdbNexthopMemberStatus, FdbNhgDriftCounters, InstanceDataplaneStatus, InstanceState,
-    IpVrfDataplaneStatus,
+    IpVrfDataplaneStatus, L3AdoptionCounters,
 };
 pub use df_election::{DfCandidate, DfElection, DfElectionError};
 pub use duplicate_mac::{

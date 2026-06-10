@@ -14,16 +14,21 @@
 //! pure), but Phase 3 will need to drive a complete actor lifecycle.
 
 use std::collections::BTreeMap;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
-use rustbgpd_evpn::{EvpnInstanceId, EvpnInstanceTable, LocalMacObservation, MacAddress};
+use rustbgpd_evpn::ip_vrf::{IpVrfId, IpVrfStatus, IpVrfTable};
+use rustbgpd_evpn::{
+    EvpnInstanceId, EvpnInstanceTable, EvpnIpPrefixValue, LocalMacObservation, MacAddress,
+};
 use tokio::sync::mpsc;
 
 use crate::dataplane::{
     Dataplane, DataplaneOp, KernelEvent, KernelNexthop, KernelNexthopKind, NexthopOps,
 };
 use crate::error::DataplaneError;
+use crate::l3_adoption::{AdoptedL3Route, L3AdoptionDump};
 use crate::nh_id_alloc::NhIdAllocator;
 use crate::snapshot::{
     InstanceProbe, InstanceProbes, KernelFdbEntry, KernelFdbFlags, KernelLinkInfo, KernelSnapshot,
@@ -78,6 +83,74 @@ struct State {
     /// the kernel's `NDA_NH_ID` row, distinct from the single-dst
     /// `KernelFdbEntry::dst` path.
     fdb_nhg_rows: BTreeMap<(EvpnInstanceId, MacAddress), u32>,
+    /// Gate 9 L3 kernel route rows, keyed the way the kernel keys
+    /// them: `(table_id, prefix)`. `apply` of `AddRemoteIpRoute` /
+    /// `RemoveRemoteIpRoute` mutates this map (replace semantics on
+    /// add, like the real `.replace()` path), and
+    /// `dump_l3_adoption_candidates` reads it live — the ADR-0079
+    /// reap re-check depends on the dump reflecting applies/removes
+    /// since startup, not a frozen copy.
+    l3_routes: BTreeMap<(u32, EvpnIpPrefixValue), InMemoryL3Route>,
+    /// Gate 9 L3 neighbor rows keyed `(l3vxlan_ifindex, next_hop)`,
+    /// mirroring the kernel's `(dev, dst)` neighbor key.
+    l3_neighbors: BTreeMap<(u32, IpAddr), InMemoryL3Neighbor>,
+    /// Gate 9 L3VXLAN FDB rows keyed `(l3vxlan_ifindex, router_mac)`,
+    /// mirroring the kernel's `(dev, lladdr)` FDB key.
+    l3_vxlan_fdb: BTreeMap<(u32, MacAddress), InMemoryL3VxlanFdb>,
+    /// Per-IP-VRF readiness verdicts returned by `probe_ip_vrfs`,
+    /// staged by tests via [`InMemoryHandle::set_ip_vrf_status`].
+    /// VRFs without an entry are simply absent from the probe result
+    /// (the actor synthesizes `NotReady` for them).
+    ip_vrf_statuses: HashMap<IpVrfId, IpVrfStatus>,
+    /// `vrf_id → l3vxlan_ifindex` "the device exists" map consulted
+    /// by `dump_l3_adoption_candidates` — the fake's stand-in for the
+    /// real impl's link-dump name resolution. Deliberately separate
+    /// from `ip_vrf_statuses`: a device can resolve to an ifindex
+    /// (so its neighbor/FDB rows are dump-visible) while the VRF as a
+    /// whole is still `NotReady`, exactly like the kernel.
+    l3vxlan_ifindexes: BTreeMap<IpVrfId, u32>,
+    /// Pending `dump_l3_adoption_candidates` failures — each call
+    /// consumes one and returns `None`, mirroring the apply-side
+    /// FIFO injection. Tests use this to validate the "failed dump
+    /// leaves the latch unset" path.
+    l3_adoption_dump_failures: u32,
+    /// Successful L3 `apply` calls in arrival order. The ADR-0079
+    /// reap-order test asserts route → neighbor → FDB teardown
+    /// sequencing, which no end-state map can capture.
+    l3_op_log: Vec<DataplaneOp>,
+}
+
+/// One in-memory kernel route row (the value half of
+/// `(table_id, prefix)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InMemoryL3Route {
+    /// Output device.
+    pub l3vxlan_ifindex: u32,
+    /// Gateway.
+    pub next_hop: IpAddr,
+    /// True when the row carries the ADR-0079 marker pair
+    /// (`proto bgp` + onlink). Rows written through `apply` are
+    /// always marked — the real apply path always writes the markers
+    /// — while `pre_load_l3_route` lets tests stage foreign rows.
+    pub marked: bool,
+}
+
+/// One in-memory L3 neighbor row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InMemoryL3Neighbor {
+    /// Link-layer address the entry resolves to.
+    pub router_mac: MacAddress,
+    /// True when the row carries `NUD_PERMANENT` + `NTF_EXT_LEARNED`.
+    pub marked: bool,
+}
+
+/// One in-memory L3VXLAN FDB row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InMemoryL3VxlanFdb {
+    /// Tunnel destination the MAC maps to.
+    pub next_hop: IpAddr,
+    /// True when the row carries the permanent `extern_learn` marker.
+    pub marked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +200,13 @@ impl InMemoryDataplane {
                 failures: VecDeque::new(),
                 apply_count: 0,
                 bum_port_flags: std::collections::BTreeMap::new(),
+                l3_routes: BTreeMap::new(),
+                l3_neighbors: BTreeMap::new(),
+                l3_vxlan_fdb: BTreeMap::new(),
+                ip_vrf_statuses: HashMap::new(),
+                l3vxlan_ifindexes: BTreeMap::new(),
+                l3_adoption_dump_failures: 0,
+                l3_op_log: Vec::new(),
             })),
             events_rx,
             events_tx,
@@ -200,6 +280,36 @@ impl Dataplane for InMemoryDataplane {
         async move { result }
     }
 
+    fn probe_ip_vrfs(
+        &mut self,
+        ip_vrfs: &IpVrfTable,
+    ) -> impl Future<Output = HashMap<IpVrfId, IpVrfStatus>> + Send {
+        // Return test-staged verdicts for configured VRFs only — a
+        // status recorded for a VRF the intent no longer carries must
+        // not leak into the probe result, matching the real impl's
+        // per-configured-VRF probe loop.
+        let state = self.state.lock().expect("poisoned");
+        let out: HashMap<IpVrfId, IpVrfStatus> = ip_vrfs
+            .iter()
+            .filter_map(|vrf| {
+                state
+                    .ip_vrf_statuses
+                    .get(&vrf.id)
+                    .map(|status| (vrf.id, status.clone()))
+            })
+            .collect();
+        drop(state);
+        async move { out }
+    }
+
+    fn dump_l3_adoption_candidates(
+        &mut self,
+        ip_vrfs: &IpVrfTable,
+    ) -> impl Future<Output = Option<L3AdoptionDump>> + Send {
+        let result = self.dump_l3_adoption_candidates_inner(ip_vrfs);
+        async move { result }
+    }
+
     fn next_event(&mut self) -> impl Future<Output = Option<KernelEvent>> + Send {
         // The receiver lifetime is tied to &mut self for the duration
         // of the await. tokio::sync::mpsc::Receiver::recv takes &mut
@@ -216,6 +326,7 @@ impl InMemoryDataplane {
     /// Synchronous half of `apply` — does the fail-injection lookup
     /// and the kernel-state mutation under the same lock so the test
     /// can't observe a partially-applied op.
+    #[allow(clippy::too_many_lines)] // one arm per op shape; splitting obscures the dispatch
     fn apply_inner(&self, op: &DataplaneOp) -> Result<(), DataplaneError> {
         let mut state = self.state.lock().expect("poisoned");
         state.apply_count += 1;
@@ -252,18 +363,83 @@ impl InMemoryDataplane {
             DataplaneOp::SetBumPortFlags { ifindex, flags } => {
                 state.bum_port_flags.insert(*ifindex, *flags);
             }
-            // Gate 9 slice 6c L3 ops are out of scope for the
-            // in-memory fake — the L3 install path's logic is unit-
-            // tested directly via `linux::l3` build helpers, and the
-            // netns integration test (`EVPN_LINUX_NETNS=1`) exercises
-            // the real kernel apply path. The L3 reconciler diff loop
-            // doesn't route ops through this fake.
-            DataplaneOp::AddRemoteIpRoute { .. }
-            | DataplaneOp::RemoveRemoteIpRoute { .. }
-            | DataplaneOp::AddL3Neighbor { .. }
-            | DataplaneOp::RemoveL3Neighbor { .. }
-            | DataplaneOp::AddL3VxlanFdb { .. }
-            | DataplaneOp::RemoveL3VxlanFdb { .. } => {}
+            // Gate 9 slice 6c L3 ops mutate the fake's L3 kernel maps
+            // with the same replace-on-add / idempotent-remove
+            // semantics the real netlink path has (`.replace()` on
+            // adds; ENOENT-as-ACK on removes). Rows written here are
+            // always `marked: true` — the real apply path always
+            // writes the ADR-0079 ownership markers. Successful ops
+            // are also appended to `l3_op_log` so ordering-sensitive
+            // tests (the ADR-0079 reap order) can assert sequencing.
+            DataplaneOp::AddRemoteIpRoute {
+                prefix,
+                table_id,
+                l3vxlan_ifindex,
+                next_hop,
+                ..
+            } => {
+                state.l3_routes.insert(
+                    (*table_id, *prefix),
+                    InMemoryL3Route {
+                        l3vxlan_ifindex: *l3vxlan_ifindex,
+                        next_hop: *next_hop,
+                        marked: true,
+                    },
+                );
+                state.l3_op_log.push(op.clone());
+            }
+            DataplaneOp::RemoveRemoteIpRoute {
+                prefix, table_id, ..
+            } => {
+                state.l3_routes.remove(&(*table_id, *prefix));
+                state.l3_op_log.push(op.clone());
+            }
+            DataplaneOp::AddL3Neighbor {
+                l3vxlan_ifindex,
+                next_hop,
+                router_mac,
+                ..
+            } => {
+                state.l3_neighbors.insert(
+                    (*l3vxlan_ifindex, *next_hop),
+                    InMemoryL3Neighbor {
+                        router_mac: *router_mac,
+                        marked: true,
+                    },
+                );
+                state.l3_op_log.push(op.clone());
+            }
+            DataplaneOp::RemoveL3Neighbor {
+                l3vxlan_ifindex,
+                next_hop,
+                ..
+            } => {
+                state.l3_neighbors.remove(&(*l3vxlan_ifindex, *next_hop));
+                state.l3_op_log.push(op.clone());
+            }
+            DataplaneOp::AddL3VxlanFdb {
+                l3vxlan_ifindex,
+                router_mac,
+                next_hop,
+                ..
+            } => {
+                state.l3_vxlan_fdb.insert(
+                    (*l3vxlan_ifindex, *router_mac),
+                    InMemoryL3VxlanFdb {
+                        next_hop: *next_hop,
+                        marked: true,
+                    },
+                );
+                state.l3_op_log.push(op.clone());
+            }
+            DataplaneOp::RemoveL3VxlanFdb {
+                l3vxlan_ifindex,
+                router_mac,
+                ..
+            } => {
+                state.l3_vxlan_fdb.remove(&(*l3vxlan_ifindex, *router_mac));
+                state.l3_op_log.push(op.clone());
+            }
             // ADR-0059 slice 3 FDB-NHG ops never reach `Dataplane::apply` —
             // the reconcile actor routes them through `NexthopOps` /
             // its own coordinator (because they require allocator +
@@ -282,6 +458,71 @@ impl InMemoryDataplane {
             }
         }
         Ok(())
+    }
+
+    /// Synchronous half of `dump_l3_adoption_candidates` — collects
+    /// the *currently* marked rows visible through the configured
+    /// VRFs (a live view: rows added or removed by `apply` since
+    /// startup are reflected, which the ADR-0079 reap re-check
+    /// depends on). Mirrors the real impl's scoping: routes match by
+    /// configured `table_id`; neighbor / FDB rows match by managed
+    /// L3VXLAN ifindex (staged via `set_l3vxlan_ifindex`).
+    fn dump_l3_adoption_candidates_inner(&self, ip_vrfs: &IpVrfTable) -> Option<L3AdoptionDump> {
+        if ip_vrfs.is_empty() {
+            return Some(L3AdoptionDump::default());
+        }
+        let mut state = self.state.lock().expect("poisoned");
+        if state.l3_adoption_dump_failures > 0 {
+            state.l3_adoption_dump_failures -= 1;
+            return None;
+        }
+        let tables: BTreeMap<u32, IpVrfId> =
+            ip_vrfs.iter().map(|vrf| (vrf.table_id, vrf.id)).collect();
+        let configured: std::collections::BTreeSet<IpVrfId> =
+            ip_vrfs.iter().map(|vrf| vrf.id).collect();
+        let managed: BTreeMap<u32, IpVrfId> = state
+            .l3vxlan_ifindexes
+            .iter()
+            .filter(|(vrf_id, _)| configured.contains(vrf_id))
+            .map(|(vrf_id, ifindex)| (*ifindex, *vrf_id))
+            .collect();
+
+        let mut out = L3AdoptionDump::default();
+        for (&(table_id, prefix), row) in &state.l3_routes {
+            if !row.marked {
+                continue;
+            }
+            let Some(vrf_id) = tables.get(&table_id).copied() else {
+                continue;
+            };
+            out.routes.insert(
+                (vrf_id, prefix),
+                AdoptedL3Route {
+                    table_id,
+                    l3vxlan_ifindex: row.l3vxlan_ifindex,
+                    next_hop: row.next_hop,
+                },
+            );
+        }
+        for (&(ifindex, next_hop), row) in &state.l3_neighbors {
+            if !row.marked {
+                continue;
+            }
+            let Some(vrf_id) = managed.get(&ifindex).copied() else {
+                continue;
+            };
+            out.neighbors.insert((ifindex, next_hop), vrf_id);
+        }
+        for (&(ifindex, router_mac), row) in &state.l3_vxlan_fdb {
+            if !row.marked {
+                continue;
+            }
+            let Some(vrf_id) = managed.get(&ifindex).copied() else {
+                continue;
+            };
+            out.l3vxlan_fdb.insert((ifindex, router_mac), vrf_id);
+        }
+        Some(out)
     }
 }
 
@@ -611,6 +852,150 @@ impl InMemoryHandle {
             .kernel
             .find_fdb(vni, mac)
             .and_then(|e| e.nh_id)
+    }
+
+    /// Stage the readiness verdict `probe_ip_vrfs` returns for one
+    /// IP-VRF (the fake has no kernel topology to derive it from).
+    pub fn set_ip_vrf_status(&self, vrf_id: IpVrfId, status: IpVrfStatus) {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .ip_vrf_statuses
+            .insert(vrf_id, status);
+    }
+
+    /// Record that an IP-VRF's L3VXLAN device "exists" at `ifindex`,
+    /// making the device's neighbor / FDB rows visible to
+    /// `dump_l3_adoption_candidates`. Separate from
+    /// [`Self::set_ip_vrf_status`] on purpose: a resolvable device
+    /// with a `NotReady` VRF is a legitimate kernel shape the ADR-0079
+    /// tests need to stage.
+    pub fn set_l3vxlan_ifindex(&self, vrf_id: IpVrfId, ifindex: u32) {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .l3vxlan_ifindexes
+            .insert(vrf_id, ifindex);
+    }
+
+    /// Pre-load a kernel route row — `marked: true` for the ADR-0079
+    /// crash-leftover shape (`proto bgp` + onlink), `false` for a
+    /// foreign row the sweep must never touch.
+    pub fn pre_load_l3_route(
+        &self,
+        table_id: u32,
+        prefix: EvpnIpPrefixValue,
+        l3vxlan_ifindex: u32,
+        next_hop: IpAddr,
+        marked: bool,
+    ) {
+        self.state.lock().expect("poisoned").l3_routes.insert(
+            (table_id, prefix),
+            InMemoryL3Route {
+                l3vxlan_ifindex,
+                next_hop,
+                marked,
+            },
+        );
+    }
+
+    /// Pre-load an L3 neighbor row — `marked` distinguishes our
+    /// `NUD_PERMANENT` + `extern_learn` shape from a foreign entry.
+    pub fn pre_load_l3_neighbor(
+        &self,
+        l3vxlan_ifindex: u32,
+        next_hop: IpAddr,
+        router_mac: MacAddress,
+        marked: bool,
+    ) {
+        self.state.lock().expect("poisoned").l3_neighbors.insert(
+            (l3vxlan_ifindex, next_hop),
+            InMemoryL3Neighbor { router_mac, marked },
+        );
+    }
+
+    /// Pre-load an L3VXLAN FDB row — `marked` distinguishes our
+    /// permanent `extern_learn` shape from a foreign entry.
+    pub fn pre_load_l3_vxlan_fdb(
+        &self,
+        l3vxlan_ifindex: u32,
+        router_mac: MacAddress,
+        next_hop: IpAddr,
+        marked: bool,
+    ) {
+        self.state.lock().expect("poisoned").l3_vxlan_fdb.insert(
+            (l3vxlan_ifindex, router_mac),
+            InMemoryL3VxlanFdb { next_hop, marked },
+        );
+    }
+
+    /// `true` if the kernel has a route row at `(table_id, prefix)`.
+    #[must_use]
+    pub fn kernel_has_l3_route(&self, table_id: u32, prefix: EvpnIpPrefixValue) -> bool {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .l3_routes
+            .contains_key(&(table_id, prefix))
+    }
+
+    /// `true` if the kernel has an L3 neighbor row at
+    /// `(l3vxlan_ifindex, next_hop)`.
+    #[must_use]
+    pub fn kernel_has_l3_neighbor(&self, l3vxlan_ifindex: u32, next_hop: IpAddr) -> bool {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .l3_neighbors
+            .contains_key(&(l3vxlan_ifindex, next_hop))
+    }
+
+    /// `true` if the kernel has an L3VXLAN FDB row at
+    /// `(l3vxlan_ifindex, router_mac)`.
+    #[must_use]
+    pub fn kernel_has_l3_vxlan_fdb(&self, l3vxlan_ifindex: u32, router_mac: MacAddress) -> bool {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .l3_vxlan_fdb
+            .contains_key(&(l3vxlan_ifindex, router_mac))
+    }
+
+    /// Snapshot the kernel L3 route map. Double-crash tests copy
+    /// these rows into a second fake to simulate kernel state
+    /// surviving the process.
+    #[must_use]
+    pub fn l3_routes(&self) -> BTreeMap<(u32, EvpnIpPrefixValue), InMemoryL3Route> {
+        self.state.lock().expect("poisoned").l3_routes.clone()
+    }
+
+    /// Snapshot the kernel L3 neighbor map.
+    #[must_use]
+    pub fn l3_neighbors(&self) -> BTreeMap<(u32, IpAddr), InMemoryL3Neighbor> {
+        self.state.lock().expect("poisoned").l3_neighbors.clone()
+    }
+
+    /// Snapshot the kernel L3VXLAN FDB map.
+    #[must_use]
+    pub fn l3_vxlan_fdb(&self) -> BTreeMap<(u32, MacAddress), InMemoryL3VxlanFdb> {
+        self.state.lock().expect("poisoned").l3_vxlan_fdb.clone()
+    }
+
+    /// Queue one `dump_l3_adoption_candidates` failure — the next
+    /// call returns `None` and consumes it, like the apply-side FIFO
+    /// injections.
+    pub fn inject_l3_adoption_dump_failure(&self) {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .l3_adoption_dump_failures += 1;
+    }
+
+    /// Successful L3 `apply` ops in arrival order — the assertion
+    /// surface for ordering-sensitive tests (ADR-0079 reap order).
+    #[must_use]
+    pub fn l3_op_log(&self) -> Vec<DataplaneOp> {
+        self.state.lock().expect("poisoned").l3_op_log.clone()
     }
 }
 

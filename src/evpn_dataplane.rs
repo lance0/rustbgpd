@@ -50,8 +50,8 @@ use std::time::Duration;
 use rustbgpd_evpn::ip_vrf::{IpVrfTable, RemoteIpPrefixTable};
 use rustbgpd_evpn::{
     BumEnforcementTable, DataplaneIntent, DataplaneReport, DuplicateMacKey, EvpnInstanceTable,
-    FdbNhgDriftCounters, LocalMacObservation, ProjectedEvpnEadPerEvi, ProjectedEvpnRoute,
-    RemoteMacTable, project_evpn_routes_with_aliases,
+    FdbNhgDriftCounters, L3AdoptionCounters, LocalMacObservation, ProjectedEvpnEadPerEvi,
+    ProjectedEvpnRoute, RemoteMacTable, project_evpn_routes_with_aliases,
 };
 use rustbgpd_evpn_linux::{Dataplane, ReconcileActor, ReconcileActorConfig};
 use rustbgpd_rib::{RibUpdate, route::EvpnRibRoute};
@@ -447,6 +447,7 @@ where
         tokio::spawn(async move {
             while let Some(report) = report_mpsc_rx.recv().await {
                 record_fdb_nhg_drift_metrics(&metrics, report.fdb_nhg_drift_counters);
+                record_l3_adoption_metrics(&metrics, report.l3_adoption_counters);
                 if !report.failed.is_empty() {
                     warn!(
                         intent_generation = report.intent_generation,
@@ -512,6 +513,15 @@ fn record_fdb_nhg_drift_metrics(metrics: &BgpMetrics, counters: FdbNhgDriftCount
     metrics.add_evpn_fdb_nhg_drift_disabled(counters.drift_disabled);
     metrics.add_evpn_fdb_single_dst_adopted(counters.single_dst_adopted);
     metrics.add_evpn_fdb_single_dst_reaped(counters.single_dst_reaped);
+}
+
+fn record_l3_adoption_metrics(metrics: &BgpMetrics, counters: L3AdoptionCounters) {
+    metrics.add_evpn_l3_route_adopted(counters.routes_adopted);
+    metrics.add_evpn_l3_route_reaped(counters.routes_reaped);
+    metrics.add_evpn_l3_neighbor_adopted(counters.neighbors_adopted);
+    metrics.add_evpn_l3_neighbor_reaped(counters.neighbors_reaped);
+    metrics.add_evpn_l3vxlan_fdb_adopted(counters.l3vxlan_fdb_adopted);
+    metrics.add_evpn_l3vxlan_fdb_reaped(counters.l3vxlan_fdb_reaped);
 }
 
 /// Returns `true` when the drop-count set changed since the last pass
@@ -1438,6 +1448,30 @@ mod tests {
         assert!(text.contains("evpn_fdb_nhg_drift_disabled_total 1"));
         assert!(text.contains("evpn_fdb_single_dst_adopted_total 5"));
         assert!(text.contains("evpn_fdb_single_dst_reaped_total 6"));
+    }
+
+    #[test]
+    fn l3_adoption_report_deltas_feed_metrics() {
+        let metrics = BgpMetrics::new();
+        record_l3_adoption_metrics(
+            &metrics,
+            rustbgpd_evpn::L3AdoptionCounters {
+                routes_adopted: 1,
+                routes_reaped: 2,
+                neighbors_adopted: 3,
+                neighbors_reaped: 4,
+                l3vxlan_fdb_adopted: 5,
+                l3vxlan_fdb_reaped: 6,
+            },
+        );
+
+        let text = gather_metrics_text(&metrics);
+        assert!(text.contains("evpn_l3_route_adopted_total 1"));
+        assert!(text.contains("evpn_l3_route_reaped_total 2"));
+        assert!(text.contains("evpn_l3_neighbor_adopted_total 3"));
+        assert!(text.contains("evpn_l3_neighbor_reaped_total 4"));
+        assert!(text.contains("evpn_l3vxlan_fdb_adopted_total 5"));
+        assert!(text.contains("evpn_l3vxlan_fdb_reaped_total 6"));
     }
 
     #[tokio::test]

@@ -79,6 +79,7 @@ pub mod enforcement;
 pub mod error;
 pub mod group_state;
 pub mod in_memory;
+pub mod l3_adoption;
 pub mod l3_diff;
 pub mod nh_id_alloc;
 pub mod reconcile;
@@ -102,6 +103,7 @@ pub use diff::{Plan, compute_diff};
 pub use enforcement::build_bum_enforcement_status;
 pub use error::{DataplaneError, FailureClass};
 pub use in_memory::{InMemoryDataplane, InMemoryHandle};
+pub use l3_adoption::{AdoptedL3Route, L3AdoptionDump};
 pub use reconcile::{ReconcileActor, ReconcileActorConfig};
 pub use snapshot::{
     InstanceProbe, InstanceProbes, KernelFdbEntry, KernelFdbFlags, KernelLinkInfo, KernelSnapshot,

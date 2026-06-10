@@ -1,0 +1,72 @@
+//! ADR-0079 L3 adoption-sweep types.
+//!
+//! The EVPN symmetric-IRB install pipeline (Gate 9 slice 6c) tracks
+//! ownership of three kernel objects — per-prefix VRF routes, shared
+//! L3 neighbors, shared L3VXLAN FDB rows — purely in memory
+//! ([`crate::l3_diff::L3OwnedState`]). After an unclean restart that
+//! record is gone, but every row we wrote carries a kernel-preserved
+//! ownership marker (the ADR-0079 marker table):
+//!
+//! - **VRF routes**: `RTPROT_BGP` + `RTNH_F_ONLINK` in a configured
+//!   `[[evpn_ip_vrfs]]` `table_id` (write side:
+//!   `linux::l3::build_ip_route_message`).
+//! - **L3 neighbors**: `NUD_PERMANENT` + `NTF_EXT_LEARNED` on a
+//!   managed L3VXLAN device (write side:
+//!   `linux::l3::apply_add_l3_neighbor`).
+//! - **L3VXLAN FDB rows**: `NUD_NOARP | NUD_PERMANENT` state with
+//!   `NTF_SELF | NTF_EXT_LEARNED` flags on a managed L3VXLAN device
+//!   (write side: `linux::l3::apply_add_l3vxlan_fdb`).
+//!
+//! [`crate::Dataplane::dump_l3_adoption_candidates`] walks the kernel
+//! for marker-matching rows; the reconcile actor adopts them so they
+//! keep forwarding, lets a still-desired prefix re-claim them
+//! implicitly (every L3 add applies with netlink replace semantics, so
+//! the re-install *is* the claim), and reaps whatever stays unclaimed
+//! after the deferral.
+
+use std::collections::BTreeMap;
+use std::net::IpAddr;
+
+use rustbgpd_evpn::{EvpnIpPrefixValue, IpVrfId, MacAddress};
+
+/// One adopted crash-leftover VRF route — everything the eventual
+/// `RemoveRemoteIpRoute` op needs, captured at dump time because the
+/// kernel row (not the intent, which may no longer carry the prefix)
+/// is the only authority on its identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdoptedL3Route {
+    /// Kernel route table the row lives in (the configured IP-VRF
+    /// `table_id` that matched at dump time).
+    pub table_id: u32,
+    /// Output device — the IP-VRF's L3VXLAN ifindex.
+    pub l3vxlan_ifindex: u32,
+    /// Gateway — the remote VTEP next-hop.
+    pub next_hop: IpAddr,
+}
+
+/// Marker-matching kernel L3 state surfaced by one
+/// [`crate::Dataplane::dump_l3_adoption_candidates`] call.
+///
+/// Keys mirror the [`crate::l3_diff::L3OwnedState`] shape so the
+/// reconcile actor can subtract already-owned rows with plain map
+/// lookups. Values carry whichever identity the matching remove op
+/// needs (for neighbors / FDB rows that is just the owning `vrf_id`
+/// accounting tag — the kernel delete keys on the map key itself).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct L3AdoptionDump {
+    /// `(vrf_id, prefix)` → everything `RemoveRemoteIpRoute` needs.
+    pub routes: BTreeMap<(IpVrfId, EvpnIpPrefixValue), AdoptedL3Route>,
+    /// `(l3vxlan_ifindex, next_hop)` → owning `vrf_id`.
+    pub neighbors: BTreeMap<(u32, IpAddr), IpVrfId>,
+    /// `(l3vxlan_ifindex, router_mac)` → owning `vrf_id`.
+    pub l3vxlan_fdb: BTreeMap<(u32, MacAddress), IpVrfId>,
+}
+
+impl L3AdoptionDump {
+    /// True when no marker rows were observed in any of the three
+    /// kernel surfaces.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.routes.is_empty() && self.neighbors.is_empty() && self.l3vxlan_fdb.is_empty()
+    }
+}

@@ -15,10 +15,15 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustbgpd_evpn::ip_vrf::{
+    IpVrf, IpVrfId, IpVrfStatus, IpVrfTable, ProjectedIpPrefixRoute, RemoteIpPrefixTable,
+    project_ip_prefix_routes,
+};
 use rustbgpd_evpn::{
     BumEnforcementReadiness, BumEnforcementTable, DataplaneIntent, DfRole,
     EthernetSegmentIdentifier, EthernetTagId, EvpnInstance, EvpnInstanceId, EvpnInstanceTable,
-    MacAddress, RemoteMacEntry, RemoteMacSource, RemoteMacTable, RouteDistinguisher, RouteTarget,
+    EvpnIpPrefixValue, Ipv4Prefix, MacAddress, RemoteMacEntry, RemoteMacSource, RemoteMacTable,
+    RouteDistinguisher, RouteTarget,
 };
 use rustbgpd_evpn_linux::snapshot::KernelVxlanInfo;
 use rustbgpd_evpn_linux::{
@@ -26,7 +31,6 @@ use rustbgpd_evpn_linux::{
     KernelFdbFlags, KernelLinkInfo, ReconcileActor, ReconcileActorConfig,
 };
 use tokio::sync::{mpsc, watch};
-use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 fn vni(n: u32) -> EvpnInstanceId {
@@ -2152,7 +2156,558 @@ async fn double_crash_readoption_is_idempotent() {
     h2.shutdown().await;
 }
 
-#[allow(dead_code)]
-fn _starts_anchor() -> Instant {
-    Instant::now()
+// ─── ADR-0079 L3 sweep: crash-restart adoption for VRF routes / L3
+// neighbors / L3VXLAN FDB rows ───
+//
+// Same post-crash simulation shape as the slice-2 block above: the
+// fake kernel is pre-loaded with marker rows (`proto bgp` + onlink
+// route in the configured table; permanent `extern_learn` neighbor /
+// FDB rows on the L3VXLAN device) and the actor starts with an empty
+// `L3OwnedState`. Re-claim is implicit — every L3 add applies with
+// replace semantics, so a desired prefix's re-install is the claim.
+
+const L3_TABLE_ID: u32 = 201;
+const L3_IFINDEX: u32 = 42;
+
+fn l3_vrf_id() -> IpVrfId {
+    IpVrfId::new(101).unwrap()
+}
+
+fn l3_prefix() -> EvpnIpPrefixValue {
+    EvpnIpPrefixValue::V4(Ipv4Prefix::new(
+        std::net::Ipv4Addr::new(198, 51, 100, 0),
+        24,
+    ))
+}
+
+fn l3_router_mac() -> MacAddress {
+    MacAddress::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01])
+}
+
+fn l3_local_mac() -> MacAddress {
+    MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x10])
+}
+
+fn l3_ip_vrfs() -> IpVrfTable {
+    let mut t = IpVrfTable::new();
+    t.insert(
+        IpVrf::new(
+            "vrf101".to_string(),
+            l3_vrf_id(),
+            "65000:101".parse().unwrap(),
+            vec!["65000:101".parse().unwrap()],
+            ipa("10.0.0.1"),
+            l3_local_mac(),
+            "vrf101".to_string(),
+            "l3vxlan101".to_string(),
+            L3_TABLE_ID,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    t
+}
+
+/// Desired projection containing the one test prefix — built through
+/// the real projection helper so the table is shaped exactly like the
+/// supervisor's.
+fn l3_desired_prefixes(ip_vrfs: &IpVrfTable) -> RemoteIpPrefixTable {
+    project_ip_prefix_routes(
+        ip_vrfs,
+        vec![ProjectedIpPrefixRoute {
+            rd: "65000:101".parse().unwrap(),
+            prefix: l3_prefix(),
+            next_hop: ipa("10.0.0.2"),
+            gateway: ipa("0.0.0.0"),
+            l3vni: 101,
+            route_targets: vec!["65000:101".parse().unwrap()],
+            router_mac: Some(l3_router_mac()),
+        }],
+    )
+}
+
+fn l3_intent(
+    generation: u64,
+    ip_vrfs: IpVrfTable,
+    remote_ip_prefixes: RemoteIpPrefixTable,
+) -> Arc<DataplaneIntent> {
+    Arc::new(DataplaneIntent {
+        generation,
+        instances: Arc::new(EvpnInstanceTable::new()),
+        remote_macs: Arc::new(RemoteMacTable::new()),
+        bum_enforcement: Arc::new(BumEnforcementTable::new()),
+        ip_vrfs: Arc::new(ip_vrfs),
+        remote_ip_prefixes: Arc::new(remote_ip_prefixes),
+    })
+}
+
+fn l3_ready_status() -> IpVrfStatus {
+    IpVrfStatus::Ready {
+        vrf_ifindex: 41,
+        l3vxlan_ifindex: L3_IFINDEX,
+        table_id: L3_TABLE_ID,
+        router_mac: l3_local_mac(),
+    }
+}
+
+/// Pre-load the three marker rows a crashed daemon leaves behind for
+/// one installed prefix.
+fn pre_load_l3_marker_rows(handle: &InMemoryHandle) {
+    handle.pre_load_l3_route(L3_TABLE_ID, l3_prefix(), L3_IFINDEX, ipa("10.0.0.2"), true);
+    handle.pre_load_l3_neighbor(L3_IFINDEX, ipa("10.0.0.2"), l3_router_mac(), true);
+    handle.pre_load_l3_vxlan_fdb(L3_IFINDEX, l3_router_mac(), ipa("10.0.0.2"), true);
+}
+
+/// `(route, neighbor, fdb)` presence triple for the test identity.
+fn l3_kernel_rows(handle: &InMemoryHandle) -> (bool, bool, bool) {
+    (
+        handle.kernel_has_l3_route(L3_TABLE_ID, l3_prefix()),
+        handle.kernel_has_l3_neighbor(L3_IFINDEX, ipa("10.0.0.2")),
+        handle.kernel_has_l3_vxlan_fdb(L3_IFINDEX, l3_router_mac()),
+    )
+}
+
+fn sum_l3_adoption_counters(
+    reports: &[rustbgpd_evpn::DataplaneReport],
+) -> rustbgpd_evpn::L3AdoptionCounters {
+    reports.iter().fold(
+        rustbgpd_evpn::L3AdoptionCounters::default(),
+        |mut acc, r| {
+            acc.routes_adopted += r.l3_adoption_counters.routes_adopted;
+            acc.routes_reaped += r.l3_adoption_counters.routes_reaped;
+            acc.neighbors_adopted += r.l3_adoption_counters.neighbors_adopted;
+            acc.neighbors_reaped += r.l3_adoption_counters.neighbors_reaped;
+            acc.l3vxlan_fdb_adopted += r.l3_adoption_counters.l3vxlan_fdb_adopted;
+            acc.l3vxlan_fdb_reaped += r.l3_adoption_counters.l3vxlan_fdb_reaped;
+            acc
+        },
+    )
+}
+
+// (a) Crash leftovers for a still-desired prefix are adopted, then
+//     claimed by the replace-semantics re-install — never reaped,
+//     even with a zero deferral.
+#[tokio::test]
+async fn l3_crash_leftover_desired_prefix_is_claimed_not_reaped() {
+    let cfg = ReconcileActorConfig {
+        l3_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+    pre_load_l3_marker_rows(&h.handle);
+
+    let ip_vrfs = l3_ip_vrfs();
+    let desired = l3_desired_prefixes(&ip_vrfs);
+    h.intent_tx.send(l3_intent(1, ip_vrfs, desired)).unwrap();
+
+    let mut reports = Vec::new();
+    loop {
+        let r = h.next_report().await;
+        let done = r.intent_generation == 1;
+        reports.push(r);
+        if done {
+            break;
+        }
+    }
+    // An extra pass after the (zero) deferral has elapsed — if the
+    // claim didn't land, this is the pass that would reap.
+    h.handle.push_event(KernelEvent::KernelStateChanged).await;
+    reports.extend(h.try_drain_reports().await);
+
+    let counters = sum_l3_adoption_counters(&reports);
+    assert_eq!(counters.routes_adopted, 1);
+    assert_eq!(counters.neighbors_adopted, 1);
+    assert_eq!(counters.l3vxlan_fdb_adopted, 1);
+    assert_eq!(counters.routes_reaped, 0, "claimed route must not reap");
+    assert_eq!(counters.neighbors_reaped, 0);
+    assert_eq!(counters.l3vxlan_fdb_reaped, 0);
+    assert_eq!(
+        l3_kernel_rows(&h.handle),
+        (true, true, true),
+        "all three rows keep forwarding after the claim"
+    );
+
+    h.shutdown().await;
+}
+
+// (b) Unclaimed marker rows keep forwarding while the deferral window
+//     is open — that is the point of the deferral.
+#[tokio::test(start_paused = true)]
+async fn l3_unclaimed_rows_kept_before_deferral() {
+    // for_tests() carries the production-length 500 s deferral.
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+    pre_load_l3_marker_rows(&h.handle);
+
+    h.intent_tx
+        .send(l3_intent(1, l3_ip_vrfs(), RemoteIpPrefixTable::new()))
+        .unwrap();
+
+    let mut reports = Vec::new();
+    loop {
+        let r = h.next_report().await;
+        let done = r.intent_generation == 1;
+        reports.push(r);
+        if done {
+            break;
+        }
+    }
+    // A couple of periodic passes well inside the deferral window.
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    reports.extend(h.try_drain_reports().await);
+
+    let counters = sum_l3_adoption_counters(&reports);
+    assert_eq!(counters.routes_adopted, 1);
+    assert_eq!(counters.neighbors_adopted, 1);
+    assert_eq!(counters.l3vxlan_fdb_adopted, 1);
+    assert_eq!(
+        counters.routes_reaped + counters.neighbors_reaped + counters.l3vxlan_fdb_reaped,
+        0,
+        "must not reap inside the deferral window"
+    );
+    assert_eq!(l3_kernel_rows(&h.handle), (true, true, true));
+
+    h.shutdown().await;
+}
+
+// (c) After the deferral, unclaimed rows are reaped from all three
+//     surfaces, most-dependent first: route → neighbor → FDB.
+#[tokio::test]
+async fn l3_unclaimed_rows_reaped_after_deferral_in_route_first_order() {
+    let cfg = ReconcileActorConfig {
+        l3_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+    pre_load_l3_marker_rows(&h.handle);
+
+    h.intent_tx
+        .send(l3_intent(1, l3_ip_vrfs(), RemoteIpPrefixTable::new()))
+        .unwrap();
+
+    let mut reports = Vec::new();
+    for _ in 0..10 {
+        reports.push(h.next_report().await);
+        if l3_kernel_rows(&h.handle) == (false, false, false) {
+            break;
+        }
+    }
+
+    assert_eq!(
+        l3_kernel_rows(&h.handle),
+        (false, false, false),
+        "all three unclaimed rows must be reaped after the deferral"
+    );
+    let counters = sum_l3_adoption_counters(&reports);
+    assert_eq!(counters.routes_adopted, 1);
+    assert_eq!(counters.neighbors_adopted, 1);
+    assert_eq!(counters.l3vxlan_fdb_adopted, 1);
+    assert_eq!(counters.routes_reaped, 1);
+    assert_eq!(counters.neighbors_reaped, 1);
+    assert_eq!(counters.l3vxlan_fdb_reaped, 1);
+
+    // The reap must tear down the route before the resolution rows
+    // its forwarding depends on (inverse of the install order).
+    let kinds: Vec<&str> = h
+        .handle
+        .l3_op_log()
+        .iter()
+        .map(|op| match op {
+            DataplaneOp::RemoveRemoteIpRoute { .. } => "route",
+            DataplaneOp::RemoveL3Neighbor { .. } => "neighbor",
+            DataplaneOp::RemoveL3VxlanFdb { .. } => "fdb",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(kinds, vec!["route", "neighbor", "fdb"]);
+
+    h.shutdown().await;
+}
+
+// (d) Foreign rows — same identities, no ownership markers — are
+//     never adopted and never reaped, even with a zero deferral.
+#[tokio::test]
+async fn l3_foreign_rows_never_adopted_or_reaped() {
+    let cfg = ReconcileActorConfig {
+        l3_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+    // Route without the proto-bgp + onlink pair, neighbor and FDB row
+    // without extern_learn — operator-installed shapes.
+    h.handle
+        .pre_load_l3_route(L3_TABLE_ID, l3_prefix(), L3_IFINDEX, ipa("10.0.0.2"), false);
+    h.handle
+        .pre_load_l3_neighbor(L3_IFINDEX, ipa("10.0.0.2"), l3_router_mac(), false);
+    h.handle
+        .pre_load_l3_vxlan_fdb(L3_IFINDEX, l3_router_mac(), ipa("10.0.0.2"), false);
+
+    h.intent_tx
+        .send(l3_intent(1, l3_ip_vrfs(), RemoteIpPrefixTable::new()))
+        .unwrap();
+
+    let mut reports = Vec::new();
+    loop {
+        let r = h.next_report().await;
+        let done = r.intent_generation == 1;
+        reports.push(r);
+        if done {
+            break;
+        }
+    }
+    h.handle.push_event(KernelEvent::KernelStateChanged).await;
+    reports.extend(h.try_drain_reports().await);
+
+    let counters = sum_l3_adoption_counters(&reports);
+    assert_eq!(counters, rustbgpd_evpn::L3AdoptionCounters::default());
+    assert_eq!(
+        l3_kernel_rows(&h.handle),
+        (true, true, true),
+        "foreign rows must survive untouched"
+    );
+
+    h.shutdown().await;
+}
+
+// (e/g) Desired prefix whose VRF is NotReady: nothing is reaped after
+//     the deadline (the route is desired-exempt; the VRF's neighbor /
+//     FDB rows are skipped because their desired keys can't be
+//     derived yet), and once the VRF turns Ready the rows are claimed
+//     — not reaped.
+#[tokio::test]
+async fn l3_desired_rows_survive_not_ready_vrf_then_claim_on_ready() {
+    let cfg = ReconcileActorConfig {
+        l3_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    // The L3VXLAN device resolves to an ifindex (so the adoption dump
+    // sees the neighbor / FDB rows), but the VRF is NOT Ready — no
+    // staged status.
+    h.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+    pre_load_l3_marker_rows(&h.handle);
+
+    let ip_vrfs = l3_ip_vrfs();
+    let desired = l3_desired_prefixes(&ip_vrfs);
+    h.intent_tx.send(l3_intent(1, ip_vrfs, desired)).unwrap();
+
+    let mut reports = Vec::new();
+    loop {
+        let r = h.next_report().await;
+        let done = r.intent_generation == 1;
+        reports.push(r);
+        if done {
+            break;
+        }
+    }
+    // Extra passes past the (zero) deferral deadline with the VRF
+    // still NotReady.
+    h.handle.push_event(KernelEvent::KernelStateChanged).await;
+    reports.extend(h.try_drain_reports().await);
+
+    let counters = sum_l3_adoption_counters(&reports);
+    assert_eq!(counters.routes_adopted, 1);
+    assert_eq!(counters.neighbors_adopted, 1);
+    assert_eq!(counters.l3vxlan_fdb_adopted, 1);
+    assert_eq!(
+        counters.routes_reaped + counters.neighbors_reaped + counters.l3vxlan_fdb_reaped,
+        0,
+        "desired / not-ready rows must survive the deadline"
+    );
+    assert_eq!(l3_kernel_rows(&h.handle), (true, true, true));
+    assert!(
+        h.handle.l3_op_log().is_empty(),
+        "no L3 ops at all while the VRF is NotReady"
+    );
+
+    // VRF turns Ready after the deadline — the rows must be claimed
+    // (the diff re-emits the adds; the replace is the claim), still
+    // never reaped.
+    h.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h.handle.push_event(KernelEvent::KernelStateChanged).await;
+    let mut claimed = false;
+    for _ in 0..10 {
+        reports.extend(h.try_drain_reports().await);
+        let log = h.handle.l3_op_log();
+        if log
+            .iter()
+            .any(|op| matches!(op, DataplaneOp::AddRemoteIpRoute { .. }))
+        {
+            claimed = true;
+            // Adds only — a remove would mean the reap fired.
+            assert!(
+                log.iter().all(|op| matches!(
+                    op,
+                    DataplaneOp::AddRemoteIpRoute { .. }
+                        | DataplaneOp::AddL3Neighbor { .. }
+                        | DataplaneOp::AddL3VxlanFdb { .. }
+                )),
+                "claim must be adds only, got {log:?}"
+            );
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(claimed, "VRF turning Ready must trigger the claim installs");
+    reports.extend(h.try_drain_reports().await);
+    let counters = sum_l3_adoption_counters(&reports);
+    assert_eq!(
+        counters.routes_reaped + counters.neighbors_reaped + counters.l3vxlan_fdb_reaped,
+        0,
+        "claimed rows must never reap"
+    );
+    assert_eq!(l3_kernel_rows(&h.handle), (true, true, true));
+
+    h.shutdown().await;
+}
+
+// (f) Double-crash idempotence: a second fresh actor over the same
+//     kernel state (the first stopped inside its deferral window)
+//     re-adopts harmlessly and reaps exactly once.
+#[tokio::test]
+async fn l3_double_crash_readoption_is_idempotent() {
+    // Lifetime 1: production-length deferral — adopt, then
+    // "crash"/stop inside the window. The rows must survive (the
+    // drain only touches owned state, and nothing was claimed).
+    let mut h1 = Harness::spawn(ReconcileActorConfig::for_tests());
+    h1.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+    pre_load_l3_marker_rows(&h1.handle);
+    h1.intent_tx
+        .send(l3_intent(1, l3_ip_vrfs(), RemoteIpPrefixTable::new()))
+        .unwrap();
+    let mut reports1 = Vec::new();
+    loop {
+        let r = h1.next_report().await;
+        let done = r.intent_generation == 1;
+        reports1.push(r);
+        if done {
+            break;
+        }
+    }
+    let counters1 = sum_l3_adoption_counters(&reports1);
+    assert_eq!(counters1.routes_adopted, 1);
+    assert_eq!(counters1.neighbors_adopted, 1);
+    assert_eq!(counters1.l3vxlan_fdb_adopted, 1);
+    let handle1 = h1.handle.clone();
+    h1.shutdown().await;
+    assert_eq!(
+        l3_kernel_rows(&handle1),
+        (true, true, true),
+        "rows must survive a shutdown inside the deferral window"
+    );
+
+    // Lifetime 2: fresh actor over the surviving kernel rows (the
+    // adopted sets died with lifetime 1), zero deferral.
+    let cfg = ReconcileActorConfig {
+        l3_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h2 = Harness::spawn(cfg);
+    h2.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h2.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+    for ((table_id, prefix), row) in handle1.l3_routes() {
+        h2.handle.pre_load_l3_route(
+            table_id,
+            prefix,
+            row.l3vxlan_ifindex,
+            row.next_hop,
+            row.marked,
+        );
+    }
+    for ((ifindex, next_hop), row) in handle1.l3_neighbors() {
+        h2.handle
+            .pre_load_l3_neighbor(ifindex, next_hop, row.router_mac, row.marked);
+    }
+    for ((ifindex, router_mac), row) in handle1.l3_vxlan_fdb() {
+        h2.handle
+            .pre_load_l3_vxlan_fdb(ifindex, router_mac, row.next_hop, row.marked);
+    }
+    h2.intent_tx
+        .send(l3_intent(1, l3_ip_vrfs(), RemoteIpPrefixTable::new()))
+        .unwrap();
+
+    let mut reports2 = Vec::new();
+    for _ in 0..10 {
+        reports2.push(h2.next_report().await);
+        if l3_kernel_rows(&h2.handle) == (false, false, false) {
+            break;
+        }
+    }
+    let counters2 = sum_l3_adoption_counters(&reports2);
+    assert_eq!(counters2.routes_adopted, 1, "re-adoption is one-shot");
+    assert_eq!(counters2.neighbors_adopted, 1);
+    assert_eq!(counters2.l3vxlan_fdb_adopted, 1);
+    assert_eq!(counters2.routes_reaped, 1, "reaped exactly once");
+    assert_eq!(counters2.neighbors_reaped, 1);
+    assert_eq!(counters2.l3vxlan_fdb_reaped, 1);
+    assert_eq!(l3_kernel_rows(&h2.handle), (false, false, false));
+
+    h2.shutdown().await;
+}
+
+// (h) A failed adoption dump on the first L3 pass leaves the latch
+//     unset; a later successful dump adopts (and, with the zero
+//     deferral, reaps the unclaimed rows).
+#[tokio::test]
+async fn l3_dump_failure_leaves_latch_unset_then_later_pass_adopts() {
+    let cfg = ReconcileActorConfig {
+        l3_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+    pre_load_l3_marker_rows(&h.handle);
+    // Fail the first dump_l3_adoption_candidates call only.
+    h.handle.inject_l3_adoption_dump_failure();
+
+    h.intent_tx
+        .send(l3_intent(1, l3_ip_vrfs(), RemoteIpPrefixTable::new()))
+        .unwrap();
+
+    let mut reports = Vec::new();
+    loop {
+        let r = h.next_report().await;
+        let done = r.intent_generation == 1;
+        reports.push(r);
+        if done {
+            break;
+        }
+    }
+    let first = sum_l3_adoption_counters(&reports);
+    assert_eq!(
+        first,
+        rustbgpd_evpn::L3AdoptionCounters::default(),
+        "failed dump must not latch or adopt anything"
+    );
+    assert_eq!(l3_kernel_rows(&h.handle), (true, true, true));
+
+    // Next pass retries the sweep, adopts, and reaps (zero deferral).
+    h.handle.push_event(KernelEvent::KernelStateChanged).await;
+    for _ in 0..10 {
+        reports.extend(h.try_drain_reports().await);
+        if l3_kernel_rows(&h.handle) == (false, false, false) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let counters = sum_l3_adoption_counters(&reports);
+    assert_eq!(counters.routes_adopted, 1);
+    assert_eq!(counters.neighbors_adopted, 1);
+    assert_eq!(counters.l3vxlan_fdb_adopted, 1);
+    assert_eq!(counters.routes_reaped, 1);
+    assert_eq!(counters.neighbors_reaped, 1);
+    assert_eq!(counters.l3vxlan_fdb_reaped, 1);
+    assert_eq!(l3_kernel_rows(&h.handle), (false, false, false));
+
+    h.shutdown().await;
 }

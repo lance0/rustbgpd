@@ -297,8 +297,10 @@ pub(crate) fn ingest_route_message(
 
 /// Effective routing table id for one `RouteMessage`. Prefers the
 /// `RouteAttribute::Table(u32)` attribute (used for tables `>= 256`),
-/// falls back to the 8-bit header field.
-fn extract_table_id(msg: &RouteMessage) -> u32 {
+/// falls back to the 8-bit header field. `pub(super)` so the
+/// ADR-0079 adoption walk (`super::l3_adoption`) shares the same
+/// table-id decoding as the observation classifier.
+pub(super) fn extract_table_id(msg: &RouteMessage) -> u32 {
     for attr in &msg.attributes {
         if let RouteAttribute::Table(t) = attr {
             return *t;
@@ -310,8 +312,9 @@ fn extract_table_id(msg: &RouteMessage) -> u32 {
 /// Build an [`EvpnIpPrefixValue`] from the message's destination
 /// attribute + header `destination_prefix_length` + header
 /// `address_family`. Returns `None` on family / attribute mismatch
-/// (the classifier counts those as `Malformed`).
-fn extract_prefix(msg: &RouteMessage) -> Option<EvpnIpPrefixValue> {
+/// (the classifier counts those as `Malformed`). `pub(super)` for
+/// the same `super::l3_adoption` reuse as [`extract_table_id`].
+pub(super) fn extract_prefix(msg: &RouteMessage) -> Option<EvpnIpPrefixValue> {
     let mut dest: Option<&RouteAddress> = None;
     for attr in &msg.attributes {
         if let RouteAttribute::Destination(addr) = attr {
@@ -349,8 +352,9 @@ fn extract_prefix(msg: &RouteMessage) -> Option<EvpnIpPrefixValue> {
 }
 
 /// Output ifindex from the first `RouteAttribute::Oif`, or `None`
-/// when the route has multipath / no output attribute.
-fn extract_output_ifindex(msg: &RouteMessage) -> Option<u32> {
+/// when the route has multipath / no output attribute. `pub(super)`
+/// for the same `super::l3_adoption` reuse as [`extract_table_id`].
+pub(super) fn extract_output_ifindex(msg: &RouteMessage) -> Option<u32> {
     for attr in &msg.attributes {
         if let RouteAttribute::Oif(idx) = attr {
             return Some(*idx);
