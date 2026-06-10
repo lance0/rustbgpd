@@ -699,6 +699,12 @@ impl Config {
             .or_else(|| group.and_then(|g| g.route_reflector_client))
             .unwrap_or(false);
         transport.remove_private_as = Self::resolved_remove_private_as(neighbor, group);
+        // RFC 4456: thread the local cluster-id just like
+        // `PeerManager::build_transport_config`. Without it a runtime-added
+        // iBGP client (this path backs the snapshot-sync gRPC peer adds)
+        // reflects routes with no CLUSTER_LIST prepend and skips inbound
+        // cluster-loop detection until the daemon restarts.
+        transport.cluster_id = self.cluster_id();
         // ADR-0073: this is the second transport-construction path (the
         // resolved-neighbor one used by snapshot-sync gRPC peer adds);
         // it must thread the explain knobs just like

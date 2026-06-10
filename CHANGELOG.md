@@ -166,6 +166,31 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shared per-session outbound teardown is now one helper used by both the
   `PeerDown` and GR paths, so the two cleanup lists can no longer drift.
 
+- **Runtime-added neighbors now carry the RR cluster id.** The
+  resolved-neighbor transport path (used by snapshot-sync gRPC peer adds)
+  never set `cluster_id`, so an iBGP route-reflector client added at runtime
+  reflected routes without CLUSTER_LIST prepend and skipped inbound
+  cluster-loop detection (RFC 4456) until the daemon restarted. A two-path
+  transport-construction parity test now pins full struct equality between
+  the resolved-neighbor and reconcile paths so the next added field cannot
+  silently diverge.
+
+- **`DeleteNeighbor` refuses dynamic-range peers.** Deleting a dynamic peer
+  through the static-neighbor surface permanently leaked one
+  `dynamic_neighbor_limit` slot per call (the idle-time decrement never ran),
+  eventually wedging the dynamic-accept plane at the limit with zero live
+  peers, and a persistence-failure rollback resurrected the ephemeral peer as
+  a persisted static neighbor. Dynamic peers are removed automatically when
+  their session ends; the delete now returns `INVALID_ARGUMENT` pointing at
+  dynamic-neighbor range deletion instead.
+
+- **BFD Down now also clears a pending collision candidate.** A genuine BFD
+  Down stopped only the primary BGP session; a live inbound collision
+  candidate spawned before the hold survived and was promoted on the
+  primary's `BackToIdle`, re-establishing BGP over the BFD-down path moments
+  after the teardown. The Down handler now shuts the candidate down and
+  `BackToIdle` promotion checks the BFD withhold before promoting.
+
 - **Loc-RIB now detects same-peer payload churn (unicast + FlowSpec).** A peer
   re-advertising the same prefix with a new next-hop or changed attributes
   (communities, equal-length AS_PATH content), or the same FlowSpec rule with a

@@ -6777,3 +6777,164 @@ async fn republish_reflects_disable_and_readd() {
     mgr.set_bfd_peer_disabled(peer, false);
     assert_eq!(enabled_now(&rx), Some(true), "re-added peer re-enabled");
 }
+
+/// Two-path transport-construction parity. Sessions are built from two
+/// independent paths: `Config::resolve_neighbor` (snapshot-sync gRPC peer
+/// adds spawn directly from `resolved.transport_config`) and
+/// `PeerManager::build_transport_config` (startup + reconcile). Fields have
+/// drifted between them before — the ADR-0073 explain knobs, and
+/// `cluster_id` (a gRPC-added iBGP RR client ran without `CLUSTER_LIST`
+/// prepend or cluster-loop detection until restart). Pin full struct
+/// equality so the next added field cannot silently diverge.
+#[tokio::test]
+async fn resolved_transport_config_matches_build_transport_config() {
+    let cluster = Ipv4Addr::new(10, 0, 0, 99);
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        Some(cluster),
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+
+    // An iBGP route-reflector client with a few non-default knobs set, so
+    // the comparison exercises more than the defaults.
+    let mut neighbor = config_neighbor(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65001);
+    neighbor.route_reflector_client = Some(true);
+    neighbor.hold_time = Some(90);
+    neighbor.gr_stale_routes_time = Some(120);
+
+    // Resolve against the manager's own config snapshot (same global
+    // ASN/router-id/cluster-id), as the runtime-add path does.
+    let mut config = mgr.current_config.clone();
+    config.neighbors = vec![neighbor.clone()];
+    let resolved = config
+        .resolve_neighbor(&neighbor)
+        .expect("neighbor resolves");
+
+    let pm_cfg = PeerManager::peer_manager_config_from_resolved(resolved.clone(), false);
+    let rebuilt = mgr.build_transport_config(&pm_cfg);
+
+    assert_eq!(
+        rebuilt.cluster_id,
+        Some(cluster),
+        "reconcile path must carry the cluster id"
+    );
+    assert_eq!(
+        resolved.transport_config, rebuilt,
+        "resolve_neighbor and build_transport_config must produce identical \
+         TransportConfigs — a field set on only one path silently diverges \
+         runtime-added peers from restart-built peers"
+    );
+}
+
+/// Regression: `DeleteNeighbor` must refuse dynamic-range peers. Deleting
+/// one through the static surface permanently leaked its
+/// `dynamic_neighbor_limit` slot (the `BackToIdle` decrement never runs for a
+/// peer removed this way), and the persist-failure rollback would resurrect
+/// it as a persisted static neighbor.
+#[tokio::test]
+async fn delete_peer_rejects_dynamic_targets() {
+    use rustbgpd_api::peer_types::PeerLifecycleError;
+
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        fake_peer_handle(
+            addr,
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+    mgr.peers.get_mut(&key(addr)).unwrap().is_dynamic = true;
+
+    let Err(err) = mgr.delete_peer(key(addr), false).await else {
+        panic!("deleting a dynamic peer must be rejected");
+    };
+    assert!(
+        matches!(err, PeerLifecycleError::Invalid(_)),
+        "expected Invalid, got {err:?}"
+    );
+    assert!(
+        mgr.peers.contains_key(&key(addr)),
+        "rejected delete must leave the dynamic peer managed"
+    );
+}
+
+/// Regression: a genuine BFD Down must tear down a pending inbound collision
+/// candidate alongside the primary session. The candidate is a live,
+/// already-started session; previously only the primary was stopped, so
+/// `BackToIdle` promotion re-established BGP over the BFD-down path moments
+/// after the teardown.
+#[tokio::test]
+async fn bfd_down_tears_down_pending_inbound_candidate() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, false, fake_bfd_peer_handle(counters.clone()));
+    let pending = Arc::new(FakePeerCounters::default());
+    attach_test_pending_inbound(
+        &mut mgr,
+        peer,
+        fake_peer_handle(peer, SessionState::OpenConfirm, None, pending.clone()),
+        2,
+    );
+
+    mgr.handle_bfd_state_change(down(peer)).await;
+
+    wait_counter(&pending.shutdown, 1).await;
+    wait_counter(&counters.stop, 1).await;
+    assert!(
+        mgr.peers
+            .get(&key(peer))
+            .is_some_and(|m| m.pending_inbound.is_none()),
+        "pending candidate must be gone after BFD down"
+    );
+    assert!(mgr.peer_key_for_session(2).is_none());
+}
+
+/// Regression: `BackToIdle` must not promote a pending inbound collision
+/// candidate while BFD is withholding the peer — the primary usually went
+/// idle BECAUSE BFD tore it down, and promotion would re-establish BGP over
+/// the BFD-down path. The candidate is dropped instead.
+#[tokio::test]
+async fn back_to_idle_drops_candidate_while_bfd_withholding() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, false, fake_bfd_peer_handle(counters.clone()));
+
+    // Enter the hold first (no candidate exists yet), then attach one —
+    // exercising the promotion-time gate rather than the BFD-down teardown.
+    mgr.handle_bfd_state_change(down(peer)).await;
+    let pending = Arc::new(FakePeerCounters::default());
+    attach_test_pending_inbound(
+        &mut mgr,
+        peer,
+        fake_peer_handle(peer, SessionState::OpenConfirm, None, pending.clone()),
+        2,
+    );
+
+    mgr.handle_session_notification(SessionNotification::BackToIdle {
+        session_id: 1,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr: peer,
+    })
+    .await;
+
+    wait_counter(&pending.shutdown, 1).await;
+    assert!(
+        mgr.peers
+            .get(&key(peer))
+            .is_some_and(|m| m.pending_inbound.is_none()),
+        "candidate must be dropped, not promoted, while BFD withholds"
+    );
+    assert!(mgr.peer_key_for_session(2).is_none());
+}
