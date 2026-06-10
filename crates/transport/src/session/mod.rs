@@ -93,6 +93,11 @@ pub(crate) struct PeerSession {
     /// OPEN, KEEPALIVE, NOTIFICATION, operator ROUTE-REFRESH commands,
     /// and the `Cease/8` we emit on bulk saturation.
     writer_priority_tx: Option<mpsc::UnboundedSender<Bytes>>,
+    /// KEEPALIVE cadence control for the writer task (ADR-0078). The
+    /// session sends `Some(interval)` when the FSM starts the keepalive
+    /// timer and `None` when it stops it; dropping the sender (TCP
+    /// teardown) also stops the cadence.
+    writer_keepalive_tx: Option<tokio::sync::watch::Sender<Option<std::time::Duration>>>,
     /// `JoinHandle` of the writer task. Polled by the session's
     /// `select!` so writer-exit (clean shutdown or TCP error) surfaces
     /// as a TCP-disconnect event.
@@ -404,6 +409,7 @@ impl PeerSession {
             read_half: None,
             writer_bulk_tx: None,
             writer_priority_tx: None,
+            writer_keepalive_tx: None,
             writer_join: None,
             read_buf: ReadBuffer::new(),
             timers: Timers::default(),
@@ -487,13 +493,19 @@ impl PeerSession {
         // `PeerHandle::spawn_inbound`), so `tokio::spawn` inside
         // `writer::spawn` works.
         let (read_half, write_half) = stream.into_split();
-        let writer_handle = writer::spawn(write_half, OUTBOUND_BUFFER);
+        let writer_handle = writer::spawn(
+            write_half,
+            OUTBOUND_BUFFER,
+            metrics.clone(),
+            peer_label.clone(),
+        );
         Self {
             config,
             fsm,
             read_half: Some(read_half),
             writer_bulk_tx: Some(writer_handle.bulk_tx),
             writer_priority_tx: Some(writer_handle.priority_tx),
+            writer_keepalive_tx: Some(writer_handle.keepalive_tx),
             writer_join: Some(writer_handle.join),
             read_buf: ReadBuffer::new(),
             timers: Timers::default(),
@@ -723,12 +735,13 @@ impl PeerSession {
                 }
                 () = poll_timer(&mut timers.hold) => {
                     timers.hold = None;
-                    self.drive_fsm(Event::HoldTimerExpires).await;
+                    self.handle_hold_timer_expiry().await;
                 }
-                () = poll_timer(&mut timers.keepalive) => {
-                    timers.keepalive = None;
-                    self.drive_fsm(Event::KeepaliveTimerExpires).await;
-                }
+                // No keepalive arm: the KEEPALIVE cadence is owned by the
+                // writer task (ADR-0078), so it keeps running even while
+                // this loop is parked on a blocking RIB delivery. The
+                // FSM's `StartTimer(Keepalive)` is routed to the writer in
+                // `execute_actions`; `timers.keepalive` is never armed.
 
                 // Deferred reconnect after unexpected Idle
                 () = poll_timer(reconnect_timer) => {
@@ -749,10 +762,16 @@ impl PeerSession {
                             // reachable via the cached bulk_tx/priority_tx
                             // senders.
                             let (rh, wh) = stream.into_split();
-                            let handle = writer::spawn(wh, OUTBOUND_BUFFER);
+                            let handle = writer::spawn(
+                                wh,
+                                OUTBOUND_BUFFER,
+                                self.metrics.clone(),
+                                self.peer_label.clone(),
+                            );
                             self.read_half = Some(rh);
                             self.writer_bulk_tx = Some(handle.bulk_tx);
                             self.writer_priority_tx = Some(handle.priority_tx);
+                            self.writer_keepalive_tx = Some(handle.keepalive_tx);
                             self.writer_join = Some(handle.join);
                             self.drive_fsm(Event::TcpConnectionConfirmed).await;
                         }
@@ -810,10 +829,16 @@ impl PeerSession {
     /// pre-writer-split test scaffolding.
     pub(super) fn test_install_stream(&mut self, stream: TcpStream) {
         let (rh, wh) = stream.into_split();
-        let handle = writer::spawn(wh, OUTBOUND_BUFFER);
+        let handle = writer::spawn(
+            wh,
+            OUTBOUND_BUFFER,
+            self.metrics.clone(),
+            self.peer_label.clone(),
+        );
         self.read_half = Some(rh);
         self.writer_bulk_tx = Some(handle.bulk_tx);
         self.writer_priority_tx = Some(handle.priority_tx);
+        self.writer_keepalive_tx = Some(handle.keepalive_tx);
         self.writer_join = Some(handle.join);
     }
 }

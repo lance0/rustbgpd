@@ -6,6 +6,58 @@ use super::{
 };
 
 impl PeerSession {
+    /// Handle a hold-timer expiry observed by the select loop.
+    ///
+    /// ADR-0078 rule 3: pending unprocessed input counts as peer
+    /// liveness. A session task that parked on a blocking RIB delivery
+    /// resumes with its hold deadline possibly in the past while the
+    /// peer's KEEPALIVEs sit unread in the socket — expiring then would
+    /// blame the peer for our own backpressure. If bytes are pending
+    /// (in the read buffer, or readable from the socket right now),
+    /// process them — the FSM re-arms the hold timer per message — and
+    /// re-arm manually if only a partial message arrived. Only a truly
+    /// silent peer expires.
+    pub(super) async fn handle_hold_timer_expiry(&mut self) {
+        if self.take_pending_input() {
+            self.metrics
+                .record_hold_timer_rearmed_pending_input(&self.peer_label);
+            debug!(
+                peer = %self.peer_label,
+                "hold timer expired with unprocessed peer input pending; re-arming instead"
+            );
+            self.process_read_buffer().await;
+            if self.timers.hold.is_none()
+                && let Some(secs) = self.timers.last_hold_secs
+            {
+                self.timers.start(rustbgpd_fsm::TimerType::Hold, secs);
+            }
+            return;
+        }
+        self.drive_fsm(Event::HoldTimerExpires).await;
+    }
+
+    /// True when peer input is pending: leftover bytes in the read
+    /// buffer, or bytes readable from the socket right now (pulled into
+    /// the buffer non-blockingly so the caller can process them).
+    fn take_pending_input(&mut self) -> bool {
+        if !self.read_buf.buf.is_empty() {
+            return true;
+        }
+        let Some(read_half) = self.read_half.as_ref() else {
+            return false;
+        };
+        let mut tmp = [0u8; 4096];
+        match read_half.try_read(&mut tmp) {
+            Ok(n) if n > 0 => {
+                self.read_buf.buf.extend_from_slice(&tmp[..n]);
+                true
+            }
+            // Ok(0) is EOF — let the normal read arm observe and handle
+            // the disconnect; the hold expiry stands.
+            _ => false,
+        }
+    }
+
     /// Feed an event into the FSM and execute the resulting actions.
     ///
     /// Uses an iterative loop to avoid async recursion: actions that
@@ -112,11 +164,30 @@ impl PeerSession {
                         secs,
                         "start timer"
                     );
-                    self.timers.start(timer_type, secs);
+                    // ADR-0078: the keepalive cadence is owned by the
+                    // writer task, not the session select loop — a session
+                    // parked on a blocking RIB delivery must keep feeding
+                    // the peer's hold timer. The FSM's timer semantics are
+                    // unchanged; only the executor differs.
+                    if timer_type == rustbgpd_fsm::TimerType::Keepalive {
+                        if let Some(tx) = &self.writer_keepalive_tx {
+                            let interval =
+                                (secs > 0).then(|| std::time::Duration::from_secs(u64::from(secs)));
+                            let _ = tx.send(interval);
+                        }
+                    } else {
+                        self.timers.start(timer_type, secs);
+                    }
                 }
                 Action::StopTimer(timer_type) => {
                     debug!(peer = %self.peer_label, timer = ?timer_type, "stop timer");
-                    self.timers.stop(timer_type);
+                    if timer_type == rustbgpd_fsm::TimerType::Keepalive {
+                        if let Some(tx) = &self.writer_keepalive_tx {
+                            let _ = tx.send(None);
+                        }
+                    } else {
+                        self.timers.stop(timer_type);
+                    }
                 }
                 Action::InitiateTcpConnection => {
                     if self.read_half.is_some() {

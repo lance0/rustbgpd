@@ -219,6 +219,7 @@ impl PeerSession {
         // writer-exit select arm needs it to observe the exit.
         self.writer_bulk_tx = None;
         self.writer_priority_tx = None;
+        self.writer_keepalive_tx = None;
         self.read_buf.clear();
     }
 
@@ -232,6 +233,7 @@ impl PeerSession {
         self.read_half = None;
         self.writer_bulk_tx = None;
         self.writer_priority_tx = None;
+        self.writer_keepalive_tx = None;
         self.read_buf.clear();
     }
 
