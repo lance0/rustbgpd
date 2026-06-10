@@ -193,41 +193,46 @@ has it, no broad performance sprints without profile evidence.
   can participate in multiple Ethernet Segments. Low-priority operational polish
   once core convergence is complete.
 - **Kernel-state crash-restart reconciliation** *(from the 2026-06 deep
-  audit).* The unicast FIB's persisted owned-state pattern (re-adopt after an
-  unclean stop, remove routes withdrawn while down) needs porting to the other
-  dataplane writers, which track ownership in memory only: RFC 7999 blackhole
-  discard routes (a crash leaves a permanent kernel discard route invisible to
-  every status surface, and preflight then rejects re-owning the still-desired
-  row as `foreign_route_exists`); EVPN symmetric-IRB L3 state (VRF routes,
-  permanent neighbors, and L3VXLAN FDB rows are never reaped after an unclean
-  restart — a Type 5 withdrawn while the daemon was down keeps steering tenant
-  traffic into a dead tunnel); and single-dst `extern_learn` FDB rows
-  (ADR-0054 §7 promises next-startup cleanup that exists only for NHG-tagged
-  rows). Related: scope the unicast owned-state signature per table and
-  compare it set-wise so a crash plus any `[[fib_tables]]` edit — even stanza
-  reordering — doesn't quarantine-freeze stale kernel routes; batch the
-  blackhole reconciler's presence checks into one kernel dump per pass instead
-  of one full-table dump per candidate.
-- **EVPN runtime apply cancellation-safety.** The `ApplyEvpnRuntime` converge
+  audit; decided in ADR-0079 — startup adoption sweeps on kernel ownership
+  markers, reap deferred until reconvergence, no new persisted files).*
+  Today only the unicast FIB survives an unclean restart; the other
+  dataplane writers track ownership in memory only: RFC 7999 blackhole
+  discard routes (a crash leaves a permanent kernel discard route invisible
+  to every status surface, and preflight then rejects re-owning the
+  still-desired row as `foreign_route_exists`); EVPN symmetric-IRB L3 state
+  (VRF routes, permanent neighbors, and L3VXLAN FDB rows are never reaped
+  after an unclean restart — a Type 5 withdrawn while the daemon was down
+  keeps steering tenant traffic into a dead tunnel); and single-dst
+  `extern_learn` FDB rows (ADR-0054 §7 promises next-startup cleanup that
+  exists only for NHG-tagged rows). Ship order per the ADR: blackhole sweep
+  first (fold in batching its presence checks into one kernel dump per
+  pass), then single-dst FDB (extends the ADR-0059 drift sweep), then L3.
+  Related: scope the unicast owned-state signature per table and compare it
+  set-wise so a crash plus any `[[fib_tables]]` edit — even stanza
+  reordering — doesn't quarantine-freeze stale kernel routes.
+- **EVPN runtime apply cancellation-safety** *(decided in ADR-0080 —
+  detached-task shield + shutdown fencing).* The `ApplyEvpnRuntime` converge
   + coordinator commit runs inline in the gRPC request future, so a client
   disconnect mid-RPC can drop the converge at an internal await: half-applied
   actor state with no rollback, no Degraded record, and a stale committed
   baseline that makes the next SIGHUP of an unchanged file skip repair. Run
   converge+commit on a detached task the RPC merely awaits (the FIB-CRUD
-  pattern); make the IMET controller self-heal on withdraw `not_found` (today
-  one dropped reply leaves the tracked key out of sync and every later
-  delete/redefine of that VNI rejects until restart); fence coordinated
-  shutdown's EVPN teardown with the apply lock so it cannot interleave with an
-  in-flight converge.
-- **Transport→RIB inbound backpressure contract.** `RoutesReceived` is
+  pattern), and fence coordinated shutdown's EVPN teardown with the apply
+  lock so it cannot interleave with an in-flight converge. **Done:** the
+  IMET controller now self-heals on withdraw `not_found` (previously one
+  dropped reply left the tracked key out of sync and every later
+  delete/redefine of that VNI rejected until restart).
+- **Transport→RIB inbound backpressure contract** *(decided in ADR-0078 —
+  block, never drop, matching the FRR/BIRD consensus).* `RoutesReceived` is
   delivered with a lossy `try_send` — a full channel silently drops announce
   and withdraw batches, leaving a permanently stale route or black-hole until
   session reset, with `known_paths`, the import-explain cache, and counters
   already advanced — while `PeerUp` / EoR / refresh markers block, so the same
   full channel parks the session task and starves its own keepalive cadence.
-  Pick one coherent policy (bounded-block off the timer path, or drop + count
-  + self-issued Route Refresh resync); at minimum surface a per-peer drop
-  counter and defer the bookkeeping commit until the batch actually enqueued.
+  Implementation slices per the ADR: keepalive emission moves to the writer
+  task (ships first, with a stalled-RIB hold-timer interop test), then
+  `RoutesReceived` flips to a blocking send with post-enqueue bookkeeping,
+  pending-input hold-timer re-arm, and a channel-saturation metric.
 - **Graceful-restart session-boundary hygiene.** GR flaps bypass `PeerDown`
   cleanup, so per-session state leaks across the restart: installed ORF
   filters and the ORF initial-advertisement gate survive into the new session

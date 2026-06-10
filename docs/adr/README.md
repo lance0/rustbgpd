@@ -86,6 +86,9 @@ consequences so future contributors understand *why*, not just *what*.
 | [0075](0075-outbound-route-filtering.md) | Receive-side Address-Prefix Outbound Route Filtering (ORF) | Accepted | 2026-06-03 |
 | [0076](0076-config-transaction-model.md) | Config transaction model foundation | Accepted | 2026-06-03 |
 | [0077](0077-mpls-vpn-bgpls-address-family-boundary.md) | MPLS, VPN, and BGP-LS address-family boundary | Accepted | 2026-06-08 |
+| [0078](0078-inbound-rib-backpressure.md) | Inbound transport→RIB backpressure — block, never drop | Accepted | 2026-06-10 |
+| [0079](0079-kernel-state-crash-restart-reconciliation.md) | Kernel-state crash-restart reconciliation via adoption sweeps | Accepted | 2026-06-10 |
+| [0080](0080-cancellation-shielded-runtime-applies.md) | Cancellation-shielded runtime mutation applies | Accepted | 2026-06-10 |
 
 ## Template
 
