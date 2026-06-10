@@ -606,7 +606,16 @@ async fn reconcile_once<F>(
         }
     }
 
-    reap_or_report_adopted(fib, metrics, owned, adoption, &desired, &mut statuses).await;
+    reap_or_report_adopted(
+        fib,
+        metrics,
+        owned,
+        adoption,
+        &desired,
+        &presences,
+        &mut statuses,
+    )
+    .await;
 
     *rejected = current_rejected;
     status_tx.send_replace(statuses);
@@ -621,6 +630,7 @@ async fn reap_or_report_adopted<F>(
     owned: &HashMap<Prefix, OwnedBlackhole>,
     adoption: &mut AdoptionSweep,
     desired: &HashMap<Prefix, &Route>,
+    presences: &HashMap<Prefix, KernelRoutePresence>,
     statuses: &mut Vec<BlackholeStatus>,
 ) where
     F: BlackholeFib,
@@ -634,6 +644,20 @@ async fn reap_or_report_adopted<F>(
             // Claimed (or about to be) — never reap a desired prefix.
             adoption.pending.remove(&prefix);
             continue;
+        }
+        match presences
+            .get(&prefix)
+            .copied()
+            .unwrap_or(KernelRoutePresence::Absent)
+        {
+            KernelRoutePresence::Marker => {}
+            KernelRoutePresence::Absent | KernelRoutePresence::Foreign => {
+                // The row vanished or a non-marker route now occupies the
+                // prefix. Either way, the adopted marker is no longer ours
+                // to report or reap.
+                adoption.pending.remove(&prefix);
+                continue;
+            }
         }
         if !reapable {
             statuses.push(BlackholeStatus {
@@ -1880,6 +1904,95 @@ mod tests {
         assert!(statuses.is_empty());
         let reaped = plain_counter_value(&metrics, "bgp_blackhole_discard_reaped_total");
         assert!((reaped - 1.0).abs() < f64::EPSILON, "got {reaped}");
+    }
+
+    /// If an adopted row disappears before the reap deadline expires,
+    /// the pending adoption record is stale and must be cleared without
+    /// issuing a delete for a row the dump no longer shows.
+    #[tokio::test]
+    async fn adopted_pending_row_disappearing_clears_without_reap() {
+        let prefix = v4(32);
+        let mut fib = FakeFib::default();
+        fib.installed.insert(prefix);
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut owned = HashMap::new();
+        let mut rejected = HashSet::new();
+        let mut adoption = deferred_adoption();
+
+        let statuses = reconcile_for_test_with_adoption(
+            Vec::new(),
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+        )
+        .await;
+        assert_eq!(statuses[0].reason, "adopted_pending_reap");
+        assert!(adoption.pending.contains(&prefix));
+
+        fib.installed.remove(&prefix);
+        adoption.reap_after = tokio::time::Instant::now();
+        let statuses = reconcile_for_test_with_adoption(
+            Vec::new(),
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+        )
+        .await;
+
+        assert!(fib.remove_calls.is_empty());
+        assert!(adoption.pending.is_empty());
+        assert!(statuses.is_empty());
+        let reaped = plain_counter_value(&metrics, "bgp_blackhole_discard_reaped_total");
+        assert!(reaped.abs() < f64::EPSILON, "got {reaped}");
+    }
+
+    /// If a foreign row replaces an adopted marker before the reap
+    /// deadline, foreign ownership dominates and the daemon must forget
+    /// the pending adoption instead of deleting the replacement.
+    #[tokio::test]
+    async fn adopted_pending_row_replaced_by_foreign_clears_without_reap() {
+        let prefix = v4(32);
+        let mut fib = FakeFib::default();
+        fib.installed.insert(prefix);
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut owned = HashMap::new();
+        let mut rejected = HashSet::new();
+        let mut adoption = deferred_adoption();
+
+        let statuses = reconcile_for_test_with_adoption(
+            Vec::new(),
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+        )
+        .await;
+        assert_eq!(statuses[0].reason, "adopted_pending_reap");
+        assert!(adoption.pending.contains(&prefix));
+
+        fib.installed.remove(&prefix);
+        fib.foreign.insert(prefix);
+        adoption.reap_after = tokio::time::Instant::now();
+        let statuses = reconcile_for_test_with_adoption(
+            Vec::new(),
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+        )
+        .await;
+
+        assert!(fib.remove_calls.is_empty());
+        assert!(adoption.pending.is_empty());
+        assert!(statuses.is_empty());
+        let reaped = plain_counter_value(&metrics, "bgp_blackhole_discard_reaped_total");
+        assert!(reaped.abs() < f64::EPSILON, "got {reaped}");
     }
 
     /// Foreign (non-marker) kernel rows are never adopted, never reaped,
