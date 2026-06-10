@@ -284,6 +284,21 @@ async fn withdraw_imet_key(
             debug!(?key, "withdrew Type 3 IMET");
             ImetWithdrawOutcome::Withdrawn { key }
         }
+        // The RIB doesn't hold this key: the route is already gone (e.g. a
+        // prior withdraw whose oneshot reply was dropped). Converge the
+        // controller to RIB reality instead of treating this as a failure —
+        // a Rejected here keeps the key tracked forever, and a tracked key
+        // the RIB doesn't hold makes the VNI permanently un-deletable and
+        // un-redefinable: re-origination short-circuits on AlreadyOriginated
+        // and every later delete/redefine converge rejects until restart.
+        Ok(Err(rustbgpd_rib::RibCommandError::NotFound(message))) => {
+            warn!(
+                ?key,
+                %message,
+                "RIB IMET withdraw: key already absent — treating as withdrawn"
+            );
+            ImetWithdrawOutcome::Withdrawn { key }
+        }
         Ok(Err(e)) => {
             debug!(?key, error = %e, "RIB IMET withdraw declined");
             ImetWithdrawOutcome::Rejected { key }
@@ -687,6 +702,60 @@ mod tests {
 
         assert_eq!(outcome, ImetWithdrawOutcome::Rejected { key });
         assert_eq!(controller.originated_key(vni(100)), Some(key));
+    }
+
+    /// Regression: a withdraw the RIB answers with `NotFound` must converge
+    /// the controller to RIB reality (untrack, report withdrawn) instead of
+    /// `Rejected`. A tracked key the RIB doesn't hold — e.g. after a dropped
+    /// oneshot reply on a prior withdraw — previously made the VNI
+    /// permanently un-deletable and un-redefinable: re-origination
+    /// short-circuited on `AlreadyOriginated` and every later
+    /// delete/redefine converge rejected until daemon restart.
+    #[tokio::test]
+    async fn controller_untracks_key_when_withdraw_not_found() {
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(8);
+        let responder = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                match msg {
+                    RibUpdate::InjectEvpn { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { reply, .. } => {
+                        let _ =
+                            reply.send(Err(RibCommandError::not_found("EVPN route key not found")));
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let mut controller = EvpnImetController::new();
+        let ImetOriginateOutcome::Originated { key } = controller
+            .originate_instance(local_instance(100), &rib_tx)
+            .await
+        else {
+            panic!("expected originate");
+        };
+        let outcome = controller.withdraw_instance(vni(100), &rib_tx).await;
+        assert_eq!(
+            outcome,
+            ImetWithdrawOutcome::Withdrawn { key },
+            "not_found must converge to withdrawn, not Rejected"
+        );
+        assert!(
+            controller.is_empty(),
+            "controller must untrack the key the RIB doesn't hold"
+        );
+
+        // The VNI is deletable/redefinable again: a follow-up withdraw is a
+        // local no-op and a re-originate actually injects.
+        let outcome = controller.withdraw_instance(vni(100), &rib_tx).await;
+        assert_eq!(
+            outcome,
+            ImetWithdrawOutcome::NotOriginated { vni: vni(100) }
+        );
+        drop(rib_tx);
+        responder.await.unwrap();
     }
 
     #[tokio::test]

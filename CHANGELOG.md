@@ -191,6 +191,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   after the teardown. The Down handler now shuts the candidate down and
   `BackToIdle` promotion checks the BFD withhold before promoting.
 
+- **EVPN IMET controller self-heals on withdraw `not_found`.** A Type 3 IMET
+  withdraw the RIB answered with `NotFound` (e.g. after a dropped reply on a
+  prior withdraw) was treated as `Rejected` and the controller kept tracking
+  the key — making that VNI permanently un-deletable and un-redefinable at
+  runtime (re-origination short-circuited on already-originated; every later
+  delete/redefine converge rejected) until a daemon restart. The controller
+  now converges to RIB reality: a `not_found` withdraw untracks the key and
+  reports it withdrawn.
+
 - **Loc-RIB now detects same-peer payload churn (unicast + FlowSpec).** A peer
   re-advertising the same prefix with a new next-hop or changed attributes
   (communities, equal-length AS_PATH content), or the same FlowSpec rule with a
