@@ -62,8 +62,8 @@ install paths today):
 |---|---|
 | Blackhole discard routes | `RTPROT_BGP` + `RTN_BLACKHOLE` (table main) |
 | EVPN L3 VRF routes | `RTPROT_BGP` + onlink, in a configured `[[evpn_ip_vrfs]]` `table_id` |
-| EVPN L3 neighbors | `NUD_PERMANENT` + `NTF_EXT_LEARNED` on managed SVIs |
-| EVPN FDB (single-dst + L3VXLAN) | `extern_learn` on managed VXLAN ports (non-NHG; NHG-tagged rows already have the ADR-0059 drift sweep) |
+| EVPN L3 neighbors | `NUD_PERMANENT` + `NTF_EXT_LEARNED` on managed L3VXLAN devices |
+| EVPN FDB (single-dst + L3VXLAN) | `extern_learn` on managed VXLAN devices (non-NHG; NHG-tagged rows already have the ADR-0059 drift sweep) |
 
 Sweep semantics, shared across subsystems:
 
@@ -103,9 +103,10 @@ sweep model is left as a future simplification, not a requirement.
   proto 186 as its own: a co-resident zebra will adopt and sweep
   rustbgpd's routes (immediately, in zebra's default mode). Likewise an
   operator's `ip route add ... proto bgp` is indistinguishable from
-  daemon state. Our table+metric discipline is the secondary key that
-  keeps the unicast/L3 sweeps scoped; co-residency with another
-  proto-186 daemon is unsupported and now documented as such.
+  daemon state. Our configured-table+metric discipline scopes unicast
+  FIB ownership; configured VRF table/device/onlink shape scopes EVPN L3
+  ownership. Co-residency with another proto-186 daemon is unsupported
+  and now documented as such.
 - **systemd-networkd reaps "foreign" state** (`ManageForeignRoutes`,
   `ManageForeignNextHops` default to yes and have deleted other daemons'
   NHGs in the wild). Deployment docs must require `ManageForeign*=no`
