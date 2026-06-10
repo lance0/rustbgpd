@@ -2416,7 +2416,9 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // If a reload is still in flight at shutdown, abort it before
     // tearing down the peer manager. Letting it run would race the
     // peer manager's Shutdown command and potentially queue commands
-    // against an already-draining manager.
+    // against an already-draining manager. An EVPN runtime apply the
+    // reload already started keeps running on its ADR-0080 detached
+    // task; the apply-lock fence below serializes with it.
     if let Some(handle) = reload_in_flight.take() {
         handle.abort();
         let _ = handle.await;
@@ -2451,6 +2453,23 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             "failed to clear GR restart marker"
         );
     }
+    // ADR-0080: fence in-flight EVPN runtime applies out of the teardown.
+    // Applies run on detached tasks (a dropped or aborted caller cannot
+    // cancel them mid-converge), so taking the apply lock here waits for
+    // any such task to finish before we withdraw routes and drain actors —
+    // and holding it for the rest of shutdown blocks a late apply from
+    // re-originating routes after the withdraw-all sweep. Bounded so a
+    // wedged converge cannot stall daemon exit.
+    let _evpn_apply_fence = tokio::time::timeout(
+        Duration::from_secs(10),
+        evpn_runtime_apply_lock.lock(),
+    )
+    .await
+    .inspect_err(|_| {
+        warn!("EVPN runtime apply still in flight after 10s; proceeding with shutdown teardown");
+    })
+    .ok();
+
     // 1.9a Drain the EVPN local-MAC originator first — BEFORE the
     // peer manager shutdown — so its Type 2 Withdraws ride the still-
     // open BGP sessions to peers. `RibUpdate::WithdrawEvpn` recomputes

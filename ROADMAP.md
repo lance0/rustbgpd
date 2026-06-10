@@ -211,15 +211,14 @@ has it, no broad performance sprints without profile evidence.
   set-wise so a crash plus any `[[fib_tables]]` edit — even stanza
   reordering — doesn't quarantine-freeze stale kernel routes.
 - **EVPN runtime apply cancellation-safety** *(decided in ADR-0080 —
-  detached-task shield + shutdown fencing).* The `ApplyEvpnRuntime` converge
-  + coordinator commit runs inline in the gRPC request future, so a client
-  disconnect mid-RPC can drop the converge at an internal await: half-applied
-  actor state with no rollback, no Degraded record, and a stale committed
-  baseline that makes the next SIGHUP of an unchanged file skip repair. Run
-  converge+commit on a detached task the RPC merely awaits (the FIB-CRUD
-  pattern), and fence coordinated shutdown's EVPN teardown with the apply
-  lock so it cannot interleave with an in-flight converge. **Done:** the
-  IMET controller now self-heals on withdraw `not_found` (previously one
+  detached-task shield + shutdown fencing).* **Done:** the
+  `ApplyEvpnRuntime` / SIGHUP converge + coordinator commit now runs on a
+  detached task the caller merely awaits (the FIB-CRUD pattern), so a
+  client disconnect or reload abort mid-apply loses only the response —
+  never the rollback ladder, Degraded record, or committed-baseline
+  advance; coordinated shutdown takes the apply lock (bounded) before EVPN
+  teardown so it cannot interleave with an in-flight converge; and the
+  IMET controller self-heals on withdraw `not_found` (previously one
   dropped reply left the tracked key out of sync and every later
   delete/redefine of that VNI rejected until restart).
 - **Transport→RIB inbound backpressure contract** *(decided in ADR-0078 —

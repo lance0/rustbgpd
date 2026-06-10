@@ -157,6 +157,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **EVPN runtime applies are cancellation-shielded (ADR-0080).** The
+  `ApplyEvpnRuntime` converge + coordinator commit ran inline in the gRPC
+  request future, so a client disconnect or RPC deadline mid-apply dropped the
+  converge at an internal await point: half-applied actor state with no
+  rollback, no Degraded record, and a stale committed baseline that made the
+  next SIGHUP of an unchanged file diff as "no change" and skip repair. The
+  critical section now runs on a detached task the caller merely awaits (the
+  FIB-CRUD pattern), for both the RPC and the SIGHUP reload path — losing the
+  caller loses only the response, never the mutation's atomicity; treat a lost
+  response as at-least-once and read `GetEvpnRuntime` for the outcome.
+  Coordinated shutdown now also takes the apply lock (bounded at 10 s) before
+  the EVPN teardown, so an in-flight converge finishes before the withdraw-all
+  sweep and a late apply cannot re-originate routes after it.
+
 - **Graceful-restart flaps no longer leak per-session ORF state.** The GR
   teardown path kept the dead session's installed ORF filter set and RFC 5291
   §6 initial-advertisement gate. A peer re-establishing without ORF inherited

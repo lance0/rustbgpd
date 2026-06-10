@@ -455,6 +455,17 @@ changes (restart-required by design — kernel VRF lifecycle), generic mixed
 add/delete/redefine edits, an ES referencing an unknown member VNI, or an
 apply on an RR-only / no-actor daemon.
 
+The apply is **cancellation-shielded** (ADR-0080): the converge + commit
+critical section runs on a detached task, so a client that disconnects or
+times out mid-apply loses only the response — the mutation still runs to
+completion (commit or rollback) and the coordinator generation and SIGHUP
+reload baseline advance truthfully. A caller that lost its response should
+treat the apply as at-least-once and read `GetEvpnRuntime` /
+`rustbgpctl evpn runtime` for the authoritative outcome. Coordinated
+shutdown takes the same apply lock before EVPN teardown, so an in-flight
+apply finishes before the withdraw-all sweep and a late apply cannot
+re-originate routes after it.
+
 **FDB reconciler (PR #34):**
 
 | Task | File / location | Status |
