@@ -11478,3 +11478,159 @@ async fn orf_defer_then_plain_refresh_withdraws_now_denied_prefix() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// Regression: a graceful-restart flap must clear the RFC 5291 §6
+/// initial-advertisement gate. The gate is per-session; previously
+/// `handle_peer_graceful_restart` left `peer_orf_pending` populated, so a
+/// peer re-establishing WITHOUT ORF inherited the dead session's gate —
+/// `send_initial_table` skipped the family and churn stayed suppressed,
+/// advertising nothing indefinitely (the new session never negotiated ORF,
+/// so it has no reason to send the ROUTE-REFRESH that lifts a gate).
+#[tokio::test]
+async fn graceful_restart_clears_stale_orf_gate() {
+    // orf_setup leaves the target gated (ORF negotiated, no refresh yet).
+    let (tx, handle, target, _out_rx) = orf_setup().await;
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer: target,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    // Re-establish WITHOUT ORF: the initial dump must carry the full table.
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+    })
+    .await
+    .unwrap();
+
+    let announced = collect_announced(&mut out_rx, 2).await;
+    assert!(
+        announced.contains(&Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))),
+        "post-GR non-ORF session must receive the initial table (stale gate leak)"
+    );
+    assert!(announced.contains(&Prefix::V4(Ipv4Prefix::new(
+        Ipv4Addr::new(192, 168, 0, 0),
+        16
+    ))));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Regression: a graceful-restart flap must clear the installed ORF filter
+/// set. Previously `handle_peer_graceful_restart` left `peer_orf_filters`
+/// populated, so a peer re-establishing WITHOUT ORF kept being filtered by
+/// the dead session's prefix list — a ghost filter constraining routes the
+/// new session never asked to filter.
+#[tokio::test]
+async fn graceful_restart_clears_orf_filter() {
+    let (tx, handle, target, mut out_rx) = orf_setup().await;
+
+    // First session installs a 10/8-only filter (lifts its gate too).
+    send_peer_orf(
+        &tx,
+        target,
+        WhenToRefresh::Immediate,
+        vec![orf_permit(
+            1,
+            0,
+            32,
+            Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8),
+        )],
+    )
+    .await;
+    let announced = collect_announced(&mut out_rx, 1).await;
+    assert_eq!(
+        announced,
+        vec![Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))]
+    );
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer: target,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    // Re-establish WITHOUT ORF: both routes must flood — the dead session's
+    // 10/8-only filter must not survive into the new session.
+    let (out_tx, mut out_rx2) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+    })
+    .await
+    .unwrap();
+
+    let announced = collect_announced(&mut out_rx2, 2).await;
+    assert!(announced.contains(&Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))));
+    assert!(
+        announced.contains(&Prefix::V4(Ipv4Prefix::new(
+            Ipv4Addr::new(192, 168, 0, 0),
+            16
+        ))),
+        "post-GR initial dump must carry the full table"
+    );
+
+    // The ghost filter bites on churn, not the initial dump (the initial
+    // dump deliberately bypasses ORF filters): announce a fresh prefix the
+    // dead session's 10/8-only filter would deny and assert it floods.
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        announced: vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), 12),
+            Ipv4Addr::new(10, 0, 0, 1),
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let churned = collect_announced(&mut out_rx2, 1).await;
+    assert_eq!(
+        churned,
+        vec![Prefix::V4(Ipv4Prefix::new(
+            Ipv4Addr::new(172, 16, 0, 0),
+            12
+        ))],
+        "post-GR non-ORF session must not inherit the dead session's filter"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
