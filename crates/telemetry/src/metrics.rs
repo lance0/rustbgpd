@@ -55,6 +55,8 @@ pub struct BgpMetrics {
     outbound_route_drops: IntCounterVec,
     blackhole_discard_installed: IntCounter,
     blackhole_discard_withdrawn: IntCounter,
+    blackhole_discard_adopted: IntCounter,
+    blackhole_discard_reaped: IntCounter,
     blackhole_discard_rejected: IntCounterVec,
     blackhole_discard_kernel_failures: IntCounterVec,
     fib_routes_installed: IntCounter,
@@ -342,6 +344,18 @@ impl BgpMetrics {
         let blackhole_discard_withdrawn = IntCounter::new(
             "bgp_blackhole_discard_withdrawn_total",
             "Daemon-owned RFC 7999 BLACKHOLE kernel discard routes successfully removed.",
+        )
+        .expect("valid metric definition");
+
+        let blackhole_discard_adopted = IntCounter::new(
+            "bgp_blackhole_discard_adopted_total",
+            "Marker-matching RFC 7999 BLACKHOLE kernel discard routes adopted by the startup sweep (ADR-0079).",
+        )
+        .expect("valid metric definition");
+
+        let blackhole_discard_reaped = IntCounter::new(
+            "bgp_blackhole_discard_reaped_total",
+            "Adopted-but-unclaimed RFC 7999 BLACKHOLE kernel discard routes reaped after the post-startup deferral.",
         )
         .expect("valid metric definition");
 
@@ -864,6 +878,12 @@ impl BgpMetrics {
             .register(Box::new(blackhole_discard_withdrawn.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(blackhole_discard_adopted.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(blackhole_discard_reaped.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(blackhole_discard_rejected.clone()))
             .expect("metric not already registered");
         registry
@@ -1042,6 +1062,8 @@ impl BgpMetrics {
             outbound_route_drops,
             blackhole_discard_installed,
             blackhole_discard_withdrawn,
+            blackhole_discard_adopted,
+            blackhole_discard_reaped,
             blackhole_discard_rejected,
             blackhole_discard_kernel_failures,
             fib_routes_installed,
@@ -1301,6 +1323,18 @@ impl BgpMetrics {
         self.blackhole_discard_withdrawn.inc();
     }
 
+    /// Record a marker-matching kernel discard route adopted by the
+    /// ADR-0079 startup sweep.
+    pub fn record_blackhole_discard_adopted(&self) {
+        self.blackhole_discard_adopted.inc();
+    }
+
+    /// Record an adopted-but-unclaimed kernel discard route reaped after
+    /// the post-startup deferral.
+    pub fn record_blackhole_discard_reaped(&self) {
+        self.blackhole_discard_reaped.inc();
+    }
+
     /// Record a rejected RFC 7999 kernel-discard candidate.
     ///
     /// `reason` is expected to be `broad_prefix` or `not_ebgp`.
@@ -1313,7 +1347,7 @@ impl BgpMetrics {
     /// Record a kernel apply failure for RFC 7999 discard state.
     ///
     /// `action` is expected to be `setup`, `install`, `remove`,
-    /// `lookup`, or `unsupported_platform`.
+    /// `dump`, or `unsupported_platform`.
     pub fn record_blackhole_discard_kernel_failure(&self, action: &str) {
         self.blackhole_discard_kernel_failures
             .with_label_values(&[action])

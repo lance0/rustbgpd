@@ -11,6 +11,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Blackhole crash-restart reconciliation (ADR-0079).** The RFC 7999 discard
+  reconciler now adopts marker-matching kernel rows (`proto bgp` + blackhole
+  type, main table) on its first pass after a restart instead of rejecting
+  them as `foreign_route_exists`. A still-desired prefix re-claims its row
+  silently (status `adopted`); adopted rows no BGP route re-claims stay
+  visible as `adopted_pending_reap` and are reaped after a 500 s deferral
+  (FRR zebra `-K` parity), so a crashed daemon can no longer leave a discard
+  route blackholing traffic forever — and reaping cannot race BGP
+  reconvergence. New counters: `bgp_blackhole_discard_adopted_total`,
+  `bgp_blackhole_discard_reaped_total`. The reconciler also now performs one
+  kernel route dump per pass instead of one full-table dump per candidate per
+  pass; a failed dump degrades the pass to stale-route removals (status
+  `dump_failed`) instead of churning owned state.
+
 - **Enhanced Route Refresh observability.** Prometheus now exposes
   `bgp_route_refresh_in_progress{peer,afi_safi}` and
   `bgp_route_refresh_stale_entries{peer,afi_safi}` so operators can see active

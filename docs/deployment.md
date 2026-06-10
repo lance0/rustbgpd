@@ -150,6 +150,16 @@ Notes on the sandbox:
 - `ExecReload=kill -HUP` is the supported reload path. See the
   [reload matrix](reload-matrix.md) for which fields hot-apply vs.
   need a restart.
+- **If rustbgpd programs the kernel** (`[[fib_tables]]`,
+  `install_blackhole_discard`, or the EVPN dataplane) on a host that
+  also runs systemd-networkd, set `ManageForeignRoutes=no`,
+  `ManageForeignRoutingPolicyRules=no`, and (where supported)
+  `ManageForeignNextHops=no` in `networkd.conf`. The defaults are
+  `yes`, and networkd will delete routes and next-hop groups it did
+  not create — including rustbgpd's, especially across a daemon
+  restart (ADR-0079). Co-residency with another daemon that claims
+  `proto bgp` kernel state (e.g. FRR zebra) is unsupported for the
+  same reason.
 
 ### Installation
 
