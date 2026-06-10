@@ -78,11 +78,53 @@ pub struct SupervisorConfig {
 
 impl Default for SupervisorConfig {
     fn default() -> Self {
+        let mut actor_config = ReconcileActorConfig::production();
+        let env = match std::env::var(ADOPTION_REAP_DEFERRAL_ENV) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                warn!("ignoring non-unicode {ADOPTION_REAP_DEFERRAL_ENV}");
+                None
+            }
+        };
+        if let Some(deferral) = adoption_reap_deferral_override(env.as_deref()) {
+            info!(
+                deferral_secs = deferral.as_secs(),
+                "{ADOPTION_REAP_DEFERRAL_ENV} overrides the ADR-0079 adoption-reap deferrals"
+            );
+            actor_config.fdb_adoption_reap_deferral = deferral;
+            actor_config.l3_adoption_reap_deferral = deferral;
+        }
         Self {
             poll_interval: Duration::from_secs(5),
-            actor_config: ReconcileActorConfig::production(),
+            actor_config,
         }
     }
+}
+
+/// Test / operational escape hatch for the ADR-0079 adoption-reap
+/// deferrals. When set to a valid `u64` number of seconds, BOTH
+/// `fdb_adoption_reap_deferral` and `l3_adoption_reap_deferral` are
+/// overridden at supervisor construction — the M60 kill-and-restart
+/// interop proof needs a deferral short enough to observe the reap
+/// inside a CI job. Unset or invalid values keep the production
+/// default of 500 s (FRR zebra `-K` parity).
+const ADOPTION_REAP_DEFERRAL_ENV: &str = "RUSTBGPD_EVPN_ADOPTION_REAP_DEFERRAL_SECS";
+
+/// Pure core of the [`ADOPTION_REAP_DEFERRAL_ENV`] override with the
+/// environment value injected, so the parse rule (valid u64 seconds →
+/// override, anything else → keep defaults) is unit-testable without
+/// touching process-global env state.
+fn adoption_reap_deferral_override(env: Option<&str>) -> Option<Duration> {
+    let raw = env?;
+    if let Ok(secs) = raw.trim().parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    warn!(
+        value = %raw,
+        "ignoring invalid {ADOPTION_REAP_DEFERRAL_ENV} (expected seconds as a u64)"
+    );
+    None
 }
 
 /// Cloneable ADR-0063 runtime control surface for daemon apply
@@ -1834,6 +1876,37 @@ mod tests {
     fn extract_seq_returns_none_without_extcomm() {
         let attrs: Vec<PathAttribute> = vec![];
         assert_eq!(extract_mac_mobility_sequence(&attrs), None);
+    }
+
+    #[test]
+    fn adoption_reap_deferral_override_parses_valid_seconds() {
+        assert_eq!(
+            adoption_reap_deferral_override(Some("5")),
+            Some(Duration::from_secs(5))
+        );
+        // Zero is meaningful (reap on the first eligible pass), not
+        // "unset" — the reconcile actor's tests rely on a zero
+        // deferral, so the escape hatch must be able to express it.
+        assert_eq!(
+            adoption_reap_deferral_override(Some("0")),
+            Some(Duration::from_secs(0))
+        );
+        // Surrounding whitespace is tolerated, matching the
+        // RUSTBGPD_WORKER_THREADS precedent.
+        assert_eq!(
+            adoption_reap_deferral_override(Some(" 500 ")),
+            Some(Duration::from_secs(500))
+        );
+    }
+
+    #[test]
+    fn adoption_reap_deferral_override_rejects_invalid_and_unset() {
+        assert_eq!(adoption_reap_deferral_override(None), None);
+        assert_eq!(adoption_reap_deferral_override(Some("")), None);
+        assert_eq!(adoption_reap_deferral_override(Some("abc")), None);
+        assert_eq!(adoption_reap_deferral_override(Some("-1")), None);
+        assert_eq!(adoption_reap_deferral_override(Some("5s")), None);
+        assert_eq!(adoption_reap_deferral_override(Some("1.5")), None);
     }
 
     #[tokio::test]
