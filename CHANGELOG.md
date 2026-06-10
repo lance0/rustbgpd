@@ -171,6 +171,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`[[fib_tables]]` edits no longer quarantine-freeze unrelated owned
+  routes (ADR-0079).** The crash-restart owned-state file was gated on an
+  ordered whole-list signature comparison, so any `[[fib_tables]]` edit
+  across an unclean restart — even reordering stanzas — quarantined the
+  entire file and froze every table's prior routes in the kernel as
+  `foreign_route_exists`. The comparison is now per table and set-wise,
+  keyed by `(table_id, metric)`: reordering is a no-op, adding a table is
+  additive, and editing or removing one table drops only that table's
+  routes from ownership. On a partial mismatch the loader preserves a
+  `.stale` evidence copy and keeps the original file live, so a second
+  crash before the next persist can't strand the surviving tables' routes.
+
 - **Crash-leftover EVPN FDB rows are adopted and reaped (ADR-0079).** The
   dataplane's ownership record dies with the process and the kernel never
   ages `extern_learn` rows, so after an unclean restart a still-desired MAC
