@@ -42,6 +42,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `evpn_l3_neighbor_adopted_total` / `_reaped_total`,
   `evpn_l3vxlan_fdb_adopted_total` / `_reaped_total`.
 
+- **M60 kill-and-restart interop proof for the ADR-0079 EVPN FDB sweep.**
+  New `kernel-dataplane` CI job: rustbgpd programs two FRR-advertised Type 2
+  MACs into a real kernel bridge FDB, is SIGKILLed (the netns and its rows
+  survive), one MAC is withdrawn while the daemon is down, and the restart
+  proves the still-desired row stays present continuously while the unclaimed
+  row is reaped after the deferral — with foreign-static rows untouched and
+  the adoption/reap counters asserted. Ships with a test/operational escape
+  hatch: `RUSTBGPD_EVPN_ADOPTION_REAP_DEFERRAL_SECS` overrides both ADR-0079
+  adoption-reap deferrals (production default stays 500 s, FRR `-K` parity).
+
 - **Enhanced Route Refresh observability.** Prometheus now exposes
   `bgp_route_refresh_in_progress{peer,afi_safi}` and
   `bgp_route_refresh_stale_entries{peer,afi_safi}` so operators can see active

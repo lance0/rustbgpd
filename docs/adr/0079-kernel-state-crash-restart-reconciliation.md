@@ -143,7 +143,13 @@ the sweep model is left as a future simplification, not a requirement.
   then single-dst FDB (extends the existing drift sweep), then L3
   (largest). Each slice needs a kill-and-restart test proving
   stale-state reaping and still-desired re-adoption. All three slices
-  have shipped.
+  have shipped. The FDB slice is proven by the M60 containerlab job
+  (`test-m60-evpn-adoption-sweep.sh`, hosted `kernel-dataplane` CI):
+  SIGKILL with the netns surviving, one MAC withdrawn while the
+  daemon is down, restart with a short deferral via
+  `RUSTBGPD_EVPN_ADOPTION_REAP_DEFERRAL_SECS` — still-desired row
+  held continuously, unclaimed row reaped, foreign rows untouched.
+  The blackhole and L3 kill-and-restart proofs are still open.
 - The per-table set-based unicast signature ends the
   quarantine-freeze-on-edit class without weakening the value-match
   adoption rule.

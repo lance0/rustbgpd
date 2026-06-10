@@ -137,6 +137,20 @@ jobs:
           topology: tests/interop/m48-evpn-tenant-teardown-datapath.clab.yml
           script: tests/interop/scripts/test-m48-evpn-tenant-teardown-datapath.sh
 
+  m60:
+    name: M60 — ADR-0079 EVPN adoption sweep kill-and-restart (FRR 10.3.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-dataplane-host
+      - name: Run M60 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M60
+          topology: tests/interop/m60-evpn-adoption-sweep.clab.yml
+          script: tests/interop/scripts/test-m60-evpn-adoption-sweep.sh
+
   m40:
     name: M40 — ADR-0059 aliasing dataplane ECMP (FRR EVPN-MH 10.3.1)
     runs-on: ubuntu-latest
