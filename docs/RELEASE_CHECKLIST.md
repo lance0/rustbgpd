@@ -318,9 +318,12 @@ If the release touches the **VTEP dataplane** (`crates/evpn-linux/`)
 or **local-MAC origination** (`crates/evpn/src/origination.rs`,
 `src/evpn_originator.rs`, `src/evpn_imet.rs`,
 `crates/wire/src/pmsi.rs`), additionally run M36 (downward, Gate 7b)
-and M37 (upward, Gate 7b+1) before tagging. Both are **local-only,
-privileged smokes** — they require `CAP_NET_ADMIN` or a privileged
-runner and are not in PR-CI:
+and M37 (upward, Gate 7b+1) before tagging. If it touches the
+**ADR-0079 adoption/reap sweep** (`crates/evpn-linux/src/reconcile.rs`),
+M60 (kill-and-restart adoption sweep) runs in the hosted
+`Kernel Dataplane` workflow and can be reproduced manually the same
+way. Both M36 and M37 are **local-only, privileged smokes** — they
+require `CAP_NET_ADMIN` or a privileged runner and are not in PR-CI:
 
 ```bash
 # Build the daemon image (bidirectional VTEP needs CAP_NET_ADMIN)

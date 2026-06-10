@@ -1,0 +1,76 @@
+# Containerlab topology: rustbgpd as EVPN VTEP ↔ FRR originator
+# (M60 — ADR-0079 single-dst FDB adoption sweep kill-and-restart)
+#
+# Validates the ADR-0079 slice-2 adoption sweep against a real Linux
+# kernel: rustbgpd programs `extern_learn` single-dst FDB rows from
+# FRR Type 2 routes (the M36 path), is then SIGKILLed so the kernel
+# rows outlive the process, and is restarted in the same netns with
+# a short adoption-reap deferral. The driver asserts:
+#
+# 1. rustbgpd ↔ FRR L2VPN/EVPN session reaches Established and both
+#    FRR-injected MACs land as `extern_learn` rows (M36 asserts).
+# 2. After `kill -9` of the rustbgpd process (container and netns
+#    survive), both rows are still in the kernel FDB — the
+#    crash-leftover premise.
+# 3. While rustbgpd is down, FRR withdraws one MAC. On restart with
+#    RUSTBGPD_EVPN_ADOPTION_REAP_DEFERRAL_SECS=5 the still-desired
+#    MAC stays present continuously (adopted + re-claimed) while the
+#    withdrawn MAC is reaped after the deferral.
+# 4. Foreign-static FDB rows (no extern_learn marker) survive the
+#    whole cycle — adoption never claims unmarked rows.
+# 5. Prometheus reports evpn_fdb_single_dst_adopted_total >= 2 and
+#    evpn_fdb_single_dst_reaped_total == 1 for the restarted process.
+#
+# Topology:
+#   rustbgpd VTEP (10.0.0.1, AS 65000) ── iBGP L2VPN/EVPN ── FRR (10.0.0.2, AS 65000)
+#
+# iBGP for the same reason as M36 — keeps the test focused on the
+# sweep, not FRR eBGP EVPN export-policy quirks. The rustbgpd node
+# reuses the M36 start script: rustbgpd runs nohup'd in the
+# background with `sleep infinity` as PID 1, so a SIGKILL leaves the
+# container (and its kernel FDB) intact and nothing auto-restarts
+# the daemon — the test script controls the restart.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   sudo containerlab deploy -t tests/interop/m60-evpn-adoption-sweep.clab.yml
+#   bash tests/interop/scripts/test-m60-evpn-adoption-sweep.sh
+#   sudo containerlab destroy -t tests/interop/m60-evpn-adoption-sweep.clab.yml
+
+name: m60-evpn-adoption-sweep
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m60-vtep.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-vtep.sh:/usr/local/bin/start-rustbgpd-vtep.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-vtep.sh 10.0.0.1 100
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug
+        VTEP_LOOPBACK: 10.0.0.1
+        VTEP_VNI: "100"
+
+    originator:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m36-originator.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep.sh:/usr/local/bin/start-frr-vtep.sh:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-vtep.sh 10.0.0.2 100
+      env:
+        VTEP_LOOPBACK: 10.0.0.2
+        VTEP_VNI: "100"
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "originator:eth1"]
