@@ -581,8 +581,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             {
                 let rollback = match prior {
                     Some(prior) => set_policy_definition(&peer_mgr_tx, name.clone(), prior).await,
-                    // The delete succeeded, so the policy existed; an
-                    // unexpectedly missing prior leaves nothing to restore.
+                    // Deletes are idempotent (a missing policy is not an
+                    // error), so a `None` prior leaves nothing to restore.
                     None => Ok(()),
                 };
                 return Err(persist_rollback_error("policy delete", error, rollback));
@@ -776,8 +776,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                         })
                         .await
                     }
-                    // The delete succeeded, so the set existed; an
-                    // unexpectedly missing prior leaves nothing to restore.
+                    // Deletes are idempotent (a missing set is not an
+                    // error), so a `None` prior leaves nothing to restore.
                     None => Ok(()),
                 };
                 return Err(persist_rollback_error(

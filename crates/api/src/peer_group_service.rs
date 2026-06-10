@@ -463,8 +463,8 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
                         })
                         .await
                     }
-                    // The delete succeeded, so the group existed; an
-                    // unexpectedly missing prior leaves nothing to restore.
+                    // Deletes are idempotent (a missing group is not an
+                    // error), so a `None` prior leaves nothing to restore.
                     None => Ok(()),
                 };
                 return Err(persist_rollback_error("peer-group delete", error, rollback));
