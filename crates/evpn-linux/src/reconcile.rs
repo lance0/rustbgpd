@@ -84,6 +84,13 @@ pub struct ReconcileActorConfig {
     /// Operators flip this to `true` once the privileged-runner soak
     /// validates enforcement on their kernel.
     pub apply_bum_enforcement: bool,
+    /// ADR-0079: how long adopted-but-unclaimed single-dst FDB rows
+    /// keep forwarding before the reap. Matches FRR zebra's
+    /// graceful-restart route-sweep deferral default (`-K`, 500 s) —
+    /// long enough for BGP to re-establish and re-announce a
+    /// still-desired MAC, whose re-install re-claims the row and
+    /// exempts it. Tests inject a short / zero value.
+    pub fdb_adoption_reap_deferral: Duration,
 }
 
 impl ReconcileActorConfig {
@@ -96,6 +103,7 @@ impl ReconcileActorConfig {
             drain_timeout: Duration::from_secs(5),
             skip_initial_dump: false,
             apply_bum_enforcement: false,
+            fdb_adoption_reap_deferral: Duration::from_secs(500),
         }
     }
 
@@ -109,6 +117,9 @@ impl ReconcileActorConfig {
             drain_timeout: Duration::from_secs(5),
             skip_initial_dump: false,
             apply_bum_enforcement: false,
+            // Production-length deferral by default; reap tests
+            // override with zero to make the reap fire immediately.
+            fdb_adoption_reap_deferral: Duration::from_secs(500),
         }
     }
 }
@@ -243,6 +254,22 @@ struct ActorState {
     /// stale cleanup. Gates the one-shot adoption/cleanup phase so
     /// subsequent passes skip the dump + sweep.
     adoption_done: bool,
+    /// ADR-0079 slice 2: single-dst `extern_learn` FDB rows adopted
+    /// from the first kernel snapshot of this process lifetime —
+    /// crash leftovers whose ownership record (the in-memory
+    /// [`OwnedSet`]) died with the previous process. They keep
+    /// forwarding until either a desired MAC re-claims them through
+    /// the diff (claim lands in `owned`, key drops out of this set)
+    /// or the reap deadline passes and they're removed.
+    adopted_fdb: BTreeSet<(EvpnInstanceId, MacAddress)>,
+    /// When adopted-but-unclaimed single-dst rows become reapable.
+    /// `None` until the one-shot sweep runs; `Some` doubles as the
+    /// "swept" latch and is never reset within a process lifetime —
+    /// marker rows appearing later are claimed only if desired, never
+    /// queued for reaping (sweeps must not depend on prior-process
+    /// state). A second crash inside the deferral window re-adopts
+    /// harmlessly in the next process (ADR-0079 rule 4).
+    fdb_adoption_reap_after: Option<Instant>,
     /// Last time the steady-state drift-recovery pass ran. ADR-0059
     /// slice 3.5 PR 2: every `periodic_dump` interval (≥ 60 s by
     /// default) after `adoption_done`, the actor re-dumps tagged
@@ -312,6 +339,8 @@ impl ActorState {
             groups: crate::group_state::GroupOwnedMap::new(),
             adopted_unreferenced: BTreeMap::new(),
             adoption_done: false,
+            adopted_fdb: BTreeSet::new(),
+            fdb_adoption_reap_after: None,
             last_drift_check: None,
             drift_disabled: false,
             fdb_nhg_drift_since_report: FdbNhgDriftCounters::default(),
@@ -531,6 +560,34 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 return;
             }
         };
+
+        // ADR-0079 slice 2: one-shot adoption sweep over the first
+        // kernel FDB snapshot. `extern_learn` is OUR ownership marker
+        // by convention (the kernel never sets it on its own learned
+        // entries — ADR-0079's marker table), so a single-dst marker
+        // row absent from the OwnedSet is a crash leftover: adopt it
+        // so it keeps forwarding, and queue it for the deferred reap
+        // unless a desired MAC re-claims it through the diff first.
+        // NHG-tagged rows (`nh_id` set) belong to the ADR-0059 sweep
+        // below.
+        if self.state.fdb_adoption_reap_after.is_none() {
+            self.state.fdb_adoption_reap_after =
+                Some(Instant::now() + self.config.fdb_adoption_reap_deferral);
+            for (&(vni, mac), kernel_entry) in snapshot.iter_fdb() {
+                if kernel_entry.is_extern_learned()
+                    && kernel_entry.nh_id.is_none()
+                    && !self.state.owned.contains(vni, mac)
+                {
+                    self.state.adopted_fdb.insert((vni, mac));
+                    self.state.fdb_nhg_drift_since_report.single_dst_adopted += 1;
+                    tracing::info!(
+                        ?vni,
+                        %mac,
+                        "adopted extern_learn single-dst FDB row from a previous daemon lifetime"
+                    );
+                }
+            }
+        }
 
         // ADR-0059 slice 3b: one-shot startup adoption. Dump tagged
         // nexthops from the kernel and reserve their IDs in the
@@ -754,6 +811,12 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 self.state.last_drift_check = Some(Instant::now());
             }
         }
+
+        // ADR-0079 slice 2: drop claimed rows from the adopted set
+        // and, once the deferral has elapsed and this pass converged
+        // cleanly, reap adopted-but-unclaimed single-dst rows.
+        self.reap_adopted_fdb(&snapshot, intent.remote_macs.as_ref(), !failed.is_empty())
+            .await;
 
         // Update the last-applied BUM plan **per port**:
         // - With `apply_bum_enforcement = false` no kernel mutation
@@ -1564,6 +1627,85 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             let _ = self.cleanup_unreferenced_adoptions(snapshot).await;
         }
         true
+    }
+
+    /// ADR-0079 slice 2 reap: remove adopted single-dst FDB rows that
+    /// no EVPN route re-claimed, once the deferral deadline has
+    /// passed and the current pass had no failed ops (the same
+    /// convergence gate the ADR-0059 cleanup uses — reaping before
+    /// BGP reconverges is the known traffic-gap failure mode).
+    ///
+    /// Claims are implicit (ADR-0079 rule 2): a desired MAC's claim
+    /// `UpdateRemoteFdb` lands in the [`OwnedSet`] via
+    /// `record_success`, so this method first drops every adopted key
+    /// the [`OwnedSet`] now covers — the set shrinks as claims happen.
+    /// Before the deadline, adopted-but-unclaimed rows are left
+    /// exactly as-is: they keep forwarding, which is the point.
+    /// A failed removal stays in the set and retries next pass.
+    async fn reap_adopted_fdb(
+        &mut self,
+        snapshot: &KernelSnapshot,
+        desired: &RemoteMacTable,
+        pass_had_failures: bool,
+    ) {
+        if self.state.adopted_fdb.is_empty() {
+            return;
+        }
+        {
+            let ActorState {
+                adopted_fdb, owned, ..
+            } = &mut self.state;
+            adopted_fdb.retain(|&(vni, mac)| !owned.contains(vni, mac));
+        }
+        if pass_had_failures {
+            return;
+        }
+        let Some(reap_after) = self.state.fdb_adoption_reap_after else {
+            return;
+        };
+        if Instant::now() < reap_after {
+            return;
+        }
+        for (vni, mac) in self.state.adopted_fdb.clone() {
+            if desired.get(vni, mac).is_some() {
+                // Desired but not yet applied (instance NotReady, or
+                // a retry pending). Never reap a desired MAC — the
+                // eventual claim exempts it.
+                continue;
+            }
+            match snapshot.find_fdb(vni, mac) {
+                Some(k) if k.is_extern_learned() && k.nh_id.is_none() => {}
+                _ => {
+                    // Row vanished, was replaced by a foreign row, or
+                    // became NHG-tagged since adoption — no longer
+                    // ours to reap. (Also avoids a `RemoveRemoteFdb`
+                    // that the real dataplane classifies as transient
+                    // on ENOENT and would retry forever.)
+                    self.state.adopted_fdb.remove(&(vni, mac));
+                    continue;
+                }
+            }
+            let op = DataplaneOp::RemoveRemoteFdb { vni, mac };
+            match self.dataplane.apply(&op).await {
+                Ok(()) => {
+                    self.state.adopted_fdb.remove(&(vni, mac));
+                    self.state.fdb_nhg_drift_since_report.single_dst_reaped += 1;
+                    tracing::info!(
+                        ?vni,
+                        %mac,
+                        "reaped adopted single-dst FDB row that no EVPN route re-claimed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        ?vni,
+                        %mac,
+                        "failed to reap adopted single-dst FDB row; will retry next pass"
+                    );
+                }
+            }
+        }
     }
 
     /// On successful apply, mirror state into `owned` so the next

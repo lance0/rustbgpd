@@ -113,6 +113,8 @@ pub struct BgpMetrics {
     evpn_fdb_nhg_drift_groups_replaced: IntCounter,
     evpn_fdb_nhg_orphans_cleaned: IntCounter,
     evpn_fdb_nhg_drift_disabled: IntCounter,
+    evpn_fdb_single_dst_adopted: IntCounter,
+    evpn_fdb_single_dst_reaped: IntCounter,
 
     // ── BMP exporter ───────────────────────────────────────────
     bmp_source_drops: IntCounterVec,
@@ -727,6 +729,18 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_fdb_single_dst_adopted = IntCounter::new(
+            "evpn_fdb_single_dst_adopted_total",
+            "Single-dst extern_learn FDB rows adopted at startup from a previous daemon lifetime (ADR-0079).",
+        )
+        .expect("valid metric definition");
+
+        let evpn_fdb_single_dst_reaped = IntCounter::new(
+            "evpn_fdb_single_dst_reaped_total",
+            "Adopted single-dst FDB rows reaped after the ADR-0079 deferral because no EVPN route re-claimed them.",
+        )
+        .expect("valid metric definition");
+
         let bmp_source_drops = IntCounterVec::new(
             Opts::new(
                 "bmp_source_drops_total",
@@ -1026,6 +1040,12 @@ impl BgpMetrics {
             .register(Box::new(evpn_fdb_nhg_drift_disabled.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_fdb_single_dst_adopted.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_fdb_single_dst_reaped.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(bmp_source_drops.clone()))
             .expect("metric not already registered");
         registry
@@ -1132,6 +1152,8 @@ impl BgpMetrics {
             evpn_fdb_nhg_drift_groups_replaced,
             evpn_fdb_nhg_orphans_cleaned,
             evpn_fdb_nhg_drift_disabled,
+            evpn_fdb_single_dst_adopted,
+            evpn_fdb_single_dst_reaped,
             bmp_source_drops,
             bmp_collector_drops,
             bmp_replay_attempts,
@@ -1702,6 +1724,22 @@ impl BgpMetrics {
             return;
         }
         self.evpn_fdb_nhg_drift_disabled.inc_by(delta);
+    }
+
+    /// Increment the ADR-0079 single-dst FDB adoption counter.
+    pub fn add_evpn_fdb_single_dst_adopted(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_fdb_single_dst_adopted.inc_by(delta);
+    }
+
+    /// Increment the ADR-0079 single-dst FDB reap counter.
+    pub fn add_evpn_fdb_single_dst_reaped(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_fdb_single_dst_reaped.inc_by(delta);
     }
 
     /// Record a BMP event dropped at the PeerSession→BmpManager channel.
@@ -2454,16 +2492,22 @@ mod tests {
         m.add_evpn_fdb_nhg_drift_groups_replaced(3);
         m.add_evpn_fdb_nhg_orphans_cleaned(4);
         m.add_evpn_fdb_nhg_drift_disabled(1);
+        m.add_evpn_fdb_single_dst_adopted(5);
+        m.add_evpn_fdb_single_dst_reaped(6);
 
         assert_eq!(m.evpn_fdb_nhg_drift_members_repaired.get(), 2);
         assert_eq!(m.evpn_fdb_nhg_drift_groups_replaced.get(), 3);
         assert_eq!(m.evpn_fdb_nhg_orphans_cleaned.get(), 4);
         assert_eq!(m.evpn_fdb_nhg_drift_disabled.get(), 1);
+        assert_eq!(m.evpn_fdb_single_dst_adopted.get(), 5);
+        assert_eq!(m.evpn_fdb_single_dst_reaped.get(), 6);
 
         let text = gather_text(&m);
         assert!(text.contains("evpn_fdb_nhg_drift_members_repaired_total 2"));
         assert!(text.contains("evpn_fdb_nhg_drift_groups_replaced_total 3"));
         assert!(text.contains("evpn_fdb_nhg_orphans_cleaned_total 4"));
+        assert!(text.contains("evpn_fdb_single_dst_adopted_total 5"));
+        assert!(text.contains("evpn_fdb_single_dst_reaped_total 6"));
         assert!(text.contains("evpn_fdb_nhg_drift_disabled_total 1"));
     }
 

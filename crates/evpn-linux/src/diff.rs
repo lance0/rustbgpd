@@ -526,15 +526,22 @@ fn emit_fdb_nhg_pass(
 }
 
 /// Decide what to do when `desired` wants `(vni, mac) -> dst` and the
-/// kernel already has *some* entry there. Splits the four interesting
+/// kernel already has *some* entry there. Splits the five interesting
 /// cases:
 ///
 /// 1. We own it (`extern_learn` + `last_applied`) and dst matches — no-op.
 /// 2. We own it but dst differs — emit `UpdateRemoteFdb` (mobility).
-/// 3. Foreign kernel-learned local MAC — log + skip; the upward
+/// 3. `extern_learn` but NOT in `last_applied` — a crash leftover from
+///    a previous daemon lifetime (the in-memory [`OwnedSet`] dies with
+///    the process). Emit `UpdateRemoteFdb` unconditionally, even when
+///    the kernel dst already matches: the REPLACE is the implicit
+///    re-claim (ADR-0079 rule 2) — it flows through apply →
+///    `record_success` → [`OwnedSet`], after which the row is ours
+///    again and exempt from the adoption reap.
+/// 4. Foreign kernel-learned local MAC — log + skip; the upward
 ///    `LocalMacObservation` handles RFC 7432 §15 mobility resolution at
 ///    the domain layer.
-/// 4. Foreign static / permanent / `self` entry — operator territory;
+/// 5. Foreign static / permanent / `self` entry — operator territory;
 ///    skip without logging at warn level.
 fn handle_existing_kernel_entry(
     vni: EvpnInstanceId,
@@ -544,17 +551,28 @@ fn handle_existing_kernel_entry(
     last_applied: &OwnedSet,
     updates: &mut Vec<DataplaneOp>,
 ) {
-    let we_own_it = kernel_entry.is_extern_learned() && last_applied.contains(vni, mac);
-
-    if we_own_it {
-        if kernel_entry.dst != Some(desired_dst) {
-            updates.push(DataplaneOp::UpdateRemoteFdb {
-                vni,
-                mac,
-                dst: desired_dst,
-            });
+    if kernel_entry.is_extern_learned() {
+        if last_applied.contains(vni, mac) {
+            if kernel_entry.dst != Some(desired_dst) {
+                updates.push(DataplaneOp::UpdateRemoteFdb {
+                    vni,
+                    mac,
+                    dst: desired_dst,
+                });
+            }
+            // else: kernel already matches; no-op.
+            return;
         }
-        // else: kernel already matches; no-op.
+        // `extern_learn` is OUR ownership marker by convention — the
+        // kernel never sets it on its own learned entries (ADR-0079's
+        // marker table) — so a marker row absent from `last_applied`
+        // is a crash leftover to re-claim, not a foreign entry to
+        // preserve.
+        updates.push(DataplaneOp::UpdateRemoteFdb {
+            vni,
+            mac,
+            dst: desired_dst,
+        });
         return;
     }
 
@@ -725,6 +743,68 @@ mod tests {
         e.mac = mac(1);
         snapshot.insert_fdb(vni(100), e);
         let applied = applied_one(vni(100), mac(1), "10.0.0.2", None);
+        let probes = ready_probes(&[vni(100)]);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
+        );
+        assert_eq!(
+            plan.ops,
+            vec![DataplaneOp::UpdateRemoteFdb {
+                vni: vni(100),
+                mac: mac(1),
+                dst: ip("10.0.0.3"),
+            }]
+        );
+    }
+
+    // 3b. ADR-0079 implicit re-claim — desired MAC, extern_learn
+    //     kernel row with MATCHING dst, but empty OwnedSet (post-crash
+    //     restart). The REPLACE is the claim: UpdateRemoteFdb must be
+    //     emitted even though the kernel already matches, so the row
+    //     flows through apply → record_success → OwnedSet.
+    #[test]
+    fn crash_leftover_matching_dst_is_reclaimed_via_update() {
+        let desired = desired_one(vni(100), mac(1), entry("10.0.0.2", None));
+        let mut snapshot = KernelSnapshot::new();
+        let mut e = ours("10.0.0.2");
+        e.mac = mac(1);
+        snapshot.insert_fdb(vni(100), e);
+        let applied = OwnedSet::new();
+        let probes = ready_probes(&[vni(100)]);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
+        );
+        assert_eq!(
+            plan.ops,
+            vec![DataplaneOp::UpdateRemoteFdb {
+                vni: vni(100),
+                mac: mac(1),
+                dst: ip("10.0.0.2"),
+            }]
+        );
+    }
+
+    // 3c. ADR-0079 implicit re-claim with a STALE dst — the VTEP moved
+    //     while the daemon was down. The claim must carry the desired
+    //     dst, healing the stale row in the same REPLACE.
+    #[test]
+    fn crash_leftover_stale_dst_is_reclaimed_with_desired_dst() {
+        let desired = desired_one(vni(100), mac(1), entry("10.0.0.3", None));
+        let mut snapshot = KernelSnapshot::new();
+        let mut e = ours("10.0.0.2");
+        e.mac = mac(1);
+        snapshot.insert_fdb(vni(100), e);
+        let applied = OwnedSet::new();
         let probes = ready_probes(&[vni(100)]);
         let plan = compute_diff(
             &desired,

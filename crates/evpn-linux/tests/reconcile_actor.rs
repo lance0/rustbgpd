@@ -1400,6 +1400,8 @@ fn sum_fdb_nhg_drift_counters(
             acc.groups_replaced += r.fdb_nhg_drift_counters.groups_replaced;
             acc.orphans_cleaned += r.fdb_nhg_drift_counters.orphans_cleaned;
             acc.drift_disabled += r.fdb_nhg_drift_counters.drift_disabled;
+            acc.single_dst_adopted += r.fdb_nhg_drift_counters.single_dst_adopted;
+            acc.single_dst_reaped += r.fdb_nhg_drift_counters.single_dst_reaped;
             acc
         },
     )
@@ -1797,6 +1799,357 @@ async fn drift_recovery_permanent_dump_failure_latches_off() {
     );
 
     h.shutdown().await;
+}
+
+// ─── ADR-0079 slice 2: single-dst FDB crash-restart adoption sweep ───
+//
+// These tests simulate the post-crash shape directly: the fake kernel
+// is pre-loaded with `extern_learn` rows (our ownership marker from a
+// previous lifetime) and the actor starts with an empty OwnedSet.
+
+/// A single-dst FDB row carrying our `extern_learn` ownership marker —
+/// what a crashed daemon leaves behind in the kernel.
+fn extern_learn_row(m: MacAddress, dst: &str) -> KernelFdbEntry {
+    KernelFdbEntry {
+        mac: m,
+        dst: Some(ipa(dst)),
+        nh_id: None,
+        flags: KernelFdbFlags {
+            extern_learn: true,
+            master: true,
+            ..Default::default()
+        },
+    }
+}
+
+// 1. A crash leftover whose MAC is still desired is re-claimed: the
+//    diff emits the claim REPLACE (even though the kernel dst already
+//    matches) and the row lands in the applied report + OwnedSet —
+//    not the foreign-skip path.
+#[tokio::test]
+async fn crash_leftover_desired_mac_is_reclaimed() {
+    use rustbgpd_evpn::DataplaneOpKind;
+
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    h.handle
+        .pre_load_fdb(vni(100), extern_learn_row(mac(1), "10.0.0.2"));
+
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx.send(intent(1, inst, macs.build())).unwrap();
+
+    let mut reports = Vec::new();
+    loop {
+        let r = h.next_report().await;
+        let done = r.intent_generation == 1 && !r.applied.is_empty();
+        reports.push(r);
+        if done {
+            break;
+        }
+    }
+    let claim = reports.last().unwrap();
+    assert_eq!(claim.applied.len(), 1, "applied: {:?}", claim.applied);
+    assert!(
+        matches!(
+            claim.applied[0].kind,
+            DataplaneOpKind::UpdateRemoteFdb { mac: m, dst } if m == mac(1) && dst == ipa("10.0.0.2")
+        ),
+        "claim must be the REPLACE-shaped UpdateRemoteFdb, got {:?}",
+        claim.applied[0].kind,
+    );
+    assert!(claim.failed.is_empty(), "{:?}", claim.failed);
+
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(counters.single_dst_adopted, 1);
+    assert_eq!(counters.single_dst_reaped, 0, "claimed row must not reap");
+
+    // Row still forwards at the desired VTEP.
+    let snap = h.handle.kernel_snapshot();
+    let row = snap.find_fdb(vni(100), mac(1)).expect("row must survive");
+    assert_eq!(row.dst, Some(ipa("10.0.0.2")));
+
+    h.shutdown().await;
+}
+
+// 2. An adopted-but-unclaimed row keeps forwarding while the deferral
+//    window is open — that is the point of the deferral. A clean
+//    shutdown inside the window must not reap it either.
+#[tokio::test(start_paused = true)]
+async fn crash_leftover_unclaimed_row_kept_before_deferral() {
+    // for_tests() carries the production-length 500 s deferral.
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    h.handle
+        .pre_load_fdb(vni(100), extern_learn_row(mac(7), "10.0.0.9"));
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent(1, inst, RemoteMacTable::new()))
+        .unwrap();
+
+    let mut reports = Vec::new();
+    loop {
+        let r = h.next_report().await;
+        let done = r.intent_generation == 1;
+        reports.push(r);
+        if done {
+            break;
+        }
+    }
+    // A couple of periodic passes well inside the deferral window.
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    reports.extend(h.try_drain_reports().await);
+
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(counters.single_dst_adopted, 1);
+    assert_eq!(
+        counters.single_dst_reaped, 0,
+        "must not reap inside the deferral window"
+    );
+    assert!(
+        h.handle.kernel_has_fdb(vni(100), mac(7)),
+        "adopted row must keep forwarding before the deferral elapses"
+    );
+
+    let handle = h.handle.clone();
+    h.shutdown().await;
+    assert!(
+        handle.kernel_has_fdb(vni(100), mac(7)),
+        "shutdown drain only touches owned entries; adopted-but-unclaimed rows \
+         are left for the next lifetime to re-adopt (ADR-0079 rule 4)"
+    );
+}
+
+// 3. After the deferral, an unclaimed row is reaped — and a desired
+//    row adopted in the same sweep is NOT (its claim exempts it).
+#[tokio::test]
+async fn crash_leftover_unclaimed_row_reaped_after_deferral() {
+    let cfg = ReconcileActorConfig {
+        fdb_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    // Withdrawn-while-down leftover — steers into a dead tunnel.
+    h.handle
+        .pre_load_fdb(vni(100), extern_learn_row(mac(7), "10.0.0.9"));
+    // Still-desired leftover alongside it.
+    h.handle
+        .pre_load_fdb(vni(100), extern_learn_row(mac(1), "10.0.0.2"));
+
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx.send(intent(1, inst, macs.build())).unwrap();
+
+    let mut reports = Vec::new();
+    for _ in 0..10 {
+        reports.push(h.next_report().await);
+        if !h.handle.kernel_has_fdb(vni(100), mac(7)) {
+            break;
+        }
+    }
+
+    assert!(
+        !h.handle.kernel_has_fdb(vni(100), mac(7)),
+        "unclaimed row must be reaped after the deferral"
+    );
+    assert!(
+        h.handle.kernel_has_fdb(vni(100), mac(1)),
+        "desired row must be claimed, never reaped"
+    );
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(counters.single_dst_adopted, 2);
+    assert_eq!(counters.single_dst_reaped, 1);
+
+    h.shutdown().await;
+}
+
+// 4. Foreign rows — operator-static and kernel-learned-local — carry
+//    no ownership marker and must be neither adopted nor reaped, even
+//    with a zero deferral.
+#[tokio::test(start_paused = true)]
+async fn foreign_rows_never_adopted_or_reaped() {
+    let cfg = ReconcileActorConfig {
+        fdb_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    // Operator-static (permanent) row.
+    h.handle.pre_load_fdb(
+        vni(100),
+        KernelFdbEntry {
+            mac: mac(8),
+            dst: Some(ipa("10.0.0.8")),
+            nh_id: None,
+            flags: KernelFdbFlags {
+                permanent: true,
+                master: true,
+                ..Default::default()
+            },
+        },
+    );
+    // Kernel-learned local row (dynamic, no flags, no dst).
+    h.handle.pre_load_fdb(
+        vni(100),
+        KernelFdbEntry {
+            mac: mac(9),
+            dst: None,
+            nh_id: None,
+            flags: KernelFdbFlags::default(),
+        },
+    );
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent(1, inst, RemoteMacTable::new()))
+        .unwrap();
+
+    let mut reports = Vec::new();
+    loop {
+        let r = h.next_report().await;
+        let done = r.intent_generation == 1;
+        reports.push(r);
+        if done {
+            break;
+        }
+    }
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    reports.extend(h.try_drain_reports().await);
+
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(counters.single_dst_adopted, 0, "foreign rows are not ours");
+    assert_eq!(counters.single_dst_reaped, 0);
+    assert!(h.handle.kernel_has_fdb(vni(100), mac(8)));
+    assert!(h.handle.kernel_has_fdb(vni(100), mac(9)));
+
+    h.shutdown().await;
+}
+
+// 5. An `extern_learn` row with `nh_id` set is ADR-0059 territory —
+//    the single-dst sweep must not adopt (or reap) it.
+#[tokio::test]
+async fn nhg_tagged_rows_left_to_adr0059_sweep() {
+    let cfg = ReconcileActorConfig {
+        fdb_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    h.handle.pre_load_fdb(
+        vni(100),
+        KernelFdbEntry {
+            mac: mac(5),
+            dst: None,
+            nh_id: Some(0x4000_0001),
+            flags: KernelFdbFlags {
+                extern_learn: true,
+                master: true,
+                ..Default::default()
+            },
+        },
+    );
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent(1, inst, RemoteMacTable::new()))
+        .unwrap();
+
+    let mut reports = Vec::new();
+    loop {
+        let r = h.next_report().await;
+        let done = r.intent_generation == 1;
+        reports.push(r);
+        if done {
+            break;
+        }
+    }
+
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(
+        counters.single_dst_adopted, 0,
+        "NHG-tagged rows belong to the ADR-0059 drift sweep"
+    );
+    assert_eq!(counters.single_dst_reaped, 0);
+    assert!(
+        h.handle.kernel_has_fdb(vni(100), mac(5)),
+        "the single-dst sweep must not touch an NHG-tagged row"
+    );
+
+    h.shutdown().await;
+}
+
+// 6. Idempotence under repeated crash: a second fresh actor over the
+//    same kernel state (the first one shut down inside its deferral
+//    window) re-adopts harmlessly, and the row is reaped exactly once.
+#[tokio::test]
+async fn double_crash_readoption_is_idempotent() {
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+
+    // Lifetime 1: long deferral — adopt, then "crash"/stop inside the
+    // window. The unclaimed row must survive.
+    let mut h1 = Harness::spawn(ReconcileActorConfig::for_tests());
+    h1.handle.set_probe(vni(100), InstanceProbe::Ready);
+    h1.handle
+        .pre_load_fdb(vni(100), extern_learn_row(mac(7), "10.0.0.9"));
+    h1.intent_tx
+        .send(intent(1, inst.clone(), RemoteMacTable::new()))
+        .unwrap();
+    let mut reports1 = Vec::new();
+    loop {
+        let r = h1.next_report().await;
+        let done = r.intent_generation == 1;
+        reports1.push(r);
+        if done {
+            break;
+        }
+    }
+    assert_eq!(sum_fdb_nhg_drift_counters(&reports1).single_dst_adopted, 1);
+    let handle1 = h1.handle.clone();
+    h1.shutdown().await;
+    assert!(
+        handle1.kernel_has_fdb(vni(100), mac(7)),
+        "row must survive a shutdown inside the deferral window"
+    );
+
+    // Lifetime 2: fresh actor over the surviving kernel state (the
+    // OwnedSet died with lifetime 1), zero deferral. Re-adoption is
+    // harmless and the reap happens exactly once.
+    let cfg = ReconcileActorConfig {
+        fdb_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h2 = Harness::spawn(cfg);
+    h2.handle.set_probe(vni(100), InstanceProbe::Ready);
+    for (&(v, _), e) in handle1.kernel_snapshot().iter_fdb() {
+        h2.handle.pre_load_fdb(v, e.clone());
+    }
+    h2.intent_tx
+        .send(intent(1, inst, RemoteMacTable::new()))
+        .unwrap();
+
+    let mut reports2 = Vec::new();
+    for _ in 0..10 {
+        reports2.push(h2.next_report().await);
+        if !h2.handle.kernel_has_fdb(vni(100), mac(7)) {
+            break;
+        }
+    }
+    let counters = sum_fdb_nhg_drift_counters(&reports2);
+    assert_eq!(
+        counters.single_dst_adopted, 1,
+        "second adoption is one-shot"
+    );
+    assert_eq!(counters.single_dst_reaped, 1, "row reaped exactly once");
+    assert!(!h2.handle.kernel_has_fdb(vni(100), mac(7)));
+
+    h2.shutdown().await;
 }
 
 #[allow(dead_code)]
