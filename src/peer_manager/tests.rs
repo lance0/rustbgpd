@@ -2480,6 +2480,85 @@ async fn apply_policy_change_reaches_live_dynamic_peers() {
     rib_drainer.await.unwrap();
 }
 
+/// A catalog mutation's fan-out is atomic: when applying the resolved
+/// chains to peer 2 fails mid-loop, peer 1 (already updated) is restored
+/// to its prior chains, peer 3 is never touched, and `current_config`
+/// does not advance — no split-brain where some sessions run the new
+/// policy and others the old.
+#[tokio::test]
+async fn apply_policy_change_mid_fanout_failure_restores_prior_chains() {
+    use rustbgpd_api::peer_types::{NamedPolicyDefinition, PolicyStatementDefinition};
+
+    let mut mgr = live_policy_test_manager();
+    let a1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let a2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)); // its apply fails
+    let a3 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    insert_test_managed_peer(
+        &mut mgr,
+        a1,
+        acking_policy_handle(a1, SessionState::Idle),
+        false,
+    );
+    insert_test_managed_peer(&mut mgr, a2, closed_peer_handle(), false);
+    insert_test_managed_peer(
+        &mut mgr,
+        a3,
+        acking_policy_handle(a3, SessionState::Idle),
+        false,
+    );
+    // Static records whose import chain references the policy being set.
+    mgr.current_config.neighbors = [a1, a2, a3]
+        .into_iter()
+        .map(|addr| {
+            let mut neighbor = config_neighbor(addr, 65002);
+            neighbor.import_policy_chain = vec!["edge-import".to_string()];
+            neighbor
+        })
+        .collect();
+    let prior = validation_policy_chain(ImportValidationDependency::Rpki);
+    for a in [a1, a2, a3] {
+        mgr.peers.get_mut(&key(a)).unwrap().import_policy = Some(prior.clone());
+    }
+
+    let result = mgr
+        .apply_policy_change(
+            ConfigEvent::SetPolicy {
+                name: "edge-import".to_string(),
+                definition: NamedPolicyDefinition {
+                    default_action: "deny".to_string(),
+                    statements: Vec::<PolicyStatementDefinition>::new(),
+                },
+                ack: None,
+            },
+            // Explicit order so peer 1 is applied before peer 2 fails.
+            Some(vec![a1, a2, a3]),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "a mid-fanout per-peer failure must surface as Err: {result:?}"
+    );
+
+    let expect_prior = format!("{:?}", Some(prior));
+    assert_eq!(
+        format!("{:?}", mgr.peers.get(&key(a1)).unwrap().import_policy),
+        expect_prior,
+        "peer 1 must be restored to its prior chain after the self-heal"
+    );
+    assert_eq!(
+        format!("{:?}", mgr.peers.get(&key(a3)).unwrap().import_policy),
+        expect_prior,
+        "peer 3 was never reached and must keep its prior chain"
+    );
+    assert!(
+        !mgr.current_config
+            .policy
+            .definitions
+            .contains_key("edge-import"),
+        "a failed catalog mutation must not advance current_config"
+    );
+}
+
 #[tokio::test]
 async fn validation_cache_refresh_targets_matching_established_import_policies() {
     let mut mgr = test_peer_manager();

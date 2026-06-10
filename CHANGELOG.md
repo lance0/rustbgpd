@@ -188,6 +188,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Catalog policy mutations apply to peers atomically.** The fan-out shared
+  by all 12 policy / neighbor-set / policy-chain catalog mutators (`SetPolicy`,
+  `DeletePolicy`, neighbor sets, global and per-neighbor chain edits) updated
+  affected peers' resolved import/export chains in a loop: a mid-loop failure
+  (for example one Established peer rejecting the required Route Refresh) left
+  already-updated peers running the new chains while later peers kept the old
+  ones — split-brain policy across sessions. The fan-out now resolves every
+  affected peer's chains first, then commits the whole set through the
+  ADR-0076 resolved-policy-snapshot primitive: on a mid-fanout failure the
+  already-updated peers are restored to their captured prior chains, the
+  mutation is rejected cleanly, and the runtime config does not advance.
+
 - **Crash-leftover EVPN FDB rows are adopted and reaped (ADR-0079).** The
   dataplane's ownership record dies with the process and the kernel never
   ages `extern_learn` rows, so after an unclean restart a still-desired MAC

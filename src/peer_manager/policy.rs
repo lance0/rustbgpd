@@ -757,7 +757,15 @@ impl PeerManager {
                     .collect()
             },
         );
-        let mut affected_peer_count = 0usize;
+        // Resolve every affected peer's chains BEFORE mutating anything, then
+        // commit the whole set through the atomic resolved-policy snapshot
+        // path (the ADR-0076 live-impact executor's capturing mechanism).
+        // The two-phase shape is what makes the fan-out atomic: a resolution
+        // failure rejects with zero peers touched, and a mid-fanout apply
+        // failure restores the already-updated peers to their captured
+        // priors — no more split-brain where peers updated before the
+        // failure run the new chains while the rest keep the old ones.
+        let mut targets: Vec<ResolvedPeerPolicy> = Vec::new();
         for peer_key in peers {
             let Some(managed) = self.peers.get(&peer_key) else {
                 continue;
@@ -800,19 +808,20 @@ impl PeerManager {
                 }
                 Err(error) => return Err(catalog_config_error(error)),
             };
-            affected_peer_count += 1;
-            self.update_runtime_policies_for_peer_key(
-                peer_key,
+            targets.push(ResolvedPeerPolicy {
+                address,
+                interface: peer_key.interface.clone(),
                 import_policy,
                 export_policy,
-                RefreshFailureHandling::Fatal,
-            )
+            });
+        }
+        let applied = self
+            .apply_resolved_policy_snapshot(targets)
             .await
             .map_err(CatalogMutationError::internal)?;
-        }
 
         self.current_config = next_config;
-        self.publish_policy_config_event(&event, affected_peer_count);
+        self.publish_policy_config_event(&event, applied.len());
         Ok(())
     }
 
