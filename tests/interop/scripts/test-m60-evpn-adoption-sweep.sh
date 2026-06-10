@@ -234,8 +234,11 @@ frr_withdraw_mac "$MAC_B"
 # the Type 2 is gone.
 b_withdrawn=0
 for _ in $(seq 1 30); do
-    if ! docker exec "$ORIGINATOR" vtysh -c "show bgp l2vpn evpn route" 2>/dev/null \
-        | grep -qiF "$MAC_B"; then
+    # Capture the table only when vtysh actually answered: a failed
+    # exec must read as "still unknown", not "withdrawn", or a
+    # momentarily unavailable FRR would falsely pass the gate.
+    if evpn_table=$(docker exec "$ORIGINATOR" vtysh -c "show bgp l2vpn evpn route" 2>/dev/null) \
+        && ! printf '%s\n' "$evpn_table" | grep -qiF "$MAC_B"; then
         b_withdrawn=1
         break
     fi
