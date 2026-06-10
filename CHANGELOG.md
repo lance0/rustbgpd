@@ -171,6 +171,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Crash-leftover EVPN FDB rows are adopted and reaped (ADR-0079).** The
+  dataplane's ownership record dies with the process and the kernel never
+  ages `extern_learn` rows, so after an unclean restart a still-desired MAC
+  was never re-owned and a MAC withdrawn while the daemon was down kept
+  steering traffic into a dead VXLAN tunnel forever. Single-destination
+  marker rows are now adopted from the first kernel snapshot: a desired MAC
+  re-claims its row implicitly (the re-program is the claim), and rows no
+  EVPN route re-claims are reaped after a 500 s deferral plus a clean apply
+  pass — reaping can't race BGP reconvergence. NHG-tagged rows keep their
+  existing ADR-0059 sweep; operator-static and kernel-learned entries stay
+  untouched. New counters: `evpn_fdb_single_dst_adopted_total`,
+  `evpn_fdb_single_dst_reaped_total`.
+
 - **Inbound routes are never dropped on a busy RIB (ADR-0078).**
   `RoutesReceived` delivery used a lossy `try_send`: a full RIB channel
   silently discarded the batch — a dropped announce was a permanently missing
