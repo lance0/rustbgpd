@@ -2711,3 +2711,142 @@ async fn l3_dump_failure_leaves_latch_unset_then_later_pass_adopts() {
 
     h.shutdown().await;
 }
+
+/// Removing all `[[evpn_ip_vrfs]]` config mid-deferral must not lose
+/// adoption tracking: a reap-eligible pass with an empty VRF table
+/// would re-dump `Some(empty)` and silently drop every adopted key,
+/// so the reap can never fire once config returns. The guard keeps
+/// the adopted sets intact across the config flap.
+#[tokio::test]
+async fn l3_config_removal_mid_window_keeps_adoption_tracking() {
+    let vrf2_id = IpVrfId::new(102).unwrap();
+    const VRF2_TABLE_ID: u32 = 202;
+    const VRF2_IFINDEX: u32 = 52;
+    let vrf2 = || {
+        IpVrf::new(
+            "vrf102".to_string(),
+            vrf2_id,
+            "65000:102".parse().unwrap(),
+            vec!["65000:102".parse().unwrap()],
+            ipa("10.0.0.1"),
+            l3_local_mac(),
+            "vrf102".to_string(),
+            "l3vxlan102".to_string(),
+            VRF2_TABLE_ID,
+        )
+        .unwrap()
+    };
+    let both_vrfs = || {
+        let mut t = l3_ip_vrfs();
+        t.insert(vrf2()).unwrap();
+        t
+    };
+    let vrf2_only = || {
+        let mut t = IpVrfTable::new();
+        t.insert(vrf2()).unwrap();
+        t
+    };
+
+    let cfg = ReconcileActorConfig {
+        l3_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    // VRF 101 is Ready and keeps a desired prefix (so `l3_owned` is
+    // non-empty and the L3 block still runs once config empties); its
+    // leftover rows are claimed in pass 1. VRF 102 resolves an
+    // ifindex but is NOT Ready — its unclaimed neighbor + FDB rows
+    // survive pass 1 through the not-ready reap skip. (No leftover
+    // route for VRF 102: route reap has no not-ready skip and would
+    // fire at the zero deadline.)
+    h.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+    h.handle.set_l3vxlan_ifindex(vrf2_id, VRF2_IFINDEX);
+    pre_load_l3_marker_rows(&h.handle);
+    h.handle
+        .pre_load_l3_neighbor(VRF2_IFINDEX, ipa("10.0.1.2"), l3_router_mac(), true);
+    h.handle
+        .pre_load_l3_vxlan_fdb(VRF2_IFINDEX, l3_router_mac(), ipa("10.0.1.2"), true);
+
+    let vrfs = both_vrfs();
+    let desired = l3_desired_prefixes(&vrfs);
+    h.intent_tx.send(l3_intent(1, vrfs, desired)).unwrap();
+    let mut reports = Vec::new();
+    loop {
+        let r = h.next_report().await;
+        let done = r.intent_generation == 1;
+        reports.push(r);
+        if done {
+            break;
+        }
+    }
+    let counters = sum_l3_adoption_counters(&reports);
+    assert_eq!(counters.neighbors_adopted, 2);
+    assert_eq!(counters.l3vxlan_fdb_adopted, 2);
+    assert_eq!(
+        counters.neighbors_reaped + counters.l3vxlan_fdb_reaped,
+        0,
+        "VRF 102's unclaimed rows must survive pass 1 (not Ready)"
+    );
+
+    // Config flap: every [[evpn_ip_vrfs]] entry removed. The pass
+    // drains VRF 101's owned rows; the reap-eligible call must keep
+    // VRF 102's adopted keys rather than dropping them off an empty
+    // re-dump.
+    h.intent_tx
+        .send(l3_intent(2, IpVrfTable::new(), RemoteIpPrefixTable::new()))
+        .unwrap();
+    loop {
+        let r = h.next_report().await;
+        let done = r.intent_generation == 2;
+        reports.push(r);
+        if done {
+            break;
+        }
+    }
+    assert!(
+        h.handle
+            .kernel_has_l3_neighbor(VRF2_IFINDEX, ipa("10.0.1.2")),
+        "no reap may fire while the VRF table is empty"
+    );
+
+    // Config returns with VRF 102 Ready and nothing desired — the
+    // preserved adopted keys must now reap.
+    h.handle.set_ip_vrf_status(
+        vrf2_id,
+        IpVrfStatus::Ready {
+            vrf_ifindex: 51,
+            l3vxlan_ifindex: VRF2_IFINDEX,
+            table_id: VRF2_TABLE_ID,
+            router_mac: l3_local_mac(),
+        },
+    );
+    h.intent_tx
+        .send(l3_intent(3, vrf2_only(), RemoteIpPrefixTable::new()))
+        .unwrap();
+    let mut reaped = false;
+    for _ in 0..10 {
+        reports.extend(h.try_drain_reports().await);
+        if !h
+            .handle
+            .kernel_has_l3_neighbor(VRF2_IFINDEX, ipa("10.0.1.2"))
+            && !h
+                .handle
+                .kernel_has_l3_vxlan_fdb(VRF2_IFINDEX, l3_router_mac())
+        {
+            reaped = true;
+            break;
+        }
+        h.handle.push_event(KernelEvent::KernelStateChanged).await;
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        reaped,
+        "adoption tracking lost across the config flap — reap never fired"
+    );
+    let counters = sum_l3_adoption_counters(&reports);
+    assert_eq!(counters.neighbors_reaped, 1);
+    assert_eq!(counters.l3vxlan_fdb_reaped, 1);
+
+    h.shutdown().await;
+}

@@ -1965,6 +1965,17 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         if Instant::now() < reap_after {
             return;
         }
+        // An empty `[[evpn_ip_vrfs]]` table can't scope the markers:
+        // the re-dump below would legitimately return `Some(empty)`
+        // and the retains would drop every adopted key without a reap,
+        // losing track of the kernel rows permanently. The tables and
+        // devices also aren't ours to manage without the config — so
+        // keep the adopted sets untouched and let a pass that has the
+        // config back (before this latch's deferral, or via a later
+        // reconcile) decide claim vs reap.
+        if ip_vrfs.is_empty() {
+            return;
+        }
         // Re-dump before removing anything: a row that vanished, lost
         // its markers, or was replaced by a foreign row since
         // adoption is no longer ours to reap — kernel reality wins,
