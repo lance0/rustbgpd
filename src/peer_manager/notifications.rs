@@ -111,7 +111,12 @@ impl PeerManager {
                     // Skip pending inbound logic for removed dynamic peers
                 } else {
                     let enabled = self.peers.get(&peer_key).is_some_and(|m| m.enabled);
-                    if enabled {
+                    // RFC 5882 coupling: a BFD hold must also gate candidate
+                    // promotion. The primary often goes BackToIdle BECAUSE
+                    // BFD tore it down — promoting a candidate spawned before
+                    // the hold would re-establish BGP over the BFD-down path.
+                    let withheld = self.bfd_withholding(&peer_addr);
+                    if enabled && !withheld {
                         // Existing primary failed — promote the already-running
                         // inbound candidate if one exists.
                         if self.promote_pending_inbound(&peer_key).await {
@@ -124,6 +129,9 @@ impl PeerManager {
                     {
                         self.unregister_session(pending.session_id);
                         let _ = pending.handle.shutdown().await;
+                        if withheld {
+                            info!(%peer_addr, "BFD withholding — dropped inbound collision candidate instead of promoting");
+                        }
                     }
                 }
             }

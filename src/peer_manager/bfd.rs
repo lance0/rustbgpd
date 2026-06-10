@@ -250,6 +250,21 @@ impl PeerManager {
                 if already_held {
                     return;
                 }
+                // Tear down a pending collision candidate too. It is a live,
+                // already-started session: stopping only the primary would
+                // let the candidate's BackToIdle promotion re-establish BGP
+                // over the BFD-down path moments later (the inbound-accept
+                // gate only blocks connections accepted AFTER the hold
+                // begins, not a candidate spawned before it).
+                let pending = peer_key
+                    .as_ref()
+                    .and_then(|key| self.peers.get_mut(key))
+                    .and_then(|managed| managed.pending_inbound.take());
+                if let Some(pending) = pending {
+                    self.unregister_session(pending.session_id);
+                    let _ = pending.handle.shutdown().await;
+                    info!(%peer, "BFD down — shut down pending inbound collision candidate");
+                }
                 if let Some(managed) = peer_key.as_ref().and_then(|key| self.peers.get(key)) {
                     let reason = bytes::Bytes::from_static(b"BFD session down");
                     if let Err(e) = managed.handle.stop(Some(reason)).await {

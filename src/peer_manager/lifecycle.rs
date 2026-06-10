@@ -431,6 +431,24 @@ impl PeerManager {
         next_tcp_ao: Option<&TcpAoConfig>,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         let address = peer.address;
+        // Dynamic-range peers are not deletable through the static-neighbor
+        // surface: they auto-remove when their session ends (a range delete
+        // only stops future accepts). Deleting one here would permanently
+        // leak its dynamic_neighbor_limit slot (the BackToIdle decrement
+        // never runs for it), and the persist-failure rollback would
+        // resurrect it as a persisted static neighbor. Mirrors the reshape
+        // executor's dynamic guard.
+        if self
+            .peers
+            .get(&peer)
+            .is_some_and(|managed| managed.is_dynamic)
+        {
+            return Err(PeerLifecycleError::Invalid(format!(
+                "peer {address} is a dynamic-range peer; dynamic peers are removed \
+                 automatically when their session ends — delete the dynamic-neighbor \
+                 range to stop future accepts"
+            )));
+        }
         let current_tcp_ao = self
             .peers
             .get(&peer)
