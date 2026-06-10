@@ -724,7 +724,7 @@ impl PeerManager {
         event: ConfigEvent,
         affected_peers: Option<Vec<IpAddr>>,
     ) -> Result<(), CatalogMutationError> {
-        if let ConfigEvent::DeletePolicy { name } = &event {
+        if let ConfigEvent::DeletePolicy { name, .. } = &event {
             let refs = policy_references(&self.current_config, name);
             if !refs.is_empty() {
                 return Err(CatalogMutationError::StillReferenced {
@@ -734,7 +734,7 @@ impl PeerManager {
                 });
             }
         }
-        if let ConfigEvent::DeleteNeighborSet { name } = &event {
+        if let ConfigEvent::DeleteNeighborSet { name, .. } = &event {
             let refs = neighbor_set_references(&self.current_config, name);
             if !refs.is_empty() {
                 return Err(CatalogMutationError::StillReferenced {
@@ -1082,7 +1082,7 @@ impl PeerManager {
         event: ConfigEvent,
         affected_peers: Vec<IpAddr>,
     ) -> Result<(), CatalogMutationError> {
-        if let ConfigEvent::DeletePeerGroup { name } = &event {
+        if let ConfigEvent::DeletePeerGroup { name, .. } = &event {
             let refs = peer_group_references(&self.current_config, name);
             if !refs.is_empty() {
                 return Err(CatalogMutationError::StillReferenced {

@@ -103,9 +103,9 @@ impl PeerManager {
     ) -> (&'static str, &'static str, String, Option<IpAddr>) {
         match event {
             ConfigEvent::SetPolicy { name, .. } => ("set", "policy", name.clone(), None),
-            ConfigEvent::DeletePolicy { name } => ("delete", "policy", name.clone(), None),
+            ConfigEvent::DeletePolicy { name, .. } => ("delete", "policy", name.clone(), None),
             ConfigEvent::SetNeighborSet { name, .. } => ("set", "neighbor_set", name.clone(), None),
-            ConfigEvent::DeleteNeighborSet { name } => {
+            ConfigEvent::DeleteNeighborSet { name, .. } => {
                 ("delete", "neighbor_set", name.clone(), None)
             }
             ConfigEvent::SetGlobalImportChain { .. } => {
@@ -114,10 +114,10 @@ impl PeerManager {
             ConfigEvent::SetGlobalExportChain { .. } => {
                 ("set", "global_export_chain", "global".to_string(), None)
             }
-            ConfigEvent::ClearGlobalImportChain => {
+            ConfigEvent::ClearGlobalImportChain { .. } => {
                 ("clear", "global_import_chain", "global".to_string(), None)
             }
-            ConfigEvent::ClearGlobalExportChain => {
+            ConfigEvent::ClearGlobalExportChain { .. } => {
                 ("clear", "global_export_chain", "global".to_string(), None)
             }
             ConfigEvent::SetNeighborImportChain { address, .. } => (
@@ -132,27 +132,29 @@ impl PeerManager {
                 address.to_string(),
                 Some(*address),
             ),
-            ConfigEvent::ClearNeighborImportChain { address } => (
+            ConfigEvent::ClearNeighborImportChain { address, .. } => (
                 "clear",
                 "neighbor_import_chain",
                 address.to_string(),
                 Some(*address),
             ),
-            ConfigEvent::ClearNeighborExportChain { address } => (
+            ConfigEvent::ClearNeighborExportChain { address, .. } => (
                 "clear",
                 "neighbor_export_chain",
                 address.to_string(),
                 Some(*address),
             ),
             ConfigEvent::SetPeerGroup { name, .. } => ("set", "peer_group", name.clone(), None),
-            ConfigEvent::DeletePeerGroup { name } => ("delete", "peer_group", name.clone(), None),
+            ConfigEvent::DeletePeerGroup { name, .. } => {
+                ("delete", "peer_group", name.clone(), None)
+            }
             ConfigEvent::SetNeighborPeerGroup { address, .. } => (
                 "set",
                 "neighbor_peer_group",
                 address.to_string(),
                 Some(*address),
             ),
-            ConfigEvent::ClearNeighborPeerGroup { address } => (
+            ConfigEvent::ClearNeighborPeerGroup { address, .. } => (
                 "clear",
                 "neighbor_peer_group",
                 address.to_string(),

@@ -612,21 +612,22 @@ branch is between features.
   `Result<_, String>`; keep that for one-status surfaces, but migrate to small
   typed enums when a caller needs to distinguish `ALREADY_EXISTS`, `NOT_FOUND`,
   `INVALID_ARGUMENT`, or similar API-visible classes.
-- [ ] **Catalog mutator persistence + lock convergence** *(from the 2026-06
-  deep audit).* The policy and peer-group gRPC mutators apply their runtime
-  change, then persist fire-and-forget outside the runtime-config coordinator
-  lock: a failed disk write is log-only (the RPC still returns OK and the next
-  SIGHUP or restart silently reverts the edit — e.g. a permit→deny policy
-  flip), and the unlocked mutation-gate check is check-then-act against
-  pending commit-confirmed transactions (an interleaved catalog write can
-  strand auto-revert on `StaleSnapshot`). `AddNeighbor`, FIB CRUD, and
-  `ApplyConfigTransaction` already implement the correct contract —
-  coordinator lock, acked persist, runtime rollback on persist failure —
-  converge the catalog mutators onto it. While there: make the direct
-  `SetPolicy` fan-out atomic via the resolved-policy-snapshot primitive
-  (mid-loop failures currently leave already-updated peers on the new
-  chains), and treat a non-committable rollback apply as a rollback failure
-  in confirmed-transaction abort/auto-revert instead of reporting success.
+- [x] **Catalog mutator persistence + lock convergence** *(from the 2026-06
+  deep audit — shipped).* All 16 policy/peer-group gRPC mutators now follow
+  the `AddNeighbor`/FIB-CRUD/`ApplyConfigTransaction` contract: detached-task
+  shield, runtime-config coordinator lock with the mutation gate checked
+  inside it, acked persist before lock release, and capture-prior runtime
+  rollback on persist failure (peer-group rollback restores the unredacted
+  stored secret). Confirmed-transaction abort/auto-revert also now treat a
+  non-committable rollback re-apply as a rollback failure instead of
+  reporting success.
+- [ ] **`SetPolicy` fan-out atomicity** *(remaining slice of the catalog
+  convergence item).* The peer manager's direct `SetPolicy` apply fans out
+  per-peer runtime-policy updates in a loop; a mid-loop failure leaves
+  already-updated peers on the new chains while later peers keep the old
+  ones. Make the fan-out atomic via the resolved-policy-snapshot primitive
+  (`ApplyResolvedPolicySnapshot`, the live-impact transaction executor's
+  capturing mechanism).
 - [x] **Config transaction live-impact policy / peer-group executor.**
   Policy definitions, `neighbor_sets`, `peer_groups`, and global named
   policy-chain edits that move existing static neighbors' or accepted dynamic

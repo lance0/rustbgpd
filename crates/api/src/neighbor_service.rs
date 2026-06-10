@@ -15,7 +15,8 @@ use crate::peer_types::{
 };
 use crate::proto;
 use crate::server::{
-    AccessMode, ConfigMutationGateFn, check_config_mutation_gate, read_only_rejection,
+    AccessMode, ConfigMutationGateFn, check_config_mutation_gate, persist_runtime_config_event,
+    read_only_rejection,
 };
 use rustbgpd_rib::RibUpdate;
 
@@ -284,18 +285,6 @@ async fn delete_dynamic_range(
         .await
         .map_err(|_| Status::internal("peer manager dropped reply"))?
         .map_err(dynamic_range_error_status)
-}
-
-async fn persist_runtime_config_event(
-    permit: mpsc::OwnedPermit<ConfigEvent>,
-    build_event: impl FnOnce(oneshot::Sender<Result<(), String>>) -> ConfigEvent,
-) -> Result<(), Status> {
-    let (ack_tx, ack_rx) = oneshot::channel();
-    permit.send(build_event(ack_tx));
-    ack_rx
-        .await
-        .map_err(|_| Status::internal("config bridge dropped persistence acknowledgement"))?
-        .map_err(|error| Status::failed_precondition(format!("config persistence failed: {error}")))
 }
 
 pub(crate) fn family_to_string(afi: Afi, safi: Safi) -> String {

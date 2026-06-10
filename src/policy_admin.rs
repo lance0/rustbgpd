@@ -512,41 +512,46 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                 .dynamic_neighbors
                 .retain(|dn| crate::config::effective_prefix_str(&dn.prefix) != Some(key));
         }
-        ConfigEvent::SetPolicy { name, definition } => {
+        ConfigEvent::SetPolicy {
+            name, definition, ..
+        } => {
             config
                 .policy
                 .definitions
                 .insert(name.clone(), api_definition_to_config(definition.clone()));
         }
-        ConfigEvent::DeletePolicy { name } => {
+        ConfigEvent::DeletePolicy { name, .. } => {
             config.policy.definitions.remove(name);
         }
-        ConfigEvent::SetNeighborSet { name, definition } => {
+        ConfigEvent::SetNeighborSet {
+            name, definition, ..
+        } => {
             config
                 .policy
                 .neighbor_sets
                 .insert(name.clone(), api_neighbor_set_to_config(definition.clone()));
         }
-        ConfigEvent::DeleteNeighborSet { name } => {
+        ConfigEvent::DeleteNeighborSet { name, .. } => {
             config.policy.neighbor_sets.remove(name);
         }
-        ConfigEvent::SetGlobalImportChain { policy_names } => {
+        ConfigEvent::SetGlobalImportChain { policy_names, .. } => {
             config.policy.import_chain.clone_from(policy_names);
             config.policy.import.clear();
         }
-        ConfigEvent::SetGlobalExportChain { policy_names } => {
+        ConfigEvent::SetGlobalExportChain { policy_names, .. } => {
             config.policy.export_chain.clone_from(policy_names);
             config.policy.export.clear();
         }
-        ConfigEvent::ClearGlobalImportChain => {
+        ConfigEvent::ClearGlobalImportChain { .. } => {
             config.policy.import_chain.clear();
         }
-        ConfigEvent::ClearGlobalExportChain => {
+        ConfigEvent::ClearGlobalExportChain { .. } => {
             config.policy.export_chain.clear();
         }
         ConfigEvent::SetNeighborImportChain {
             address,
             policy_names,
+            ..
         } => {
             let neighbor = neighbor_mut(config, *address)?;
             neighbor.import_policy_chain.clone_from(policy_names);
@@ -555,32 +560,36 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
         ConfigEvent::SetNeighborExportChain {
             address,
             policy_names,
+            ..
         } => {
             let neighbor = neighbor_mut(config, *address)?;
             neighbor.export_policy_chain.clone_from(policy_names);
             neighbor.export_policy.clear();
         }
-        ConfigEvent::ClearNeighborImportChain { address } => {
+        ConfigEvent::ClearNeighborImportChain { address, .. } => {
             neighbor_mut(config, *address)?.import_policy_chain.clear();
         }
-        ConfigEvent::ClearNeighborExportChain { address } => {
+        ConfigEvent::ClearNeighborExportChain { address, .. } => {
             neighbor_mut(config, *address)?.export_policy_chain.clear();
         }
-        ConfigEvent::SetPeerGroup { name, definition } => {
+        ConfigEvent::SetPeerGroup {
+            name, definition, ..
+        } => {
             config
                 .peer_groups
                 .insert(name.clone(), api_peer_group_to_config(definition.clone()));
         }
-        ConfigEvent::DeletePeerGroup { name } => {
+        ConfigEvent::DeletePeerGroup { name, .. } => {
             config.peer_groups.remove(name);
         }
         ConfigEvent::SetNeighborPeerGroup {
             address,
             peer_group,
+            ..
         } => {
             neighbor_mut(config, *address)?.peer_group = Some(peer_group.clone());
         }
-        ConfigEvent::ClearNeighborPeerGroup { address } => {
+        ConfigEvent::ClearNeighborPeerGroup { address, .. } => {
             neighbor_mut(config, *address)?.peer_group = None;
         }
         ConfigEvent::FibTablesReplaced {
@@ -683,6 +692,18 @@ pub fn global_policy_chains_from_config(config: &Config) -> PolicyChainAssignmen
     }
 }
 
+/// Return a neighbor's configured peer-group membership. Outer `None` =
+/// neighbor not configured; inner `None` = no membership.
+#[must_use]
+#[allow(clippy::option_option)] // the two None levels are distinct contract states
+pub fn neighbor_peer_group_from_config(config: &Config, address: IpAddr) -> Option<Option<String>> {
+    config
+        .neighbors
+        .iter()
+        .find(|neighbor| neighbor.address == address.to_string())
+        .map(|neighbor| neighbor.peer_group.clone())
+}
+
 /// Return the configured per-neighbor named policy chains.
 pub fn neighbor_policy_chains_from_config(
     config: &Config,
@@ -763,6 +784,7 @@ remote_asn = 65002
                         set_as_path_prepend: None,
                     }],
                 },
+                ack: None,
             },
         )
         .unwrap();

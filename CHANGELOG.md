@@ -171,6 +171,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Policy and peer-group runtime CRUD can no longer drift from the persisted
+  config.** All 16 catalog mutators (`PolicyService` definitions,
+  neighbor-sets, global and per-neighbor chains; `PeerGroupService`
+  definitions and membership) previously applied their runtime change and
+  queued persistence fire-and-forget outside the runtime-config coordinator
+  lock: a failed disk write was log-only (the RPC returned OK and the next
+  SIGHUP silently reverted the edit — e.g. a permit→deny policy flip), a
+  SIGHUP racing the unacknowledged write could rebuild from stale TOML, and
+  the unlocked transaction-gate check was check-then-act. They now follow the
+  same contract as neighbor/FIB CRUD and config transactions: the apply runs
+  on a detached task (a disconnected client can't split apply from persist),
+  holds the coordinator lock with the gate checked inside it, awaits the
+  on-disk persistence acknowledgement before releasing the lock, and rolls
+  the runtime back to the captured prior state when persistence fails — so a
+  failed RPC means "nothing changed". Peer-group rollback restores the stored
+  definition with its md5 secret intact.
+
 - **Commit-confirmed rollback no longer reports success when the rollback was
   rejected.** Abort and auto-revert re-apply the captured pre-commit snapshot
   through the transaction executor; a re-apply whose plan came back `Rejected`

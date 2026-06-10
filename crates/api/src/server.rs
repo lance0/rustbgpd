@@ -310,6 +310,109 @@ pub async fn check_config_mutation_gate(
     Ok(())
 }
 
+/// Queue a runtime-config event through a reserved persistence slot and
+/// wait for the config bridge to acknowledge the on-disk write.
+///
+/// Shared by every persisted runtime CRUD path (neighbors, dynamic
+/// ranges, policy/peer-group catalogs): the caller holds the shared
+/// runtime-config lock across this await so a SIGHUP reload cannot read
+/// a stale TOML between the runtime mutation and the disk commit.
+pub(crate) async fn persist_runtime_config_event(
+    permit: tokio::sync::mpsc::OwnedPermit<crate::peer_types::ConfigEvent>,
+    build_event: impl FnOnce(
+        tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) -> crate::peer_types::ConfigEvent,
+) -> Result<(), Status> {
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    permit.send(build_event(ack_tx));
+    ack_rx
+        .await
+        .map_err(|_| Status::internal("config bridge dropped persistence acknowledgement"))?
+        .map_err(|error| Status::failed_precondition(format!("config persistence failed: {error}")))
+}
+
+/// Run a persisted catalog mutation on a detached task: take the shared
+/// runtime-config lock, check the config-transaction mutation gate
+/// inside it, then run `body` (read prior state, apply, persist with
+/// acknowledgement, roll back on persist failure).
+///
+/// The detached task is the ADR-0080 cancellation shield — a client
+/// that disconnects mid-RPC loses only the response, never the
+/// runtime-vs-disk consistency of the mutation. Holding the lock across
+/// the body serializes catalog mutations with SIGHUP reload, FIB-table
+/// and neighbor CRUD, and config transactions; it also makes the
+/// read-prior-then-apply sequence inside `body` race-free, because
+/// every catalog writer takes this same lock.
+///
+/// # Errors
+///
+/// Returns the gate's `FAILED_PRECONDITION`, the body's error, or
+/// `INTERNAL` if the detached task is lost.
+pub(crate) async fn run_shielded_catalog_mutation<F, Fut>(
+    runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
+    config_mutation_gate: Option<ConfigMutationGateFn>,
+    operation: &'static str,
+    body: F,
+) -> Result<(), Status>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), Status>> + Send,
+{
+    let join = tokio::spawn(async move {
+        let _guard = runtime_config_lock.lock().await;
+        check_config_mutation_gate(&config_mutation_gate, operation).await?;
+        body().await
+    });
+    join.await
+        .map_err(|_| Status::internal(format!("{operation} task did not complete")))?
+}
+
+/// Send a peer-manager command built around a oneshot reply channel and
+/// await the reply.
+pub(crate) async fn peer_manager_request<R>(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    build_command: impl FnOnce(oneshot::Sender<R>) -> PeerManagerCommand,
+) -> Result<R, Status> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(build_command(reply_tx))
+        .await
+        .map_err(|_| Status::internal("peer manager unavailable"))?;
+    reply_rx
+        .await
+        .map_err(|_| Status::internal("peer manager dropped reply"))
+}
+
+/// Send a catalog mutation command to the peer manager and map its
+/// typed failure onto the gRPC status surface.
+pub(crate) async fn apply_catalog_mutation(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    build_command: impl FnOnce(oneshot::Sender<Result<(), CatalogMutationError>>) -> PeerManagerCommand,
+) -> Result<(), Status> {
+    peer_manager_request(peer_mgr_tx, build_command)
+        .await?
+        .map_err(|error| catalog_mutation_error_to_status(&error))
+}
+
+/// Compose the persist failure with a rollback failure, if any: a failed
+/// rollback means runtime and disk have drifted and only a restart or
+/// SIGHUP repair reconciles them — the error must say so.
+pub(crate) fn persist_rollback_error(
+    operation: &str,
+    error: Status,
+    rollback: Result<(), Status>,
+) -> Status {
+    match rollback {
+        Ok(()) => error,
+        Err(rollback_error) => Status::internal(format!(
+            "{}; rollback of {operation} failed (runtime and persisted config have drifted — \
+             SIGHUP or restart to reconcile): {}",
+            error.message(),
+            rollback_error.message()
+        )),
+    }
+}
+
 /// Configuration for the gRPC server beyond basic connectivity.
 #[derive(Clone)]
 pub struct ServeConfig {
@@ -963,26 +1066,28 @@ async fn run_tcp_listener(
             peer_mgr_tx.clone(),
             rib_query_tx.clone(),
             config_tx.clone(),
-            runtime_config_lock,
+            runtime_config_lock.clone(),
             config_mutation_gate.clone(),
         ),
         interceptor.clone(),
     ));
     routes.add_service(PeerGroupServiceServer::with_interceptor(
-        PeerGroupService::new(
+        PeerGroupService::with_runtime_config_lock(
             access_mode,
             peer_mgr_tx.clone(),
             config_tx.clone(),
             config_mutation_gate.clone(),
+            runtime_config_lock.clone(),
         ),
         interceptor.clone(),
     ));
     routes.add_service(PolicyServiceServer::with_interceptor(
-        PolicyService::new(
+        PolicyService::with_runtime_config_lock(
             access_mode,
             peer_mgr_tx.clone(),
             config_tx.clone(),
             config_mutation_gate.clone(),
+            runtime_config_lock,
         ),
         interceptor.clone(),
     ));
@@ -1149,26 +1254,28 @@ async fn run_uds_listener(
             peer_mgr_tx.clone(),
             rib_query_tx.clone(),
             config_tx.clone(),
-            runtime_config_lock,
+            runtime_config_lock.clone(),
             config_mutation_gate.clone(),
         ),
         interceptor.clone(),
     ));
     routes.add_service(PeerGroupServiceServer::with_interceptor(
-        PeerGroupService::new(
+        PeerGroupService::with_runtime_config_lock(
             access_mode,
             peer_mgr_tx.clone(),
             config_tx.clone(),
             config_mutation_gate.clone(),
+            runtime_config_lock.clone(),
         ),
         interceptor.clone(),
     ));
     routes.add_service(PolicyServiceServer::with_interceptor(
-        PolicyService::new(
+        PolicyService::with_runtime_config_lock(
             access_mode,
             peer_mgr_tx.clone(),
             config_tx.clone(),
             config_mutation_gate.clone(),
+            runtime_config_lock,
         ),
         interceptor.clone(),
     ));
