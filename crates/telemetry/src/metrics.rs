@@ -115,6 +115,12 @@ pub struct BgpMetrics {
     evpn_fdb_nhg_drift_disabled: IntCounter,
     evpn_fdb_single_dst_adopted: IntCounter,
     evpn_fdb_single_dst_reaped: IntCounter,
+    evpn_l3_route_adopted: IntCounter,
+    evpn_l3_route_reaped: IntCounter,
+    evpn_l3_neighbor_adopted: IntCounter,
+    evpn_l3_neighbor_reaped: IntCounter,
+    evpn_l3vxlan_fdb_adopted: IntCounter,
+    evpn_l3vxlan_fdb_reaped: IntCounter,
 
     // ── BMP exporter ───────────────────────────────────────────
     bmp_source_drops: IntCounterVec,
@@ -741,6 +747,42 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_l3_route_adopted = IntCounter::new(
+            "evpn_l3_route_adopted_total",
+            "Proto-bgp onlink routes in configured IP-VRF tables adopted from a previous daemon lifetime (ADR-0079).",
+        )
+        .expect("valid metric definition");
+
+        let evpn_l3_route_reaped = IntCounter::new(
+            "evpn_l3_route_reaped_total",
+            "Adopted IP-VRF routes reaped after the ADR-0079 deferral because no Type 5 re-claimed them.",
+        )
+        .expect("valid metric definition");
+
+        let evpn_l3_neighbor_adopted = IntCounter::new(
+            "evpn_l3_neighbor_adopted_total",
+            "Permanent extern_learn L3 neighbors on managed L3VXLAN devices adopted from a previous daemon lifetime (ADR-0079).",
+        )
+        .expect("valid metric definition");
+
+        let evpn_l3_neighbor_reaped = IntCounter::new(
+            "evpn_l3_neighbor_reaped_total",
+            "Adopted L3 neighbors reaped after the ADR-0079 deferral because no Type 5 re-claimed them.",
+        )
+        .expect("valid metric definition");
+
+        let evpn_l3vxlan_fdb_adopted = IntCounter::new(
+            "evpn_l3vxlan_fdb_adopted_total",
+            "Extern_learn L3VXLAN FDB rows adopted from a previous daemon lifetime (ADR-0079).",
+        )
+        .expect("valid metric definition");
+
+        let evpn_l3vxlan_fdb_reaped = IntCounter::new(
+            "evpn_l3vxlan_fdb_reaped_total",
+            "Adopted L3VXLAN FDB rows reaped after the ADR-0079 deferral because no Type 5 re-claimed them.",
+        )
+        .expect("valid metric definition");
+
         let bmp_source_drops = IntCounterVec::new(
             Opts::new(
                 "bmp_source_drops_total",
@@ -1046,6 +1088,24 @@ impl BgpMetrics {
             .register(Box::new(evpn_fdb_single_dst_reaped.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_l3_route_adopted.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_l3_route_reaped.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_l3_neighbor_adopted.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_l3_neighbor_reaped.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_l3vxlan_fdb_adopted.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_l3vxlan_fdb_reaped.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(bmp_source_drops.clone()))
             .expect("metric not already registered");
         registry
@@ -1154,6 +1214,12 @@ impl BgpMetrics {
             evpn_fdb_nhg_drift_disabled,
             evpn_fdb_single_dst_adopted,
             evpn_fdb_single_dst_reaped,
+            evpn_l3_route_adopted,
+            evpn_l3_route_reaped,
+            evpn_l3_neighbor_adopted,
+            evpn_l3_neighbor_reaped,
+            evpn_l3vxlan_fdb_adopted,
+            evpn_l3vxlan_fdb_reaped,
             bmp_source_drops,
             bmp_collector_drops,
             bmp_replay_attempts,
@@ -1740,6 +1806,54 @@ impl BgpMetrics {
             return;
         }
         self.evpn_fdb_single_dst_reaped.inc_by(delta);
+    }
+
+    /// Increment the ADR-0079 adopted IP-VRF route counter.
+    pub fn add_evpn_l3_route_adopted(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_l3_route_adopted.inc_by(delta);
+    }
+
+    /// Increment the ADR-0079 reaped IP-VRF route counter.
+    pub fn add_evpn_l3_route_reaped(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_l3_route_reaped.inc_by(delta);
+    }
+
+    /// Increment the ADR-0079 adopted L3 neighbor counter.
+    pub fn add_evpn_l3_neighbor_adopted(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_l3_neighbor_adopted.inc_by(delta);
+    }
+
+    /// Increment the ADR-0079 reaped L3 neighbor counter.
+    pub fn add_evpn_l3_neighbor_reaped(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_l3_neighbor_reaped.inc_by(delta);
+    }
+
+    /// Increment the ADR-0079 adopted L3VXLAN FDB row counter.
+    pub fn add_evpn_l3vxlan_fdb_adopted(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_l3vxlan_fdb_adopted.inc_by(delta);
+    }
+
+    /// Increment the ADR-0079 reaped L3VXLAN FDB row counter.
+    pub fn add_evpn_l3vxlan_fdb_reaped(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_l3vxlan_fdb_reaped.inc_by(delta);
     }
 
     /// Record a BMP event dropped at the PeerSession→BmpManager channel.
@@ -2509,6 +2623,32 @@ mod tests {
         assert!(text.contains("evpn_fdb_single_dst_adopted_total 5"));
         assert!(text.contains("evpn_fdb_single_dst_reaped_total 6"));
         assert!(text.contains("evpn_fdb_nhg_drift_disabled_total 1"));
+    }
+
+    #[test]
+    fn evpn_l3_adoption_counters_are_exported() {
+        let m = BgpMetrics::new();
+        m.add_evpn_l3_route_adopted(1);
+        m.add_evpn_l3_route_reaped(2);
+        m.add_evpn_l3_neighbor_adopted(3);
+        m.add_evpn_l3_neighbor_reaped(4);
+        m.add_evpn_l3vxlan_fdb_adopted(5);
+        m.add_evpn_l3vxlan_fdb_reaped(6);
+
+        assert_eq!(m.evpn_l3_route_adopted.get(), 1);
+        assert_eq!(m.evpn_l3_route_reaped.get(), 2);
+        assert_eq!(m.evpn_l3_neighbor_adopted.get(), 3);
+        assert_eq!(m.evpn_l3_neighbor_reaped.get(), 4);
+        assert_eq!(m.evpn_l3vxlan_fdb_adopted.get(), 5);
+        assert_eq!(m.evpn_l3vxlan_fdb_reaped.get(), 6);
+
+        let text = gather_text(&m);
+        assert!(text.contains("evpn_l3_route_adopted_total 1"));
+        assert!(text.contains("evpn_l3_route_reaped_total 2"));
+        assert!(text.contains("evpn_l3_neighbor_adopted_total 3"));
+        assert!(text.contains("evpn_l3_neighbor_reaped_total 4"));
+        assert!(text.contains("evpn_l3vxlan_fdb_adopted_total 5"));
+        assert!(text.contains("evpn_l3vxlan_fdb_reaped_total 6"));
     }
 
     #[test]

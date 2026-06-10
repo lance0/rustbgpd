@@ -58,6 +58,7 @@ mod fdb;
 mod fdb_nhg;
 mod ip_vrf;
 mod l3;
+mod l3_adoption;
 mod links;
 pub mod nexthop_raw;
 mod notify;
@@ -518,6 +519,17 @@ impl Dataplane for LinuxDataplane {
                 None
             }
         }
+    }
+
+    async fn dump_l3_adoption_candidates(
+        &mut self,
+        ip_vrfs: &IpVrfTable,
+    ) -> Option<crate::l3_adoption::L3AdoptionDump> {
+        // Delegates wholesale — the empty-table short-circuit, the
+        // marker classifiers, and the all-or-nothing failure handling
+        // (any sub-dump error → `None`, with the failing surface
+        // logged) live in `linux::l3_adoption`.
+        l3_adoption::dump_l3_adoption_candidates(&self.handle, ip_vrfs).await
     }
 
     async fn probe_ip_vrfs(&mut self, ip_vrfs: &IpVrfTable) -> HashMap<IpVrfId, IpVrfStatus> {

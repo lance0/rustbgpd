@@ -309,6 +309,11 @@ pub struct DataplaneReport {
     /// Prometheus counters; each report carries only events since the
     /// prior report.
     pub fdb_nhg_drift_counters: FdbNhgDriftCounters,
+    /// Per-report deltas for the ADR-0079 L3 adoption sweep —
+    /// crash-leftover VRF routes / L3 neighbors / L3VXLAN FDB rows
+    /// adopted at startup and reaped after the deferral. Same
+    /// drain-into-Prometheus contract as `fdb_nhg_drift_counters`.
+    pub l3_adoption_counters: L3AdoptionCounters,
 }
 
 /// Per-report deltas for FDB-NHG drift recovery and stale-NHID
@@ -330,6 +335,30 @@ pub struct FdbNhgDriftCounters {
     /// Adopted single-dst FDB rows reaped after the deferral because
     /// no EVPN route re-claimed them (ADR-0079).
     pub single_dst_reaped: u64,
+}
+
+/// Per-report deltas for the ADR-0079 EVPN L3 crash-restart adoption
+/// sweep: kernel VRF routes, L3 neighbors, and L3VXLAN FDB rows that
+/// carry our ownership markers but whose in-memory owned state died
+/// with a previous process.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct L3AdoptionCounters {
+    /// `proto bgp` + onlink routes in configured IP-VRF tables adopted
+    /// from a previous daemon lifetime.
+    pub routes_adopted: u64,
+    /// Adopted VRF routes reaped after the deferral because no Type 5
+    /// re-claimed them.
+    pub routes_reaped: u64,
+    /// `NUD_PERMANENT` + `extern_learn` L3 neighbors on managed
+    /// L3VXLAN devices adopted from a previous daemon lifetime.
+    pub neighbors_adopted: u64,
+    /// Adopted L3 neighbors reaped after the deferral.
+    pub neighbors_reaped: u64,
+    /// `extern_learn` L3VXLAN FDB rows adopted from a previous daemon
+    /// lifetime.
+    pub l3vxlan_fdb_adopted: u64,
+    /// Adopted L3VXLAN FDB rows reaped after the deferral.
+    pub l3vxlan_fdb_reaped: u64,
 }
 
 /// Operator-facing summary of owned ADR-0059 FDB nexthop-group state.

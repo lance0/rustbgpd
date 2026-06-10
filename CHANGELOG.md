@@ -25,6 +25,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pass; a failed dump degrades the pass to stale-route removals (status
   `dump_failed`) instead of churning owned state.
 
+- **EVPN L3 crash-restart reconciliation (ADR-0079).** The symmetric-IRB
+  install pipeline tracked its kernel state (per-VRF routes, L3 neighbors,
+  L3VXLAN FDB rows) in memory only, so after an unclean restart a Type 5
+  withdrawn while the daemon was down kept steering tenant traffic into a
+  dead VXLAN tunnel forever. The reconcile actor now adopts marker-matching
+  rows on its first pass with `[[evpn_ip_vrfs]]` configured — `proto bgp` +
+  onlink routes in configured VRF tables, permanent `extern_learn` neighbors
+  and `extern_learn` FDB rows on managed L3VXLAN devices. A still-desired
+  prefix re-claims its rows implicitly (every L3 add applies with netlink
+  replace semantics, so the re-install is the claim); adopted rows that no
+  Type 5 re-claims are reaped after a 500 s deferral plus a clean L3 apply pass,
+  routes before their resolution rows, with a fresh marker dump re-check so
+  a vanished or foreign-replaced row is dropped without a remove. New
+  counters: `evpn_l3_route_adopted_total` / `_reaped_total`,
+  `evpn_l3_neighbor_adopted_total` / `_reaped_total`,
+  `evpn_l3vxlan_fdb_adopted_total` / `_reaped_total`.
+
 - **Enhanced Route Refresh observability.** Prometheus now exposes
   `bgp_route_refresh_in_progress{peer,afi_safi}` and
   `bgp_route_refresh_stale_entries{peer,afi_safi}` so operators can see active
