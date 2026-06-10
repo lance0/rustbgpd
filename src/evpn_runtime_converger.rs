@@ -7712,6 +7712,7 @@ table_id = 6000
             ip_vrf_installed_routes: std::collections::HashMap::new(),
             fdb_nexthops: rustbgpd_evpn::FdbNexthopDataplaneStatus::default(),
             fdb_nhg_drift_counters: rustbgpd_evpn::FdbNhgDriftCounters::default(),
+            l3_adoption_counters: rustbgpd_evpn::L3AdoptionCounters::default(),
         }
     }
 
