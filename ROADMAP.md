@@ -206,7 +206,9 @@ has it, no broad performance sprints without profile evidence.
   `extern_learn` FDB rows (ADR-0054 §7 promises next-startup cleanup that
   exists only for NHG-tagged rows). Ship order per the ADR: blackhole sweep
   first (fold in batching its presence checks into one kernel dump per
-  pass), then single-dst FDB (extends the ADR-0059 drift sweep), then L3.
+  pass) — **done:** adopt-at-startup + implicit re-claim + 500 s deferred
+  reap + one-dump-per-pass shipped for the blackhole reconciler — then
+  single-dst FDB (extends the ADR-0059 drift sweep), then L3.
   Related: scope the unicast owned-state signature per table and compare it
   set-wise so a crash plus any `[[fib_tables]]` edit — even stanza
   reordering — doesn't quarantine-freeze stale kernel routes.

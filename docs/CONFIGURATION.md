@@ -146,15 +146,31 @@ install_blackhole_discard = true
 The FIB path is conservative. It only considers accepted best routes that
 still carry `BLACKHOLE` after import policy, only installs routes learned
 from EBGP, and only installs IPv4 `/32` or IPv6 `/128` host routes unless
-`allow_blackhole_broad_prefixes = true` is also set. Existing kernel routes
-for the same prefix are treated as install failures rather than overwritten,
-so operator/static or other-daemon routes are preserved.
+`allow_blackhole_broad_prefixes = true` is also set. Existing foreign kernel
+routes for the same prefix are treated as install failures rather than
+overwritten, so operator/static or other-daemon routes are preserved.
+
+Rows that carry rustbgpd's own ownership marker (`proto bgp` + blackhole
+type in the main table) are the exception: after an unclean restart the
+first reconcile pass **adopts** them (ADR-0079), so a crash leftover keeps
+discarding attack traffic instead of blocking re-installation as foreign. A
+still-desired prefix re-claims its adopted row silently (status `adopted`);
+rows no BGP route re-claims stay visible as `adopted_pending_reap` and are
+removed after a 500 s deferral, so reaping never races BGP reconvergence.
+Note this marker is a userspace convention: an operator's manual
+`ip route add blackhole ... proto bgp` is indistinguishable from daemon
+state and will be adopted, and co-residency with another proto-bgp daemon
+(e.g. FRR zebra, which claims the same marker) is unsupported.
 
 `rustbgpctl rib blackholes` shows the current discard status for every
-BLACKHOLE-marked best route the daemon has observed: `installed`, `rejected`
+BLACKHOLE-marked best route the daemon has observed: `installed`
+(`installed` / `owned` / `adopted` / `adopted_pending_reap`), `rejected`
 (`broad_prefix` / `not_ebgp`), or `failed` (`foreign_route_exists`,
-`lookup_failed`, `remove_failed`, or the kernel install error). The same
-surface is available as JSON with `rustbgpctl -j rib blackholes`.
+`dump_failed`, `remove_failed`, `reap_failed`, or the kernel install
+error). The same surface is available as JSON with
+`rustbgpctl -j rib blackholes`. Adoption and reaping are counted by
+`bgp_blackhole_discard_adopted_total` and
+`bgp_blackhole_discard_reaped_total`.
 If the reconciler cannot start at all (for example netlink setup failure, or
 requesting FIB install on a non-Linux build), the status list is empty and
 `bgp_blackhole_discard_kernel_failures_total{action="setup"}` or
