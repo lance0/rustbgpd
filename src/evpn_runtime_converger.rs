@@ -158,25 +158,41 @@ impl EvpnRuntimeReloadApply {
         })
     }
 
+    // ADR-0080: the converge + commit critical section runs on a detached
+    // task so a dropped caller — a disconnected gRPC client or an aborted
+    // SIGHUP reload — cannot cancel the apply between its actor/RIB side
+    // effects and the rollback/baseline bookkeeping. The caller only awaits
+    // the result; losing the caller loses the response, never the
+    // mutation's atomicity. Coordinated shutdown serializes with these
+    // detached tasks by taking the same apply lock before EVPN teardown.
     async fn apply_candidate_config(
         &self,
         config: &Config,
         validate_only: bool,
     ) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
-        let _apply_guard = self.apply_lock.lock().await;
-        let response = self
-            .apply_candidate_config_locked(config, validate_only)
-            .await?;
-        if !validate_only
-            && matches!(
-                response.outcome,
-                value if value == proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyNoop as i32
-                    || value == proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyCommitted as i32
+        let this = self.clone();
+        let config = config.clone();
+        let join = tokio::spawn(async move {
+            let _apply_guard = this.apply_lock.lock().await;
+            let response = this
+                .apply_candidate_config_locked(&config, validate_only)
+                .await?;
+            if !validate_only
+                && matches!(
+                    response.outcome,
+                    value if value == proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyNoop as i32
+                        || value == proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyCommitted as i32
+                )
+            {
+                this.set_committed_config(&config);
+            }
+            Ok(response)
+        });
+        join.await.map_err(|_| {
+            GrpcEvpnRuntimeApplyError::Internal(
+                "EVPN runtime apply task did not complete".to_string(),
             )
-        {
-            self.set_committed_config(config);
-        }
-        Ok(response)
+        })?
     }
 
     pub(crate) async fn apply_config_if_changed<F>(
@@ -185,31 +201,47 @@ impl EvpnRuntimeReloadApply {
         changed: F,
     ) -> EvpnRuntimeReloadAttempt
     where
-        F: FnOnce(&Config, &Config) -> bool,
+        F: FnOnce(&Config, &Config) -> bool + Send + 'static,
     {
-        let _apply_guard = self.apply_lock.lock().await;
-        let baseline = self.committed_config_locked();
-        if !changed(config, &baseline) {
-            return EvpnRuntimeReloadAttempt {
-                baseline,
-                result: Ok(None),
+        let this = self.clone();
+        let config = config.clone();
+        // Same ADR-0080 shield as `apply_candidate_config`: shutdown aborts
+        // an in-flight reload task, and that abort must not cancel a
+        // converge mid-flight.
+        let join = tokio::spawn(async move {
+            let _apply_guard = this.apply_lock.lock().await;
+            let baseline = this.committed_config_locked();
+            if !changed(&config, &baseline) {
+                return EvpnRuntimeReloadAttempt {
+                    baseline,
+                    result: Ok(None),
+                };
+            }
+
+            let result = match this.apply_candidate_config_locked(&config, false).await {
+                Ok(response) => response_to_reload_outcome(response.outcome).map(|outcome| {
+                    Some(EvpnRuntimeReloadApplyResult {
+                        outcome,
+                        message: response.message,
+                    })
+                }),
+                Err(error) => Err(error),
             };
-        }
+            if matches!(result, Ok(Some(_))) {
+                this.set_committed_config(&config);
+            }
 
-        let result = match self.apply_candidate_config_locked(config, false).await {
-            Ok(response) => response_to_reload_outcome(response.outcome).map(|outcome| {
-                Some(EvpnRuntimeReloadApplyResult {
-                    outcome,
-                    message: response.message,
-                })
-            }),
-            Err(error) => Err(error),
-        };
-        if matches!(result, Ok(Some(_))) {
-            self.set_committed_config(config);
+            EvpnRuntimeReloadAttempt { baseline, result }
+        });
+        match join.await {
+            Ok(attempt) => attempt,
+            Err(_) => EvpnRuntimeReloadAttempt {
+                baseline: self.committed_config_locked(),
+                result: Err(GrpcEvpnRuntimeApplyError::Internal(
+                    "EVPN runtime reload apply task did not complete".to_string(),
+                )),
+            },
         }
-
-        EvpnRuntimeReloadAttempt { baseline, result }
     }
 
     async fn apply_candidate_config_locked(
@@ -2810,6 +2842,28 @@ mod tests {
         }
     }
 
+    /// Signals entry into `converge` and then blocks until the test grants
+    /// a permit — lets a test drop the caller's future mid-converge.
+    struct GatedRuntimeConverger {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+
+    impl DaemonEvpnRuntimeConverger for GatedRuntimeConverger {
+        fn converge<'a>(
+            &'a self,
+            _current: &'a rustbgpd_evpn::EvpnRuntimeModel,
+            _candidate: &'a rustbgpd_evpn::EvpnRuntimeCandidate,
+            _plan: &'a rustbgpd_evpn::EvpnRuntimePlan,
+        ) -> DaemonEvpnRuntimeConvergeFuture<'a> {
+            Box::pin(async move {
+                self.entered.notify_one();
+                let _permit = self.release.acquire().await;
+                Ok(())
+            })
+        }
+    }
+
     fn minimal_runtime_candidate_toml() -> &'static str {
         r#"
 [global]
@@ -4317,6 +4371,106 @@ table_id = 6000
         assert_eq!(vrf.table_id, 5000);
         assert_eq!(vrf.vrf_device, "vrf-blue");
         assert_eq!(vrf.l3vxlan_device, "vni5000");
+    }
+
+    /// ADR-0080: dropping the request future mid-converge (a disconnected
+    /// gRPC client) must not cancel the apply — the detached task finishes
+    /// the commit and advances the reload baseline on its own.
+    #[tokio::test]
+    async fn apply_request_dropped_mid_converge_still_commits_and_advances_baseline() {
+        let baseline =
+            Config::load_toml_with_diagnostics(minimal_runtime_candidate_toml(), "test baseline")
+                .unwrap();
+        let coordinator = empty_evpn_runtime_coordinator();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let converger = Arc::new(GatedRuntimeConverger {
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let reload_apply = EvpnRuntimeReloadApply::new(
+            coordinator.clone(),
+            Arc::new(tokio::sync::Mutex::new(())),
+            converger,
+            baseline,
+        );
+
+        let request = proto::ApplyEvpnRuntimeRequest {
+            candidate_toml: l2vni_runtime_candidate_toml().to_string(),
+            validate_only: false,
+        };
+        let mut caller = Box::pin(reload_apply.apply_request(&request));
+        tokio::select! {
+            _ = &mut caller => panic!("apply must still be blocked in converge"),
+            () = entered.notified() => {}
+        }
+        // Simulate the client disconnect: tonic drops the request future.
+        drop(caller);
+        release.add_permits(1);
+
+        let deadline = StdInstant::now() + Duration::from_secs(5);
+        loop {
+            if coordinator.lock().unwrap().model().generation().as_u64() == 2
+                && reload_apply.committed_config_locked().evpn_instances.len() == 1
+            {
+                break;
+            }
+            assert!(
+                StdInstant::now() < deadline,
+                "dropped caller cancelled the apply: generation/baseline never advanced"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// ADR-0080, SIGHUP flavor: shutdown aborts an in-flight reload task;
+    /// the abort must not cancel an EVPN converge already past planning.
+    #[tokio::test]
+    async fn reload_apply_dropped_mid_converge_still_commits_and_advances_baseline() {
+        let baseline =
+            Config::load_toml_with_diagnostics(minimal_runtime_candidate_toml(), "test baseline")
+                .unwrap();
+        let candidate =
+            Config::load_toml_with_diagnostics(l2vni_runtime_candidate_toml(), "test candidate")
+                .unwrap();
+        let coordinator = empty_evpn_runtime_coordinator();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let converger = Arc::new(GatedRuntimeConverger {
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let reload_apply = EvpnRuntimeReloadApply::new(
+            coordinator.clone(),
+            Arc::new(tokio::sync::Mutex::new(())),
+            converger,
+            baseline,
+        );
+
+        let apply = reload_apply.clone();
+        let mut caller =
+            Box::pin(async move { apply.apply_config_if_changed(&candidate, |_, _| true).await });
+        tokio::select! {
+            _ = &mut caller => panic!("reload apply must still be blocked in converge"),
+            () = entered.notified() => {}
+        }
+        // Simulate the shutdown-time `JoinHandle::abort` of the reload task.
+        drop(caller);
+        release.add_permits(1);
+
+        let deadline = StdInstant::now() + Duration::from_secs(5);
+        loop {
+            if coordinator.lock().unwrap().model().generation().as_u64() == 2
+                && reload_apply.committed_config_locked().evpn_instances.len() == 1
+            {
+                break;
+            }
+            assert!(
+                StdInstant::now() < deadline,
+                "aborted reload cancelled the apply: generation/baseline never advanced"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[test]
