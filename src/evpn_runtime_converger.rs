@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
+use tokio::task::JoinError;
 
 use rustbgpd_api::evpn_service::{
     EvpnRuntimeApplyError as GrpcEvpnRuntimeApplyError, runtime_apply_outcome_to_proto,
@@ -73,6 +74,17 @@ pub(crate) trait DaemonEvpnRuntimeConverger: Send + Sync {
         candidate: &'a rustbgpd_evpn::EvpnRuntimeCandidate,
         plan: &'a rustbgpd_evpn::EvpnRuntimePlan,
     ) -> DaemonEvpnRuntimeConvergeFuture<'a>;
+}
+
+fn apply_task_join_error(context: &str, error: &JoinError) -> GrpcEvpnRuntimeApplyError {
+    let reason = if error.is_panic() {
+        "panicked"
+    } else if error.is_cancelled() {
+        "was cancelled"
+    } else {
+        "failed"
+    };
+    GrpcEvpnRuntimeApplyError::Internal(format!("EVPN runtime {context} task {reason}: {error}"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,11 +200,8 @@ impl EvpnRuntimeReloadApply {
             }
             Ok(response)
         });
-        join.await.map_err(|_| {
-            GrpcEvpnRuntimeApplyError::Internal(
-                "EVPN runtime apply task did not complete".to_string(),
-            )
-        })?
+        join.await
+            .map_err(|error| apply_task_join_error("apply", &error))?
     }
 
     pub(crate) async fn apply_config_if_changed<F>(
@@ -235,11 +244,9 @@ impl EvpnRuntimeReloadApply {
         });
         match join.await {
             Ok(attempt) => attempt,
-            Err(_) => EvpnRuntimeReloadAttempt {
+            Err(error) => EvpnRuntimeReloadAttempt {
                 baseline: self.committed_config_locked(),
-                result: Err(GrpcEvpnRuntimeApplyError::Internal(
-                    "EVPN runtime reload apply task did not complete".to_string(),
-                )),
+                result: Err(apply_task_join_error("reload apply", &error)),
             },
         }
     }
