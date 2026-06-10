@@ -385,7 +385,7 @@ evolving API.**
 | Dimension | Current state |
 |-----------|---------------|
 | **Target use case** | Data-center fabric pilots, IXP route servers, programmable BGP control planes, lab/test environments |
-| **Maturity** | Public alpha (v0.36.0) |
+| **Maturity** | Public alpha (v0.37.0) |
 | **Supported OS** | Linux (primary target). Requires `CAP_NET_BIND_SERVICE` for port 179. |
 | **Runtime** | Rust 1.95+ (workspace MSRV — set by the bundled SQLite build), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |

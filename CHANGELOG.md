@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.37.0] — 2026-06-11
+
 ### Added
 
 - **Blackhole crash-restart reconciliation (ADR-0079).** The RFC 7999 discard
