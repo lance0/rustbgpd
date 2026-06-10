@@ -43,10 +43,11 @@ use tracing::{debug, warn};
 
 /// Channel handles + a [`JoinHandle`] held by the session task.
 ///
-/// Drop `bulk_tx`, `priority_tx`, and `keepalive_tx` to signal the
-/// writer to exit cleanly — its `recv` calls return `None`, the cadence
-/// stops, the task returns `Ok(())` and `join` resolves. A TCP write or
-/// flush failure ends the task with `Err(io::Error)` instead.
+/// Drop `bulk_tx` and `priority_tx` to signal the writer to exit
+/// cleanly — its message `recv` calls return `None`, the task returns
+/// `Ok(())`, and `join` resolves. Dropping `keepalive_tx` only stops the
+/// cadence; it is not part of the exit condition. A TCP write or flush
+/// failure ends the task with `Err(io::Error)` instead.
 pub(super) struct WriterHandle {
     /// Bounded channel — `UPDATE`s, `RouteRefresh` `BoRR`/`EoRR`, `EoR` markers.
     /// `try_send` returning `Full` is the saturation signal that
