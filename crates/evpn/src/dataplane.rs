@@ -312,7 +312,8 @@ pub struct DataplaneReport {
 }
 
 /// Per-report deltas for FDB-NHG drift recovery and stale-NHID
-/// cleanup.
+/// cleanup (ADR-0059), plus the ADR-0079 single-dst FDB
+/// crash-restart adoption sweep.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FdbNhgDriftCounters {
     /// Per-VTEP member nexthops repaired by drift recovery.
@@ -323,6 +324,12 @@ pub struct FdbNhgDriftCounters {
     pub orphans_cleaned: u64,
     /// Permanent drift-dump failures that latched drift recovery off.
     pub drift_disabled: u64,
+    /// Single-dst `extern_learn` FDB rows adopted at startup from a
+    /// previous daemon lifetime (ADR-0079).
+    pub single_dst_adopted: u64,
+    /// Adopted single-dst FDB rows reaped after the deferral because
+    /// no EVPN route re-claimed them (ADR-0079).
+    pub single_dst_reaped: u64,
 }
 
 /// Operator-facing summary of owned ADR-0059 FDB nexthop-group state.

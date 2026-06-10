@@ -208,7 +208,10 @@ has it, no broad performance sprints without profile evidence.
   first (fold in batching its presence checks into one kernel dump per
   pass) — **done:** adopt-at-startup + implicit re-claim + 500 s deferred
   reap + one-dump-per-pass shipped for the blackhole reconciler — then
-  single-dst FDB (extends the ADR-0059 drift sweep), then L3.
+  single-dst FDB — **done:** diff-level implicit re-claim (a marker row
+  absent from the OwnedSet is a crash leftover, not a foreign entry) +
+  startup adoption + deferred reap behind the ADR-0059 convergence gate —
+  then L3.
   Related: scope the unicast owned-state signature per table and compare it
   set-wise so a crash plus any `[[fib_tables]]` edit — even stanza
   reordering — doesn't quarantine-freeze stale kernel routes.

@@ -510,6 +510,8 @@ fn record_fdb_nhg_drift_metrics(metrics: &BgpMetrics, counters: FdbNhgDriftCount
     metrics.add_evpn_fdb_nhg_drift_groups_replaced(counters.groups_replaced);
     metrics.add_evpn_fdb_nhg_orphans_cleaned(counters.orphans_cleaned);
     metrics.add_evpn_fdb_nhg_drift_disabled(counters.drift_disabled);
+    metrics.add_evpn_fdb_single_dst_adopted(counters.single_dst_adopted);
+    metrics.add_evpn_fdb_single_dst_reaped(counters.single_dst_reaped);
 }
 
 /// Returns `true` when the drop-count set changed since the last pass
@@ -1424,6 +1426,8 @@ mod tests {
                 groups_replaced: 3,
                 orphans_cleaned: 4,
                 drift_disabled: 1,
+                single_dst_adopted: 5,
+                single_dst_reaped: 6,
             },
         );
 
@@ -1432,6 +1436,8 @@ mod tests {
         assert!(text.contains("evpn_fdb_nhg_drift_groups_replaced_total 3"));
         assert!(text.contains("evpn_fdb_nhg_orphans_cleaned_total 4"));
         assert!(text.contains("evpn_fdb_nhg_drift_disabled_total 1"));
+        assert!(text.contains("evpn_fdb_single_dst_adopted_total 5"));
+        assert!(text.contains("evpn_fdb_single_dst_reaped_total 6"));
     }
 
     #[tokio::test]
