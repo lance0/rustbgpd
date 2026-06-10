@@ -218,7 +218,10 @@ has it, no broad performance sprints without profile evidence.
   down routes before their resolution rows.
   Related: scope the unicast owned-state signature per table and compare it
   set-wise so a crash plus any `[[fib_tables]]` edit — even stanza
-  reordering — doesn't quarantine-freeze stale kernel routes.
+  reordering — doesn't quarantine-freeze stale kernel routes — **done:**
+  per-table `(table_id, metric)`-keyed signature matching; only the edited
+  or removed table re-projects, with a `.stale` evidence copy beside the
+  still-live owned-state file.
 - **EVPN runtime apply cancellation-safety** *(decided in ADR-0080 —
   detached-task shield + shutdown fencing).* **Done:** the
   `ApplyEvpnRuntime` / SIGHUP converge + coordinator commit now runs on a
