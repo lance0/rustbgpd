@@ -2865,7 +2865,14 @@ mod tests {
         ) -> DaemonEvpnRuntimeConvergeFuture<'a> {
             Box::pin(async move {
                 self.entered.notify_one();
-                let _permit = self.release.acquire().await;
+                // A closed semaphore must fail the test loudly — silently
+                // proceeding would let the cancellation-shield tests pass
+                // without ever blocking mid-converge.
+                let _permit = self
+                    .release
+                    .acquire()
+                    .await
+                    .expect("gate semaphore closed while converge was blocked");
                 Ok(())
             })
         }
