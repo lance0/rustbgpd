@@ -171,6 +171,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Inbound routes are never dropped on a busy RIB (ADR-0078).**
+  `RoutesReceived` delivery used a lossy `try_send`: a full RIB channel
+  silently discarded the batch — a dropped announce was a permanently missing
+  route and a dropped withdraw a permanently stale one (the lost-withdraw
+  "BGP zombie" failure mode), invisible to every counter while the transport
+  bookkeeping claimed acceptance. Delivery now blocks when the channel is
+  full: the session task parks, stops reading its TCP socket, and kernel
+  receive-window backpressure paces the sender — the consensus contract
+  across FRR/BIRD/OpenBGPD. Liveness is decoupled so the park is safe: the
+  KEEPALIVE cadence is owned by the per-connection writer task (a parked
+  session keeps feeding the peer's hold timer), and a hold-timer expiry with
+  unprocessed peer input pending re-arms instead of tearing the session down.
+  New counters: `bgp_inbound_rib_backpressure_total{peer}`,
+  `bgp_hold_timer_rearmed_pending_input_total{peer}`.
+
 - **Policy and peer-group runtime CRUD can no longer drift from the persisted
   config.** All 16 catalog mutators (`PolicyService` definitions,
   neighbor-sets, global and per-neighbor chains; `PeerGroupService`

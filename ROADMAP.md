@@ -224,16 +224,19 @@ has it, no broad performance sprints without profile evidence.
   dropped reply left the tracked key out of sync and every later
   delete/redefine of that VNI rejected until restart).
 - **Transport→RIB inbound backpressure contract** *(decided in ADR-0078 —
-  block, never drop, matching the FRR/BIRD consensus).* `RoutesReceived` is
-  delivered with a lossy `try_send` — a full channel silently drops announce
-  and withdraw batches, leaving a permanently stale route or black-hole until
-  session reset, with `known_paths`, the import-explain cache, and counters
-  already advanced — while `PeerUp` / EoR / refresh markers block, so the same
-  full channel parks the session task and starves its own keepalive cadence.
-  Implementation slices per the ADR: keepalive emission moves to the writer
-  task (ships first, with a stalled-RIB hold-timer interop test), then
-  `RoutesReceived` flips to a blocking send with post-enqueue bookkeeping,
-  pending-input hold-timer re-arm, and a channel-saturation metric.
+  block, never drop, matching the FRR/BIRD consensus).* **Done:**
+  `RoutesReceived` now falls back from `try_send` to a blocking send — a
+  full RIB channel parks the session task, stops the socket read, and TCP
+  receive-window backpressure paces the sender instead of silently dropping
+  a batch (`bgp_inbound_rib_backpressure_total` counts blocked sends); the
+  KEEPALIVE cadence moved into the per-connection writer task so a parked
+  session keeps feeding the peer's hold timer; and a hold-timer expiry with
+  unprocessed peer input pending re-arms instead of expiring
+  (`bgp_hold_timer_rearmed_pending_input_total`). Remaining follow-up: an
+  M-series interop smoke proving hold-timer survival under an artificially
+  stalled RIB against a real peer, and revisiting the RIB channel capacity
+  default against the bench convergence shapes now that overflow is a pacing
+  knob rather than a correctness cliff.
 - **Graceful-restart session-boundary hygiene.** GR flaps bypass `PeerDown`
   cleanup, so per-session state leaks across the restart: installed ORF
   filters and the ORF initial-advertisement gate survive into the new session
