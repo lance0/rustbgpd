@@ -1172,3 +1172,23 @@ to the plain capability they delivered.
 - **RibManager submodule split** — 8,318-line `manager.rs` split into 7
   submodules (`mod.rs`, `distribution.rs`, `peer_lifecycle.rs`,
   `route_refresh.rs`, `graceful_restart.rs`, `helpers.rs`, `tests.rs`).
+
+### Transport→RIB inbound backpressure (ADR-0078)
+
+- **Block-never-drop inbound delivery, writer-owned KEEPALIVE cadence, and
+  pending-input hold-timer re-arm** — proven against a real FRR peer by the
+  **M63** interop job (`test-m63-stalled-rib-hold-timer.sh`, hosted
+  `interop.yml` CI). The RIB manager is stalled 12 s per `RoutesReceived`
+  batch via the test-only `RUSTBGPD_TEST_RIB_INGEST_STALL_MS` env with the
+  transport→RIB channel shrunk to 2 slots via
+  `RUSTBGPD_TEST_RIB_CHANNEL_CAPACITY`; FRR floods 4000 /32 statics in 8
+  waves spaced 2 s apart (the spacing lower-bounds the UPDATE batch count
+  regardless of NLRI packing, so the guaranteed stall is ≥ 96 s ≫ 2× the 9 s
+  negotiated hold time). Asserts both ends stay Established at 1 s grain
+  through a 40 s survival window inside the stall,
+  `bgp_inbound_rib_backpressure_total` > 0, exactly 4000 routes in the RIB
+  after the drain (never-drop receipt), and zero flaps from both vantage
+  points; `bgp_hold_timer_rearmed_pending_input_total` is logged
+  informationally (expected 0 in this shape — each parked delivery
+  completes with the UPDATE's normal hold reset, so the select loop never
+  observes an expired deadline; that path stays pinned by unit tests).

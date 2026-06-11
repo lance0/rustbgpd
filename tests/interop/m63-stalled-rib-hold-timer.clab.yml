@@ -1,0 +1,58 @@
+# Containerlab topology: rustbgpd ↔ FRR (M63 — ADR-0078 stalled-RIB
+# hold-timer survival)
+#
+# Proves the inbound transport→RIB backpressure contract (#422/#429)
+# against a real peer: with the RIB manager artificially stalled
+# (RUSTBGPD_TEST_RIB_INGEST_STALL_MS) and the RIB channel shrunk
+# (RUSTBGPD_TEST_RIB_CHANNEL_CAPACITY), an FRR route flood fills the
+# channel, the session task parks on the blocking delivery, and:
+#
+#   * neither side's hold timer expires — the writer-task-owned
+#     KEEPALIVE cadence keeps feeding FRR's hold timer while parked,
+#     and pending peer input re-arms ours
+#     (bgp_hold_timer_rearmed_pending_input_total);
+#   * bgp_inbound_rib_backpressure_total{peer} > 0 — the channel
+#     really saturated;
+#   * every flooded route lands in the RIB (never-drop receipt);
+#   * zero session flaps end to end.
+#
+# The hold time is 9 s (keepalive 3 s) on both sides so survival is
+# provable in seconds. Both test envs are injected by the driver
+# script at start, not baked into the image.
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m63-stalled-rib-hold-timer.clab.yml
+#   bash tests/interop/scripts/test-m63-stalled-rib-hold-timer.sh
+#   containerlab destroy -t tests/interop/m63-stalled-rib-hold-timer.clab.yml --cleanup
+
+name: m63-stalled-rib-hold-timer
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m63-stalled-rib.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.63.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m63-stalled-rib.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.63.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.63.0.0/24 — rustbgpd (10.63.0.1, AS 65001) ↔ FRR (10.63.0.2, AS 65002)

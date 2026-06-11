@@ -11634,3 +11634,25 @@ async fn graceful_restart_clears_orf_filter() {
     drop(tx);
     handle.await.unwrap();
 }
+
+#[test]
+fn test_ingest_stall_override_parse_rules() {
+    // Unset → no stall.
+    assert_eq!(test_ingest_stall_override(None), None);
+    // Valid positive milliseconds → stall, whitespace tolerated.
+    assert_eq!(
+        test_ingest_stall_override(Some("1500")),
+        Some(Duration::from_millis(1500))
+    );
+    assert_eq!(
+        test_ingest_stall_override(Some(" 250 ")),
+        Some(Duration::from_millis(250))
+    );
+    // Zero disables (a zero-length stall is not a stall).
+    assert_eq!(test_ingest_stall_override(Some("0")), None);
+    // Garbage and empty values disable rather than erroring.
+    assert_eq!(test_ingest_stall_override(Some("")), None);
+    assert_eq!(test_ingest_stall_override(Some("fast")), None);
+    assert_eq!(test_ingest_stall_override(Some("-5")), None);
+    assert_eq!(test_ingest_stall_override(Some("1.5")), None);
+}

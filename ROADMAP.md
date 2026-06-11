@@ -242,9 +242,13 @@ has it, no broad performance sprints without profile evidence.
   KEEPALIVE cadence moved into the per-connection writer task so a parked
   session keeps feeding the peer's hold timer; and a hold-timer expiry with
   unprocessed peer input pending re-arms instead of expiring
-  (`bgp_hold_timer_rearmed_pending_input_total`). Remaining follow-up: an
-  M-series interop smoke proving hold-timer survival under an artificially
-  stalled RIB against a real peer, and revisiting the RIB channel capacity
+  (`bgp_hold_timer_rearmed_pending_input_total`). The interop-coverage
+  follow-up is **done** — the M63 smoke
+  (`test-m63-stalled-rib-hold-timer.sh`) proves hold-timer survival under
+  an artificially stalled RIB (`RUSTBGPD_TEST_RIB_INGEST_STALL_MS` +
+  `RUSTBGPD_TEST_RIB_CHANNEL_CAPACITY`) against a real FRR peer, with the
+  saturation counter, the exact never-drop route count, and zero flaps as
+  receipts. Remaining follow-up: revisiting the RIB channel capacity
   default against the bench convergence shapes now that overflow is a pacing
   knob rather than a correctness cliff.
 - **Graceful-restart session-boundary hygiene.** GR flaps bypass `PeerDown`
