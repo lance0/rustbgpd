@@ -5281,6 +5281,46 @@ async fn hold_expiry_with_complete_frame_then_partial_rearms() {
     );
 }
 
+/// When the pending input itself tears the session down (here: a
+/// NOTIFICATION), the manual re-arm after processing must be skipped.
+/// The FSM stopped the hold timer and closed the connection during
+/// teardown; re-arming would plant a hold timer on the dead session
+/// that later fires in Idle and logs a spurious stale-timer
+/// "daemon-side timer-management bug" warning.
+#[tokio::test]
+async fn hold_expiry_teardown_during_processing_does_not_rearm() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+
+    let notification =
+        rustbgpd_wire::encode_message(&Message::Notification(NotificationMessage::new(
+            NotificationCode::Cease,
+            cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+            Bytes::new(),
+        )))
+        .unwrap();
+    session.read_buf.buf.extend_from_slice(&notification);
+    session.timers.hold = None;
+
+    session.handle_hold_timer_expiry().await;
+
+    assert_ne!(
+        session.fsm.state(),
+        SessionState::Established,
+        "the buffered NOTIFICATION must tear the session down"
+    );
+    assert!(
+        session.read_half.is_none(),
+        "teardown must have dropped the read half"
+    );
+    assert!(
+        session.timers.hold.is_none(),
+        "a torn-down session must not get its hold timer re-armed"
+    );
+}
+
 /// A genuinely silent peer still expires: no buffered or readable input
 /// means the hold expiry stands and the session leaves Established.
 #[tokio::test]

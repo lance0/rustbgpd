@@ -36,6 +36,20 @@ impl PeerSession {
                 "hold timer expired with unprocessed peer input pending; re-arming instead"
             );
             self.process_read_buffer().await;
+            // Processing may have torn the session down (the pending
+            // frame was a NOTIFICATION, or failed decode): the FSM has
+            // already stopped the hold timer and closed the connection
+            // (read half dropped). Re-arming then would plant a hold
+            // timer on the dead session; when it fired in Idle, the
+            // FSM would flag it as a stale-timer daemon bug and log a
+            // spurious warning. Take the silent path instead.
+            if self.read_half.is_none() {
+                debug!(
+                    peer = %self.peer_label,
+                    "session torn down while processing pending input; skipping hold re-arm"
+                );
+                return;
+            }
             if self.timers.hold.is_none()
                 && let Some(secs) = self.timers.last_hold_secs
             {
