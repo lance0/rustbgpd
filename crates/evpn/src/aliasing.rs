@@ -30,6 +30,11 @@
 //!   intent the Linux dataplane will consume in ADR-0059 slice
 //!   3+ when it programs FDB nexthop groups via
 //!   `RTM_NEWNEXTHOP` + `NHA_FDB`.
+//! - [`SingleActiveEligibleIndex`] derives the ADR-0083
+//!   single-active eligible-PE set and backup PE per
+//!   `(ESI, EthTag)` — the receive-side backup-path companion to
+//!   the all-active index above. Pure derivation only (ADR-0083
+//!   slice 1); nothing consumes it yet.
 //!
 //! ## What this module does NOT do
 //!
@@ -200,6 +205,193 @@ pub fn group_members(entry: &RemoteMacEntry) -> Vec<IpAddr> {
         set.insert(*ip);
     }
     set.into_iter().collect()
+}
+
+/// One EAD-per-ES advertisement, trimmed to the fields the
+/// single-active eligible-set fold needs. Built by the daemon at the
+/// boundary between the RIB's `EvpnRoute::EadPerEs` and the resolver
+/// here, with `single_active` decoded from the ESI Label extended
+/// community flag (RFC 7432 §7.5). Self-originated routes are
+/// filtered at the caller, same as [`AliasEadPerEvi`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EadPerEsMode {
+    /// Ethernet Segment Identifier the EAD-per-ES route names.
+    pub esi: EthernetSegmentIdentifier,
+    /// Next-hop / VTEP IP advertised on the EAD-per-ES route.
+    pub vtep_ip: IpAddr,
+    /// Single-Active bit from the ESI Label extended community.
+    /// Duplicate rows for the same `(VTEP, ESI)` are OR-folded by
+    /// [`SingleActiveEligibleIndex::build`], so a transient
+    /// RD-changing duplicate can never flip a segment back to
+    /// all-active depending on arrival order.
+    pub single_active: bool,
+}
+
+/// The portable single-active backup view for one `(ESI, EthTag)`
+/// given a primary PE — what ADR-0083 slice 2 consumes to decide
+/// whether to program the NHG indirection (eligible set beyond the
+/// primary?) and which per-VTEP nexthop object to pre-create (the
+/// backup).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SingleActiveBackupView {
+    /// Eligible-PE set, sorted by `IpAddr` natural order. Membership is
+    /// purely advertisement-derived — the current primary appears only
+    /// while its own EAD pair is present, and drops out during the
+    /// post-failover window. Sorted by
+    /// order (ADR-0083 decision 2: PEs advertising *both* a
+    /// single-active EAD-per-ES and an EAD-per-EVI for the key).
+    pub eligible_pes: Vec<IpAddr>,
+    /// Backup PE: numerically lowest VTEP IP in the eligible set
+    /// excluding the primary; `None` when the primary is the only
+    /// eligible PE (decision 1's single-dst fallback applies there).
+    pub backup_pe: Option<IpAddr>,
+}
+
+/// Built index of single-active `(ESI, EthTag) -> eligible-PE set`
+/// for the ADR-0083 receive-side backup path.
+///
+/// The eligible set for `(ESI, EthTag)` is every PE (VTEP IP)
+/// advertising *both* an EAD-per-ES with the Single-Active bit set
+/// *and* an EAD-per-EVI for that `(ESI, EthTag)` — RFC 7432 §8.4's
+/// "reachable via any PE" set (ADR-0083 decision
+/// 2). All-active segments never appear here; they stay on the
+/// [`AliasIndex`] ECMP path.
+///
+/// Like [`AliasIndex`], the index is read-only after `build` and is
+/// rebuilt on every projection pass from the RIB snapshot — desired
+/// state is a pure function of the EVPN RIB (ADR-0083 decision 5),
+/// so crash-restart, the drift sweep, and the EAD-withdrawal event
+/// path all converge on the same answer with no hidden state and no
+/// ordering dependence.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SingleActiveEligibleIndex {
+    by_key: BTreeMap<(EthernetSegmentIdentifier, EthernetTagId), Vec<IpAddr>>,
+}
+
+impl SingleActiveEligibleIndex {
+    /// Empty index. Lookup returns `None` for every key.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Build from EAD-per-ES and EAD-per-EVI advertisement streams.
+    ///
+    /// EAD-per-ES rows are OR-folded per `(VTEP, ESI)`: if ANY row
+    /// for a key advertises single-active, the pair is single-active
+    /// — the same deterministic fold the daemon's
+    /// `fold_ead_per_es_modes` applies before suppressing all-active
+    /// aliasing, so the two derivations can never disagree on a
+    /// segment's mode. Single-homed entries (`ESI == ZERO`) are
+    /// filtered out on both streams; duplicate triples are deduped.
+    #[must_use]
+    pub fn build<E, V>(ead_per_es: E, ead_per_evi: V) -> Self
+    where
+        E: IntoIterator<Item = EadPerEsMode>,
+        V: IntoIterator<Item = AliasEadPerEvi>,
+    {
+        let mut modes: BTreeMap<(IpAddr, EthernetSegmentIdentifier), bool> = BTreeMap::new();
+        for row in ead_per_es {
+            if row.esi == EthernetSegmentIdentifier::ZERO {
+                continue;
+            }
+            let entry = modes.entry((row.vtep_ip, row.esi)).or_insert(false);
+            *entry = *entry || row.single_active;
+        }
+
+        let mut staged: BTreeMap<(EthernetSegmentIdentifier, EthernetTagId), BTreeSet<IpAddr>> =
+            BTreeMap::new();
+        for row in ead_per_evi {
+            if row.esi == EthernetSegmentIdentifier::ZERO {
+                continue;
+            }
+            // Eligibility requires BOTH route types: an EAD-per-EVI
+            // only counts when the same VTEP also advertises a
+            // single-active EAD-per-ES for the segment. A VTEP whose
+            // EAD-per-ES folds all-active belongs to the AliasIndex
+            // ECMP path, never to a single-active eligible set.
+            if modes.get(&(row.vtep_ip, row.esi)).copied() != Some(true) {
+                continue;
+            }
+            staged
+                .entry((row.esi, row.ethernet_tag))
+                .or_default()
+                .insert(row.vtep_ip);
+        }
+
+        let by_key = staged
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().collect()))
+            .collect();
+        Self { by_key }
+    }
+
+    /// Eligible PEs for `(esi, eth_tag)`, sorted by `IpAddr` natural
+    /// order; the current primary is present only while its own EAD pair
+    /// is advertised. Returns `None` when no PE qualifies
+    /// — the key is not a single-active segment we know a path for.
+    #[must_use]
+    pub fn eligible_pes(
+        &self,
+        esi: EthernetSegmentIdentifier,
+        eth_tag: EthernetTagId,
+    ) -> Option<&[IpAddr]> {
+        self.by_key.get(&(esi, eth_tag)).map(Vec::as_slice)
+    }
+
+    /// Backup PE for `(esi, eth_tag)` given the primary (the MAC
+    /// routes' advertising next-hop): the numerically lowest VTEP IP
+    /// in the eligible set excluding the primary (ADR-0083 decision
+    /// 2 — the `BTreeSet<IpAddr>` total order, IPv4 before IPv6; an
+    /// honest tie-break, not a preference signal, since wrong picks
+    /// drop at the blocked non-DF egress and never loop). The
+    /// primary need not be in the eligible set: post-failover the
+    /// dead primary's MAC routes can outlive its EAD-per-ES, and the
+    /// derivation still yields the lowest survivor (decision 5's
+    /// "primary ineligible → backup" window). Returns `None` when no
+    /// non-primary eligible PE exists.
+    #[must_use]
+    pub fn backup_pe(
+        &self,
+        esi: EthernetSegmentIdentifier,
+        eth_tag: EthernetTagId,
+        primary: IpAddr,
+    ) -> Option<IpAddr> {
+        self.eligible_pes(esi, eth_tag)?
+            .iter()
+            .copied()
+            .find(|&ip| ip != primary)
+    }
+
+    /// Combined [`SingleActiveBackupView`] for `(esi, eth_tag)`
+    /// given the primary. Returns `None` when the key has no
+    /// eligible set at all (not single-active, or no PE advertises
+    /// both route types).
+    #[must_use]
+    pub fn backup_view(
+        &self,
+        esi: EthernetSegmentIdentifier,
+        eth_tag: EthernetTagId,
+        primary: IpAddr,
+    ) -> Option<SingleActiveBackupView> {
+        let eligible = self.eligible_pes(esi, eth_tag)?;
+        Some(SingleActiveBackupView {
+            eligible_pes: eligible.to_vec(),
+            backup_pe: eligible.iter().copied().find(|&ip| ip != primary),
+        })
+    }
+
+    /// Number of `(ESI, EthTag)` pairs with a non-empty eligible set.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.by_key.len()
+    }
+
+    /// `true` if no single-active eligible set was derived.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_key.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -402,5 +594,327 @@ mod tests {
         // single canonical membership set.
         let entry = entry_with_aliases("10.0.0.2", &["10.0.0.2", "10.0.0.3"]);
         assert_eq!(group_members(&entry), vec![ip("10.0.0.2"), ip("10.0.0.3")],);
+    }
+
+    // --- ADR-0083 slice 1: single-active eligible set + backup PE ---
+
+    fn es_row(seed: u8, vtep: &str, single_active: bool) -> EadPerEsMode {
+        EadPerEsMode {
+            esi: esi(seed),
+            vtep_ip: ip(vtep),
+            single_active,
+        }
+    }
+
+    fn evi_row(seed: u8, tag: u32, vtep: &str) -> AliasEadPerEvi {
+        AliasEadPerEvi {
+            esi: esi(seed),
+            ethernet_tag: EthernetTagId(tag),
+            vtep_ip: ip(vtep),
+        }
+    }
+
+    #[test]
+    fn eligible_set_empty_index_resolves_nothing() {
+        let idx = SingleActiveEligibleIndex::new();
+        assert!(idx.is_empty());
+        assert!(idx.eligible_pes(esi(1), EthernetTagId(0)).is_none());
+        assert!(
+            idx.backup_pe(esi(1), EthernetTagId(0), ip("10.0.0.2"))
+                .is_none()
+        );
+        assert!(
+            idx.backup_view(esi(1), EthernetTagId(0), ip("10.0.0.2"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn eligible_set_requires_both_ead_route_types() {
+        // PE .2: EAD-per-ES only. PE .3: EAD-per-EVI only. PE .4: both.
+        // Only .4 is eligible (ADR-0083 decision 2).
+        let idx = SingleActiveEligibleIndex::build(
+            [es_row(1, "10.0.0.2", true), es_row(1, "10.0.0.4", true)],
+            [evi_row(1, 100, "10.0.0.3"), evi_row(1, 100, "10.0.0.4")],
+        );
+        assert_eq!(
+            idx.eligible_pes(esi(1), EthernetTagId(100)).unwrap(),
+            &[ip("10.0.0.4")],
+        );
+    }
+
+    #[test]
+    fn eligible_set_ead_per_es_alone_yields_no_key() {
+        let idx = SingleActiveEligibleIndex::build([es_row(1, "10.0.0.2", true)], []);
+        assert!(idx.is_empty());
+        assert!(idx.eligible_pes(esi(1), EthernetTagId(0)).is_none());
+    }
+
+    #[test]
+    fn eligible_set_ead_per_evi_alone_yields_no_key() {
+        let idx = SingleActiveEligibleIndex::build([], [evi_row(1, 0, "10.0.0.2")]);
+        assert!(idx.is_empty());
+        assert!(idx.eligible_pes(esi(1), EthernetTagId(0)).is_none());
+    }
+
+    #[test]
+    fn all_active_ead_per_es_never_contributes() {
+        // PE .2's EAD-per-ES is all-active: it belongs to the
+        // AliasIndex ECMP path, never to a single-active eligible
+        // set, even though it advertises a matching EAD-per-EVI.
+        let idx = SingleActiveEligibleIndex::build(
+            [es_row(1, "10.0.0.2", false), es_row(1, "10.0.0.3", true)],
+            [evi_row(1, 0, "10.0.0.2"), evi_row(1, 0, "10.0.0.3")],
+        );
+        assert_eq!(
+            idx.eligible_pes(esi(1), EthernetTagId(0)).unwrap(),
+            &[ip("10.0.0.3")],
+        );
+    }
+
+    #[test]
+    fn or_fold_duplicate_ead_per_es_single_active_wins_both_orders() {
+        // Duplicate (e.g. RD-changing transient) EAD-per-ES rows for
+        // the same (VTEP, ESI) with conflicting flags must OR-fold to
+        // single-active regardless of arrival order — the same rule
+        // as the daemon's fold_ead_per_es_modes.
+        for rows in [
+            [es_row(1, "10.0.0.2", false), es_row(1, "10.0.0.2", true)],
+            [es_row(1, "10.0.0.2", true), es_row(1, "10.0.0.2", false)],
+        ] {
+            let idx = SingleActiveEligibleIndex::build(rows, [evi_row(1, 0, "10.0.0.2")]);
+            assert_eq!(
+                idx.eligible_pes(esi(1), EthernetTagId(0)).unwrap(),
+                &[ip("10.0.0.2")],
+                "single-active must win the (VTEP, ESI) fold",
+            );
+        }
+    }
+
+    #[test]
+    fn build_filters_zero_esi_rows() {
+        let idx = SingleActiveEligibleIndex::build(
+            [EadPerEsMode {
+                esi: EthernetSegmentIdentifier::ZERO,
+                vtep_ip: ip("10.0.0.2"),
+                single_active: true,
+            }],
+            [AliasEadPerEvi {
+                esi: EthernetSegmentIdentifier::ZERO,
+                ethernet_tag: EthernetTagId(0),
+                vtep_ip: ip("10.0.0.2"),
+            }],
+        );
+        assert!(idx.is_empty());
+    }
+
+    fn three_pe_index() -> SingleActiveEligibleIndex {
+        SingleActiveEligibleIndex::build(
+            [
+                es_row(1, "10.0.0.2", true),
+                es_row(1, "10.0.0.3", true),
+                es_row(1, "10.0.0.4", true),
+            ],
+            [
+                evi_row(1, 0, "10.0.0.2"),
+                evi_row(1, 0, "10.0.0.3"),
+                evi_row(1, 0, "10.0.0.4"),
+            ],
+        )
+    }
+
+    #[test]
+    fn backup_pe_is_lowest_excluding_primary_when_primary_is_lowest() {
+        let idx = three_pe_index();
+        assert_eq!(
+            idx.backup_pe(esi(1), EthernetTagId(0), ip("10.0.0.2")),
+            Some(ip("10.0.0.3")),
+        );
+    }
+
+    #[test]
+    fn backup_pe_is_lowest_excluding_primary_when_primary_is_not_lowest() {
+        let idx = three_pe_index();
+        assert_eq!(
+            idx.backup_pe(esi(1), EthernetTagId(0), ip("10.0.0.3")),
+            Some(ip("10.0.0.2")),
+        );
+        assert_eq!(
+            idx.backup_pe(esi(1), EthernetTagId(0), ip("10.0.0.4")),
+            Some(ip("10.0.0.2")),
+        );
+    }
+
+    #[test]
+    fn backup_pe_primary_absent_from_eligible_set_yields_lowest_survivor() {
+        // ADR-0083 decision 5 post-failover window: the dead
+        // primary's MAC routes can outlive its EAD-per-ES; the
+        // derivation must still yield the lowest surviving PE.
+        let idx = SingleActiveEligibleIndex::build(
+            [es_row(1, "10.0.0.3", true), es_row(1, "10.0.0.4", true)],
+            [evi_row(1, 0, "10.0.0.3"), evi_row(1, 0, "10.0.0.4")],
+        );
+        assert_eq!(
+            idx.backup_pe(esi(1), EthernetTagId(0), ip("10.0.0.2")),
+            Some(ip("10.0.0.3")),
+        );
+    }
+
+    #[test]
+    fn sole_eligible_pe_yields_no_backup() {
+        let idx = SingleActiveEligibleIndex::build(
+            [es_row(1, "10.0.0.2", true)],
+            [evi_row(1, 0, "10.0.0.2")],
+        );
+        assert!(
+            idx.backup_pe(esi(1), EthernetTagId(0), ip("10.0.0.2"))
+                .is_none()
+        );
+        let view = idx
+            .backup_view(esi(1), EthernetTagId(0), ip("10.0.0.2"))
+            .unwrap();
+        assert_eq!(view.eligible_pes, vec![ip("10.0.0.2")]);
+        assert_eq!(view.backup_pe, None);
+    }
+
+    #[test]
+    fn backup_view_carries_eligible_set_and_backup() {
+        let idx = three_pe_index();
+        let view = idx
+            .backup_view(esi(1), EthernetTagId(0), ip("10.0.0.3"))
+            .unwrap();
+        assert_eq!(
+            view.eligible_pes,
+            vec![ip("10.0.0.2"), ip("10.0.0.3"), ip("10.0.0.4")],
+        );
+        assert_eq!(view.backup_pe, Some(ip("10.0.0.2")));
+    }
+
+    #[test]
+    fn ethernet_tags_derive_independently() {
+        // Same ESI, two tags, different EAD-per-EVI advertisement
+        // sets: derivations must not bleed across tags.
+        let idx = SingleActiveEligibleIndex::build(
+            [es_row(1, "10.0.0.2", true), es_row(1, "10.0.0.3", true)],
+            [
+                evi_row(1, 100, "10.0.0.2"),
+                evi_row(1, 100, "10.0.0.3"),
+                evi_row(1, 200, "10.0.0.2"),
+            ],
+        );
+        assert_eq!(
+            idx.eligible_pes(esi(1), EthernetTagId(100)).unwrap(),
+            &[ip("10.0.0.2"), ip("10.0.0.3")],
+        );
+        assert_eq!(
+            idx.eligible_pes(esi(1), EthernetTagId(200)).unwrap(),
+            &[ip("10.0.0.2")],
+        );
+        assert_eq!(
+            idx.backup_pe(esi(1), EthernetTagId(100), ip("10.0.0.2")),
+            Some(ip("10.0.0.3")),
+        );
+        assert!(
+            idx.backup_pe(esi(1), EthernetTagId(200), ip("10.0.0.2"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn withdrawing_either_route_type_removes_pe_from_eligible_set() {
+        // Pure-function convergence: rebuilding without PE .3's
+        // EAD-per-ES (or its EAD-per-EVI) must drop it from the
+        // eligible set — no incremental state to invalidate.
+        let full = SingleActiveEligibleIndex::build(
+            [es_row(1, "10.0.0.2", true), es_row(1, "10.0.0.3", true)],
+            [evi_row(1, 0, "10.0.0.2"), evi_row(1, 0, "10.0.0.3")],
+        );
+        assert_eq!(
+            full.eligible_pes(esi(1), EthernetTagId(0)).unwrap(),
+            &[ip("10.0.0.2"), ip("10.0.0.3")],
+        );
+
+        let without_es = SingleActiveEligibleIndex::build(
+            [es_row(1, "10.0.0.2", true)],
+            [evi_row(1, 0, "10.0.0.2"), evi_row(1, 0, "10.0.0.3")],
+        );
+        assert_eq!(
+            without_es.eligible_pes(esi(1), EthernetTagId(0)).unwrap(),
+            &[ip("10.0.0.2")],
+        );
+
+        let without_evi = SingleActiveEligibleIndex::build(
+            [es_row(1, "10.0.0.2", true), es_row(1, "10.0.0.3", true)],
+            [evi_row(1, 0, "10.0.0.2")],
+        );
+        assert_eq!(
+            without_evi.eligible_pes(esi(1), EthernetTagId(0)).unwrap(),
+            &[ip("10.0.0.2")],
+        );
+    }
+
+    #[test]
+    fn build_is_insertion_order_independent() {
+        // ADR-0083 decision 5: desired state is a pure function of
+        // the RIB. Every permutation of the same advertisement sets
+        // must derive an identical index.
+        let es_rows = [
+            es_row(1, "10.0.0.4", true),
+            es_row(1, "10.0.0.2", true),
+            es_row(2, "10.0.0.3", true),
+            es_row(1, "10.0.0.2", false),
+        ];
+        let evi_rows = [
+            evi_row(1, 100, "10.0.0.2"),
+            evi_row(2, 100, "10.0.0.3"),
+            evi_row(1, 100, "10.0.0.4"),
+            evi_row(1, 200, "10.0.0.4"),
+        ];
+        let reference = SingleActiveEligibleIndex::build(es_rows, evi_rows);
+        let mut es_rev = es_rows;
+        es_rev.reverse();
+        let mut evi_rev = evi_rows;
+        evi_rev.reverse();
+        assert_eq!(
+            SingleActiveEligibleIndex::build(es_rev, evi_rows),
+            reference,
+        );
+        assert_eq!(
+            SingleActiveEligibleIndex::build(es_rows, evi_rev),
+            reference,
+        );
+        assert_eq!(SingleActiveEligibleIndex::build(es_rev, evi_rev), reference,);
+    }
+
+    #[test]
+    fn mixed_address_families_ipv4_sorts_before_ipv6() {
+        // ADR-0083 decision 2: the IpAddr total order puts IPv4
+        // before IPv6 — a tie-break, not a preference signal.
+        let idx = SingleActiveEligibleIndex::build(
+            [
+                es_row(1, "10.0.0.9", true),
+                es_row(1, "2001:db8::1", true),
+                es_row(1, "2001:db8::2", true),
+            ],
+            [
+                evi_row(1, 0, "10.0.0.9"),
+                evi_row(1, 0, "2001:db8::1"),
+                evi_row(1, 0, "2001:db8::2"),
+            ],
+        );
+        assert_eq!(
+            idx.eligible_pes(esi(1), EthernetTagId(0)).unwrap(),
+            &[ip("10.0.0.9"), ip("2001:db8::1"), ip("2001:db8::2")],
+        );
+        // IPv4 primary: backup is the lowest IPv6.
+        assert_eq!(
+            idx.backup_pe(esi(1), EthernetTagId(0), ip("10.0.0.9")),
+            Some(ip("2001:db8::1")),
+        );
+        // IPv6 primary: the IPv4 PE is the lowest non-primary.
+        assert_eq!(
+            idx.backup_pe(esi(1), EthernetTagId(0), ip("2001:db8::1")),
+            Some(ip("10.0.0.9")),
+        );
     }
 }

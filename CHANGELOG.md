@@ -9,6 +9,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **EVPN single-active eligible-PE set / backup-PE derivation (ADR-0083
+  slice 1).** New pure-logic layer in `crates/evpn/src/aliasing.rs`
+  (`SingleActiveEligibleIndex`, `SingleActiveBackupView`): for a
+  single-active `(ESI, Ethernet Tag)`, derives the RFC 7432 §8.4
+  eligible-PE set — every VTEP advertising *both* an EAD-per-ES with the
+  Single-Active flag set and an EAD-per-EVI for the key — and the backup
+  PE (numerically lowest VTEP IP excluding the primary, per ADR-0083
+  decision 2). Desired state is a pure function of the EVPN RIB snapshot
+  (ADR-0083 decision 5), so crash-restart, the drift sweep, and the
+  EAD-withdrawal event path converge on the same answer. First of four
+  ADR-0083 slices: derivation only — nothing consumes it yet, no
+  dataplane or projection behavior change.
+
 ## [0.38.0] — 2026-06-11
 
 ### Added
