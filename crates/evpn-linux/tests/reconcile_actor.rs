@@ -2156,6 +2156,116 @@ async fn double_crash_readoption_is_idempotent() {
     h2.shutdown().await;
 }
 
+// 7. The kernel snapshot is host-wide (every bridge-enslaved VXLAN),
+//    so a co-resident EVPN controller's `extern_learn` rows on VNIs
+//    absent from our instance table must be neither adopted nor
+//    reaped — even with a zero deferral — while managed-VNI rows in
+//    the same pass behave as before.
+#[tokio::test]
+async fn unmanaged_vni_marker_rows_never_adopted_or_reaped() {
+    let cfg = ReconcileActorConfig {
+        fdb_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    // Another controller's marker row on a VNI we don't manage.
+    h.handle
+        .pre_load_fdb(vni(200), extern_learn_row(mac(7), "10.0.0.9"));
+    // Our crash leftover on the managed VNI — unclaimed, so reaped.
+    h.handle
+        .pre_load_fdb(vni(100), extern_learn_row(mac(7), "10.0.0.9"));
+
+    // Intent manages VNI 100 only.
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent(1, inst, RemoteMacTable::new()))
+        .unwrap();
+
+    let mut reports = Vec::new();
+    for _ in 0..10 {
+        reports.push(h.next_report().await);
+        if !h.handle.kernel_has_fdb(vni(100), mac(7)) {
+            break;
+        }
+    }
+
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(
+        counters.single_dst_adopted, 1,
+        "only the managed-VNI row is ours to adopt"
+    );
+    assert_eq!(counters.single_dst_reaped, 1);
+    assert!(
+        !h.handle.kernel_has_fdb(vni(100), mac(7)),
+        "managed-VNI unclaimed row reaped as before"
+    );
+    assert!(
+        h.handle.kernel_has_fdb(vni(200), mac(7)),
+        "unmanaged-VNI marker row must survive — another controller owns it"
+    );
+
+    h.shutdown().await;
+}
+
+// 8. An empty-instance-table first pass must not burn the one-shot
+//    sweep latch: a later intent that brings the instance table runs
+//    the sweep on the first pass that sees it.
+#[tokio::test]
+async fn empty_instance_first_pass_does_not_burn_adoption_latch() {
+    let cfg = ReconcileActorConfig {
+        fdb_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    h.handle
+        .pre_load_fdb(vni(100), extern_learn_row(mac(7), "10.0.0.9"));
+
+    // First intent: no instances configured yet.
+    h.intent_tx
+        .send(intent(1, EvpnInstanceTable::new(), RemoteMacTable::new()))
+        .unwrap();
+    let mut reports = Vec::new();
+    loop {
+        let r = h.next_report().await;
+        let done = r.intent_generation == 1;
+        reports.push(r);
+        if done {
+            break;
+        }
+    }
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(
+        counters.single_dst_adopted, 0,
+        "empty-intent pass must not sweep"
+    );
+    assert!(h.handle.kernel_has_fdb(vni(100), mac(7)));
+
+    // Config arrives: the sweep runs on the first pass that sees a
+    // non-empty instance table, and the (zero-deferral) reap follows.
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent(2, inst, RemoteMacTable::new()))
+        .unwrap();
+    let mut reports = Vec::new();
+    for _ in 0..10 {
+        reports.push(h.next_report().await);
+        if !h.handle.kernel_has_fdb(vni(100), mac(7)) {
+            break;
+        }
+    }
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(
+        counters.single_dst_adopted, 1,
+        "later non-empty intent must still get the one-shot sweep"
+    );
+    assert_eq!(counters.single_dst_reaped, 1);
+    assert!(!h.handle.kernel_has_fdb(vni(100), mac(7)));
+
+    h.shutdown().await;
+}
+
 // ─── ADR-0079 L3 sweep: crash-restart adoption for VRF routes / L3
 // neighbors / L3VXLAN FDB rows ───
 //

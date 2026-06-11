@@ -267,7 +267,9 @@ struct ActorState {
     /// ADR-0079 slice 2: single-dst `extern_learn` FDB rows adopted
     /// from the first kernel snapshot of this process lifetime —
     /// crash leftovers whose ownership record (the in-memory
-    /// [`OwnedSet`]) died with the previous process. They keep
+    /// [`OwnedSet`]) died with the previous process. Scoped to VNIs
+    /// in the intent's instance table — marker rows on unmanaged
+    /// VNIs (a co-resident EVPN controller's) are never adopted. They keep
     /// forwarding until either a desired MAC re-claims them through
     /// the diff (claim lands in `owned`, key drops out of this set)
     /// or the reap deadline passes and they're removed.
@@ -610,17 +612,32 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
 
         // ADR-0079 slice 2: one-shot adoption sweep over the first
         // kernel FDB snapshot. `extern_learn` is OUR ownership marker
-        // by convention (the kernel never sets it on its own learned
-        // entries — ADR-0079's marker table), so a single-dst marker
-        // row absent from the OwnedSet is a crash leftover: adopt it
-        // so it keeps forwarding, and queue it for the deferred reap
-        // unless a desired MAC re-claims it through the diff first.
-        // NHG-tagged rows (`nh_id` set) belong to the ADR-0059 sweep
-        // below.
-        if self.state.fdb_adoption_reap_after.is_none() {
+        // by convention on VNIs we manage (the kernel never sets it
+        // on its own learned entries — ADR-0079's marker table), so a
+        // single-dst marker row on a managed VNI absent from the
+        // OwnedSet is a crash leftover: adopt it so it keeps
+        // forwarding, and queue it for the deferred reap unless a
+        // desired MAC re-claims it through the diff first. The
+        // snapshot is host-wide — `dump_links` indexes every
+        // bridge-enslaved VXLAN, managed or not — and a co-resident
+        // EVPN controller (e.g., FRR during a per-VNI migration)
+        // stamps the same `extern_learn` marker on VNIs it owns, so
+        // rows whose VNI is not in `intent.instances` are not ours to
+        // manage: never adopted, never reaped. NHG-tagged rows
+        // (`nh_id` set) belong to the ADR-0059 sweep below.
+        //
+        // Gated on a non-empty instance table (the marker is only
+        // ours relative to managed VNIs) — an empty-intent first pass
+        // must not burn the one-shot latch; config arriving later
+        // runs the sweep on the first pass that sees it. Mirrors the
+        // L3 sweep's `!intent.ip_vrfs.is_empty()` gate below.
+        if self.state.fdb_adoption_reap_after.is_none() && !intent.instances.is_empty() {
             self.state.fdb_adoption_reap_after =
                 Some(Instant::now() + self.config.fdb_adoption_reap_deferral);
             for (&(vni, mac), kernel_entry) in snapshot.iter_fdb() {
+                if intent.instances.get(vni).is_none() {
+                    continue;
+                }
                 if kernel_entry.is_extern_learned()
                     && kernel_entry.nh_id.is_none()
                     && !self.state.owned.contains(vni, mac)
@@ -862,8 +879,13 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // ADR-0079 slice 2: drop claimed rows from the adopted set
         // and, once the deferral has elapsed and this pass converged
         // cleanly, reap adopted-but-unclaimed single-dst rows.
-        self.reap_adopted_fdb(&snapshot, intent.remote_macs.as_ref(), !failed.is_empty())
-            .await;
+        self.reap_adopted_fdb(
+            &snapshot,
+            intent.remote_macs.as_ref(),
+            intent.instances.as_ref(),
+            !failed.is_empty(),
+        )
+        .await;
 
         // Update the last-applied BUM plan **per port**:
         // - With `apply_bum_enforcement = false` no kernel mutation
@@ -1838,10 +1860,15 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// Before the deadline, adopted-but-unclaimed rows are left
     /// exactly as-is: they keep forwarding, which is the point.
     /// A failed removal stays in the set and retries next pass.
+    /// Keys whose VNI is no longer in the current intent's instance
+    /// table are skipped (kept tracked, never removed): rows of
+    /// unmanaged VNIs are out of scope, same rationale as the L3
+    /// reap's empty-config guard.
     async fn reap_adopted_fdb(
         &mut self,
         snapshot: &KernelSnapshot,
         desired: &RemoteMacTable,
+        instances: &EvpnInstanceTable,
         pass_had_failures: bool,
     ) {
         if self.state.adopted_fdb.is_empty() {
@@ -1866,6 +1893,15 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // `adopted_fdb`; cheaper than cloning the tree structure.
         let candidates: Vec<_> = self.state.adopted_fdb.iter().copied().collect();
         for (vni, mac) in candidates {
+            if instances.get(vni).is_none() {
+                // The VNI dropped out of the intent's instance table
+                // since adoption — its rows are no longer ours to
+                // manage (same rationale as the L3 reap's empty-
+                // config guard). Keep tracking the key untouched so a
+                // later intent that re-adds the instance decides
+                // claim vs reap.
+                continue;
+            }
             if desired.get(vni, mac).is_some() {
                 // Desired but not yet applied (instance NotReady, or
                 // a retry pending). Never reap a desired MAC — the
