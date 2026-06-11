@@ -9,6 +9,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **M61 kill-and-restart interop proof for the ADR-0079 EVPN L3 sweep.**
+  New `kernel-dataplane` CI job closing the residual-risk gap the v0.37.0
+  notes carried (the L3 slice — the largest new surface — had only in-memory
+  and netns-unit coverage): rustbgpd imports two FRR-originated Type 5
+  prefixes into a real kernel VRF table over the M48 symmetric-IRB topology,
+  is SIGKILLed (the netns and its VRF-route / L3-neighbor / L3VXLAN-FDB rows
+  survive), one prefix is withdrawn while the daemon is down, and the restart
+  proves the still-desired route plus the shared resolution rows stay marked
+  continuously while the unclaimed route is reaped after the deferral — with
+  a foreign `proto static` route and a non-`extern_learn` neighbor untouched
+  and all six `evpn_l3_*_adopted_total` / `_reaped_total` counters asserted.
+
 ## [0.37.0] — 2026-06-11
 
 ### Added
