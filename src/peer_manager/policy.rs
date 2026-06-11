@@ -1154,13 +1154,13 @@ impl PeerManager {
             targets.push(Self::peer_manager_config_from_resolved(resolved, false));
         }
 
-        let applied = self
+        let priors = self
             .apply_peer_reshape_snapshot(targets)
             .await
             .map_err(CatalogMutationError::from)?;
 
         self.current_config = next_config;
-        self.publish_policy_config_event(&event, applied.len());
+        self.publish_policy_config_event(&event, priors.len());
         Ok(())
     }
 }
