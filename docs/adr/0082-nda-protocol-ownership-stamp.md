@@ -164,6 +164,17 @@ stamp-or-legacy migration window.**
   rule that row strands after the next unclean restart. Same class as
   ADR-0079's "operator's `ip route add proto bgp` is indistinguishable"
   hazard — document, don't solve.
+- **A stamp can be silently swapped.** Netlink replace semantics let
+  another controller rewrite a row we own with *its* stamp between our
+  install and our delete; delete paths trust the owned/adopted sets and
+  do not recheck the live row, so the delete would take out the foreign
+  row (netlink has no compare-and-delete, so a delete-time recheck only
+  narrows the race). Moot for FDB on current kernels (the stamp is not
+  stored) and an active-conflict scenario co-residency already excludes.
+  Intended fix when FDB stamping goes live: snapshot-driven ownership
+  *relinquishment* — a reconcile dump showing a foreign stamp at an
+  owned key drops the key from owned state instead of deleting the row,
+  the same kernel-reality-wins shape the adoption reap retain uses.
 - **FRR co-residency is now *detectably* excluded for neighbors**: zebra
   rows carry `RTPROT_ZEBRA` and ours `RTPROT_BGP`, so the sweeps no
   longer cross-adopt neighbor state. FDB cross-adoption remains possible
