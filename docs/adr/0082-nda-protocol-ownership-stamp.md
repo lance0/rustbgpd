@@ -1,6 +1,6 @@
 # ADR-0082: NDA_PROTOCOL ownership stamping for EVPN FDB/neighbor state
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-06-10
 
 ## Context

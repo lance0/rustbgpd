@@ -1,6 +1,6 @@
 # ADR-0081: Atomic peer-group session reshapes on the targeted RPC path
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-06-10
 
 ## Context
