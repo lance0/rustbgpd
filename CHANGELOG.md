@@ -24,8 +24,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (the kernel hashes over all members; single-active means exactly one
   egress forwards) — a new *standby* reference class in the dataplane's
   group refcounting pins it while the `(ESI, Ethernet Tag)` intent
-  lives, exempts it from the orphan reap and the ADR-0059 drift sweep,
-  and reaps it when the intent disappears. Single-active MACs whose ES
+  lives — the ADR-0059 drift sweep tracks and heals it like any owned
+  NH, but it is exempt from the orphan reap — and reaps it when the
+  intent disappears. Single-active MACs whose ES
   has **no** other eligible PE keep today's single-dst rows (ADR-0083
   decision 1's no-backup fallback); all-active aliasing and the
   RFC 7432 §8.2 mass-withdraw flush are unchanged this slice (the
@@ -43,8 +44,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   decision 2). Desired state is a pure function of the EVPN RIB snapshot
   (ADR-0083 decision 5), so crash-restart, the drift sweep, and the
   EAD-withdrawal event path converge on the same answer. First of four
-  ADR-0083 slices: derivation only — nothing consumes it yet, no
-  dataplane or projection behavior change.
+  ADR-0083 slices: derivation only, no dataplane or projection
+  behavior change in this slice (the slice-2 entry above adds the
+  consumer).
 
 ### Changed
 
