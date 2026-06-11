@@ -632,6 +632,15 @@ pub struct Neighbor {
     /// Advertise willingness to receive Address-Prefix ORF entries from this
     /// peer (RFC 5291/5292) and apply them to its outbound advertisements.
     pub prefix_orf_receive: Option<bool>,
+    /// Never treat IPv4 unicast as available on this session (true
+    /// IPv6-only peering). When `true`, IPv4 unicast is excluded from our
+    /// advertised `MultiProtocol` capability and the RFC 4760 §8
+    /// implicit-IPv4 fallback is suppressed; a session whose family
+    /// intersection ends up empty is rejected with OPEN error /
+    /// Unsupported Capability. Default: `false` (RFC-default implicit
+    /// IPv4). Rejected at config load when the neighbor's effective
+    /// `families` resolve to IPv4 unicast only.
+    pub disable_ipv4_unicast: Option<bool>,
     /// Remove private ASNs from `AS_PATH` before eBGP advertisement.
     ///
     /// - `"remove"` — only if the entire path consists of private ASNs
@@ -716,6 +725,10 @@ pub struct PeerGroupConfig {
     /// Advertise willingness to receive Address-Prefix ORF entries (RFC
     /// 5291/5292) from peers in this group.
     pub prefix_orf_receive: Option<bool>,
+    /// Never treat IPv4 unicast as available for peers in this group
+    /// (true IPv6-only peering). See the neighbor-level
+    /// `disable_ipv4_unicast` for semantics.
+    pub disable_ipv4_unicast: Option<bool>,
     pub remove_private_as: Option<String>,
     pub add_path: Option<AddPathConfig>,
     /// Override log level for peers in this group.

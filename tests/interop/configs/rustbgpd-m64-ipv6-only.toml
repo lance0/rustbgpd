@@ -1,0 +1,35 @@
+[global]
+asn = 65001
+router_id = "10.64.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# The IPv6-only session: never negotiate IPv4 unicast. Without
+# disable_ipv4_unicast the RFC 4760 §8 fallback would implicitly add
+# IPv4 unicast even though families only lists ipv6_unicast.
+[[neighbors]]
+address = "fd00:64::2"
+remote_asn = 65002
+description = "frr-m64-v6only"
+hold_time = 90
+families = ["ipv6_unicast"]
+disable_ipv4_unicast = true
+
+# The §8 regression guard: defaults (implicit ipv4_unicast family, no
+# flag) against an FRR neighbor that sends no capabilities at all
+# (dont-capability-negotiate) — IPv4 unicast must still be negotiated
+# through the implicit fallback.
+[[neighbors]]
+address = "10.64.0.2"
+remote_asn = 65002
+description = "frr-m64-v4-regression"
+hold_time = 90
+
+[security.grpc]
+enforcement = "legacy"

@@ -180,6 +180,7 @@ log_format = "json"
             role: None,
             strict_role: None,
             prefix_orf_receive: None,
+            disable_ipv4_unicast: None,
             remove_private_as: None,
             add_path: None,
             import_policy: Vec::new(),

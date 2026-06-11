@@ -34,6 +34,7 @@ fn make_test_session(local_asn: u32, remote_asn: u32) -> PeerSession {
         local_role: None,
         strict_role: false,
         prefix_orf_receive: false,
+        disable_ipv4_unicast: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -65,6 +66,7 @@ fn make_test_session_with_rib(
         local_role: None,
         strict_role: false,
         prefix_orf_receive: false,
+        disable_ipv4_unicast: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -103,6 +105,7 @@ fn make_test_session_with_rib_and_bmp(
         local_role: None,
         strict_role: false,
         prefix_orf_receive: false,
+        disable_ipv4_unicast: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -2582,6 +2585,7 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
         local_role: None,
         strict_role: false,
         prefix_orf_receive: false,
+        disable_ipv4_unicast: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -2710,6 +2714,7 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
         local_role: None,
         strict_role: false,
         prefix_orf_receive: false,
+        disable_ipv4_unicast: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -2874,6 +2879,7 @@ async fn session_down_flushes_import_decision_cache() {
         local_role: None,
         strict_role: false,
         prefix_orf_receive: false,
+        disable_ipv4_unicast: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -3139,6 +3145,7 @@ async fn explain_disabled_stores_no_decisions() {
         local_role: None,
         strict_role: false,
         prefix_orf_receive: false,
+        disable_ipv4_unicast: false,
     };
     let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     config.explain_enabled = false;
@@ -3214,6 +3221,7 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
         local_role: None,
         strict_role: false,
         prefix_orf_receive: false,
+        disable_ipv4_unicast: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -3362,6 +3370,7 @@ async fn update_import_policy_applies_to_future_updates() {
         local_role: None,
         strict_role: false,
         prefix_orf_receive: false,
+        disable_ipv4_unicast: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -3514,6 +3523,7 @@ async fn err_denied_replacement_is_swept_at_eorr() {
         local_role: None,
         strict_role: false,
         prefix_orf_receive: false,
+        disable_ipv4_unicast: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -3638,6 +3648,7 @@ async fn import_policy_match_next_hop_filters_route() {
         local_role: None,
         strict_role: false,
         prefix_orf_receive: false,
+        disable_ipv4_unicast: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -4176,6 +4187,7 @@ async fn import_policy_filters_rpki_invalid_with_snapshot() {
         local_role: None,
         strict_role: false,
         prefix_orf_receive: false,
+        disable_ipv4_unicast: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -4319,6 +4331,7 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
         local_role: None,
         strict_role: false,
         prefix_orf_receive: false,
+        disable_ipv4_unicast: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
@@ -5022,6 +5035,7 @@ fn backpressure_test_session(
         local_role: None,
         strict_role: false,
         prefix_orf_receive: false,
+        disable_ipv4_unicast: false,
     };
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();

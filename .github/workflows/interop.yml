@@ -928,3 +928,41 @@ jobs:
           label: M63
           topology: tests/interop/m63-stalled-rib-hold-timer.clab.yml
           script: tests/interop/scripts/test-m63-stalled-rib-hold-timer.sh
+
+  m64:
+    name: M64 — IPv6-only peering via disable_ipv4_unicast (FRR 10.3.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Install grpcurl + jq
+        # jq parses FRR's `show bgp neighbors json` capability output for
+        # the no-IPv4-MP assertion; grpcurl injects the bidirectional
+        # route-exchange prefixes and reads rustbgpd's RIB.
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+          sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run M64 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M64
+          topology: tests/interop/m64-ipv6-only.clab.yml
+          script: tests/interop/scripts/test-m64-ipv6-only.sh

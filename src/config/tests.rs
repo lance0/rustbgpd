@@ -2477,6 +2477,166 @@ peer_group = "clients"
 }
 
 #[test]
+fn disable_ipv4_unicast_enabled_on_neighbor() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+families = ["ipv6_unicast"]
+disable_ipv4_unicast = true
+"#;
+    let config = parse(toml_str).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert!(peers[0].0.peer.disable_ipv4_unicast);
+}
+
+#[test]
+fn disable_ipv4_unicast_defaults_to_disabled() {
+    let config = parse(valid_toml()).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert!(!peers[0].0.peer.disable_ipv4_unicast);
+}
+
+#[test]
+fn disable_ipv4_unicast_inherited_from_peer_group() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.fabric]
+families = ["ipv6_unicast"]
+disable_ipv4_unicast = true
+
+[[neighbors]]
+address = "fd00::2"
+remote_asn = 65002
+peer_group = "fabric"
+"#;
+    let config = parse(toml_str).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert!(peers[0].0.peer.disable_ipv4_unicast);
+}
+
+#[test]
+fn disable_ipv4_unicast_neighbor_overrides_group() {
+    // Option<bool> resolution: an explicit neighbor `false` wins over the
+    // group's `true`.
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.fabric]
+families = ["ipv6_unicast"]
+disable_ipv4_unicast = true
+
+[[neighbors]]
+address = "fd00::2"
+remote_asn = 65002
+peer_group = "fabric"
+disable_ipv4_unicast = false
+"#;
+    let config = parse(toml_str).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert!(!peers[0].0.peer.disable_ipv4_unicast);
+}
+
+#[test]
+fn disable_ipv4_unicast_rejects_ipv4_only_families() {
+    // Explicit ipv4_unicast-only families + the flag is contradictory:
+    // nothing could ever be negotiated on the session.
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+families = ["ipv4_unicast"]
+disable_ipv4_unicast = true
+"#;
+    let err = parse(toml_str).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("disable_ipv4_unicast"),
+        "error must name the contradictory field, got: {msg}"
+    );
+}
+
+#[test]
+fn disable_ipv4_unicast_rejects_default_ipv4_only_families() {
+    // An IPv4 neighbor with no explicit families resolves to the implicit
+    // ["ipv4_unicast"] default — also contradictory with the flag.
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+disable_ipv4_unicast = true
+"#;
+    let err = parse(toml_str).unwrap_err();
+    assert!(err.to_string().contains("disable_ipv4_unicast"));
+}
+
+#[test]
+fn disable_ipv4_unicast_accepts_ipv6_neighbor_default_families() {
+    // An IPv6 neighbor's default families are ["ipv4_unicast",
+    // "ipv6_unicast"]; the flag simply drops IPv4 from the effective set.
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "fd00::2"
+remote_asn = 65002
+disable_ipv4_unicast = true
+"#;
+    let config = parse(toml_str).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert!(peers[0].0.peer.disable_ipv4_unicast);
+}
+
+#[test]
 fn to_peer_configs_maps_route_server_client() {
     let toml_str = r#"
 [global]
@@ -3369,6 +3529,7 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         role: None,
         strict_role: None,
         prefix_orf_receive: None,
+        disable_ipv4_unicast: None,
         remove_private_as: None,
         add_path: None,
         import_policy: Vec::new(),
@@ -3472,6 +3633,27 @@ fn diff_neighbors_detects_prefix_orf_receive_only_change() {
     assert!(
         changes.iter().any(|c| c.contains("prefix_orf_receive")),
         "describe_neighbor_changes must name prefix_orf_receive, got {changes:?}"
+    );
+}
+
+#[test]
+fn diff_neighbors_detects_disable_ipv4_unicast_only_change() {
+    // disable_ipv4_unicast is an OPEN-time property like prefix_orf_receive:
+    // live config, effective on the next session via ReconcilePeers. A bare
+    // toggle must surface as a changed neighbor, not a silent no-op.
+    let old = vec![test_neighbor("10.0.0.1", 65001)];
+    let mut new_neighbor = test_neighbor("10.0.0.1", 65001);
+    new_neighbor.disable_ipv4_unicast = Some(true);
+
+    let diff = super::diff_neighbors(&old, &[new_neighbor]);
+    assert!(diff.added.is_empty());
+    assert!(diff.removed.is_empty());
+    assert_eq!(diff.changed.len(), 1);
+
+    let changes = super::describe_neighbor_changes(&old[0], &diff.changed[0]);
+    assert!(
+        changes.iter().any(|c| c.contains("disable_ipv4_unicast")),
+        "describe_neighbor_changes must name disable_ipv4_unicast, got {changes:?}"
     );
 }
 
@@ -3945,6 +4127,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             role: None,
             strict_role: None,
             prefix_orf_receive: None,
+            disable_ipv4_unicast: None,
             remove_private_as: None,
             add_path: None,
             log_level: None,
@@ -3984,6 +4167,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         role: None,
         strict_role: None,
         prefix_orf_receive: None,
+        disable_ipv4_unicast: None,
         remove_private_as: None,
         add_path: None,
         import_policy: Vec::new(),
@@ -4015,6 +4199,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         role: None,
         strict_role: None,
         prefix_orf_receive: None,
+        disable_ipv4_unicast: None,
         remove_private_as: None,
         add_path: None,
         import_policy: Vec::new(),
@@ -4072,6 +4257,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         role: None,
         strict_role: None,
         prefix_orf_receive: None,
+        disable_ipv4_unicast: None,
         remove_private_as: None,
         add_path: None,
         import_policy: Vec::new(),
@@ -8643,6 +8829,8 @@ const RELOAD_MATRIX_NEIGHBOR_FIELDS: &[&str] = &[
     "route_server_client",
     "role",
     "strict_role",
+    "prefix_orf_receive",
+    "disable_ipv4_unicast",
     "remove_private_as",
     "add_path",
     "log_level",
@@ -8672,6 +8860,7 @@ const RELOAD_MATRIX_PEER_GROUP_FIELDS: &[&str] = &[
     "role",
     "strict_role",
     "prefix_orf_receive",
+    "disable_ipv4_unicast",
     "remove_private_as",
     "add_path",
     "log_level",
