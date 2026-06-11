@@ -156,7 +156,9 @@ first reconcile pass **adopts** them (ADR-0079), so a crash leftover keeps
 discarding attack traffic instead of blocking re-installation as foreign. A
 still-desired prefix re-claims its adopted row silently (status `adopted`);
 rows no BGP route re-claims stay visible as `adopted_pending_reap` and are
-removed after a 500 s deferral, so reaping never races BGP reconvergence.
+removed after a 500 s deferral, which makes reaping while BGP is still
+reconverging unlikely (the deferral is a time proxy for convergence, not a
+convergence signal).
 Note this marker is a userspace convention: an operator's manual
 `ip route add blackhole ... proto bgp` is indistinguishable from daemon
 state and will be adopted, and co-residency with another proto-bgp daemon

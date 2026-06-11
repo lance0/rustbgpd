@@ -121,6 +121,12 @@ the sweep model is left as a future simplification, not a requirement.
   FIB ownership; configured VRF table/device/onlink shape scopes EVPN L3
   ownership. Co-residency with another proto-186 daemon is unsupported
   and now documented as such.
+- **`extern_learn` is likewise contested on the FDB side.** The FDB
+  sweep's current discriminator is `extern_learn` on a VNI in our
+  configured instance table — rows on unmanaged VNIs are never adopted
+  or reaped — and an `NDA_PROTOCOL` ownership stamp (FRR's January 2026
+  model) is the hardening follow-up for distinguishing controllers
+  sharing a VNI.
 - **systemd-networkd reaps "foreign" state** (`ManageForeignRoutes`,
   `ManageForeignNextHops` default to yes and have deleted other daemons'
   NHGs in the wild). Deployment docs must require `ManageForeign*=no`

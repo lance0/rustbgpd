@@ -34,8 +34,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   silently (status `adopted`); adopted rows that no BGP route re-claims stay
   visible as `adopted_pending_reap` and are reaped after a 500 s deferral
   (FRR zebra `-K` parity), so a crashed daemon can no longer leave a discard
-  route blackholing traffic forever — and reaping cannot race BGP
-  reconvergence. New counters: `bgp_blackhole_discard_adopted_total`,
+  route blackholing traffic forever — and the deferral makes reaping while
+  BGP is still reconverging unlikely (the deadline is a time proxy for
+  convergence, not a convergence signal). New counters:
+  `bgp_blackhole_discard_adopted_total`,
   `bgp_blackhole_discard_reaped_total`. The reconciler also now performs one
   kernel route dump per pass instead of one full-table dump per candidate per
   pass; a failed dump degrades the pass to stale-route removals (status
@@ -246,7 +248,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   marker rows are now adopted from the first kernel snapshot: a desired MAC
   re-claims its row implicitly (the re-program is the claim), and rows no
   EVPN route re-claims are reaped after a 500 s deferral plus a clean apply
-  pass — reaping can't race BGP reconvergence. NHG-tagged rows keep their
+  pass — together those make reaping mid-reconvergence unlikely, not
+  impossible (the deadline is a time proxy, and an ADR-0078 backpressure
+  stall consumes the same budget). NHG-tagged rows keep their
   existing ADR-0059 sweep; operator-static and kernel-learned entries stay
   untouched. New counters: `evpn_fdb_single_dst_adopted_total`,
   `evpn_fdb_single_dst_reaped_total`.

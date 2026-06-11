@@ -11,7 +11,9 @@ use rustbgpd_api::gnmi;
 use rustbgpd_api::server::{GnmiSetError, GnmiSetOperation, GnmiSetTransaction};
 use serde_json::Value;
 
-use crate::config::{Config, DynamicNeighborConfig, Neighbor, PeerGroupConfig};
+use crate::config::{
+    Config, DynamicNeighborConfig, Neighbor, PeerGroupConfig, effective_prefix_str,
+};
 
 const DEFAULT_NETWORK_INSTANCE: &str = "DEFAULT";
 const DEFAULT_PROTOCOL_NAME: &str = "BGP";
@@ -258,7 +260,14 @@ fn apply_dynamic_neighbor_leaf(
     match leaf {
         DynamicNeighborConfigLeaf::Prefix => {
             let configured = parse_string_value(value, "prefix")?;
-            if configured != prefix {
+            let configured_key = effective_prefix_str(&configured).ok_or_else(|| {
+                GnmiSetError::InvalidArgument(format!(
+                    "prefix value {configured:?} is not a valid addr/len prefix"
+                ))
+            })?;
+            // Canonical-key comparison: equivalent non-canonical forms
+            // (host bits set) of the same range are a match.
+            if Some(configured_key) != effective_prefix_str(prefix) {
                 return Err(GnmiSetError::InvalidArgument(format!(
                     "dynamic-neighbor-prefix value {configured:?} does not match prefix key {prefix:?}"
                 )));
@@ -335,7 +344,14 @@ fn ensure_dynamic_neighbor_draft(drafts: &mut Vec<DynamicNeighborDraft>, prefix:
 }
 
 fn dynamic_neighbor_index(drafts: &[DynamicNeighborDraft], prefix: &str) -> Option<usize> {
-    drafts.iter().position(|draft| draft.range.prefix == prefix)
+    // Match on the canonical (masked network, length) key, not the raw
+    // string, so `10.0.0.5/24` addresses the range configured as
+    // `10.0.0.0/24` — the same equivalence the config validator and the
+    // runtime add/delete paths use via `effective_prefix_str`.
+    let key = effective_prefix_str(prefix)?;
+    drafts
+        .iter()
+        .position(|draft| effective_prefix_str(&draft.range.prefix) == Some(key))
 }
 
 fn neighbor_index(
@@ -721,6 +737,11 @@ fn expect_dynamic_neighbor_prefix_key(elem: &gnmi::PathElem) -> Result<String, G
         return Err(GnmiSetError::InvalidArgument(
             "dynamic-neighbor-prefix key must be a non-empty literal".to_string(),
         ));
+    }
+    if effective_prefix_str(prefix).is_none() {
+        return Err(GnmiSetError::InvalidArgument(format!(
+            "dynamic-neighbor-prefix key {prefix:?} is not a valid addr/len prefix"
+        )));
     }
     Ok(prefix.to_string())
 }
@@ -1154,6 +1175,43 @@ description = "old"
     }
 
     #[test]
+    fn set_peer_group_unknown_remove_private_as_identity_is_rejected_downstream() {
+        // The bridge passes an unrecognized identity through verbatim —
+        // it must never be silently mapped to a known mode (or to
+        // disabled). The ADR-0076 candidate validation then rejects the
+        // transaction with the config-level unknown-mode diagnostic,
+        // which the commit path surfaces as InvalidArgument.
+        let mut candidate = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![peer_group_update(
+                "rs-clients",
+                &["config", "remove-private-as"],
+                TypedValue::StringVal("openconfig-bgp-types:PRIVATE_AS_KEEP".to_string()),
+            )]),
+        )
+        .unwrap();
+        // Keep the round-trip focused on the leaf under test: the bare
+        // test config has no gRPC roles, which tier enforcement (the
+        // serialized default) would reject before reaching the
+        // remove-private-as validation.
+        candidate.security.grpc.enforcement = crate::config::GrpcEnforcementConfig::Legacy;
+        let group = candidate.peer_groups.get("rs-clients").unwrap();
+        assert_eq!(
+            group.remove_private_as.as_deref(),
+            Some("openconfig-bgp-types:PRIVATE_AS_KEEP"),
+            "unknown identity must pass through verbatim, never coerced"
+        );
+
+        let candidate_toml = toml::to_string_pretty(&candidate).unwrap();
+        let error =
+            Config::load_toml_with_diagnostics(&candidate_toml, "gnmi set candidate").unwrap_err();
+        assert!(
+            error.contains("unknown mode"),
+            "candidate validation must reject the unknown identity, got: {error}"
+        );
+    }
+
+    #[test]
     fn set_peer_group_delete_removes_entry() {
         let mut config = base_config();
         config
@@ -1304,6 +1362,124 @@ description = "old"
         .unwrap();
 
         assert!(candidate.dynamic_neighbors.is_empty());
+    }
+
+    #[test]
+    fn set_dynamic_neighbor_noncanonical_key_matches_configured_range() {
+        // `10.0.0.5/24` and `10.0.0.0/24` cover the identical address
+        // set (host bits are masked off, the same canonical key the
+        // config validator uses) — the update must address the existing
+        // range, not create a duplicate draft.
+        let mut config = base_config();
+        config.dynamic_neighbors.push(DynamicNeighborConfig {
+            prefix: "10.0.0.0/24".to_string(),
+            peer_group: "old".to_string(),
+            remote_asn: 65010,
+            description: Some("existing".to_string()),
+        });
+
+        let candidate = apply_transaction_to_config(
+            config,
+            &transaction(vec![dynamic_neighbor_update(
+                "10.0.0.5/24",
+                &["config", "peer-group"],
+                TypedValue::StringVal("new".to_string()),
+            )]),
+        )
+        .unwrap();
+
+        assert_eq!(candidate.dynamic_neighbors.len(), 1);
+        let range = &candidate.dynamic_neighbors[0];
+        assert_eq!(range.prefix, "10.0.0.0/24");
+        assert_eq!(range.peer_group, "new");
+        assert_eq!(range.remote_asn, 65010);
+    }
+
+    #[test]
+    fn set_dynamic_neighbor_delete_matches_noncanonical_key() {
+        let mut config = base_config();
+        config.dynamic_neighbors.push(DynamicNeighborConfig {
+            prefix: "10.0.0.0/24".to_string(),
+            peer_group: "ix-members".to_string(),
+            remote_asn: 0,
+            description: None,
+        });
+
+        let candidate = apply_transaction_to_config(
+            config,
+            &transaction(vec![GnmiSetOperation::Delete(dynamic_neighbor_path(
+                "10.0.0.5/24",
+                &[],
+            ))]),
+        )
+        .unwrap();
+
+        assert!(candidate.dynamic_neighbors.is_empty());
+    }
+
+    #[test]
+    fn set_dynamic_neighbor_prefix_leaf_accepts_equivalent_form() {
+        // Value and key with the same canonical prefix are a match even
+        // when the raw strings differ.
+        let candidate = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![
+                dynamic_neighbor_update(
+                    "10.0.0.0/24",
+                    &["config", "prefix"],
+                    TypedValue::StringVal("10.0.0.5/24".to_string()),
+                ),
+                dynamic_neighbor_update(
+                    "10.0.0.0/24",
+                    &["config", "peer-group"],
+                    TypedValue::StringVal("ix-members".to_string()),
+                ),
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(candidate.dynamic_neighbors.len(), 1);
+        assert_eq!(candidate.dynamic_neighbors[0].peer_group, "ix-members");
+    }
+
+    #[test]
+    fn set_rejects_unparseable_dynamic_neighbor_prefix_key() {
+        for bad in ["not-a-prefix", "10.0.0.0/40", "10.0.0.0"] {
+            let error = apply_transaction_to_config(
+                base_config(),
+                &transaction(vec![dynamic_neighbor_update(
+                    bad,
+                    &["config", "peer-group"],
+                    TypedValue::StringVal("ix-members".to_string()),
+                )]),
+            )
+            .unwrap_err();
+
+            assert!(
+                matches!(error, GnmiSetError::InvalidArgument(_)),
+                "key {bad:?}: expected InvalidArgument, got {error:?}"
+            );
+            assert!(
+                error.to_string().contains("not a valid addr/len prefix"),
+                "key {bad:?}: unexpected message {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_rejects_unparseable_dynamic_neighbor_prefix_value() {
+        let error = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![dynamic_neighbor_update(
+                "10.0.0.0/24",
+                &["config", "prefix"],
+                TypedValue::StringVal("10.0.0.0/40".to_string()),
+            )]),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, GnmiSetError::InvalidArgument(_)));
+        assert!(error.to_string().contains("not a valid addr/len prefix"));
     }
 
     #[test]
