@@ -234,7 +234,10 @@ pub struct EadPerEsMode {
 /// backup).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SingleActiveBackupView {
-    /// Eligible-PE set, primary included, sorted by `IpAddr` natural
+    /// Eligible-PE set, sorted by `IpAddr` natural order. Membership is
+    /// purely advertisement-derived — the current primary appears only
+    /// while its own EAD pair is present, and drops out during the
+    /// post-failover window. Sorted by
     /// order (ADR-0083 decision 2: PEs advertising *both* a
     /// single-active EAD-per-ES and an EAD-per-EVI for the key).
     pub eligible_pes: Vec<IpAddr>,
@@ -250,7 +253,7 @@ pub struct SingleActiveBackupView {
 /// The eligible set for `(ESI, EthTag)` is every PE (VTEP IP)
 /// advertising *both* an EAD-per-ES with the Single-Active bit set
 /// *and* an EAD-per-EVI for that `(ESI, EthTag)` — RFC 7432 §8.4's
-/// "reachable via any PE" set, primary included (ADR-0083 decision
+/// "reachable via any PE" set (ADR-0083 decision
 /// 2). All-active segments never appear here; they stay on the
 /// [`AliasIndex`] ECMP path.
 ///
@@ -324,7 +327,8 @@ impl SingleActiveEligibleIndex {
     }
 
     /// Eligible PEs for `(esi, eth_tag)`, sorted by `IpAddr` natural
-    /// order, primary included. Returns `None` when no PE qualifies
+    /// order; the current primary is present only while its own EAD pair
+    /// is advertised. Returns `None` when no PE qualifies
     /// — the key is not a single-active segment we know a path for.
     #[must_use]
     pub fn eligible_pes(
