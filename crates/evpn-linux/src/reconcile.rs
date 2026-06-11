@@ -2646,10 +2646,26 @@ where
             mac,
             group_key,
             members,
-        } => apply_install_fdb_nhg(dataplane, state, *vni, *mac, *group_key, members).await,
-        DataplaneOp::UpdateFdbNhgMembers { group_key, members } => {
-            apply_update_fdb_nhg_members(dataplane, state, *group_key, members).await
+            standby,
+            convert_from_dst,
+        } => {
+            apply_install_fdb_nhg(
+                dataplane,
+                state,
+                *vni,
+                *mac,
+                *group_key,
+                members,
+                *standby,
+                *convert_from_dst,
+            )
+            .await
         }
+        DataplaneOp::UpdateFdbNhgMembers {
+            group_key,
+            members,
+            standby,
+        } => apply_update_fdb_nhg_members(dataplane, state, *group_key, members, *standby).await,
         DataplaneOp::RemoveFdbNhg {
             vni,
             mac,
@@ -2659,10 +2675,12 @@ where
     }
 }
 
-/// Install path: per-VTEP members → group (replace if exists) → FDB row.
-/// ADR-0059 §5 invariants 1 + 3. Reads top-to-bottom; further breaking
-/// this up would obscure the rollback ordering.
-#[allow(clippy::too_many_lines)]
+/// Install path: per-VTEP members (incl. the ADR-0083 standby, if
+/// any) → group (replace if exists) → optional dst-row conversion
+/// delete → FDB row. ADR-0059 §5 invariants 1 + 3. Reads
+/// top-to-bottom; further breaking this up would obscure the rollback
+/// ordering.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn apply_install_fdb_nhg<D>(
     dataplane: &mut D,
     state: &mut ActorState,
@@ -2670,6 +2688,8 @@ async fn apply_install_fdb_nhg<D>(
     mac: rustbgpd_evpn::MacAddress,
     group_key: crate::group_state::AliasGroupKey,
     members: &[std::net::IpAddr],
+    standby: Option<std::net::IpAddr>,
+    convert_from_dst: bool,
 ) -> Result<(), crate::error::DataplaneError>
 where
     D: crate::dataplane::NexthopOps,
@@ -2677,12 +2697,17 @@ where
     use std::collections::BTreeSet;
 
     // Track resources newly created in this op so a later step's
-    // failure can roll them back rather than leak.
+    // failure can roll them back rather than leak. The standby NH
+    // (if newly created) rides `new_members` too — the rollback's
+    // orphan check accounts both reference classes.
     let mut new_members: Vec<(std::net::IpAddr, u32)> = Vec::new();
     let mut new_group: Option<(crate::group_state::AliasGroupKey, u32)> = None;
 
-    // Step 1: install any per-VTEP members not yet present.
-    for ip in members {
+    // Step 1: install any per-VTEP members not yet present. The
+    // ADR-0083 standby NH is created through the same path (it is a
+    // plain per-VTEP fdb nexthop — only the reference class differs),
+    // so a future membership swap allocates nothing.
+    for ip in members.iter().chain(standby.iter()) {
         if state.groups.vtep_nh(ip).is_none() {
             let id = match state.nh_id_alloc.alloc_vtep_nh() {
                 Ok(id) => id,
@@ -2733,7 +2758,17 @@ where
         .group(&group_key)
         .map(|g| (g.id, g.members.iter().copied().collect::<Vec<_>>()));
     let group_id = if let Some((g_id, existing_members)) = existing {
-        if existing_members.as_slice() != members {
+        if existing_members.as_slice() == members {
+            // Members unchanged — the standby intent may still have
+            // moved (the derived backup PE changed without touching
+            // the active member).
+            let old_standby = state.groups.record_group_standby_change(group_key, standby);
+            if let Some(old_ip) = old_standby
+                && let Some(vtep_id) = state.groups.record_standby_unref(old_ip, group_key)
+            {
+                try_del_and_release_alloc(dataplane, state, vtep_id, "install_standby").await;
+            }
+        } else {
             // Member set drifted (e.g., re-install after
             // partial-failure recovery). Atomic REPLACE, then GC any
             // per-VTEP members whose last group-ref dropped —
@@ -2751,6 +2786,11 @@ where
                 .await;
                 return Err(e);
             }
+            // ADR-0083: re-pin the standby BEFORE the member GC so a
+            // member that just became the standby (or vice versa) is
+            // never reaped in the window between the two bookkeeping
+            // calls. The old standby's GC follows the member GC.
+            let old_standby = state.groups.record_group_standby_change(group_key, standby);
             let new_members_set: BTreeSet<_> = members.iter().copied().collect();
             let removed = state
                 .groups
@@ -2759,6 +2799,11 @@ where
                 if let Some(vtep_id) = state.groups.record_member_unref(ip, group_key) {
                     try_del_and_release_alloc(dataplane, state, vtep_id, "install_drift").await;
                 }
+            }
+            if let Some(old_ip) = old_standby
+                && let Some(vtep_id) = state.groups.record_standby_unref(old_ip, group_key)
+            {
+                try_del_and_release_alloc(dataplane, state, vtep_id, "install_standby").await;
             }
         }
         g_id
@@ -2796,11 +2841,23 @@ where
         let members_set: BTreeSet<_> = members.iter().copied().collect();
         state
             .groups
-            .record_group_install(group_key, id, members_set);
+            .record_group_install(group_key, id, members_set, standby);
         state.adopted_unreferenced.remove(&id);
         new_group = Some((group_key, id));
         id
     };
+    // Step 2.5 (ADR-0083 row-shape conversion): the kernel holds a
+    // dst-shaped row at this MAC and rejects in-place dst→nhid
+    // conversion with -EOPNOTSUPP, so delete it now — immediately
+    // before the nhid install, so the forwarding gap is bounded by
+    // one netlink round-trip for this one MAC. `remove_fdb_nhg_row`
+    // deletes by MAC regardless of the row's shape and treats ENOENT
+    // as ACK, so a row that vanished since the snapshot is harmless.
+    if convert_from_dst && let Err(e) = dataplane.remove_fdb_nhg_row(vni, mac).await {
+        rollback_partial_install(dataplane, state, &new_members, new_group, "install_convert")
+            .await;
+        return Err(e);
+    }
     // Step 3: install the FDB row pointing at the group. On failure,
     // roll back the newly-created group (if any) and members — they
     // have no MAC ref yet, so they're true orphans without rollback.
@@ -2812,12 +2869,15 @@ where
     Ok(())
 }
 
-/// Update path: per-VTEP members (added) → group REPLACE → GC removed members.
+/// Update path: per-VTEP members (added, incl. the ADR-0083 standby)
+/// → group REPLACE → standby re-pin → GC removed members + old
+/// standby.
 async fn apply_update_fdb_nhg_members<D>(
     dataplane: &mut D,
     state: &mut ActorState,
     group_key: crate::group_state::AliasGroupKey,
     members: &[std::net::IpAddr],
+    standby: Option<std::net::IpAddr>,
 ) -> Result<(), crate::error::DataplaneError>
 where
     D: crate::dataplane::NexthopOps,
@@ -2829,7 +2889,7 @@ where
     // "Update", not "Install") so it never appears in the rollback's
     // `new_group` slot.
     let mut new_members: Vec<(std::net::IpAddr, u32)> = Vec::new();
-    for ip in members {
+    for ip in members.iter().chain(standby.iter()) {
         if state.groups.vtep_nh(ip).is_none() {
             let id = match state.nh_id_alloc.alloc_vtep_nh() {
                 Ok(id) => id,
@@ -2885,6 +2945,11 @@ where
         rollback_partial_install(dataplane, state, &new_members, None, "update_step2").await;
         return Err(e);
     }
+    // ADR-0083: re-pin the standby BEFORE the member GC so a member
+    // that just became the standby (the slice-3 swap shape: backup
+    // promoted to member, old active demoted to standby) is never
+    // reaped in the window between the two bookkeeping calls.
+    let old_standby = state.groups.record_group_standby_change(group_key, standby);
     let new_members_set: BTreeSet<_> = members.iter().copied().collect();
     let removed = state
         .groups
@@ -2894,6 +2959,12 @@ where
         if let Some(vtep_id) = state.groups.record_member_unref(ip, group_key) {
             try_del_and_release_alloc(dataplane, state, vtep_id, "update_members").await;
         }
+    }
+    // GC the old standby if the change unpinned its last reference.
+    if let Some(old_ip) = old_standby
+        && let Some(vtep_id) = state.groups.record_standby_unref(old_ip, group_key)
+    {
+        try_del_and_release_alloc(dataplane, state, vtep_id, "update_standby").await;
     }
     Ok(())
 }
@@ -2916,12 +2987,24 @@ where
     dataplane.remove_fdb_nhg_row(vni, mac).await?;
     match state.groups.record_mac_unref(group_key, vni, mac) {
         RefDelta::GroupStillReferenced => Ok(()),
-        RefDelta::GroupShouldDelete { id, members } => {
+        RefDelta::GroupShouldDelete {
+            id,
+            members,
+            standby,
+        } => {
             try_del_and_release_alloc(dataplane, state, id, "remove_group").await;
             for ip in members {
                 if let Some(vtep_id) = state.groups.record_member_unref(ip, group_key) {
                     try_del_and_release_alloc(dataplane, state, vtep_id, "remove_member").await;
                 }
+            }
+            // ADR-0083: the group's standby pin died with the group's
+            // intent — GC the backup NH unless another group still
+            // references it (as member or standby).
+            if let Some(ip) = standby
+                && let Some(vtep_id) = state.groups.record_standby_unref(ip, group_key)
+            {
+                try_del_and_release_alloc(dataplane, state, vtep_id, "remove_standby").await;
             }
             Ok(())
         }
@@ -2984,12 +3067,15 @@ async fn rollback_partial_install<D: crate::dataplane::NexthopOps>(
     // if state ever drifts, the map's ID is what we actually tracked
     // and is the safer kernel reference.
     if let Some((group_key, expected_id)) = new_group
-        && let Some((tracked_id, _members)) = state.groups.drop_unreferenced_group(&group_key)
+        && let Some((tracked_id, _members, _standby)) =
+            state.groups.drop_unreferenced_group(&group_key)
     {
         debug_assert_eq!(tracked_id, expected_id, "rollback ID mismatch");
         try_del_and_release_alloc(dataplane, state, tracked_id, site).await;
     }
-    // Members in reverse-creation order. Skip members that a still-
+    // Members in reverse-creation order (the ADR-0083 standby NH, if
+    // newly created this op, rides this list too — the orphan check
+    // accounts both reference classes). Skip members that a still-
     // installed group now references — this happens on the
     // existing-group drift-heal path when Step 2's REPLACE succeeded
     // and attached the new members to the (already-live) group, and

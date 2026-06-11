@@ -157,6 +157,62 @@ where
     R: IntoIterator<Item = ProjectedEvpnRoute>,
     A: IntoIterator<Item = ProjectedEvpnEadPerEvi>,
 {
+    // Empty single-active index: `pair_is_single_active` is false for
+    // every pair, so every entry takes the pre-ADR-0083 path and the
+    // output is bit-identical to the historical behavior.
+    project_evpn_routes_with_backup_paths(
+        instances,
+        routes,
+        ead_per_evi,
+        &crate::SingleActiveEligibleIndex::new(),
+    )
+}
+
+/// Build a [`RemoteMacTable`] from Type 2 best paths, all-active
+/// EAD-per-EVI aliasing advertisements, and the ADR-0083
+/// single-active eligible-set index.
+///
+/// `ead_per_evi` is the all-active aliasing feed — the caller has
+/// already removed self-originated rows *and* rows whose
+/// `(next-hop, ESI)` folds single-active (single-active never feeds
+/// the ECMP [`crate::AliasIndex`]). `single_active` is the
+/// [`crate::SingleActiveEligibleIndex`] built from the same RIB
+/// snapshot's EAD-per-ES modes + the full (self-filtered)
+/// EAD-per-EVI stream.
+///
+/// Per staged Type 2 route with a non-zero ESI (ADR-0083 decision 1):
+///
+/// - **`(next-hop, ESI)` folds single-active, backup derivable** →
+///   the entry carries `alias_group_key = (ESI, EthernetTag)` with an
+///   *empty* `alias_vtep_ips` (one-member desired membership: the
+///   active PE) plus `single_active_backup_vtep_ip = Some(backup)`.
+/// - **single-active, no other eligible PE** → de-facto single-homed:
+///   plain single-dst entry (no key, no backup) — the NHG indirection
+///   buys nothing there.
+/// - **all-active (or no EAD-per-ES mode known)** → the existing
+///   RFC 7432 §14 aliasing resolution, unchanged.
+///
+/// Same purity / panic contract as [`project_evpn_routes`].
+///
+/// # Panics
+///
+/// Panics under the same logic-bug condition as
+/// [`project_evpn_routes`] — the staged `BTreeMap` already dedupes
+/// `(VNI, MAC)` keys before calling
+/// [`RemoteMacTableBuilder::insert`].
+///
+/// [`RemoteMacTableBuilder::insert`]: crate::RemoteMacTableBuilder::insert
+#[must_use]
+pub fn project_evpn_routes_with_backup_paths<R, A>(
+    instances: &EvpnInstanceTable,
+    routes: R,
+    ead_per_evi: A,
+    single_active: &crate::SingleActiveEligibleIndex,
+) -> RemoteMacTable
+where
+    R: IntoIterator<Item = ProjectedEvpnRoute>,
+    A: IntoIterator<Item = ProjectedEvpnEadPerEvi>,
+{
     use std::collections::BTreeMap;
 
     // Build the aliasing index once. Empty input → empty index;
@@ -205,6 +261,32 @@ where
 
     let mut builder = RemoteMacTable::builder();
     for ((vni, mac), route) in staged {
+        // ADR-0083 single-active gate: a non-zero-ESI route whose
+        // origin `(next-hop, ESI)` pair folds single-active never
+        // takes the all-active aliasing path (the single-active bit
+        // suppresses ECMP — RFC 7432 §14 vs §8.4). With a derivable
+        // backup it carries the one-member group key + backup
+        // intent; with no other eligible PE it is de-facto
+        // single-homed and keeps today's single-dst shape
+        // (decision 1's no-backup fallback).
+        if route.esi != rustbgpd_wire::EthernetSegmentIdentifier::ZERO
+            && single_active.pair_is_single_active(route.next_hop, route.esi)
+        {
+            let backup = single_active.backup_pe(route.esi, route.ethernet_tag, route.next_hop);
+            let entry = RemoteMacEntry {
+                remote_vtep_ip: route.next_hop,
+                mobility_sequence: route.mobility_sequence,
+                alias_vtep_ips: Vec::new(),
+                alias_group_key: backup.map(|_| (route.esi, route.ethernet_tag)),
+                single_active_backup_vtep_ip: backup,
+                source: RemoteMacSource::EvpnRibBestPath,
+            };
+            builder
+                .insert(vni, mac, entry)
+                .expect("staged BTreeMap already deduped (VNI, MAC) keys");
+            continue;
+        }
+
         // Resolve aliasing alternatives for non-zero-ESI routes.
         // `alias_resolved_next_hops` returns primary first; we want
         // only the *additional* VTEPs in `alias_vtep_ips`, so trim
@@ -266,6 +348,7 @@ where
             mobility_sequence: route.mobility_sequence,
             alias_vtep_ips,
             alias_group_key,
+            single_active_backup_vtep_ip: None,
             source: RemoteMacSource::EvpnRibBestPath,
         };
         // Builder rejects duplicates, but we already deduped via
@@ -662,6 +745,171 @@ mod tests {
         let table = project_evpn_routes(&one_local(100), routes);
         let entry = table.get(vni(100), mac(1)).unwrap();
         assert!(entry.alias_vtep_ips.is_empty());
+    }
+
+    // ─── ADR-0083 slice 2: single-active backup-path projection ───
+
+    use crate::aliasing::{EadPerEsMode, SingleActiveEligibleIndex};
+
+    fn sa_index(
+        es_rows: &[(u8, &str, bool)],
+        evi_rows: &[(u8, u32, &str)],
+    ) -> SingleActiveEligibleIndex {
+        SingleActiveEligibleIndex::build(
+            es_rows
+                .iter()
+                .map(|&(seed, vtep, single_active)| EadPerEsMode {
+                    esi: esi_seed(seed),
+                    vtep_ip: ipa(vtep),
+                    single_active,
+                }),
+            evi_rows
+                .iter()
+                .map(|&(seed, tag, vtep)| crate::AliasEadPerEvi {
+                    esi: esi_seed(seed),
+                    ethernet_tag: rustbgpd_wire::EthernetTagId(tag),
+                    vtep_ip: ipa(vtep),
+                }),
+        )
+    }
+
+    #[test]
+    fn single_active_entry_carries_one_member_group_key_and_backup() {
+        // Primary 10.0.0.2 + eligible backup 10.0.0.3 on a
+        // single-active segment: the entry must carry the
+        // `(ESI, EthernetTag)` group key with an EMPTY alias list
+        // (one-member desired membership = the active PE) plus the
+        // backup intent (ADR-0083 decision 1).
+        let routes = vec![route_with_esi(100, 1, "10.0.0.2", None, esi_seed(7))];
+        let index = sa_index(
+            &[(7, "10.0.0.2", true), (7, "10.0.0.3", true)],
+            &[(7, 0, "10.0.0.2"), (7, 0, "10.0.0.3")],
+        );
+        // Single-active rows never feed the all-active aliasing feed.
+        let table = project_evpn_routes_with_backup_paths(
+            &one_local(100),
+            routes,
+            std::iter::empty(),
+            &index,
+        );
+        let entry = table.get(vni(100), mac(1)).unwrap();
+        assert_eq!(entry.remote_vtep_ip, ipa("10.0.0.2"));
+        assert!(
+            entry.alias_vtep_ips.is_empty(),
+            "single-active membership is one member: the active PE only"
+        );
+        assert_eq!(
+            entry.alias_group_key,
+            Some((esi_seed(7), rustbgpd_wire::EthernetTagId(0))),
+        );
+        assert_eq!(entry.single_active_backup_vtep_ip, Some(ipa("10.0.0.3")));
+    }
+
+    #[test]
+    fn single_active_backup_is_lowest_non_primary_eligible() {
+        let routes = vec![route_with_esi(100, 1, "10.0.0.4", None, esi_seed(7))];
+        let index = sa_index(
+            &[
+                (7, "10.0.0.2", true),
+                (7, "10.0.0.3", true),
+                (7, "10.0.0.4", true),
+            ],
+            &[(7, 0, "10.0.0.2"), (7, 0, "10.0.0.3"), (7, 0, "10.0.0.4")],
+        );
+        let table = project_evpn_routes_with_backup_paths(
+            &one_local(100),
+            routes,
+            std::iter::empty(),
+            &index,
+        );
+        let entry = table.get(vni(100), mac(1)).unwrap();
+        assert_eq!(entry.single_active_backup_vtep_ip, Some(ipa("10.0.0.2")));
+    }
+
+    #[test]
+    fn single_active_sole_pe_falls_back_to_plain_dst_row() {
+        // ADR-0083 decision 1: "Single-active MACs on an ES with no
+        // other eligible PE (a de-facto single-homed segment) keep
+        // today's single-dst rows; the NHG indirection buys nothing
+        // there." No group key, no backup.
+        let routes = vec![route_with_esi(100, 1, "10.0.0.2", None, esi_seed(7))];
+        let index = sa_index(&[(7, "10.0.0.2", true)], &[(7, 0, "10.0.0.2")]);
+        let table = project_evpn_routes_with_backup_paths(
+            &one_local(100),
+            routes,
+            std::iter::empty(),
+            &index,
+        );
+        let entry = table.get(vni(100), mac(1)).unwrap();
+        assert!(entry.alias_group_key.is_none());
+        assert!(entry.alias_vtep_ips.is_empty());
+        assert!(entry.single_active_backup_vtep_ip.is_none());
+    }
+
+    #[test]
+    fn single_active_gate_never_consumes_all_active_aliases() {
+        // Pathological mixed-mode segment: the primary's pair folds
+        // single-active while another PE advertises an all-active
+        // EAD-per-EVI for the same key (which therefore appears in
+        // the aliasing feed). The single-active bit on the primary's
+        // pair is authoritative: no ECMP aliases, and the all-active
+        // PE is not eligible as a backup either.
+        let routes = vec![route_with_esi(100, 1, "10.0.0.2", None, esi_seed(7))];
+        let index = sa_index(
+            &[(7, "10.0.0.2", true), (7, "10.0.0.3", false)],
+            &[(7, 0, "10.0.0.2"), (7, 0, "10.0.0.3")],
+        );
+        let eads = vec![ead(esi_seed(7), 0, "10.0.0.3")];
+        let table = project_evpn_routes_with_backup_paths(&one_local(100), routes, eads, &index);
+        let entry = table.get(vni(100), mac(1)).unwrap();
+        assert!(entry.alias_vtep_ips.is_empty());
+        assert!(entry.alias_group_key.is_none());
+        assert!(entry.single_active_backup_vtep_ip.is_none());
+    }
+
+    #[test]
+    fn all_active_entries_unchanged_by_backup_path_projection() {
+        // All-active behavior must be bit-identical: the same inputs
+        // through the aliasing wrapper and through the backup-path
+        // function (with the segment's pairs folding all-active)
+        // produce identical tables, with no backup intent.
+        let routes = vec![route_with_esi(100, 1, "10.0.0.2", None, esi_seed(7))];
+        let eads = vec![
+            ead(esi_seed(7), 0, "10.0.0.3"),
+            ead(esi_seed(7), 0, "10.0.0.4"),
+        ];
+        let index = sa_index(
+            &[(7, "10.0.0.2", false), (7, "10.0.0.3", false)],
+            &[(7, 0, "10.0.0.2"), (7, 0, "10.0.0.3")],
+        );
+        let via_wrapper =
+            project_evpn_routes_with_aliases(&one_local(100), routes.clone(), eads.clone());
+        let via_backup_paths =
+            project_evpn_routes_with_backup_paths(&one_local(100), routes, eads, &index);
+        assert_eq!(via_wrapper, via_backup_paths);
+        let entry = via_backup_paths.get(vni(100), mac(1)).unwrap();
+        assert!(entry.single_active_backup_vtep_ip.is_none());
+        assert_eq!(entry.alias_vtep_ips.len(), 2);
+    }
+
+    #[test]
+    fn zero_esi_routes_ignore_single_active_index() {
+        // ESI == ZERO routes are single-homed regardless of what the
+        // index contains for unrelated keys.
+        let routes = vec![route(100, 1, "10.0.0.2", None)];
+        let index = sa_index(
+            &[(7, "10.0.0.2", true), (7, "10.0.0.3", true)],
+            &[(7, 0, "10.0.0.2"), (7, 0, "10.0.0.3")],
+        );
+        let table = project_evpn_routes_with_backup_paths(
+            &one_local(100),
+            routes,
+            std::iter::empty(),
+            &index,
+        );
+        let entry = table.get(vni(100), mac(1)).unwrap();
+        assert!(entry.alias_group_key.is_none());
+        assert!(entry.single_active_backup_vtep_ip.is_none());
     }
 
     #[test]

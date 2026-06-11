@@ -51,7 +51,7 @@ use rustbgpd_evpn::ip_vrf::{IpVrfTable, RemoteIpPrefixTable};
 use rustbgpd_evpn::{
     BumEnforcementTable, DataplaneIntent, DataplaneReport, DuplicateMacKey, EvpnInstanceTable,
     FdbNhgDriftCounters, L3AdoptionCounters, LocalMacObservation, ProjectedEvpnEadPerEvi,
-    ProjectedEvpnRoute, RemoteMacTable, project_evpn_routes_with_aliases,
+    ProjectedEvpnRoute, RemoteMacTable,
 };
 use rustbgpd_evpn_linux::{Dataplane, ReconcileActor, ReconcileActorConfig};
 use rustbgpd_rib::{RibUpdate, route::EvpnRibRoute};
@@ -928,7 +928,8 @@ async fn supervisor_loop(
 }
 
 /// Query the RIB for current best-path EVPN routes and project Type 2
-/// MAC/IP routes through [`project_evpn_routes_with_aliases`]. Type 1
+/// MAC/IP routes through
+/// [`rustbgpd_evpn::project_evpn_routes_with_backup_paths`]. Type 1
 /// EAD-per-EVI routes are projected as aliasing inputs so multi-homed
 /// MACs surface their alternative VTEPs in
 /// [`rustbgpd_evpn::RemoteMacEntry::alias_vtep_ips`]. Type 1 EAD-per-ES
@@ -996,6 +997,29 @@ async fn build_intent_tables(
         .filter_map(|r| project_ead_per_evi(r, &local_vtep_ips, &ead_per_es_modes))
         .collect();
 
+    // ADR-0083: derive the single-active eligible-set index from the
+    // same RIB snapshot — EAD-per-ES modes (the OR-fold above) plus
+    // the FULL self-filtered EAD-per-EVI stream (the index keeps only
+    // rows whose pair folds single-active; the all-active aliasing
+    // feed above keeps the complement). The projection uses it to
+    // give single-active MAC entries a one-member group key + the
+    // pre-create-backup intent instead of bypassing the FDB-NHG
+    // machinery.
+    let single_active_index = rustbgpd_evpn::SingleActiveEligibleIndex::build(
+        ead_per_es_modes
+            .iter()
+            .map(
+                |(&(vtep_ip, esi), &single_active)| rustbgpd_evpn::EadPerEsMode {
+                    esi,
+                    vtep_ip,
+                    single_active,
+                },
+            ),
+        routes
+            .iter()
+            .filter_map(|r| project_ead_per_evi_unfiltered(r, &local_vtep_ips)),
+    );
+
     // Gate 9 slice 6c: project Type 5 (`EvpnRoute::IpPrefix`) routes
     // through the pure helper. Skip when no IP-VRFs are configured
     // so RR-only / L2-only deployments incur no per-pass cost.
@@ -1014,7 +1038,12 @@ async fn build_intent_tables(
             overlay_index_t2,
         )
     };
-    let remote_macs = project_evpn_routes_with_aliases(instances, projected, ead_per_evi);
+    let remote_macs = rustbgpd_evpn::project_evpn_routes_with_backup_paths(
+        instances,
+        projected,
+        ead_per_evi,
+        &single_active_index,
+    );
 
     Ok(IntentTables {
         remote_macs,
@@ -1163,6 +1192,30 @@ fn project_ead_per_evi(
         esi: ead.esi,
         ethernet_tag: ead.ethernet_tag,
         next_hop: route.next_hop,
+    })
+}
+
+/// Translate a Type 1 EAD-per-EVI [`EvpnRibRoute`] into the ADR-0083
+/// single-active eligibility input shape. Unlike
+/// [`project_ead_per_evi`], this does NOT filter by EAD-per-ES mode —
+/// the `SingleActiveEligibleIndex` build performs the
+/// "single-active EAD-per-ES AND EAD-per-EVI" join itself (decision
+/// 2's both-route-types rule). Self-originated rows are still
+/// filtered: we are never our own backup path.
+fn project_ead_per_evi_unfiltered(
+    route: &EvpnRibRoute,
+    local_vtep_ips: &std::collections::BTreeSet<std::net::IpAddr>,
+) -> Option<rustbgpd_evpn::AliasEadPerEvi> {
+    let EvpnRoute::EadPerEvi(ead) = &route.route else {
+        return None;
+    };
+    if local_vtep_ips.contains(&route.next_hop) {
+        return None;
+    }
+    Some(rustbgpd_evpn::AliasEadPerEvi {
+        esi: ead.esi,
+        ethernet_tag: ead.ethernet_tag,
+        vtep_ip: route.next_hop,
     })
 }
 
@@ -1834,6 +1887,157 @@ mod tests {
                 .unwrap()
                 .remote_vtep_ip,
             ipa("10.0.0.3")
+        );
+    }
+
+    fn evpn_macip_route_with_esi(
+        v: u32,
+        m: u8,
+        dst: &str,
+        esi: EthernetSegmentIdentifier,
+    ) -> EvpnRibRoute {
+        let mut route = evpn_macip_route(v, m, dst, None);
+        if let EvpnRoute::MacIp(macip) = &mut route.route {
+            macip.esi = esi;
+        }
+        route
+    }
+
+    // ─── ADR-0083 slice 2: single-active projection wiring ───
+
+    #[tokio::test]
+    async fn build_intent_tables_single_active_entry_carries_backup_intent() {
+        // Two PEs advertise single-active EAD-per-ES + EAD-per-EVI
+        // for the segment; the MAC's origin is 10.0.0.2 → the entry
+        // must carry the one-member group key (empty alias list) and
+        // backup = 10.0.0.3 (lowest non-primary eligible).
+        let instances = local_instance_table(100, Some("br100"));
+        let ip_vrfs = IpVrfTable::new();
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let _responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let routes = vec![
+                    evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
+                    evpn_ead_per_es_route(esi, "10.0.0.2", true),
+                    evpn_ead_per_es_route(esi, "10.0.0.3", true),
+                    evpn_ead_per_evi_route(esi, 0, "10.0.0.2"),
+                    evpn_ead_per_evi_route(esi, 0, "10.0.0.3"),
+                ];
+                let _ = reply.send(routes);
+            }
+        });
+
+        let tables = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new())
+            .await
+            .unwrap();
+        let entry = tables.remote_macs.get(vni(100), mac(1)).unwrap();
+        assert_eq!(entry.remote_vtep_ip, ipa("10.0.0.2"));
+        assert!(
+            entry.alias_vtep_ips.is_empty(),
+            "single-active never carries ECMP aliases"
+        );
+        assert_eq!(entry.alias_group_key, Some((esi, EthernetTagId(0))));
+        assert_eq!(entry.single_active_backup_vtep_ip, Some(ipa("10.0.0.3")));
+    }
+
+    #[tokio::test]
+    async fn build_intent_tables_single_active_sole_pe_keeps_plain_dst_shape() {
+        // ADR-0083 decision 1 no-backup fallback: the segment is
+        // single-active but only the primary is eligible → de-facto
+        // single-homed, no group key, no backup intent.
+        let instances = local_instance_table(100, Some("br100"));
+        let ip_vrfs = IpVrfTable::new();
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let _responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let routes = vec![
+                    evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
+                    evpn_ead_per_es_route(esi, "10.0.0.2", true),
+                    evpn_ead_per_evi_route(esi, 0, "10.0.0.2"),
+                ];
+                let _ = reply.send(routes);
+            }
+        });
+
+        let tables = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new())
+            .await
+            .unwrap();
+        let entry = tables.remote_macs.get(vni(100), mac(1)).unwrap();
+        assert_eq!(entry.remote_vtep_ip, ipa("10.0.0.2"));
+        assert!(entry.alias_group_key.is_none());
+        assert!(entry.single_active_backup_vtep_ip.is_none());
+    }
+
+    #[tokio::test]
+    async fn build_intent_tables_single_active_mass_withdraw_still_flushes_slice2() {
+        // ADR-0083 slice boundary pin: in slice 2 the `project_one`
+        // mass-withdraw gate KEEPS its flush behavior for
+        // single-active. The origin VTEP (10.0.0.2) has no EAD-per-ES
+        // — even though a single-active backup (10.0.0.3) is fully
+        // eligible, the MAC is dropped from the projection. Slice 3
+        // reinterprets this as "stays projected, retargeted at the
+        // group" (decision 5); this test must be UPDATED there so the
+        // change is visible in review.
+        let instances = local_instance_table(100, Some("br100"));
+        let ip_vrfs = IpVrfTable::new();
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let _responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let routes = vec![
+                    evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
+                    // Backup PE still fully eligible — but no
+                    // EAD-per-ES from the MAC's origin VTEP.
+                    evpn_ead_per_es_route(esi, "10.0.0.3", true),
+                    evpn_ead_per_evi_route(esi, 0, "10.0.0.3"),
+                ];
+                let _ = reply.send(routes);
+            }
+        });
+
+        let tables = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new())
+            .await
+            .unwrap();
+        assert!(
+            tables.remote_macs.get(vni(100), mac(1)).is_none(),
+            "slice 2 keeps the mass-withdraw flush for single-active; \
+             the EAD-withdrawal swap reinterpretation is slice 3"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_intent_tables_all_active_aliasing_unchanged() {
+        // All-active behavior must be bit-identical with the
+        // single-active index in the pipeline: ECMP aliases populate,
+        // no backup intent.
+        let instances = local_instance_table(100, Some("br100"));
+        let ip_vrfs = IpVrfTable::new();
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let _responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let routes = vec![
+                    evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
+                    evpn_ead_per_es_route(esi, "10.0.0.2", false),
+                    evpn_ead_per_es_route(esi, "10.0.0.3", false),
+                    evpn_ead_per_evi_route(esi, 0, "10.0.0.2"),
+                    evpn_ead_per_evi_route(esi, 0, "10.0.0.3"),
+                ];
+                let _ = reply.send(routes);
+            }
+        });
+
+        let tables = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new())
+            .await
+            .unwrap();
+        let entry = tables.remote_macs.get(vni(100), mac(1)).unwrap();
+        assert_eq!(entry.alias_vtep_ips, vec![ipa("10.0.0.3")]);
+        assert_eq!(entry.alias_group_key, Some((esi, EthernetTagId(0))));
+        assert!(
+            entry.single_active_backup_vtep_ip.is_none(),
+            "all-active entries never carry the backup intent"
         );
     }
 

@@ -214,8 +214,26 @@ pub enum DataplaneOp {
         group_key: crate::group_state::AliasGroupKey,
         /// Canonical sorted+deduped member VTEP IPs. Produced by
         /// [`rustbgpd_evpn::group_members`] on the slice 1
-        /// `RemoteMacEntry`.
+        /// `RemoteMacEntry`. Exactly one member (the active PE) for
+        /// ADR-0083 single-active groups.
         members: Vec<IpAddr>,
+        /// ADR-0083 single-active backup PE. The coordinator
+        /// pre-creates this per-VTEP fdb nexthop and pins it with the
+        /// `GroupOwnedMap` standby ref class — it is **not** a group
+        /// member (the kernel hashes over all members; single-active
+        /// means exactly one egress forwards). `None` for all-active
+        /// aliasing groups.
+        standby: Option<IpAddr>,
+        /// ADR-0083 row-shape conversion: `true` when the kernel
+        /// currently holds a single-dst (`NDA_DST`) row at this
+        /// `(vni, mac)` that must be deleted before the `NDA_NH_ID`
+        /// install — the kernel rejects the in-place conversion with
+        /// `-EOPNOTSUPP` ("Cannot replace an existing non nexthop
+        /// fdb with a nexthop", `vxlan_fdb_update_existing`). The
+        /// coordinator performs the delete→add **per row** inside
+        /// this one op so the forwarding gap stays per-MAC, never
+        /// batch-delete-then-batch-add.
+        convert_from_dst: bool,
     },
     /// Update an existing FDB nexthop group's member set in place.
     /// The reconcile actor emits this when the same `group_key` has
@@ -228,6 +246,11 @@ pub enum DataplaneOp {
         group_key: crate::group_state::AliasGroupKey,
         /// New canonical member set.
         members: Vec<IpAddr>,
+        /// ADR-0083 single-active backup PE (see
+        /// [`Self::InstallFdbNhg::standby`]). The diff emits this op
+        /// when the member set *or* the standby drifted; the
+        /// coordinator re-pins / GCs the standby NH accordingly.
+        standby: Option<IpAddr>,
     },
     /// Remove an FDB-NHG row for `(vni, mac)`. The reconcile actor's
     /// coordinator consults its `GroupOwnedMap` refcount: if this MAC

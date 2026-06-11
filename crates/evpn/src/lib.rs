@@ -143,7 +143,7 @@ pub use origination_es::{LocalEadPerEsOriginator, LocalEadPerEviOriginator, Loca
 pub use origination_macip::{LocalMacIpOriginator, MacIpKey, RemoteMacIpView};
 pub use projection::{
     ProjectedEvpnEadPerEvi, ProjectedEvpnRoute, project_evpn_routes,
-    project_evpn_routes_with_aliases,
+    project_evpn_routes_with_aliases, project_evpn_routes_with_backup_paths,
 };
 pub use route_target::{RouteTarget, RouteTargetParseError};
 pub use runtime::{

@@ -342,16 +342,18 @@ answer.**
   — the same order as aliasing already costs all-active segments.
 - Ship slices (smallest correct slice first):
   1. **Pure logic** (`crates/evpn`): eligible-set fold + backup
-     derivation as a pure function of projected EAD state; extend the
+     derivation as a pure function of projected EAD state; keep the
+     empty-eligible-set → today's-behavior fallback. Unit tests incl.
+     the OR-fold duplicate-RD cases `fold_ead_per_es_modes` already
+     covers.
+  2. **Dataplane pre-install** (`crates/evpn-linux`): extend the
      projection so single-active MAC entries carry
      `alias_group_key` + a one-member desired membership instead of
-     bypassing the group machinery; keep the empty-eligible-set →
-     today's-behavior fallback. Unit tests incl. the OR-fold
-     duplicate-RD cases `fold_ead_per_es_modes` already covers.
-  2. **Dataplane pre-install** (`crates/evpn-linux`): program
-     single-active groups through the existing reconcile actor;
-     pre-create the backup per-VTEP NH (ref-counted, not a member);
-     row-shape migration verification (hazard above).
+     bypassing the group machinery (moved here from slice 1 — the
+     wiring ships with its first consumer); program single-active
+     groups through the existing reconcile actor; pre-create the
+     backup per-VTEP NH (ref-counted, not a member); row-shape
+     migration verification (hazard above).
   3. **Swap path**: prompt recompute on `MassWithdrawTrigger` for
      single-active segments; single-message membership replace;
      ordered teardown when the eligible set empties; the

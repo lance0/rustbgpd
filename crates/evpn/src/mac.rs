@@ -85,17 +85,41 @@ pub struct RemoteMacEntry {
     /// only the *additional* VTEPs.
     pub alias_vtep_ips: Vec<IpAddr>,
     /// Aliasing group key — `Some((ESI, EthernetTag))` when the
-    /// originating Type 2 carries a non-zero ESI **and** at least
-    /// one alias VTEP has been observed for that segment. `None`
-    /// for single-homed routes (ESI == ZERO) and for multi-homed
-    /// routes whose EAD-per-EVI peers haven't been observed yet.
-    /// The L2 dataplane uses this to key one FDB nexthop group per
-    /// Ethernet Segment instance so multiple MACs behind the same
-    /// segment share one kernel resource. Empty `alias_vtep_ips`
-    /// ⇔ `alias_group_key.is_none()`.
+    /// originating Type 2 carries a non-zero ESI **and** either at
+    /// least one all-active alias VTEP has been observed for that
+    /// segment (RFC 7432 §14 aliasing, ADR-0059) or the segment is
+    /// single-active with a derived backup PE (RFC 7432 §8.4
+    /// backup-path, ADR-0083). `None` for single-homed routes
+    /// (ESI == ZERO), for multi-homed routes whose EAD-per-EVI peers
+    /// haven't been observed yet, and for single-active segments with
+    /// no eligible backup. The L2 dataplane uses this to key one FDB
+    /// nexthop group per Ethernet Segment instance so multiple MACs
+    /// behind the same segment share one kernel resource.
     ///
-    /// See ADR-0059 §4 for the portable-intent extension rationale.
+    /// Invariant: `alias_group_key.is_some()` ⇔ (`alias_vtep_ips` is
+    /// non-empty) ∨ (`single_active_backup_vtep_ip.is_some()`). The
+    /// all-active shape keeps the original "empty alias list ⇔ key is
+    /// `None`" rule; the single-active shape carries the key with an
+    /// empty alias list (the group has exactly one member — the
+    /// active PE) plus the backup intent.
+    ///
+    /// See ADR-0059 §4 / ADR-0083 decision 1 for the portable-intent
+    /// extension rationale.
     pub alias_group_key: Option<(EthernetSegmentIdentifier, EthernetTagId)>,
+    /// ADR-0083 single-active backup-path intent. `Some(backup)` when
+    /// the originating `(next-hop, ESI)` pair folds single-active and
+    /// the `(ESI, EthernetTag)` eligible set contains at least one
+    /// PE other than the primary — `backup` is the numerically lowest
+    /// such VTEP IP (decision 2). The dataplane then programs this
+    /// MAC as an `NDA_NH_ID` row behind a **one-member** FDB nexthop
+    /// group (member = `remote_vtep_ip`) and pre-creates the backup
+    /// PE's per-VTEP fdb nexthop object so a future membership swap
+    /// (slice 3) allocates nothing. The backup is *never* a group
+    /// member — single-active means exactly one egress forwards.
+    /// `None` for single-homed, all-active, and single-active-without-
+    /// backup entries (the last keeps today's single-dst row —
+    /// decision 1's no-backup fallback).
+    pub single_active_backup_vtep_ip: Option<IpAddr>,
     /// How this entry came to be desired.
     pub source: RemoteMacSource,
 }
@@ -300,6 +324,7 @@ mod tests {
             mobility_sequence: None,
             alias_vtep_ips: Vec::new(),
             alias_group_key: None,
+            single_active_backup_vtep_ip: None,
             source: RemoteMacSource::EvpnRibBestPath,
         }
     }
