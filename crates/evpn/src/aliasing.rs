@@ -276,6 +276,14 @@ pub struct SingleActiveEligibleIndex {
     /// routes an entry down the ADR-0083 backup path instead of the
     /// all-active aliasing path.
     single_active_pairs: BTreeSet<(IpAddr, EthernetSegmentIdentifier)>,
+    /// Every `(VTEP, ESI)` pair with at least one EAD-per-ES row of
+    /// *either* mode. The ADR-0083 slice-3 swap arm needs to
+    /// distinguish "the MAC's origin lost its EAD-per-ES entirely"
+    /// (the RFC 7432 §8.2 mass-withdraw window — retarget at the
+    /// backup) from "the origin advertises an all-active EAD-per-ES"
+    /// (mixed-mode segment — the all-active aliasing path stays
+    /// authoritative for that origin, slice-2 pinned behavior).
+    pairs_with_ead_per_es: BTreeSet<(IpAddr, EthernetSegmentIdentifier)>,
 }
 
 impl SingleActiveEligibleIndex {
@@ -333,6 +341,7 @@ impl SingleActiveEligibleIndex {
             .into_iter()
             .map(|(k, v)| (k, v.into_iter().collect()))
             .collect();
+        let pairs_with_ead_per_es = modes.keys().copied().collect();
         let single_active_pairs = modes
             .into_iter()
             .filter(|&(_, single_active)| single_active)
@@ -341,6 +350,7 @@ impl SingleActiveEligibleIndex {
         Self {
             by_key,
             single_active_pairs,
+            pairs_with_ead_per_es,
         }
     }
 
@@ -354,6 +364,22 @@ impl SingleActiveEligibleIndex {
     #[must_use]
     pub fn pair_is_single_active(&self, vtep_ip: IpAddr, esi: EthernetSegmentIdentifier) -> bool {
         self.single_active_pairs.contains(&(vtep_ip, esi))
+    }
+
+    /// `true` when the `(vtep_ip, esi)` pair has at least one
+    /// EAD-per-ES row of *either* mode in the snapshot the index was
+    /// built from. `false` means the VTEP currently claims no
+    /// reachability for the segment at all — for a MAC route's
+    /// origin pair this is exactly the RFC 7432 §8.2 mass-withdraw
+    /// condition, and the ADR-0083 slice-3 swap arm fires iff this is
+    /// `false` while [`Self::backup_pe`] still derives a survivor.
+    /// A pair advertising an all-active EAD-per-ES returns `true`, so
+    /// mixed-mode segments keep the slice-2 "the origin's own mode is
+    /// authoritative" behavior instead of being swapped onto a
+    /// single-active survivor.
+    #[must_use]
+    pub fn pair_has_ead_per_es(&self, vtep_ip: IpAddr, esi: EthernetSegmentIdentifier) -> bool {
+        self.pairs_with_ead_per_es.contains(&(vtep_ip, esi))
     }
 
     /// Eligible PEs for `(esi, eth_tag)`, sorted by `IpAddr` natural
@@ -938,6 +964,51 @@ mod tests {
         // Unknown pair (no EAD-per-ES observed) → false.
         assert!(!idx.pair_is_single_active(ip("10.0.0.9"), esi(1)));
         assert!(!idx.pair_is_single_active(ip("10.0.0.2"), esi(2)));
+    }
+
+    #[test]
+    fn pair_has_ead_per_es_covers_both_modes() {
+        // ADR-0083 slice 3: the swap arm fires only when the MAC's
+        // origin pair has NO EAD-per-ES at all. Both single-active
+        // and all-active rows count as "has" — an all-active origin
+        // on a mixed-mode segment must not be treated as withdrawn.
+        let idx = SingleActiveEligibleIndex::build(
+            [es_row(1, "10.0.0.2", true), es_row(1, "10.0.0.3", false)],
+            [],
+        );
+        assert!(idx.pair_has_ead_per_es(ip("10.0.0.2"), esi(1)));
+        assert!(
+            idx.pair_has_ead_per_es(ip("10.0.0.3"), esi(1)),
+            "all-active rows count: the pair claims segment reachability"
+        );
+        // No EAD-per-ES observed → false (the mass-withdraw window).
+        assert!(!idx.pair_has_ead_per_es(ip("10.0.0.9"), esi(1)));
+        assert!(!idx.pair_has_ead_per_es(ip("10.0.0.2"), esi(2)));
+        // Empty index → false everywhere.
+        assert!(!SingleActiveEligibleIndex::new().pair_has_ead_per_es(ip("10.0.0.2"), esi(1)));
+    }
+
+    #[test]
+    fn backup_pe_with_withdrawn_primary_yields_lowest_survivor() {
+        // The decision-5 post-failover window: the dead primary has
+        // no EAD pair, so it is absent from the eligible set; the
+        // derivation yields the lowest survivor, and the survivor's
+        // own backup is the next-lowest (the slice-3 re-pin source).
+        let idx = SingleActiveEligibleIndex::build(
+            [es_row(1, "10.0.0.3", true), es_row(1, "10.0.0.4", true)],
+            [evi_row(1, 0, "10.0.0.3"), evi_row(1, 0, "10.0.0.4")],
+        );
+        let dead_primary = ip("10.0.0.2");
+        let member = idx
+            .backup_pe(esi(1), EthernetTagId(0), dead_primary)
+            .expect("survivors exist");
+        assert_eq!(member, ip("10.0.0.3"));
+        // New standby for the swapped group: lowest excluding the
+        // new member (the dead primary is not eligible anyway).
+        assert_eq!(
+            idx.backup_pe(esi(1), EthernetTagId(0), member),
+            Some(ip("10.0.0.4")),
+        );
     }
 
     #[test]

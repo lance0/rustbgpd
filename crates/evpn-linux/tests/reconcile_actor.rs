@@ -3340,6 +3340,297 @@ async fn single_active_upgrade_converts_dst_rows_to_nhid_per_row() {
     h.shutdown().await;
 }
 
+// ─── ADR-0083 slice 3: the backup-PE swap on mass-withdraw ───
+
+/// Swapped single-active entry: the projection retargeted the
+/// one-member group at the backup PE; `standby` is the re-derived
+/// next-lowest survivor (None when the member is the sole survivor).
+fn entry_single_active_swapped(member: &str, standby: Option<&str>, seg: u8) -> RemoteMacEntry {
+    RemoteMacEntry {
+        remote_vtep_ip: ipa(member),
+        mobility_sequence: None,
+        alias_vtep_ips: Vec::new(),
+        alias_group_key: Some((EthernetSegmentIdentifier::new([seg; 10]), EthernetTagId(0))),
+        single_active_backup_vtep_ip: standby.map(ipa),
+        source: RemoteMacSource::EvpnRibBestPath,
+    }
+}
+
+fn sum_single_active_counters(
+    reports: &[rustbgpd_evpn::DataplaneReport],
+) -> rustbgpd_evpn::SingleActiveCounters {
+    reports.iter().fold(
+        rustbgpd_evpn::SingleActiveCounters::default(),
+        |mut acc, r| {
+            acc.backup_swaps += r.single_active_counters.backup_swaps;
+            acc.teardowns += r.single_active_counters.teardowns;
+            acc
+        },
+    )
+}
+
+// 7. The swap: an EAD-per-ES withdrawal with a survivor retargets the
+//    group's one member at the pre-created backup NH — same group ID,
+//    same backup NH ID (the swap allocates nothing), MAC rows
+//    untouched (still pointing at the same group), the withdrawn PE's
+//    NH GC'd, and the swap surfaced on the report counters.
+#[tokio::test]
+async fn single_active_swap_retargets_group_via_one_replace() {
+    use rustbgpd_evpn_linux::dataplane::KernelNexthopKind;
+
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+
+    // Pre-swap steady state: two MACs behind (active .2, backup .3).
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(
+        vni(100),
+        mac(1),
+        entry_single_active("10.0.0.2", "10.0.0.3", 7),
+    )
+    .unwrap();
+    macs.insert(
+        vni(100),
+        mac(2),
+        entry_single_active("10.0.0.2", "10.0.0.3", 7),
+    )
+    .unwrap();
+    h.intent_tx
+        .send(intent(1, inst.clone(), macs.build()))
+        .unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert!(last.failed.is_empty(), "{:?}", last.failed);
+    let nhs = h.handle.nexthop_ops();
+    let (members, groups) = split_nexthop_ops(&nhs);
+    assert_eq!(members.len(), 2);
+    assert_eq!(groups.len(), 1);
+    let group_id = groups[0].id;
+    let find = |gw: &str| -> u32 {
+        h.handle
+            .nexthop_ops()
+            .values()
+            .find_map(|m| match &m.kind {
+                KernelNexthopKind::Member { gateway } if *gateway == ipa(gw) => Some(m.id),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no member NH with gateway {gw}"))
+    };
+    let active_id = find("10.0.0.2");
+    let backup_id = find("10.0.0.3");
+    // Drain the install-phase reports so counter sums below only see
+    // the swap pass.
+    let _ = h.try_drain_reports().await;
+
+    // The withdrawal arrives: projection swapped both entries to the
+    // backup (sole survivor → no new standby).
+    let mut macs2 = RemoteMacTable::builder();
+    macs2
+        .insert(
+            vni(100),
+            mac(1),
+            entry_single_active_swapped("10.0.0.3", None, 7),
+        )
+        .unwrap();
+    macs2
+        .insert(
+            vni(100),
+            mac(2),
+            entry_single_active_swapped("10.0.0.3", None, 7),
+        )
+        .unwrap();
+    h.intent_tx.send(intent(2, inst, macs2.build())).unwrap();
+    let mut reports = Vec::new();
+    let mut last = h.next_report().await;
+    while last.intent_generation < 2 {
+        last = h.next_report().await;
+    }
+    assert!(last.failed.is_empty(), "{:?}", last.failed);
+    reports.push(last);
+    reports.extend(h.try_drain_reports().await);
+
+    // Group ID unchanged; membership now the pre-created backup NH —
+    // the swap allocated nothing and never passed through empty.
+    let nhs = h.handle.nexthop_ops();
+    let group = nhs.get(&group_id).expect("group survives the swap");
+    let KernelNexthopKind::Group { member_ids } = &group.kind else {
+        panic!("expected group at {group_id:#x}");
+    };
+    assert_eq!(
+        member_ids,
+        &vec![backup_id],
+        "membership replaced with the PRE-CREATED backup NH (same ID)"
+    );
+    // MAC rows untouched: both still point at the same group.
+    assert_eq!(h.handle.kernel_fdb_nh_id(vni(100), mac(1)), Some(group_id));
+    assert_eq!(h.handle.kernel_fdb_nh_id(vni(100), mac(2)), Some(group_id));
+    // The withdrawn PE's NH was GC'd (no other group references it).
+    assert!(
+        !nhs.contains_key(&active_id),
+        "the withdrawn PE's NH must be GC'd after the swap; got {nhs:?}"
+    );
+    // Exactly one swap surfaced; no teardown.
+    let counters = sum_single_active_counters(&reports);
+    assert_eq!(counters.backup_swaps, 1, "reports: {reports:?}");
+    assert_eq!(counters.teardowns, 0);
+
+    h.shutdown().await;
+}
+
+// 8. Withdrawal with NO survivors: the ordered teardown — MAC rows
+//    removed before the group (never-through-empty), active + standby
+//    NHs reaped with the intent, and the teardown surfaced on the
+//    report counters (no swap counted).
+#[tokio::test]
+async fn single_active_withdraw_no_survivors_ordered_teardown() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    let (_group_id, _active_id, _backup_id) = install_and_settle_single_active(&mut h).await;
+    let _ = h.try_drain_reports().await;
+
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent(2, inst, RemoteMacTable::new()))
+        .unwrap();
+    let mut reports = Vec::new();
+    let mut last = h.next_report().await;
+    while last.intent_generation < 2 {
+        last = h.next_report().await;
+    }
+    assert!(last.failed.is_empty(), "{:?}", last.failed);
+    reports.push(last);
+    reports.extend(h.try_drain_reports().await);
+
+    assert!(!h.handle.kernel_has_fdb(vni(100), mac(1)));
+    let nhs = h.handle.nexthop_ops();
+    assert!(
+        nhs.is_empty(),
+        "group + active NH + standby NH must all be reaped; got {nhs:?}"
+    );
+    let counters = sum_single_active_counters(&reports);
+    assert_eq!(counters.teardowns, 1, "reports: {reports:?}");
+    assert_eq!(counters.backup_swaps, 0);
+
+    h.shutdown().await;
+}
+
+// 9. Crash between the withdrawal and the swap: a restarted daemon
+//    re-derives the swapped desired state from the reloaded RIB (the
+//    intent below is what the projection yields in the window) and
+//    converges the crash-leftover pre-swap kernel state onto the
+//    backup — without ever seeing the withdrawal event.
+#[tokio::test(start_paused = true)]
+async fn single_active_restart_mid_window_converges_to_swapped_state() {
+    use rustbgpd_evpn_linux::dataplane::{KernelNexthop, KernelNexthopKind};
+    use rustbgpd_evpn_linux::nh_id_alloc::{NHG_TAG, VTEP_NH_TAG};
+
+    let cfg = ReconcileActorConfig {
+        fdb_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    // Prior lifetime's PRE-swap stack: group still pointing at the
+    // (now-withdrawn) active PE 10.0.0.2; backup NH pre-created.
+    let old_active = VTEP_NH_TAG | 1;
+    let old_backup = VTEP_NH_TAG | 2;
+    let old_group = NHG_TAG | 1;
+    h.handle.pre_load_nexthop_op(KernelNexthop {
+        id: old_active,
+        kind: KernelNexthopKind::Member {
+            gateway: ipa("10.0.0.2"),
+        },
+    });
+    h.handle.pre_load_nexthop_op(KernelNexthop {
+        id: old_backup,
+        kind: KernelNexthopKind::Member {
+            gateway: ipa("10.0.0.3"),
+        },
+    });
+    h.handle.pre_load_nexthop_op(KernelNexthop {
+        id: old_group,
+        kind: KernelNexthopKind::Group {
+            member_ids: vec![old_active],
+        },
+    });
+    h.handle.pre_load_fdb(
+        vni(100),
+        KernelFdbEntry {
+            mac: mac(1),
+            dst: None,
+            nh_id: Some(old_group),
+            protocol: None,
+            flags: KernelFdbFlags {
+                extern_learn: true,
+                master: true,
+                ..Default::default()
+            },
+        },
+    );
+
+    // The reloaded RIB already lacks the dead PE's EAD-per-ES, so the
+    // projection yields the swapped intent (decision 5: the post-swap
+    // window is representable as a pure function of the RIB).
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(
+        vni(100),
+        mac(1),
+        entry_single_active_swapped("10.0.0.3", None, 7),
+    )
+    .unwrap();
+    h.intent_tx.send(intent(1, inst, macs.build())).unwrap();
+
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert!(last.failed.is_empty(), "{:?}", last.failed);
+
+    // The MAC row must point at a group whose sole member resolves to
+    // the backup 10.0.0.3.
+    let row_group = h
+        .handle
+        .kernel_fdb_nh_id(vni(100), mac(1))
+        .expect("row stays NHG-shaped");
+    let nhs = h.handle.nexthop_ops();
+    let Some(KernelNexthopKind::Group { member_ids }) = nhs.get(&row_group).map(|g| &g.kind) else {
+        panic!("row's group missing: {nhs:?}");
+    };
+    assert_eq!(member_ids.len(), 1);
+    let gw = nhs.get(&member_ids[0]).map(|m| &m.kind);
+    assert!(
+        matches!(gw, Some(KernelNexthopKind::Member { gateway }) if *gateway == ipa("10.0.0.3")),
+        "restart mid-window must converge to the backup PE; got {nhs:?}"
+    );
+
+    // The prior lifetime's group stops being referenced once the row
+    // is retargeted; the ADR-0059 drift sweep's orphan cleanup reaps
+    // it on its 60 s cadence (the adoption-flip cleanup retained it —
+    // the pre-apply snapshot still showed the row pointing at it).
+    let mut cleaned = false;
+    for _ in 0..4 {
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        let _ = h.try_drain_reports().await;
+        if !h.handle.nexthop_ops().contains_key(&old_group) {
+            cleaned = true;
+            break;
+        }
+    }
+    assert!(
+        cleaned,
+        "crash-leftover pre-swap group must be reaped after convergence; got {:?}",
+        h.handle.nexthop_ops(),
+    );
+
+    h.shutdown().await;
+}
+
 // 6. Reverse conversion (nhid→dst): the ES degrades to one PE — the
 //    projection yields a plain dst entry (no backup, ADR-0083
 //    decision 1) — and the actor converts the row back, tearing down

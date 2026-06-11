@@ -7713,6 +7713,7 @@ table_id = 6000
             fdb_nexthops: rustbgpd_evpn::FdbNexthopDataplaneStatus::default(),
             fdb_nhg_drift_counters: rustbgpd_evpn::FdbNhgDriftCounters::default(),
             l3_adoption_counters: rustbgpd_evpn::L3AdoptionCounters::default(),
+            single_active_counters: rustbgpd_evpn::SingleActiveCounters::default(),
         }
     }
 
