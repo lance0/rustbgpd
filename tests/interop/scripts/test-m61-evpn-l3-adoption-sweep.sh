@@ -25,8 +25,12 @@
 #    adopted counters are 1, their reaped counters are 0, and the
 #    shared rows must stay present continuously while A re-claims them.
 # 2. Foreign rows planted while rustbgpd is running — a `proto static`
-#    route in the VRF table and a permanent neighbor WITHOUT
-#    `extern_learn` — survive the entire cycle.
+#    route in the VRF table, a permanent neighbor WITHOUT
+#    `extern_learn`, and (ADR-0082) a neighbor with the FULL legacy
+#    marker pair (`extern_learn` + `nud permanent`) but a foreign
+#    `protocol zebra` ownership stamp — survive the entire cycle.
+#    The zebra-stamped row is the new discrimination the NDA_PROTOCOL
+#    stamp buys: the pre-stamp rule would have adopted and reaped it.
 # 3. After `kill -9` of the rustbgpd process (container and netns
 #    survive — this is NOT a container stop), every marker row is
 #    still in the kernel: the crash-leftover premise.
@@ -38,6 +42,10 @@
 #    a transient reap would be caught), while B's route is reaped
 #    once the 5 s deferral passes and a reconcile pass fires (bounded
 #    by the periodic reconcile cadence, so the window allows 90 s).
+#    The re-claimed neighbor row must also show the ADR-0082
+#    NDA_PROTOCOL ownership stamp (`proto bgp` in `ip neigh show`) —
+#    the re-claim re-applies the row with replace semantics, so the
+#    stamped write lands even if the adopted leftover predated it.
 #    Because B shares its resolution rows with A there is no
 #    resolution-row reap in this topology, so the route-before-
 #    resolution reap order is not observable here — it is pinned by
@@ -87,6 +95,12 @@ B_TENANT_ADDR="203.0.113.1/24"
 FOREIGN_PREFIX="198.18.0.0/24"
 FOREIGN_NEIGH_IP="10.0.0.99"
 FOREIGN_NEIGH_MAC="02:99:99:99:99:97"
+# Foreign-by-stamp neighbor (ADR-0082): carries the full legacy
+# marker pair (`extern_learn` + `nud permanent`) on the managed
+# L3VXLAN device, but `protocol zebra` proves another controller
+# owns it — the sweep must leave it untouched.
+FOREIGN_STAMP_NEIGH_IP="10.0.0.98"
+FOREIGN_STAMP_NEIGH_MAC="02:99:99:99:99:96"
 REAP_DEFERRAL_SECS="5"
 # Bounded wait for the reap: 5 s deferral + the periodic reconcile
 # cadence (the reap fires on the first clean L3 pass after the
@@ -134,6 +148,15 @@ pe1_neigh_marked() {
         | grep -F "extern_learn" | grep -qF "PERMANENT"
 }
 
+# ADR-0082: managed L3 neighbor rows carry the NDA_PROTOCOL
+# ownership stamp (RTPROT_BGP); the kernel stores and echoes it for
+# IP neighbors since 5.0, and iproute2 prints it as `proto bgp` on
+# the plain `ip neigh show` row.
+pe1_neigh_stamped() {
+    pe1_neigh | awk -v ip="$PE2_IP" '$1 == ip' \
+        | grep -F "extern_learn" | grep -qF "proto bgp"
+}
+
 pe1_neigh_lladdr() {
     pe1_neigh | awk -v ip="$PE2_IP" \
         '$1 == ip { for (i = 1; i < NF; i++) if ($i == "lladdr") print $(i+1) }' | head -1
@@ -149,6 +172,14 @@ pe1_l3fdb_marked() {
 
 pe1_foreign_neigh_present() {
     pe1_neigh | awk -v ip="$FOREIGN_NEIGH_IP" '$1 == ip' | grep -qF "PERMANENT"
+}
+
+# The zebra-stamped foreign neighbor must keep ALL of its row intact:
+# legacy marker pair still present (neither adopted-and-reaped nor
+# rewritten) and the foreign stamp still on it.
+pe1_foreign_stamped_neigh_present() {
+    pe1_neigh | awk -v ip="$FOREIGN_STAMP_NEIGH_IP" '$1 == ip' \
+        | grep -F "extern_learn" | grep -F "PERMANENT" | grep -qF "proto zebra"
 }
 
 # Inject / withdraw the second tenant prefix on the FRR side. The
@@ -242,6 +273,13 @@ else
     fail "L3 neighbor ${PE2_IP} missing or unmarked on ${L3VXLAN}"
     pe1_neigh >&2
 fi
+# ADR-0082 baseline: a fresh install must already carry the stamp.
+if pe1_neigh_stamped; then
+    ok "L3 neighbor ${PE2_IP} carries the NDA_PROTOCOL ownership stamp (proto bgp)"
+else
+    fail "L3 neighbor ${PE2_IP} missing the proto bgp ownership stamp"
+    pe1_neigh >&2
+fi
 ROUTER_MAC=$(pe1_neigh_lladdr)
 if [ -z "$ROUTER_MAC" ]; then
     fail "could not capture FRR's router MAC from the L3 neighbor row"
@@ -281,6 +319,20 @@ if pe1_foreign_neigh_present; then
     ok "foreign permanent neighbor $FOREIGN_NEIGH_IP planted"
 else
     fail "foreign permanent neighbor $FOREIGN_NEIGH_IP did not land"
+fi
+
+# extern_learn + permanent + `protocol zebra` → matches the legacy
+# marker pair exactly but is foreign BY STAMP (ADR-0082). The
+# post-restart sweep must classify it NotOurs: never adopted (the
+# neighbor adopted counter stays 1 below) and never reaped.
+log "Planting foreign zebra-stamped neighbor $FOREIGN_STAMP_NEIGH_IP on ${L3VXLAN}..."
+docker exec "$PE1" ip neigh add "$FOREIGN_STAMP_NEIGH_IP" \
+    lladdr "$FOREIGN_STAMP_NEIGH_MAC" dev "$L3VXLAN" nud permanent \
+    extern_learn protocol zebra
+if pe1_foreign_stamped_neigh_present; then
+    ok "foreign zebra-stamped neighbor $FOREIGN_STAMP_NEIGH_IP planted (extern_learn + PERMANENT + proto zebra)"
+else
+    fail "foreign zebra-stamped neighbor $FOREIGN_STAMP_NEIGH_IP did not land"
 fi
 
 # ---------------------------------------------------------------------------
@@ -445,6 +497,25 @@ else
     pe1_l3fdb >&2
 fi
 
+# ADR-0082: the re-claimed neighbor row must show the ownership stamp.
+# The re-claim re-applies the row with netlink replace semantics, so
+# the stamped write overwrites whatever the adopted leftover carried;
+# the re-apply rides the convergence / reconcile cadence, so poll.
+neigh_stamp_seen=0
+for _ in $(seq 1 60); do
+    if pe1_neigh_stamped; then
+        neigh_stamp_seen=1
+        break
+    fi
+    sleep 1
+done
+if [ "$neigh_stamp_seen" -eq 1 ]; then
+    ok "re-claimed L3 neighbor row carries the NDA_PROTOCOL ownership stamp (proto bgp)"
+else
+    fail "re-claimed L3 neighbor row never showed proto bgp after restart"
+    pe1_neigh >&2
+fi
+
 # Foreign rows: unmarked, untouched through kill, restart, and reap.
 if pe1_route_present "$FOREIGN_PREFIX"; then
     ok "foreign static route $FOREIGN_PREFIX survived the kill-and-restart cycle"
@@ -456,6 +527,15 @@ if pe1_foreign_neigh_present; then
     ok "foreign permanent neighbor $FOREIGN_NEIGH_IP survived the cycle"
 else
     fail "foreign permanent neighbor $FOREIGN_NEIGH_IP was deleted"
+    pe1_neigh >&2
+fi
+# The foreign-by-stamp row: legacy marker pair intact AND still
+# stamped zebra — proof the sweep discriminated on NDA_PROTOCOL
+# rather than adopting (and reaping) on flags alone.
+if pe1_foreign_stamped_neigh_present; then
+    ok "foreign zebra-stamped neighbor $FOREIGN_STAMP_NEIGH_IP survived the cycle untouched"
+else
+    fail "foreign zebra-stamped neighbor $FOREIGN_STAMP_NEIGH_IP was adopted/reaped or rewritten"
     pe1_neigh >&2
 fi
 

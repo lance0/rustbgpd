@@ -52,7 +52,7 @@ use netlink_packet_route::AddressFamily;
 use netlink_packet_route::neighbour::{
     NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
 };
-use netlink_packet_route::route::RouteType;
+use netlink_packet_route::route::{RouteProtocol, RouteType};
 use rtnetlink::Handle;
 use rustbgpd_evpn::{EvpnInstanceId, MacAddress};
 
@@ -89,32 +89,50 @@ pub(crate) async fn apply_install_fdb_nhg_row(
 ) -> Result<(), DataplaneError> {
     let vxlan_ifindex = check_cve_guard_and_get_ifindex(cache, vni)?;
 
-    // Use `add_bridge` (which builds an AF_BRIDGE NeighbourMessage
-    // with the right family + ifindex + mac) and then mutate it to
-    // (a) override the auto-set flags/state for the extern_learn
-    // case and (b) attach the NDA_NH_ID attribute. The builder
-    // doesn't expose `NDA_NH_ID` as a typed setter — we go through
-    // `Other(DefaultNla)` like the existing parse path.
-    let mut req = handle.neighbours().add_bridge(vxlan_ifindex, &mac.octets());
-
-    {
-        let msg = req.message_mut();
-        msg.header.kind = RouteType::Unspec;
-        msg.attributes
-            .push(NeighbourAttribute::Other(DefaultNla::new(
-                NDA_NH_ID,
-                nh_id.to_ne_bytes().to_vec(),
-            )));
-    }
-
-    req.state(NeighbourState::Other(NUD_NOARP_PERMANENT))
-        .flags(NeighbourFlags::Own | NeighbourFlags::Controller | NeighbourFlags::ExtLearned)
-        .replace()
-        .execute()
+    // `add_bridge` only supplies the transport; the full message
+    // shape comes from the pure builder so it unit-tests without a
+    // netlink socket.
+    let mut req = handle
+        .neighbours()
+        .add_bridge(vxlan_ifindex, &mac.octets())
+        .replace();
+    *req.message_mut() = build_fdb_nhg_message(vxlan_ifindex, mac, nh_id);
+    req.execute()
         .await
         .map_err(|e| super::fdb::classify_apply_error(&e))?;
 
     Ok(())
+}
+
+/// Build the `RTM_NEWNEIGH` message for an FDB-NHG row: the
+/// module-level wire shape (`AF_BRIDGE`, combined `NUD_NOARP |
+/// NUD_PERMANENT` state, `NTF_SELF | NTF_MASTER | NTF_EXT_LEARNED`
+/// flags, `LinkLayerAddress` + `NDA_NH_ID`, no `NDA_DST`). The
+/// builder doesn't expose `NDA_NH_ID` as a typed setter — we go
+/// through `Other(DefaultNla)` like the existing parse path.
+///
+/// Also carries the ADR-0082 `NDA_PROTOCOL = RTPROT_BGP` ownership
+/// stamp. Mainline `AF_BRIDGE` parses FDB adds with a NULL attribute
+/// policy and silently drops the stamp — a forward-compatible no-op
+/// that becomes effective once kernel FDB support lands.
+fn build_fdb_nhg_message(vxlan_ifindex: u32, mac: MacAddress, nh_id: u32) -> NeighbourMessage {
+    let mut msg = NeighbourMessage::default();
+    msg.header.family = AddressFamily::Bridge;
+    msg.header.ifindex = vxlan_ifindex;
+    msg.header.state = NeighbourState::Other(NUD_NOARP_PERMANENT);
+    msg.header.flags =
+        NeighbourFlags::Own | NeighbourFlags::Controller | NeighbourFlags::ExtLearned;
+    msg.header.kind = RouteType::Unspec;
+    msg.attributes
+        .push(NeighbourAttribute::LinkLayerAddress(mac.octets().to_vec()));
+    msg.attributes
+        .push(NeighbourAttribute::Other(DefaultNla::new(
+            NDA_NH_ID,
+            nh_id.to_ne_bytes().to_vec(),
+        )));
+    msg.attributes
+        .push(NeighbourAttribute::Protocol(RouteProtocol::Bgp));
+    msg
 }
 
 /// Remove an FDB row for `(vni, mac)`. The kernel cleans up by
@@ -266,5 +284,43 @@ mod tests {
         let vni = EvpnInstanceId::new(999).unwrap();
         let err = check_cve_guard_and_get_ifindex(&cache, vni).unwrap_err();
         assert!(matches!(err, DataplaneError::LinkNotFound { .. }));
+    }
+
+    #[test]
+    fn build_fdb_nhg_message_carries_nh_id_and_ownership_stamp() {
+        let mac = MacAddress::new([1, 2, 3, 4, 5, 6]);
+        let msg = build_fdb_nhg_message(11, mac, 0x4000_0001);
+        assert_eq!(msg.header.family, AddressFamily::Bridge);
+        assert_eq!(msg.header.ifindex, 11);
+        assert_eq!(msg.header.state, NeighbourState::Other(NUD_NOARP_PERMANENT));
+        assert_eq!(
+            msg.header.flags,
+            NeighbourFlags::Own | NeighbourFlags::Controller | NeighbourFlags::ExtLearned
+        );
+        assert!(
+            msg.attributes
+                .contains(&NeighbourAttribute::LinkLayerAddress(mac.octets().to_vec()))
+        );
+        // NDA_NH_ID rides the Other(DefaultNla) escape hatch; no
+        // NDA_DST may accompany it (kernel vxlan_fdb_parse rejects
+        // the combination).
+        assert!(
+            msg.attributes
+                .contains(&NeighbourAttribute::Other(DefaultNla::new(
+                    NDA_NH_ID,
+                    0x4000_0001u32.to_ne_bytes().to_vec()
+                )))
+        );
+        assert!(
+            !msg.attributes
+                .iter()
+                .any(|a| matches!(a, NeighbourAttribute::Destination(_)))
+        );
+        // ADR-0082 ownership stamp — silently dropped by mainline
+        // AF_BRIDGE, emitted anyway as the forward-compatible posture.
+        assert!(
+            msg.attributes
+                .contains(&NeighbourAttribute::Protocol(RouteProtocol::Bgp))
+        );
     }
 }

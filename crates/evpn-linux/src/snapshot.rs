@@ -21,6 +21,13 @@ use std::net::IpAddr;
 
 use rustbgpd_evpn::{EvpnInstanceId, MacAddress};
 
+/// `RTPROT_BGP` (186) — the daemon's kernel ownership identity, shared
+/// with every route we install (`rtm_protocol`) and, per ADR-0082, the
+/// `NDA_PROTOCOL` stamp on every FDB/neighbor install. Kept as a raw
+/// `u8` here because the snapshot types are platform-independent (the
+/// netlink crates are Linux-only deps).
+const RTPROT_BGP: u8 = 186;
+
 /// Bridge / VXLAN link inventory entry.
 ///
 /// Phase 2 holds only the fields the diff loop and per-instance probe
@@ -85,18 +92,30 @@ pub struct KernelFdbEntry {
     /// `NDA_DST` instead (single-VTEP rows). Mutually exclusive with
     /// `dst` per `vxlan_fdb_parse` kernel rules.
     pub nh_id: Option<u32>,
+    /// `NDA_PROTOCOL` ownership stamp (`rtm_protocol` value space) if
+    /// the kernel echoed one back. Mainline `AF_BRIDGE` FDB does not
+    /// store the attribute (`rtnl_fdb_add` parses with a NULL policy
+    /// and drops it), so on current kernels this is always `None`;
+    /// once kernel support lands, the stamp rustbgpd already writes
+    /// starts round-tripping and the ADR-0082 prefer-mode check in
+    /// [`Self::is_extern_learned`] becomes effective with no flag day.
+    pub protocol: Option<u8>,
     /// Coarse-grained ownership flags.
     pub flags: KernelFdbFlags,
 }
 
 impl KernelFdbEntry {
-    /// `true` if this entry has `extern_learn` set — the marker
-    /// rustbgpd uses to denote "this entry was programmed by us".
-    /// Foreign entries (kernel-learned, operator-static) do not have
-    /// this flag.
+    /// `true` if this entry carries rustbgpd's ownership markers:
+    /// `extern_learn` set, and — when the kernel reports an
+    /// `NDA_PROTOCOL` value — that value equal to `RTPROT_BGP`.
+    /// Foreign entries (kernel-learned, operator-static) lack the
+    /// flag; a row stamped with another controller's protocol value
+    /// (e.g. zebra's 11) is provably not ours regardless of flags
+    /// (ADR-0082 prefer mode). Protocol absence keeps the flag-based
+    /// rule — current kernels never return the attribute for FDB rows.
     #[must_use]
     pub fn is_extern_learned(&self) -> bool {
-        self.flags.extern_learn
+        self.flags.extern_learn && self.protocol.is_none_or(|p| p == RTPROT_BGP)
     }
 
     /// `true` if this entry is dynamic (no static/permanent flags) and
@@ -452,6 +471,7 @@ mod tests {
             mac: mac(1),
             dst: Some(ip("10.0.0.2")),
             nh_id: None,
+            protocol: None,
             flags: KernelFdbFlags {
                 extern_learn: true,
                 master: true,
@@ -470,10 +490,35 @@ mod tests {
             mac: mac(2),
             dst: None,
             nh_id: None,
+            protocol: None,
             flags: KernelFdbFlags::default(),
         };
         assert!(!entry.is_extern_learned());
         assert!(entry.is_kernel_learned_local());
+    }
+
+    #[test]
+    fn foreign_protocol_stamp_disqualifies_extern_learn() {
+        // ADR-0082 prefer mode: a kernel-echoed NDA_PROTOCOL value
+        // other than RTPROT_BGP proves another controller owns the
+        // row (zebra stamps 11), so `extern_learn` alone no longer
+        // claims it. Our own stamp (186) keeps the classification.
+        let mut entry = KernelFdbEntry {
+            mac: mac(1),
+            dst: Some(ip("10.0.0.2")),
+            nh_id: None,
+            protocol: Some(11), // RTPROT_ZEBRA
+            flags: KernelFdbFlags {
+                extern_learn: true,
+                master: true,
+                ..Default::default()
+            },
+        };
+        assert!(!entry.is_extern_learned());
+        assert!(!entry.is_kernel_learned_local());
+
+        entry.protocol = Some(186); // RTPROT_BGP — ours
+        assert!(entry.is_extern_learned());
     }
 
     #[test]
@@ -482,6 +527,7 @@ mod tests {
             mac: mac(3),
             dst: None,
             nh_id: None,
+            protocol: None,
             flags: KernelFdbFlags {
                 permanent: true,
                 ..Default::default()
@@ -531,6 +577,7 @@ mod tests {
                 mac: mac(1),
                 dst: Some(ip("10.0.0.2")),
                 nh_id: None,
+                protocol: None,
                 flags: KernelFdbFlags {
                     extern_learn: true,
                     master: true,
@@ -554,6 +601,7 @@ mod tests {
                     mac: mac(1),
                     dst: Some(ip("10.0.0.2")),
                     nh_id: None,
+                    protocol: None,
                     flags: KernelFdbFlags::default(),
                 },
             );

@@ -43,10 +43,11 @@
 //! route with the wrong gateway type.
 
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use netlink_packet_route::AddressFamily;
 use netlink_packet_route::neighbour::{
-    NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
+    NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
 };
 use netlink_packet_route::route::{
     RouteAddress, RouteAttribute, RouteFlags, RouteHeader, RouteMessage, RouteProtocol, RouteScope,
@@ -55,7 +56,7 @@ use netlink_packet_route::route::{
 use rtnetlink::Handle;
 use rustbgpd_evpn::{EvpnIpPrefixValue, MacAddress};
 
-use super::fdb::{classify_apply_error, classify_remove_apply_error};
+use super::fdb::{classify_apply_error, classify_remove_apply_error, is_einval};
 use crate::error::DataplaneError;
 
 /// `RT_TABLE_COMPAT` — the kernel UAPI sentinel
@@ -191,10 +192,65 @@ fn build_ip_route_message(
     Ok(msg)
 }
 
+/// Latched `true` once a kernel rejects the `NDA_PROTOCOL` ownership
+/// stamp on an L3 neighbor install with `EINVAL` and the unstamped
+/// retry succeeds (ADR-0082 decision 5: a strict-validation kernel
+/// predating the neighbor protocol attribute, Linux < 5.0 — outside
+/// the EVPN kernel baseline we test, but fail-soft). Subsequent
+/// installs skip the stamp for the rest of the run and adoption stays
+/// on the legacy markers. Process-global on purpose: the capability
+/// is a property of the running kernel, not of any one actor.
+static L3_NEIGHBOR_STAMP_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
+
+/// Build the `RTM_NEWNEIGH` message for the permanent ARP/ND entry on
+/// the L3 VXLAN device: `Permanent` state + `NTF_EXT_LEARNED`, and —
+/// unless stamping has been latched unavailable — the ADR-0082
+/// `NDA_PROTOCOL = RTPROT_BGP` ownership stamp. IP neighbors store and
+/// echo the stamp since Linux 5.0, so `ip neigh show` reports
+/// `proto bgp` on managed rows and the adoption sweep can tell our
+/// rows from another controller's (zebra stamps `RTPROT_ZEBRA`).
+fn build_l3_neighbor_message(
+    l3vxlan_ifindex: u32,
+    next_hop: IpAddr,
+    router_mac: MacAddress,
+    stamp: bool,
+) -> NeighbourMessage {
+    let mut msg = NeighbourMessage::default();
+    msg.header.family = match next_hop {
+        IpAddr::V4(_) => AddressFamily::Inet,
+        IpAddr::V6(_) => AddressFamily::Inet6,
+    };
+    msg.header.ifindex = l3vxlan_ifindex;
+    msg.header.state = NeighbourState::Permanent;
+    msg.header.flags = NeighbourFlags::ExtLearned;
+    msg.header.kind = RouteType::Unspec;
+    msg.attributes
+        .push(NeighbourAttribute::Destination(match next_hop {
+            IpAddr::V4(a) => NeighbourAddress::Inet(a),
+            IpAddr::V6(a) => NeighbourAddress::Inet6(a),
+        }));
+    msg.attributes.push(NeighbourAttribute::LinkLayerAddress(
+        router_mac.octets().to_vec(),
+    ));
+    if stamp {
+        msg.attributes
+            .push(NeighbourAttribute::Protocol(RouteProtocol::Bgp));
+    }
+    msg
+}
+
 /// Add (or replace) a permanent ARP/ND entry on the L3 VXLAN
 /// device mapping the remote VTEP IP to the remote PE's router MAC.
 /// This is what the kernel consults when building the inner
 /// Ethernet header during symmetric-IRB encapsulation.
+///
+/// Installs carry the ADR-0082 ownership stamp; if a stamped install
+/// fails with `EINVAL` the kernel may be a strict-validation one
+/// without the neighbor protocol attribute, so it is retried once
+/// unstamped — on success, stamping is latched off for the rest of
+/// the run (warned once). The errno alone cannot prove the attribute
+/// caused the rejection; if the unstamped retry also fails, that
+/// error propagates normally.
 ///
 /// # Errors
 ///
@@ -207,16 +263,37 @@ pub(crate) async fn apply_add_l3_neighbor(
     next_hop: IpAddr,
     router_mac: MacAddress,
 ) -> Result<(), DataplaneError> {
-    handle
-        .neighbours()
-        .add(l3vxlan_ifindex, next_hop)
-        .link_layer_address(&router_mac.octets())
-        .state(NeighbourState::Permanent)
-        .flags(NeighbourFlags::ExtLearned)
-        .replace()
-        .execute()
-        .await
-        .map_err(|e| classify_apply_error(&e))
+    let stamp = !L3_NEIGHBOR_STAMP_UNAVAILABLE.load(Ordering::Relaxed);
+    match send_l3_neighbor(handle, l3vxlan_ifindex, next_hop, router_mac, stamp).await {
+        Ok(()) => Ok(()),
+        Err(e) if stamp && is_einval(&e) => {
+            send_l3_neighbor(handle, l3vxlan_ifindex, next_hop, router_mac, false)
+                .await
+                .map_err(|retry_err| classify_apply_error(&retry_err))?;
+            if !L3_NEIGHBOR_STAMP_UNAVAILABLE.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    "kernel rejected the NDA_PROTOCOL ownership stamp on an L3 \
+                     neighbor install (EINVAL) but accepted the unstamped retry; \
+                     disabling stamping for the rest of this run — adoption falls \
+                     back to the legacy extern_learn+permanent markers (ADR-0082)"
+                );
+            }
+            Ok(())
+        }
+        Err(e) => Err(classify_apply_error(&e)),
+    }
+}
+
+async fn send_l3_neighbor(
+    handle: &Handle,
+    l3vxlan_ifindex: u32,
+    next_hop: IpAddr,
+    router_mac: MacAddress,
+    stamp: bool,
+) -> Result<(), rtnetlink::Error> {
+    let mut req = handle.neighbours().add(l3vxlan_ifindex, next_hop).replace();
+    *req.message_mut() = build_l3_neighbor_message(l3vxlan_ifindex, next_hop, router_mac, stamp);
+    req.execute().await
 }
 
 /// Remove a previously-installed L3 neighbor entry.
@@ -241,13 +318,48 @@ pub(crate) async fn apply_remove_l3_neighbor(
     msg.header.kind = RouteType::Unspec;
     msg.attributes
         .push(NeighbourAttribute::Destination(match next_hop {
-            IpAddr::V4(a) => netlink_packet_route::neighbour::NeighbourAddress::Inet(a),
-            IpAddr::V6(a) => netlink_packet_route::neighbour::NeighbourAddress::Inet6(a),
+            IpAddr::V4(a) => NeighbourAddress::Inet(a),
+            IpAddr::V6(a) => NeighbourAddress::Inet6(a),
         }));
     match handle.neighbours().del(msg).execute().await {
         Ok(()) => Ok(()),
         Err(e) => classify_remove_apply_error(&e),
     }
+}
+
+/// Build the `RTM_NEWNEIGH` message for the L3VXLAN FDB row
+/// (`router_mac → next_hop`), the `bridge fdb add ... dev l3vxlanX
+/// self` shape with `NTF_SELF | NTF_EXT_LEARNED` and the combined
+/// `NUD_NOARP | NUD_PERMANENT` state.
+///
+/// Carries the ADR-0082 `NDA_PROTOCOL = RTPROT_BGP` ownership stamp
+/// unconditionally: `AF_BRIDGE` parses FDB adds with a NULL attribute
+/// policy on mainline kernels, so the stamp is silently accepted and
+/// dropped — it can never cause an `EINVAL` (no fallback needed) and
+/// becomes effective automatically once kernel FDB support for the
+/// attribute lands.
+fn build_l3vxlan_fdb_message(
+    l3vxlan_ifindex: u32,
+    router_mac: MacAddress,
+    next_hop: IpAddr,
+) -> NeighbourMessage {
+    let mut msg = NeighbourMessage::default();
+    msg.header.family = AddressFamily::Bridge;
+    msg.header.ifindex = l3vxlan_ifindex;
+    msg.header.state = NeighbourState::Other(NUD_NOARP_PERMANENT);
+    msg.header.flags = NeighbourFlags::Own | NeighbourFlags::ExtLearned;
+    msg.header.kind = RouteType::Unspec;
+    msg.attributes.push(NeighbourAttribute::LinkLayerAddress(
+        router_mac.octets().to_vec(),
+    ));
+    msg.attributes
+        .push(NeighbourAttribute::Destination(match next_hop {
+            IpAddr::V4(a) => NeighbourAddress::Inet(a),
+            IpAddr::V6(a) => NeighbourAddress::Inet6(a),
+        }));
+    msg.attributes
+        .push(NeighbourAttribute::Protocol(RouteProtocol::Bgp));
+    msg
 }
 
 /// Add (or replace) the FDB row on the L3 VXLAN device that maps
@@ -270,16 +382,12 @@ pub(crate) async fn apply_add_l3vxlan_fdb(
     router_mac: MacAddress,
     next_hop: IpAddr,
 ) -> Result<(), DataplaneError> {
-    handle
+    let mut req = handle
         .neighbours()
         .add_bridge(l3vxlan_ifindex, &router_mac.octets())
-        .destination(next_hop)
-        .state(NeighbourState::Other(NUD_NOARP_PERMANENT))
-        .flags(NeighbourFlags::Own | NeighbourFlags::ExtLearned)
-        .replace()
-        .execute()
-        .await
-        .map_err(|e| classify_apply_error(&e))
+        .replace();
+    *req.message_mut() = build_l3vxlan_fdb_message(l3vxlan_ifindex, router_mac, next_hop);
+    req.execute().await.map_err(|e| classify_apply_error(&e))
 }
 
 /// Remove a previously-installed L3VXLAN FDB row.
@@ -400,5 +508,67 @@ mod tests {
         let nh = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1));
         let err = build_ip_route_message(prefix, 100, 42, nh).unwrap_err();
         assert!(matches!(err, DataplaneError::InvalidArgument(_)));
+    }
+
+    fn protocol_attr(msg: &NeighbourMessage) -> Option<RouteProtocol> {
+        msg.attributes.iter().find_map(|a| match a {
+            NeighbourAttribute::Protocol(p) => Some(*p),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn build_l3_neighbor_message_carries_markers_and_ownership_stamp() {
+        let nh = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mac = MacAddress::new([0x02, 0, 0, 0, 1, 1]);
+        let msg = build_l3_neighbor_message(42, nh, mac, true);
+        assert_eq!(msg.header.family, AddressFamily::Inet);
+        assert_eq!(msg.header.ifindex, 42);
+        assert_eq!(msg.header.state, NeighbourState::Permanent);
+        assert_eq!(msg.header.flags, NeighbourFlags::ExtLearned);
+
+        let dst = msg.attributes.iter().find_map(|a| match a {
+            NeighbourAttribute::Destination(NeighbourAddress::Inet(v4)) => Some(*v4),
+            _ => None,
+        });
+        assert_eq!(dst, Some(Ipv4Addr::new(10, 0, 0, 2)));
+        let lladdr = msg.attributes.iter().find_map(|a| match a {
+            NeighbourAttribute::LinkLayerAddress(bytes) => Some(bytes.clone()),
+            _ => None,
+        });
+        assert_eq!(lladdr, Some(mac.octets().to_vec()));
+        // ADR-0082: the NDA_PROTOCOL ownership stamp, the same
+        // RTPROT_BGP identity as our routes.
+        assert_eq!(protocol_attr(&msg), Some(RouteProtocol::Bgp));
+    }
+
+    #[test]
+    fn build_l3_neighbor_message_unstamped_omits_protocol() {
+        // The EINVAL-retry / latched-unavailable shape (ADR-0082
+        // decision 5): everything but the stamp stays identical.
+        let nh = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1));
+        let mac = MacAddress::new([0x02, 0, 0, 0, 1, 1]);
+        let msg = build_l3_neighbor_message(42, nh, mac, false);
+        assert_eq!(msg.header.family, AddressFamily::Inet6);
+        assert_eq!(msg.header.flags, NeighbourFlags::ExtLearned);
+        assert_eq!(protocol_attr(&msg), None);
+    }
+
+    #[test]
+    fn build_l3vxlan_fdb_message_carries_bridge_shape_and_stamp() {
+        let nh = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mac = MacAddress::new([0x02, 0, 0, 0, 1, 1]);
+        let msg = build_l3vxlan_fdb_message(42, mac, nh);
+        assert_eq!(msg.header.family, AddressFamily::Bridge);
+        assert_eq!(msg.header.ifindex, 42);
+        assert_eq!(msg.header.state, NeighbourState::Other(NUD_NOARP_PERMANENT));
+        assert_eq!(
+            msg.header.flags,
+            NeighbourFlags::Own | NeighbourFlags::ExtLearned
+        );
+        // AF_BRIDGE drops the stamp silently on mainline kernels —
+        // it is emitted unconditionally as the forward-compatible
+        // ADR-0082 posture, so the encode must always carry it.
+        assert_eq!(protocol_attr(&msg), Some(RouteProtocol::Bgp));
     }
 }

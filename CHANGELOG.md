@@ -11,6 +11,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **NDA_PROTOCOL ownership stamping on EVPN kernel state (ADR-0082).** Every
+  EVPN FDB/neighbor install — L2 single-dst FDB, ADR-0059 NHG FDB rows, L3
+  neighbors, and L3VXLAN router-MAC FDB — now carries
+  `NDA_PROTOCOL = RTPROT_BGP` (186), the same kernel identity our routes
+  already use, so `ip neigh show` reports `proto bgp` on managed L3 neighbor
+  rows. The ADR-0079 adoption sweeps use it as a second, value-bearing
+  ownership discriminator: L3 neighbor adoption requires the stamp **or**
+  accepts a stamp-less row as the pre-stamp legacy shape (one-release
+  migration window — a future release may require the stamp, gated on having
+  run this release once), while any other stamped value (e.g. zebra's 11)
+  disqualifies the row as provably another controller's. FDB classifiers
+  apply the same check in *prefer* mode only, because mainline AF_BRIDGE
+  silently drops the attribute (stamping it is a forward-compatible no-op,
+  FRR parity): a foreign stamp disqualifies if a future kernel ever returns
+  one, absence keeps today's flag-based rule — zero behavior change on
+  current kernels. If a strict-validation kernel rejects a stamped L3
+  neighbor install with `EINVAL`, the install is retried once unstamped and
+  stamping is latched off for the rest of the run (warned once). The M61
+  kill-and-restart job now also proves the stamp end-to-end: the re-claimed
+  neighbor row shows `proto bgp`, and a planted `extern_learn` + permanent +
+  `protocol zebra` neighbor — adoptable under the old flags-only rule —
+  survives the sweep untouched.
+
 - **M61 kill-and-restart interop proof for the ADR-0079 EVPN L3 sweep.**
   New `kernel-dataplane` CI job closing the residual-risk gap the v0.37.0
   notes carried (the L3 slice — the largest new surface — had only in-memory
