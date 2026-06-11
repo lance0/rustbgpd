@@ -5129,9 +5129,12 @@ async fn full_rib_channel_parks_session_and_never_drops_routes() {
     assert!((blocked - 1.0).abs() < f64::EPSILON, "got {blocked}");
 }
 
-/// ADR-0078 rule 3: a hold-timer expiry with unprocessed bytes already
-/// in the read buffer re-arms instead of expiring — we were the
-/// bottleneck, not the peer.
+/// ADR-0078 rule 3: a hold-timer expiry with an unprocessed COMPLETE
+/// frame already in the read buffer re-arms instead of expiring — we
+/// were the bottleneck, not the peer. The buffered bytes are a full
+/// encoded KEEPALIVE on purpose: liveness is counted in complete
+/// frames, so partial bytes would not qualify (see
+/// `hold_expiry_with_partial_frame_expires`).
 #[tokio::test]
 async fn hold_expiry_with_buffered_input_rearms_instead_of_expiring() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -5163,8 +5166,10 @@ async fn hold_expiry_with_buffered_input_rearms_instead_of_expiring() {
     assert!((rearmed - 1.0).abs() < f64::EPSILON, "got {rearmed}");
 }
 
-/// ADR-0078 rule 3, socket flavor: peer bytes sitting unread in the
-/// kernel receive buffer also count as liveness at hold expiry.
+/// ADR-0078 rule 3, socket flavor: a complete frame sitting unread in
+/// the kernel receive buffer also counts as liveness at hold expiry.
+/// As above, the peer writes a full encoded KEEPALIVE — completeness
+/// is what qualifies it as liveness, not the mere presence of bytes.
 #[tokio::test]
 async fn hold_expiry_with_unread_socket_data_rearms() {
     use tokio::io::AsyncWriteExt;
@@ -5184,6 +5189,96 @@ async fn hold_expiry_with_unread_socket_data_rearms() {
 
     assert_eq!(session.fsm.state(), SessionState::Established);
     assert!(session.timers.hold.is_some());
+}
+
+/// A partial frame in the read buffer is NOT liveness: a peer whose
+/// application hangs mid-frame while its kernel keeps acknowledging must not
+/// re-arm the hold timer forever (zombie session). RFC 4271 resets the
+/// hold timer on receipt of a complete message; ten bytes of a header
+/// don't qualify, so the expiry stands.
+#[tokio::test]
+async fn hold_expiry_with_partial_frame_expires() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+
+    let keepalive = rustbgpd_wire::encode_message(&Message::Keepalive).unwrap();
+    session.read_buf.buf.extend_from_slice(&keepalive[..10]);
+    session.timers.hold = None;
+
+    session.handle_hold_timer_expiry().await;
+
+    assert_ne!(
+        session.fsm.state(),
+        SessionState::Established,
+        "a permanently incomplete frame must not hold the session open"
+    );
+    assert!(
+        session.timers.hold.is_none(),
+        "partial input must not re-arm the hold timer"
+    );
+}
+
+/// Partial frame, socket flavor: the peer wrote ten bytes of a frame
+/// and then hung. The socket probe drains them into the read buffer,
+/// but without a complete frame there is no liveness — the session
+/// expires instead of zombieing.
+#[tokio::test]
+async fn hold_expiry_with_partial_socket_frame_expires() {
+    use tokio::io::AsyncWriteExt;
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+
+    let keepalive = rustbgpd_wire::encode_message(&Message::Keepalive).unwrap();
+    server.write_all(&keepalive[..10]).await.unwrap();
+    server.flush().await.unwrap();
+    // Let the bytes land in the local receive buffer.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    session.timers.hold = None;
+
+    session.handle_hold_timer_expiry().await;
+
+    assert_ne!(
+        session.fsm.state(),
+        SessionState::Established,
+        "a peer hung mid-frame must still expire the hold timer"
+    );
+}
+
+/// Boundary: one complete frame followed by a partial second frame
+/// re-arms — the complete frame is liveness, and the trailing partial
+/// simply waits in the buffer for the rest of its bytes.
+#[tokio::test]
+async fn hold_expiry_with_complete_frame_then_partial_rearms() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+
+    let keepalive = rustbgpd_wire::encode_message(&Message::Keepalive).unwrap();
+    session.read_buf.buf.extend_from_slice(&keepalive);
+    session.read_buf.buf.extend_from_slice(&keepalive[..10]);
+    session.timers.hold = None;
+
+    session.handle_hold_timer_expiry().await;
+
+    assert_eq!(
+        session.fsm.state(),
+        SessionState::Established,
+        "the complete leading frame is liveness even with a partial tail"
+    );
+    assert!(
+        session.timers.hold.is_some(),
+        "processing the complete KEEPALIVE must re-arm the hold timer"
+    );
+    assert_eq!(
+        session.read_buf.buf.len(),
+        10,
+        "the partial second frame stays buffered for the normal read path"
+    );
 }
 
 /// A genuinely silent peer still expires: no buffered or readable input

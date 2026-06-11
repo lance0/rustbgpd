@@ -12,11 +12,21 @@ impl PeerSession {
     /// liveness. A session task that parked on a blocking RIB delivery
     /// resumes with its hold deadline possibly in the past while the
     /// peer's KEEPALIVEs sit unread in the socket — expiring then would
-    /// blame the peer for our own backpressure. If bytes are pending
-    /// (in the read buffer, or readable from the socket right now),
-    /// process them — the FSM re-arms the hold timer per message — and
-    /// re-arm manually if only a partial message arrived. Only a truly
-    /// silent peer expires.
+    /// blame the peer for our own backpressure. If at least one
+    /// complete BGP frame is pending (in the read buffer, or readable
+    /// from the socket right now), process the buffer — the FSM re-arms
+    /// the hold timer per message — and re-arm manually if processing
+    /// left the timer stopped.
+    ///
+    /// Liveness is counted in complete frames, not raw bytes. RFC 4271
+    /// §4.4/§8 resets the hold timer on receipt of a complete message;
+    /// a received-but-unprocessed complete frame is therefore liveness
+    /// under our own backpressure stall, but a permanently incomplete
+    /// frame is not — counting raw bytes would let a peer that hangs
+    /// mid-frame while its kernel keeps acknowledging (half a BGP header, then
+    /// silence) re-arm forever and hold a zombie session open. FRR's
+    /// equivalent rule likewise counts parsed packets. Only a peer with
+    /// no complete frame outstanding expires.
     pub(super) async fn handle_hold_timer_expiry(&mut self) {
         if self.take_pending_input() {
             self.metrics
@@ -36,11 +46,19 @@ impl PeerSession {
         self.drive_fsm(Event::HoldTimerExpires).await;
     }
 
-    /// True when peer input is pending: leftover bytes in the read
-    /// buffer, or bytes readable from the socket right now (pulled into
-    /// the buffer non-blockingly so the caller can process them).
+    /// True when at least one complete BGP frame is pending: in the
+    /// read buffer, or completed by bytes readable from the socket
+    /// right now (pulled into the buffer non-blockingly so the caller
+    /// can process them).
+    ///
+    /// Completeness — `buf.len() >= length` for the header's declared
+    /// length — is the only check; marker/length validation stays with
+    /// the codec on the normal read path (a malformed header counts as
+    /// processable: the parser resolves it as a NOTIFICATION once
+    /// processing resumes). A partial frame is NOT liveness — see
+    /// [`Self::handle_hold_timer_expiry`].
     fn take_pending_input(&mut self) -> bool {
-        if !self.read_buf.buf.is_empty() {
+        if self.read_buf.has_complete_frame() {
             return true;
         }
         let Some(read_half) = self.read_half.as_ref() else {
@@ -50,7 +68,7 @@ impl PeerSession {
         match read_half.try_read(&mut tmp) {
             Ok(n) if n > 0 => {
                 self.read_buf.buf.extend_from_slice(&tmp[..n]);
-                true
+                self.read_buf.has_complete_frame()
             }
             // Ok(0) is EOF — let the normal read arm observe and handle
             // the disconnect; the hold expiry stands.
