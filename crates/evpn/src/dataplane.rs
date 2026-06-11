@@ -314,6 +314,10 @@ pub struct DataplaneReport {
     /// adopted at startup and reaped after the deferral. Same
     /// drain-into-Prometheus contract as `fdb_nhg_drift_counters`.
     pub l3_adoption_counters: L3AdoptionCounters,
+    /// Per-report deltas for the ADR-0083 single-active backup-path
+    /// failover events (group swaps + ordered teardowns). Same
+    /// drain-into-Prometheus contract as `fdb_nhg_drift_counters`.
+    pub single_active_counters: SingleActiveCounters,
 }
 
 /// Per-report deltas for FDB-NHG drift recovery and stale-NHID
@@ -359,6 +363,23 @@ pub struct L3AdoptionCounters {
     pub l3vxlan_fdb_adopted: u64,
     /// Adopted L3VXLAN FDB rows reaped after the deferral.
     pub l3vxlan_fdb_reaped: u64,
+}
+
+/// Per-report deltas for ADR-0083 single-active backup-path failover
+/// events.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SingleActiveCounters {
+    /// Single-active FDB nexthop groups whose one-member membership
+    /// was atomically swapped to a different PE (the EAD-per-ES
+    /// mass-withdraw reinterpreted as a local repair — one
+    /// `NLM_F_REPLACE` retargeting every MAC behind the group).
+    pub backup_swaps: u64,
+    /// Single-active groups torn down with their MAC rows (rows
+    /// removed first, group deleted after — never-through-empty).
+    /// Covers both the eligible-set-emptied mass-withdraw flush and
+    /// the degrade-to-single-dst row-shape conversion; both end the
+    /// group's indirection.
+    pub teardowns: u64,
 }
 
 /// Operator-facing summary of owned ADR-0059 FDB nexthop-group state.

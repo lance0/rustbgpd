@@ -788,6 +788,89 @@ mod tests {
         );
     }
 
+    // ─── ADR-0083 slice 3: the swap bookkeeping sequence ───
+
+    #[test]
+    fn swap_sequence_promotes_standby_to_member_without_reap_window() {
+        // The coordinator's post-REPLACE bookkeeping order for a swap
+        // (standby re-pin FIRST, then member change, then GCs): the NH
+        // being promoted standby→member (10.0.0.3) must never be
+        // reapable at any GC step, and the withdrawn member (10.0.0.2)
+        // must become reapable.
+        let mut map = GroupOwnedMap::new();
+        let k = install_single_active(&mut map); // member .2, standby .3
+
+        // Step 1: standby re-pin. Sole survivor → new standby None;
+        // the old standby (.3) is returned for the *deferred* GC.
+        let old_standby = map.record_group_standby_change(k, None);
+        assert_eq!(old_standby, Some(ipa("10.0.0.3")));
+
+        // Step 2: member change {.2} → {.3} (the swap itself).
+        let mut new_members = BTreeSet::new();
+        new_members.insert(ipa("10.0.0.3"));
+        let removed = map.record_group_member_change(k, new_members);
+        assert_eq!(removed, vec![ipa("10.0.0.2")]);
+
+        // Step 3: GC the removed member — .2 is reapable.
+        assert_eq!(
+            map.record_member_unref(ipa("10.0.0.2"), k),
+            Some(0x3000_0001)
+        );
+        // Step 4: GC the old standby — .3 is now the member, so the
+        // unref must NOT reap it (the member⇄standby transition is
+        // never reaped in the bookkeeping window).
+        assert_eq!(map.record_standby_unref(ipa("10.0.0.3"), k), None);
+        assert!(!map.vtep_nh_is_orphan(&ipa("10.0.0.3")));
+        assert_eq!(
+            map.group(&k)
+                .unwrap()
+                .members
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![ipa("10.0.0.3")],
+        );
+        assert_eq!(map.group(&k).unwrap().standby, None);
+    }
+
+    #[test]
+    fn swap_member_gc_spares_pe_pinned_as_standby_elsewhere() {
+        // Group A swaps its member away from .2 while .2 is the
+        // pre-created standby for group B: the post-swap member GC
+        // must not cross-group-reap .2's NH.
+        let mut map = GroupOwnedMap::new();
+        let ka = key(100, 7, 0);
+        let kb = key(100, 8, 0);
+        map.record_member_install(ipa("10.0.0.2"), 0x3000_0001);
+        map.record_member_install(ipa("10.0.0.3"), 0x3000_0002);
+        map.record_member_install(ipa("10.0.0.6"), 0x3000_0003);
+
+        let mut members_a = BTreeSet::new();
+        members_a.insert(ipa("10.0.0.2"));
+        map.record_group_install(ka, 0x4000_0001, members_a, Some(ipa("10.0.0.3")));
+        map.record_mac_ref(ka, vni(100), mac(1));
+
+        let mut members_b = BTreeSet::new();
+        members_b.insert(ipa("10.0.0.6"));
+        map.record_group_install(kb, 0x4000_0002, members_b, Some(ipa("10.0.0.2")));
+        map.record_mac_ref(kb, vni(100), mac(2));
+
+        // Swap group A: member {.2} → {.3}, standby → None.
+        let old_standby = map.record_group_standby_change(ka, None);
+        assert_eq!(old_standby, Some(ipa("10.0.0.3")));
+        let mut new_members = BTreeSet::new();
+        new_members.insert(ipa("10.0.0.3"));
+        let removed = map.record_group_member_change(ka, new_members);
+        assert_eq!(removed, vec![ipa("10.0.0.2")]);
+
+        // .2 stays pinned by group B's standby ref — no reap.
+        assert_eq!(map.record_member_unref(ipa("10.0.0.2"), ka), None);
+        assert!(!map.vtep_nh_is_orphan(&ipa("10.0.0.2")));
+        assert!(map.vtep_nh(&ipa("10.0.0.2")).is_some());
+        // Group B's standby record is untouched.
+        assert_eq!(map.group(&kb).unwrap().standby, Some(ipa("10.0.0.2")));
+    }
+
     #[test]
     fn drop_unreferenced_group_releases_standby_pin() {
         let mut map = GroupOwnedMap::new();

@@ -189,8 +189,13 @@ where
 /// - **single-active, no other eligible PE** → de-facto single-homed:
 ///   plain single-dst entry (no key, no backup) — the NHG indirection
 ///   buys nothing there.
-/// - **all-active (or no EAD-per-ES mode known)** → the existing
-///   RFC 7432 §14 aliasing resolution, unchanged.
+/// - **origin has NO EAD-per-ES but the `(ESI, EthernetTag)` eligible
+///   set is non-empty** (ADR-0083 decision 3/5, the slice-3 swap
+///   window) → the entry stays projected at the group with its one
+///   member retargeted to the derived backup (lowest eligible
+///   survivor) and the standby re-derived as the next-lowest.
+/// - **all-active (or origin's EAD-per-ES folds all-active)** → the
+///   existing RFC 7432 §14 aliasing resolution, unchanged.
 ///
 /// Same purity / panic contract as [`project_evpn_routes`].
 ///
@@ -261,26 +266,11 @@ where
 
     let mut builder = RemoteMacTable::builder();
     for ((vni, mac), route) in staged {
-        // ADR-0083 single-active gate: a non-zero-ESI route whose
-        // origin `(next-hop, ESI)` pair folds single-active never
-        // takes the all-active aliasing path (the single-active bit
-        // suppresses ECMP — RFC 7432 §14 vs §8.4). With a derivable
-        // backup it carries the one-member group key + backup
-        // intent; with no other eligible PE it is de-facto
-        // single-homed and keeps today's single-dst shape
-        // (decision 1's no-backup fallback).
-        if route.esi != rustbgpd_wire::EthernetSegmentIdentifier::ZERO
-            && single_active.pair_is_single_active(route.next_hop, route.esi)
-        {
-            let backup = single_active.backup_pe(route.esi, route.ethernet_tag, route.next_hop);
-            let entry = RemoteMacEntry {
-                remote_vtep_ip: route.next_hop,
-                mobility_sequence: route.mobility_sequence,
-                alias_vtep_ips: Vec::new(),
-                alias_group_key: backup.map(|_| (route.esi, route.ethernet_tag)),
-                single_active_backup_vtep_ip: backup,
-                source: RemoteMacSource::EvpnRibBestPath,
-            };
+        // ADR-0083 single-active gate (pre-install arm + slice-3 swap
+        // arm). `Some(entry)` means the route is governed by the
+        // single-active machinery; `None` falls through to the
+        // all-active aliasing path.
+        if let Some(entry) = single_active_entry(&route, single_active) {
             builder
                 .insert(vni, mac, entry)
                 .expect("staged BTreeMap already deduped (VNI, MAC) keys");
@@ -359,6 +349,68 @@ where
             .expect("staged BTreeMap already deduped (VNI, MAC) keys");
     }
     builder.build()
+}
+
+/// The ADR-0083 single-active gate for one staged Type 2 route.
+///
+/// Returns `Some(entry)` when the route is governed by the
+/// single-active machinery, `None` when it should take the all-active
+/// aliasing path:
+///
+/// - **Origin pair folds single-active** (slice 2, decision 1): the
+///   single-active bit suppresses ECMP (RFC 7432 §14 vs §8.4). With a
+///   derivable backup the entry carries the one-member group key +
+///   backup intent; with no other eligible PE it is de-facto
+///   single-homed and keeps the single-dst shape (no key, no backup).
+/// - **Origin pair has NO EAD-per-ES but the `(ESI, EthernetTag)`
+///   eligible set is non-empty** (slice 3, decisions 3 + 5 — the
+///   post-failover swap window): instead of flushing, the entry stays
+///   projected with the group's one member retargeted at the derived
+///   backup (the lowest eligible survivor) and the standby re-derived
+///   as the next-lowest (`None` when the member is the sole survivor —
+///   the group stays desired with one member; decision 5's
+///   sole-PE single-dst fallback applies only when the *primary* is
+///   the lone eligible PE). This is the same pure function the
+///   EAD-withdrawal event path realizes promptly, so a restart inside
+///   the window re-derives it instead of flapping back to the dead
+///   PE. An origin advertising an *all-active* EAD-per-ES (mixed-mode
+///   segment) does NOT take this arm: its own mode stays
+///   authoritative (slice-2 pinned behavior).
+fn single_active_entry(
+    route: &ProjectedEvpnRoute,
+    single_active: &crate::SingleActiveEligibleIndex,
+) -> Option<RemoteMacEntry> {
+    if route.esi == rustbgpd_wire::EthernetSegmentIdentifier::ZERO {
+        return None;
+    }
+    if single_active.pair_is_single_active(route.next_hop, route.esi) {
+        let backup = single_active.backup_pe(route.esi, route.ethernet_tag, route.next_hop);
+        return Some(RemoteMacEntry {
+            remote_vtep_ip: route.next_hop,
+            mobility_sequence: route.mobility_sequence,
+            alias_vtep_ips: Vec::new(),
+            alias_group_key: backup.map(|_| (route.esi, route.ethernet_tag)),
+            single_active_backup_vtep_ip: backup,
+            source: RemoteMacSource::EvpnRibBestPath,
+        });
+    }
+    if !single_active.pair_has_ead_per_es(route.next_hop, route.esi)
+        && let Some(member) = single_active.backup_pe(route.esi, route.ethernet_tag, route.next_hop)
+    {
+        // The swap window. New standby: the lowest eligible PE
+        // excluding the new member (the withdrawn primary is not in
+        // the eligible set — eligibility requires its EAD pair).
+        let standby = single_active.backup_pe(route.esi, route.ethernet_tag, member);
+        return Some(RemoteMacEntry {
+            remote_vtep_ip: member,
+            mobility_sequence: route.mobility_sequence,
+            alias_vtep_ips: Vec::new(),
+            alias_group_key: Some((route.esi, route.ethernet_tag)),
+            single_active_backup_vtep_ip: standby,
+            source: RemoteMacSource::EvpnRibBestPath,
+        });
+    }
+    None
 }
 
 /// Decide whether `new` should displace `existing` for the same
@@ -908,6 +960,158 @@ mod tests {
             &index,
         );
         let entry = table.get(vni(100), mac(1)).unwrap();
+        assert!(entry.alias_group_key.is_none());
+        assert!(entry.single_active_backup_vtep_ip.is_none());
+    }
+
+    // ─── ADR-0083 slice 3: the mass-withdraw swap window ───
+
+    #[test]
+    fn single_active_withdrawn_primary_swaps_member_to_backup() {
+        // The primary (10.0.0.2) lost its EAD-per-ES entirely; two
+        // eligible survivors remain. Decision 3/5: the entry stays
+        // projected, the group's one member retargets to the lowest
+        // survivor, and the standby re-derives as the next-lowest.
+        let routes = vec![route_with_esi(100, 1, "10.0.0.2", None, esi_seed(7))];
+        let index = sa_index(
+            &[(7, "10.0.0.3", true), (7, "10.0.0.4", true)],
+            &[(7, 0, "10.0.0.3"), (7, 0, "10.0.0.4")],
+        );
+        let table = project_evpn_routes_with_backup_paths(
+            &one_local(100),
+            routes,
+            std::iter::empty(),
+            &index,
+        );
+        let entry = table.get(vni(100), mac(1)).unwrap();
+        assert_eq!(
+            entry.remote_vtep_ip,
+            ipa("10.0.0.3"),
+            "membership retargets to the lowest eligible survivor"
+        );
+        assert!(entry.alias_vtep_ips.is_empty());
+        assert_eq!(
+            entry.alias_group_key,
+            Some((esi_seed(7), rustbgpd_wire::EthernetTagId(0))),
+        );
+        assert_eq!(
+            entry.single_active_backup_vtep_ip,
+            Some(ipa("10.0.0.4")),
+            "standby re-pins to the next-lowest survivor"
+        );
+    }
+
+    #[test]
+    fn single_active_swap_window_sole_survivor_keeps_group_no_standby() {
+        // Decision 5 parenthetical: a group that currently points at
+        // the backup with the primary gone stays desired with one
+        // member — even when that survivor is the only eligible PE.
+        // (The sole-PE single-dst fallback applies only when the
+        // PRIMARY is the lone eligible PE.)
+        let routes = vec![route_with_esi(100, 1, "10.0.0.2", None, esi_seed(7))];
+        let index = sa_index(&[(7, "10.0.0.3", true)], &[(7, 0, "10.0.0.3")]);
+        let table = project_evpn_routes_with_backup_paths(
+            &one_local(100),
+            routes,
+            std::iter::empty(),
+            &index,
+        );
+        let entry = table.get(vni(100), mac(1)).unwrap();
+        assert_eq!(entry.remote_vtep_ip, ipa("10.0.0.3"));
+        assert_eq!(
+            entry.alias_group_key,
+            Some((esi_seed(7), rustbgpd_wire::EthernetTagId(0))),
+        );
+        assert!(
+            entry.single_active_backup_vtep_ip.is_none(),
+            "no further survivor → no standby to pre-create"
+        );
+    }
+
+    #[test]
+    fn single_active_swap_then_readvertisement_projects_identical_entry() {
+        // The convergence property (decision 5): with ≥3 PEs, the
+        // swap-window projection (dead primary's MAC routes still in
+        // the RIB) and the post-reconvergence projection (the new
+        // active re-advertised the MAC with itself as next-hop) yield
+        // the IDENTICAL entry — the swap is an optimization of the
+        // transient, not a second source of truth.
+        let index = sa_index(
+            &[(7, "10.0.0.3", true), (7, "10.0.0.4", true)],
+            &[(7, 0, "10.0.0.3"), (7, 0, "10.0.0.4")],
+        );
+        // Window: MAC still advertised by dead 10.0.0.2.
+        let window = project_evpn_routes_with_backup_paths(
+            &one_local(100),
+            vec![route_with_esi(100, 1, "10.0.0.2", None, esi_seed(7))],
+            std::iter::empty(),
+            &index,
+        );
+        // Reconverged: the new active 10.0.0.3 re-advertised the MAC.
+        let reconverged = project_evpn_routes_with_backup_paths(
+            &one_local(100),
+            vec![route_with_esi(100, 1, "10.0.0.3", None, esi_seed(7))],
+            std::iter::empty(),
+            &index,
+        );
+        assert_eq!(
+            window, reconverged,
+            "swap-window and post-readvertisement projections must agree"
+        );
+    }
+
+    #[test]
+    fn mixed_mode_all_active_origin_never_takes_the_swap_arm() {
+        // The origin advertises an ALL-ACTIVE EAD-per-ES while other
+        // PEs are single-active-eligible for the same key. The
+        // origin's own mode is authoritative (slice-2 pinned): the
+        // entry takes the aliasing path, not the swap arm.
+        let routes = vec![route_with_esi(100, 1, "10.0.0.2", None, esi_seed(7))];
+        let index = sa_index(
+            &[
+                (7, "10.0.0.2", false),
+                (7, "10.0.0.3", true),
+                (7, "10.0.0.4", true),
+            ],
+            &[(7, 0, "10.0.0.2"), (7, 0, "10.0.0.3"), (7, 0, "10.0.0.4")],
+        );
+        let table = project_evpn_routes_with_backup_paths(
+            &one_local(100),
+            routes,
+            std::iter::empty(),
+            &index,
+        );
+        let entry = table.get(vni(100), mac(1)).unwrap();
+        assert_eq!(
+            entry.remote_vtep_ip,
+            ipa("10.0.0.2"),
+            "an all-active origin keeps its own next-hop"
+        );
+        assert!(entry.single_active_backup_vtep_ip.is_none());
+        assert!(
+            entry.alias_group_key.is_none(),
+            "no aliases observed on the all-active feed → no group"
+        );
+    }
+
+    #[test]
+    fn withdrawn_origin_with_empty_eligible_set_falls_through() {
+        // Origin lost its EAD-per-ES AND no single-active survivor
+        // exists: the swap arm must not fire — the entry takes the
+        // historical path (here: plain single-dst, since the aliasing
+        // feed is empty). The daemon-side `project_one` gate drops
+        // such routes before projection in production; this pins the
+        // pure function's fallback for direct callers.
+        let routes = vec![route_with_esi(100, 1, "10.0.0.2", None, esi_seed(7))];
+        let index = sa_index(&[], &[(7, 0, "10.0.0.3")]);
+        let table = project_evpn_routes_with_backup_paths(
+            &one_local(100),
+            routes,
+            std::iter::empty(),
+            &index,
+        );
+        let entry = table.get(vni(100), mac(1)).unwrap();
+        assert_eq!(entry.remote_vtep_ip, ipa("10.0.0.2"));
         assert!(entry.alias_group_key.is_none());
         assert!(entry.single_active_backup_vtep_ip.is_none());
     }

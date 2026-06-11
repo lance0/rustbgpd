@@ -490,6 +490,7 @@ where
             while let Some(report) = report_mpsc_rx.recv().await {
                 record_fdb_nhg_drift_metrics(&metrics, report.fdb_nhg_drift_counters);
                 record_l3_adoption_metrics(&metrics, report.l3_adoption_counters);
+                record_single_active_metrics(&metrics, report.single_active_counters);
                 if !report.failed.is_empty() {
                     warn!(
                         intent_generation = report.intent_generation,
@@ -555,6 +556,14 @@ fn record_fdb_nhg_drift_metrics(metrics: &BgpMetrics, counters: FdbNhgDriftCount
     metrics.add_evpn_fdb_nhg_drift_disabled(counters.drift_disabled);
     metrics.add_evpn_fdb_single_dst_adopted(counters.single_dst_adopted);
     metrics.add_evpn_fdb_single_dst_reaped(counters.single_dst_reaped);
+}
+
+fn record_single_active_metrics(
+    metrics: &BgpMetrics,
+    counters: rustbgpd_evpn::SingleActiveCounters,
+) {
+    metrics.add_evpn_single_active_backup_swaps(counters.backup_swaps);
+    metrics.add_evpn_single_active_teardowns(counters.teardowns);
 }
 
 fn record_l3_adoption_metrics(metrics: &BgpMetrics, counters: L3AdoptionCounters) {
@@ -663,6 +672,13 @@ async fn publish_dataplane_intent(
         quarantined_macs,
     )
     .await?;
+    // ADR-0083 slice 3: refresh the backup-window gauge on every
+    // successful projection, BEFORE the unchanged-table early return —
+    // the gauge derives from the same RIB snapshot and must converge
+    // back to zero once the new active PE's re-advertisements land.
+    metrics.set_evpn_single_active_backup_active(
+        i64::try_from(tables.single_active_backup_active).unwrap_or(i64::MAX),
+    );
     if state.generation > 0
         && instances.as_ref() == state.last_instances.as_ref()
         && ip_vrfs.as_ref() == state.last_ip_vrfs.as_ref()
@@ -949,6 +965,11 @@ async fn supervisor_loop(
 struct IntentTables {
     remote_macs: rustbgpd_evpn::RemoteMacTable,
     remote_ip_prefixes: rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable,
+    /// ADR-0083 slice 3: number of `(ESI, EthernetTag)` single-active
+    /// groups currently retargeted at their backup PE (origin VTEP
+    /// withdrew its EAD-per-ES; eligible survivors remain). Mirrored
+    /// onto the `evpn_single_active_backup_active` gauge.
+    single_active_backup_active: usize,
 }
 
 async fn build_intent_tables(
@@ -987,24 +1008,17 @@ async fn build_intent_tables(
         rustbgpd_wire::EthernetSegmentIdentifier,
     )> = ead_per_es_modes.keys().copied().collect();
 
-    let projected: Vec<ProjectedEvpnRoute> = routes
-        .iter()
-        .filter_map(|r| project_one(r, &active_ead_per_es))
-        .filter(|route| !projected_route_is_quarantined(route, quarantined_macs))
-        .collect();
-    let ead_per_evi: Vec<ProjectedEvpnEadPerEvi> = routes
-        .iter()
-        .filter_map(|r| project_ead_per_evi(r, &local_vtep_ips, &ead_per_es_modes))
-        .collect();
-
     // ADR-0083: derive the single-active eligible-set index from the
     // same RIB snapshot — EAD-per-ES modes (the OR-fold above) plus
     // the FULL self-filtered EAD-per-EVI stream (the index keeps only
     // rows whose pair folds single-active; the all-active aliasing
-    // feed above keeps the complement). The projection uses it to
+    // feed below keeps the complement). The projection uses it to
     // give single-active MAC entries a one-member group key + the
     // pre-create-backup intent instead of bypassing the FDB-NHG
-    // machinery.
+    // machinery, and (slice 3) the `project_one` mass-withdraw gate
+    // uses it to keep — rather than flush — Type 2 routes whose
+    // origin withdrew its EAD-per-ES while eligible survivors remain.
+    // Built BEFORE the Type 2 projection because the gate consumes it.
     let single_active_index = rustbgpd_evpn::SingleActiveEligibleIndex::build(
         ead_per_es_modes
             .iter()
@@ -1019,6 +1033,36 @@ async fn build_intent_tables(
             .iter()
             .filter_map(|r| project_ead_per_evi_unfiltered(r, &local_vtep_ips)),
     );
+
+    let projected: Vec<ProjectedEvpnRoute> = routes
+        .iter()
+        .filter_map(|r| project_one(r, &active_ead_per_es, &single_active_index))
+        .filter(|route| !projected_route_is_quarantined(route, quarantined_macs))
+        .collect();
+    let ead_per_evi: Vec<ProjectedEvpnEadPerEvi> = routes
+        .iter()
+        .filter_map(|r| project_ead_per_evi(r, &local_vtep_ips, &ead_per_es_modes))
+        .collect();
+
+    // ADR-0083 slice 3 observability: the number of (ESI, EthernetTag)
+    // groups currently in the post-failover backup window — i.e. with
+    // at least one locally-relevant Type 2 kept by the swap arm of
+    // the mass-withdraw gate. Drives the
+    // `evpn_single_active_backup_active` gauge so operators can tell
+    // "expected egress DF wait" apart from "repair failed".
+    let single_active_backup_active = routes
+        .iter()
+        .filter_map(|r| {
+            let key = single_active_swap_window_key(r, &active_ead_per_es, &single_active_index)?;
+            let EvpnRoute::MacIp(macip) = &r.route else {
+                return None;
+            };
+            let vni = rustbgpd_evpn::EvpnInstanceId::new(macip.label1.as_vni()).ok()?;
+            instances.get(vni)?;
+            Some(key)
+        })
+        .collect::<BTreeSet<_>>()
+        .len();
 
     // Gate 9 slice 6c: project Type 5 (`EvpnRoute::IpPrefix`) routes
     // through the pure helper. Skip when no IP-VRFs are configured
@@ -1048,7 +1092,41 @@ async fn build_intent_tables(
     Ok(IntentTables {
         remote_macs,
         remote_ip_prefixes,
+        single_active_backup_active,
     })
+}
+
+/// ADR-0083 slice 3: returns the `(ESI, EthernetTag)` group key when
+/// `route` is a Type 2 in the post-failover swap window — its origin
+/// VTEP advertises NO EAD-per-ES for the segment (the RFC 7432 §8.2
+/// mass-withdraw condition that used to flush the MAC) but the
+/// segment's single-active eligible set still has a survivor to
+/// retarget at. `None` for every other route shape. This is the
+/// keep-vs-flush decision of the reinterpreted mass-withdraw gate;
+/// [`project_one`] consults it and the supervisor counts distinct
+/// keys for the `evpn_single_active_backup_active` gauge.
+fn single_active_swap_window_key(
+    route: &EvpnRibRoute,
+    active_ead_per_es: &std::collections::BTreeSet<(
+        std::net::IpAddr,
+        rustbgpd_wire::EthernetSegmentIdentifier,
+    )>,
+    single_active_index: &rustbgpd_evpn::SingleActiveEligibleIndex,
+) -> Option<(
+    rustbgpd_wire::EthernetSegmentIdentifier,
+    rustbgpd_wire::EthernetTagId,
+)> {
+    let EvpnRoute::MacIp(macip) = &route.route else {
+        return None;
+    };
+    if macip.esi == rustbgpd_wire::EthernetSegmentIdentifier::ZERO
+        || active_ead_per_es.contains(&(route.next_hop, macip.esi))
+    {
+        return None;
+    }
+    single_active_index
+        .backup_pe(macip.esi, macip.ethernet_tag, route.next_hop)
+        .map(|_| (macip.esi, macip.ethernet_tag))
 }
 
 fn projected_route_is_quarantined(
@@ -1224,13 +1302,21 @@ fn project_ead_per_evi_unfiltered(
 /// dataplane only programs MAC/IP entries) and for Type 2 routes
 /// that fail the RFC 7432 §8.4 mass-withdraw reachability gate
 /// (non-zero ESI without a matching EAD-per-ES from the same
-/// origin VTEP next-hop).
+/// origin VTEP next-hop). ADR-0083 slice 3 reinterprets that gate
+/// for single-active segments: a Type 2 whose origin VTEP lost its
+/// EAD-per-ES STAYS projected iff the segment's single-active
+/// eligible set is non-empty (decision 5) — the projection then
+/// retargets the entry's one-member group at the derived backup,
+/// and the reconcile actor realizes the retarget as one atomic
+/// `NLM_F_REPLACE` per `(ESI, EthernetTag)` group with the MAC rows
+/// untouched. With no eligible survivor, today's flush applies.
 fn project_one(
     route: &EvpnRibRoute,
     active_ead_per_es: &std::collections::BTreeSet<(
         std::net::IpAddr,
         rustbgpd_wire::EthernetSegmentIdentifier,
     )>,
+    single_active_index: &rustbgpd_evpn::SingleActiveEligibleIndex,
 ) -> Option<ProjectedEvpnRoute> {
     let EvpnRoute::MacIp(macip) = &route.route else {
         return None;
@@ -1240,9 +1326,13 @@ fn project_one(
     // valid if the originating VTEP also advertises an EAD-per-ES
     // for the same segment. Without that, the segment is
     // unreachable from the peer's side and we shouldn't program
-    // the MAC. ESI=0 routes (single-homed) bypass the filter.
+    // the MAC — UNLESS the segment is single-active with a
+    // surviving eligible PE, in which case the withdrawal means
+    // "swap to the backup", not "flush" (ADR-0083 decision 3).
+    // ESI=0 routes (single-homed) bypass the filter.
     if macip.esi != rustbgpd_wire::EthernetSegmentIdentifier::ZERO
         && !active_ead_per_es.contains(&(route.next_hop, macip.esi))
+        && single_active_swap_window_key(route, active_ead_per_es, single_active_index).is_none()
     {
         return None;
     }
@@ -1324,6 +1414,13 @@ mod tests {
     }
     fn ipa(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    /// Empty single-active index: `project_one`'s ADR-0083 swap arm
+    /// never fires, so the mass-withdraw gate behaves exactly as it
+    /// did pre-slice-3 (flush) in the tests that pin that baseline.
+    fn empty_sa_index() -> rustbgpd_evpn::SingleActiveEligibleIndex {
+        rustbgpd_evpn::SingleActiveEligibleIndex::new()
     }
 
     fn gather_metrics_text(metrics: &BgpMetrics) -> String {
@@ -1688,7 +1785,7 @@ mod tests {
         // ESI=0 → bypasses the mass-withdraw filter regardless of
         // the active set's contents.
         let active = std::collections::BTreeSet::new();
-        let projected = project_one(&route, &active).unwrap();
+        let projected = project_one(&route, &active, &empty_sa_index()).unwrap();
         assert_eq!(projected.mac.octets(), [1; 6]);
         assert_eq!(projected.next_hop, ipa("10.0.0.2"));
         assert_eq!(projected.mobility_sequence, Some(7));
@@ -1713,7 +1810,7 @@ mod tests {
             is_llgr_stale: false,
         };
         let active = std::collections::BTreeSet::new();
-        assert!(project_one(&imet, &active).is_none());
+        assert!(project_one(&imet, &active, &empty_sa_index()).is_none());
     }
 
     #[test]
@@ -1747,15 +1844,15 @@ mod tests {
         };
         // No EAD-per-ES from VTEP 10.0.0.2 for this ESI → filter.
         let empty = std::collections::BTreeSet::new();
-        assert!(project_one(&route, &empty).is_none());
+        assert!(project_one(&route, &empty, &empty_sa_index()).is_none());
         // Same route with the active set populated → route survives.
         let mut active = std::collections::BTreeSet::new();
         active.insert((ipa("10.0.0.2"), esi));
-        assert!(project_one(&route, &active).is_some());
+        assert!(project_one(&route, &active, &empty_sa_index()).is_some());
         // Different VTEP in the active set doesn't satisfy the gate.
         let mut wrong_vtep = std::collections::BTreeSet::new();
         wrong_vtep.insert((ipa("10.0.0.55"), esi));
-        assert!(project_one(&route, &wrong_vtep).is_none());
+        assert!(project_one(&route, &wrong_vtep, &empty_sa_index()).is_none());
     }
 
     #[test]
@@ -1783,9 +1880,9 @@ mod tests {
         let mut active = std::collections::BTreeSet::new();
         active.insert((ipa("10.0.0.2"), esi));
 
-        assert!(project_one(&from_vtep_a, &active).is_some());
+        assert!(project_one(&from_vtep_a, &active, &empty_sa_index()).is_some());
         assert!(
-            project_one(&from_vtep_b, &active).is_none(),
+            project_one(&from_vtep_b, &active, &empty_sa_index()).is_none(),
             "EAD-per-ES from VTEP A must not satisfy VTEP B"
         );
     }
@@ -1970,16 +2067,23 @@ mod tests {
         assert!(entry.single_active_backup_vtep_ip.is_none());
     }
 
+    // ─── ADR-0083 slice 3: the mass-withdraw swap window ───
+    //
+    // These replace the slice-2 boundary pin
+    // `build_intent_tables_single_active_mass_withdraw_still_flushes_slice2`:
+    // the EAD-per-ES withdrawal is reinterpreted per decision 3 — with
+    // eligible survivors the MAC stays projected, retargeted at the
+    // group's backup member; with none, today's flush applies.
+
     #[tokio::test]
-    async fn build_intent_tables_single_active_mass_withdraw_still_flushes_slice2() {
-        // ADR-0083 slice boundary pin: in slice 2 the `project_one`
-        // mass-withdraw gate KEEPS its flush behavior for
-        // single-active. The origin VTEP (10.0.0.2) has no EAD-per-ES
-        // — even though a single-active backup (10.0.0.3) is fully
-        // eligible, the MAC is dropped from the projection. Slice 3
-        // reinterprets this as "stays projected, retargeted at the
-        // group" (decision 5); this test must be UPDATED there so the
-        // change is visible in review.
+    async fn build_intent_tables_single_active_mass_withdraw_swaps_to_backup() {
+        // The MAC's origin VTEP (10.0.0.2) has NO EAD-per-ES — the
+        // RFC 7432 §8.2 mass-withdraw condition. Two single-active
+        // survivors remain eligible: the entry stays projected with
+        // the one-member group retargeted at the lowest survivor
+        // (10.0.0.3) and the standby re-derived as the next-lowest
+        // (10.0.0.4). MAC rows are untouched downstream — the diff
+        // realizes this as one membership REPLACE per group.
         let instances = local_instance_table(100, Some("br100"));
         let ip_vrfs = IpVrfTable::new();
         let esi = EthernetSegmentIdentifier::new([7; 10]);
@@ -1988,11 +2092,52 @@ mod tests {
             if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
                 let routes = vec![
                     evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
-                    // Backup PE still fully eligible — but no
-                    // EAD-per-ES from the MAC's origin VTEP.
                     evpn_ead_per_es_route(esi, "10.0.0.3", true),
+                    evpn_ead_per_es_route(esi, "10.0.0.4", true),
                     evpn_ead_per_evi_route(esi, 0, "10.0.0.3"),
+                    evpn_ead_per_evi_route(esi, 0, "10.0.0.4"),
                 ];
+                let _ = reply.send(routes);
+            }
+        });
+
+        let tables = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new())
+            .await
+            .unwrap();
+        let entry = tables
+            .remote_macs
+            .get(vni(100), mac(1))
+            .expect("withdrawal with survivors must swap, not flush (ADR-0083 decision 3)");
+        assert_eq!(
+            entry.remote_vtep_ip,
+            ipa("10.0.0.3"),
+            "group member retargets to the lowest eligible survivor"
+        );
+        assert!(entry.alias_vtep_ips.is_empty());
+        assert_eq!(entry.alias_group_key, Some((esi, EthernetTagId(0))));
+        assert_eq!(
+            entry.single_active_backup_vtep_ip,
+            Some(ipa("10.0.0.4")),
+            "standby re-pins to the next-lowest survivor"
+        );
+        assert_eq!(
+            tables.single_active_backup_active, 1,
+            "the backup-window gauge counts this (ESI, EthTag) group"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_intent_tables_single_active_mass_withdraw_no_survivors_flushes() {
+        // Eligible set empty after the withdrawal: the existing flush
+        // semantics apply (the dataplane's ordered teardown removes
+        // MAC rows before the group — never-through-empty).
+        let instances = local_instance_table(100, Some("br100"));
+        let ip_vrfs = IpVrfTable::new();
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let _responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let routes = vec![evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi)];
                 let _ = reply.send(routes);
             }
         });
@@ -2002,9 +2147,203 @@ mod tests {
             .unwrap();
         assert!(
             tables.remote_macs.get(vni(100), mac(1)).is_none(),
-            "slice 2 keeps the mass-withdraw flush for single-active; \
-             the EAD-withdrawal swap reinterpretation is slice 3"
+            "no eligible survivor → today's mass-withdraw flush"
         );
+        assert_eq!(tables.single_active_backup_active, 0);
+    }
+
+    #[tokio::test]
+    async fn build_intent_tables_single_active_swap_is_independent_per_ethernet_tag() {
+        // Groups are keyed per (ESI, EthernetTag): an ES spanning two
+        // tags takes one retarget each, derived from each tag's own
+        // eligible set.
+        let instances = local_instance_table(100, Some("br100"));
+        let ip_vrfs = IpVrfTable::new();
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
+        let _responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let mut tag1_route = evpn_macip_route_with_esi(100, 2, "10.0.0.2", esi);
+                if let EvpnRoute::MacIp(macip) = &mut tag1_route.route {
+                    macip.ethernet_tag = EthernetTagId(1);
+                }
+                let routes = vec![
+                    evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi), // tag 0
+                    tag1_route,                                         // tag 1
+                    evpn_ead_per_es_route(esi, "10.0.0.3", true),
+                    evpn_ead_per_es_route(esi, "10.0.0.4", true),
+                    // Tag 0 survivors: .3 + .4; tag 1 survivor: .4 only.
+                    evpn_ead_per_evi_route(esi, 0, "10.0.0.3"),
+                    evpn_ead_per_evi_route(esi, 0, "10.0.0.4"),
+                    evpn_ead_per_evi_route(esi, 1, "10.0.0.4"),
+                ];
+                let _ = reply.send(routes);
+            }
+        });
+
+        let tables = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new())
+            .await
+            .unwrap();
+        let tag0 = tables.remote_macs.get(vni(100), mac(1)).unwrap();
+        assert_eq!(tag0.remote_vtep_ip, ipa("10.0.0.3"));
+        assert_eq!(tag0.alias_group_key, Some((esi, EthernetTagId(0))));
+        assert_eq!(tag0.single_active_backup_vtep_ip, Some(ipa("10.0.0.4")));
+        let tag1 = tables.remote_macs.get(vni(100), mac(2)).unwrap();
+        assert_eq!(
+            tag1.remote_vtep_ip,
+            ipa("10.0.0.4"),
+            "tag 1 retargets from its own eligible set"
+        );
+        assert_eq!(tag1.alias_group_key, Some((esi, EthernetTagId(1))));
+        assert!(tag1.single_active_backup_vtep_ip.is_none());
+        assert_eq!(
+            tables.single_active_backup_active, 2,
+            "two (ESI, EthTag) groups in the backup window"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_intent_tables_swap_window_matches_post_readvertisement() {
+        // The desired-state-as-pure-function-of-RIB property (decision
+        // 5): the swap-window snapshot (dead PE's MAC routes still in
+        // the RIB) and the reconverged snapshot (the new active
+        // re-advertised the MAC with itself as next-hop) project the
+        // IDENTICAL remote-MAC table — the post-reconverge state is
+        // the same whether or not the swap fired.
+        let instances = local_instance_table(100, Some("br100"));
+        let ip_vrfs = IpVrfTable::new();
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(2);
+        let _responder = tokio::spawn(async move {
+            // Snapshot 1: the window — MAC still from dead 10.0.0.2.
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let routes = vec![
+                    evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
+                    evpn_ead_per_es_route(esi, "10.0.0.3", true),
+                    evpn_ead_per_es_route(esi, "10.0.0.4", true),
+                    evpn_ead_per_evi_route(esi, 0, "10.0.0.3"),
+                    evpn_ead_per_evi_route(esi, 0, "10.0.0.4"),
+                ];
+                let _ = reply.send(routes);
+            }
+            // Snapshot 2: reconverged — new active 10.0.0.3
+            // re-advertised the MAC; the dead PE's route aged out.
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let routes = vec![
+                    evpn_macip_route_with_esi(100, 1, "10.0.0.3", esi),
+                    evpn_ead_per_es_route(esi, "10.0.0.3", true),
+                    evpn_ead_per_es_route(esi, "10.0.0.4", true),
+                    evpn_ead_per_evi_route(esi, 0, "10.0.0.3"),
+                    evpn_ead_per_evi_route(esi, 0, "10.0.0.4"),
+                ];
+                let _ = reply.send(routes);
+            }
+        });
+
+        let window = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new())
+            .await
+            .unwrap();
+        let reconverged = build_intent_tables(&rib_tx, &instances, &ip_vrfs, &BTreeSet::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            window.remote_macs, reconverged.remote_macs,
+            "swap-window and post-readvertisement intents must be identical"
+        );
+        // The gauge, however, closes with the window.
+        assert_eq!(window.single_active_backup_active, 1);
+        assert_eq!(reconverged.single_active_backup_active, 0);
+    }
+
+    #[tokio::test]
+    async fn publish_dataplane_intent_drives_single_active_backup_gauge() {
+        // The `evpn_single_active_backup_active` gauge follows the
+        // projected window: 1 while the swap-kept route is in the RIB,
+        // back to 0 once the new active's re-advertisement replaces it.
+        let instances = Arc::new(local_instance_table(100, Some("br100")));
+        let ip_vrfs = Arc::new(IpVrfTable::new());
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(2);
+        let _responder = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let routes = vec![
+                    evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
+                    evpn_ead_per_es_route(esi, "10.0.0.3", true),
+                    evpn_ead_per_evi_route(esi, 0, "10.0.0.3"),
+                ];
+                let _ = reply.send(routes);
+            }
+            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+                let routes = vec![
+                    evpn_macip_route_with_esi(100, 1, "10.0.0.3", esi),
+                    evpn_ead_per_es_route(esi, "10.0.0.3", true),
+                    evpn_ead_per_evi_route(esi, 0, "10.0.0.3"),
+                ];
+                let _ = reply.send(routes);
+            }
+        });
+        let metrics = BgpMetrics::new();
+        let (intent_tx, _intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let (drop_counts_tx, _drop_counts_rx) =
+            watch::channel(Arc::new(RemoteIpPrefixDropCounts::new()));
+        let mut state = SupervisorIntentState::default();
+
+        assert!(
+            publish_dataplane_intent(
+                &rib_tx,
+                &intent_tx,
+                instances.clone(),
+                ip_vrfs.clone(),
+                BumEnforcementTable::new(),
+                &BTreeSet::new(),
+                &metrics,
+                &mut state,
+                &drop_counts_tx,
+            )
+            .await
+            .unwrap()
+        );
+        let text = gather_metrics_text(&metrics);
+        assert!(
+            text.contains("evpn_single_active_backup_active 1"),
+            "gauge must show the open backup window: {text}"
+        );
+
+        assert!(
+            publish_dataplane_intent(
+                &rib_tx,
+                &intent_tx,
+                instances,
+                ip_vrfs,
+                BumEnforcementTable::new(),
+                &BTreeSet::new(),
+                &metrics,
+                &mut state,
+                &drop_counts_tx,
+            )
+            .await
+            .unwrap()
+        );
+        let text = gather_metrics_text(&metrics);
+        assert!(
+            text.contains("evpn_single_active_backup_active 0"),
+            "gauge must close once the new active re-advertised: {text}"
+        );
+    }
+
+    #[test]
+    fn single_active_report_counters_feed_metrics() {
+        let metrics = BgpMetrics::new();
+        record_single_active_metrics(
+            &metrics,
+            rustbgpd_evpn::SingleActiveCounters {
+                backup_swaps: 2,
+                teardowns: 1,
+            },
+        );
+        let text = gather_metrics_text(&metrics);
+        assert!(text.contains("evpn_single_active_backup_swaps_total 2"));
+        assert!(text.contains("evpn_single_active_teardowns_total 1"));
     }
 
     #[tokio::test]

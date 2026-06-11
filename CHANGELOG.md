@@ -11,6 +11,42 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN single-active failover becomes a local repair: the backup-PE
+  swap on EAD-per-ES withdrawal (ADR-0083 slice 3).** When the active
+  PE of a single-active Ethernet Segment withdraws its EAD-per-ES (CE
+  link down, segment de-configured) and at least one eligible PE
+  survives, the RFC 7432 §8.2 mass-withdraw no longer flushes the
+  segment's remote MACs into a flood-and-relearn wave. Instead, each
+  affected `(ESI, Ethernet Tag)` nexthop group is atomically retargeted
+  at the slice-2 pre-created backup PE with **one** `RTM_NEWNEXTHOP`
+  `NLM_F_REPLACE` per group — every MAC row behind the group follows in
+  that single kernel operation; the rows themselves are untouched, and
+  the swap allocates nothing (the backup's nexthop object already
+  exists). The standby then re-pins to the next-lowest surviving PE
+  (pre-creating its nexthop if needed) before the withdrawn PE's
+  nexthop is garbage-collected, and a withdrawal that empties the
+  eligible set keeps today's ordered teardown (MAC rows removed before
+  the group — never through empty — with the standby reaped alongside).
+  Desired membership stays a pure function of the EVPN RIB (ADR-0083
+  decision 5): the post-swap window is just what that function yields
+  while the dead PE's MAC routes outlive its EAD-per-ES, so a daemon
+  restart inside the window re-derives the swapped state from the
+  reloaded RIB, and the new active PE's eventual re-advertisements
+  converge to the identical dataplane state whether or not the swap
+  fired. **Bounded honestly:** the repair at each remote VTEP is one
+  netlink message per affected group once the withdrawal *arrives*;
+  end-to-end blackout is still floored by withdrawal propagation, by
+  the segment's own DF re-election unblocking the backup's access
+  circuit (expect drops at the backup egress until then — the new
+  `evpn_single_active_backup_active` gauge makes that window legible),
+  and, for PE *node* failure, by BGP session death (hold timer / BFD to
+  the RR); cutting detection latency needs liveness toward the VTEP
+  itself, which is a future ADR. New observability:
+  `evpn_single_active_backup_swaps_total`,
+  `evpn_single_active_teardowns_total`, the
+  `evpn_single_active_backup_active` gauge, and an info-level log at
+  the swap site naming VNI/ESI/Ethernet Tag/old PE/new PE.
+
 - **EVPN single-active backup-path dataplane pre-install (ADR-0083 slice
   2).** Single-active remote MACs with at least one other eligible PE on
   the segment now route through the FDB nexthop-group machinery instead
@@ -64,6 +100,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   group-teardown path. The per-VNI `apply_aliasing_ecmp = false`
   off-switch governs the single-active indirection too (falls back to
   single-dst at the active PE, no backup pre-create).
+
+### Fixed
+
+- **Adoption-retained nexthop IDs are re-evaluated on every drift
+  cycle (ADR-0059/0079/0083).** A crash-leftover tagged nexthop
+  retained at startup adoption because a kernel FDB row referenced it
+  kept that protection forever, even after the row was retargeted at a
+  fresh group — e.g. a restart inside the ADR-0083 failover window,
+  where the first reconcile points the surviving rows at a new group
+  and the prior lifetime's group + member nexthops become permanently
+  unreferenced kernel cruft. The drift sweep's in-line adoption cleanup
+  now re-runs whenever any adopted-unreferenced IDs remain (the
+  retention set is recomputed from the fresh snapshot each cycle), so
+  dereferenced leftovers are reaped on the normal drift cadence while
+  anything still referenced stays protected.
 
 ## [0.38.0] — 2026-06-11
 

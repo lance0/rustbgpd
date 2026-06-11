@@ -127,6 +127,9 @@ pub struct BgpMetrics {
     evpn_l3_neighbor_reaped: IntCounter,
     evpn_l3vxlan_fdb_adopted: IntCounter,
     evpn_l3vxlan_fdb_reaped: IntCounter,
+    evpn_single_active_backup_swaps: IntCounter,
+    evpn_single_active_teardowns: IntCounter,
+    evpn_single_active_backup_active: IntGauge,
 
     // ── BMP exporter ───────────────────────────────────────────
     bmp_source_drops: IntCounterVec,
@@ -789,6 +792,34 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_single_active_backup_swaps = IntCounter::new(
+            "evpn_single_active_backup_swaps_total",
+            "Single-active FDB nexthop groups atomically swapped to the backup PE on \
+             EAD-per-ES mass-withdraw (ADR-0083: one NLM_F_REPLACE retargets every \
+             MAC behind the group; rows untouched).",
+        )
+        .expect("valid metric definition");
+
+        let evpn_single_active_teardowns = IntCounter::new(
+            "evpn_single_active_teardowns_total",
+            "Single-active FDB nexthop groups torn down with their MAC rows (ADR-0083 \
+             ordered teardown: rows removed before the group, standby GC'd with the \
+             intent). Covers the no-survivor mass-withdraw flush and the \
+             degrade-to-single-dst conversion.",
+        )
+        .expect("valid metric definition");
+
+        let evpn_single_active_backup_active = IntGauge::new(
+            "evpn_single_active_backup_active",
+            "Number of (ESI, EthernetTag) single-active groups currently retargeted at \
+             their backup PE (the ADR-0083 post-failover window: the origin VTEP \
+             withdrew its EAD-per-ES, eligible survivors remain, and the new active \
+             PE has not yet re-advertised the MACs). Non-zero values are expected \
+             during failover; retargeted traffic drops at the backup egress until \
+             the segment's DF re-election unblocks its AC.",
+        )
+        .expect("valid metric definition");
+
         let bmp_source_drops = IntCounterVec::new(
             Opts::new(
                 "bmp_source_drops_total",
@@ -1112,6 +1143,15 @@ impl BgpMetrics {
             .register(Box::new(evpn_l3vxlan_fdb_reaped.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_single_active_backup_swaps.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_single_active_teardowns.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_single_active_backup_active.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(bmp_source_drops.clone()))
             .expect("metric not already registered");
         registry
@@ -1226,6 +1266,9 @@ impl BgpMetrics {
             evpn_l3_neighbor_reaped,
             evpn_l3vxlan_fdb_adopted,
             evpn_l3vxlan_fdb_reaped,
+            evpn_single_active_backup_swaps,
+            evpn_single_active_teardowns,
+            evpn_single_active_backup_active,
             bmp_source_drops,
             bmp_collector_drops,
             bmp_replay_attempts,
@@ -1963,6 +2006,29 @@ impl BgpMetrics {
             return;
         }
         self.evpn_l3vxlan_fdb_reaped.inc_by(delta);
+    }
+
+    /// Increment the ADR-0083 single-active backup-swap counter.
+    pub fn add_evpn_single_active_backup_swaps(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_single_active_backup_swaps.inc_by(delta);
+    }
+
+    /// Increment the ADR-0083 single-active ordered-teardown counter.
+    pub fn add_evpn_single_active_teardowns(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_single_active_teardowns.inc_by(delta);
+    }
+
+    /// Set the ADR-0083 backup-window gauge: how many
+    /// `(ESI, EthernetTag)` single-active groups are currently
+    /// retargeted at their backup PE.
+    pub fn set_evpn_single_active_backup_active(&self, value: i64) {
+        self.evpn_single_active_backup_active.set(value);
     }
 
     /// Record a BMP event dropped at the PeerSession→BmpManager channel.
@@ -2758,6 +2824,28 @@ mod tests {
         assert!(text.contains("evpn_l3_neighbor_reaped_total 4"));
         assert!(text.contains("evpn_l3vxlan_fdb_adopted_total 5"));
         assert!(text.contains("evpn_l3vxlan_fdb_reaped_total 6"));
+    }
+
+    #[test]
+    fn evpn_single_active_metrics_are_exported() {
+        let m = BgpMetrics::new();
+        m.add_evpn_single_active_backup_swaps(2);
+        m.add_evpn_single_active_teardowns(1);
+        m.set_evpn_single_active_backup_active(3);
+
+        assert_eq!(m.evpn_single_active_backup_swaps.get(), 2);
+        assert_eq!(m.evpn_single_active_teardowns.get(), 1);
+        assert_eq!(m.evpn_single_active_backup_active.get(), 3);
+
+        let text = gather_text(&m);
+        assert!(text.contains("evpn_single_active_backup_swaps_total 2"));
+        assert!(text.contains("evpn_single_active_teardowns_total 1"));
+        assert!(text.contains("evpn_single_active_backup_active 3"));
+
+        // The gauge must converge back down (failover window closed).
+        m.set_evpn_single_active_backup_active(0);
+        let text = gather_text(&m);
+        assert!(text.contains("evpn_single_active_backup_active 0"));
     }
 
     #[test]

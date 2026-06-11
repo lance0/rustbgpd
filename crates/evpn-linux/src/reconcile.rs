@@ -40,6 +40,7 @@ use rustbgpd_evpn::{
     AppliedOp, DataplaneIntent, DataplaneOpKind, DataplaneReport, EvpnInstanceTable, FailedOp,
     FdbNexthopDataplaneStatus, FdbNexthopGroupStatus, FdbNexthopMemberStatus, FdbNhgDriftCounters,
     InstanceDataplaneStatus, InstanceState, L3AdoptionCounters, RemoteMacTable,
+    SingleActiveCounters,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior, sleep_until};
@@ -349,6 +350,11 @@ struct ActorState {
     /// increment Prometheus counters without coupling this crate to
     /// the telemetry crate.
     fdb_nhg_drift_since_report: FdbNhgDriftCounters,
+    /// ADR-0083 single-active failover deltas (backup swaps + ordered
+    /// teardowns) accumulated since the last [`DataplaneReport`].
+    /// Same drain-into-Prometheus contract as
+    /// `fdb_nhg_drift_since_report`.
+    single_active_since_report: SingleActiveCounters,
     /// Tracks whether [`Dataplane::next_event`] is still expected to
     /// yield events. `true` at startup; flipped to `false` the first
     /// time `next_event()` resolves to `None`. While `false` the
@@ -393,6 +399,7 @@ impl ActorState {
             last_drift_check: None,
             drift_disabled: false,
             fdb_nhg_drift_since_report: FdbNhgDriftCounters::default(),
+            single_active_since_report: SingleActiveCounters::default(),
         }
     }
 
@@ -1830,18 +1837,30 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 adopted = self.state.adopted_unreferenced.len(),
                 "drift: discovered untracked tagged NHIDs; running adoption cleanup in-line"
             );
-            // Run cleanup directly with the snapshot we already have
-            // rather than clearing `adoption_done`. Clearing it would
-            // reopen the startup-adoption `dump_owned_nexthops` path
-            // on the next reconcile pass (a second netlink dump, plus
-            // `reserve()` warnings for IDs we already reserved here)
-            // AND defer the actual delete by up to another
-            // `periodic_dump` interval. The retention set is built
-            // from the current snapshot; any FDB row drift's step (3)
-            // removed earlier this pass is still listed there (the
-            // snapshot was taken before our removes), so the orphan
-            // NHID may retain this pass and clean up cleanly on the
-            // next drift cycle when the snapshot is fresh.
+        }
+        // Run cleanup directly with the snapshot we already have
+        // rather than clearing `adoption_done`. Clearing it would
+        // reopen the startup-adoption `dump_owned_nexthops` path
+        // on the next reconcile pass (a second netlink dump, plus
+        // `reserve()` warnings for IDs we already reserved here)
+        // AND defer the actual delete by up to another
+        // `periodic_dump` interval. The retention set is built
+        // from the current snapshot; any FDB row drift's step (3)
+        // removed earlier this pass is still listed there (the
+        // snapshot was taken before our removes), so the orphan
+        // NHID may retain this pass and clean up cleanly on the
+        // next drift cycle when the snapshot is fresh.
+        //
+        // Re-run even when nothing NEW was adopted this cycle: an ID
+        // retained at adoption time loses its protection when the
+        // kernel FDB row that referenced it is later REPLACEd onto a
+        // fresh group — e.g. the ADR-0083 restart-mid-failover shape,
+        // where the first reconcile retargets the crash-leftover rows
+        // at a new group and the prior lifetime's group + member NHs
+        // become permanently unreferenced. The retention set is
+        // recomputed from the fresh snapshot each cycle, so anything
+        // still referenced stays protected.
+        if !self.state.adopted_unreferenced.is_empty() {
             let _ = self.cleanup_unreferenced_adoptions(snapshot).await;
         }
         true
@@ -2322,6 +2341,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         }
         let fdb_nhg_drift_counters = std::mem::take(&mut self.state.fdb_nhg_drift_since_report);
         let l3_adoption_counters = std::mem::take(&mut self.state.l3_adoption_since_report);
+        let single_active_counters = std::mem::take(&mut self.state.single_active_since_report);
 
         let report = DataplaneReport {
             intent_generation: self.state.last_intent_generation,
@@ -2336,6 +2356,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             fdb_nexthops: build_fdb_nexthop_status(&self.state),
             fdb_nhg_drift_counters,
             l3_adoption_counters,
+            single_active_counters,
         };
         if let Err(e) = self.report_tx.send(report).await {
             tracing::trace!(error = %e, "report receiver gone; report dropped");
@@ -2618,10 +2639,35 @@ fn build_fdb_nexthop_status(state: &ActorState) -> FdbNexthopDataplaneStatus {
     }
 }
 
-/// VNI carried by an FDB op. BUM ops have no VNI surface — the
-/// operator-facing key for BUM reports is the `kind` field, which
-/// carries the ifindex. The placeholder VNI is only present because
-/// `AppliedOp` / `FailedOp` predate BUM-port operations.
+/// ADR-0083 slice 3: record + log a single-active backup swap when a
+/// group-membership REPLACE changed a one-member group's sole member.
+/// One-member groups are single-active by construction — all-active
+/// aliasing groups always carry the primary plus at least one alias
+/// (`alias_group_key` is only set when an alias survived), so their
+/// canonical membership never has fewer than two entries.
+fn note_single_active_swap(
+    state: &mut ActorState,
+    group_key: crate::group_state::AliasGroupKey,
+    old_members: &[std::net::IpAddr],
+    new_members: &[std::net::IpAddr],
+) {
+    if let ([old_pe], [new_pe]) = (old_members, new_members)
+        && old_pe != new_pe
+    {
+        state.single_active_since_report.backup_swaps += 1;
+        tracing::info!(
+            vni = group_key.vni.as_u32(),
+            esi = ?group_key.esi,
+            ethernet_tag = ?group_key.ethernet_tag,
+            old_pe = %old_pe,
+            new_pe = %new_pe,
+            "ADR-0083 single-active backup swap: group membership \
+             atomically retargeted (one NLM_F_REPLACE; every MAC row \
+             behind the group follows, no per-MAC churn)"
+        );
+    }
+}
+
 /// ADR-0059 slice 3b coordinator: apply an FDB-NHG op by calling
 /// [`NexthopOps`] methods in ADR §5 invariant 1+2 order, updating
 /// the allocator + [`GroupOwnedMap`] state.
@@ -2786,6 +2832,12 @@ where
                 .await;
                 return Err(e);
             }
+            // ADR-0083 slice 3: when the plan carried an Install for
+            // this group (the diff dedupes the redundant
+            // UpdateFdbNhgMembers away), the drift-heal REPLACE here
+            // is where a one-member swap actually lands — surface it
+            // the same way as the update path.
+            note_single_active_swap(state, group_key, &existing_members, members);
             // ADR-0083: re-pin the standby BEFORE the member GC so a
             // member that just became the standby (or vice versa) is
             // never reaped in the window between the two bookkeeping
@@ -2927,7 +2979,11 @@ where
         .iter()
         .map(|ip| state.groups.vtep_nh(ip).expect("just installed").id)
         .collect();
-    let Some(g_id) = state.groups.group(&group_key).map(|g| g.id) else {
+    let existing = state
+        .groups
+        .group(&group_key)
+        .map(|g| (g.id, g.members.iter().copied().collect::<Vec<_>>()));
+    let Some((g_id, old_members)) = existing else {
         // `compute_diff` Pass 1b only emits `UpdateFdbNhgMembers`
         // when the group exists in `GroupOwnedMap`, so hitting this
         // branch means `owned` and `groups` have drifted out of sync
@@ -2945,6 +3001,9 @@ where
         rollback_partial_install(dataplane, state, &new_members, None, "update_step2").await;
         return Err(e);
     }
+    // ADR-0083 slice 3: a one-member → one-member membership change is
+    // the single-active backup swap — surface it (counter + info log).
+    note_single_active_swap(state, group_key, &old_members, members);
     // ADR-0083: re-pin the standby BEFORE the member GC so a member
     // that just became the standby (the slice-3 swap shape: backup
     // promoted to member, old active demoted to standby) is never
@@ -2992,6 +3051,24 @@ where
             members,
             standby,
         } => {
+            // ADR-0083 slice 3: a single-active group (one member by
+            // construction, and/or a pinned standby) reaching this arm
+            // is the ordered teardown — every MAC row already left
+            // (never-through-empty), the group goes now, the standby
+            // is GC'd with the intent below. Surface it so operators
+            // can tell "withdrawal with no survivors → flush" apart
+            // from the swap path.
+            if standby.is_some() || members.len() == 1 {
+                state.single_active_since_report.teardowns += 1;
+                tracing::info!(
+                    vni = group_key.vni.as_u32(),
+                    esi = ?group_key.esi,
+                    ethernet_tag = ?group_key.ethernet_tag,
+                    "ADR-0083 single-active group teardown: MAC rows \
+                     removed before the group; standby GC'd with the \
+                     group intent"
+                );
+            }
             try_del_and_release_alloc(dataplane, state, id, "remove_group").await;
             for ip in members {
                 if let Some(vtep_id) = state.groups.record_member_unref(ip, group_key) {
@@ -3148,6 +3225,10 @@ async fn try_del_and_release_alloc<D: crate::dataplane::NexthopOps>(
     }
 }
 
+/// VNI carried by an FDB op. BUM ops have no VNI surface — the
+/// operator-facing key for BUM reports is the `kind` field, which
+/// carries the ifindex. The placeholder VNI is only present because
+/// `AppliedOp` / `FailedOp` predate BUM-port operations.
 fn fdb_op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
     match op {
         DataplaneOp::AddRemoteFdb { vni, .. }

@@ -2270,4 +2270,266 @@ mod tests {
             }],
         );
     }
+
+    // ─── ADR-0083 slice 3: the backup-PE swap on mass-withdraw ───
+
+    /// Marker NHG-shaped kernel row pointing at `nh_id`.
+    fn nhid_row(m: MacAddress, nh_id: u32) -> KernelFdbEntry {
+        KernelFdbEntry {
+            mac: m,
+            dst: None,
+            nh_id: Some(nh_id),
+            protocol: None,
+            flags: KernelFdbFlags {
+                extern_learn: true,
+                master: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Pre-swap tracked state: one single-active group (`seg`, tag 0)
+    /// with member 10.0.0.2 + standby 10.0.0.3, ref'd by `macs`.
+    fn pre_swap_groups(seg: u8, macs: &[MacAddress]) -> GroupOwnedMap {
+        let mut groups = GroupOwnedMap::new();
+        groups.record_member_install(ip("10.0.0.2"), 0x3000_0001);
+        groups.record_member_install(ip("10.0.0.3"), 0x3000_0002);
+        let mut members = std::collections::BTreeSet::new();
+        members.insert(ip("10.0.0.2"));
+        groups.record_group_install(
+            linux_key(100, seg),
+            0x4000_0001,
+            members,
+            Some(ip("10.0.0.3")),
+        );
+        for &m in macs {
+            groups.record_mac_ref(linux_key(100, seg), vni(100), m);
+        }
+        groups
+    }
+
+    /// Swapped single-active entry: the projection retargeted the
+    /// one-member group at the backup (`member`); the new standby may
+    /// be `None` when the member is the sole survivor.
+    fn entry_single_active_swapped(member: &str, standby: Option<&str>, seg: u8) -> RemoteMacEntry {
+        RemoteMacEntry {
+            remote_vtep_ip: ip(member),
+            mobility_sequence: None,
+            alias_vtep_ips: Vec::new(),
+            alias_group_key: Some((esi(seg), EthernetTagId(0))),
+            single_active_backup_vtep_ip: standby.map(ip),
+            source: RemoteMacSource::EvpnRibBestPath,
+        }
+    }
+
+    #[test]
+    fn single_active_swap_emits_one_member_replace_macs_untouched() {
+        // The payoff shape: two MACs behind the same single-active
+        // group; the projection swapped the desired member to the
+        // backup (10.0.0.3, sole survivor → no new standby). The plan
+        // must be EXACTLY ONE UpdateFdbNhgMembers for the group —
+        // no per-MAC row ops, no flushes, no installs. The single
+        // NLM_F_REPLACE retargets every MAC behind the group.
+        let mut desired = RemoteMacTable::builder();
+        desired
+            .insert(
+                vni(100),
+                mac(1),
+                entry_single_active_swapped("10.0.0.3", None, 7),
+            )
+            .unwrap();
+        desired
+            .insert(
+                vni(100),
+                mac(2),
+                entry_single_active_swapped("10.0.0.3", None, 7),
+            )
+            .unwrap();
+        let desired = desired.build();
+
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_fdb(vni(100), nhid_row(mac(1), 0x4000_0001));
+        snapshot.insert_fdb(vni(100), nhid_row(mac(2), 0x4000_0001));
+        let mut applied = OwnedSet::new();
+        applied.record_applied(vni(100), mac(1), OwnedEntry::fdb_nhg(linux_key(100, 7)));
+        applied.record_applied(vni(100), mac(2), OwnedEntry::fdb_nhg(linux_key(100, 7)));
+        let probes = ready_probes(&[vni(100)]);
+        let groups = pre_swap_groups(7, &[mac(1), mac(2)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &groups,
+            &EvpnInstanceTable::new(),
+        );
+
+        assert_eq!(
+            plan.ops,
+            vec![DataplaneOp::UpdateFdbNhgMembers {
+                group_key: linux_key(100, 7),
+                members: vec![ip("10.0.0.3")],
+                standby: None,
+            }],
+            "the swap is ONE membership replace per group; MAC rows untouched"
+        );
+    }
+
+    #[test]
+    fn single_active_swap_repins_standby_to_next_survivor() {
+        // Three-PE segment: member swaps 10.0.0.2 → 10.0.0.3 and the
+        // standby re-pins to the next-lowest survivor 10.0.0.4 in the
+        // same op (the coordinator orders the re-pin before member GC).
+        let desired = desired_one(
+            vni(100),
+            mac(1),
+            entry_single_active_swapped("10.0.0.3", Some("10.0.0.4"), 7),
+        );
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_fdb(vni(100), nhid_row(mac(1), 0x4000_0001));
+        let mut applied = OwnedSet::new();
+        applied.record_applied(vni(100), mac(1), OwnedEntry::fdb_nhg(linux_key(100, 7)));
+        let probes = ready_probes(&[vni(100)]);
+        let groups = pre_swap_groups(7, &[mac(1)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &groups,
+            &EvpnInstanceTable::new(),
+        );
+
+        assert_eq!(
+            plan.ops,
+            vec![DataplaneOp::UpdateFdbNhgMembers {
+                group_key: linux_key(100, 7),
+                members: vec![ip("10.0.0.3")],
+                standby: Some(ip("10.0.0.4")),
+            }],
+        );
+    }
+
+    #[test]
+    fn single_active_swap_is_one_replace_per_ethernet_tag_group() {
+        // An ES spanning two Ethernet Tags = two groups: the swap
+        // pass emits exactly one membership replace per group, even
+        // with multiple MACs behind each.
+        let key_tag0 = AliasGroupKey::new(vni(100), esi(7), EthernetTagId(0));
+        let key_tag1 = AliasGroupKey::new(vni(100), esi(7), EthernetTagId(1));
+        let entry_for = |tag: u32| RemoteMacEntry {
+            remote_vtep_ip: ip("10.0.0.3"),
+            mobility_sequence: None,
+            alias_vtep_ips: Vec::new(),
+            alias_group_key: Some((esi(7), EthernetTagId(tag))),
+            single_active_backup_vtep_ip: None,
+            source: RemoteMacSource::EvpnRibBestPath,
+        };
+        let mut desired = RemoteMacTable::builder();
+        desired.insert(vni(100), mac(1), entry_for(0)).unwrap();
+        desired.insert(vni(100), mac(2), entry_for(0)).unwrap();
+        desired.insert(vni(100), mac(3), entry_for(1)).unwrap();
+        let desired = desired.build();
+
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_fdb(vni(100), nhid_row(mac(1), 0x4000_0001));
+        snapshot.insert_fdb(vni(100), nhid_row(mac(2), 0x4000_0001));
+        snapshot.insert_fdb(vni(100), nhid_row(mac(3), 0x4000_0002));
+        let mut applied = OwnedSet::new();
+        applied.record_applied(vni(100), mac(1), OwnedEntry::fdb_nhg(key_tag0));
+        applied.record_applied(vni(100), mac(2), OwnedEntry::fdb_nhg(key_tag0));
+        applied.record_applied(vni(100), mac(3), OwnedEntry::fdb_nhg(key_tag1));
+        let probes = ready_probes(&[vni(100)]);
+
+        let mut groups = GroupOwnedMap::new();
+        groups.record_member_install(ip("10.0.0.2"), 0x3000_0001);
+        groups.record_member_install(ip("10.0.0.3"), 0x3000_0002);
+        let mut members = std::collections::BTreeSet::new();
+        members.insert(ip("10.0.0.2"));
+        groups.record_group_install(key_tag0, 0x4000_0001, members.clone(), Some(ip("10.0.0.3")));
+        groups.record_group_install(key_tag1, 0x4000_0002, members, Some(ip("10.0.0.3")));
+        groups.record_mac_ref(key_tag0, vni(100), mac(1));
+        groups.record_mac_ref(key_tag0, vni(100), mac(2));
+        groups.record_mac_ref(key_tag1, vni(100), mac(3));
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &groups,
+            &EvpnInstanceTable::new(),
+        );
+
+        let updates: Vec<_> = plan
+            .ops
+            .iter()
+            .filter(|o| matches!(o, DataplaneOp::UpdateFdbNhgMembers { .. }))
+            .collect();
+        assert_eq!(
+            updates.len(),
+            2,
+            "one replace per (ESI, EthTag) group, deduped across MACs: {:?}",
+            plan.ops,
+        );
+        assert_eq!(
+            plan.ops.len(),
+            2,
+            "no per-MAC row churn during the swap: {:?}",
+            plan.ops,
+        );
+    }
+
+    #[test]
+    fn single_active_swap_respects_off_switch_no_group_resurrection() {
+        // Race: the operator flipped `apply_aliasing_ecmp = false`
+        // while a swap-window intent is in flight. Desired state from
+        // the RIB still carries the swapped group key, but the
+        // off-switch governs: the diff converts the rows to single-dst
+        // at the (swapped) backup PE and must NOT emit any group
+        // install/update — the indirection being torn down is not
+        // resurrected by the swap.
+        let desired = desired_one(
+            vni(100),
+            mac(1),
+            entry_single_active_swapped("10.0.0.3", None, 7),
+        );
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_fdb(vni(100), nhid_row(mac(1), 0x4000_0001));
+        let mut applied = OwnedSet::new();
+        applied.record_applied(vni(100), mac(1), OwnedEntry::fdb_nhg(linux_key(100, 7)));
+        let probes = ready_probes(&[vni(100)]);
+        let groups = pre_swap_groups(7, &[mac(1)]);
+        let instances = instances_disabled(&[vni(100)]);
+
+        let plan = compute_diff(&desired, &snapshot, &applied, &probes, &groups, &instances);
+
+        assert_eq!(
+            plan.ops,
+            vec![
+                DataplaneOp::RemoveFdbNhg {
+                    vni: vni(100),
+                    mac: mac(1),
+                    group_key: linux_key(100, 7),
+                },
+                DataplaneOp::AddRemoteFdb {
+                    vni: vni(100),
+                    mac: mac(1),
+                    dst: ip("10.0.0.3"),
+                },
+            ],
+            "off-switch wins: rows convert to single-dst at the backup; \
+             no Install/UpdateFdbNhgMembers may resurrect the group"
+        );
+        assert!(
+            !plan.ops.iter().any(|o| matches!(
+                o,
+                DataplaneOp::InstallFdbNhg { .. } | DataplaneOp::UpdateFdbNhgMembers { .. }
+            )),
+            "{:?}",
+            plan.ops,
+        );
+    }
 }
