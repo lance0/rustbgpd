@@ -89,6 +89,8 @@ consequences so future contributors understand *why*, not just *what*.
 | [0078](0078-inbound-rib-backpressure.md) | Inbound transport→RIB backpressure — block, never drop | Accepted | 2026-06-10 |
 | [0079](0079-kernel-state-crash-restart-reconciliation.md) | Kernel-state crash-restart reconciliation via adoption sweeps | Accepted | 2026-06-10 |
 | [0080](0080-cancellation-shielded-runtime-applies.md) | Cancellation-shielded runtime mutation applies | Accepted | 2026-06-10 |
+| [0081](0081-atomic-peer-group-reshape.md) | Atomic peer-group session reshapes on the targeted RPC path | Proposed | 2026-06-10 |
+| [0082](0082-nda-protocol-ownership-stamp.md) | NDA_PROTOCOL ownership stamping for EVPN FDB/neighbor state | Proposed | 2026-06-10 |
 
 ## Template
 
