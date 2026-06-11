@@ -62,6 +62,7 @@ fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
         local_role: None,
         strict_role: false,
         prefix_orf_receive: false,
+        disable_ipv4_unicast: false,
         import_policy: None,
         export_policy: None,
     }
@@ -892,6 +893,7 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         role: None,
         strict_role: None,
         prefix_orf_receive: None,
+        disable_ipv4_unicast: None,
         remove_private_as: None,
         add_path: None,
         log_level: None,

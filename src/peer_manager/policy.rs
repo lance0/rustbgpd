@@ -862,6 +862,7 @@ impl PeerManager {
                 role: None,
                 strict_role: None,
                 prefix_orf_receive: None,
+                disable_ipv4_unicast: None,
                 remove_private_as: None,
                 add_path: None,
                 log_level: None,
@@ -1082,6 +1083,7 @@ impl PeerManager {
             local_role: tc.peer.local_role,
             strict_role: tc.peer.strict_role,
             prefix_orf_receive: tc.peer.prefix_orf_receive,
+            disable_ipv4_unicast: tc.peer.disable_ipv4_unicast,
             import_policy: resolved.import_policy,
             export_policy: resolved.export_policy,
         }

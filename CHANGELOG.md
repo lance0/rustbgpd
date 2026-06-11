@@ -11,6 +11,30 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **True IPv6-only peering via `disable_ipv4_unicast` (M64).** New opt-in
+  neighbor / peer-group flag (default `false`, existing configs behave
+  identically) that closes the KNOWN_ISSUES "implicit IPv4 prevents
+  IPv6-only peers" limitation: with the flag set, the session never treats
+  IPv4 unicast as implicitly available. IPv4 unicast is excluded from the
+  MultiProtocol capability rustbgpd advertises (and from every
+  family-derived capability — GR, LLGR, Add-Path, ORF, extended next-hop)
+  regardless of the resolved `families`, and the RFC 4760 §8 implicit-IPv4
+  fallback is suppressed during OPEN negotiation. A session whose family
+  intersection ends up empty (e.g. the peer advertises only IPv4 unicast,
+  or sends no MultiProtocol capability at all) is rejected with
+  NOTIFICATION OPEN error / Unsupported Capability (2/7) — FRR parity with
+  its "Configured AFI/SAFIs do not overlap with received MP capabilities"
+  behavior. Config validation rejects the contradictory shape where the
+  flag is set but the effective `families` resolve to `ipv4_unicast` only.
+  Capability-negotiation scope only: RFC 8950 extended next-hop encoding
+  and ADR-0069 unnumbered peering are untouched. Proven by the new M64
+  interop job: rustbgpd ↔ FRR over IPv6 GUA with `no neighbor ... activate`
+  in IPv4 + activate in IPv6, asserting Established with no IPv4-unicast MP
+  capability received by FRR, IPv6 routes exchanged both directions, and a
+  §8 regression guard — a second flag-less neighbor against an FRR peer
+  sending no capabilities at all (`dont-capability-negotiate`) still
+  implicitly negotiates IPv4 and exchanges IPv4 routes.
+
 - **M63 interop proof for ADR-0078 hold-timer survival under a stalled
   RIB.** New `interop` CI job closing the follow-up the ADR-0078
   implementation carried (the contract was unit-tested but had no receipt

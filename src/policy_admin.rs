@@ -184,6 +184,7 @@ fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerGroupConfig 
         role: None,
         strict_role: None,
         prefix_orf_receive: None,
+        disable_ipv4_unicast: None,
         remove_private_as: definition.remove_private_as,
         add_path: api_add_path_to_config(definition.add_path),
         import_policy: definition
@@ -438,6 +439,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     role: cfg.local_role.map(wire_role_to_config),
                     strict_role: Some(cfg.strict_role),
                     prefix_orf_receive: Some(cfg.prefix_orf_receive),
+                    disable_ipv4_unicast: Some(cfg.disable_ipv4_unicast),
                     remove_private_as: match cfg.remove_private_as {
                         rustbgpd_transport::RemovePrivateAs::Disabled => None,
                         rustbgpd_transport::RemovePrivateAs::Remove => Some("remove".to_string()),
@@ -868,6 +870,7 @@ remote_asn = 65002
                     local_role: None,
                     strict_role: false,
                     prefix_orf_receive: false,
+                    disable_ipv4_unicast: false,
                     import_policy: None,
                     export_policy: None,
                 },

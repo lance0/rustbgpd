@@ -23,8 +23,10 @@ use crate::config::PeerConfig;
 /// # Errors
 ///
 /// Returns a [`NotificationMessage`] when the OPEN fails validation:
-/// unsupported version, unacceptable hold time, bad BGP identifier, or
-/// peer ASN mismatch.
+/// unsupported version, unacceptable hold time, bad BGP identifier,
+/// peer ASN mismatch, or an empty negotiated family intersection
+/// (reachable only with `disable_ipv4_unicast`; OPEN error /
+/// Unsupported Capability, matching FRR).
 #[expect(
     clippy::too_many_lines,
     reason = "OPEN validation keeps negotiation logic together for protocol correctness"
@@ -89,6 +91,29 @@ pub fn validate_open(
 
     // Intersect address families: only families both sides advertise
     let negotiated_families = intersect_families(config, &open.capabilities);
+
+    // No common address family: nothing could ever be exchanged on this
+    // session. Reject with OPEN error / Unsupported Capability, matching
+    // FRR's "Configured AFI/SAFIs do not overlap with received MP
+    // capabilities" behavior. Without `disable_ipv4_unicast` this is
+    // unreachable — the RFC 4760 §8 implicit-IPv4 fallback guarantees a
+    // non-empty intersection. Per RFC 5492 §5 the Data field lists the
+    // capabilities that caused the rejection — the MultiProtocol
+    // capabilities this speaker required and the peer did not offer.
+    if negotiated_families.is_empty() {
+        let mut data = bytes::BytesMut::new();
+        for (afi, safi) in config.effective_families() {
+            // Encoding a MultiProtocol capability into a fresh buffer
+            // cannot fail; skip rather than mask the NOTIFICATION if it
+            // ever does.
+            let _ = (Capability::MultiProtocol { afi, safi }).encode(&mut data);
+        }
+        return Err(NotificationMessage::new(
+            NotificationCode::OpenMessage,
+            open_subcode::UNSUPPORTED_CAPABILITY,
+            data.freeze(),
+        ));
+    }
 
     // Extract Graceful Restart capability from peer
     let (
@@ -314,15 +339,15 @@ pub fn negotiate_hold_time(local: u16, peer: u16) -> u16 {
 /// IPv4 unicast via `MultiProtocol` capability, IPv4 unicast is implicitly
 /// supported (body NLRI is always IPv4).
 ///
-/// **Limitation:** The implicit IPv4 fallback means a peer cannot be
-/// configured as IPv6-only. Even if config specifies only `ipv6_unicast`
-/// and the peer advertises only IPv6 MP, IPv4 unicast is still added
-/// implicitly. An explicit `disable_ipv4_unicast` config option would
-/// be needed to support IPv6-only peers — this is future work.
+/// **IPv6-only peering:** when the peer is configured with
+/// `disable_ipv4_unicast`, the implicit IPv4 fallback is suppressed and
+/// IPv4 unicast is excluded from the local family set entirely — only
+/// explicitly negotiated non-IPv4-unicast families survive. The caller
+/// rejects an empty intersection with OPEN error / Unsupported Capability.
 #[must_use]
 fn intersect_families(config: &PeerConfig, peer_caps: &[Capability]) -> Vec<(Afi, Safi)> {
-    let mut result: Vec<(Afi, Safi)> = config
-        .families
+    let local_families = config.effective_families();
+    let mut result: Vec<(Afi, Safi)> = local_families
         .iter()
         .filter(|(afi, safi)| {
             peer_caps.iter().any(|c| {
@@ -331,6 +356,12 @@ fn intersect_families(config: &PeerConfig, peer_caps: &[Capability]) -> Vec<(Afi
         })
         .copied()
         .collect();
+
+    // IPv6-only peering: never treat IPv4 unicast as implicitly available
+    // for this peer (the operator asserted the session must not carry it).
+    if config.disable_ipv4_unicast {
+        return result;
+    }
 
     // RFC 4760 §8: IPv4 unicast is implicitly supported unless BOTH sides
     // explicitly advertise MultiProtocol for IPv4 unicast (making it subject
@@ -346,7 +377,7 @@ fn intersect_families(config: &PeerConfig, peer_caps: &[Capability]) -> Vec<(Afi
                 }
             )
         });
-        let local_advertises_mp_ipv4 = config.families.contains(&ipv4_unicast);
+        let local_advertises_mp_ipv4 = local_families.contains(&ipv4_unicast);
 
         // If both sides explicitly negotiate IPv4 MP and the intersection
         // didn't include it, one side rejected it — don't add implicitly.
@@ -452,6 +483,7 @@ mod tests {
             local_role: None,
             strict_role: false,
             prefix_orf_receive: false,
+            disable_ipv4_unicast: false,
         }
     }
 
@@ -731,6 +763,99 @@ mod tests {
             neg.negotiated_families
                 .contains(&(Afi::Ipv4, Safi::Unicast))
         );
+    }
+
+    #[test]
+    fn disable_ipv4_unicast_suppresses_implicit_fallback() {
+        // Config: IPv6 only + flag. Peer: IPv6 MP only. Without the flag the
+        // RFC 4760 §8 fallback would add IPv4 unicast (see
+        // implicit_ipv4_unicast_when_neither_advertises_mp); with it the
+        // session is genuinely IPv6-only.
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv6, Safi::Unicast)];
+        cfg.disable_ipv4_unicast = true;
+        let mut open = peer_open();
+        open.capabilities = vec![
+            Capability::MultiProtocol {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+            },
+            Capability::FourOctetAs { asn: 65002 },
+        ];
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert_eq!(neg.negotiated_families, vec![(Afi::Ipv6, Safi::Unicast)]);
+    }
+
+    #[test]
+    fn disable_ipv4_unicast_excludes_ipv4_even_when_both_advertise_it() {
+        // Dual-family config + flag, peer advertises both MP families:
+        // IPv4 unicast must not survive the intersection — the flag wins
+        // over the configured/inherited family list.
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        cfg.disable_ipv4_unicast = true;
+        let mut open = peer_open(); // already advertises IPv4 MP
+        open.capabilities.push(Capability::MultiProtocol {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+        });
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert_eq!(neg.negotiated_families, vec![(Afi::Ipv6, Safi::Unicast)]);
+    }
+
+    #[test]
+    fn disable_ipv4_unicast_rejects_ipv4_only_peer() {
+        // Peer explicitly advertises ONLY IPv4 unicast MP: the intersection
+        // is empty → OPEN error / Unsupported Capability (FRR parity:
+        // "Configured AFI/SAFIs do not overlap with received MP
+        // capabilities").
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv6, Safi::Unicast)];
+        cfg.disable_ipv4_unicast = true;
+        let open = peer_open(); // advertises IPv4 unicast MP only
+        let err = validate_open(&open, &cfg).unwrap_err();
+        assert_eq!(err.code, NotificationCode::OpenMessage);
+        assert_eq!(err.subcode, open_subcode::UNSUPPORTED_CAPABILITY);
+        // RFC 5492 §5: the Data field carries the MultiProtocol
+        // capabilities this speaker required and the peer did not offer.
+        let mut buf = err.data.clone();
+        let listed = Capability::decode(&mut buf).unwrap();
+        assert_eq!(
+            listed,
+            Capability::MultiProtocol {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast
+            }
+        );
+        assert!(buf.is_empty(), "exactly one required family expected");
+    }
+
+    #[test]
+    fn disable_ipv4_unicast_rejects_peer_without_any_mp_capability() {
+        // A legacy peer sending no MP capability at all is implicitly
+        // IPv4-unicast-only (RFC 4760 §8); with the fallback suppressed the
+        // intersection is empty → same OPEN error / Unsupported Capability.
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv6, Safi::Unicast)];
+        cfg.disable_ipv4_unicast = true;
+        let mut open = peer_open();
+        open.capabilities = vec![Capability::FourOctetAs { asn: 65002 }];
+        let err = validate_open(&open, &cfg).unwrap_err();
+        assert_eq!(err.code, NotificationCode::OpenMessage);
+        assert_eq!(err.subcode, open_subcode::UNSUPPORTED_CAPABILITY);
+    }
+
+    #[test]
+    fn implicit_ipv4_fallback_unchanged_without_flag() {
+        // Regression guard for the §8 fallback: same shape as
+        // disable_ipv4_unicast_rejects_peer_without_any_mp_capability but
+        // with the flag clear — IPv4 unicast is implicitly negotiated.
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv6, Safi::Unicast)];
+        let mut open = peer_open();
+        open.capabilities = vec![Capability::FourOctetAs { asn: 65002 }];
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert_eq!(neg.negotiated_families, vec![(Afi::Ipv4, Safi::Unicast)]);
     }
 
     #[test]

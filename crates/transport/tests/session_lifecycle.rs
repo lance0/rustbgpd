@@ -41,6 +41,7 @@ fn test_peer_config() -> PeerConfig {
         local_role: None,
         strict_role: false,
         prefix_orf_receive: false,
+        disable_ipv4_unicast: false,
     }
 }
 

@@ -537,9 +537,11 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             add_path_send_max: config.add_path_send_max,
             local_role,
             strict_role: config.strict_role,
-            // ORF is not exposed on the dynamic-neighbor gRPC surface; enable
-            // it via the static TOML `prefix_orf_receive` knob instead.
+            // ORF and IPv6-only peering are not exposed on the runtime
+            // neighbor-add gRPC surface; enable them via the static TOML
+            // `prefix_orf_receive` / `disable_ipv4_unicast` knobs instead.
             prefix_orf_receive: false,
+            disable_ipv4_unicast: false,
             import_policy: None,
             export_policy: None,
         };
@@ -1062,6 +1064,7 @@ mod tests {
             local_role: None,
             strict_role: false,
             prefix_orf_receive: false,
+            disable_ipv4_unicast: false,
             import_policy: None,
             export_policy: None,
         }

@@ -405,6 +405,7 @@ fn empty_neighbor(address: IpAddr) -> Neighbor {
         role: None,
         strict_role: None,
         prefix_orf_receive: None,
+        disable_ipv4_unicast: None,
         remove_private_as: None,
         add_path: None,
         log_level: None,

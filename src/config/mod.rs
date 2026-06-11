@@ -634,6 +634,10 @@ impl Config {
                 .prefix_orf_receive
                 .or_else(|| group.and_then(|g| g.prefix_orf_receive))
                 .unwrap_or(false),
+            disable_ipv4_unicast: neighbor
+                .disable_ipv4_unicast
+                .or_else(|| group.and_then(|g| g.disable_ipv4_unicast))
+                .unwrap_or(false),
         };
 
         let (remote_addr, peer_interface, peer_scope_id) =
@@ -763,6 +767,7 @@ impl Config {
             role: None,
             strict_role: None,
             prefix_orf_receive: None,
+            disable_ipv4_unicast: None,
             remove_private_as: None,
             add_path: None,
             log_level: None,
@@ -1157,6 +1162,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<String> 
     cmp_field!(role);
     cmp_field!(strict_role);
     cmp_field!(prefix_orf_receive);
+    cmp_field!(disable_ipv4_unicast);
     cmp_field!(remove_private_as);
     cmp_field!(add_path);
     cmp_field!(log_level);
@@ -1260,6 +1266,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.role == new.role
         && old.strict_role == new.strict_role
         && old.prefix_orf_receive == new.prefix_orf_receive
+        && old.disable_ipv4_unicast == new.disable_ipv4_unicast
         && old.remove_private_as == new.remove_private_as
         && old.add_path == new.add_path
         && old.log_level == new.log_level
@@ -3129,6 +3136,7 @@ pub fn describe_peer_group_changes(old: &PeerGroupConfig, new: &PeerGroupConfig)
     cmp_field!(role);
     cmp_field!(strict_role);
     cmp_field!(prefix_orf_receive);
+    cmp_field!(disable_ipv4_unicast);
     cmp_field!(remove_private_as);
     cmp_field!(add_path);
     cmp_field!(log_level);

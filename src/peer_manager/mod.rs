@@ -447,6 +447,7 @@ impl PeerManager {
             local_role: config.local_role,
             strict_role: config.strict_role,
             prefix_orf_receive: config.prefix_orf_receive,
+            disable_ipv4_unicast: config.disable_ipv4_unicast,
         };
         let scope_id = config.scope_id.or_else(|| {
             config

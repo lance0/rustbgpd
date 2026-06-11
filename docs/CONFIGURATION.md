@@ -443,6 +443,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `role`                 | string   | no       | --      | Local BGP Role for RFC 9234 route-leak protection: `"provider"`, `"rs"`, `"rs-client"`, `"customer"`, or `"peer"` (eBGP only) |
 | `strict_role`          | bool     | no       | false   | Require the peer to advertise a compatible BGP Role capability; only valid when `role` is set |
 | `prefix_orf_receive`   | bool     | no       | false   | Advertise receive-side Address-Prefix ORF (RFC 5291/5292); peer-pushed prefix filters constrain outbound advertisements |
+| `disable_ipv4_unicast` | bool     | no       | false   | True IPv6-only peering: never negotiate IPv4 unicast on this session (suppresses the RFC 4760 §8 implicit-IPv4 fallback; see below) |
 | `remove_private_as`   | string   | no       | --      | Remove private ASNs from AS_PATH: `"remove"`, `"all"`, or `"replace"` (eBGP only) |
 | `route_reflector_client` | bool   | no       | false   | Mark this iBGP peer as a route reflector client (RFC 4456) |
 | `local_ipv6_nexthop`   | string   | no       | --      | Override IPv6 next-hop for eBGP exports (must be valid non-link-local IPv6) |
@@ -620,6 +621,44 @@ address type:
 
 - IPv4 neighbor address → `["ipv4_unicast"]`
 - IPv6 neighbor address → `["ipv4_unicast", "ipv6_unicast"]`
+
+### IPv6-only peering (`disable_ipv4_unicast`)
+
+Per RFC 4760 §8, IPv4 unicast is implicitly available on a BGP session
+whenever it is not explicitly negotiated away — even a `families =
+["ipv6_unicast"]` neighbor still ends up with IPv4 unicast negotiated.
+That default is correct for backward compatibility but wrong for an
+IPv6-only fabric (including ADR-0069 link-local unnumbered peering)
+where the peer genuinely refuses IPv4 unicast.
+
+Set `disable_ipv4_unicast = true` on a neighbor or peer group to make
+the session truly IPv6-only:
+
+- IPv4 unicast is excluded from the MultiProtocol capability rustbgpd
+  advertises in OPEN (and from every family-derived capability: GR,
+  LLGR, Add-Path, ORF, extended next-hop), regardless of what
+  `families` resolves to.
+- The RFC 4760 §8 implicit-IPv4 fallback is suppressed during
+  negotiation — IPv4 unicast is never added behind the operator's back.
+- If the resulting family intersection with the peer is empty (for
+  example the peer advertises only IPv4 unicast, or sends no
+  MultiProtocol capability at all), rustbgpd rejects the session with
+  NOTIFICATION OPEN error / Unsupported Capability (2/7) — the same
+  behavior FRR exhibits when configured AFI/SAFIs do not overlap.
+
+```toml
+[[neighbors]]
+address = "fd00:64::2"
+remote_asn = 65002
+families = ["ipv6_unicast"]
+disable_ipv4_unicast = true
+```
+
+Config validation rejects `disable_ipv4_unicast = true` when the
+neighbor's effective `families` resolve to `ipv4_unicast` only — that
+combination could never negotiate anything. The knob is off by default;
+existing configs behave identically. It controls capability negotiation
+only: RFC 8950 extended-next-hop and unnumbered peering are unaffected.
 
 ### Peer groups
 
@@ -2434,6 +2473,7 @@ starting:
 | Named policy referenced in chain must exist in `[policy.definitions]` | `undefined policy` |
 | Inline policy and policy chain cannot both be set for the same neighbor/direction | `mutually exclusive` |
 | `route_server_client` is only valid on eBGP neighbors | `invalid route_server_client` |
+| `disable_ipv4_unicast = true` requires at least one non-`ipv4_unicast` effective family | `invalid neighbor config` |
 | `role` is only valid on eBGP neighbors; `strict_role = true` requires `role` | `invalid neighbor config` |
 | `remove_private_as` must be `"remove"`, `"all"`, or `"replace"` (eBGP only) | `invalid remove_private_as` |
 | MRT `output_dir` must not be empty | `output_dir must not be empty` |
@@ -2472,6 +2512,7 @@ starting:
 | `description` | peer address used as label |
 | `route_server_client` | `false` |
 | `prefix_orf_receive` | `false` |
+| `disable_ipv4_unicast` | `false` |
 | `role` / `strict_role` | disabled / `false` |
 | `remove_private_as` | disabled (absent) |
 | Policy default action | permit (when no entry matches) |

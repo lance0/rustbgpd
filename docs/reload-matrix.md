@@ -82,6 +82,7 @@ the old neighbor is torn down, the new one starts fresh.
 | `role` | live (effective next session) | RFC 9234 BGP Role capability — advertised in OPEN. Compatibility check + NOTIFICATION 2/11 enforcement happen at OPEN time, so role changes require a session bounce to renegotiate. The §5 OTC procedures (driven by the local role) re-evaluate against the next received/emitted UPDATE. |
 | `strict_role` | live (effective next session) | Strict-mode toggle. Without an OPEN renegotiation, the existing session keeps whatever it negotiated. |
 | `prefix_orf_receive` | live (effective next session) | RFC 5291/5292 Address-Prefix ORF receive capability — advertised in OPEN. Like `add_path`/`role`, a toggle is reconciled by the ReconcilePeers delete/re-add path and takes effect on the next session; an established session keeps whatever ORF it negotiated. Reported by `describe_neighbor_changes`; a transaction-model edit is a supported `[[neighbors]] modify`. |
+| `disable_ipv4_unicast` | live (effective next session) | IPv6-only peering: drops IPv4 unicast from the advertised MultiProtocol capability and suppresses the RFC 4760 §8 implicit-IPv4 fallback — both OPEN-time properties, so a toggle takes effect on the next session. Rejected at load when the effective `families` resolve to `ipv4_unicast` only. |
 | `remove_private_as` | live | Applied to every outbound advertisement; the next distribution pass picks up the new value. |
 | `add_path` | live (effective next session) | RFC 7911 Add-Path send/receive modes are negotiated in OPEN. Mid-session changes are no-ops until renegotiation. |
 | `log_level` | live | Per-peer tracing filter; takes effect on next log emission. |
@@ -116,6 +117,7 @@ dynamic-neighbor TCP-AO needs a separate wildcard-MKT design.
 | `role` | live (effective next session) | |
 | `strict_role` | live (effective next session) | |
 | `prefix_orf_receive` | live (effective next session) | Group-level ORF toggle is caught by `diff_peer_groups` (whole-record compare) and named by `describe_peer_group_changes`; effective on the inheriting peer's next session. |
+| `disable_ipv4_unicast` | live (effective next session) | Group-level IPv6-only toggle; same OPEN-time semantics as the neighbor field, effective on the inheriting peer's next session. |
 | `remove_private_as` | live | |
 | `add_path` | live (effective next session) | |
 | `log_level` | live | |
@@ -284,6 +286,7 @@ load) or rejects the reload and keeps running on the previous config
 | Validation rule | Trigger | Notes |
 |---|---|---|
 | `strict_role` requires `role` | `[[neighbors]] strict_role = true` without `role` | RFC 9234 requires Roles to be configured before strict mode is meaningful. |
+| `disable_ipv4_unicast` requires a non-IPv4-unicast family | `[[neighbors]] disable_ipv4_unicast = true` with effective `families` resolving to `ipv4_unicast` only | The combination is contradictory: the session could never negotiate any family. |
 | `role` requires eBGP | `[[neighbors]] role = "..."` on an iBGP session (`remote_asn == global.asn`) | RFC 9234 §4 scopes Roles to eBGP. |
 | `tcp_ao` mandatory fields | Missing `key`, `send_id`, `recv_id`, or `algorithm` | TCP-AO MKT is incomplete. |
 | `bfd.profile` references unknown profile | The `[[bfd_profiles]]` entry referenced by `[[neighbors]] bfd.profile` doesn't exist | |

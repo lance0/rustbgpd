@@ -7,6 +7,17 @@ resolved.
 
 ## Resolved
 
+- **Implicit IPv4 prevents IPv6-only peers (resolved).** Per RFC 4760
+  §8, IPv4 unicast was implicitly added whenever it was not explicitly
+  negotiated via the MultiProtocol capability, so a peer could not be
+  made genuinely IPv6-only. The `disable_ipv4_unicast` neighbor /
+  peer-group option now suppresses that fallback and excludes IPv4
+  unicast from the advertised MultiProtocol capability; a session whose
+  family intersection ends up empty is rejected with OPEN error /
+  Unsupported Capability (2/7), matching FRR. Configs that set the flag
+  while the effective `families` resolve to IPv4 unicast only are
+  rejected at load. Proven against FRR in the M64 interop job.
+
 - **IPv6 link-local next-hop preserved (resolved).** `MP_REACH_NLRI`
   with a 32-byte next-hop (global + link-local per RFC 4760 §3 / RFC
   2545) is decoded, stored on `Route` / `EvpnRibRoute`, re-emitted by
@@ -213,10 +224,6 @@ resolved.
   70) RR-mode forwarding (ADR-0050, RFC 7432). Other families such as
   VPNv4/VPNv6 (AFI 1/2, SAFI 128) and VPN FlowSpec (AFI 1/2, SAFI 134)
   are not implemented.
-- **Implicit IPv4 prevents IPv6-only peers.** Per RFC 4760 §8, IPv4
-  unicast is implicitly added when not explicitly negotiated via
-  MultiProtocol capability. A `disable_ipv4_unicast` config option
-  would be needed for true IPv6-only operation — future work.
 - **Graceful Restart: no forwarding-state preservation.** RFC 4724 is
   implemented as helper (receiving speaker) plus minimal restarting speaker
   (`R=1` after coordinated restart via marker file, ADR-0040). However,

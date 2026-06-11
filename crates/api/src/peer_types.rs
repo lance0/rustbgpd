@@ -1312,6 +1312,10 @@ pub struct PeerManagerNeighborConfig {
     /// Advertise willingness to receive Address-Prefix ORF entries and apply
     /// them to this peer's outbound advertisements (RFC 5291/5292).
     pub prefix_orf_receive: bool,
+    /// Never treat IPv4 unicast as available on this session (IPv6-only
+    /// peering): excluded from our `MultiProtocol` capability and the
+    /// RFC 4760 §8 implicit-IPv4 fallback is suppressed.
+    pub disable_ipv4_unicast: bool,
     /// Import policy chain applied to inbound routes.
     pub import_policy: Option<PolicyChain>,
     /// Export policy chain applied to outbound routes.

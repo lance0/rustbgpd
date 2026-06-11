@@ -450,6 +450,38 @@ impl Config {
                 parse_families(&group.families)?;
             }
 
+            // disable_ipv4_unicast contradicts an effective family set of
+            // IPv4 unicast only: the session could never negotiate anything.
+            let disable_ipv4_unicast = neighbor
+                .disable_ipv4_unicast
+                .or_else(|| group.and_then(|g| g.disable_ipv4_unicast))
+                .unwrap_or(false);
+            if disable_ipv4_unicast {
+                // Address parse was validated earlier in this function.
+                let peer_addr: IpAddr =
+                    neighbor
+                        .address
+                        .parse()
+                        .map_err(|e| ConfigError::InvalidNeighborAddress {
+                            value: neighbor.address.clone(),
+                            reason: format!("{e}"),
+                        })?;
+                let families = Self::resolved_families(neighbor, group, peer_addr)?;
+                if families
+                    .iter()
+                    .all(|f| *f == (rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast))
+                {
+                    return Err(ConfigError::InvalidNeighborConfig {
+                        address: neighbor.address.clone(),
+                        field: "disable_ipv4_unicast".to_string(),
+                        reason: "disable_ipv4_unicast = true requires at least one \
+                                 non-ipv4_unicast family (effective families resolve \
+                                 to ipv4_unicast only)"
+                            .to_string(),
+                    });
+                }
+            }
+
             // Validate log_level
             validate_log_level(
                 neighbor

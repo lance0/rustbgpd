@@ -46,14 +46,34 @@ pub struct PeerConfig {
     /// Advertise willingness to receive Address-Prefix ORF entries from this
     /// peer and apply them to our outbound advertisements (RFC 5291/5292).
     pub prefix_orf_receive: bool,
+    /// Never treat IPv4 unicast as available on this session (IPv6-only
+    /// peering). When set, IPv4 unicast is excluded from our advertised
+    /// `MultiProtocol` capability (and every family-derived capability) and
+    /// the RFC 4760 §8 implicit-IPv4 fallback is suppressed during
+    /// negotiation.
+    pub disable_ipv4_unicast: bool,
 }
 
 impl PeerConfig {
+    /// The configured families minus IPv4 unicast when
+    /// `disable_ipv4_unicast` is set — the family set every advertised
+    /// capability and the negotiation intersection derive from. With the
+    /// flag clear this is exactly `families`.
+    #[must_use]
+    pub fn effective_families(&self) -> Vec<(Afi, Safi)> {
+        self.families
+            .iter()
+            .copied()
+            .filter(|&family| !(self.disable_ipv4_unicast && family == (Afi::Ipv4, Safi::Unicast)))
+            .collect()
+    }
+
     /// Build the capability list for our outgoing OPEN message.
     #[must_use]
     pub fn local_capabilities(&self) -> Vec<Capability> {
+        let families = self.effective_families();
         let mut caps = Vec::new();
-        for &(afi, safi) in &self.families {
+        for &(afi, safi) in &families {
             caps.push(Capability::MultiProtocol { afi, safi });
         }
         if self.graceful_restart {
@@ -61,8 +81,7 @@ impl PeerConfig {
                 restart_state: false,
                 notification: true,
                 restart_time: self.gr_restart_time,
-                families: self
-                    .families
+                families: families
                     .iter()
                     .map(|&(afi, safi)| GracefulRestartFamily {
                         afi,
@@ -75,7 +94,7 @@ impl PeerConfig {
         // LLGR requires GR — only advertise when both are enabled (RFC 9494 §3).
         if self.graceful_restart && self.llgr_stale_time > 0 {
             caps.push(Capability::LongLivedGracefulRestart(
-                self.families
+                families
                     .iter()
                     .map(|&(afi, safi)| LlgrFamily {
                         afi,
@@ -129,10 +148,10 @@ impl PeerConfig {
             (false, true) => AddPathMode::Receive,
             (false, false) => unreachable!(),
         };
-        self.families
-            .iter()
+        self.effective_families()
+            .into_iter()
             .filter(|(_, safi)| *safi == Safi::Unicast)
-            .map(|&(afi, safi)| AddPathFamily {
+            .map(|(afi, safi)| AddPathFamily {
                 afi,
                 safi,
                 send_receive: mode,
@@ -153,10 +172,10 @@ impl PeerConfig {
         if !self.prefix_orf_receive {
             return Vec::new();
         }
-        self.families
-            .iter()
+        self.effective_families()
+            .into_iter()
             .filter(|(_, safi)| *safi == Safi::Unicast)
-            .map(|&(afi, safi)| OrfCapEntry {
+            .map(|(afi, safi)| OrfCapEntry {
                 afi,
                 safi,
                 orf_types: vec![OrfCapType {
@@ -172,11 +191,13 @@ impl PeerConfig {
     ///
     /// The capability is advertised automatically when both IPv4 and IPv6
     /// unicast are configured. We advertise support for IPv4 unicast NLRI
-    /// using an IPv6 next hop.
+    /// using an IPv6 next hop. With `disable_ipv4_unicast` set the IPv4
+    /// unicast family is never negotiated, so the capability is omitted.
     #[must_use]
     pub fn extended_nexthop_capabilities(&self) -> Vec<ExtendedNextHopFamily> {
-        let has_ipv4 = self.families.contains(&(Afi::Ipv4, Safi::Unicast));
-        let has_ipv6 = self.families.contains(&(Afi::Ipv6, Safi::Unicast));
+        let families = self.effective_families();
+        let has_ipv4 = families.contains(&(Afi::Ipv4, Safi::Unicast));
+        let has_ipv6 = families.contains(&(Afi::Ipv6, Safi::Unicast));
         if has_ipv4 && has_ipv6 {
             vec![ExtendedNextHopFamily {
                 nlri_afi: Afi::Ipv4,
@@ -223,6 +244,7 @@ mod tests {
             local_role: None,
             strict_role: false,
             prefix_orf_receive: false,
+            disable_ipv4_unicast: false,
         }
     }
 
@@ -453,6 +475,85 @@ mod tests {
         let orf = cfg.orf_capabilities();
         assert_eq!(orf.len(), 2, "only unicast families advertise ORF");
         assert!(orf.iter().all(|e| e.safi == Safi::Unicast));
+    }
+
+    #[test]
+    fn effective_families_drop_ipv4_unicast_when_disabled() {
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        cfg.disable_ipv4_unicast = true;
+        assert_eq!(cfg.effective_families(), vec![(Afi::Ipv6, Safi::Unicast)]);
+    }
+
+    #[test]
+    fn effective_families_keep_non_unicast_ipv4_when_disabled() {
+        // Only IPv4 *unicast* is excluded — e.g. IPv4 FlowSpec survives.
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::FlowSpec)];
+        cfg.disable_ipv4_unicast = true;
+        assert_eq!(cfg.effective_families(), vec![(Afi::Ipv4, Safi::FlowSpec)]);
+    }
+
+    #[test]
+    fn local_capabilities_omit_ipv4_unicast_mp_when_disabled() {
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        cfg.disable_ipv4_unicast = true;
+        let caps = cfg.local_capabilities();
+        assert!(!caps.iter().any(|c| matches!(
+            c,
+            Capability::MultiProtocol {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast
+            }
+        )));
+        assert!(caps.iter().any(|c| matches!(
+            c,
+            Capability::MultiProtocol {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast
+            }
+        )));
+        // Extended next hop only applies to IPv4 NLRI — never negotiated
+        // when IPv4 unicast itself is disabled.
+        assert!(
+            !caps
+                .iter()
+                .any(|c| matches!(c, Capability::ExtendedNextHop(_)))
+        );
+    }
+
+    #[test]
+    fn graceful_restart_families_omit_ipv4_unicast_when_disabled() {
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        cfg.graceful_restart = true;
+        cfg.disable_ipv4_unicast = true;
+        let caps = cfg.local_capabilities();
+        let gr_families = caps
+            .iter()
+            .find_map(|c| match c {
+                Capability::GracefulRestart { families, .. } => Some(families),
+                _ => None,
+            })
+            .expect("GR capability advertised");
+        assert_eq!(gr_families.len(), 1);
+        assert_eq!(gr_families[0].afi, Afi::Ipv6);
+    }
+
+    #[test]
+    fn add_path_and_orf_capabilities_omit_ipv4_unicast_when_disabled() {
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        cfg.add_path_receive = true;
+        cfg.prefix_orf_receive = true;
+        cfg.disable_ipv4_unicast = true;
+        let add_path = cfg.add_path_capabilities();
+        assert_eq!(add_path.len(), 1);
+        assert_eq!(add_path[0].afi, Afi::Ipv6);
+        let orf = cfg.orf_capabilities();
+        assert_eq!(orf.len(), 1);
+        assert_eq!(orf[0].afi, Afi::Ipv6);
     }
 
     #[test]
