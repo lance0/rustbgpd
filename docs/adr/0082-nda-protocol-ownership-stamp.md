@@ -57,8 +57,10 @@ reshapes this ADR (research findings, source-verified June 2026):
    consistently, does not require the stamp when reading FDB back.
 3. **Value space.** `NDA_PROTOCOL` shares the `rtm_protocol` number space
    (`RTPROT_*`): zebra uses `RTPROT_ZEBRA` (11); `RTPROT_BGP` is 186.
-   Values ≥ `RTPROT_STATIC` are userspace ownership tags the kernel
-   ignores (same convention ADR-0079 already documents for routes).
+   For neighbor entries the kernel stores and echoes the value but does
+   not interpret routing-daemon values; in practice the protocol number is
+   a userspace ownership tag (same convention ADR-0079 already documents
+   for routes).
 4. **Our crate stack already carries the attribute.** We pin
    `netlink-packet-route 0.30.0`, which exposes
    `NeighbourAttribute::Protocol(RouteProtocol)` (emits/parses
@@ -135,16 +137,16 @@ stamp-or-legacy migration window.**
    notes, and keep an escape hatch
    (`RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY=1`) for skip-version upgrades.
 5. **Kernel-too-old fallback: detect by read-back, not by error.** The
-   failure mode is *not* an install error we can catch once: AF_BRIDGE
-   ignores the attribute silently, and pre-5.0 kernels are below anything
-   that runs our VXLAN/EVPN feature set anyway. Defensive shape: if a
-   stamped neighbor install does fail with `EINVAL` where the unstamped
-   shape succeeds (strict-validation kernel without the attr — ancient),
-   retry once unstamped, log once per process, and latch
+   common failure mode is *not* an install error we can catch once:
+   AF_BRIDGE ignores the attribute silently, and kernels before the IP
+   neighbor protocol attribute are outside the EVPN kernel baseline we test.
+   Defensive shape: if a stamped neighbor install does fail with `EINVAL`
+   where the unstamped shape succeeds (strict-validation kernel without the
+   attr), retry once unstamped, log once per process, and latch
    stamping-unavailable: adoption then stays on the legacy markers
-   permanently for that run. The authoritative signal for "stamp is
-   live" is the dump side — our own freshly-installed row echoing
-   `Protocol` back — which the adoption sweep sees for free.
+   permanently for that run. The authoritative signal for "stamp is live"
+   is the dump side — our own freshly-installed row echoing `Protocol`
+   back — which the adoption sweep sees for free.
 6. **Non-goals.** No `NDA_FDB_EXT_ATTRS`/activity-notify usage, no
    persisted stamp state (ADR-0079: no new owned-state files), no change
    to the unicast FIB path (already value-match adoption), and no attempt

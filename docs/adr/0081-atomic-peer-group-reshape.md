@@ -29,9 +29,12 @@ and every step short-circuits with `?` and no rollback
   (`crates/api/src/peer_group_service.rs:389-410`) only fires on *persist*
   failure, never on a partial *apply* failure.
 
-One concrete in-tree trigger: a peer-group edit that changes an inherited
-`tcp_ao` only fails inside `delete_peer_checked`'s RestartRequired guard —
-*per member, mid-loop* — after earlier members were already bounced.
+One concrete in-tree trigger: a targeted peer-group/member edit can include
+a TCP-AO-protected static member in the reshape set. `tcp_ao` is
+static-neighbor-only (not inherited from peer groups), but the current loop
+only discovers a restart-required TCP-AO delta when it reaches that member's
+`delete_peer_checked` guard — *per member, mid-loop* — after earlier members
+may already have been bounced.
 
 The **0.37.0 catalog-policy fix is precedent but not coverage.** The 12
 policy / neighbor-set / policy-chain mutators got an atomic fan-out:
@@ -141,10 +144,10 @@ One reshape engine, two front doors.
    existing per-member delete/re-add loop in `policy.rs:1113-1148` is
    deleted, not wrapped.
 2. **Preflight before mutation.** The primitive's guards now cover the
-   targeted path by construction: a peer-group edit that changes an
-   inherited `tcp_ao` returns `RestartRequired` *before* any member is
-   bounced instead of mid-loop; duplicate and dynamic targets are
-   rejected up front.
+   targeted path by construction: a reshape target that changes
+   static-neighbor TCP-AO returns `RestartRequired` *before* any member is
+   bounced instead of mid-loop; duplicate and dynamic targets are rejected
+   up front.
 3. **Rollback corner cases are part of the contract:**
    - *Member reconnects mid-rollback.* Rollback replays
      `reconfigure_peer`, which is itself delete + re-add: a member that
