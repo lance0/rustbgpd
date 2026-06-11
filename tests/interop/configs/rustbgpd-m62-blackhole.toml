@@ -1,0 +1,28 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+# Receiver leg: routes carrying BLACKHOLE get an implicit chain-tail
+# rule that preserves BLACKHOLE and adds NO_ADVERTISE. EBGP-only
+# (this peer is EBGP — remote_asn 65002).
+honor_blackhole = true
+# FIB leg: accepted EBGP BLACKHOLE host routes install kernel
+# RTN_BLACKHOLE rows — the state the ADR-0079 adoption sweep
+# re-adopts after a SIGKILL.
+install_blackhole_discard = true
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr-m62"
+hold_time = 90
+
+[security.grpc]
+enforcement = "legacy"

@@ -1,0 +1,73 @@
+# Containerlab topology: rustbgpd ↔ FRR
+# (M62 — ADR-0079 blackhole discard adoption sweep kill-and-restart)
+#
+# Validates the ADR-0079 slice-1 adoption sweep against a real Linux
+# kernel: rustbgpd installs RFC 7999 kernel discard routes
+# (`RTN_BLACKHOLE` + `RTPROT_BGP` in the main table — the M41 path)
+# from FRR-tagged host routes, is then SIGKILLed so the kernel rows
+# outlive the process, and is restarted in the same netns with a
+# short adoption-reap deferral. The driver asserts:
+#
+# 1. rustbgpd ↔ FRR session reaches Established and both tagged host
+#    routes A (203.0.113.66/32) and B (203.0.113.68/32) install as
+#    `blackhole ... proto bgp` kernel rows reported `installed` by
+#    `ListBlackholeDiscards` (M41 asserts).
+# 2. After `kill -9` of the rustbgpd process (container and netns
+#    survive), both discard rows are still in the kernel FIB — the
+#    crash-leftover premise.
+# 3. While rustbgpd is down, FRR withdraws prefix B. On restart with
+#    RUSTBGPD_BLACKHOLE_ADOPTION_REAP_DEFERRAL_SECS=5 row A stays
+#    present continuously (adopted + re-claimed) while row B is
+#    reaped after the deferral — and never before it elapses.
+# 4. A foreign `proto static` blackhole row (no `proto bgp` marker)
+#    planted while rustbgpd runs survives the whole cycle — adoption
+#    never claims unmarked rows.
+# 5. Prometheus reports bgp_blackhole_discard_adopted_total >= 2 and
+#    bgp_blackhole_discard_reaped_total == 1 for the restarted
+#    process.
+#
+# Topology:
+#   rustbgpd (10.0.0.1, AS 65001) ── eBGP ── FRR (10.0.0.2, AS 65002)
+#
+# The rustbgpd node runs `sleep infinity` as PID 1 and the test
+# driver starts the daemon itself (M41 shape), so a SIGKILL leaves
+# the container (and its kernel FIB) intact and nothing auto-restarts
+# the daemon — the test script controls the restart.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m62-blackhole-adoption-sweep.clab.yml
+#   bash tests/interop/scripts/test-m62-blackhole-adoption-sweep.sh
+#   containerlab destroy -t tests/interop/m62-blackhole-adoption-sweep.clab.yml
+
+name: m62-blackhole-adoption-sweep
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m62-blackhole.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m62-blackhole.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.0.0.0/24 — rustbgpd (10.0.0.1, AS 65001) ↔ FRR (10.0.0.2, AS 65002)

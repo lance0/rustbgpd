@@ -11,6 +11,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **M63 interop proof for ADR-0078 hold-timer survival under a stalled
+  RIB.** New `interop` CI job closing the follow-up the ADR-0078
+  implementation carried (the contract was unit-tested but had no receipt
+  against a real peer): with the RIB manager artificially stalled 12 s per
+  `RoutesReceived` batch and the transport→RIB channel shrunk to 2 slots, an
+  FRR peer floods 4000 /32s in 8 wave-separated UPDATE batches, the channel
+  saturates, and the session task parks for longer than the 9 s negotiated
+  hold time — repeatedly — while both ends stay Established (the
+  writer-task-owned KEEPALIVE cadence feeds FRR's hold timer while the
+  session task is parked; our own hold timer stays fresh because each
+  parked delivery completes with the UPDATE's normal hold reset, so the
+  pending-input re-arm counter is expected 0 here and stays pinned by the
+  transport unit tests). Asserts `bgp_inbound_rib_backpressure_total` > 0,
+  exactly 4000 routes in the RIB after the drain (the never-drop receipt),
+  and zero session flaps from both vantage points. Ships two test-only
+  fault-injection envs, parsed once at startup and inert unless set:
+  `RUSTBGPD_TEST_RIB_INGEST_STALL_MS` (per-batch RIB ingest sleep) and
+  `RUSTBGPD_TEST_RIB_CHANNEL_CAPACITY` (channel-capacity override — filling
+  the production 4096-slot channel against a real peer would need thousands
+  of in-flight UPDATE batches). Never set either in production.
+
 - **NDA_PROTOCOL ownership stamping on EVPN kernel state (ADR-0082).** Every
   EVPN FDB/neighbor install — L2 single-dst FDB, ADR-0059 NHG FDB rows, L3
   neighbors, and L3VXLAN router-MAC FDB — now carries
@@ -45,6 +66,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   continuously while the unclaimed route is reaped after the deferral — with
   a foreign `proto static` route and a non-`extern_learn` neighbor untouched
   and all six `evpn_l3_*_adopted_total` / `_reaped_total` counters asserted.
+
+- **M62 kill-and-restart interop proof for the ADR-0079 blackhole sweep.**
+  New `kernel-dataplane` CI job closing the last open ADR-0079 proof item
+  (the blackhole slice — the worst failure mode — had only in-memory
+  coverage): rustbgpd installs two FRR-tagged RFC 7999 host routes as kernel
+  `RTN_BLACKHOLE` + `RTPROT_BGP` discards over the M41 topology, is
+  SIGKILLed (the netns and its discard rows survive), one prefix is
+  withdrawn while the daemon is down, and the restart proves the
+  still-desired discard stays present continuously while the unclaimed row
+  surfaces as `adopted_pending_reap` and is reaped only after the deferral —
+  with a foreign `proto static` blackhole row untouched and the
+  `bgp_blackhole_discard_adopted_total` / `_reaped_total` counters asserted.
+  The blackhole deferral gains the same test/operational escape hatch the
+  EVPN sweeps have: `RUSTBGPD_BLACKHOLE_ADOPTION_REAP_DEFERRAL_SECS`
+  overrides the 500 s default at actor startup (unset or invalid values keep
+  the default).
 
 ### Fixed
 

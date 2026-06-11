@@ -41,6 +41,51 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 // blackhole, which re-claims the row and exempts it.
 const ADOPTION_REAP_DEFERRAL: Duration = Duration::from_secs(500);
 
+/// Test / operational escape hatch for the ADR-0079 blackhole
+/// adoption-reap deferral. When set to a valid `u64` number of
+/// seconds, the deferral is overridden at actor startup — the M62
+/// kill-and-restart interop proof needs a deferral short enough to
+/// observe the reap inside a CI job. Unset or invalid values keep
+/// the production default of 500 s (FRR zebra `-K` parity).
+const ADOPTION_REAP_DEFERRAL_ENV: &str = "RUSTBGPD_BLACKHOLE_ADOPTION_REAP_DEFERRAL_SECS";
+
+/// Pure core of the [`ADOPTION_REAP_DEFERRAL_ENV`] override with the
+/// environment value injected, so the parse rule (valid u64 seconds →
+/// override, anything else → keep the default) is unit-testable
+/// without touching process-global env state.
+fn blackhole_reap_deferral_override(env: Option<&str>) -> Option<Duration> {
+    let raw = env?;
+    if let Ok(secs) = raw.trim().parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    warn!(
+        value = %raw,
+        "ignoring invalid {ADOPTION_REAP_DEFERRAL_ENV} (expected seconds as a u64)"
+    );
+    None
+}
+
+/// Resolve the effective adoption-reap deferral, reading
+/// [`ADOPTION_REAP_DEFERRAL_ENV`] once at actor startup.
+fn adoption_reap_deferral() -> Duration {
+    let env = match std::env::var(ADOPTION_REAP_DEFERRAL_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            warn!("ignoring non-unicode {ADOPTION_REAP_DEFERRAL_ENV}");
+            None
+        }
+    };
+    if let Some(deferral) = blackhole_reap_deferral_override(env.as_deref()) {
+        warn!(
+            deferral_secs = deferral.as_secs(),
+            "{ADOPTION_REAP_DEFERRAL_ENV} overrides the ADR-0079 blackhole adoption-reap deferral"
+        );
+        return deferral;
+    }
+    ADOPTION_REAP_DEFERRAL
+}
+
 /// Runtime knobs resolved from `[global]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlackholeConfig {
@@ -266,7 +311,7 @@ async fn run_loop<F>(
 ) where
     F: BlackholeFib,
 {
-    let mut state = ReconcilerState::new(tokio::time::Instant::now() + ADOPTION_REAP_DEFERRAL);
+    let mut state = ReconcilerState::new(tokio::time::Instant::now() + adoption_reap_deferral());
     let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     interval.tick().await;
@@ -1402,6 +1447,36 @@ mod tests {
             &routes,
         );
         assert!(got.is_empty());
+    }
+
+    #[test]
+    fn blackhole_reap_deferral_override_parses_valid_seconds() {
+        assert_eq!(
+            blackhole_reap_deferral_override(Some("5")),
+            Some(Duration::from_secs(5))
+        );
+        // Zero is meaningful (reap on the first eligible pass), not
+        // "unset" — the escape hatch must be able to express it.
+        assert_eq!(
+            blackhole_reap_deferral_override(Some("0")),
+            Some(Duration::from_secs(0))
+        );
+        // Surrounding whitespace is tolerated, matching the
+        // RUSTBGPD_EVPN_ADOPTION_REAP_DEFERRAL_SECS precedent.
+        assert_eq!(
+            blackhole_reap_deferral_override(Some(" 500 ")),
+            Some(Duration::from_secs(500))
+        );
+    }
+
+    #[test]
+    fn blackhole_reap_deferral_override_rejects_invalid_and_unset() {
+        assert_eq!(blackhole_reap_deferral_override(None), None);
+        assert_eq!(blackhole_reap_deferral_override(Some("")), None);
+        assert_eq!(blackhole_reap_deferral_override(Some("abc")), None);
+        assert_eq!(blackhole_reap_deferral_override(Some("-1")), None);
+        assert_eq!(blackhole_reap_deferral_override(Some("5s")), None);
+        assert_eq!(blackhole_reap_deferral_override(Some("1.5")), None);
     }
 
     #[test]

@@ -181,12 +181,49 @@ pub struct RibManager {
     /// not sent the deferred batch yet.
     pending_distribute_changed: HashSet<Prefix>,
     pending_distribute_affected: HashSet<Prefix>,
+    /// Test-only ingest stall (ADR-0078 fault injection). When set via
+    /// [`TEST_INGEST_STALL_ENV`], the run loop sleeps this long before
+    /// handling each `RoutesReceived` batch popped from the primary
+    /// channel, so the channel's remaining capacity stays occupied by
+    /// the session tasks' sends and the inbound backpressure path
+    /// (block-never-drop, writer-owned keepalives, pending-input hold
+    /// re-arm) becomes deterministically observable. `None` in
+    /// production — the only cost when unset is an `is_some()` check.
+    test_ingest_stall: Option<std::time::Duration>,
 }
 
 const ROUTES_RECEIVED_CHUNK_SIZE: usize = 1024;
 const QUERY_BUDGET_PER_CHUNK: usize = 8;
 const ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
 const EVPN_ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
+
+/// Test-only fault injection for the ADR-0078 inbound backpressure
+/// contract: milliseconds the RIB manager sleeps before handling each
+/// `RoutesReceived` batch. Used by the M63 interop smoke to stall the
+/// RIB against a real peer so the inbound channel fills, the session
+/// task parks, and hold-timer survival is provable. Never set this in
+/// production. Read once at RIB-manager construction; unset, empty,
+/// zero, or unparseable values disable the stall.
+const TEST_INGEST_STALL_ENV: &str = "RUSTBGPD_TEST_RIB_INGEST_STALL_MS";
+
+/// Pure core of the [`TEST_INGEST_STALL_ENV`] override with the
+/// environment value injected, so the parse rule (positive u64
+/// milliseconds → stall, anything else → no stall) is unit-testable
+/// without touching process-global env state.
+fn test_ingest_stall_override(env: Option<&str>) -> Option<std::time::Duration> {
+    let raw = env?;
+    match raw.trim().parse::<u64>() {
+        Ok(ms) if ms > 0 => Some(std::time::Duration::from_millis(ms)),
+        Ok(_) => None,
+        Err(_) => {
+            warn!(
+                value = %raw,
+                "ignoring invalid {TEST_INGEST_STALL_ENV} (expected milliseconds as a u64)"
+            );
+            None
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct PolicyFilteredRouteKey {
@@ -378,6 +415,24 @@ impl RibManager {
         // through transient bursts (mobility storms, FRR-side
         // re-advertisement on session up).
         let (evpn_events_tx, _) = broadcast::channel(4096);
+        // Read the test-only ingest stall once at construction
+        // (RIB-manager startup); unset in production.
+        let test_ingest_stall_env = match std::env::var(TEST_INGEST_STALL_ENV) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                warn!("ignoring non-unicode {TEST_INGEST_STALL_ENV}");
+                None
+            }
+        };
+        let test_ingest_stall = test_ingest_stall_override(test_ingest_stall_env.as_deref());
+        if let Some(stall) = test_ingest_stall {
+            warn!(
+                stall_ms = u64::try_from(stall.as_millis()).unwrap_or(u64::MAX),
+                "{TEST_INGEST_STALL_ENV} active: stalling every RoutesReceived batch \
+                 (ADR-0078 fault injection — test use only, never set in production)"
+            );
+        }
         Self {
             ribs: HashMap::new(),
             loc_rib: LocRib::new(),
@@ -428,6 +483,26 @@ impl RibManager {
             pending_route_batches: VecDeque::new(),
             pending_distribute_changed: HashSet::new(),
             pending_distribute_affected: HashSet::new(),
+            test_ingest_stall,
+        }
+    }
+
+    /// Test-only ADR-0078 fault injection: sleep before handling a
+    /// `RoutesReceived` batch popped from the primary channel. The
+    /// sleep happens *after* the recv and *before* `handle_update`, so
+    /// the channel's remaining slots stay occupied by session-task
+    /// sends for the whole stall — exactly the saturation shape the
+    /// M63 interop smoke needs. No-op (one `is_some()` check) unless
+    /// [`TEST_INGEST_STALL_ENV`] was set at construction.
+    async fn maybe_stall_test_ingest(&self, update: &RibUpdate) {
+        if let Some(stall) = self.test_ingest_stall
+            && matches!(update, RibUpdate::RoutesReceived { .. })
+        {
+            debug!(
+                stall_ms = u64::try_from(stall.as_millis()).unwrap_or(u64::MAX),
+                "test ingest stall before RoutesReceived batch"
+            );
+            tokio::time::sleep(stall).await;
         }
     }
 
@@ -1497,6 +1572,7 @@ impl RibManager {
                     update = self.rx.recv() => {
                         match update {
                             Some(update) => {
+                                self.maybe_stall_test_ingest(&update).await;
                                 self.handle_update(update);
                                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                             }
@@ -1570,6 +1646,7 @@ impl RibManager {
                     update = self.rx.recv() => {
                         match update {
                             Some(update) => {
+                                self.maybe_stall_test_ingest(&update).await;
                                 self.handle_update(update);
                                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                             }

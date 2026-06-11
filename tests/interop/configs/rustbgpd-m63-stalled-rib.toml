@@ -1,0 +1,24 @@
+[global]
+asn = 65001
+router_id = "10.63.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.63.0.2"
+remote_asn = 65002
+description = "frr-m63"
+# Small hold time (configured minimum is 3; keepalive = hold/3 = 3 s)
+# so ADR-0078 hold-timer survival under the stalled RIB is provable
+# in seconds: every per-batch park (12 s) exceeds the negotiated hold
+# time, yet the session must stay Established on both ends.
+hold_time = 9
+
+[security.grpc]
+enforcement = "legacy"

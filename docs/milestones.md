@@ -764,6 +764,7 @@ runners can't sustain:
 | **M58** | ADR-0061 FIB-table runtime CRUD. Drives `SetFibTable` / `DeleteFibTable` / `ListFibTables` against a real kernel: runtime table add, `table_id`/`metric` key-move (old rows withdraw, new install), persist-across-restart, delete withdraws only its rows, and `NOT_FOUND` on a missing name. Companion to M42 (startup FIB path). | `kernel-dataplane` CI (GitHub-hosted). Script: `test-m58-fib-table-crud-frr.sh`. |
 | **M60** | ADR-0079 single-dst FDB adoption sweep kill-and-restart. FRR advertises two Type 2 MACs; rustbgpd programs them, is SIGKILLed (netns + kernel FDB survive), one MAC is withdrawn while the daemon is down, and the restart runs with `RUSTBGPD_EVPN_ADOPTION_REAP_DEFERRAL_SECS=5`. Proves the still-desired row stays present continuously (adopted + re-claimed), the unclaimed row is reaped after the deferral, foreign-static rows survive, and the `evpn_fdb_single_dst_adopted_total` / `_reaped_total` counters report the cycle. | `kernel-dataplane` CI (GitHub-hosted). Script: `test-m60-evpn-adoption-sweep.sh`. |
 | **M61** | ADR-0079 EVPN L3 adoption sweep kill-and-restart. FRR originates two Type 5 prefixes over the M48 symmetric-IRB topology; rustbgpd imports both into vrf1's kernel table (`proto bgp onlink`) plus the shared L3 neighbor / L3VXLAN FDB resolution rows, is SIGKILLed (netns + kernel rows survive), one prefix is withdrawn while the daemon is down, and the restart runs with `RUSTBGPD_EVPN_ADOPTION_REAP_DEFERRAL_SECS=5`. Proves the still-desired route + shared resolution rows stay marked continuously, the unclaimed route is reaped after the deferral, foreign `proto static` route / non-`extern_learn` neighbor / zebra-stamped `extern_learn` neighbor (ADR-0082) rows survive, the re-claimed neighbor row carries the `NDA_PROTOCOL` ownership stamp (`proto bgp`), and the six `evpn_l3_*_adopted_total` / `_reaped_total` counters report the cycle. | `kernel-dataplane` CI (GitHub-hosted). Script: `test-m61-evpn-l3-adoption-sweep.sh`. |
+| **M62** | ADR-0079 blackhole discard adoption sweep kill-and-restart. FRR tags two host routes with BLACKHOLE (65535:666) over the M41 topology; rustbgpd installs both as kernel `RTN_BLACKHOLE` + `RTPROT_BGP` discards, is SIGKILLed (netns + kernel rows survive), one prefix is withdrawn while the daemon is down, and the restart runs with `RUSTBGPD_BLACKHOLE_ADOPTION_REAP_DEFERRAL_SECS=5`. Proves the still-desired discard stays present continuously (adopted + re-claimed, `ListBlackholeDiscards` reads `installed/adopted` → `owned`), the unclaimed row surfaces as `adopted_pending_reap` and is reaped only after the deferral, a foreign `proto static` blackhole row survives, and the `bgp_blackhole_discard_adopted_total` / `_reaped_total` counters report the cycle. | `kernel-dataplane` CI (GitHub-hosted). Script: `test-m62-blackhole-adoption-sweep.sh`. |
 
 ---
 
@@ -1172,3 +1173,23 @@ to the plain capability they delivered.
 - **RibManager submodule split** — 8,318-line `manager.rs` split into 7
   submodules (`mod.rs`, `distribution.rs`, `peer_lifecycle.rs`,
   `route_refresh.rs`, `graceful_restart.rs`, `helpers.rs`, `tests.rs`).
+
+### Transport→RIB inbound backpressure (ADR-0078)
+
+- **Block-never-drop inbound delivery, writer-owned KEEPALIVE cadence, and
+  pending-input hold-timer re-arm** — proven against a real FRR peer by the
+  **M63** interop job (`test-m63-stalled-rib-hold-timer.sh`, hosted
+  `interop.yml` CI). The RIB manager is stalled 12 s per `RoutesReceived`
+  batch via the test-only `RUSTBGPD_TEST_RIB_INGEST_STALL_MS` env with the
+  transport→RIB channel shrunk to 2 slots via
+  `RUSTBGPD_TEST_RIB_CHANNEL_CAPACITY`; FRR floods 4000 /32 statics in 8
+  waves spaced 2 s apart (the spacing lower-bounds the UPDATE batch count
+  regardless of NLRI packing, so the guaranteed stall is ≥ 96 s ≫ 2× the 9 s
+  negotiated hold time). Asserts both ends stay Established at 1 s grain
+  through a 40 s survival window inside the stall,
+  `bgp_inbound_rib_backpressure_total` > 0, exactly 4000 routes in the RIB
+  after the drain (never-drop receipt), and zero flaps from both vantage
+  points; `bgp_hold_timer_rearmed_pending_input_total` is logged
+  informationally (expected 0 in this shape — each parked delivery
+  completes with the UPDATE's normal hold reset, so the select loop never
+  observes an expired deadline; that path stays pinned by unit tests).
