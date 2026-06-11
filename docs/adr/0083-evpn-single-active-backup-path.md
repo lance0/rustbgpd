@@ -145,17 +145,22 @@ answer.**
    pointing at a per-`(ESI, EthernetTag)` FDB nexthop group with
    exactly **one member: the primary PE** (the MAC route's advertising
    next-hop). The backup PE's per-VTEP fdb nexthop object is created
-   at the same time (ref-counted in `GroupOwnedMap` exactly like
-   aliasing members) but is *not* a group member — the kernel hashes
+   at the same time but is *not* a group member — the kernel hashes
    over all members, and single-active means exactly one egress
-   forwards. Single-active MACs on an ES with **no** other eligible PE
+   forwards. This needs a small extension to `GroupOwnedMap`'s
+   ref-counting: today a `VtepNh` is kept alive only by the groups
+   whose membership references it (`ref_groups`; zero refs ⇒ orphan
+   reap), so the pre-created backup NH must hold a distinct *standby*
+   ref class tied to the group key, or the existing orphan sweep
+   deletes the very object the swap depends on. Single-active MACs on an ES with **no** other eligible PE
    (a de-facto single-homed segment) keep today's single-dst rows; the
    NHG indirection buys nothing there.
-2. **Backup derivation rule: lowest VTEP IP among the eligible set.**
-   Eligible set for `(ESI, EthernetTag)` = PEs advertising *both* an
-   EAD-per-ES with the Single-Active bit set *and* an EAD-per-EVI for
-   that `(ESI, EthernetTag)`, minus the primary. Backup = the
-   numerically lowest VTEP IP (the existing `BTreeSet<IpAddr>` total
+2. **Backup derivation rule: lowest VTEP IP among the non-primary
+   eligible PEs.** The *eligible set* for `(ESI, EthernetTag)` = PEs
+   advertising *both* an EAD-per-ES with the Single-Active bit set
+   *and* an EAD-per-EVI for that `(ESI, EthernetTag)` — primary
+   included. Backup = the numerically lowest VTEP IP in the eligible
+   set excluding the primary (the existing `BTreeSet<IpAddr>` total
    order; IPv4 sorts before IPv6, which is fine — it is a tie-break,
    not a preference signal). Deterministic, derivable from routes every
    remote PE already has, and safe when wrong (Context: "wrong picks
@@ -202,7 +207,11 @@ answer.**
    the RIB.** Desired group member for `(ESI, EthernetTag)` =
    the MAC routes' advertising next-hop if it is still in the eligible
    set, else the backup per decision 2, else (empty eligible set) the
-   group is undesired. The EAD-withdrawal event path (decision 3) is
+   group is undesired. (When the eligible set is exactly the primary —
+   no backup exists — decision 1's single-dst fallback applies and no
+   group is desired either; a group that *currently* points at the
+   backup with the primary gone stays desired with one member.) The
+   EAD-withdrawal event path (decision 3) is
    only a *prompt* recompute of this function — not a special state.
    Consequences:
    - **Crash-restart converges for free.** The restart converger
