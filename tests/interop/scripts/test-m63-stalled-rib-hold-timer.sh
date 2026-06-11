@@ -313,11 +313,11 @@ else
     dump_state_on_failure
 fi
 
-# Stability + exactness: poll once more after the stall has provably
-# passed one more batch interval — the count must still be EXACTLY
+# Stability + exactness: poll once more after a full stalled batch
+# interval has provably elapsed — the count must still be EXACTLY
 # the injected number (a drop would undershoot; a duplicate-delivery
 # bug would overshoot).
-sleep 3
+sleep $(( STALL_MS / 1000 + 1 ))
 final_count=$(rib_received_count || echo "")
 if [ "$final_count" = "$TOTAL_ROUTES" ]; then
     ok "never-drop receipt: RIB received-route count == ${TOTAL_ROUTES} exactly and stable"

@@ -1030,7 +1030,7 @@ fn resolve_rib_channel_capacity() -> usize {
     if capacity != RIB_CHANNEL_CAPACITY {
         warn!(
             capacity,
-            "{TEST_RIB_CHANNEL_CAPACITY_ENV} active: shrunken RIB channel \
+            "{TEST_RIB_CHANNEL_CAPACITY_ENV} active: RIB channel capacity overridden \
              (ADR-0078 fault injection — test use only, never set in production)"
         );
     }

@@ -417,8 +417,15 @@ impl RibManager {
         let (evpn_events_tx, _) = broadcast::channel(4096);
         // Read the test-only ingest stall once at construction
         // (RIB-manager startup); unset in production.
-        let test_ingest_stall =
-            test_ingest_stall_override(std::env::var(TEST_INGEST_STALL_ENV).ok().as_deref());
+        let test_ingest_stall_env = match std::env::var(TEST_INGEST_STALL_ENV) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                warn!("ignoring non-unicode {TEST_INGEST_STALL_ENV}");
+                None
+            }
+        };
+        let test_ingest_stall = test_ingest_stall_override(test_ingest_stall_env.as_deref());
         if let Some(stall) = test_ingest_stall {
             warn!(
                 stall_ms = u64::try_from(stall.as_millis()).unwrap_or(u64::MAX),
