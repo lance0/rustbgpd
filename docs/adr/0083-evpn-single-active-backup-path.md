@@ -358,15 +358,40 @@ answer.**
      single-active segments; single-message membership replace;
      ordered teardown when the eligible set empties; the
      `single_active_backup_active` observability surface.
-  4. **Measurement M-job**: containerlab topology with a 2-PE
-     single-active ES + ≥1 remote VTEP running rustbgpd; kill the
-     active PE's CE link (AC failure) and separately the PE itself
-     (node failure); measure the dataplane blackout window at the
-     remote CE (continuous traffic probe) before/after this feature,
-     and assert the NHG membership swap landed (one `RTM_GETNEXTHOP`
-     dump). The before/after numbers go in the ADR's evidence doc, not
-     marketing copy — node-failure numbers will honestly show the
-     hold-timer floor.
+  4. **Measurement M-job** — **shipped as M65**
+     (`tests/interop/m65-evpn-single-active-failover.clab.yml`,
+     kernel-dataplane CI): 2-PE single-active ES + rustbgpd as the
+     remote VTEP, a 100 ms-grain traffic probe across an AC failure,
+     hard asserts on the pre-install shape, the one-message swap (same
+     group id, member == the pre-created standby id, MAC rows' `nhid`
+     held continuously), the last-PE ordered teardown, and the
+     swap/teardown counters + gauge. Three precise deviations from the
+     sketch above, found while building it:
+     - **The segment PEs are GoBGP-driven, not rustbgpd.** The swap
+       stimulus is the §8.2 mass-withdraw wire shape — EAD-per-ES
+       withdrawn while the MAC routes stay advertised. rustbgpd
+       originates the Single-Active flag, but an ES has no
+       AC/interface binding, so the only live withdrawal trigger is a
+       config reload, and the SIGHUP ES-removal path drains and
+       synchronously re-keys the VNI's Type 2 routes (zero ESI) in
+       the same apply — no stable swap window exists. FRR is
+       all-active only.
+     - **The node-failure phase is scoped out by construction, not
+       measured**: a dead PE's session carries its MAC routes down
+       with its EAD-per-ES, so the receive side flushes — no swap
+       window exists to measure (decision 4's hold-timer floor still
+       governs detection; flush semantics are M36/M60 coverage).
+     - **"Before/after" reduced to the after-measurement plus a
+       structural argument**: the M65 topology injects no Type 3
+       routes, so no flood entries exist and the swap is the only
+       restoration path — pre-ADR behavior there is a permanent
+       blackout, not a number. Measured after-window: **~4.5 s on
+       local hardware (both validation runs)**, dominated by the
+       dataplane supervisor's 5 s RIB-poll cadence — the swap itself
+       is the single `NLM_F_REPLACE`, and the poll is the
+       detection-to-repair term at the receiver. An event-driven
+       intent recompute on EVPN RIB change would shave the remote
+       repair to sub-second; recorded as follow-up, not done here.
 - A future remote-VTEP liveness detector (BFD-to-VTEP or underlay
   route tracking) plugs into decision 5's eligibility function rather
   than inventing a new failover path.

@@ -366,6 +366,26 @@ jobs:
           topology: tests/interop/m49-evpn-preference-df.clab.yml
           script: tests/interop/scripts/test-m49-evpn-preference-df.sh
 
+  m65:
+    name: M65 — ADR-0083 single-active failover blackout measurement (GoBGP 3.x)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-dataplane-host
+      # The segment PEs run GoBGP (the failure injection needs the RFC 7432
+      # §8.2 mass-withdraw wire shape — EAD-per-ES withdrawn with the MAC
+      # routes retained — which neither rustbgpd nor FRR can originate; see
+      # the topology header).
+      - name: Build gobgp:interop image
+        run: docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+      - name: Run M65 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M65
+          topology: tests/interop/m65-evpn-single-active-failover.clab.yml
+          script: tests/interop/scripts/test-m65-evpn-single-active-failover.sh
+
   netns:
     name: Privileged netns selectors (fdb_nhg + fib_runtime + bfd_runtime)
     runs-on: ubuntu-latest

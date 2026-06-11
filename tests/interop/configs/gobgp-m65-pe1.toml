@@ -1,0 +1,18 @@
+# M65 PE1 (GoBGP) — the ACTIVE PE of the single-active Ethernet
+# Segment. The driver injects the segment's routes via the gobgp CLI
+# (EAD-per-ES with the Single-Active ESI Label flag, EAD-per-EVI,
+# and the CE MAC's Type 2) and withdraws the EAD-per-ES to emulate
+# the RFC 7432 §8.2 AC-failure mass-withdraw.
+[global.config]
+as = 65000
+router-id = "10.0.1.2"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.0.1.1"
+peer-as = 65000
+description = "rustbgpd-m65-vtep"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "l2vpn-evpn"

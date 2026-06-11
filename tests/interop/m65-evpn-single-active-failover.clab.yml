@@ -1,0 +1,143 @@
+# Containerlab topology: ADR-0083 single-active failover blackout
+# measurement (M65).
+#
+# rustbgpd is the remote VTEP (the device under test, receive side):
+# it consumes a single-active Ethernet Segment advertised by two PEs
+# and must program the ADR-0083 pre-installed one-member FDB nexthop
+# group (member = active PE, backup PE's per-VTEP nexthop pre-created),
+# then repair forwarding with one atomic NLM_F_REPLACE membership swap
+# when the active PE's EAD-per-ES withdraws.
+#
+# The segment PEs run GoBGP as their control plane over a plain kernel
+# bridge/VXLAN dataplane. GoBGP — not a second rustbgpd — because the
+# failure injection must be the RFC 7432 §8.2 mass-withdraw wire shape:
+# the EAD-per-ES withdrawn while the segment's MAC/IP routes stay
+# advertised. rustbgpd can originate the Single-Active flag on its
+# EAD-per-ES (`redundancy_mode = "single-active"`), but it has no
+# AC/interface binding for an Ethernet Segment, so nothing short of a
+# config reload withdraws the EAD-per-ES — and the SIGHUP ES-removal
+# path drains and synchronously re-keys the VNI's Type 2 routes
+# (zero ESI), destroying the swap window in the same apply. GoBGP's
+# `global rib add/del` gives byte-exact control over exactly that
+# window. (FRR cannot stand in: its EVPN multihoming is all-active
+# only.)
+#
+# Topology (DUT is the underlay hub; VTEP IPs are the link addresses):
+#
+#   hr ── eth3[br100] vtep (rustbgpd, 10.0.1.1) eth1 ── pe1 (GoBGP, 10.0.1.2) eth2 ──┐
+#   192.168.65.20            DUT, receive side  eth2 ── pe2 (GoBGP, 10.0.2.2) eth2 ──┤
+#                                                                                    ce (bridge)
+#                                                                              192.168.65.10
+#
+#   pe1 + pe2 share single-active ES 00:00:00:00:00:00:00:00:00:01 for
+#   VNI 100; pe1 is the active PE (originates the CE MAC's Type 2),
+#   pe2 the backup. The CE host bridges both PE attachment circuits
+#   (no bond needed: bridge MAC learning re-pins the return path when
+#   traffic starts arriving on the surviving leg). hr is the remote
+#   host behind the DUT. Static neighbor entries on hr/ce remove ARP
+#   from the measurement; no Type 3 (IMET) routes are injected, so the
+#   DUT has no flood entries and known-unicast via the NHG row is the
+#   ONLY path — connectivity restored ⇔ the swap landed.
+#
+# Asserts (see scripts/test-m65-evpn-single-active-failover.sh):
+# hard on mechanism (pre-install shape, one-message swap, MAC rows
+# untouched, ordered teardown, foreign state, counters), informational
+# on the measured blackout window (plus a generous <30 s sanity bound
+# that separates the event-driven swap from the ≤60 s periodic
+# reconcile backstop).
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+#   containerlab deploy -t tests/interop/m65-evpn-single-active-failover.clab.yml
+#   bash tests/interop/scripts/test-m65-evpn-single-active-failover.sh
+#   containerlab destroy -t tests/interop/m65-evpn-single-active-failover.clab.yml
+
+name: m65-evpn-single-active-failover
+
+topology:
+  nodes:
+    vtep:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m65-vtep.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-vtep.sh:/usr/local/bin/start-rustbgpd-vtep.sh:ro
+      exec:
+        - ip addr add 10.0.1.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.2.1/24 dev eth2
+        - ip link set eth2 up
+        - /usr/local/bin/start-rustbgpd-vtep.sh 10.0.1.1 100
+        # Kernel learning on the VXLAN bridge port off: EVPN owns the
+        # remote-MAC rows. A kernel-learned (unmarked) row landing
+        # before the route would be foreign state the daemon
+        # correctly refuses to claim (ADR-0054 §5/§7).
+        - bridge link set dev vxlan100 learning off
+        - ip link set eth3 master br100
+        - ip link set eth3 up
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug,rustbgpd::evpn_dataplane=debug
+
+    pe1:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m65-pe1.toml:/config/gobgp.toml:ro
+        - ./scripts/start-gobgp-sa-pe.sh:/usr/local/bin/start-gobgp-sa-pe.sh:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-gobgp-sa-pe.sh 10.0.1.2 100
+
+    pe2:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m65-pe2.toml:/config/gobgp.toml:ro
+        - ./scripts/start-gobgp-sa-pe.sh:/usr/local/bin/start-gobgp-sa-pe.sh:ro
+      exec:
+        - ip addr add 10.0.2.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-gobgp-sa-pe.sh 10.0.2.2 100 10.0.1.0/24 10.0.2.1
+
+    # Dual-homed CE: a plain bridge over both PE attachment circuits
+    # with a pinned MAC. Single-active means at most one PE forwards
+    # toward it at any time; bridge learning re-pins the return path
+    # on failover.
+    ce:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip link add br0 type bridge
+        - ip link set br0 address 02:ce:ce:ce:ce:01
+        - ip link set eth1 master br0
+        - ip link set eth2 master br0
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip link set br0 up
+        - ip addr add 192.168.65.10/24 dev br0
+        - ip neigh replace 192.168.65.20 lladdr 02:aa:aa:aa:aa:01 dev br0 nud permanent
+
+    # Remote host behind the DUT — the traffic source whose ping
+    # stream measures the dataplane blackout window.
+    hr:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip link set eth1 address 02:aa:aa:aa:aa:01
+        - ip addr add 192.168.65.20/24 dev eth1
+        - ip link set eth1 up
+        - ip neigh replace 192.168.65.10 lladdr 02:ce:ce:ce:ce:01 dev eth1 nud permanent
+
+  links:
+    - endpoints: ["vtep:eth1", "pe1:eth1"]
+    - endpoints: ["vtep:eth2", "pe2:eth1"]
+    - endpoints: ["vtep:eth3", "hr:eth1"]
+    - endpoints: ["pe1:eth2", "ce:eth1"]
+    - endpoints: ["pe2:eth2", "ce:eth2"]

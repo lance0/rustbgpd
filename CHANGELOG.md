@@ -11,6 +11,34 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **M65 interop proof for the ADR-0083 single-active backup path:
+  failover blackout measured on a live kernel (slice 4 — closes the
+  ADR).** New `kernel-dataplane` CI job: rustbgpd is the remote VTEP
+  (receive side); two GoBGP-driven PEs share a single-active ES, and a
+  host behind the DUT pings the dual-homed CE at a 100 ms grain across
+  an AC failure injected as the RFC 7432 §8.2 mass-withdraw wire shape
+  (active PE's CE leg down + its EAD-per-ES withdrawn, MAC routes
+  retained). Hard asserts on the mechanism: the slice-2 pre-install
+  (one-member FDB nexthop group + the backup PE's nexthop pre-created
+  but not a member), the slice-3 swap (the SAME group retargeted to the
+  pre-created standby id in one membership replace — nothing allocated,
+  the MAC row's `nhid` held continuously, the withdrawn PE's nexthop
+  GC'd, swap counter == 1, backup-active gauge == 1), the last-PE
+  ordered teardown (rows flushed, group gone, teardown counter == 1,
+  pings hard-dead — no flood entries exist in the topology, so the swap
+  is provably the only restoration path), and foreign FDB rows + an
+  untagged fdb nexthop untouched throughout. The blackout window is
+  informational, with one generous < 30 s hard bound: **~4.5 s on local
+  hardware (both validation runs), AC-failure case** — dominated by the
+  dataplane supervisor's 5 s RIB-poll cadence, not the swap itself
+  (one `NLM_F_REPLACE`); an event-driven intent recompute would shave
+  the repair to sub-second and is recorded in the ADR as follow-up.
+  The PEs are GoBGP because no in-tree origin can emit the stimulus:
+  rustbgpd originates the Single-Active flag fine but has no
+  AC/interface binding for an ES (config-removal SIGHUP drains and
+  synchronously re-keys the VNI's Type 2 routes, destroying the swap
+  window), and FRR's EVPN multihoming is all-active only.
+
 - **EVPN single-active failover becomes a local repair: the backup-PE
   swap on EAD-per-ES withdrawal (ADR-0083 slice 3).** When the active
   PE of a single-active Ethernet Segment withdraws its EAD-per-ES (CE
