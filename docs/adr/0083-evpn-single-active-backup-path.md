@@ -172,9 +172,11 @@ answer.**
 3. **Switchover trigger: EAD-per-ES withdrawal, reinterpreted.** For a
    single-active `(origin VTEP, ESI)` with a non-empty remaining
    eligible set, the `MassWithdrawTrigger` no longer sweeps the MAC
-   rows; it drives one `add_fdb_group` (`NLM_F_REPLACE`) replacing the
-   group's membership with the backup PE's nexthop id. One netlink
-   message retargets every MAC on the segment (finding 3). The MAC
+   rows; it drives one `add_fdb_group` (`NLM_F_REPLACE`) per affected
+   `(ESI, EthernetTag)` group — groups are keyed per Ethernet Tag, so
+   an ES spanning several tags takes one replace each — swapping that
+   group's membership to the backup PE's nexthop id. Each netlink
+   message retargets every MAC behind its group (finding 3). The MAC
    rows themselves are untouched — no per-MAC churn, no flood-relearn
    wave. When the new active PE later re-advertises the MACs with
    itself as next-hop, normal projection takes over (the primary
@@ -282,11 +284,19 @@ answer.**
 - **Row-shape migration on upgrade.** Existing deployments carry
   single-dst (`NDA_DST`) rows for single-active MACs; this feature
   programs `NDA_NH_ID` rows, and the kernel rejects both attributes
-  combined (`vxlan_fdb_parse`, see `fdb_nhg.rs` header). Whether an
-  `NLM_F_REPLACE` cleanly converts a dst-row into an nhid-row in one
-  message (vs. needing delete+add with a momentary gap) must be
-  verified on a real kernel during implementation — the converger's
-  first pass after upgrade does this conversion fleet-wide.
+  combined (`vxlan_fdb_parse`, see `fdb_nhg.rs` header). The kernel
+  also rejects converting the row shape in place:
+  `vxlan_fdb_update_existing` returns `-EOPNOTSUPP` ("Cannot replace
+  an existing non nexthop fdb with a nexthop",
+  `drivers/net/vxlan/vxlan_core.c`, master, verified June 2026), so an
+  `NLM_F_REPLACE` cannot turn a dst-row into an nhid-row in one
+  message. Upgrade conversion is therefore an explicit
+  delete-then-add per MAC row — a known, bounded transient gap — or a
+  staged migration that converts a segment's rows behind the
+  pre-installed group before cutting over. The converger's first pass
+  after upgrade performs this fleet-wide; the implementation must
+  order it delete→add per row (never batch-delete-then-batch-add) to
+  keep the gap per-MAC rather than per-segment.
 - **ADR-0079 adoption-sweep interaction.** Single-active NHG rows move
   from the single-dst sweep's jurisdiction to the ADR-0059 drift
   sweep's (nexthop-id-tagged rows are excluded from the FDB adoption
