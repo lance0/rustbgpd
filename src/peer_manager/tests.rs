@@ -1774,7 +1774,18 @@ async fn collision_notifications_flush_ready_lifecycle_events_first() {
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (session_tx, mut session_rx) = mpsc::channel(8);
     let task = tokio::spawn(async move {
-        while session_rx.recv().await.is_some() {}
+        // Exit on Shutdown: `PeerHandle::shutdown` keeps its command
+        // sender alive while awaiting the task, so a drain-forever loop
+        // here never sees `None` and deadlocks the join.
+        while let Some(cmd) = session_rx.recv().await {
+            if matches!(
+                cmd,
+                rustbgpd_transport::PeerCommand::Shutdown
+                    | rustbgpd_transport::PeerCommand::Stop { .. }
+            ) {
+                break;
+            }
+        }
         Ok(())
     });
     insert_test_managed_peer(
