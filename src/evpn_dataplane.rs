@@ -1059,6 +1059,12 @@ async fn build_intent_tables(
             };
             let vni = rustbgpd_evpn::EvpnInstanceId::new(macip.label1.as_vni()).ok()?;
             instances.get(vni)?;
+            // Mirror the projection's quarantine gate — a quarantined
+            // MAC contributes no desired state, so it must not light
+            // the gauge either.
+            if quarantined_macs.contains(&DuplicateMacKey::new(vni, macip.mac)) {
+                return None;
+            }
             Some(key)
         })
         .collect::<BTreeSet<_>>()
