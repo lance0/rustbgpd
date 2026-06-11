@@ -5,7 +5,7 @@ use rustbgpd_api::peer_types::{
     SetGshutError,
 };
 use rustbgpd_rib::RibUpdate;
-use rustbgpd_transport::{PeerHandle, SessionIdentity, TcpAoConfig};
+use rustbgpd_transport::{PeerHandle, SessionIdentity, TcpAoConfig, TransportConfig};
 use rustbgpd_wire::{Afi, Safi};
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
@@ -241,16 +241,19 @@ impl PeerManager {
         peer: PeerKey,
         sync_config_snapshot: bool,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
-        self.delete_peer_checked(peer, sync_config_snapshot, None)
+        self.delete_peer_checked(peer, sync_config_snapshot, None, true)
             .await
     }
 
+    /// Reconfigure's delete half: the peer is immediately re-added, so
+    /// it continues to exist and keeps its metric series
+    /// (`reap_metric_series = false`).
     pub(super) async fn delete_peer_for_reconfigure(
         &mut self,
         peer: PeerKey,
         next_tcp_ao: Option<&TcpAoConfig>,
     ) -> Result<(), PeerLifecycleError> {
-        self.delete_peer_checked(peer, false, next_tcp_ao)
+        self.delete_peer_checked(peer, false, next_tcp_ao, false)
             .await
             .map(|_| ())
     }
@@ -273,7 +276,7 @@ impl PeerManager {
             .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
 
         let previous = self
-            .delete_peer_checked(peer.clone(), false, config.tcp_ao.as_ref())
+            .delete_peer_checked(peer.clone(), false, config.tcp_ao.as_ref(), false)
             .await?;
         if let Err(add_error) = self
             .add_peer_with_admin_state(config, false, was_enabled)
@@ -401,7 +404,7 @@ impl PeerManager {
         graceful_shutdown: bool,
     ) -> Result<(), PeerLifecycleError> {
         if self.peers.contains_key(&peer) {
-            self.delete_peer_checked(peer.clone(), false, previous.tcp_ao.as_ref())
+            self.delete_peer_checked(peer.clone(), false, previous.tcp_ao.as_ref(), false)
                 .await?;
         }
         self.add_peer_with_admin_state(previous, false, was_enabled)
@@ -430,11 +433,16 @@ impl PeerManager {
         Ok(())
     }
 
+    /// `reap_metric_series` distinguishes a real peer *deletion* (reap
+    /// the peer's per-peer metric series — the peer ceases to exist)
+    /// from reconfigure's delete-then-re-add (the peer continues to
+    /// exist and keeps its series and counter history).
     pub(super) async fn delete_peer_checked(
         &mut self,
         peer: PeerKey,
         sync_config_snapshot: bool,
         next_tcp_ao: Option<&TcpAoConfig>,
+        reap_metric_series: bool,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         let address = peer.address;
         // Dynamic-range peers are not deletable through the static-neighbor
@@ -496,7 +504,49 @@ impl PeerManager {
 
         // ADR-0067 step 4: drain the deleted peer's BFD session.
         self.set_bfd_peer_disabled(address, true);
+
+        // Operator rule: reap per-peer runtime/state metrics for
+        // *deleted* peers only — never on a session flap (the session
+        // task records its final transitions before the shutdown join
+        // above, so this runs after the last transport-side emission).
+        if reap_metric_series {
+            self.reap_deleted_peer_metric_series(address, &managed.transport_config)
+                .await;
+        }
         Ok(removed_config)
+    }
+
+    /// Remove a deleted peer's per-peer metric series.
+    ///
+    /// Transport sessions label `peer` with the remote `SocketAddr`
+    /// (`"10.0.0.2:179"`, `"[fe80::2%3]:179"`), while the RIB manager
+    /// and BFD runtime label it with the bare address — reap both
+    /// exact forms. Call only after the peer has been removed from
+    /// `self.peers` and its session task joined.
+    pub(super) async fn reap_deleted_peer_metric_series(
+        &self,
+        address: std::net::IpAddr,
+        transport_config: &TransportConfig,
+    ) {
+        // The SocketAddr form is unique to this peer (same-address
+        // link-local peers differ in scope id), so it is always safe.
+        self.metrics
+            .reap_peer_series(&transport_config.remote_addr.to_string());
+        // The bare-address form can be shared with a surviving peer
+        // (the same link-local address on another interface) — leave
+        // it alone unless this peer was the last user of the address.
+        if self.peer_keys_for_address(address).is_empty() {
+            self.metrics.reap_peer_series(&address.to_string());
+            // The RIB manager emits bare-address series from its own
+            // task; this marker is queued behind the session's final
+            // `PeerDown`, so the RIB manager reaps again *after* its
+            // own teardown emissions instead of racing them. Send
+            // failure means the RIB manager is gone (daemon shutdown).
+            let _ = self
+                .rib_tx
+                .send(RibUpdate::PeerDeleted { peer: address })
+                .await;
+        }
     }
 
     pub(super) async fn enable_peer(&mut self, peer: PeerKey) -> Result<(), PeerLifecycleError> {

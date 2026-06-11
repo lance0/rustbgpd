@@ -11634,3 +11634,46 @@ async fn graceful_restart_clears_orf_filter() {
     drop(tx);
     handle.await.unwrap();
 }
+
+#[tokio::test]
+async fn peer_deleted_reaps_metric_series_peer_down_does_not() {
+    fn peer_series_count(metrics: &BgpMetrics, peer: &str) -> usize {
+        metrics
+            .registry()
+            .gather()
+            .iter()
+            .flat_map(|family| family.get_metric().iter())
+            .filter(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer)
+            })
+            .count()
+    }
+
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    // Seed per-peer series the way the RIB emitters do (bare address).
+    metrics.set_rib_prefixes("10.0.0.2", "ipv4_unicast", 42);
+    metrics.set_gr_active("10.0.0.2", true);
+
+    // A session flap: PeerDown zeroes / rewrites gauges but must keep
+    // the label sets — the peer still exists.
+    manager.handle_update(RibUpdate::PeerDown { peer });
+    assert!(
+        peer_series_count(&metrics, "10.0.0.2") > 0,
+        "PeerDown must not remove the peer's label sets"
+    );
+
+    // A deletion: the PeerDeleted marker (queued by the peer manager
+    // behind the session's PeerDown) removes the label sets entirely.
+    manager.handle_update(RibUpdate::PeerDeleted { peer });
+    assert_eq!(peer_series_count(&metrics, "10.0.0.2"), 0);
+
+    // Re-deleting an already-reaped peer is a no-op (no panic).
+    manager.handle_update(RibUpdate::PeerDeleted { peer });
+    assert_eq!(peer_series_count(&metrics, "10.0.0.2"), 0);
+}

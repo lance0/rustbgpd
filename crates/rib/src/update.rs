@@ -188,6 +188,16 @@ pub enum RibUpdate {
         /// The peer whose session went down.
         peer: IpAddr,
     },
+    /// Peer was *deleted* from the configuration (not a session flap):
+    /// after clearing any remaining per-peer state, remove the peer's
+    /// metric label sets so the exposition stops advertising a peer
+    /// that no longer exists. The delete path queues this behind the
+    /// session's own `PeerDown`, so it is processed after the teardown
+    /// emissions it cleans up.
+    PeerDeleted {
+        /// The peer that was deleted.
+        peer: IpAddr,
+    },
     /// Peer session established — register for outbound updates.
     PeerUp {
         /// The peer whose session came up.

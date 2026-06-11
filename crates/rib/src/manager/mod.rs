@@ -538,6 +538,7 @@ impl RibManager {
                 evpn_withdrawn,
             ),
             RibUpdate::PeerDown { peer } => self.handle_peer_down(peer),
+            RibUpdate::PeerDeleted { peer } => self.handle_peer_deleted(peer),
             RibUpdate::PeerUp {
                 peer,
                 peer_asn,
