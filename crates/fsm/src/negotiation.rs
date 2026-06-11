@@ -97,12 +97,21 @@ pub fn validate_open(
     // FRR's "Configured AFI/SAFIs do not overlap with received MP
     // capabilities" behavior. Without `disable_ipv4_unicast` this is
     // unreachable — the RFC 4760 §8 implicit-IPv4 fallback guarantees a
-    // non-empty intersection.
+    // non-empty intersection. Per RFC 5492 §5 the Data field lists the
+    // capabilities that caused the rejection — the MultiProtocol
+    // capabilities this speaker required and the peer did not offer.
     if negotiated_families.is_empty() {
+        let mut data = bytes::BytesMut::new();
+        for (afi, safi) in config.effective_families() {
+            // Encoding a MultiProtocol capability into a fresh buffer
+            // cannot fail; skip rather than mask the NOTIFICATION if it
+            // ever does.
+            let _ = (Capability::MultiProtocol { afi, safi }).encode(&mut data);
+        }
         return Err(NotificationMessage::new(
             NotificationCode::OpenMessage,
             open_subcode::UNSUPPORTED_CAPABILITY,
-            Bytes::new(),
+            data.freeze(),
         ));
     }
 
@@ -807,6 +816,18 @@ mod tests {
         let err = validate_open(&open, &cfg).unwrap_err();
         assert_eq!(err.code, NotificationCode::OpenMessage);
         assert_eq!(err.subcode, open_subcode::UNSUPPORTED_CAPABILITY);
+        // RFC 5492 §5: the Data field carries the MultiProtocol
+        // capabilities this speaker required and the peer did not offer.
+        let mut buf = err.data.clone();
+        let listed = Capability::decode(&mut buf).unwrap();
+        assert_eq!(
+            listed,
+            Capability::MultiProtocol {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast
+            }
+        );
+        assert!(buf.is_empty(), "exactly one required family expected");
     }
 
     #[test]
