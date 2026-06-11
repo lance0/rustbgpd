@@ -22,6 +22,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::net::IpAddr;
 
 use futures::stream::TryStreamExt;
 use netlink_packet_core::Nla;
@@ -29,7 +30,7 @@ use netlink_packet_route::AddressFamily;
 use netlink_packet_route::neighbour::{
     NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
 };
-use netlink_packet_route::route::RouteType;
+use netlink_packet_route::route::{RouteProtocol, RouteType};
 use rtnetlink::Handle;
 use rustbgpd_evpn::{EvpnInstanceId, MacAddress};
 
@@ -124,6 +125,12 @@ fn merge_fdb_rows(existing: &mut KernelFdbEntry, incoming: &KernelFdbEntry) {
     if existing.nh_id.is_none() && incoming.nh_id.is_some() {
         existing.nh_id = incoming.nh_id;
     }
+    // Same shape for the ADR-0082 NDA_PROTOCOL stamp: mainline kernels
+    // never emit it for FDB rows, and a future kernel that does may
+    // emit it on either leg.
+    if existing.protocol.is_none() && incoming.protocol.is_some() {
+        existing.protocol = incoming.protocol;
+    }
     existing.flags.extern_learn |= incoming.flags.extern_learn;
     existing.flags.permanent |= incoming.flags.permanent;
     existing.flags.noarp |= incoming.flags.noarp;
@@ -149,6 +156,7 @@ fn parse_fdb_entry(
     let mut mac: Option<MacAddress> = None;
     let mut dst: Option<std::net::IpAddr> = None;
     let mut nh_id: Option<u32> = None;
+    let mut protocol: Option<u8> = None;
     for attr in &msg.attributes {
         match attr {
             NeighbourAttribute::LinkLayerAddress(bytes) if bytes.len() == 6 => {
@@ -173,6 +181,13 @@ fn parse_fdb_entry(
                 Nla::emit_value(default_nla, &mut bytes);
                 nh_id = Some(u32::from_ne_bytes(bytes));
             }
+            // NDA_PROTOCOL (ADR-0082 ownership stamp). Mainline
+            // AF_BRIDGE never returns it today; parsed so the
+            // prefer-mode ownership check engages automatically once
+            // kernel FDB support lands. Stored as the raw
+            // `rtm_protocol` byte — the snapshot types are
+            // platform-independent and don't see netlink enums.
+            NeighbourAttribute::Protocol(p) => protocol = Some(u8::from(*p)),
             _ => {}
         }
     }
@@ -200,6 +215,7 @@ fn parse_fdb_entry(
             mac,
             dst,
             nh_id,
+            protocol,
             flags,
         },
     ))
@@ -229,6 +245,49 @@ fn decode_state(state: NeighbourState, flags: &mut KernelFdbFlags) {
         }
         _ => {}
     }
+}
+
+/// Build the `RTM_NEWNEIGH` message for a single-dst remote-MAC FDB
+/// row — the `bridge fdb add MAC dev vxlanX master dst R self
+/// extern_learn` wire shape:
+///
+/// - `NTF_SELF` + `NDA_DST` → VXLAN-self encap row on vxlanX (gives
+///   the VXLAN driver the tunnel target),
+/// - `NTF_MASTER` → bridge-FDB row on br100 (the MAC is reachable
+///   via vxlanX),
+/// - `NTF_EXT_LEARNED` → distinguishes our entries from
+///   kernel-learned ones at FDB dump time.
+///
+/// `ndm_state` must carry both `NUD_NOARP` and `NUD_PERMANENT` so the
+/// entry is non-expiring. The crate's `NeighbourState` enum doesn't
+/// represent the combined bitmask, so we use the `Other` escape hatch
+/// with the shared `NUD_NOARP_PERMANENT` constant.
+///
+/// The message also carries the ADR-0082 `NDA_PROTOCOL = RTPROT_BGP`
+/// ownership stamp. Mainline `AF_BRIDGE` silently drops the attribute
+/// (`rtnl_fdb_add` parses with a NULL policy — it never errors and
+/// never round-trips in dumps), so this is a forward-compatible no-op
+/// on current kernels, exactly FRR's posture: when bridge/vxlan
+/// support merges, already-deployed daemons start writing effective
+/// stamps with no upgrade.
+fn build_remote_fdb_message(vxlan_ifindex: u32, mac: MacAddress, dst: IpAddr) -> NeighbourMessage {
+    let mut msg = NeighbourMessage::default();
+    msg.header.family = AddressFamily::Bridge;
+    msg.header.ifindex = vxlan_ifindex;
+    msg.header.state = NeighbourState::Other(NUD_NOARP_PERMANENT);
+    msg.header.flags =
+        NeighbourFlags::Own | NeighbourFlags::Controller | NeighbourFlags::ExtLearned;
+    msg.header.kind = RouteType::Unspec;
+    msg.attributes
+        .push(NeighbourAttribute::LinkLayerAddress(mac.octets().to_vec()));
+    msg.attributes
+        .push(NeighbourAttribute::Destination(match dst {
+            IpAddr::V4(v4) => NeighbourAddress::Inet(v4),
+            IpAddr::V6(v6) => NeighbourAddress::Inet6(v6),
+        }));
+    msg.attributes
+        .push(NeighbourAttribute::Protocol(RouteProtocol::Bgp));
+    msg
 }
 
 /// Apply one [`DataplaneOp`] against the kernel.
@@ -294,33 +353,18 @@ pub(crate) async fn apply_op(
             // Single message matching what iproute2 sends for
             // `bridge fdb add MAC dev vxlanX master dst R self
             // extern_learn` (verified via strace on FRR's exact wire
-            // shape). The kernel programs both rows from one
-            // RTM_NEWNEIGH:
-            //
-            // - NTF_SELF + NDA_DST → VXLAN-self encap row on
-            //   vxlanX (gives the VXLAN driver the tunnel target),
-            // - NTF_MASTER → bridge-FDB row on br100 (the MAC is
-            //   reachable via vxlanX),
-            // - NTF_EXT_LEARNED → distinguishes our entries from
-            //   kernel-learned ones at FDB dump time.
-            //
-            // ndm_state must carry both NUD_NOARP and NUD_PERMANENT
-            // so the entry is non-expiring. The crate's
-            // NeighbourState enum doesn't represent the combined
-            // bitmask, so we use the `Other` escape hatch with the
-            // shared NUD_NOARP_PERMANENT constant.
-            handle
+            // shape) — see [`build_remote_fdb_message`] for the
+            // field-by-field rationale. The kernel programs both the
+            // VXLAN-self encap row and the bridge-master row from
+            // this one RTM_NEWNEIGH. The builder request is just the
+            // transport; the message shape lives in the pure
+            // function so it unit-tests without a netlink socket.
+            let mut req = handle
                 .neighbours()
                 .add_bridge(vxlan_ifindex, &mac.octets())
-                .destination(*dst)
-                .state(NeighbourState::Other(NUD_NOARP_PERMANENT))
-                .flags(
-                    NeighbourFlags::Own | NeighbourFlags::Controller | NeighbourFlags::ExtLearned,
-                )
-                .replace()
-                .execute()
-                .await
-                .map_err(|e| classify_apply_error(&e))?;
+                .replace();
+            *req.message_mut() = build_remote_fdb_message(vxlan_ifindex, mac, *dst);
+            req.execute().await.map_err(|e| classify_apply_error(&e))?;
             Ok(())
         }
         DataplaneOp::RemoveRemoteFdb { .. } => {
@@ -387,6 +431,18 @@ pub(super) fn classify_apply_error(err: &rtnetlink::Error) -> DataplaneError {
         return DataplaneError::Io(io::Error::other("rtnetlink request failed"));
     }
     DataplaneError::Other(format!("rtnetlink: {err:?}"))
+}
+
+/// `true` when the netlink error is the kernel's `EINVAL` reply.
+/// Used by the L3 neighbor install path's ADR-0082 retry-once shape
+/// (a strict-validation kernel without the `NDA_PROTOCOL` neighbor
+/// attribute rejects the stamped message with `EINVAL`).
+pub(super) fn is_einval(err: &rtnetlink::Error) -> bool {
+    if let rtnetlink::Error::NetlinkError(msg) = err {
+        i32::try_from(msg.raw_code().unsigned_abs()).unwrap_or(0) == libc::EINVAL
+    } else {
+        false
+    }
 }
 
 /// Variant of [`classify_apply_error`] for **remove** ops:
@@ -480,6 +536,7 @@ mod tests {
             mac: rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]),
             dst: dst.map(ipa),
             nh_id: None,
+            protocol: None,
             flags: f,
         }
     }
@@ -576,12 +633,14 @@ mod tests {
             mac: rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]),
             dst: None,
             nh_id: None,
+            protocol: None,
             flags: flags(two),
         };
         let nhg_row = KernelFdbEntry {
             mac: rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]),
             dst: None,
             nh_id: Some(0x4000_0001),
+            protocol: None,
             flags: flags(one),
         };
         merge_fdb_rows(&mut acc, &nhg_row);
@@ -607,6 +666,32 @@ mod tests {
         let other = fdb_row(Some("10.0.0.3"), flags(one));
         merge_fdb_rows(&mut acc, &other);
         assert_eq!(acc.dst, Some(ipa("10.0.0.2")));
+    }
+
+    #[test]
+    fn merge_preserves_protocol_across_self_master_split() {
+        // A future FDB-storing kernel may echo NDA_PROTOCOL on either
+        // leg; the merge must surface it on the combined entry just
+        // like dst / nh_id.
+        let one = FlagSet {
+            extern_learn: true,
+            self_flag: true,
+            permanent: true,
+            ..FlagSet::default()
+        };
+        let mut acc = fdb_row(None, flags(one));
+        let mut stamped = fdb_row(
+            Some("10.0.0.2"),
+            flags(FlagSet {
+                extern_learn: true,
+                master: true,
+                permanent: true,
+                ..FlagSet::default()
+            }),
+        );
+        stamped.protocol = Some(186);
+        merge_fdb_rows(&mut acc, &stamped);
+        assert_eq!(acc.protocol, Some(186));
     }
 
     // ── decode_state: combined NUD bitmask ──
@@ -636,6 +721,60 @@ mod tests {
         decode_state(NeighbourState::Other(0x01), &mut f); // NUD_INCOMPLETE
         assert!(!f.permanent);
         assert!(!f.noarp);
+    }
+
+    // ── encode/parse: ADR-0082 ownership stamp ──
+
+    #[test]
+    fn build_remote_fdb_message_shape_includes_ownership_stamp() {
+        let mac = rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]);
+        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"));
+        assert_eq!(msg.header.family, AddressFamily::Bridge);
+        assert_eq!(msg.header.ifindex, 11);
+        assert_eq!(msg.header.state, NeighbourState::Other(NUD_NOARP_PERMANENT));
+        assert_eq!(
+            msg.header.flags,
+            NeighbourFlags::Own | NeighbourFlags::Controller | NeighbourFlags::ExtLearned
+        );
+        assert!(
+            msg.attributes
+                .contains(&NeighbourAttribute::LinkLayerAddress(mac.octets().to_vec()))
+        );
+        assert!(
+            msg.attributes
+                .contains(&NeighbourAttribute::Destination(NeighbourAddress::Inet(
+                    "10.0.0.2".parse().unwrap()
+                )))
+        );
+        // ADR-0082: stamped unconditionally; mainline AF_BRIDGE drops
+        // it silently, so the encode side must always carry it for
+        // the stamp to become effective when kernel support lands.
+        assert!(
+            msg.attributes
+                .contains(&NeighbourAttribute::Protocol(RouteProtocol::Bgp))
+        );
+    }
+
+    #[test]
+    fn parse_fdb_entry_extracts_protocol_when_kernel_echoes_it() {
+        let mut cache = LinkCache::default();
+        cache.vxlan_ifindex_to_vni.insert(11, 100);
+        // Round-trip our own encode shape through the parser, as a
+        // future FDB-storing kernel would echo it back.
+        let mac = rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]);
+        let msg = build_remote_fdb_message(11, mac, ipa("10.0.0.2"));
+        let (_, entry) = parse_fdb_entry(&msg, &cache).unwrap();
+        assert_eq!(entry.protocol, Some(186));
+        assert!(entry.is_extern_learned());
+
+        // Current kernels return no protocol attribute at all.
+        let mut unstamped = build_remote_fdb_message(11, mac, ipa("10.0.0.2"));
+        unstamped
+            .attributes
+            .retain(|a| !matches!(a, NeighbourAttribute::Protocol(_)));
+        let (_, entry) = parse_fdb_entry(&unstamped, &cache).unwrap();
+        assert_eq!(entry.protocol, None);
+        assert!(entry.is_extern_learned());
     }
 
     // ── errno classification ──

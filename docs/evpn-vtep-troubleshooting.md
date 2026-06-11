@@ -377,3 +377,20 @@ or installs remote prefixes.
    debug logs for `RouterMacConflict` (two prefixes mapping
    `(L3VXLAN ifindex, router_mac)` to different next-hops drop *both*) or
    `FamilyMismatch` (`L3Drop` in `crates/evpn-linux/src/l3_diff.rs`).
+
+## Crash-restart adoption across upgrades (ADR-0082)
+
+rustbgpd stamps every EVPN FDB/neighbor install with
+`NDA_PROTOCOL = RTPROT_BGP`, so managed L3 neighbor rows show
+`proto bgp` in `ip neigh show` alongside `extern_learn`, and the
+crash-restart adoption sweep (ADR-0079) refuses rows stamped by
+another controller (e.g. zebra's `proto zebra`). Rows installed by
+pre-stamp rustbgpd versions carry no stamp; this release accepts them
+at adoption via the legacy `extern_learn` + permanent rule, and every
+re-claim rewrites the row with the stamp. A future release may require
+the stamp at L3 neighbor adoption — that flip is gated on having run
+this release once, so don't skip from a pre-stamp version directly to
+a strict-stamp one with kernel rows still live. FDB rows are
+unaffected either way: mainline kernels don't store the attribute for
+AF_BRIDGE entries, so FDB adoption stays flag-based until kernel
+support lands.

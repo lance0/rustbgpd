@@ -15,7 +15,10 @@
 //!    arm on `classify`.
 //! 2. **L3 neighbors** — `RTM_GETNEIGH` per address family (Inet,
 //!    Inet6), keeping rows on managed L3VXLAN ifindexes whose state
-//!    has `NUD_PERMANENT` and whose flags carry `NTF_EXT_LEARNED`.
+//!    has `NUD_PERMANENT` and whose flags carry `NTF_EXT_LEARNED`,
+//!    and whose `NDA_PROTOCOL` — when present — is `RTPROT_BGP`
+//!    (ADR-0082; absence is accepted this release as the pre-stamp
+//!    legacy shape).
 //! 3. **L3VXLAN FDB rows** — `AF_BRIDGE` `RTM_GETNEIGH`, keeping
 //!    `extern_learn` + permanent-state rows on managed L3VXLAN
 //!    ifindexes. The existing bridge-FDB snapshot (`super::fdb`)
@@ -41,7 +44,9 @@ use netlink_packet_route::AddressFamily;
 use netlink_packet_route::neighbour::{
     NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
 };
-use netlink_packet_route::route::{RouteAddress, RouteAttribute, RouteFlags, RouteMessage};
+use netlink_packet_route::route::{
+    RouteAddress, RouteAttribute, RouteFlags, RouteMessage, RouteProtocol,
+};
 use rtnetlink::{Handle, IpVersion, RouteMessageBuilder};
 
 use rustbgpd_evpn::ip_vrf::{IpVrfId, IpVrfTable};
@@ -122,7 +127,14 @@ pub(crate) fn classify_adoption_route(
 /// Pure L3-neighbor classifier: keep rows on a managed L3VXLAN
 /// ifindex whose state carries `NUD_PERMANENT` and whose flags carry
 /// `NTF_EXT_LEARNED` — exactly what `super::l3::apply_add_l3_neighbor`
-/// writes. Returns the `(ifindex, next_hop) → vrf_id` pair the
+/// writes — and whose `NDA_PROTOCOL`, when present, is `RTPROT_BGP`
+/// (the ADR-0082 ownership stamp the same write side emits). A row
+/// stamped with any other protocol value is provably another
+/// controller's (zebra stamps `RTPROT_ZEBRA`) and is never adopted; a
+/// stamp-less row stays adoptable this release (stamp-or-legacy
+/// migration window, ADR-0082 decision 4 — rows installed by
+/// pre-stamp rustbgpd versions carry no protocol attribute).
+/// Returns the `(ifindex, next_hop) → vrf_id` pair the
 /// adoption dump records, or `None` for foreign / unmanaged rows.
 #[must_use]
 pub(crate) fn classify_adoption_neighbor(
@@ -134,6 +146,9 @@ pub(crate) fn classify_adoption_neighbor(
     if !state_has_permanent(msg.header.state)
         || !msg.header.flags.contains(NeighbourFlags::ExtLearned)
     {
+        return None;
+    }
+    if extract_protocol(msg).is_some_and(|p| p != RouteProtocol::Bgp) {
         return None;
     }
     let next_hop = msg.attributes.iter().find_map(|attr| match attr {
@@ -152,6 +167,13 @@ pub(crate) fn classify_adoption_neighbor(
 /// master, so every row in its own FDB dump is a self row by
 /// construction, and `extern_learn` is the discriminating half of the
 /// marker.
+///
+/// The ADR-0082 protocol check runs in *prefer* mode only: mainline
+/// `AF_BRIDGE` never stores `NDA_PROTOCOL`, so requiring the stamp
+/// would make FDB adoption permanently empty. If a future kernel
+/// returns the attribute, a value ≠ `RTPROT_BGP` disqualifies the row
+/// (provably another controller's); absence keeps today's flag-based
+/// rule — zero behavior change on current kernels.
 #[must_use]
 pub(crate) fn classify_adoption_l3vxlan_fdb(
     msg: &NeighbourMessage,
@@ -167,6 +189,9 @@ pub(crate) fn classify_adoption_l3vxlan_fdb(
     {
         return None;
     }
+    if extract_protocol(msg).is_some_and(|p| p != RouteProtocol::Bgp) {
+        return None;
+    }
     let router_mac = msg.attributes.iter().find_map(|attr| match attr {
         NeighbourAttribute::LinkLayerAddress(bytes) if bytes.len() == 6 => {
             let mut arr = [0u8; 6];
@@ -176,6 +201,16 @@ pub(crate) fn classify_adoption_l3vxlan_fdb(
         _ => None,
     })?;
     Some(((ifindex, router_mac), vrf_id))
+}
+
+/// `NDA_PROTOCOL` value from the dumped neighbour message, if the
+/// kernel returned one. IP neighbors store and echo it since Linux
+/// 5.0; `AF_BRIDGE` FDB rows never carry it on mainline kernels.
+fn extract_protocol(msg: &NeighbourMessage) -> Option<RouteProtocol> {
+    msg.attributes.iter().find_map(|attr| match attr {
+        NeighbourAttribute::Protocol(p) => Some(*p),
+        _ => None,
+    })
 }
 
 /// `true` when the `ndm_state` bitmask includes `NUD_PERMANENT`.
@@ -591,6 +626,79 @@ mod tests {
         );
     }
 
+    // ── ADR-0082 NDA_PROTOCOL ownership stamp (neighbor) ──
+
+    fn with_protocol(mut msg: NeighbourMessage, proto: RouteProtocol) -> NeighbourMessage {
+        msg.attributes.push(NeighbourAttribute::Protocol(proto));
+        msg
+    }
+
+    #[test]
+    fn neighbor_with_bgp_protocol_stamp_is_adopted() {
+        // A post-ADR-0082 install: the stamp matches our RTPROT_BGP
+        // identity, so the row stays a candidate.
+        let msg = with_protocol(
+            neigh_msg(
+                AddressFamily::Inet,
+                42,
+                NeighbourState::Permanent,
+                NeighbourFlags::ExtLearned,
+                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                None,
+            ),
+            RouteProtocol::Bgp,
+        );
+        assert_eq!(
+            classify_adoption_neighbor(&msg, &managed(&[(42, 101)])),
+            Some(((42, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))), vrf_id(101))),
+        );
+    }
+
+    #[test]
+    fn neighbor_with_foreign_protocol_stamp_is_never_adopted() {
+        // Flags match ours exactly, but the stamp proves another
+        // controller wrote the row (zebra stamps RTPROT_ZEBRA = 11).
+        // Same verdict for an arbitrary unassigned protocol value.
+        for proto in [RouteProtocol::Zebra, RouteProtocol::Other(150)] {
+            let msg = with_protocol(
+                neigh_msg(
+                    AddressFamily::Inet,
+                    42,
+                    NeighbourState::Permanent,
+                    NeighbourFlags::ExtLearned,
+                    Some(Ipv4Addr::new(10, 0, 0, 2)),
+                    None,
+                ),
+                proto,
+            );
+            assert_eq!(
+                classify_adoption_neighbor(&msg, &managed(&[(42, 101)])),
+                None,
+                "protocol {proto:?} must disqualify the row",
+            );
+        }
+    }
+
+    #[test]
+    fn neighbor_without_protocol_stamp_is_adopted_as_legacy() {
+        // Rows installed by pre-stamp rustbgpd versions carry no
+        // NDA_PROTOCOL; the ADR-0082 decision 4 migration window
+        // keeps them adoptable this release (a strict flip is a
+        // later, separate release).
+        let msg = neigh_msg(
+            AddressFamily::Inet,
+            42,
+            NeighbourState::Permanent,
+            NeighbourFlags::ExtLearned,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            None,
+        );
+        assert_eq!(
+            classify_adoption_neighbor(&msg, &managed(&[(42, 101)])),
+            Some(((42, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))), vrf_id(101))),
+        );
+    }
+
     // ── L3VXLAN FDB classifier ──
 
     #[test]
@@ -665,6 +773,79 @@ mod tests {
         assert_eq!(
             classify_adoption_l3vxlan_fdb(&msg, &managed(&[(42, 101)])),
             None
+        );
+    }
+
+    // ── ADR-0082 NDA_PROTOCOL prefer mode (L3VXLAN FDB) ──
+
+    #[test]
+    fn fdb_row_with_bgp_protocol_stamp_is_adopted() {
+        // Prefer mode: if a future FDB-storing kernel echoes our own
+        // stamp back, the row stays a candidate.
+        let msg = with_protocol(
+            neigh_msg(
+                AddressFamily::Bridge,
+                42,
+                NeighbourState::Other(0xc0),
+                NeighbourFlags::Own | NeighbourFlags::ExtLearned,
+                None,
+                Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]),
+            ),
+            RouteProtocol::Bgp,
+        );
+        assert_eq!(
+            classify_adoption_l3vxlan_fdb(&msg, &managed(&[(42, 101)])),
+            Some((
+                (42, MacAddress::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01])),
+                vrf_id(101),
+            )),
+        );
+    }
+
+    #[test]
+    fn fdb_row_with_foreign_protocol_stamp_is_foreign() {
+        // A stamped value ≠ RTPROT_BGP is provably another
+        // controller's row, flags notwithstanding.
+        for proto in [RouteProtocol::Zebra, RouteProtocol::Other(150)] {
+            let msg = with_protocol(
+                neigh_msg(
+                    AddressFamily::Bridge,
+                    42,
+                    NeighbourState::Other(0xc0),
+                    NeighbourFlags::Own | NeighbourFlags::ExtLearned,
+                    None,
+                    Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]),
+                ),
+                proto,
+            );
+            assert_eq!(
+                classify_adoption_l3vxlan_fdb(&msg, &managed(&[(42, 101)])),
+                None,
+                "protocol {proto:?} must disqualify the row",
+            );
+        }
+    }
+
+    #[test]
+    fn fdb_row_without_protocol_stamp_keeps_flag_based_rule() {
+        // Mainline AF_BRIDGE never returns the attribute — the
+        // flag-based rule is the only effective one today, so
+        // absence must keep adopting (zero behavior change on
+        // current kernels).
+        let msg = neigh_msg(
+            AddressFamily::Bridge,
+            42,
+            NeighbourState::Other(0xc0),
+            NeighbourFlags::Own | NeighbourFlags::ExtLearned,
+            None,
+            Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]),
+        );
+        assert_eq!(
+            classify_adoption_l3vxlan_fdb(&msg, &managed(&[(42, 101)])),
+            Some((
+                (42, MacAddress::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01])),
+                vrf_id(101),
+            )),
         );
     }
 }

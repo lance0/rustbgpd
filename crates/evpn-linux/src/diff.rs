@@ -668,6 +668,7 @@ mod tests {
             mac: mac(0),
             dst: Some(ip(dst)),
             nh_id: None,
+            protocol: None,
             flags: KernelFdbFlags {
                 extern_learn: true,
                 master: true,
@@ -897,6 +898,7 @@ mod tests {
                 mac: mac(1),
                 dst: Some(ip("10.0.0.99")),
                 nh_id: None,
+                protocol: None,
                 flags: KernelFdbFlags {
                     permanent: true,
                     master: true,
@@ -934,6 +936,7 @@ mod tests {
                 mac: mac(1),
                 dst: None,
                 nh_id: None,
+                protocol: None,
                 flags: KernelFdbFlags::default(),
             },
         );
@@ -1076,6 +1079,7 @@ mod tests {
                 mac: mac(9),
                 dst: Some(ip("10.0.0.99")),
                 nh_id: None,
+                protocol: None,
                 flags: KernelFdbFlags {
                     permanent: true,
                     master: true,
@@ -1340,6 +1344,7 @@ mod tests {
                     mac: mac(1),
                     dst: None,
                     nh_id: Some(0x4000_0001),
+                    protocol: None,
                     flags: KernelFdbFlags {
                         extern_learn: true,
                         master: true,

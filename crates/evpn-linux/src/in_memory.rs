@@ -349,6 +349,7 @@ impl InMemoryDataplane {
                         mac: *mac,
                         dst: Some(*dst),
                         nh_id: None,
+                        protocol: None,
                         flags: KernelFdbFlags {
                             extern_learn: true,
                             master: true,
@@ -610,6 +611,7 @@ impl NexthopOps for InMemoryDataplane {
                 mac,
                 dst: None,
                 nh_id: Some(nh_id),
+                protocol: None,
                 flags: KernelFdbFlags {
                     extern_learn: true,
                     master: true,
@@ -1135,6 +1137,7 @@ mod tests {
                 mac: mac(9),
                 dst: None,
                 nh_id: None,
+                protocol: None,
                 flags: KernelFdbFlags::default(),
             },
         );

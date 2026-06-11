@@ -553,6 +553,7 @@ async fn shutdown_drain_preserves_foreign_static_entry() {
             mac: mac(99),
             dst: Some(ipa("10.0.0.99")),
             nh_id: None,
+            protocol: None,
             flags: KernelFdbFlags {
                 permanent: true,
                 master: true,
@@ -1178,6 +1179,7 @@ async fn fdb_nhg_adoption_retains_live_kernel_fdb_refs() {
             mac: mac(99),
             dst: None,
             nh_id: Some(group_id),
+            protocol: None,
             flags: KernelFdbFlags {
                 extern_learn: true,
                 master: true,
@@ -1704,6 +1706,7 @@ async fn drift_recovery_preserves_fdb_row_for_desired_mac() {
             mac: mac(1),
             dst: None,
             nh_id: Some(stale_nh_id),
+            protocol: None,
             flags: KernelFdbFlags {
                 extern_learn: true,
                 master: true,
@@ -1818,6 +1821,7 @@ fn extern_learn_row(m: MacAddress, dst: &str) -> KernelFdbEntry {
         mac: m,
         dst: Some(ipa(dst)),
         nh_id: None,
+        protocol: None,
         flags: KernelFdbFlags {
             extern_learn: true,
             master: true,
@@ -1992,6 +1996,7 @@ async fn foreign_rows_never_adopted_or_reaped() {
             mac: mac(8),
             dst: Some(ipa("10.0.0.8")),
             nh_id: None,
+            protocol: None,
             flags: KernelFdbFlags {
                 permanent: true,
                 master: true,
@@ -2006,6 +2011,7 @@ async fn foreign_rows_never_adopted_or_reaped() {
             mac: mac(9),
             dst: None,
             nh_id: None,
+            protocol: None,
             flags: KernelFdbFlags::default(),
         },
     );
@@ -2053,6 +2059,7 @@ async fn nhg_tagged_rows_left_to_adr0059_sweep() {
             mac: mac(5),
             dst: None,
             nh_id: Some(0x4000_0001),
+            protocol: None,
             flags: KernelFdbFlags {
                 extern_learn: true,
                 master: true,
