@@ -78,15 +78,27 @@ impl PeerSession {
         let Some(read_half) = self.read_half.as_ref() else {
             return false;
         };
+        // Drain everything the kernel has buffered, not one probe's
+        // worth: with Extended Messages (RFC 8654) a complete frame can
+        // be up to 65535 bytes, so a single 4096-byte read could leave
+        // a complete frame split between our buffer and the kernel's
+        // and wrongly expire a live peer. Bounded by the kernel receive
+        // buffer; stops early once a complete frame is found.
         let mut tmp = [0u8; 4096];
-        match read_half.try_read(&mut tmp) {
-            Ok(n) if n > 0 => {
-                self.read_buf.buf.extend_from_slice(&tmp[..n]);
-                self.read_buf.has_complete_frame()
+        loop {
+            match read_half.try_read(&mut tmp) {
+                Ok(n) if n > 0 => {
+                    self.read_buf.buf.extend_from_slice(&tmp[..n]);
+                    if self.read_buf.has_complete_frame() {
+                        return true;
+                    }
+                }
+                // Ok(0) is EOF — let the normal read arm observe and
+                // handle the disconnect; WouldBlock means the kernel
+                // buffer is drained. Either way the hold expiry stands
+                // unless a complete frame was already assembled.
+                _ => return self.read_buf.has_complete_frame(),
             }
-            // Ok(0) is EOF — let the normal read arm observe and handle
-            // the disconnect; the hold expiry stands.
-            _ => false,
         }
     }
 

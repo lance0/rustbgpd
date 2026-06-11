@@ -30,8 +30,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   peer liveness, so a peer whose application hung mid-frame while its kernel
   kept ACKing (half a BGP header, then silence) re-armed the hold timer
   forever — a zombie session that never expired. The pending-input check now
-  counts complete BGP frames (`buf.len() >= 19` and `>=` the header's
-  declared length), matching RFC 4271's "hold timer resets on receipt of a
+  counts complete BGP frames (a full 19-byte header whose declared length
+  is fully buffered; a header the codec will reject as malformed also
+  counts, since resuming processing makes immediate progress on it),
+  matching RFC 4271's "hold timer resets on receipt of a
   complete message" and FRR's parsed-packet rule; a permanently incomplete
   frame lets the session expire. Frame completeness is the only check —
   marker/length validation stays with the codec, so a malformed header still
