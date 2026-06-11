@@ -33,8 +33,11 @@
 //! - [`SingleActiveEligibleIndex`] derives the ADR-0083
 //!   single-active eligible-PE set and backup PE per
 //!   `(ESI, EthTag)` — the receive-side backup-path companion to
-//!   the all-active index above. Pure derivation only (ADR-0083
-//!   slice 1); nothing consumes it yet.
+//!   the all-active index above. The projection
+//!   ([`crate::projection::project_evpn_routes_with_backup_paths`])
+//!   consumes it (ADR-0083 slice 2) to give single-active MAC
+//!   entries a one-member group key plus the pre-create-backup
+//!   intent ([`crate::mac::RemoteMacEntry::single_active_backup_vtep_ip`]).
 //!
 //! ## What this module does NOT do
 //!
@@ -266,6 +269,13 @@ pub struct SingleActiveBackupView {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SingleActiveEligibleIndex {
     by_key: BTreeMap<(EthernetSegmentIdentifier, EthernetTagId), Vec<IpAddr>>,
+    /// `(VTEP, ESI)` pairs whose EAD-per-ES rows OR-fold to
+    /// single-active. Retained from the build's mode fold so the
+    /// projection can ask "is this MAC route's origin pair
+    /// single-active?" without re-deriving the fold — the gate that
+    /// routes an entry down the ADR-0083 backup path instead of the
+    /// all-active aliasing path.
+    single_active_pairs: BTreeSet<(IpAddr, EthernetSegmentIdentifier)>,
 }
 
 impl SingleActiveEligibleIndex {
@@ -323,7 +333,27 @@ impl SingleActiveEligibleIndex {
             .into_iter()
             .map(|(k, v)| (k, v.into_iter().collect()))
             .collect();
-        Self { by_key }
+        let single_active_pairs = modes
+            .into_iter()
+            .filter(|&(_, single_active)| single_active)
+            .map(|((vtep_ip, esi), _)| (vtep_ip, esi))
+            .collect();
+        Self {
+            by_key,
+            single_active_pairs,
+        }
+    }
+
+    /// `true` when the `(vtep_ip, esi)` pair's EAD-per-ES rows
+    /// OR-fold to single-active — the same fold the daemon's
+    /// `fold_ead_per_es_modes` applies. The projection uses this on
+    /// a MAC route's `(next-hop, ESI)` to decide whether the entry
+    /// takes the ADR-0083 single-active backup path (decision 1) or
+    /// the all-active aliasing path. A pair without any EAD-per-ES
+    /// row, or whose rows all fold all-active, returns `false`.
+    #[must_use]
+    pub fn pair_is_single_active(&self, vtep_ip: IpAddr, esi: EthernetSegmentIdentifier) -> bool {
+        self.single_active_pairs.contains(&(vtep_ip, esi))
     }
 
     /// Eligible PEs for `(esi, eth_tag)`, sorted by `IpAddr` natural
@@ -566,6 +596,7 @@ mod tests {
             mobility_sequence: None,
             alias_vtep_ips: aliases.iter().map(|s| ip(s)).collect(),
             alias_group_key: None,
+            single_active_backup_vtep_ip: None,
             source: crate::mac::RemoteMacSource::EvpnRibBestPath,
         }
     }
@@ -884,6 +915,29 @@ mod tests {
             reference,
         );
         assert_eq!(SingleActiveEligibleIndex::build(es_rev, evi_rev), reference,);
+    }
+
+    #[test]
+    fn pair_is_single_active_reflects_or_fold() {
+        let idx = SingleActiveEligibleIndex::build(
+            [
+                es_row(1, "10.0.0.2", true),
+                es_row(1, "10.0.0.3", false),
+                // Duplicate rows OR-fold: any single-active row wins.
+                es_row(2, "10.0.0.4", false),
+                es_row(2, "10.0.0.4", true),
+            ],
+            // No EAD-per-EVI rows at all — pair modes are derived
+            // from EAD-per-ES alone, independent of eligibility.
+            [],
+        );
+        assert!(idx.pair_is_single_active(ip("10.0.0.2"), esi(1)));
+        assert!(idx.pair_is_single_active(ip("10.0.0.4"), esi(2)));
+        // All-active pair → false.
+        assert!(!idx.pair_is_single_active(ip("10.0.0.3"), esi(1)));
+        // Unknown pair (no EAD-per-ES observed) → false.
+        assert!(!idx.pair_is_single_active(ip("10.0.0.9"), esi(1)));
+        assert!(!idx.pair_is_single_active(ip("10.0.0.2"), esi(2)));
     }
 
     #[test]

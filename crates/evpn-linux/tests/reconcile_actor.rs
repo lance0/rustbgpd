@@ -78,6 +78,7 @@ fn entry(remote: &str, seq: Option<u32>) -> RemoteMacEntry {
         mobility_sequence: seq,
         alias_vtep_ips: Vec::new(),
         alias_group_key: None,
+        single_active_backup_vtep_ip: None,
         source: RemoteMacSource::EvpnRibBestPath,
     }
 }
@@ -919,6 +920,7 @@ fn entry_multi_homed(remote: &str, aliases: &[&str], seg: u8) -> RemoteMacEntry 
         mobility_sequence: None,
         alias_vtep_ips: aliases.iter().map(|s| ipa(s)).collect(),
         alias_group_key: Some((EthernetSegmentIdentifier::new([seg; 10]), EthernetTagId(0))),
+        single_active_backup_vtep_ip: None,
         source: RemoteMacSource::EvpnRibBestPath,
     }
 }
@@ -2964,6 +2966,413 @@ async fn l3_config_removal_mid_window_keeps_adoption_tracking() {
     let counters = sum_l3_adoption_counters(&reports);
     assert_eq!(counters.neighbors_reaped, 1);
     assert_eq!(counters.l3vxlan_fdb_reaped, 1);
+
+    h.shutdown().await;
+}
+
+// ─── ADR-0083 slice 2: single-active backup-path pre-install ───
+//
+// Actor-level coverage for the one-member-group + pre-created-backup
+// shape: the diff-level unit tests pin op emission; these pin the
+// coordinator's kernel-state outcome (NH(active), NH(backup), group
+// with ONE member, NDA_NH_ID row), the standby ref-class lifecycle,
+// the drift sweep's ownership view, the sweep-jurisdiction split, and
+// the row-shape conversions in both directions.
+
+/// Single-active entry: one-member desired membership (the active PE)
+/// plus the pre-create-backup intent. No ECMP aliases.
+fn entry_single_active(remote: &str, backup: &str, seg: u8) -> RemoteMacEntry {
+    RemoteMacEntry {
+        remote_vtep_ip: ipa(remote),
+        mobility_sequence: None,
+        alias_vtep_ips: Vec::new(),
+        alias_group_key: Some((EthernetSegmentIdentifier::new([seg; 10]), EthernetTagId(0))),
+        single_active_backup_vtep_ip: Some(ipa(backup)),
+        source: RemoteMacSource::EvpnRibBestPath,
+    }
+}
+
+/// Install one single-active MAC (active 10.0.0.2, backup 10.0.0.3,
+/// ESI seed 7) and drain reports until the install settles. Returns
+/// `(group_id, active_nh_id, backup_nh_id)`.
+async fn install_and_settle_single_active(h: &mut Harness) -> (u32, u32, u32) {
+    use rustbgpd_evpn_linux::dataplane::KernelNexthopKind;
+
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(
+        vni(100),
+        mac(1),
+        entry_single_active("10.0.0.2", "10.0.0.3", 7),
+    )
+    .unwrap();
+    let macs = macs.build();
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx.send(intent(1, inst, macs)).unwrap();
+
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert!(last.failed.is_empty(), "install failed: {:?}", last.failed);
+
+    let nhs = h.handle.nexthop_ops();
+    let (members, groups) = split_nexthop_ops(&nhs);
+    assert_eq!(
+        members.len(),
+        2,
+        "expected NH(active) + NH(backup); got {nhs:?}"
+    );
+    assert_eq!(groups.len(), 1, "expected 1 group; got {nhs:?}");
+    let group_id = groups[0].id;
+    let find = |gw: &str| -> u32 {
+        members
+            .iter()
+            .find_map(|m| match &m.kind {
+                KernelNexthopKind::Member { gateway } if *gateway == ipa(gw) => Some(m.id),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no member NH with gateway {gw} in {members:?}"))
+    };
+    (group_id, find("10.0.0.2"), find("10.0.0.3"))
+}
+
+// 1. Pre-install programs NH(active), NH(backup), a ONE-member group
+//    (active only — the backup is never a member), and the NDA_NH_ID
+//    MAC row pointing at the group.
+#[tokio::test]
+async fn single_active_preinstall_programs_active_backup_group_and_nhid_row() {
+    use rustbgpd_evpn_linux::dataplane::KernelNexthopKind;
+
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    let (group_id, active_id, backup_id) = install_and_settle_single_active(&mut h).await;
+
+    let nhs = h.handle.nexthop_ops();
+    let group = nhs.get(&group_id).expect("group installed");
+    let KernelNexthopKind::Group { member_ids } = &group.kind else {
+        panic!("expected group kind at {group_id:#x}");
+    };
+    assert_eq!(
+        member_ids,
+        &vec![active_id],
+        "single-active group has exactly one member: the active PE"
+    );
+    assert!(
+        !member_ids.contains(&backup_id),
+        "the backup NH must NOT be a group member (kernel hashes over members; \
+         single-active means one egress forwards)"
+    );
+    // The MAC row is NDA_NH_ID-shaped, pointing at the group.
+    assert_eq!(h.handle.kernel_fdb_nh_id(vni(100), mac(1)), Some(group_id));
+
+    h.shutdown().await;
+}
+
+// 2. Standby lifecycle through the actor: two MACs share the group;
+//    withdrawing one keeps group + backup NH (intent lives);
+//    withdrawing the last tears everything down — MAC rows leave
+//    before the group (never-through-empty), and the backup NH is
+//    reaped with the intent, not before.
+#[tokio::test]
+async fn single_active_backup_nh_survives_until_group_intent_disappears() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(
+        vni(100),
+        mac(1),
+        entry_single_active("10.0.0.2", "10.0.0.3", 7),
+    )
+    .unwrap();
+    macs.insert(
+        vni(100),
+        mac(2),
+        entry_single_active("10.0.0.2", "10.0.0.3", 7),
+    )
+    .unwrap();
+    h.intent_tx
+        .send(intent(1, inst.clone(), macs.build()))
+        .unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    let (members, groups) = split_nexthop_ops(&h.handle.nexthop_ops());
+    assert_eq!(
+        members.len(),
+        2,
+        "NH(active) + NH(backup) shared by both MACs"
+    );
+    assert_eq!(groups.len(), 1);
+
+    // Withdraw MAC(1) — group + backup NH must survive (MAC(2)'s
+    // intent still pins them).
+    let mut macs2 = RemoteMacTable::builder();
+    macs2
+        .insert(
+            vni(100),
+            mac(2),
+            entry_single_active("10.0.0.2", "10.0.0.3", 7),
+        )
+        .unwrap();
+    h.intent_tx
+        .send(intent(2, inst.clone(), macs2.build()))
+        .unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation < 2 {
+        last = h.next_report().await;
+    }
+    let (members, groups) = split_nexthop_ops(&h.handle.nexthop_ops());
+    assert_eq!(
+        members.len(),
+        2,
+        "backup NH must survive while the group intent lives; got {members:?}"
+    );
+    assert_eq!(groups.len(), 1);
+    assert!(!h.handle.kernel_has_fdb(vni(100), mac(1)));
+    assert!(h.handle.kernel_has_fdb(vni(100), mac(2)));
+
+    // Withdraw the last MAC — intent gone: group AND backup NH reaped.
+    h.intent_tx
+        .send(intent(3, inst, RemoteMacTable::new()))
+        .unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation < 3 {
+        last = h.next_report().await;
+    }
+    let (members, groups) = split_nexthop_ops(&h.handle.nexthop_ops());
+    assert!(
+        groups.is_empty(),
+        "group must be GC'd after last MAC unref; got {groups:?}"
+    );
+    assert!(
+        members.is_empty(),
+        "active AND backup NHs must be reaped when the (ESI, EthTag) intent \
+         disappears; got {members:?}"
+    );
+    assert!(!h.handle.kernel_has_fdb(vni(100), mac(2)));
+
+    h.shutdown().await;
+}
+
+// 3. The ADR-0059 drift sweep accounts the standby NH as OWNED: a
+//    drift cycle over a settled single-active install must not fold
+//    the backup NH into adopted_unreferenced / orphan cleanup, and a
+//    backup NH deleted out-of-band is repaired like any tracked
+//    member.
+#[tokio::test(start_paused = true)]
+async fn single_active_drift_sweep_owns_and_repairs_backup_nh() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    let (_group_id, _active_id, backup_id) = install_and_settle_single_active(&mut h).await;
+
+    // First drift cycle over healthy state: nothing reaped.
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let reports = h.try_drain_reports().await;
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(
+        counters.orphans_cleaned, 0,
+        "the standby NH must not be flagged as an orphan by the drift sweep"
+    );
+    assert!(
+        h.handle.nexthop_ops().contains_key(&backup_id),
+        "backup NH must survive the drift sweep"
+    );
+
+    // Out-of-band delete of the backup NH → next drift cycle repairs
+    // it at the same kernel ID (it is tracked state, not foreign).
+    h.handle
+        .force_remove_nexthop_op(backup_id)
+        .expect("backup NH was installed");
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let reports = h.try_drain_reports().await;
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(counters.members_repaired, 1);
+    assert!(
+        h.handle.nexthop_ops().contains_key(&backup_id),
+        "drift recovery must re-install the deleted backup NH at the same ID"
+    );
+
+    h.shutdown().await;
+}
+
+// 4. Sweep jurisdiction: an NHG-backed single-active row (nh_id set)
+//    is invisible to the ADR-0079 single-dst FDB adoption sweep —
+//    never adopted, never reaped by it, even with a zero deferral and
+//    no desired intent. The ADR-0059 drift sweep owns it.
+#[tokio::test]
+async fn single_active_nhg_row_not_adopted_or_reaped_by_single_dst_sweep() {
+    use rustbgpd_evpn_linux::dataplane::{KernelNexthop, KernelNexthopKind};
+    use rustbgpd_evpn_linux::nh_id_alloc::{NHG_TAG, VTEP_NH_TAG};
+
+    let cfg = ReconcileActorConfig {
+        fdb_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    // A prior lifetime's single-active stack: active + backup NHs,
+    // one-member group, NHG-tagged MAC row.
+    let active_id = VTEP_NH_TAG | 1;
+    let backup_id = VTEP_NH_TAG | 2;
+    let group_id = NHG_TAG | 1;
+    h.handle.pre_load_nexthop_op(KernelNexthop {
+        id: active_id,
+        kind: KernelNexthopKind::Member {
+            gateway: ipa("10.0.0.2"),
+        },
+    });
+    h.handle.pre_load_nexthop_op(KernelNexthop {
+        id: backup_id,
+        kind: KernelNexthopKind::Member {
+            gateway: ipa("10.0.0.3"),
+        },
+    });
+    h.handle.pre_load_nexthop_op(KernelNexthop {
+        id: group_id,
+        kind: KernelNexthopKind::Group {
+            member_ids: vec![active_id],
+        },
+    });
+    h.handle.pre_load_fdb(
+        vni(100),
+        KernelFdbEntry {
+            mac: mac(1),
+            dst: None,
+            nh_id: Some(group_id),
+            protocol: None,
+            flags: KernelFdbFlags {
+                extern_learn: true,
+                master: true,
+                ..Default::default()
+            },
+        },
+    );
+
+    // Empty desired intent + zero reap deferral: a single-dst marker
+    // row would be adopted AND reaped here. The NHG row must be
+    // neither.
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent(1, inst, RemoteMacTable::new()))
+        .unwrap();
+    let mut reports = Vec::new();
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        reports.push(last);
+        last = h.next_report().await;
+    }
+    reports.push(last);
+    reports.extend(h.try_drain_reports().await);
+
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(
+        counters.single_dst_adopted, 0,
+        "NHG-tagged rows are outside the single-dst sweep's jurisdiction"
+    );
+    assert_eq!(counters.single_dst_reaped, 0);
+    assert!(
+        h.handle.kernel_has_fdb(vni(100), mac(1)),
+        "the single-dst sweep must not touch an NHG-backed row \
+         (the ADR-0059 drift sweep owns it)"
+    );
+
+    h.shutdown().await;
+}
+
+// 5. Upgrade row-shape conversion (dst→nhid): the kernel holds the
+//    previous release's extern_learn single-dst rows for single-active
+//    MACs; the first pass converts each row delete→add inside one
+//    InstallFdbNhg (per-MAC gap) and the rows end up NDA_NH_ID-shaped
+//    behind the one-member group, claimed (no adoption reap).
+#[tokio::test]
+async fn single_active_upgrade_converts_dst_rows_to_nhid_per_row() {
+    let cfg = ReconcileActorConfig {
+        fdb_adoption_reap_deferral: Duration::ZERO,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    h.handle
+        .pre_load_fdb(vni(100), extern_learn_row(mac(1), "10.0.0.2"));
+    h.handle
+        .pre_load_fdb(vni(100), extern_learn_row(mac(2), "10.0.0.2"));
+
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(
+        vni(100),
+        mac(1),
+        entry_single_active("10.0.0.2", "10.0.0.3", 7),
+    )
+    .unwrap();
+    macs.insert(
+        vni(100),
+        mac(2),
+        entry_single_active("10.0.0.2", "10.0.0.3", 7),
+    )
+    .unwrap();
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx.send(intent(1, inst, macs.build())).unwrap();
+
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert!(last.failed.is_empty(), "{:?}", last.failed);
+
+    let (members, groups) = split_nexthop_ops(&h.handle.nexthop_ops());
+    assert_eq!(groups.len(), 1);
+    assert_eq!(members.len(), 2, "NH(active) + NH(backup)");
+    let group_id = groups[0].id;
+    assert_eq!(
+        h.handle.kernel_fdb_nh_id(vni(100), mac(1)),
+        Some(group_id),
+        "dst row must have been converted to an NDA_NH_ID row"
+    );
+    assert_eq!(h.handle.kernel_fdb_nh_id(vni(100), mac(2)), Some(group_id));
+
+    h.shutdown().await;
+}
+
+// 6. Reverse conversion (nhid→dst): the ES degrades to one PE — the
+//    projection yields a plain dst entry (no backup, ADR-0083
+//    decision 1) — and the actor converts the row back, tearing down
+//    the group, the now-unused active NH, and the standby NH.
+#[tokio::test]
+async fn single_active_degrade_to_sole_pe_converts_back_to_dst_row() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    let (_group_id, _active_id, _backup_id) = install_and_settle_single_active(&mut h).await;
+
+    // Backup PE withdrew: the entry degrades to a plain dst row.
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx.send(intent(2, inst, macs.build())).unwrap();
+
+    let mut last = h.next_report().await;
+    while last.intent_generation < 2 {
+        last = h.next_report().await;
+    }
+    assert!(last.failed.is_empty(), "{:?}", last.failed);
+
+    // Row is back to dst shape...
+    assert_eq!(h.handle.kernel_fdb_nh_id(vni(100), mac(1)), None);
+    let snap = h.handle.kernel_snapshot();
+    let row = snap.find_fdb(vni(100), mac(1)).expect("dst row present");
+    assert_eq!(row.dst, Some(ipa("10.0.0.2")));
+    // ...and the whole NHG stack (group, active NH, standby NH) is gone.
+    let nhs = h.handle.nexthop_ops();
+    assert!(
+        nhs.is_empty(),
+        "group + active NH + standby NH must all be reaped; got {nhs:?}"
+    );
 
     h.shutdown().await;
 }

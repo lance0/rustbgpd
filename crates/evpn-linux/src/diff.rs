@@ -112,6 +112,18 @@ pub fn compute_diff(
     let mut creates: Vec<DataplaneOp> = Vec::new();
     let mut updates: Vec<DataplaneOp> = Vec::new();
     let mut deletes: Vec<DataplaneOp> = Vec::new();
+    // Row-shape conversion pairs (ADR-0083 hazard: the kernel rejects
+    // in-place dst↔nhid conversion with -EOPNOTSUPP). Each conversion
+    // contributes its Remove and its Add/Install as ADJACENT ops so
+    // the per-MAC forwarding gap spans one op, never a batch — the
+    // plan-level deletes→creates split would batch all removes ahead
+    // of all adds across MACs. dst→nhid conversions ride the
+    // `InstallFdbNhg::convert_from_dst` flag (delete→add inside one
+    // op); the pairs staged here are the directions that need a
+    // distinct remove op for refcount / ownership bookkeeping
+    // (nhid→dst via `RemoveFdbNhg`, marker-row nhid→dst via
+    // `RemoveRemoteFdb`, and group-key drift).
+    let mut conversions: Vec<DataplaneOp> = Vec::new();
 
     // Pass 1b helpers — track which (VNI, ESI, EthTag) groups have
     // already been considered for member-set diff, so two MACs
@@ -158,7 +170,10 @@ pub fn compute_diff(
             aliasing_enabled,
         ) {
             (Some(portable_key), true, true) => {
-                // FDB-NHG path.
+                // FDB-NHG path — all-active aliasing groups and
+                // ADR-0083 single-active one-member groups (the
+                // latter distinguished by
+                // `single_active_backup_vtep_ip`).
                 let linux_key = AliasGroupKey::new(vni, portable_key.0, portable_key.1);
                 emit_fdb_nhg_pass(
                     vni,
@@ -171,7 +186,7 @@ pub fn compute_diff(
                     &mut group_seen,
                     &mut creates,
                     &mut updates,
-                    &mut deletes,
+                    &mut conversions,
                 );
             }
             (Some(_), false, true) => {
@@ -202,7 +217,7 @@ pub fn compute_diff(
                     last_applied,
                     &mut creates,
                     &mut updates,
-                    &mut deletes,
+                    &mut conversions,
                 );
             }
             _ => {
@@ -228,7 +243,7 @@ pub fn compute_diff(
                     last_applied,
                     &mut creates,
                     &mut updates,
-                    &mut deletes,
+                    &mut conversions,
                 );
             }
         }
@@ -272,23 +287,27 @@ pub fn compute_diff(
         }
     }
 
-    // Order: deletes (including Pass 2 withdrawals AND transition
-    // removes from Pass 1/1b) → creates → updates. Transition pairs
-    // (`SingleDst → FdbNhg`, `FdbNhg → SingleDst`, group-key drift)
-    // push their Remove into `deletes` and their Install/Add into
-    // `creates`, so the remove always runs first within the plan
-    // even though the per-MAC remove + add target the same kernel
-    // row. Mobility-style `UpdateRemoteFdb` ops stay in `updates`
-    // because they're atomic netlink REPLACE calls, no remove
-    // needed.
+    // Order: deletes (Pass 2 withdrawals) → conversions (adjacent
+    // per-MAC Remove→Add/Install pairs from Pass 1/1b row-shape
+    // transitions — `FdbNhg → SingleDst`, marker-row nhid→dst,
+    // group-key drift) → creates → updates. Keeping each
+    // conversion's Remove immediately before its Add bounds the
+    // forwarding gap to one op per MAC (the ADR-0083 row-shape
+    // hazard); the `SingleDst → FdbNhg` direction needs no pair at
+    // all — its delete→add runs inside one `InstallFdbNhg` via
+    // `convert_from_dst`. Mobility-style `UpdateRemoteFdb` ops stay
+    // in `updates` because they're atomic netlink REPLACE calls, no
+    // remove needed.
     // De-dupe redundant `UpdateFdbNhgMembers` ops: if the same plan
-    // also carries an `InstallFdbNhg` for the same `group_key`, the
+    // also carries an `InstallFdbNhg` for the same `group_key`
+    // (whether in `creates` or inside a conversion pair), the
     // Install path's REPLACE branch in `apply_nhg_op` already covers
     // the member-set update, so emitting the Update would be a second
     // REPLACE on the same NHID — wasted netlink churn and a more
     // complicated failure-classification surface.
     let install_group_keys: BTreeSet<AliasGroupKey> = creates
         .iter()
+        .chain(conversions.iter())
         .filter_map(|op| match op {
             DataplaneOp::InstallFdbNhg { group_key, .. } => Some(*group_key),
             _ => None,
@@ -304,6 +323,7 @@ pub fn compute_diff(
     }
 
     let mut ops = deletes;
+    ops.append(&mut conversions);
     ops.append(&mut creates);
     ops.append(&mut updates);
     Plan {
@@ -340,24 +360,29 @@ fn emit_single_dst_pass(
     last_applied: &OwnedSet,
     creates: &mut Vec<DataplaneOp>,
     updates: &mut Vec<DataplaneOp>,
-    deletes: &mut Vec<DataplaneOp>,
+    conversions: &mut Vec<DataplaneOp>,
 ) {
-    // Transition: previously installed as FdbNhg, now wants single-dst.
-    // Emit RemoveFdbNhg into `deletes` so the plan-level ordering
-    // (deletes → creates → updates) runs the remove before the add
-    // — apply ops within the same `(vni, mac)` are serialized so
-    // this avoids kernel-side conflicts. RemoveFdbNhg is idempotent
-    // on `ENOENT` (slice 3a `classify_remove_apply_error`), so we
-    // emit unconditionally without gating on the kernel snapshot.
+    // Transition: previously installed as FdbNhg, now wants single-dst
+    // (the ES degraded to one PE / lost its backup, or the segment
+    // config went away). The kernel rejects converting an nhid row to
+    // a dst row in place (-EOPNOTSUPP), so this is an explicit
+    // delete→add — emitted as an ADJACENT pair into `conversions` so
+    // the per-MAC gap spans one op (ADR-0083 row-shape hazard), and
+    // the Remove rides `RemoveFdbNhg` because the group refcount /
+    // teardown bookkeeping lives on that path (MACs leave before the
+    // group is deleted — never-through-empty). RemoveFdbNhg is
+    // idempotent on `ENOENT` (slice 3a `classify_remove_apply_error`),
+    // so we emit unconditionally without gating on the kernel
+    // snapshot.
     if let Some(owned) = last_applied.get(vni, mac)
         && let OwnedEntryKind::FdbNhg { group_key } = owned.kind
     {
-        deletes.push(DataplaneOp::RemoveFdbNhg {
+        conversions.push(DataplaneOp::RemoveFdbNhg {
             vni,
             mac,
             group_key,
         });
-        creates.push(DataplaneOp::AddRemoteFdb {
+        conversions.push(DataplaneOp::AddRemoteFdb {
             vni,
             mac,
             dst: entry.remote_vtep_ip,
@@ -381,13 +406,17 @@ fn emit_single_dst_pass(
                 entry.remote_vtep_ip,
                 last_applied,
                 updates,
+                conversions,
             );
         }
     }
 }
 
 /// Pass 1b emission — `InstallFdbNhg` / `UpdateFdbNhgMembers` /
-/// transitions when the entry is FDB-NHG-eligible.
+/// transitions when the entry is FDB-NHG-eligible (all-active
+/// aliasing, or ADR-0083 single-active with a backup — the entry's
+/// `single_active_backup_vtep_ip` rides every Install/Update so the
+/// coordinator can pre-create + pin the backup NH).
 #[allow(clippy::too_many_arguments)]
 fn emit_fdb_nhg_pass(
     vni: EvpnInstanceId,
@@ -400,9 +429,19 @@ fn emit_fdb_nhg_pass(
     group_seen: &mut BTreeSet<AliasGroupKey>,
     creates: &mut Vec<DataplaneOp>,
     updates: &mut Vec<DataplaneOp>,
-    deletes: &mut Vec<DataplaneOp>,
+    conversions: &mut Vec<DataplaneOp>,
 ) {
     let canonical = group_members(entry);
+    let standby = entry.single_active_backup_vtep_ip;
+
+    // ADR-0083 row-shape hazard: an existing dst-shaped (`NDA_DST`)
+    // kernel row cannot be converted to an nhid row in place — the
+    // kernel rejects it with -EOPNOTSUPP. When the kernel currently
+    // holds a dst row at this MAC, the Install must delete→add per
+    // row (`convert_from_dst`).
+    let kernel_dst_row = snapshot
+        .find_fdb(vni, mac)
+        .is_some_and(|k| k.nh_id.is_none());
 
     let owned_kind = last_applied.get(vni, mac).map(|e| e.kind.clone());
     match owned_kind {
@@ -414,7 +453,12 @@ fn emit_fdb_nhg_pass(
             // gates Install on whichever holds:
             //   - no kernel row, OR
             //   - the row is `extern_learn` (our own marker — restart
-            //     case or NHG-tagged carryover; NLM_F_REPLACE heals).
+            //     case or NHG-tagged carryover). An NHG-tagged
+            //     carryover heals via NLM_F_REPLACE; a dst-shaped
+            //     marker row (the post-upgrade conversion case)
+            //     rides `convert_from_dst` because the in-place
+            //     REPLACE would be rejected with -EOPNOTSUPP and end
+            //     up permanently suppressed.
             // Operator-static / kernel-learned rows are skipped here
             // the same way `handle_existing_kernel_entry` does for the
             // single-dst path.
@@ -428,6 +472,8 @@ fn emit_fdb_nhg_pass(
                     mac,
                     group_key: linux_key,
                     members: canonical,
+                    standby,
+                    convert_from_dst: kernel_dst_row,
                 });
             } else {
                 tracing::trace!(
@@ -438,21 +484,21 @@ fn emit_fdb_nhg_pass(
             }
         }
         Some(OwnedEntryKind::SingleDst { .. }) => {
-            // Single-dst → FDB-NHG transition. Remove the old row
-            // first (goes into `deletes` so the plan-level ordering
-            // runs it before the Install). Gate on snapshot presence:
-            // `RemoveRemoteFdb` via `linux::fdb::classify_apply_error`
-            // treats `ENOENT` as transient (would backoff-retry
-            // forever), so don't emit if the kernel row is already
-            // gone.
-            if snapshot.find_fdb(vni, mac).is_some() {
-                deletes.push(DataplaneOp::RemoveRemoteFdb { vni, mac });
-            }
+            // Single-dst → FDB-NHG transition. The old dst row must
+            // go before the nhid row lands (kernel rejects in-place
+            // conversion); `convert_from_dst` performs the
+            // delete→add inside this one op, so the gap stays
+            // per-MAC even when a whole segment converts in one pass
+            // (ADR-0083 row-shape hazard). The flag is gated on the
+            // kernel actually holding a dst row — if the row already
+            // vanished (interface flap), a plain install suffices.
             creates.push(DataplaneOp::InstallFdbNhg {
                 vni,
                 mac,
                 group_key: linux_key,
                 members: canonical,
+                standby,
+                convert_from_dst: kernel_dst_row,
             });
         }
         Some(OwnedEntryKind::FdbNhg {
@@ -460,26 +506,30 @@ fn emit_fdb_nhg_pass(
         }) if prev_key != linux_key => {
             // Group-key drift on the same MAC (ESI change / VNI change).
             // RemoveFdbNhg is idempotent on ENOENT (slice 3a) so
-            // unconditional emission is safe. Goes into `deletes`
-            // for plan-level ordering.
-            deletes.push(DataplaneOp::RemoveFdbNhg {
+            // unconditional emission is safe. The Remove must run on
+            // the RemoveFdbNhg path (old group's refcount teardown),
+            // so this is an adjacent conversion pair rather than a
+            // `convert_from_dst` install.
+            conversions.push(DataplaneOp::RemoveFdbNhg {
                 vni,
                 mac,
                 group_key: prev_key,
             });
-            creates.push(DataplaneOp::InstallFdbNhg {
+            conversions.push(DataplaneOp::InstallFdbNhg {
                 vni,
                 mac,
                 group_key: linux_key,
                 members: canonical,
+                standby,
+                convert_from_dst: false,
             });
         }
         Some(OwnedEntryKind::FdbNhg { .. }) => {
             // Same key. Per-MAC FDB row already installed.
             let tracked_group_id = groups.group(&linux_key).map(|g| g.id);
 
-            // Per-group member-set diff. Dedupe across MACs that
-            // share the group. The group-missing case (our local
+            // Per-group member-set + standby diff. Dedupe across MACs
+            // that share the group. The group-missing case (our local
             // state doesn't track this `linux_key`) is intentionally
             // *not* healed here — the per-MAC kernel-drift check
             // below emits one Install per MAC, which the apply path
@@ -488,10 +538,11 @@ fn emit_fdb_nhg_pass(
                 && let Some(existing) = groups.group(&linux_key)
             {
                 let existing_members: Vec<_> = existing.members.iter().copied().collect();
-                if existing_members != canonical {
+                if existing_members != canonical || existing.standby != standby {
                     updates.push(DataplaneOp::UpdateFdbNhgMembers {
                         group_key: linux_key,
                         members: canonical.clone(),
+                        standby,
                     });
                 }
             }
@@ -499,7 +550,8 @@ fn emit_fdb_nhg_pass(
             // Per-MAC kernel-snapshot drift check. Re-emit Install
             // when:
             //   - kernel has no FDB row for `(vni, mac)`,
-            //   - kernel row is single-dst (no `nh_id`),
+            //   - kernel row is single-dst (no `nh_id`) — rides
+            //     `convert_from_dst` (in-place dst→nhid is rejected),
             //   - kernel row points at an `nh_id` that doesn't
             //     match our locally-tracked group ID (manual
             //     `bridge fdb replace`, partial-failure carryover,
@@ -519,6 +571,8 @@ fn emit_fdb_nhg_pass(
                     mac,
                     group_key: linux_key,
                     members: canonical,
+                    standby,
+                    convert_from_dst: kernel_dst_row,
                 });
             }
         }
@@ -526,7 +580,7 @@ fn emit_fdb_nhg_pass(
 }
 
 /// Decide what to do when `desired` wants `(vni, mac) -> dst` and the
-/// kernel already has *some* entry there. Splits the five interesting
+/// kernel already has *some* entry there. Splits the six interesting
 /// cases:
 ///
 /// 1. We own it (`extern_learn` + `last_applied`) and dst matches — no-op.
@@ -538,11 +592,23 @@ fn emit_fdb_nhg_pass(
 ///    re-claim (ADR-0079 rule 2) — it flows through apply →
 ///    `record_success` → [`OwnedSet`], after which the row is ours
 ///    again and exempt from the adoption reap.
-/// 4. Foreign kernel-learned local MAC — log + skip; the upward
+/// 4. `extern_learn` with `nh_id` set — an NHG-shaped marker row
+///    (ours, by tag convention) where the desired shape is now a dst
+///    row: e.g. the daemon restarted while the ES degraded to one PE.
+///    `UpdateRemoteFdb`'s in-place REPLACE would be rejected by the
+///    kernel with `-EOPNOTSUPP` ("Cannot replace an existing nexthop
+///    fdb with a non nexthop fdb") and end up permanently suppressed,
+///    so emit an explicit per-row delete→add conversion pair instead
+///    (ADR-0083 row-shape hazard). `RemoveRemoteFdb` deletes by MAC
+///    regardless of row shape; there is no tracked group to unref in
+///    this lifetime (the drift sweep / adoption cleanup own the
+///    leftover NHG objects).
+/// 5. Foreign kernel-learned local MAC — log + skip; the upward
 ///    `LocalMacObservation` handles RFC 7432 §15 mobility resolution at
 ///    the domain layer.
-/// 5. Foreign static / permanent / `self` entry — operator territory;
+/// 6. Foreign static / permanent / `self` entry — operator territory;
 ///    skip without logging at warn level.
+#[allow(clippy::too_many_arguments)]
 fn handle_existing_kernel_entry(
     vni: EvpnInstanceId,
     mac: MacAddress,
@@ -550,8 +616,23 @@ fn handle_existing_kernel_entry(
     desired_dst: std::net::IpAddr,
     last_applied: &OwnedSet,
     updates: &mut Vec<DataplaneOp>,
+    conversions: &mut Vec<DataplaneOp>,
 ) {
     if kernel_entry.is_extern_learned() {
+        // Case 4: nhid-shaped marker row, dst-shaped desire. The
+        // owned-vs-crash-leftover distinction doesn't matter here —
+        // an in-place REPLACE is rejected either way; the conversion
+        // pair claims the row in the same breath (the Add lands in
+        // the OwnedSet via record_success).
+        if kernel_entry.nh_id.is_some() {
+            conversions.push(DataplaneOp::RemoveRemoteFdb { vni, mac });
+            conversions.push(DataplaneOp::AddRemoteFdb {
+                vni,
+                mac,
+                dst: desired_dst,
+            });
+            return;
+        }
         if last_applied.contains(vni, mac) {
             if kernel_entry.dst != Some(desired_dst) {
                 updates.push(DataplaneOp::UpdateRemoteFdb {
@@ -659,6 +740,7 @@ mod tests {
             mobility_sequence: seq,
             alias_vtep_ips: Vec::new(),
             alias_group_key: None,
+            single_active_backup_vtep_ip: None,
             source: RemoteMacSource::EvpnRibBestPath,
         }
     }
@@ -1158,6 +1240,7 @@ mod tests {
             mobility_sequence: None,
             alias_vtep_ips: aliases.iter().map(|s| ip(s)).collect(),
             alias_group_key: Some((esi(seg), EthernetTagId(0))),
+            single_active_backup_vtep_ip: None,
             source: RemoteMacSource::EvpnRibBestPath,
         }
     }
@@ -1169,7 +1252,11 @@ mod tests {
     #[test]
     fn transition_single_dst_owned_to_desired_fdb_nhg() {
         // Last applied: SingleDst → Desired: FdbNhg.
-        // Expect: RemoveRemoteFdb + InstallFdbNhg (in that order).
+        // Expect: one InstallFdbNhg with `convert_from_dst: true` —
+        // the kernel rejects in-place dst→nhid conversion with
+        // -EOPNOTSUPP, and the delete→add runs inside the one op so
+        // the gap stays per-MAC (ADR-0083 row-shape hazard), never
+        // batch-delete-then-batch-add.
         let mut desired = RemoteMacTable::builder();
         desired
             .insert(
@@ -1180,8 +1267,8 @@ mod tests {
             .unwrap();
         let desired = desired.build();
 
-        // Kernel still has the prior single-dst row — RemoveRemoteFdb
-        // is gated on snapshot presence to keep the op idempotent.
+        // Kernel still has the prior single-dst row — that presence
+        // is what arms `convert_from_dst`.
         let mut snapshot = KernelSnapshot::new();
         let mut e = ours("10.0.0.2");
         e.mac = mac(1);
@@ -1203,22 +1290,23 @@ mod tests {
             &EvpnInstanceTable::new(),
         );
 
-        // The plan should contain both a RemoveRemoteFdb (for the old
-        // single-dst row) and an InstallFdbNhg (for the new FDB-NHG).
+        // One conversion-flagged Install; no separate batched remove.
         assert!(
-            plan.ops
+            !plan
+                .ops
                 .iter()
-                .any(|o| matches!(o, DataplaneOp::RemoveRemoteFdb { vni: v, mac: m } if *v == vni(100) && *m == mac(1))),
-            "expected RemoveRemoteFdb in {:?}",
+                .any(|o| matches!(o, DataplaneOp::RemoveRemoteFdb { .. })),
+            "conversion must not batch a separate remove: {:?}",
             plan.ops,
         );
         assert!(
             plan.ops.iter().any(|o| matches!(
                 o,
-                DataplaneOp::InstallFdbNhg { vni: v, mac: m, group_key, .. }
-                    if *v == vni(100) && *m == mac(1) && *group_key == linux_key(100, 7),
+                DataplaneOp::InstallFdbNhg { vni: v, mac: m, group_key, convert_from_dst, .. }
+                    if *v == vni(100) && *m == mac(1) && *group_key == linux_key(100, 7)
+                        && *convert_from_dst,
             )),
-            "expected InstallFdbNhg in {:?}",
+            "expected InstallFdbNhg with convert_from_dst in {:?}",
             plan.ops,
         );
     }
@@ -1367,7 +1455,7 @@ mod tests {
         members.insert(ip("10.0.0.2"));
         members.insert(ip("10.0.0.3"));
         members.insert(ip("10.0.0.4"));
-        groups.record_group_install(linux_key(100, 7), 0x4000_0001, members);
+        groups.record_group_install(linux_key(100, 7), 0x4000_0001, members, None);
         groups.record_mac_ref(linux_key(100, 7), vni(100), mac(1));
 
         let plan = compute_diff(
@@ -1583,17 +1671,22 @@ mod tests {
         );
 
         assert!(
-            plan.ops
-                .iter()
-                .any(|o| matches!(o, DataplaneOp::RemoveRemoteFdb { vni: v, mac: m } if *v == vni(100) && *m == mac(1))),
-            "expected RemoveRemoteFdb in transition, got {:?}",
+            plan.ops.iter().any(|o| matches!(
+                o,
+                DataplaneOp::InstallFdbNhg {
+                    convert_from_dst: true,
+                    ..
+                }
+            )),
+            "expected conversion-flagged InstallFdbNhg in transition, got {:?}",
             plan.ops,
         );
         assert!(
-            plan.ops
+            !plan
+                .ops
                 .iter()
-                .any(|o| matches!(o, DataplaneOp::InstallFdbNhg { .. })),
-            "expected InstallFdbNhg in transition, got {:?}",
+                .any(|o| matches!(o, DataplaneOp::RemoveRemoteFdb { .. })),
+            "conversion must not batch a separate remove: {:?}",
             plan.ops,
         );
     }
@@ -1820,6 +1913,361 @@ mod tests {
             "off-switch must not record a misleading IPv6 fallback warning; \
              got fallback keys: {:?}",
             plan.ipv6_alias_fallback_keys,
+        );
+    }
+
+    // ─── ADR-0083 slice 2: single-active backup-path pre-install ───
+
+    /// Single-active entry shape: one-member group key (empty alias
+    /// list) + backup intent.
+    fn entry_single_active(remote: &str, backup: &str, seg: u8) -> RemoteMacEntry {
+        RemoteMacEntry {
+            remote_vtep_ip: ip(remote),
+            mobility_sequence: None,
+            alias_vtep_ips: Vec::new(),
+            alias_group_key: Some((esi(seg), EthernetTagId(0))),
+            single_active_backup_vtep_ip: Some(ip(backup)),
+            source: RemoteMacSource::EvpnRibBestPath,
+        }
+    }
+
+    #[test]
+    fn single_active_entry_emits_one_member_install_with_standby() {
+        let desired = desired_one(
+            vni(100),
+            mac(1),
+            entry_single_active("10.0.0.2", "10.0.0.3", 7),
+        );
+        let snapshot = KernelSnapshot::new();
+        let applied = OwnedSet::new();
+        let probes = ready_probes(&[vni(100)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
+        );
+
+        assert_eq!(
+            plan.ops,
+            vec![DataplaneOp::InstallFdbNhg {
+                vni: vni(100),
+                mac: mac(1),
+                group_key: linux_key(100, 7),
+                members: vec![ip("10.0.0.2")],
+                standby: Some(ip("10.0.0.3")),
+                convert_from_dst: false,
+            }],
+            "single-active install: one member (the active PE), the backup as standby"
+        );
+    }
+
+    #[test]
+    fn single_active_upgrade_conversion_sets_convert_from_dst() {
+        // Post-upgrade restart shape: the kernel holds the previous
+        // release's extern_learn single-dst row for a single-active
+        // MAC, OwnedSet is empty. The kernel rejects in-place
+        // dst→nhid conversion (-EOPNOTSUPP), so the Install must
+        // carry `convert_from_dst` — the per-row delete→add.
+        let desired = desired_one(
+            vni(100),
+            mac(1),
+            entry_single_active("10.0.0.2", "10.0.0.3", 7),
+        );
+        let mut snapshot = KernelSnapshot::new();
+        let mut e = ours("10.0.0.2");
+        e.mac = mac(1);
+        snapshot.insert_fdb(vni(100), e);
+        let applied = OwnedSet::new();
+        let probes = ready_probes(&[vni(100)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
+        );
+
+        assert!(
+            plan.ops.iter().any(|o| matches!(
+                o,
+                DataplaneOp::InstallFdbNhg {
+                    convert_from_dst: true,
+                    standby: Some(s),
+                    ..
+                } if *s == ip("10.0.0.3")
+            )),
+            "upgrade conversion must ride convert_from_dst, got {:?}",
+            plan.ops,
+        );
+        assert!(
+            !plan
+                .ops
+                .iter()
+                .any(|o| matches!(o, DataplaneOp::RemoveRemoteFdb { .. })),
+            "never batch-delete-then-batch-add: {:?}",
+            plan.ops,
+        );
+    }
+
+    #[test]
+    fn single_active_standby_drift_emits_update_with_new_standby() {
+        // Group exists with the right one-member set but the derived
+        // backup moved (eligible set changed) → UpdateFdbNhgMembers
+        // carrying the same members and the NEW standby.
+        let desired = desired_one(
+            vni(100),
+            mac(1),
+            entry_single_active("10.0.0.2", "10.0.0.4", 7),
+        );
+        let snapshot = {
+            let mut s = KernelSnapshot::new();
+            s.insert_fdb(
+                vni(100),
+                KernelFdbEntry {
+                    mac: mac(1),
+                    dst: None,
+                    nh_id: Some(0x4000_0001),
+                    protocol: None,
+                    flags: KernelFdbFlags {
+                        extern_learn: true,
+                        master: true,
+                        ..Default::default()
+                    },
+                },
+            );
+            s
+        };
+        let mut applied = OwnedSet::new();
+        applied.record_applied(vni(100), mac(1), OwnedEntry::fdb_nhg(linux_key(100, 7)));
+        let probes = ready_probes(&[vni(100)]);
+
+        let mut groups = GroupOwnedMap::new();
+        groups.record_member_install(ip("10.0.0.2"), 0x3000_0001);
+        groups.record_member_install(ip("10.0.0.3"), 0x3000_0002);
+        let mut members = std::collections::BTreeSet::new();
+        members.insert(ip("10.0.0.2"));
+        groups.record_group_install(
+            linux_key(100, 7),
+            0x4000_0001,
+            members,
+            Some(ip("10.0.0.3")),
+        );
+        groups.record_mac_ref(linux_key(100, 7), vni(100), mac(1));
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &groups,
+            &EvpnInstanceTable::new(),
+        );
+
+        assert_eq!(
+            plan.ops,
+            vec![DataplaneOp::UpdateFdbNhgMembers {
+                group_key: linux_key(100, 7),
+                members: vec![ip("10.0.0.2")],
+                standby: Some(ip("10.0.0.4")),
+            }],
+            "standby drift alone must re-emit the group update"
+        );
+    }
+
+    #[test]
+    fn single_active_steady_state_is_noop() {
+        // Group + standby tracked exactly as desired, kernel row
+        // points at the group → zero ops.
+        let desired = desired_one(
+            vni(100),
+            mac(1),
+            entry_single_active("10.0.0.2", "10.0.0.3", 7),
+        );
+        let snapshot = {
+            let mut s = KernelSnapshot::new();
+            s.insert_fdb(
+                vni(100),
+                KernelFdbEntry {
+                    mac: mac(1),
+                    dst: None,
+                    nh_id: Some(0x4000_0001),
+                    protocol: None,
+                    flags: KernelFdbFlags {
+                        extern_learn: true,
+                        master: true,
+                        ..Default::default()
+                    },
+                },
+            );
+            s
+        };
+        let mut applied = OwnedSet::new();
+        applied.record_applied(vni(100), mac(1), OwnedEntry::fdb_nhg(linux_key(100, 7)));
+        let probes = ready_probes(&[vni(100)]);
+
+        let mut groups = GroupOwnedMap::new();
+        groups.record_member_install(ip("10.0.0.2"), 0x3000_0001);
+        groups.record_member_install(ip("10.0.0.3"), 0x3000_0002);
+        let mut members = std::collections::BTreeSet::new();
+        members.insert(ip("10.0.0.2"));
+        groups.record_group_install(
+            linux_key(100, 7),
+            0x4000_0001,
+            members,
+            Some(ip("10.0.0.3")),
+        );
+        groups.record_mac_ref(linux_key(100, 7), vni(100), mac(1));
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &groups,
+            &EvpnInstanceTable::new(),
+        );
+        assert!(plan.is_noop(), "expected no-op, got {:?}", plan.ops);
+    }
+
+    #[test]
+    fn nhg_to_dst_conversion_pair_is_adjacent_per_mac() {
+        // Two MACs convert nhid→dst in the same pass (the ES degraded
+        // to one PE). Each MAC's RemoveFdbNhg must be IMMEDIATELY
+        // followed by its AddRemoteFdb — the gap stays per-MAC, never
+        // batch-delete-then-batch-add (ADR-0083 row-shape hazard).
+        let mut desired = RemoteMacTable::builder();
+        desired
+            .insert(vni(100), mac(1), entry("10.0.0.2", None))
+            .unwrap();
+        desired
+            .insert(vni(100), mac(2), entry("10.0.0.2", None))
+            .unwrap();
+        let desired = desired.build();
+
+        let snapshot = KernelSnapshot::new();
+        let mut applied = OwnedSet::new();
+        applied.record_applied(vni(100), mac(1), OwnedEntry::fdb_nhg(linux_key(100, 7)));
+        applied.record_applied(vni(100), mac(2), OwnedEntry::fdb_nhg(linux_key(100, 7)));
+        let probes = ready_probes(&[vni(100)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
+        );
+
+        assert_eq!(plan.ops.len(), 4, "two conversion pairs: {:?}", plan.ops);
+        for pair in plan.ops.chunks(2) {
+            let DataplaneOp::RemoveFdbNhg {
+                vni: rv, mac: rm, ..
+            } = &pair[0]
+            else {
+                panic!("pair must start with RemoveFdbNhg: {:?}", plan.ops);
+            };
+            let DataplaneOp::AddRemoteFdb {
+                vni: av, mac: am, ..
+            } = &pair[1]
+            else {
+                panic!("pair must end with AddRemoteFdb: {:?}", plan.ops);
+            };
+            assert_eq!((rv, rm), (av, am), "pair must target the same MAC");
+        }
+    }
+
+    #[test]
+    fn marker_nhid_row_with_dst_desire_converts_via_pair() {
+        // Crash-leftover NHG-shaped marker row + the desired shape is
+        // now single-dst (e.g. the ES degraded while the daemon was
+        // down). An in-place UpdateRemoteFdb REPLACE would be
+        // rejected with -EOPNOTSUPP and permanently suppressed; the
+        // diff must emit the explicit RemoveRemoteFdb → AddRemoteFdb
+        // pair instead.
+        let desired = desired_one(vni(100), mac(1), entry("10.0.0.2", None));
+        let mut snapshot = KernelSnapshot::new();
+        snapshot.insert_fdb(
+            vni(100),
+            KernelFdbEntry {
+                mac: mac(1),
+                dst: None,
+                nh_id: Some(0x4000_0001),
+                protocol: None,
+                flags: KernelFdbFlags {
+                    extern_learn: true,
+                    master: true,
+                    ..Default::default()
+                },
+            },
+        );
+        let applied = OwnedSet::new();
+        let probes = ready_probes(&[vni(100)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
+        );
+
+        assert_eq!(
+            plan.ops,
+            vec![
+                DataplaneOp::RemoveRemoteFdb {
+                    vni: vni(100),
+                    mac: mac(1),
+                },
+                DataplaneOp::AddRemoteFdb {
+                    vni: vni(100),
+                    mac: mac(1),
+                    dst: ip("10.0.0.2"),
+                },
+            ],
+            "nhid→dst over a marker row must be an adjacent delete→add pair"
+        );
+    }
+
+    #[test]
+    fn single_active_respects_apply_aliasing_ecmp_off_switch() {
+        // The per-VNI FDB-NHG off-switch governs single-active
+        // indirection too: the operator disabled the NHG machinery,
+        // so the entry falls back to a single-dst row at the active
+        // PE and no backup NH is pre-created.
+        let desired = desired_one(
+            vni(100),
+            mac(1),
+            entry_single_active("10.0.0.2", "10.0.0.3", 7),
+        );
+        let snapshot = KernelSnapshot::new();
+        let applied = OwnedSet::new();
+        let probes = ready_probes(&[vni(100)]);
+        let instances = instances_disabled(&[vni(100)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &instances,
+        );
+
+        assert_eq!(
+            plan.ops,
+            vec![DataplaneOp::AddRemoteFdb {
+                vni: vni(100),
+                mac: mac(1),
+                dst: ip("10.0.0.2"),
+            }],
         );
     }
 }

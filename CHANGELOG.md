@@ -11,6 +11,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN single-active backup-path dataplane pre-install (ADR-0083 slice
+  2).** Single-active remote MACs with at least one other eligible PE on
+  the segment now route through the FDB nexthop-group machinery instead
+  of plain single-dst rows: the projection gives each such MAC a
+  per-`(ESI, Ethernet Tag)` group key with a **one-member** desired
+  membership (the active PE), and the reconcile actor programs the
+  per-VTEP fdb nexthop for the active PE, **pre-creates the backup PE's
+  per-VTEP fdb nexthop** (so the future failover swap allocates nothing
+  — slice 3), installs the one-member group, and points the MAC rows at
+  it via `NDA_NH_ID`. The backup NH is deliberately *not* a group member
+  (the kernel hashes over all members; single-active means exactly one
+  egress forwards) — a new *standby* reference class in the dataplane's
+  group refcounting pins it while the `(ESI, Ethernet Tag)` intent
+  lives, exempts it from the orphan reap and the ADR-0059 drift sweep,
+  and reaps it when the intent disappears. Single-active MACs whose ES
+  has **no** other eligible PE keep today's single-dst rows (ADR-0083
+  decision 1's no-backup fallback); all-active aliasing and the
+  RFC 7432 §8.2 mass-withdraw flush are unchanged this slice (the
+  EAD-withdrawal swap reinterpretation is slice 3). NHG-backed rows stay
+  under the ADR-0059 drift sweep's jurisdiction — the ADR-0079
+  single-dst adoption sweep neither adopts nor reaps them.
+
 - **EVPN single-active eligible-PE set / backup-PE derivation (ADR-0083
   slice 1).** New pure-logic layer in `crates/evpn/src/aliasing.rs`
   (`SingleActiveEligibleIndex`, `SingleActiveBackupView`): for a
@@ -23,6 +45,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   EAD-withdrawal event path converge on the same answer. First of four
   ADR-0083 slices: derivation only — nothing consumes it yet, no
   dataplane or projection behavior change.
+
+### Changed
+
+- **Operator-visible row shape for single-active remote MACs (ADR-0083
+  slice 2).** `bridge fdb show` now reports `nhid <id>` (pointing at the
+  one-member group) instead of `dst <vtep>` for single-active MACs with
+  an eligible backup; `ip nexthop show` gains one group + up to two
+  per-VTEP fdb nexthops (active + pre-created backup) per single-active
+  `(ESI, Ethernet Tag)`. On upgrade, the first reconcile pass converts
+  each existing single-dst row with an explicit per-row delete→add (the
+  kernel rejects in-place `NDA_DST`→`NDA_NH_ID` conversion with
+  `-EOPNOTSUPP`), so the transient forwarding gap is bounded per MAC,
+  never per segment; the reverse conversion (segment degrades to one
+  PE / config removes it) runs the same per-row discipline through the
+  group-teardown path. The per-VNI `apply_aliasing_ecmp = false`
+  off-switch governs the single-active indirection too (falls back to
+  single-dst at the active PE, no backup pre-create).
 
 ## [0.38.0] — 2026-06-11
 
