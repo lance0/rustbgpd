@@ -12,11 +12,21 @@ impl PeerSession {
     /// liveness. A session task that parked on a blocking RIB delivery
     /// resumes with its hold deadline possibly in the past while the
     /// peer's KEEPALIVEs sit unread in the socket — expiring then would
-    /// blame the peer for our own backpressure. If bytes are pending
-    /// (in the read buffer, or readable from the socket right now),
-    /// process them — the FSM re-arms the hold timer per message — and
-    /// re-arm manually if only a partial message arrived. Only a truly
-    /// silent peer expires.
+    /// blame the peer for our own backpressure. If at least one
+    /// complete BGP frame is pending (in the read buffer, or readable
+    /// from the socket right now), process the buffer — the FSM re-arms
+    /// the hold timer per message — and re-arm manually if processing
+    /// left the timer stopped.
+    ///
+    /// Liveness is counted in complete frames, not raw bytes. RFC 4271
+    /// §4.4/§8 resets the hold timer on receipt of a complete message;
+    /// a received-but-unprocessed complete frame is therefore liveness
+    /// under our own backpressure stall, but a permanently incomplete
+    /// frame is not — counting raw bytes would let a peer that hangs
+    /// mid-frame while its kernel keeps acknowledging (half a BGP header, then
+    /// silence) re-arm forever and hold a zombie session open. FRR's
+    /// equivalent rule likewise counts parsed packets. Only a peer with
+    /// no complete frame outstanding expires.
     pub(super) async fn handle_hold_timer_expiry(&mut self) {
         if self.take_pending_input() {
             self.metrics
@@ -26,6 +36,20 @@ impl PeerSession {
                 "hold timer expired with unprocessed peer input pending; re-arming instead"
             );
             self.process_read_buffer().await;
+            // Processing may have torn the session down (the pending
+            // frame was a NOTIFICATION, or failed decode): the FSM has
+            // already stopped the hold timer and closed the connection
+            // (read half dropped). Re-arming then would plant a hold
+            // timer on the dead session; when it fired in Idle, the
+            // FSM would flag it as a stale-timer daemon bug and log a
+            // spurious warning. Take the silent path instead.
+            if self.read_half.is_none() {
+                debug!(
+                    peer = %self.peer_label,
+                    "session torn down while processing pending input; skipping hold re-arm"
+                );
+                return;
+            }
             if self.timers.hold.is_none()
                 && let Some(secs) = self.timers.last_hold_secs
             {
@@ -36,25 +60,45 @@ impl PeerSession {
         self.drive_fsm(Event::HoldTimerExpires).await;
     }
 
-    /// True when peer input is pending: leftover bytes in the read
-    /// buffer, or bytes readable from the socket right now (pulled into
-    /// the buffer non-blockingly so the caller can process them).
+    /// True when at least one complete BGP frame is pending: in the
+    /// read buffer, or completed by bytes readable from the socket
+    /// right now (pulled into the buffer non-blockingly so the caller
+    /// can process them).
+    ///
+    /// Completeness — `buf.len() >= length` for the header's declared
+    /// length — is the only check; marker/length validation stays with
+    /// the codec on the normal read path (a malformed header counts as
+    /// processable: the parser resolves it as a NOTIFICATION once
+    /// processing resumes). A partial frame is NOT liveness — see
+    /// [`Self::handle_hold_timer_expiry`].
     fn take_pending_input(&mut self) -> bool {
-        if !self.read_buf.buf.is_empty() {
+        if self.read_buf.has_complete_frame() {
             return true;
         }
         let Some(read_half) = self.read_half.as_ref() else {
             return false;
         };
+        // Drain everything the kernel has buffered, not one probe's
+        // worth: with Extended Messages (RFC 8654) a complete frame can
+        // be up to 65535 bytes, so a single 4096-byte read could leave
+        // a complete frame split between our buffer and the kernel's
+        // and wrongly expire a live peer. Bounded by the kernel receive
+        // buffer; stops early once a complete frame is found.
         let mut tmp = [0u8; 4096];
-        match read_half.try_read(&mut tmp) {
-            Ok(n) if n > 0 => {
-                self.read_buf.buf.extend_from_slice(&tmp[..n]);
-                true
+        loop {
+            match read_half.try_read(&mut tmp) {
+                Ok(n) if n > 0 => {
+                    self.read_buf.buf.extend_from_slice(&tmp[..n]);
+                    if self.read_buf.has_complete_frame() {
+                        return true;
+                    }
+                }
+                // Ok(0) is EOF — let the normal read arm observe and
+                // handle the disconnect; WouldBlock means the kernel
+                // buffer is drained. Either way the hold expiry stands
+                // unless a complete frame was already assembled.
+                _ => return self.read_buf.has_complete_frame(),
             }
-            // Ok(0) is EOF — let the normal read arm observe and handle
-            // the disconnect; the hold expiry stands.
-            _ => false,
         }
     }
 

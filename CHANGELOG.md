@@ -23,6 +23,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a foreign `proto static` route and a non-`extern_learn` neighbor untouched
   and all six `evpn_l3_*_adopted_total` / `_reaped_total` counters asserted.
 
+### Fixed
+
+- **Hold-expiry re-arm now requires a complete pending frame (ADR-0078).**
+  The hold-timer expiry handler treated ANY buffered or readable bytes as
+  peer liveness, so a peer whose application hung mid-frame while its kernel
+  kept ACKing (half a BGP header, then silence) re-armed the hold timer
+  forever — a zombie session that never expired. The pending-input check now
+  counts complete BGP frames (a full 19-byte header whose declared length
+  is fully buffered; a header the codec will reject as malformed also
+  counts, since resuming processing makes immediate progress on it),
+  matching RFC 4271's "hold timer resets on receipt of a
+  complete message" and FRR's parsed-packet rule; a permanently incomplete
+  frame lets the session expire. Frame completeness is the only check —
+  marker/length validation stays with the codec, so a malformed header still
+  resolves through the normal NOTIFICATION path.
+
 ## [0.37.0] — 2026-06-11
 
 ### Added

@@ -62,6 +62,27 @@ impl ReadBuffer {
         Ok(Some((msg, raw)))
     }
 
+    /// True when the buffer holds at least one complete BGP frame —
+    /// i.e. resuming [`Self::try_decode`] would make progress instead
+    /// of returning `Ok(None)` and waiting for more bytes.
+    ///
+    /// Completeness is the only question answered here; full validation
+    /// stays with the decode path. A malformed header (bad marker,
+    /// out-of-range length, unknown type) therefore counts as
+    /// "complete": processing it resolves the buffer through the
+    /// codec's NOTIFICATION path rather than stalling on more input.
+    #[must_use]
+    pub fn has_complete_frame(&self) -> bool {
+        match peek_message_length(&self.buf, self.max_message_len) {
+            Ok(Some(len)) => self.buf.len() >= usize::from(len),
+            // Fewer than 19 header bytes — nothing decodable yet.
+            Ok(None) => false,
+            // Malformed header: try_decode will surface the error
+            // immediately, so processing can make progress.
+            Err(_) => true,
+        }
+    }
+
     /// Clear all buffered data (e.g., after TCP disconnect).
     pub fn clear(&mut self) {
         self.buf.clear();
