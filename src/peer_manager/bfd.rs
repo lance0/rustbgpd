@@ -208,6 +208,16 @@ impl PeerManager {
             if let Some(c) = self.bfd_coupling.as_mut() {
                 c.held_down.remove(&peer);
             }
+            // A *deleted* peer's BFD session drains asynchronously, so
+            // its final AdminDown transition re-creates
+            // `bfd_session_up{peer}=0` after the delete-path reap. This
+            // handler runs after the actor's metric write, so re-reaping
+            // here makes removal the last word. A merely disabled peer
+            // still exists (`peer_keys_for_address` non-empty) and keeps
+            // its series.
+            if self.peer_keys_for_address(peer).is_empty() {
+                self.metrics.reap_peer_series(&peer.to_string());
+            }
             return;
         }
 

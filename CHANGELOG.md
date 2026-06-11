@@ -85,6 +85,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Deleted peers no longer leave stale per-peer Prometheus series behind.**
+  Every `peer`-labeled metric family (27 of them — session/FSM, message and
+  NOTIFICATION counters, Adj-RIB-In/Out gauges, policy/loop-detection/OTC
+  counters, graceful-restart and Enhanced Route Refresh gauges, BFD, BMP
+  source drops) now has its label sets removed when the peer is *deleted* —
+  static neighbor delete (CLI/gRPC/SIGHUP reload) and dynamic-peer
+  auto-removal alike. Previously a deleted peer's gauges froze at their last
+  value (e.g. a `bgp_session_established_total` series for a neighbor that
+  no longer exists) and misled dashboards forever after peer churn. Reaping
+  happens on deletion only: a session flap or admin disable keeps the peer's
+  history, and a reconfigure (delete-then-re-add reshape) routes around the
+  reap because the peer continues to exist. Process-global and
+  non-peer-labeled families (Loc-RIB, EVPN, FIB, BMP collector, event
+  outbox, …) are untouched. Prometheus marks the removed series stale at the
+  next scrape; if the same peer is later re-added, its counters restart from
+  zero, which `rate()` / `increase()` handle as an ordinary counter reset —
+  no negative-rate artifacts.
+
 - **Targeted peer-group RPCs now reshape members atomically (ADR-0081).**
   `SetPeerGroup`, `SetPeerGroupPreserveMd5`, `SetNeighborPeerGroup`, and
   `ClearNeighborPeerGroup` reshaped each affected static member with

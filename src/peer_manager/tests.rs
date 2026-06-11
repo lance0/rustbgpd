@@ -2267,6 +2267,252 @@ async fn delete_peer_drains_pending_inbound_candidate() {
     assert!(mgr.peer_key_for_session(2).is_none());
 }
 
+/// Number of metric series in the registry whose `peer` label equals
+/// `peer` (exact match), across all families.
+fn peer_metric_series_count(metrics: &BgpMetrics, peer: &str) -> usize {
+    metrics
+        .registry()
+        .gather()
+        .iter()
+        .flat_map(|family| family.get_metric().iter())
+        .filter(|metric| {
+            metric
+                .get_label()
+                .iter()
+                .any(|label| label.name() == "peer" && label.value() == peer)
+        })
+        .count()
+}
+
+/// Seed per-peer series under both label forms used at runtime: the
+/// transport sessions label `peer` with the remote `SocketAddr`, the
+/// RIB manager and BFD runtime with the bare address.
+fn seed_peer_metric_series(metrics: &BgpMetrics, transport_label: &str, bare_label: &str) {
+    metrics.record_state_transition(transport_label, "open_confirm", "established");
+    metrics.record_message_sent(transport_label, "keepalive");
+    metrics.set_rib_prefixes(bare_label, "ipv4_unicast", 42);
+    metrics.record_bfd_state(bare_label, true, false);
+}
+
+#[tokio::test]
+async fn delete_peer_reaps_metric_series() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let metrics_view = metrics.clone();
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(peer_addr, SessionState::Established, None, counters.clone()),
+        false,
+    );
+    let transport_label = mgr
+        .peers
+        .get(&key(peer_addr))
+        .unwrap()
+        .transport_config
+        .remote_addr
+        .to_string();
+    seed_peer_metric_series(&metrics_view, &transport_label, "10.0.0.2");
+    metrics_view.record_fib_route_installed(); // process-global counter
+    assert!(peer_metric_series_count(&metrics_view, &transport_label) > 0);
+    assert!(peer_metric_series_count(&metrics_view, "10.0.0.2") > 0);
+
+    mgr.delete_peer(key(peer_addr), false).await.unwrap();
+
+    // Both label forms are gone; process-global counters are untouched.
+    assert_eq!(peer_metric_series_count(&metrics_view, &transport_label), 0);
+    assert_eq!(peer_metric_series_count(&metrics_view, "10.0.0.2"), 0);
+    let fib_installed = metrics_view
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_fib_routes_installed_total")
+        .expect("global counter family present");
+    assert!((fib_installed.get_metric()[0].get_counter().value() - 1.0).abs() < f64::EPSILON);
+    // The ordered RIB-side reap marker was queued.
+    let update = rib_rx.try_recv().expect("PeerDeleted queued for the RIB");
+    assert!(matches!(update, RibUpdate::PeerDeleted { peer } if peer == peer_addr));
+}
+
+#[tokio::test]
+async fn session_flap_does_not_reap_metric_series() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let metrics_view = metrics.clone();
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(peer_addr, SessionState::Idle, None, counters.clone()),
+        false,
+    );
+    let transport_label = mgr
+        .peers
+        .get(&key(peer_addr))
+        .unwrap()
+        .transport_config
+        .remote_addr
+        .to_string();
+    seed_peer_metric_series(&metrics_view, &transport_label, "10.0.0.2");
+    metrics_view.record_state_transition(&transport_label, "established", "idle");
+    let before_transport = peer_metric_series_count(&metrics_view, &transport_label);
+    let before_bare = peer_metric_series_count(&metrics_view, "10.0.0.2");
+
+    // A static peer's session flap (BackToIdle) must keep its history.
+    mgr.handle_session_notification(SessionNotification::BackToIdle {
+        session_id: 1,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr,
+    })
+    .await;
+
+    assert!(mgr.peers.contains_key(&key(peer_addr)));
+    assert_eq!(
+        peer_metric_series_count(&metrics_view, &transport_label),
+        before_transport
+    );
+    assert_eq!(
+        peer_metric_series_count(&metrics_view, "10.0.0.2"),
+        before_bare
+    );
+    assert!(rib_rx.try_recv().is_err(), "no PeerDeleted on a flap");
+}
+
+#[tokio::test]
+async fn reconfigure_peer_does_not_reap_metric_series() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let metrics_view = metrics.clone();
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(peer_addr, SessionState::Established, None, counters.clone()),
+        false,
+    );
+    let transport_label = mgr
+        .peers
+        .get(&key(peer_addr))
+        .unwrap()
+        .transport_config
+        .remote_addr
+        .to_string();
+    seed_peer_metric_series(&metrics_view, &transport_label, "10.0.0.2");
+    let before_transport = peer_metric_series_count(&metrics_view, &transport_label);
+    let before_bare = peer_metric_series_count(&metrics_view, "10.0.0.2");
+
+    // Reconfigure routes through the same delete primitive, but the
+    // peer continues to exist — its series and history must survive.
+    let mut new_config = make_config(peer_addr, 65002);
+    new_config.description = "reshaped".to_string();
+    mgr.reconfigure_peer(new_config).await.unwrap();
+
+    assert!(mgr.peers.contains_key(&key(peer_addr)));
+    assert_eq!(
+        peer_metric_series_count(&metrics_view, &transport_label),
+        before_transport
+    );
+    assert_eq!(
+        peer_metric_series_count(&metrics_view, "10.0.0.2"),
+        before_bare
+    );
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "no PeerDeleted on a reconfigure"
+    );
+}
+
+#[tokio::test]
+async fn dynamic_peer_auto_removal_reaps_metric_series() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let metrics_view = metrics.clone();
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(peer_addr, SessionState::Idle, None, counters.clone()),
+        false,
+    );
+    mgr.peers.get_mut(&key(peer_addr)).unwrap().is_dynamic = true;
+    mgr.dynamic_peer_count = 1;
+    let transport_label = mgr
+        .peers
+        .get(&key(peer_addr))
+        .unwrap()
+        .transport_config
+        .remote_addr
+        .to_string();
+    seed_peer_metric_series(&metrics_view, &transport_label, "10.0.0.2");
+
+    // Auto-removal on idle is a full deletion for a dynamic peer.
+    mgr.handle_session_notification(SessionNotification::BackToIdle {
+        session_id: 1,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr,
+    })
+    .await;
+
+    assert!(mgr.peers.is_empty());
+    assert_eq!(peer_metric_series_count(&metrics_view, &transport_label), 0);
+    assert_eq!(peer_metric_series_count(&metrics_view, "10.0.0.2"), 0);
+    let update = rib_rx.try_recv().expect("PeerDeleted queued for the RIB");
+    assert!(matches!(update, RibUpdate::PeerDeleted { peer } if peer == peer_addr));
+}
+
 #[tokio::test]
 async fn delete_tcp_ao_peer_is_restart_required() {
     let (tx, rx) = mpsc::channel(16);

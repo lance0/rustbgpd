@@ -343,6 +343,20 @@ Metrics are exposed on the Prometheus endpoint if `prometheus_addr` is
 configured. If omitted, metrics are still collected internally and available
 via gRPC `GetMetrics` and `GetHealth` RPCs.
 
+### Per-peer series lifecycle
+
+All `peer`-labeled series are removed when the peer is **deleted** — a static
+neighbor delete (CLI/gRPC/config reload) or a dynamic peer's auto-removal
+when its session ends. Prometheus marks the removed series stale at the next
+scrape, so deleted peers stop appearing in instant queries instead of
+freezing at their last value. A session flap or admin disable does *not*
+remove anything: a flapping peer keeps its counters and history. If a deleted
+peer is later re-added, its per-peer counters restart from zero — PromQL
+`rate()` / `increase()` treat that as an ordinary counter reset, so
+dashboards see no negative-rate artifacts. Process-global counters and
+families keyed by other identities (AFI/SAFI, VRF, VNI, BMP collector) are
+never removed.
+
 ### Health
 
 | Metric | What it tells you |

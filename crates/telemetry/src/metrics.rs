@@ -13,6 +13,12 @@ use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registr
 /// Label values are plain strings — this crate has no dependency on
 /// `rustbgpd-fsm` or `rustbgpd-wire`.  Callers pass `state.as_str()`,
 /// `"keepalive"`, etc.
+///
+/// **Adding a `peer`-labeled Vec metric?** Add it to the reap list in
+/// [`Self::reap_peer_series`] too, so the series are removed when the
+/// peer is deleted. Families without a `peer` label are process-global
+/// (or keyed by another identity such as VNI, VRF, or BMP collector)
+/// and are intentionally not reaped.
 #[derive(Debug, Clone)]
 pub struct BgpMetrics {
     registry: Registry,
@@ -1240,6 +1246,109 @@ impl BgpMetrics {
     #[must_use]
     pub fn registry(&self) -> &Registry {
         &self.registry
+    }
+
+    // ── Per-peer series reaping ────────────────────────────────────
+
+    /// Remove every series whose `peer` label equals `peer`, across all
+    /// peer-labeled metric families (gauges and counters alike).
+    ///
+    /// Call this only when a peer is **deleted** — never on a session
+    /// flap or admin disable, where the peer still exists and must keep
+    /// its history. Removing a label set makes Prometheus mark the
+    /// series stale at the next scrape; if the same peer is later
+    /// re-added, its counters restart from zero, which `rate()` /
+    /// `increase()` handle as an ordinary counter reset.
+    ///
+    /// Matching is exact on the label string. Callers that emit the
+    /// peer under more than one formatting (e.g. bare address vs
+    /// address:port) must call this once per form.
+    ///
+    /// Reaping a peer with no live series is a no-op.
+    ///
+    /// REAP LIST — keep in sync with the `peer`-labeled Vec fields on
+    /// [`BgpMetrics`] (see the struct doc comment).
+    pub fn reap_peer_series(&self, peer: &str) {
+        Self::reap_peer_series_from_vec(&self.state_transitions, peer);
+        Self::reap_peer_series_from_vec(&self.session_flaps, peer);
+        Self::reap_peer_series_from_vec(&self.session_established, peer);
+        Self::reap_peer_series_from_vec(&self.stale_timer_events, peer);
+        Self::reap_peer_series_from_vec(&self.bfd_session_up, peer);
+        Self::reap_peer_series_from_vec(&self.bfd_session_flaps_total, peer);
+        Self::reap_peer_series_from_vec(&self.notifications_sent, peer);
+        Self::reap_peer_series_from_vec(&self.notifications_received, peer);
+        Self::reap_peer_series_from_vec(&self.messages_sent, peer);
+        Self::reap_peer_series_from_vec(&self.messages_received, peer);
+        Self::reap_peer_series_from_vec(&self.rib_prefixes, peer);
+        Self::reap_peer_series_from_vec(&self.rib_adj_out_prefixes, peer);
+        Self::reap_peer_series_from_vec(&self.max_prefix_exceeded, peer);
+        Self::reap_peer_series_from_vec(&self.outbound_route_drops, peer);
+        Self::reap_peer_series_from_vec(&self.inbound_rib_backpressure, peer);
+        Self::reap_peer_series_from_vec(&self.hold_timer_rearmed_pending_input, peer);
+        Self::reap_peer_series_from_vec(&self.as_path_loop_detected, peer);
+        Self::reap_peer_series_from_vec(&self.rr_loop_detected, peer);
+        Self::reap_peer_series_from_vec(&self.otc_routes_blocked, peer);
+        Self::reap_peer_series_from_vec(&self.role_mismatch, peer);
+        Self::reap_peer_series_from_vec(&self.policy_routes, peer);
+        Self::reap_peer_series_from_vec(&self.gr_active_peers, peer);
+        Self::reap_peer_series_from_vec(&self.gr_stale_routes, peer);
+        Self::reap_peer_series_from_vec(&self.gr_timer_expired, peer);
+        Self::reap_peer_series_from_vec(&self.route_refresh_in_progress, peer);
+        Self::reap_peer_series_from_vec(&self.route_refresh_stale_entries, peer);
+        Self::reap_peer_series_from_vec(&self.bmp_source_drops, peer);
+    }
+
+    /// Remove every series of one Vec metric whose `peer` label equals
+    /// `peer`.
+    ///
+    /// The prometheus crate has no wildcard removal —
+    /// `remove_label_values` needs the exact, complete label-value
+    /// tuple in the declared label order. So: collect the family proto,
+    /// select the metrics whose `peer` label matches, rebuild each full
+    /// tuple in the order of the family's declared `variable_labels`
+    /// (the proto sorts label pairs by name, which may differ), and
+    /// remove them one by one.
+    fn reap_peer_series_from_vec<T: prometheus::core::MetricVecBuilder>(
+        vec: &prometheus::core::MetricVec<T>,
+        peer: &str,
+    ) {
+        use prometheus::core::Collector;
+
+        let descs = vec.desc();
+        let Some(desc) = descs.first() else {
+            return;
+        };
+        for family in vec.collect() {
+            for metric in family.get_metric() {
+                let labels = metric.get_label();
+                if !labels
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer)
+                {
+                    continue;
+                }
+                // Every declared variable label must be present on the
+                // metric; a missing one would make the rebuilt tuple
+                // alias a different series whose label value is
+                // legitimately empty, so skip rather than guess.
+                let Some(values) = desc
+                    .variable_labels
+                    .iter()
+                    .map(|name| {
+                        labels
+                            .iter()
+                            .find(|label| label.name() == name.as_str())
+                            .map(prometheus::proto::LabelPair::value)
+                    })
+                    .collect::<Option<Vec<&str>>>()
+                else {
+                    continue;
+                };
+                // Removal can only fail for a tuple that no longer
+                // exists (e.g. removed concurrently) — ignore.
+                let _ = vec.remove_label_values(&values);
+            }
+        }
     }
 
     // ── Recording methods ──────────────────────────────────────────
@@ -2784,6 +2893,160 @@ mod tests {
             .with_label_values(&["127.0.0.1:5000", "collector_connected", "channel_closed"])
             .get();
         assert_eq!(closed, 1);
+    }
+
+    /// Populate every peer-labeled family for `peer` through the public
+    /// recording surface. Doubles as the sync guard for the reap list:
+    /// if a future peer-labeled family is added here but not to
+    /// `reap_peer_series`, `reap_peer_series_removes_every_peer_labeled_family`
+    /// fails.
+    fn populate_all_peer_families(m: &BgpMetrics, peer: &str) {
+        // state_transitions + session_flaps + session_established
+        m.record_state_transition(peer, "open_confirm", "established");
+        m.record_state_transition(peer, "established", "idle");
+        m.record_stale_timer_event(peer, "idle", "hold");
+        m.record_bfd_state(peer, true, false);
+        m.record_bfd_state(peer, false, true); // bfd flap counter
+        m.record_notification_sent(peer, "6", "0");
+        m.record_notification_received(peer, "4", "0");
+        m.record_message_sent(peer, "keepalive");
+        m.record_message_received(peer, "update");
+        m.set_rib_prefixes(peer, "ipv4_unicast", 42);
+        m.set_adj_rib_out_prefixes(peer, "ipv4_unicast", 7);
+        m.record_max_prefix_exceeded(peer);
+        m.record_outbound_route_drop(peer);
+        m.record_inbound_rib_backpressure(peer);
+        m.record_hold_timer_rearmed_pending_input(peer);
+        m.record_as_path_loop_detected(peer, 3);
+        m.record_rr_loop_detected(peer);
+        m.record_otc_routes_blocked(peer, "ingress_peer_mismatch", 2);
+        m.record_role_mismatch(peer, "provider", "provider");
+        m.record_policy_routes(peer, "ingress-filter", "import", "permit");
+        m.set_gr_active(peer, true);
+        m.set_gr_stale_routes(peer, 5);
+        m.record_gr_timer_expired(peer);
+        m.set_route_refresh_in_progress(peer, "ipv4_unicast", true);
+        m.set_route_refresh_stale_entries(peer, "ipv4_unicast", 9);
+        m.record_bmp_source_drop(peer, "channel_full");
+    }
+
+    /// Series (family name + label set) in the registry whose `peer`
+    /// label equals `peer`.
+    fn series_for_peer(m: &BgpMetrics, peer: &str) -> Vec<String> {
+        m.registry()
+            .gather()
+            .into_iter()
+            .flat_map(|family| {
+                let name = family.name().to_string();
+                family
+                    .get_metric()
+                    .iter()
+                    .filter(|metric| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|label| label.name() == "peer" && label.value() == peer)
+                    })
+                    .map(|_| name.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reap_peer_series_removes_every_peer_labeled_family() {
+        let m = BgpMetrics::new();
+        populate_all_peer_families(&m, "10.0.0.1");
+        populate_all_peer_families(&m, "10.0.0.2");
+        // 27 peer-labeled families; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 28);
+
+        m.reap_peer_series("10.0.0.1");
+
+        let leftovers = series_for_peer(&m, "10.0.0.1");
+        assert!(
+            leftovers.is_empty(),
+            "peer-labeled families not reaped: {leftovers:?}"
+        );
+        // The other peer's series are untouched.
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 28);
+    }
+
+    #[test]
+    fn reap_peer_series_spares_other_peers_and_global_counters() {
+        let m = BgpMetrics::new();
+        // One gauge family, one counter family, one multi-label family,
+        // for two peers each.
+        m.set_gr_active("10.0.0.1", true);
+        m.set_gr_active("10.0.0.2", true);
+        m.record_max_prefix_exceeded("10.0.0.1");
+        m.record_max_prefix_exceeded("10.0.0.2");
+        m.record_state_transition("10.0.0.1", "idle", "connect");
+        m.record_state_transition("10.0.0.1", "open_confirm", "established");
+        m.record_state_transition("10.0.0.2", "idle", "connect");
+        // Process-global counters must be untouched.
+        m.record_fib_route_installed();
+        m.record_event_outbox_cursor_gap();
+
+        m.reap_peer_series("10.0.0.1");
+
+        let text = gather_text(&m);
+        assert!(
+            !text.contains("10.0.0.1"),
+            "reaped peer still present in exposition:\n{text}"
+        );
+        assert!(text.contains(r#"bgp_gr_active_peers{peer="10.0.0.2"} 1"#));
+        assert!(text.contains(r#"bgp_max_prefix_exceeded_total{peer="10.0.0.2"} 1"#));
+        assert!(text.contains(r#"peer="10.0.0.2""#));
+        assert!(text.contains("bgp_fib_routes_installed_total 1"));
+        assert!(text.contains("bgp_event_outbox_cursor_gap_total 1"));
+    }
+
+    #[test]
+    fn reap_peer_series_removes_all_label_combinations_for_peer() {
+        let m = BgpMetrics::new();
+        // Multi-label family with several combinations per peer.
+        m.record_message_sent("10.0.0.1", "open");
+        m.record_message_sent("10.0.0.1", "keepalive");
+        m.record_message_sent("10.0.0.1", "update");
+        m.record_message_sent("10.0.0.2", "keepalive");
+
+        m.reap_peer_series("10.0.0.1");
+
+        let family = m
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|f| f.name() == "bgp_messages_sent_total")
+            .expect("family present");
+        assert_eq!(family.get_metric().len(), 1);
+        assert!(
+            family.get_metric()[0]
+                .get_label()
+                .iter()
+                .any(|l| l.name() == "peer" && l.value() == "10.0.0.2")
+        );
+    }
+
+    #[test]
+    fn reap_peer_series_without_series_is_noop() {
+        let m = BgpMetrics::new();
+        // Nothing recorded at all — must not panic.
+        m.reap_peer_series("192.0.2.99");
+        // Series exist, but none for the reaped peer.
+        m.record_state_transition("10.0.0.1", "idle", "connect");
+        m.reap_peer_series("192.0.2.99");
+        assert_eq!(
+            m.state_transitions
+                .with_label_values(&["10.0.0.1", "idle", "connect"])
+                .get(),
+            1
+        );
+        // Reaping the same peer twice is also a no-op.
+        m.reap_peer_series("10.0.0.1");
+        m.reap_peer_series("10.0.0.1");
+        let text = gather_text(&m);
+        assert!(!text.contains("10.0.0.1"));
     }
 
     #[test]

@@ -66,6 +66,21 @@ impl RibManager {
         self.clear_peer_refresh_metrics(peer);
     }
 
+    /// Handle a peer *deletion* (the neighbor was removed from the
+    /// configuration — not a session flap, which keeps its series).
+    ///
+    /// The delete path queues this after the session's own `PeerDown`,
+    /// so the per-peer teardown above (zeroed gauges, cleared maps) has
+    /// already run when this arrives; re-running it here is a cheap
+    /// no-op safety net for a peer that was deleted while never
+    /// established. Afterwards, remove the deleted peer's metric label
+    /// sets entirely — gauges frozen at their last value would
+    /// otherwise keep advertising a peer that no longer exists.
+    pub(super) fn handle_peer_deleted(&mut self, peer: IpAddr) {
+        self.handle_peer_down(peer);
+        self.metrics.reap_peer_series(&peer.to_string());
+    }
+
     /// Clear the per-session outbound state shared by the `PeerDown` and
     /// graceful-restart teardown paths. Keeping ONE list prevents the two
     /// cleanup sites from drifting — the GR path historically missed maps
