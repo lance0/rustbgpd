@@ -149,7 +149,15 @@ the sweep model is left as a future simplification, not a requirement.
   daemon is down, restart with a short deferral via
   `RUSTBGPD_EVPN_ADOPTION_REAP_DEFERRAL_SECS` — still-desired row
   held continuously, unclaimed row reaped, foreign rows untouched.
-  The blackhole and L3 kill-and-restart proofs are still open.
+  The L3 slice is proven the same way by the M61 containerlab job
+  (`test-m61-evpn-l3-adoption-sweep.sh`, same workflow): two
+  FRR-originated Type 5 prefixes over the M48 symmetric-IRB
+  topology, one withdrawn while the daemon is down — the surviving
+  VRF route plus the shared L3 neighbor / L3VXLAN FDB resolution
+  rows held continuously, the unclaimed route reaped, foreign
+  `proto static` route and non-`extern_learn` neighbor rows
+  untouched, all six `evpn_l3_*` counters asserted. The blackhole
+  kill-and-restart proof is still open.
 - The per-table set-based unicast signature ends the
   quarantine-freeze-on-edit class without weakening the value-match
   adoption rule.
