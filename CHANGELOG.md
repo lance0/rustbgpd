@@ -46,6 +46,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a foreign `proto static` route and a non-`extern_learn` neighbor untouched
   and all six `evpn_l3_*_adopted_total` / `_reaped_total` counters asserted.
 
+- **M62 kill-and-restart interop proof for the ADR-0079 blackhole sweep.**
+  New `kernel-dataplane` CI job closing the last open ADR-0079 proof item
+  (the blackhole slice — the worst failure mode — had only in-memory
+  coverage): rustbgpd installs two FRR-tagged RFC 7999 host routes as kernel
+  `RTN_BLACKHOLE` + `RTPROT_BGP` discards over the M41 topology, is
+  SIGKILLed (the netns and its discard rows survive), one prefix is
+  withdrawn while the daemon is down, and the restart proves the
+  still-desired discard stays present continuously while the unclaimed row
+  surfaces as `adopted_pending_reap` and is reaped only after the deferral —
+  with a foreign `proto static` blackhole row untouched and the
+  `bgp_blackhole_discard_adopted_total` / `_reaped_total` counters asserted.
+  The blackhole deferral gains the same test/operational escape hatch the
+  EVPN sweeps have: `RUSTBGPD_BLACKHOLE_ADOPTION_REAP_DEFERRAL_SECS`
+  overrides the 500 s default at actor startup (unset or invalid values keep
+  the default).
+
 ### Fixed
 
 - **Targeted peer-group RPCs now reshape members atomically (ADR-0081).**

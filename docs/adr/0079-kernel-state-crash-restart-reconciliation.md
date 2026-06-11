@@ -164,7 +164,15 @@ the sweep model is left as a future simplification, not a requirement.
   rows held continuously, the unclaimed route reaped, foreign
   `proto static` route and non-`extern_learn` neighbor rows
   untouched, all six `evpn_l3_*` counters asserted. The blackhole
-  kill-and-restart proof is still open.
+  slice is proven by the M62 containerlab job
+  (`test-m62-blackhole-adoption-sweep.sh`, same workflow): two
+  FRR-tagged RFC 7999 host routes installed as kernel discards over
+  the M41 topology, one withdrawn while the daemon is down — the
+  surviving discard held continuously, the unclaimed row surfaced as
+  `adopted_pending_reap` then reaped after the deferral (shortened
+  via `RUSTBGPD_BLACKHOLE_ADOPTION_REAP_DEFERRAL_SECS`), a foreign
+  `proto static` blackhole row untouched, both
+  `bgp_blackhole_discard_*` adoption counters asserted.
 - The per-table set-based unicast signature ends the
   quarantine-freeze-on-edit class without weakening the value-match
   adoption rule.

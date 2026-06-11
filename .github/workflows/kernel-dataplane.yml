@@ -165,6 +165,20 @@ jobs:
           topology: tests/interop/m61-evpn-l3-adoption-sweep.clab.yml
           script: tests/interop/scripts/test-m61-evpn-l3-adoption-sweep.sh
 
+  m62:
+    name: M62 — ADR-0079 blackhole adoption sweep kill-and-restart (FRR 10.3.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-dataplane-host
+      - name: Run M62 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M62
+          topology: tests/interop/m62-blackhole-adoption-sweep.clab.yml
+          script: tests/interop/scripts/test-m62-blackhole-adoption-sweep.sh
+
   m40:
     name: M40 — ADR-0059 aliasing dataplane ECMP (FRR EVPN-MH 10.3.1)
     runs-on: ubuntu-latest
