@@ -75,7 +75,8 @@
 //!   it under `IpVrfStatus::Ready`).
 //!
 //! Other modules: `aliasing` (canonical alias VTEP set per
-//! `RemoteMacEntry`), `df_election` (Gate 8 RFC 7432 §8.5),
+//! `RemoteMacEntry`, plus the ADR-0083 single-active eligible-set /
+//! backup-PE derivation), `df_election` (Gate 8 RFC 7432 §8.5),
 //! `label_allocator` (Gate 8b per-ESI EVPN label),
 //! `mass_withdraw` (Gate 8b RFC 7432 §8.4 receive-side filter),
 //! `projection` (RIB → `RemoteMacTable` with same-AF
@@ -107,7 +108,10 @@ pub mod route_target;
 pub mod runtime;
 pub mod segment;
 
-pub use aliasing::{AliasEadPerEvi, AliasIndex, alias_resolved_next_hops, group_members};
+pub use aliasing::{
+    AliasEadPerEvi, AliasIndex, EadPerEsMode, SingleActiveBackupView, SingleActiveEligibleIndex,
+    alias_resolved_next_hops, group_members,
+};
 pub use dataplane::{
     AppliedOp, BumEnforcementEntry, BumEnforcementKey, BumEnforcementReadiness,
     BumEnforcementStatus, BumEnforcementTable, BumForwardingAction, DataplaneIntent,
