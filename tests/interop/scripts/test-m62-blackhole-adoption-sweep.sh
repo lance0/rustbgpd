@@ -74,7 +74,7 @@ rb_route() {
 # Any blackhole row for the prefix, regardless of proto.
 kernel_blackhole_present() {
     local prefix=${1:?}
-    rb_route "$prefix" | grep -Eq "^blackhole ${prefix%/*}\b"
+    rb_route "$prefix" | grep -Eq "^blackhole ${prefix%/*}( |$)"
 }
 
 # A blackhole row carrying our ownership marker (RTN_BLACKHOLE +
@@ -82,15 +82,15 @@ kernel_blackhole_present() {
 # knows 186 and as the raw number otherwise — accept both.
 kernel_blackhole_marker_present() {
     local prefix=${1:?}
-    rb_route "$prefix" | grep -E "^blackhole ${prefix%/*}\b" \
-        | grep -Eq 'proto (bgp|186)\b'
+    rb_route "$prefix" | grep -E "^blackhole ${prefix%/*}( |$)" \
+        | grep -Eq 'proto (bgp|186)( |$)'
 }
 
 # The foreign row must keep its non-marker proto.
 kernel_blackhole_foreign_present() {
     local prefix=${1:?}
-    rb_route "$prefix" | grep -E "^blackhole ${prefix%/*}\b" \
-        | grep -Eq 'proto (static|4)\b'
+    rb_route "$prefix" | grep -E "^blackhole ${prefix%/*}( |$)" \
+        | grep -Eq 'proto (static|4)( |$)'
 }
 
 grpc_blackholes() {
