@@ -1001,6 +1001,60 @@ fn resolve_worker_threads_from(env: Option<String>, configured: Option<usize>) -
         .min(DEFAULT_WORKER_THREAD_CAP)
 }
 
+/// Production capacity of the transport→RIB update channel. ADR-0078
+/// made overflow a pacing knob (session tasks block, never drop), so
+/// this bounds in-flight inbound work, not correctness.
+const RIB_CHANNEL_CAPACITY: usize = 4096;
+
+/// Test-only override for [`RIB_CHANNEL_CAPACITY`] (ADR-0078 fault
+/// injection). Filling the production 4096-slot channel against a real
+/// peer would need thousands of in-flight UPDATE batches; the M63
+/// interop smoke shrinks the channel so a modest stalled flood
+/// saturates it deterministically and the block-never-drop path is
+/// observable. Never set this in production. Read once at startup;
+/// unset, zero, or unparseable values keep the production capacity.
+const TEST_RIB_CHANNEL_CAPACITY_ENV: &str = "RUSTBGPD_TEST_RIB_CHANNEL_CAPACITY";
+
+/// Resolve the RIB channel capacity: [`TEST_RIB_CHANNEL_CAPACITY_ENV`]
+/// (if a positive integer) overrides the production default.
+fn resolve_rib_channel_capacity() -> usize {
+    let env = match std::env::var(TEST_RIB_CHANNEL_CAPACITY_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            warn!("ignoring non-unicode {TEST_RIB_CHANNEL_CAPACITY_ENV}");
+            None
+        }
+    };
+    let capacity = resolve_rib_channel_capacity_from(env.as_deref());
+    if capacity != RIB_CHANNEL_CAPACITY {
+        warn!(
+            capacity,
+            "{TEST_RIB_CHANNEL_CAPACITY_ENV} active: RIB channel capacity overridden \
+             (ADR-0078 fault injection — test use only, never set in production)"
+        );
+    }
+    capacity
+}
+
+/// Pure core of [`resolve_rib_channel_capacity`] with the environment
+/// value injected, so the parse rule (positive usize → override,
+/// anything else → production default) is unit-testable without
+/// touching process-global env state.
+fn resolve_rib_channel_capacity_from(env: Option<&str>) -> usize {
+    if let Some(raw) = env {
+        match raw.trim().parse::<usize>() {
+            Ok(n) if n > 0 => return n,
+            Ok(_) => {}
+            Err(_) => warn!(
+                value = %raw,
+                "ignoring invalid {TEST_RIB_CHANNEL_CAPACITY_ENV} (expected a positive integer)"
+            ),
+        }
+    }
+    RIB_CHANNEL_CAPACITY
+}
+
 #[expect(clippy::too_many_lines)]
 async fn run<T>(mut config: Config, profiler: Option<T>) {
     // Snapshot the gRPC listener config as it was at process start.
@@ -1162,7 +1216,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // event sink so route + EVPN events flow into the durable
     // outbox alongside the existing process-local ring + broadcast.
     let cluster_id = config.cluster_id();
-    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4096);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(resolve_rib_channel_capacity());
     let (rib_query_tx, rib_query_rx) = mpsc::channel::<RibUpdate>(256);
     let mut rib_manager = RibManager::new(
         rib_rx,
@@ -2684,6 +2738,35 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
         // no env, no config → capped default in [1, 8].
         let default = resolve_worker_threads_from(None, None);
         assert!((1..=DEFAULT_WORKER_THREAD_CAP).contains(&default));
+    }
+
+    #[test]
+    fn rib_channel_capacity_override_parse_rules() {
+        // Unset → production default.
+        assert_eq!(
+            resolve_rib_channel_capacity_from(None),
+            RIB_CHANNEL_CAPACITY
+        );
+        // Valid positive integer → override, whitespace tolerated.
+        assert_eq!(resolve_rib_channel_capacity_from(Some("2")), 2);
+        assert_eq!(resolve_rib_channel_capacity_from(Some(" 16 ")), 16);
+        // Zero, garbage, and empty values keep the production default.
+        assert_eq!(
+            resolve_rib_channel_capacity_from(Some("0")),
+            RIB_CHANNEL_CAPACITY
+        );
+        assert_eq!(
+            resolve_rib_channel_capacity_from(Some("")),
+            RIB_CHANNEL_CAPACITY
+        );
+        assert_eq!(
+            resolve_rib_channel_capacity_from(Some("tiny")),
+            RIB_CHANNEL_CAPACITY
+        );
+        assert_eq!(
+            resolve_rib_channel_capacity_from(Some("-1")),
+            RIB_CHANNEL_CAPACITY
+        );
     }
 
     #[test]

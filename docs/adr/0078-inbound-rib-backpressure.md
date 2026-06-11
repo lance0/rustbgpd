@@ -105,6 +105,15 @@ decoupled from processing.**
 - The keepalive-ownership move touches the transport timer wiring and
   needs interop coverage (hold-timer survival under an artificially
   stalled RIB) — this is the riskiest slice and ships first with tests.
+  That coverage is proven by the M63 containerlab job
+  (`test-m63-stalled-rib-hold-timer.sh`, `interop` CI): the RIB manager
+  is stalled per `RoutesReceived` batch via
+  `RUSTBGPD_TEST_RIB_INGEST_STALL_MS` with the channel shrunk via
+  `RUSTBGPD_TEST_RIB_CHANNEL_CAPACITY`, an FRR flood saturates it, and
+  the session survives parks longer than the negotiated hold time on
+  both ends — with `bgp_inbound_rib_backpressure_total` > 0, the exact
+  injected route count in the RIB (never-drop), and zero flaps as
+  receipts.
 - The RIB channel capacity becomes a meaningful tuning knob (today its
   overflow behavior made it a correctness cliff); its default should be
   revisited against the bench-suite convergence shapes.
