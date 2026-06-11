@@ -1,6 +1,6 @@
 # ADR-0083: EVPN single-active backup-path pre-install
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-06-11
 
 ## Context
