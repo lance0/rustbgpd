@@ -48,6 +48,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Targeted peer-group RPCs now reshape members atomically (ADR-0081).**
+  `SetPeerGroup`, `SetPeerGroupPreserveMd5`, `SetNeighborPeerGroup`, and
+  `ClearNeighborPeerGroup` reshaped each affected static member with
+  delete-then-re-add in a loop and no rollback, so a mid-fanout failure left
+  earlier members running the new config, the failing member possibly
+  deleted entirely, and the runtime config snapshot disagreeing with the
+  live sessions. The member fan-out now resolves every affected member's
+  next config up front and commits the whole set through the same
+  captured-prior reshape primitive the config-transaction path uses: a
+  resolution or preflight failure rejects with zero sessions touched, and a
+  mid-fanout failure restores the already-reshaped members to their captured
+  priors (preserving live admin-disabled / graceful-shutdown intent) without
+  advancing the config snapshot. A member whose resolved next config changes
+  TCP-AO now yields `FAILED_PRECONDITION` (restart required) *before* any
+  session bounces, instead of after some members were already flapped — a
+  deliberate, observable behavior change. Dynamic peers at an affected
+  address are never bounced by these RPCs; their sessions keep the running
+  config until they reconnect.
+
 - **Hold-expiry re-arm now requires a complete pending frame (ADR-0078).**
   The hold-timer expiry handler treated ANY buffered or readable bytes as
   peer liveness, so a peer whose application hung mid-frame while its kernel

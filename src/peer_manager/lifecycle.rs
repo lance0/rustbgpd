@@ -260,6 +260,12 @@ impl PeerManager {
         config: PeerManagerNeighborConfig,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         let peer = PeerKey::new(config.address, config.interface.clone());
+        #[cfg(test)]
+        if self.inject_reconfigure_failure.as_ref() == Some(&peer) {
+            return Err(PeerLifecycleError::Internal(format!(
+                "injected reconfigure failure for {peer}"
+            )));
+        }
         let (was_enabled, graceful_shutdown) = self
             .peers
             .get(&peer)

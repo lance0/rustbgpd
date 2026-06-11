@@ -98,6 +98,7 @@ pub(crate) fn catalog_mutation_error_to_status(error: &CatalogMutationError) -> 
             Status::failed_precondition(error.to_string())
         }
         CatalogMutationError::Invalid(_) => Status::invalid_argument(error.to_string()),
+        CatalogMutationError::RestartRequired(_) => Status::failed_precondition(error.to_string()),
         CatalogMutationError::Internal(_) => Status::internal(error.to_string()),
     }
 }
@@ -1430,6 +1431,10 @@ mod tests {
             (
                 CatalogMutationError::invalid("bad policy"),
                 tonic::Code::InvalidArgument,
+            ),
+            (
+                CatalogMutationError::RestartRequired("tcp_ao delta".into()),
+                tonic::Code::FailedPrecondition,
             ),
             (
                 CatalogMutationError::internal("runtime apply failed"),

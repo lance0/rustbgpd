@@ -227,6 +227,14 @@ pub struct PeerManager {
     /// from acting as an offline oracle for config secrets. See
     /// [`crate::config::RuntimeSnapshotKey`].
     snapshot_key: crate::config::RuntimeSnapshotKey,
+    /// Test-only deterministic fault injection: `reconfigure_peer` against
+    /// this key fails up front, before the delete/re-add cycle. Models a
+    /// transient runtime failure (e.g. a session task that cannot start) —
+    /// the only mid-fanout failure class left, since config-shaped failures
+    /// are all caught by validation, resolution, or the reshape preflight
+    /// before any peer is touched.
+    #[cfg(test)]
+    inject_reconfigure_failure: Option<PeerKey>,
 }
 
 impl PeerManager {
@@ -364,6 +372,8 @@ impl PeerManager {
             event_history: None,
             transport_event_sink: None,
             snapshot_key: crate::config::RuntimeSnapshotKey::random(),
+            #[cfg(test)]
+            inject_reconfigure_failure: None,
         }
     }
 
