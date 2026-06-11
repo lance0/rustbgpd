@@ -286,6 +286,10 @@ pub enum CatalogMutationError {
     /// Operator supplied invalid catalog data (maps to gRPC
     /// `INVALID_ARGUMENT`).
     Invalid(String),
+    /// Applying the mutation would reconfigure something only a daemon
+    /// restart can change, e.g. a TCP-AO delta on a reshaped peer-group
+    /// member (maps to gRPC `FAILED_PRECONDITION`).
+    RestartRequired(String),
     /// Runtime/session failure while applying otherwise-valid catalog data
     /// (maps to gRPC `INTERNAL`).
     Internal(String),
@@ -311,9 +315,10 @@ impl CatalogMutationError {
 impl std::fmt::Display for CatalogMutationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotFound(message) | Self::Invalid(message) | Self::Internal(message) => {
-                f.write_str(message)
-            }
+            Self::NotFound(message)
+            | Self::Invalid(message)
+            | Self::RestartRequired(message)
+            | Self::Internal(message) => f.write_str(message),
             Self::StillReferenced {
                 kind,
                 name,
@@ -328,6 +333,24 @@ impl std::fmt::Display for CatalogMutationError {
 }
 
 impl std::error::Error for CatalogMutationError {}
+
+/// Lifecycle failures surface through catalog mutations when a peer-group
+/// change commits its member fan-out via the captured-prior reshape
+/// primitive (ADR-0081). Preserve the failure class so the gRPC layer keeps
+/// stable status codes: a TCP-AO delta stays `FAILED_PRECONDITION`, a
+/// missing member stays `NOT_FOUND`.
+impl From<PeerLifecycleError> for CatalogMutationError {
+    fn from(error: PeerLifecycleError) -> Self {
+        match error {
+            PeerLifecycleError::RestartRequired(message) => Self::RestartRequired(message),
+            PeerLifecycleError::NotFound(peer) => Self::NotFound(format!("peer {peer} not found")),
+            PeerLifecycleError::Invalid(message) => Self::Invalid(message),
+            error @ (PeerLifecycleError::AlreadyExists(_) | PeerLifecycleError::Internal(_)) => {
+                Self::Internal(error.to_string())
+            }
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[expect(

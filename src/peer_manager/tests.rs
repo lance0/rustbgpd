@@ -1318,6 +1318,404 @@ peer_group = "edge"
     assert!(!managed.enabled);
 }
 
+fn edge_group_definition(hold_time: Option<u16>) -> rustbgpd_api::peer_types::PeerGroupDefinition {
+    rustbgpd_api::peer_types::PeerGroupDefinition {
+        hold_time,
+        max_prefixes: None,
+        md5_password: None,
+        ttl_security: None,
+        families: Vec::new(),
+        graceful_restart: None,
+        gr_restart_time: None,
+        gr_stale_routes_time: None,
+        llgr_stale_time: None,
+        local_ipv6_nexthop: None,
+        route_reflector_client: None,
+        route_server_client: None,
+        remove_private_as: None,
+        add_path: None,
+        import_policy: Vec::new(),
+        export_policy: Vec::new(),
+        import_policy_chain: Vec::new(),
+        export_policy_chain: Vec::new(),
+    }
+}
+
+fn set_edge_hold_time_event(hold_time: u16) -> rustbgpd_api::peer_types::ConfigEvent {
+    rustbgpd_api::peer_types::ConfigEvent::SetPeerGroup {
+        name: "edge".to_string(),
+        definition: edge_group_definition(Some(hold_time)),
+        ack: None,
+    }
+}
+
+fn peer_group_reshape_manager(config: Config) -> PeerManager {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    // Leak the RIB receiver so session sends during delete/re-add never fail.
+    Box::leak(Box::new(rib_rx));
+    PeerManager::new_with_config(
+        rx,
+        mpsc::unbounded_channel().1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        config,
+    )
+}
+
+const EDGE_GROUP_TOML: &str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.edge]
+hold_time = 90
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "edge"
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "edge"
+
+[[neighbors]]
+address = "10.0.0.4"
+remote_asn = 65004
+peer_group = "edge"
+"#;
+
+/// ADR-0081 success path: a targeted `SetPeerGroup` reshapes every static
+/// member through the captured-prior snapshot primitive, advances
+/// `current_config`, and publishes the applied member count.
+#[tokio::test]
+async fn peer_group_reshape_applies_to_all_members_and_advances_config() {
+    let config = load_test_config(EDGE_GROUP_TOML);
+    let mut mgr = peer_group_reshape_manager(config.clone());
+    for resolved in config.resolved_neighbors().unwrap() {
+        mgr.add_peer(
+            PeerManager::peer_manager_config_from_resolved(resolved, false),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    let a1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let a2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let a3 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+
+    mgr.apply_peer_group_change(set_edge_hold_time_event(45), vec![a1, a2, a3])
+        .await
+        .unwrap();
+
+    for addr in [a1, a2, a3] {
+        assert_eq!(
+            mgr.peers
+                .get(&key(addr))
+                .expect("reshaped member")
+                .hold_time,
+            Some(45)
+        );
+    }
+    assert_eq!(
+        mgr.current_config
+            .peer_groups
+            .get("edge")
+            .expect("group definition")
+            .hold_time,
+        Some(45),
+        "successful reshape must advance current_config"
+    );
+    let events = query_policy_event_history(&mgr, None, 8).await;
+    let event = events
+        .iter()
+        .find(|event| event.target_type == "peer_group")
+        .expect("peer-group policy event");
+    assert_eq!(event.affected_peer_count, 3);
+}
+
+/// ADR-0081: a mid-fanout reconfigure failure on the targeted peer-group
+/// path restores already-reshaped members from their captured priors, never
+/// reaches later members, leaves the failing member in place, and does not
+/// advance `current_config`.
+///
+/// Every config-shaped failure is rejected before any peer is touched
+/// (event validation, phase-1 resolution, the primitive's preflight), so
+/// the surviving mid-fanout failure class is a transient runtime fault —
+/// induced here with the manager's test-only reconfigure injection.
+#[tokio::test]
+async fn peer_group_reshape_mid_fanout_failure_restores_prior_members() {
+    let config = load_test_config(EDGE_GROUP_TOML);
+    let mut mgr = peer_group_reshape_manager(config.clone());
+    for resolved in config.resolved_neighbors().unwrap() {
+        mgr.add_peer(
+            PeerManager::peer_manager_config_from_resolved(resolved, false),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    let a1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let a2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)); // its reconfigure fails
+    let a3 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    mgr.inject_reconfigure_failure = Some(key(a2));
+
+    let result = mgr
+        .apply_peer_group_change(
+            set_edge_hold_time_event(45),
+            // Explicit order so member 1 is reshaped before member 2 fails.
+            vec![a1, a2, a3],
+        )
+        .await;
+    let Err(error) = result else {
+        panic!("mid-fanout reconfigure failure must surface as Err");
+    };
+    assert!(
+        matches!(error, CatalogMutationError::Internal(_)),
+        "{error:?}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("prior peers restored"), "{message}");
+    assert!(message.contains("10.0.0.3"), "{message}");
+
+    assert_eq!(
+        mgr.peers
+            .get(&key(a1))
+            .expect("restored member 1")
+            .hold_time,
+        Some(90),
+        "member reshaped before the failure must be back on its prior config"
+    );
+    assert_eq!(
+        mgr.peers.get(&key(a2)).expect("failing member").hold_time,
+        Some(90),
+        "the failing member must still exist on its prior config, not be left deleted"
+    );
+    assert_eq!(
+        mgr.peers
+            .get(&key(a3))
+            .expect("untouched member 3")
+            .hold_time,
+        Some(90),
+        "member after the failure must never be touched"
+    );
+    assert_eq!(
+        mgr.current_config
+            .peer_groups
+            .get("edge")
+            .expect("group definition")
+            .hold_time,
+        Some(90),
+        "failed reshape must not advance current_config"
+    );
+}
+
+/// ADR-0081 decision 2: a member whose resolved next config changes TCP-AO
+/// is rejected by the primitive's preflight with `RestartRequired` BEFORE
+/// any session is bounced — no delete/re-add, no partial apply.
+#[tokio::test]
+async fn peer_group_reshape_rejects_tcp_ao_delta_before_any_bounce() {
+    let config = load_test_config(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.edge]
+hold_time = 90
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "edge"
+tcp_ao = { key = "secret", send_id = 7, recv_id = 9, algorithm = "hmac(sha256)" }
+"#,
+    );
+    let mut mgr = peer_group_reshape_manager(config);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let counters = Arc::new(FakePeerCounters::default());
+    // The running peer carries NO TCP-AO key, so the resolved next config
+    // (tcp_ao set) is a restart-required delta.
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        fake_peer_handle(addr, SessionState::Idle, None, counters.clone()),
+        false,
+    );
+
+    let Err(error) = mgr
+        .apply_peer_group_change(set_edge_hold_time_event(45), vec![addr])
+        .await
+    else {
+        panic!("TCP-AO delta must be rejected up front");
+    };
+    assert!(
+        matches!(error, CatalogMutationError::RestartRequired(_)),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("changes tcp_ao"), "{error}");
+
+    assert_eq!(
+        counters.shutdown.load(Ordering::SeqCst),
+        0,
+        "preflight rejection must not bounce any session"
+    );
+    let managed = mgr.peers.get(&key(addr)).expect("untouched peer");
+    assert_eq!(managed.hold_time, Some(90));
+    assert_eq!(managed.session_id, 1, "peer generation unchanged");
+    assert_eq!(
+        mgr.current_config
+            .peer_groups
+            .get("edge")
+            .expect("group definition")
+            .hold_time,
+        Some(90)
+    );
+}
+
+/// ADR-0081 decision 3: rollback re-reads live admin state, so a member
+/// that was admin-disabled before the failed fan-out is still disabled
+/// after its prior config is restored.
+#[tokio::test]
+async fn peer_group_reshape_rollback_preserves_admin_disabled_state() {
+    let config = load_test_config(EDGE_GROUP_TOML);
+    let mut mgr = peer_group_reshape_manager(config.clone());
+    for resolved in config.resolved_neighbors().unwrap() {
+        mgr.add_peer(
+            PeerManager::peer_manager_config_from_resolved(resolved, false),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    let a1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let a2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    mgr.disable_peer(key(a1), None).await.unwrap();
+    // Member 2 fails after member 1 was reshaped, forcing member 1's
+    // rollback while it is admin-disabled.
+    mgr.inject_reconfigure_failure = Some(key(a2));
+
+    let result = mgr
+        .apply_peer_group_change(set_edge_hold_time_event(45), vec![a1, a2])
+        .await;
+    assert!(result.is_err(), "{result:?}");
+
+    let managed = mgr.peers.get(&key(a1)).expect("restored member");
+    assert_eq!(managed.hold_time, Some(90));
+    assert!(
+        !managed.enabled,
+        "rollback must preserve the member's admin-disabled state"
+    );
+}
+
+/// ADR-0081 decision 4: a dynamic peer at an affected address is never
+/// bounced by a targeted peer-group reshape — its running session keeps its
+/// config until it reconnects. The definition edit itself still commits.
+#[tokio::test]
+async fn peer_group_reshape_skips_dynamic_peers_without_bouncing() {
+    let config = load_test_config(EDGE_GROUP_TOML);
+    let mut mgr = peer_group_reshape_manager(config);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        fake_peer_handle(addr, SessionState::Established, None, counters.clone()),
+        false,
+    );
+    mgr.peers.get_mut(&key(addr)).unwrap().is_dynamic = true;
+
+    mgr.apply_peer_group_change(set_edge_hold_time_event(45), vec![addr])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        counters.shutdown.load(Ordering::SeqCst),
+        0,
+        "dynamic peer must not be bounced by a peer-group reshape"
+    );
+    let managed = mgr.peers.get(&key(addr)).expect("dynamic peer");
+    assert!(managed.is_dynamic);
+    assert_eq!(managed.hold_time, Some(90), "running config unchanged");
+    assert_eq!(
+        mgr.current_config
+            .peer_groups
+            .get("edge")
+            .expect("group definition")
+            .hold_time,
+        Some(45),
+        "the definition edit itself still commits"
+    );
+}
+
+/// Regression for the old per-member loop's `None` arm, which DELETED a
+/// managed static peer whose neighbor record could not be found in the next
+/// config. Peer-group events never remove records, so that state is a
+/// snapshot/managed-peer inconsistency: refuse with zero peers touched.
+#[tokio::test]
+async fn peer_group_reshape_rejects_member_missing_from_next_config() {
+    let config = load_test_config(EDGE_GROUP_TOML);
+    let mut mgr = peer_group_reshape_manager(config);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let counters = Arc::new(FakePeerCounters::default());
+    // Managed under a scoped key, so the interface-qualified record lookup
+    // finds no `[[neighbors]]` entry for it.
+    insert_test_scoped_managed_peer(
+        &mut mgr,
+        addr,
+        "rustbgpd-test-missing0",
+        7,
+        42,
+        fake_peer_handle(addr, SessionState::Idle, None, counters.clone()),
+    );
+
+    let Err(error) = mgr
+        .apply_peer_group_change(set_edge_hold_time_event(45), vec![addr])
+        .await
+    else {
+        panic!("member missing from next_config must be rejected");
+    };
+    assert!(
+        matches!(error, CatalogMutationError::Internal(_)),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("no neighbor record"), "{error}");
+
+    assert!(
+        mgr.peers
+            .contains_key(&scoped_key(addr, "rustbgpd-test-missing0")),
+        "the member must NOT be deleted (the old loop's None arm did)"
+    );
+    assert_eq!(counters.shutdown.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        mgr.current_config
+            .peer_groups
+            .get("edge")
+            .expect("group definition")
+            .hold_time,
+        Some(90),
+        "rejected reshape must not advance current_config"
+    );
+}
+
 #[tokio::test]
 async fn session_events_publish_state_changes() {
     let (tx, rx) = mpsc::channel(16);

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::net::IpAddr;
 
 use rustbgpd_api::peer_types::{
@@ -1105,50 +1106,61 @@ impl PeerManager {
         let mut next_config = self.current_config.clone();
         apply_config_event(&mut next_config, &event).map_err(catalog_config_error)?;
 
-        let targets: Vec<PeerKey> = affected_peers
+        // ADR-0081: resolve every affected member's next config BEFORE
+        // touching any peer, then commit the whole set through the
+        // captured-prior reshape primitive. A resolution failure rejects with
+        // zero peers touched; a mid-fanout reconfigure failure restores the
+        // already-reshaped members from their captured priors instead of
+        // leaving earlier members on the next config (and the failing member
+        // possibly deleted) while `current_config` never advanced.
+        let mut seen = BTreeSet::new();
+        let mut targets: Vec<PeerManagerNeighborConfig> = Vec::new();
+        for peer_key in affected_peers
             .into_iter()
             .flat_map(|address| self.peer_keys_for_address(address))
-            .collect();
-        let mut affected_peer_count = 0usize;
-        for peer_key in targets {
-            let address = peer_key.address;
-            let was_enabled = self
+        {
+            if !seen.insert(peer_key.clone()) {
+                continue;
+            }
+            // A dynamic peer at an affected address is never reshaped here:
+            // delete/re-add is wrong for an ephemeral accepted peer (ADR-0081
+            // decision 4, and the primitive rejects dynamic targets). Its
+            // running session keeps its config until it reconnects; resolved
+            // policy chains hot-apply through the catalog policy fan-out.
+            if self
                 .peers
                 .get(&peer_key)
-                .is_none_or(|managed| managed.enabled);
-            let next_peer_config = if let Some(neighbor) =
-                next_config.neighbors.iter().find(|neighbor| {
-                    neighbor.address == address.to_string()
-                        && neighbor.interface == peer_key.interface
-                }) {
-                let resolved = next_config
-                    .resolve_neighbor(neighbor)
-                    .map_err(catalog_config_error)?;
-                Some(Self::peer_manager_config_from_resolved(resolved, false))
-            } else {
-                None
+                .is_some_and(|managed| managed.is_dynamic)
+            {
+                continue;
+            }
+            let address = peer_key.address;
+            let Some(neighbor) = next_config.neighbors.iter().find(|neighbor| {
+                neighbor.address == address.to_string() && neighbor.interface == peer_key.interface
+            }) else {
+                // Peer-group events never remove `[[neighbors]]` records, so
+                // a static managed peer without one means the config snapshot
+                // and the managed-peer set disagree. The old per-member loop
+                // deleted the peer outright here; refuse instead (still zero
+                // peers touched — this runs before the commit phase).
+                return Err(CatalogMutationError::internal(format!(
+                    "static peer {peer_key} affected by the peer-group change has no neighbor \
+                     record in the updated config; refusing to reshape an inconsistent snapshot"
+                )));
             };
-
-            if let Some(cfg) = next_peer_config.as_ref() {
-                self.delete_peer_for_reconfigure(peer_key, cfg.tcp_ao.as_ref())
-                    .await
-                    .map_err(|error| CatalogMutationError::internal(error.to_string()))?;
-            } else {
-                self.delete_peer(peer_key, false)
-                    .await
-                    .map_err(|error| CatalogMutationError::internal(error.to_string()))?;
-            }
-
-            if let Some(cfg) = next_peer_config {
-                self.add_peer_with_admin_state(cfg, false, was_enabled)
-                    .await
-                    .map_err(|error| CatalogMutationError::internal(error.to_string()))?;
-                affected_peer_count += 1;
-            }
+            let resolved = next_config
+                .resolve_neighbor(neighbor)
+                .map_err(catalog_config_error)?;
+            targets.push(Self::peer_manager_config_from_resolved(resolved, false));
         }
 
+        let applied = self
+            .apply_peer_reshape_snapshot(targets)
+            .await
+            .map_err(CatalogMutationError::from)?;
+
         self.current_config = next_config;
-        self.publish_policy_config_event(&event, affected_peer_count);
+        self.publish_policy_config_event(&event, applied.len());
         Ok(())
     }
 }
