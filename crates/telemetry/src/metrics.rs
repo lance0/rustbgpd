@@ -1327,16 +1327,23 @@ impl BgpMetrics {
                 {
                     continue;
                 }
-                let values: Vec<&str> = desc
+                // Every declared variable label must be present on the
+                // metric; a missing one would make the rebuilt tuple
+                // alias a different series whose label value is
+                // legitimately empty, so skip rather than guess.
+                let Some(values) = desc
                     .variable_labels
                     .iter()
                     .map(|name| {
                         labels
                             .iter()
                             .find(|label| label.name() == name.as_str())
-                            .map_or("", |label| label.value())
+                            .map(prometheus::proto::LabelPair::value)
                     })
-                    .collect();
+                    .collect::<Option<Vec<&str>>>()
+                else {
+                    continue;
+                };
                 // Removal can only fail for a tuple that no longer
                 // exists (e.g. removed concurrently) — ignore.
                 let _ = vec.remove_label_values(&values);

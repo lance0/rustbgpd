@@ -109,7 +109,11 @@ impl PeerManager {
                         // Auto-removal is a full peer deletion (the
                         // ManagedPeer is gone; a re-accepted peer at
                         // this address starts a fresh lifecycle), so
-                        // reap its per-peer metric series too.
+                        // reap its per-peer metric series too — but
+                        // join the session task first so the reap runs
+                        // after its last transport-side emission, the
+                        // same ordering the static delete path uses.
+                        let _ = managed.handle.shutdown().await;
                         self.reap_deleted_peer_metric_series(peer_addr, &managed.transport_config)
                             .await;
                     }
