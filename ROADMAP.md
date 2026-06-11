@@ -499,6 +499,22 @@ has it, no broad performance sprints without profile evidence.
 These have explicit rationale and, where noted, are the roadmap counterpart of
 an ADR "Deferred" section that points back here. Tightened, not dropped.
 
+- **Peer-group persist-failure double-bounce removal (ADR-0081 decision 3
+  follow-up).** A persist failure after a successful targeted peer-group
+  reshape rolls members back through the same atomic fan-out — apply
+  forward, bounce; roll back, bounce again. Correct and loud, never silent,
+  but noisy. Removing the second bounce requires inverting the shared
+  catalog-mutator contract (live apply → acked persist → capture-prior
+  rollback) for reshape-bearing commands: split the atomic persist into a
+  fallible *stage* (temp write + fsync, where disk-full/permission failures
+  live) and a near-infallible *commit* (rename), and run the reshape
+  between them. That is a two-phase persister protocol with its own new
+  failure states (stage succeeds / reshape fails / temp cleanup fails;
+  rename vs dir-fsync ordering; death between stage and commit) — real
+  persistence-architecture work for a rare full-disk-mid-edit annoyance.
+  Deferred until operator signal; the stage/commit split is the agreed
+  shape if it is ever picked up.
+
 - **Shared route storage / compact RIB indexing — measured, rejected
   (2026-05-29).** The realistic policy-robust `RouteData` split (identity shared
   via `Arc`; attributes + next-hop kept per-copy so per-client export policy
