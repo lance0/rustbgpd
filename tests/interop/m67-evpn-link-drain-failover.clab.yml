@@ -1,0 +1,206 @@
+# Containerlab topology: ADR-0085 link-driven Ethernet Segment drain
+# failover (M67) — rustbgpd on BOTH sides, no RPC in the failover path.
+#
+# The end-to-end automation proof for the ADR-0085 ES↔interface
+# binding. M66 proved the ADR-0084 drain *primitive* with the operator
+# RPC as the stimulus; M67 proves the production trigger: a real
+# attachment-circuit failure. pe1 and pe2 bind their CE-facing AC
+# (`interface = "eth2"`, `recovery_delay_secs = 5`) so an AC carrier
+# loss on the active PE drives, with no operator action: the `link`
+# drain reason (`evpn_es_drained{esi, reason="link"}` gauge), the
+# RFC 7432 §8.2 withdrawal wire shape (Type 4 + EAD-per-ES +
+# EAD-per-EVI + the member VNI's local Type 2 routes), pe2's DF
+# promotion, and the receive-side handover on the vtep. Carrier
+# return is held off `recovery_delay_secs` before origination comes
+# back (RFC 8584 §3 recovery damping, re-armed per up edge), and the
+# operator/link reasons compose (ADR-0085 decision 2).
+#
+# Failure injection point: `ip link set eth2 down` INSIDE pe1 — the
+# binding watches pe1's local ifindex carrier (`IFF_LOWER_UP`), so
+# the cleanest stimulus is pe1's own AC end. Containerlab links are
+# veth pairs: admin-down on pe1's end also drops carrier on the CE's
+# eth1, which is realistic cable-pull semantics — the CE loses its
+# bridge path through pe1 at the same instant the PE sees the AC die
+# (M65 injected the same failure from the CE leg; here the PE end is
+# the watched one). Per ADR-0085 decision 1 admin-down and cable pull
+# are deliberately the same signal.
+#
+# Topology — identical to M66 (vtep is the underlay hub and an iBGP
+# route reflector so the PEs see each other's Type 4 routes for DF
+# election; VTEP IPs are the link addresses):
+#
+#   hr ── eth3[br100] vtep (rustbgpd RR, 10.0.1.1) eth1 ── pe1 (rustbgpd, 10.0.1.2) eth2 ──┐
+#   192.168.67.20             DUT, receive side    eth2 ── pe2 (rustbgpd, 10.0.2.2) eth2 ──┤
+#                                                                                          ce (bridge)
+#                                                                                   192.168.67.10
+#
+#   pe1 + pe2 share single-active ES 00:00:00:00:00:00:00:00:00:01
+#   for VNI 100 (`redundancy_mode = "single-active"`). DF election is
+#   RFC 9785 highest-preference: pe1 df_preference 200, pe2 100, so
+#   pe1 deterministically wins DF and — being the only PE that floods
+#   toward the CE — is the only PE whose kernel bridge ever learns the
+#   CE MAC, hence the only Type 2 originator for it. The CE host
+#   bridges both PE attachment circuits; bridge MAC learning re-pins
+#   the return path when traffic starts arriving on the other leg. hr
+#   is the remote host behind the DUT. Static neighbor entries on
+#   hr/ce remove ARP from the picture, and IPv6 is disabled on every
+#   node so the CE emits no spontaneous chatter: a frame from the CE
+#   arriving at the non-DF PE's bridge would kernel-learn the CE MAC
+#   there and break the "Type 2 from the DF only" steady state.
+#
+# Inherited M66 fixture quirks (see that topology's header for the
+# full rationale): IGMP silencing everywhere (mcast_snooping 0 +
+# multicast off — the rustbgpd:dev image carries no sysctl binary, so
+# the IPv6 disables go through /proc writes); the realistic BUM flood
+# path is present via Type 3 IMET from all nodes plus static all-zero
+# VXLAN FDB rows standing in for an IMET-driven flood programmer
+# (foreign to the daemon's FDB diff, ADR-0054 §5/§7); the
+# BUM-flood-only DF-enforcement limit (a drained/non-DF AC does not
+# block known unicast — asserts are on route state and the
+# receive-side handover, never on the drained AC dropping unicast);
+# and the CE "speaks on recovery" ARP broadcast — the GARP pattern
+# real CEs emit after maintenance — as the DF re-winner's legitimate
+# AC re-learn stimulus (with the ADR-0085 same-ESI local bias and the
+# VXLAN-port move observation both landed, the recovered pe1 simply
+# originates no Type 2 for the CE MAC until its kernel relearns it on
+# the AC).
+#
+# gRPC authorization: the PEs run `enforcement = "tier"` with two
+# principals — an operator (bearer-token TCP listener) and an
+# observer (UDS listener) — so the driver can exercise the ADR-0084
+# operator drain for the reason-composition phase with rustbgpctl.
+# The VTEP keeps the M65/M66 legacy fixture shape.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m67-evpn-link-drain-failover.clab.yml
+#   bash tests/interop/scripts/test-m67-evpn-link-drain-failover.sh
+#   containerlab destroy -t tests/interop/m67-evpn-link-drain-failover.clab.yml
+
+name: m67-evpn-link-drain-failover
+
+topology:
+  nodes:
+    vtep:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m67-vtep.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-vtep.sh:/usr/local/bin/start-rustbgpd-vtep.sh:ro
+      exec:
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6"
+        # The vtep routes between the two PE subnets (pe1 <-> pe2
+        # flood frames transit it).
+        - sh -c "echo 1 > /proc/sys/net/ipv4/ip_forward"
+        - ip addr add 10.0.1.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.2.1/24 dev eth2
+        - ip link set eth2 up
+        - /usr/local/bin/start-rustbgpd-vtep.sh 10.0.1.1 100
+        # Kernel learning on the VXLAN bridge port off: EVPN owns the
+        # remote-MAC rows (ADR-0054 §5/§7).
+        - bridge link set dev vxlan100 learning off
+        # Silence kernel IGMP bring-up frames on the test fabric (see
+        # the CE node comment).
+        - ip link set br100 type bridge mcast_snooping 0
+        - ip link set dev br100 multicast off
+        - ip link set dev eth3 multicast off
+        - ip link set eth3 master br100
+        - ip link set eth3 up
+        # Static stand-in for IMET-driven flood programming (see
+        # header): BUM toward both segment PEs.
+        - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.1.2 self permanent
+        - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.2.2 self permanent
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug,rustbgpd::evpn_dataplane=debug
+
+    pe1:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m67-pe1.toml:/etc/rustbgpd/config.template.toml:ro
+        - ./configs/m67-grpc-operator.token:/etc/rustbgpd/grpc-operator.token:ro
+        - ./scripts/start-rustbgpd-sa-pe.sh:/usr/local/bin/start-rustbgpd-sa-pe.sh:ro
+      exec:
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6"
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-sa-pe.sh 10.0.1.2 100 10.0.2.0/24 10.0.1.1
+        - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.1.1 self permanent
+        - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.2.2 self permanent
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug
+
+    pe2:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m67-pe2.toml:/etc/rustbgpd/config.template.toml:ro
+        - ./configs/m67-grpc-operator.token:/etc/rustbgpd/grpc-operator.token:ro
+        - ./scripts/start-rustbgpd-sa-pe.sh:/usr/local/bin/start-rustbgpd-sa-pe.sh:ro
+      exec:
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6"
+        - ip addr add 10.0.2.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-sa-pe.sh 10.0.2.2 100 10.0.1.0/24 10.0.2.1
+        - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.1.1 self permanent
+        - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.1.2 self permanent
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug
+
+    # Dual-homed CE: a plain bridge over both PE attachment circuits
+    # with a pinned MAC (M65/M66 shape). Single-active means at most
+    # one PE floods toward it; bridge learning re-pins the return path
+    # on handover. IPv6 off so the CE never transmits except to reply —
+    # the non-DF PE must never kernel-learn the CE MAC.
+    ce:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6"
+        # mcast_snooping 0 + multicast off: the kernel's IGMP machinery
+        # otherwise emits bring-up frames that the CE bridge floods out
+        # BOTH legs, kernel-learning the CE/port MACs on the non-DF PE
+        # and breaking the "Type 2 from the DF only" steady state.
+        - ip link add br0 type bridge mcast_snooping 0
+        - ip link set br0 address 02:ce:ce:ce:ce:01
+        - ip link set dev br0 multicast off
+        - ip link set dev eth1 multicast off
+        - ip link set dev eth2 multicast off
+        - ip link set eth1 master br0
+        - ip link set eth2 master br0
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip link set br0 up
+        - ip addr add 192.168.67.10/24 dev br0
+        - ip neigh replace 192.168.67.20 lladdr 02:aa:aa:aa:aa:01 dev br0 nud permanent
+
+    # Remote host behind the DUT — the traffic source whose ping
+    # stream measures the failover blackout window (M65/M66 shape).
+    hr:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
+        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6"
+        - ip link set eth1 address 02:aa:aa:aa:aa:01
+        - ip link set dev eth1 multicast off
+        - ip addr add 192.168.67.20/24 dev eth1
+        - ip link set eth1 up
+        - ip neigh replace 192.168.67.10 lladdr 02:ce:ce:ce:ce:01 dev eth1 nud permanent
+
+  links:
+    - endpoints: ["vtep:eth1", "pe1:eth1"]
+    - endpoints: ["vtep:eth2", "pe2:eth1"]
+    - endpoints: ["vtep:eth3", "hr:eth1"]
+    - endpoints: ["pe1:eth2", "ce:eth1"]
+    - endpoints: ["pe2:eth2", "ce:eth2"]

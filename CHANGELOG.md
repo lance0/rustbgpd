@@ -11,6 +11,38 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **M67 interop proof for the ADR-0085 link-driven Ethernet Segment
+  drain: a real AC failure drives the failover end-to-end, no RPC in
+  the path.** New `kernel-dataplane` CI job — the M66 sibling with
+  the production trigger, closing the four-slice ADR-0085 arc. Same
+  five-node topology (two full-dataplane rustbgpd single-active
+  segment PEs behind a rustbgpd VTEP/RR, a host pinging the
+  dual-homed CE at a 100 ms grain), but the PEs bind their CE-facing
+  attachment circuit (`interface = "eth2"`,
+  `recovery_delay_secs = 5`) and the stimulus is
+  `ip link set eth2 down` inside the active PE — the binding watches
+  that PE's own ifindex carrier, and the veth peer (the CE leg)
+  drops with it: cable-pull semantics. Hard asserts on the
+  mechanism: the carrier monitor armed and every
+  `evpn_es_drained{esi, reason}` gauge 0 at steady state; on AC loss
+  the `link` reason goes 1 with the operator reason untouched, the
+  RFC 7432 §8.2 mass-withdraw shape (all four route classes) leaves
+  the VTEP while the peer PE's routes survive, the backup promotes
+  to DF and the VTEP hands the CE MAC to exactly the backup; on
+  carrier return the recovery hold-off demonstrably holds (gauge
+  still 1 on every sub-second sample through up+3 s against the 5 s
+  window) before releasing; a down-up-down-up flap inside the
+  hold-off stays drained past the first up's would-be deadline
+  (proving the per-up-edge re-arm) and recovers only after the last
+  up + hold-off; and the drain reasons compose — an operator drain
+  survives a full link down/up cycle and only the operator undrain
+  restores origination. Failover blackout measured informationally
+  (100–300 ms locally; unlike M66's RPC drain the AC is really
+  dead, so this is the genuine end-to-end failover) under a
+  generous < 30 s bound. Re-runnable against a live topology: a
+  prior cycle's shared-ESI co-advertisement (legitimate RFC 7432
+  aliasing once the CE has spoken on both legs) downgrades the two
+  fresh-bring-up-only steady-state pins to informational.
 - **Same-ESI local bias in the remote-MAC projection (ADR-0085
   slice 3 — decision 5).** A multi-homed PE no longer lets a peer
   PE's Type 2 usurp its own healthy attachment circuit: a remote

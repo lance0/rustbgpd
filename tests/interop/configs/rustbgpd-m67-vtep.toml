@@ -1,0 +1,49 @@
+# M67 link-drain failover proof: rustbgpd as the remote EVPN VTEP
+# (receive side — the proven ADR-0083 swap consumer) AND the iBGP
+# route reflector between the two rustbgpd segment PEs, so the PEs
+# see each other's Type 4 ES routes for DF election without a direct
+# PE-PE session. Same VTEP shape as M65/M66 plus the RR client flags.
+# The driver asserts the per-class route presence/absence across the
+# ADR-0085 link-driven drain/recovery cycle on this node's RIB and
+# kernel FDB.
+[global]
+asn = 65000
+router_id = "10.0.1.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+prometheus_addr = "0.0.0.0:9179"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# Single EVPN instance bound to br100 / vxlan100 — the start script
+# pre-creates the topology in this container's netns. The single-active
+# NHG indirection rides the default `apply_aliasing_ecmp = true`.
+[[evpn_instances]]
+vni = 100
+rd = "10.0.1.1:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.1.1"
+bridge = "br100"
+advertise_svi_mac = false
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65000
+description = "pe1-preferred-df"
+hold_time = 30
+families = ["l2vpn_evpn"]
+route_reflector_client = true
+
+[[neighbors]]
+address = "10.0.2.2"
+remote_asn = 65000
+description = "pe2-backup"
+hold_time = 30
+families = ["l2vpn_evpn"]
+route_reflector_client = true
+
+[security.grpc]
+enforcement = "legacy"
