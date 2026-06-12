@@ -412,8 +412,13 @@ has it, no broad performance sprints without profile evidence.
   Prometheus series leak listed here previously was fixed — deleted peers
   now reap their label series.)
 - **Policy / explain follow-ups** *(operator polish, not feature).* Stable
-  `reason` labels across the remaining ingress filter paths; per-feature counter
-  unit-test coverage. Per-statement attribution within a matched import chain —
+  `reason` labels across the remaining ingress filter paths — **shipped in
+  `[Unreleased]`**: the canonical vocabulary is pinned in
+  `crates/telemetry/src/reason_labels.rs` (typed `OtcBlockReason` /
+  `RrLoopReason` shared by the metric labels, log tokens, and the structured
+  OTC event; exact strings pinned by tests; documented per metric in
+  `docs/OPERATIONS.md` "Ingress rejection / route-leak detection").
+  Per-statement attribution within a matched import chain —
   **shipped in `[Unreleased]`**: each `policy explain` permit/deny match carries
   a statement trace (policy + statement identity, matched conditions with
   stable labels, default-action fallthrough, `before -> after` attribute

@@ -385,6 +385,22 @@ Prometheus gauge.
 | `bgp_rib_dirty_resync_total{outcome}` | Dirty-peer resync timer fires, by `cleared` / `still_dirty` |
 | `bgp_rib_ingest_channel_depth` | RIB manager ingest queue depth, sampled once per manager loop iteration; pegged at capacity means producers are parked on backpressure |
 
+### Ingress rejection / route-leak detection
+
+Routes rejected at the session boundary before reaching the RIB.
+The `reason` label values below are the canonical contract pinned in
+`crates/telemetry/src/reason_labels.rs` — they are stable across
+releases and shared verbatim by the metric label, the log-line
+`reason` token, and (for OTC) the structured `OTC_ROUTE_BLOCKED`
+event payload, so alert expressions can key on them safely.
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `bgp_otc_routes_blocked_total{peer,reason}` | RFC 9234 Only-to-Customer route-leak blocks (ADR-0071). `reason` is `ingress_from_customer_rsclient` (OTC-tagged route arrived while we act as Provider / Route Server), `ingress_peer_mismatch` (lateral Peer session, OTC value is not the peer's ASN), `malformed_length` (OTC attribute undecodable; announcements dropped treat-as-withdraw style per RFC 7606), or `egress_to_upstream_via_otc` (outbound advertisement of an OTC-tagged route toward a Provider / Peer / Route Server suppressed) |
+| `bgp_as_path_loop_detected_total{peer}` | Prefixes rejected because our own ASN appears in the received `AS_PATH` (RFC 4271 §9.1.2). No `reason` label — the mechanism is the metric name; withdrawals in the same UPDATE are still processed |
+| `bgp_rr_loop_detected_total{peer}` | UPDATEs rejected by route-reflection loop detection (RFC 4456 §8). No `reason` label; the debug log line emitted with each increment carries `reason=originator_id` (received `ORIGINATOR_ID` equals our router-id) or `reason=cluster_list` (our cluster-id already in `CLUSTER_LIST`) |
+| `bgp_max_prefix_exceeded_total{peer}` | `max_prefixes` ceiling breaches; each increment is followed by a Cease / Maximum Number of Prefixes Reached NOTIFICATION and session teardown (see "Peer max-prefix exceeded" above) |
+
 ### Event Streams
 
 | Metric | What it tells you |
@@ -617,6 +633,7 @@ FIB runtime. The actor is still default-off; configure at least one
 | `bgp_fib_routes_rejected_total{reason="foreign_route_exists"}` | Desired route suppressed because a kernel row already exists at the same table / metric / prefix and is not daemon-owned |
 | `bgp_fib_routes_rejected_total{reason="owned_route_drifted"}` | A row rustbgpd previously owned was externally changed; rustbgpd released ownership and preserved the live kernel row |
 | `bgp_fib_routes_rejected_total{reason="next_hop_family_unsupported"}` | Desired route suppressed because the table family and BGP next-hop family do not match |
+| `bgp_fib_routes_rejected_total{reason="link_local_next_hop_scope_missing"}` | Desired route suppressed because an IPv6 link-local next-hop was selected without the egress interface needed to resolve it in the Linux FIB |
 | `bgp_fib_routes_rejected_total{reason="peer_not_allowed"}` | Desired route suppressed by a `[[fib_tables]]` peer / peer-group allow-list |
 | `bgp_fib_routes_rejected_total{reason="route_limit_exceeded"}` | Desired route suppressed because the table exceeded its `max_routes` hard cap; existing owned rows are frozen in place |
 | `bgp_fib_kernel_failures_total{action="setup"}` | Runtime could not open the Linux FIB programming surface at startup |

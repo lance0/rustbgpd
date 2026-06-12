@@ -448,7 +448,7 @@ mod tests {
         let event = rustbgpd_transport::OtcRouteBlockedEvent {
             peer: std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             direction: rustbgpd_transport::OtcDirection::Ingress,
-            reason: "ingress_from_customer_rsclient",
+            reason: rustbgpd_telemetry::reason_labels::OtcBlockReason::IngressFromCustomerRsclient,
             prefixes: vec!["203.0.113.0/24".to_string(), "2001:db8::/32".to_string()],
             local_role: Some(rustbgpd_wire::BgpRole::Provider),
             remote_role: Some(rustbgpd_wire::BgpRole::Customer),
@@ -482,7 +482,7 @@ mod tests {
         let event = rustbgpd_transport::OtcRouteBlockedEvent {
             peer: std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             direction: rustbgpd_transport::OtcDirection::Ingress,
-            reason: "malformed_length",
+            reason: rustbgpd_telemetry::reason_labels::OtcBlockReason::MalformedLength,
             prefixes: vec!["203.0.113.0/24".to_string()],
             local_role: Some(rustbgpd_wire::BgpRole::Provider),
             remote_role: None,
@@ -506,7 +506,7 @@ mod tests {
         let event = rustbgpd_transport::OtcRouteBlockedEvent {
             peer: std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             direction: rustbgpd_transport::OtcDirection::Egress,
-            reason: "egress_to_upstream_via_otc",
+            reason: rustbgpd_telemetry::reason_labels::OtcBlockReason::EgressToUpstreamViaOtc,
             prefixes: vec!["203.0.113.0/24".to_string()],
             local_role: Some(rustbgpd_wire::BgpRole::Customer),
             remote_role: Some(rustbgpd_wire::BgpRole::Provider),

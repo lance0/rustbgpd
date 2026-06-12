@@ -11,6 +11,7 @@ use super::{
 use rustbgpd_policy::{
     NextHopAction, PolicyAction, PolicyEvaluation, RouteContext, RouteModifications, RouteType,
 };
+use rustbgpd_telemetry::reason_labels::{OtcBlockReason, RrLoopReason};
 use rustbgpd_wire::AspaValidationContext;
 
 /// Increment `bgp_policy_routes_total{peer, policy, direction=import,
@@ -49,7 +50,7 @@ enum OtcState {
 enum OtcIngressAction {
     None,
     Add(u32),
-    DropUnicastAnnouncements(&'static str),
+    DropUnicastAnnouncements(OtcBlockReason),
 }
 
 fn otc_state(attrs: &[PathAttribute]) -> OtcState {
@@ -89,8 +90,8 @@ fn otc_state(attrs: &[PathAttribute]) -> OtcState {
 /// [`rustbgpd_wire::AsPath::to_aspath_string`] so `AS_SET` / confed
 /// segments survive the lossless round-trip into the structured
 /// event — the proto field is `string`, not `repeated uint32`.
-fn otc_event_context(attrs: &[PathAttribute], reason: &'static str) -> (Option<u32>, String) {
-    let otc_value = if reason == "malformed_length" {
+fn otc_event_context(attrs: &[PathAttribute], reason: OtcBlockReason) -> (Option<u32>, String) {
+    let otc_value = if reason == OtcBlockReason::MalformedLength {
         None
     } else {
         match otc_state(attrs) {
@@ -117,14 +118,16 @@ fn otc_ingress_action(
         return OtcIngressAction::None;
     };
     match otc_state(attrs) {
-        OtcState::MalformedLength => OtcIngressAction::DropUnicastAnnouncements("malformed_length"),
+        OtcState::MalformedLength => {
+            OtcIngressAction::DropUnicastAnnouncements(OtcBlockReason::MalformedLength)
+        }
         OtcState::Present(_) if matches!(local_role, BgpRole::Provider | BgpRole::RouteServer) => {
-            OtcIngressAction::DropUnicastAnnouncements("ingress_from_customer_rsclient")
+            OtcIngressAction::DropUnicastAnnouncements(OtcBlockReason::IngressFromCustomerRsclient)
         }
         OtcState::Present(asn)
             if local_role == BgpRole::Peer && remote_asn.is_some_and(|remote| asn != remote) =>
         {
-            OtcIngressAction::DropUnicastAnnouncements("ingress_peer_mismatch")
+            OtcIngressAction::DropUnicastAnnouncements(OtcBlockReason::IngressPeerMismatch)
         }
         OtcState::Absent
             if matches!(
@@ -572,7 +575,7 @@ impl PeerSession {
             if rejected > 0 {
                 warn!(
                     peer = %self.peer_label,
-                    reason,
+                    reason = reason.as_str(),
                     rejected,
                     "OTC route-leak rule rejected unicast announcements; withdrawals still processed"
                 );
@@ -697,13 +700,13 @@ impl PeerSession {
         });
         if originator_loop || cluster_loop {
             let reason = if originator_loop {
-                "ORIGINATOR_ID"
+                RrLoopReason::OriginatorId
             } else {
-                "CLUSTER_LIST"
+                RrLoopReason::ClusterList
             };
             debug!(
                 peer = %self.peer_label,
-                reason,
+                reason = reason.as_str(),
                 "Route reflector loop detected — discarding announcements"
             );
             self.metrics.record_rr_loop_detected(&self.peer_label);

@@ -11,6 +11,34 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Canonical ingress reason-label contract
+  (`crates/telemetry/src/reason_labels.rs`).** The reason strings
+  that ingress route-rejection mechanisms report are now a single
+  typed vocabulary shared by every surface — Prometheus label values,
+  log-line `reason` tokens, and the structured `OTC_ROUTE_BLOCKED`
+  event payload — instead of free-form `&str` literals repeated per
+  call site. `OtcBlockReason` (RFC 9234: `ingress_from_customer_rsclient`,
+  `ingress_peer_mismatch`, `malformed_length`,
+  `egress_to_upstream_via_otc`) is enforced at compile time through
+  the `bgp_otc_routes_blocked_total` recorder and the transport event
+  payload; `RrLoopReason` (`originator_id`, `cluster_list`) pins the
+  RFC 4456 §8 log token. Tests pin the exact strings — renaming one
+  now fails a test and must be called out as a breaking observability
+  change. **No metric names, label sets, or metric label values
+  changed.** One log-only token changed: the debug-level
+  "Route reflector loop detected" line's `reason` field is now
+  snake_case per the contract — `ORIGINATOR_ID` → `originator_id`,
+  `CLUSTER_LIST` → `cluster_list`. `docs/OPERATIONS.md` gains an
+  "Ingress rejection / route-leak detection" metric table listing the
+  canonical reason values per metric, plus the previously
+  undocumented `bgp_fib_routes_rejected_total{reason="link_local_next_hop_scope_missing"}`
+  row; `docs/deployment.md` now uses the real metric names
+  (`bgp_as_path_loop_detected_total`, `bgp_rr_loop_detected_total`,
+  `bgp_max_prefix_exceeded_total` — the `_total` suffix was missing —
+  and the nonexistent `bgp_routes_received_total` /
+  `bgp_routes_installed_total` references were replaced with
+  `bgp_rib_prefixes` / `bgp_rib_loc_prefixes`).
+
 - **RIB distribution-health observability for the wedged
   post-Established advertisement path (ROADMAP, observed in an M66 CI
   run).** Root-cause analysis identified a silent failure mode:
