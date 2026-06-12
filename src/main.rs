@@ -1687,6 +1687,21 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         .as_ref()
         .map(evpn_svi::EvpnSviHandle::runtime_control);
 
+    // ADR-0085: resolved [[ethernet_segments]] interface bindings.
+    // Initial value from the startup config; the reload apply
+    // republishes on every committed config advance. Two consumers:
+    // the link-drain coordinator (spawned further below) and the
+    // segment actor (bound-ness is the "locally attached" half of the
+    // decision 5 bias-eligibility condition).
+    let initial_es_link_bindings = config.resolve_es_link_bindings().unwrap_or_else(|error| {
+        // Unreachable: the config passed full validation at load.
+        warn!(%error, "failed to resolve Ethernet Segment interface bindings at startup");
+        std::collections::BTreeMap::new()
+    });
+    let (es_link_bindings_tx, es_link_bindings_rx) =
+        watch::channel::<evpn_es_link_drain::EsLinkBindings>(Arc::new(initial_es_link_bindings));
+    let es_link_bindings_tx = Arc::new(es_link_bindings_tx);
+
     // EVPN Ethernet Segment orchestrator (Gate 8 multihoming
     // foundation — observable DF election, no enforcement). Spawned
     // when `[[ethernet_segments]]` has at least one entry and at
@@ -1702,11 +1717,20 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         let bum_enforcement_tx = evpn_dataplane_handle
             .as_ref()
             .map(evpn_dataplane::EvpnDataplaneHandle::bum_enforcement_sender);
-        evpn_segment::spawn(
+        // ADR-0085 decision 5: the segment actor publishes the
+        // same-ESI bias-eligibility snapshot toward the dataplane
+        // supervisor (alongside the BUM-enforcement flow) and consumes
+        // the binding watch for the bound-ESI projection.
+        let same_esi_bias_tx = evpn_dataplane_handle
+            .as_ref()
+            .map(evpn_dataplane::EvpnDataplaneHandle::same_esi_bias_sender);
+        evpn_segment::spawn_with_local_bias(
             &evpn_instances,
             ethernet_segments,
             rib_tx.clone(),
             bum_enforcement_tx,
+            same_esi_bias_tx,
+            Some(es_link_bindings_tx.subscribe()),
             metrics.clone(),
             evpn_segment_shutdown.clone(),
         )
@@ -1903,18 +1927,6 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         evpn_segment_runtime_control.clone(),
         evpn_es_drain_state.clone(),
     ));
-    // ADR-0085: resolved [[ethernet_segments]] interface bindings.
-    // Initial value from the startup config; the reload apply
-    // republishes on every committed config advance; the link-drain
-    // coordinator (spawned below) consumes the receiver.
-    let initial_es_link_bindings = config.resolve_es_link_bindings().unwrap_or_else(|error| {
-        // Unreachable: the config passed full validation at load.
-        warn!(%error, "failed to resolve Ethernet Segment interface bindings at startup");
-        std::collections::BTreeMap::new()
-    });
-    let (es_link_bindings_tx, es_link_bindings_rx) =
-        watch::channel::<evpn_es_link_drain::EsLinkBindings>(Arc::new(initial_es_link_bindings));
-    let es_link_bindings_tx = Arc::new(es_link_bindings_tx);
     let evpn_runtime_reload_apply = evpn_runtime_converger::EvpnRuntimeReloadApply::new(
         evpn_runtime_coordinator.clone(),
         evpn_runtime_apply_lock.clone(),

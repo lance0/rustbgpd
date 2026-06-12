@@ -132,6 +132,14 @@ inventory stays poll-based until something else needs eventing.
 
 ## Decision 5 — same-ESI local bias in the remote-MAC projection
 
+**Landed:** 2026-06-12 (slice 3). The segment actor publishes the
+bias-eligibility snapshot alongside the BUM-enforcement flow;
+`project_one` consumes it. "Healthy" is derived from the composed
+drained set (decision 2 makes link-down imply the `Link` reason, so
+attached + not drained implies healthy, and the decision 3 hold-off
+correctly suppresses the bias during recovery) — no separate health
+channel.
+
 The binding feeds a per-`(ESI, VNI)` **bias-eligibility** snapshot to
 the dataplane supervisor, published by the segment actor alongside the
 existing BUM-enforcement flow. Projection rule (`project_one`):
