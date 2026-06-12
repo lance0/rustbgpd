@@ -113,11 +113,12 @@ pub use aliasing::{
     alias_resolved_next_hops, group_members,
 };
 pub use dataplane::{
-    AppliedOp, BumEnforcementEntry, BumEnforcementKey, BumEnforcementReadiness,
-    BumEnforcementStatus, BumEnforcementTable, BumForwardingAction, DataplaneIntent,
-    DataplaneOpKind, DataplaneReport, FailedOp, FdbNexthopDataplaneStatus, FdbNexthopGroupStatus,
-    FdbNexthopMemberStatus, FdbNhgDriftCounters, InstanceDataplaneStatus, InstanceState,
-    IpVrfDataplaneStatus, L3AdoptionCounters, SameEsiBiasTable, SingleActiveCounters,
+    AcGateEntry, AcGateState, AppliedOp, BumEnforcementEntry, BumEnforcementKey,
+    BumEnforcementReadiness, BumEnforcementStatus, BumEnforcementTable, BumForwardingAction,
+    DataplaneIntent, DataplaneOpKind, DataplaneReport, FailedOp, FdbNexthopDataplaneStatus,
+    FdbNexthopGroupStatus, FdbNexthopMemberStatus, FdbNhgDriftCounters, InstanceDataplaneStatus,
+    InstanceState, IpVrfDataplaneStatus, L3AdoptionCounters, SameEsiBiasTable,
+    SingleActiveCounters,
 };
 pub use df_election::{DfCandidate, DfElection, DfElectionError};
 pub use duplicate_mac::{

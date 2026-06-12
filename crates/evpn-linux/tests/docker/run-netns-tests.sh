@@ -47,6 +47,9 @@
 #       (ADR-0069 BGP unnumbered Linux/socket primitive spike)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh link_carrier
 #       (ADR-0085 RTNLGRP_LINK carrier monitor veth transitions)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh ac_gate
+#       (single-active AC-gate IFLA_BRPORT_STATE round-trip +
+#        flood-flag non-clobber proof)
 #
 # Exits 0 on green; surfaces the inner cargo exit code otherwise.
 
@@ -78,8 +81,9 @@ case "${1:-all}" in
     bfd_runtime)        FILTER=""; RUSTBGPD_TEST_FILTER="bfd_runtime::tests::netns::" ;;
     bgp_unnumbered)     TEST_BIN="netns_bgp_unnumbered"; FILTER="" ;;
     link_carrier)       TEST_BIN="netns_link_carrier"; FILTER="" ;;
+    ac_gate)            TEST_BIN="netns_ac_gate"; FILTER="" ;;
     *)
-        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered, link_carrier" >&2
+        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered, link_carrier, ac_gate" >&2
         exit 2
         ;;
 esac

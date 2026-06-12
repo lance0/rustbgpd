@@ -56,6 +56,7 @@ use crate::dataplane::{Dataplane, DataplaneOp, KernelEvent};
 use crate::error::DataplaneError;
 use crate::snapshot::{InstanceProbes, KernelSnapshot};
 
+mod ac_gate;
 mod bum_filter;
 mod fdb;
 mod fdb_nhg;
@@ -490,6 +491,9 @@ impl Dataplane for LinuxDataplane {
                 ce_port_ifindexes: link.ce_port_ifindexes.clone(),
             });
         }
+        for (name, port) in &cache.bridge_ports_by_name {
+            snap.insert_bridge_port(name, port.ifindex, port.state);
+        }
         Ok(snap)
     }
 
@@ -599,6 +603,9 @@ impl Dataplane for LinuxDataplane {
         match op {
             DataplaneOp::SetBumPortFlags { ifindex, flags } => {
                 bum_filter::apply_bum_port_flags(&self.handle, *ifindex, *flags).await
+            }
+            DataplaneOp::SetAcPortState { ifindex, blocked } => {
+                ac_gate::apply_ac_port_state(&self.handle, *ifindex, *blocked).await
             }
             DataplaneOp::AddRemoteFdb { .. }
             | DataplaneOp::UpdateRemoteFdb { .. }

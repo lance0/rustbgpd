@@ -114,6 +114,7 @@ pub struct BgpMetrics {
     evpn_duplicate_mac_threshold_exceeded: IntCounterVec,
     evpn_duplicate_mac_quarantine_active: IntGaugeVec,
     evpn_df_role: IntGaugeVec,
+    evpn_es_ac_gate: IntGaugeVec,
     evpn_df_role_changes: IntCounterVec,
     evpn_es_drained: IntGaugeVec,
     evpn_ip_vrf_observed_routes: IntGaugeVec,
@@ -686,6 +687,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_es_ac_gate = IntGaugeVec::new(
+            Opts::new(
+                "evpn_es_ac_gate",
+                "Single-active EVPN attachment-circuit gate state per (ESI, state): 1 indicates the current state of the bound AC port gate. States: blocked (non-DF for every member VNI or drained; whole port disabled), forwarding (DF; port forwarding), mixed-roles (RFC 8584 service carving split the DF roles across member VNIs — the port stays forwarding and only BUM flood flags enforce; partial enforcement). Rows exist only for single-active segments with an interface binding.",
+            ),
+            &["esi", "state"],
+        )
+        .expect("valid metric definition");
+
         let evpn_df_role_changes = IntCounterVec::new(
             Opts::new(
                 "evpn_df_role_changes_total",
@@ -1158,6 +1168,9 @@ impl BgpMetrics {
             .register(Box::new(evpn_df_role.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_es_ac_gate.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(evpn_df_role_changes.clone()))
             .expect("metric not already registered");
         registry
@@ -1326,6 +1339,7 @@ impl BgpMetrics {
             evpn_duplicate_mac_threshold_exceeded,
             evpn_duplicate_mac_quarantine_active,
             evpn_df_role,
+            evpn_es_ac_gate,
             evpn_df_role_changes,
             evpn_es_drained,
             evpn_ip_vrf_observed_routes,
@@ -1956,6 +1970,33 @@ impl BgpMetrics {
         self.evpn_df_role
             .with_label_values(&[esi, vni.as_str(), "nondf"])
             .set(i64::from(!is_df));
+    }
+
+    /// Set the single-active AC-gate state gauge for one ESI: the
+    /// named state's label combination reads 1, the other two read 0.
+    pub fn set_evpn_es_ac_gate(&self, esi: &str, state: &str) {
+        const KNOWN: [&str; 3] = ["blocked", "forwarding", "mixed-roles"];
+        debug_assert!(KNOWN.contains(&state), "unknown AC-gate state {state:?}");
+        if !KNOWN.contains(&state) {
+            tracing::warn!("unknown AC-gate state label {state:?}; gauge left untouched");
+            return;
+        }
+        for candidate in KNOWN {
+            self.evpn_es_ac_gate
+                .with_label_values(&[esi, candidate])
+                .set(i64::from(candidate == state));
+        }
+    }
+
+    /// Clear the single-active AC-gate gauge for one ESI (segment
+    /// removed / unbound / flipped to all-active): all three state
+    /// label combinations read 0.
+    pub fn clear_evpn_es_ac_gate(&self, esi: &str) {
+        for candidate in ["blocked", "forwarding", "mixed-roles"] {
+            self.evpn_es_ac_gate
+                .with_label_values(&[esi, candidate])
+                .set(0);
+        }
     }
 
     /// Record an EVPN DF role transition for `(ESI, VNI)`.

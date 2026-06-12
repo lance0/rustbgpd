@@ -190,6 +190,27 @@ existing BUM-enforcement flow. Projection rule (`project_one`):
   closed by this ADR, but the binding provides the port handle a
   per-role traffic gate needs; that work can follow without new
   config surface.
+  **Annotation (landed 2026-06-12):** that follow-on shipped exactly
+  on this consequence — the single-active AC gate drives the bound
+  port's `IFLA_BRPORT_STATE` (`disabled` when non-DF for every
+  member VNI or drained, `forwarding` when DF) through the Gate 8b
+  enforcement flow, with no new config surface: the `interface`
+  binding is both the trigger source (this ADR) and the port handle
+  (the gate). Unbound single-active segments remain BUM-flood-only —
+  the gate cannot act without the handle, which is one more reason
+  to bind. The gate is whole-port, not per-VLAN: RFC 8584 service
+  carving that splits DF roles across an ES's member VNIs falls back
+  to BUM-only enforcement with a structured warning + the
+  `evpn_es_ac_gate` mixed-roles gauge (per-VLAN state would need
+  `vlan_filtering` bridges and per-VLAN STP state — out of scope).
+  Drain interaction is the maintenance semantic foreseen here: any
+  drain reason blocks the AC, and the decision 3 hold-off keeps it
+  blocked until the segment re-converges; note the kernel itself
+  re-enables a disabled port on carrier-up
+  (`br_port_carrier_check`), so the reconciler diffs desired against
+  *observed* port state every pass and re-blocks on the next wake.
+  M67 asserts the disabled/forwarding transitions across the
+  failover cycle.
 
 ## Out of scope
 
@@ -202,7 +223,7 @@ existing BUM-enforcement flow. Projection rule (`project_one`):
   link; if the AC is a bond, bind the bond device (its carrier
   already aggregates member health).
 - **Non-DF all-traffic AC blocking** — separate ROADMAP item, as
-  above.
+  above. *(Since landed — see the Consequences annotation.)*
 
 ## Cross-references
 

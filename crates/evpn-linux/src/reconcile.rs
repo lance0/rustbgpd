@@ -186,6 +186,30 @@ struct ActorState {
     /// ops. Same fingerprint-equality semantics as the FDB map: a
     /// new flag triplet for the same ifindex clears the suppression.
     bum_permanent_failures: BTreeMap<u32, DataplaneOp>,
+    /// Retry schedule for single-active AC-gate `SetAcPortState`
+    /// ops, keyed by AC-port ifindex. Independent from the BUM
+    /// schedule even though both are ifindex-keyed — the two op
+    /// shapes target the same port namespace but must not share
+    /// backoff state.
+    ac_gate_retry: RetrySchedule<u32>,
+    /// Per-ifindex permanent-failure suppression for AC-gate ops.
+    /// Same fingerprint-equality semantics as the BUM map: a new
+    /// desired state for the same ifindex clears the suppression.
+    ac_gate_permanent_failures: BTreeMap<u32, DataplaneOp>,
+    /// AC ports under gate management as of the last reconcile pass
+    /// (ifindex → desired blocked). Used ONLY to restore ports that
+    /// *leave* management to `BR_STATE_FORWARDING` (ES/binding
+    /// removed, redundancy mode flipped, shutdown) — never for
+    /// change detection, which diffs desired against the *observed*
+    /// port state each pass because the kernel rewrites bridge-port
+    /// state on carrier transitions (see `crate::ac_gate`).
+    last_ac_gate_managed: BTreeMap<u32, bool>,
+    /// Bound AC interface names we've already warned about for
+    /// failing to resolve to a bridge port. Same new-entry-only
+    /// discipline as `warned_ipv6_fallback`: warn when a name enters
+    /// the unresolved set, prune when it resolves so a later
+    /// re-entry warns afresh.
+    warned_unresolved_ac_gates: BTreeSet<String>,
     /// Retry schedule for ADR-0059 slice 3b `UpdateFdbNhgMembers`
     /// ops, keyed by [`AliasGroupKey`]. Group-level ops have no
     /// natural `(VNI, MAC)` identity, so they need their own key
@@ -374,6 +398,10 @@ impl ActorState {
             permanent_failures: BTreeMap::new(),
             bum_retry: RetrySchedule::new(),
             bum_permanent_failures: BTreeMap::new(),
+            ac_gate_retry: RetrySchedule::new(),
+            ac_gate_permanent_failures: BTreeMap::new(),
+            last_ac_gate_managed: BTreeMap::new(),
+            warned_unresolved_ac_gates: BTreeSet::new(),
             nhg_retry: RetrySchedule::new(),
             nhg_permanent_failures: BTreeMap::new(),
             pending_deletes: BTreeSet::new(),
@@ -459,14 +487,16 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         }
 
         loop {
-            // Compute the next retry deadline across the three retry
-            // schedules — FDB ops keyed by `(VNI, MAC)`, BUM ops keyed
-            // by ifindex, and FDB-NHG group-level ops keyed by
-            // `AliasGroupKey`. The earliest wakes the actor.
+            // Compute the next retry deadline across the four retry
+            // schedules — FDB ops keyed by `(VNI, MAC)`, BUM and
+            // AC-gate ops keyed by ifindex (separate schedules), and
+            // FDB-NHG group-level ops keyed by `AliasGroupKey`. The
+            // earliest wakes the actor.
             let next_fdb = self.state.retry.earliest_due();
             let next_bum = self.state.bum_retry.earliest_due();
+            let next_ac_gate = self.state.ac_gate_retry.earliest_due();
             let next_nhg = self.state.nhg_retry.earliest_due();
-            let retry_due = [next_fdb, next_bum, next_nhg]
+            let retry_due = [next_fdb, next_bum, next_ac_gate, next_nhg]
                 .into_iter()
                 .flatten()
                 .min()
@@ -794,6 +824,47 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             }
         }
 
+        // Single-active AC gate (whole-port blocking, the RFC 7432
+        // §14.1.1 complement to the BUM flood flags above). Resolved
+        // against the *observed* `IFLA_BRPORT_STATE` from this pass's
+        // snapshot — never against a remembered plan — because the
+        // kernel rewrites port state on carrier transitions
+        // (`br_port_carrier_check` re-enables a DISABLED port when
+        // carrier returns); diffing observed state heals that drift
+        // on every pass. `last_ac_gate_managed` exists only to
+        // restore ports that *leave* gate management to forwarding,
+        // so a removed ES/binding never orphans a disabled port.
+        // Gated behind the same `apply_bum_enforcement` knob as the
+        // flood flags — both are Gate 8b DF dataplane enforcement.
+        let ac_resolution =
+            crate::ac_gate::resolve_ac_gate_plan(&intent.bum_enforcement, &snapshot);
+        for name in &ac_resolution.unresolved {
+            if self.state.warned_unresolved_ac_gates.insert(name.clone()) {
+                tracing::warn!(
+                    interface = name.as_str(),
+                    "single-active AC gate: bound interface is not a bridge port; \
+                     whole-port blocking NOT enforced for this segment (BUM flood \
+                     flags still apply)"
+                );
+            }
+        }
+        self.state
+            .warned_unresolved_ac_gates
+            .retain(|name| ac_resolution.unresolved.contains(name));
+        let ac_restore = crate::ac_gate::restore_ops(
+            &self.state.last_ac_gate_managed,
+            &ac_resolution.managed,
+            &snapshot,
+        );
+        if self.config.apply_bum_enforcement {
+            for change in ac_resolution.ops.iter().chain(ac_restore.iter()) {
+                plan.ops.push(DataplaneOp::SetAcPortState {
+                    ifindex: change.ifindex,
+                    blocked: change.blocked,
+                });
+            }
+        }
+
         let (applied, failed) = self.apply_plan(&plan, intent.remote_macs.as_ref()).await;
 
         // Retry any kernel-nexthop deletes left over from steady-state
@@ -936,6 +1007,32 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             // start builds a fresh actor with an empty applied-state
             // baseline.
             self.state.last_bum_plan = new_bum_plan.iter().map(|p| (p.ifindex, p.flags)).collect();
+        }
+
+        // Advance the AC-gate management baseline. Change detection
+        // is observed-state-based (above), so this map only powers
+        // the removal-restore path: a port whose forwarding restore
+        // did not demonstrably succeed this pass stays in the
+        // baseline (as blocked) and the restore re-emits next pass —
+        // a removed ES/binding must never orphan a disabled port on
+        // a transient netlink failure.
+        {
+            let mut new_managed = ac_resolution.managed.clone();
+            if self.config.apply_bum_enforcement {
+                let succeeded_ac: std::collections::BTreeSet<u32> = applied
+                    .iter()
+                    .filter_map(|a| match a.kind {
+                        DataplaneOpKind::SetAcPortState { ifindex, .. } => Some(ifindex),
+                        _ => None,
+                    })
+                    .collect();
+                for op in &ac_restore {
+                    if !succeeded_ac.contains(&op.ifindex) {
+                        new_managed.insert(op.ifindex, true);
+                    }
+                }
+            }
+            self.state.last_ac_gate_managed = new_managed;
         }
 
         // Gate 9 slice 6c: drive the L3 install pipeline. Pure-
@@ -1254,6 +1351,12 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     op,
                     "BUM",
                 ),
+                DataplaneOp::SetAcPortState { ifindex, .. } => check_permanent_suppression(
+                    &mut self.state.ac_gate_permanent_failures,
+                    ifindex,
+                    op,
+                    "AC gate",
+                ),
                 DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => check_permanent_suppression(
                     &mut self.state.nhg_permanent_failures,
                     group_key,
@@ -1277,6 +1380,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             let next_due_ms_opt = match op {
                 DataplaneOp::SetBumPortFlags { ifindex, .. } => {
                     self.state.bum_retry.next_due_for(*ifindex)
+                }
+                DataplaneOp::SetAcPortState { ifindex, .. } => {
+                    self.state.ac_gate_retry.next_due_for(*ifindex)
                 }
                 DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => {
                     self.state.nhg_retry.next_due_for(*group_key)
@@ -1321,6 +1427,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                                 DataplaneOp::SetBumPortFlags { ifindex, .. } => {
                                     self.state.bum_retry.record_failure(*ifindex, now_ms)
                                 }
+                                DataplaneOp::SetAcPortState { ifindex, .. } => {
+                                    self.state.ac_gate_retry.record_failure(*ifindex, now_ms)
+                                }
                                 DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => {
                                     self.state.nhg_retry.record_failure(*group_key, now_ms)
                                 }
@@ -1355,6 +1464,12 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                                     self.state.bum_retry.record_success(*ifindex);
                                     self.state
                                         .bum_permanent_failures
+                                        .insert(*ifindex, op.clone());
+                                }
+                                DataplaneOp::SetAcPortState { ifindex, .. } => {
+                                    self.state.ac_gate_retry.record_success(*ifindex);
+                                    self.state
+                                        .ac_gate_permanent_failures
                                         .insert(*ifindex, op.clone());
                                 }
                                 DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => {
@@ -2225,6 +2340,12 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 // Clear the BUM-side retry schedule for the ifindex.
                 self.state.bum_retry.record_success(*ifindex);
             }
+            DataplaneOp::SetAcPortState { ifindex, .. } => {
+                // Same bridge-port surface as BUM flags; no FDB
+                // OwnedSet interaction. Clear the AC-gate retry
+                // schedule for the ifindex.
+                self.state.ac_gate_retry.record_success(*ifindex);
+            }
             DataplaneOp::InstallFdbNhg {
                 vni,
                 mac,
@@ -2389,6 +2510,25 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             Vec::new()
         };
 
+        // Restore any gate-blocked AC port to forwarding — same
+        // rationale as the BUM restore: a daemon exit must not leave
+        // a CE-facing port disabled (the next daemon decides afresh;
+        // a kernel carrier flap would re-enable it anyway).
+        let ac_gate_restore_ops: Vec<_> = if self.config.apply_bum_enforcement {
+            self.state
+                .last_ac_gate_managed
+                .iter()
+                .filter_map(|(&ifindex, &blocked)| {
+                    blocked.then_some(DataplaneOp::SetAcPortState {
+                        ifindex,
+                        blocked: false,
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         // Compute the L3 drain plan up front so the early-return
         // guard below also gates on Gate 9 owned state. Drain is
         // built by running the diff against an empty intent — the
@@ -2408,7 +2548,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             )
         };
 
-        if self.state.owned.is_empty() && bum_restore_ops.is_empty() && l3_drain_plan.ops.is_empty()
+        if self.state.owned.is_empty()
+            && bum_restore_ops.is_empty()
+            && ac_gate_restore_ops.is_empty()
+            && l3_drain_plan.ops.is_empty()
         {
             return;
         }
@@ -2432,6 +2575,20 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     self.state.last_bum_plan.remove(&ifindex);
                     self.state.bum_retry.record_success(ifindex);
                     self.state.bum_permanent_failures.remove(&ifindex);
+                }
+            }
+
+            for op in ac_gate_restore_ops {
+                let DataplaneOp::SetAcPortState { ifindex, .. } = op else {
+                    unreachable!("AC-gate restore ops are always SetAcPortState")
+                };
+                if let Err(e) = self.dataplane.apply(&op).await {
+                    tracing::debug!(error = %e, ?op, "AC-gate restore during drain failed");
+                    // Best-effort, like the BUM restore above.
+                } else {
+                    self.state.last_ac_gate_managed.remove(&ifindex);
+                    self.state.ac_gate_retry.record_success(ifindex);
+                    self.state.ac_gate_permanent_failures.remove(&ifindex);
                 }
             }
 
@@ -3238,6 +3395,7 @@ fn fdb_op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
         | DataplaneOp::RemoveFdbNhg { vni, .. } => *vni,
         DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => group_key.vni,
         DataplaneOp::SetBumPortFlags { .. }
+        | DataplaneOp::SetAcPortState { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
         | DataplaneOp::AddL3Neighbor { .. }
@@ -3263,6 +3421,7 @@ fn fdb_op_mac(op: &DataplaneOp) -> rustbgpd_evpn::MacAddress {
         | DataplaneOp::RemoveFdbNhg { mac, .. } => *mac,
         DataplaneOp::UpdateFdbNhgMembers { .. }
         | DataplaneOp::SetBumPortFlags { .. }
+        | DataplaneOp::SetAcPortState { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
         | DataplaneOp::AddL3Neighbor { .. }
@@ -3286,6 +3445,10 @@ fn op_to_kind(op: &DataplaneOp) -> DataplaneOpKind {
         DataplaneOp::SetBumPortFlags { ifindex, .. } => {
             DataplaneOpKind::SetBumPortFlags { ifindex: *ifindex }
         }
+        DataplaneOp::SetAcPortState { ifindex, blocked } => DataplaneOpKind::SetAcPortState {
+            ifindex: *ifindex,
+            blocked: *blocked,
+        },
         // Gate 9 L3 ops use a parallel accounting surface
         // (`AppliedL3Op` lands with the reconciler diff loop). They
         // never reach the L2 `op_to_kind` path under the current

@@ -3667,3 +3667,237 @@ async fn single_active_degrade_to_sole_pe_converts_back_to_dst_row() {
 
     h.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Single-active AC gate (whole-port blocking) through the actor.
+// ---------------------------------------------------------------------------
+
+fn ac_gate_table(
+    esi: EthernetSegmentIdentifier,
+    state: rustbgpd_evpn::AcGateState,
+) -> BumEnforcementTable {
+    let mut table = BumEnforcementTable::new();
+    table.set_ac_gate(esi, "eth2".to_string(), state);
+    table
+}
+
+// Observe-only posture: with `apply_bum_enforcement = false` (the
+// for_tests default) a Blocked gate row must not produce any kernel
+// port-state mutation — same contract as the BUM flood flags.
+#[tokio::test]
+async fn ac_gate_observe_only_emits_no_ops() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_bridge_port(
+        "eth2",
+        10,
+        Some(rustbgpd_evpn_linux::ac_gate::BR_STATE_FORWARDING),
+    );
+
+    let esi = EthernetSegmentIdentifier::new([7; 10]);
+    h.intent_tx
+        .send(intent_with_bum_enforcement(
+            1,
+            EvpnInstanceTable::new(),
+            RemoteMacTable::new(),
+            ac_gate_table(esi, rustbgpd_evpn::AcGateState::Blocked),
+        ))
+        .unwrap();
+
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert!(
+        h.handle.ac_port_states().is_empty(),
+        "no AC-gate ops should be applied when apply_bum_enforcement = false"
+    );
+    h.shutdown().await;
+}
+
+// With apply enabled, a Blocked gate row on a forwarding port emits
+// `SetAcPortState { blocked: true }`, and a follow-up intent that
+// drops the gate row (ES/binding removed from config) restores the
+// port to forwarding — never leave a disabled port orphaned.
+#[tokio::test]
+async fn ac_gate_blocks_non_df_port_and_restores_on_config_removal() {
+    let cfg = ReconcileActorConfig {
+        apply_bum_enforcement: true,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_bridge_port(
+        "eth2",
+        10,
+        Some(rustbgpd_evpn_linux::ac_gate::BR_STATE_FORWARDING),
+    );
+
+    let esi = EthernetSegmentIdentifier::new([7; 10]);
+    h.intent_tx
+        .send(intent_with_bum_enforcement(
+            1,
+            EvpnInstanceTable::new(),
+            RemoteMacTable::new(),
+            ac_gate_table(esi, rustbgpd_evpn::AcGateState::Blocked),
+        ))
+        .unwrap();
+
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert_eq!(
+        h.handle.ac_port_states().get(&10),
+        Some(&true),
+        "non-DF single-active AC must be blocked"
+    );
+
+    // ES removed from config → gate row disappears → restore.
+    h.intent_tx
+        .send(intent_with_bum_enforcement(
+            2,
+            EvpnInstanceTable::new(),
+            RemoteMacTable::new(),
+            BumEnforcementTable::new(),
+        ))
+        .unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation < 2 {
+        last = h.next_report().await;
+    }
+    assert_eq!(
+        h.handle.ac_port_states().get(&10),
+        Some(&false),
+        "a gate row leaving the intent must restore the port to forwarding"
+    );
+    h.shutdown().await;
+}
+
+// The kernel rewrites bridge-port state on carrier transitions
+// (`br_port_carrier_check` re-enables a DISABLED port when carrier
+// returns). Because the gate diffs desired against *observed* state,
+// the next reconcile pass re-emits the block.
+#[tokio::test]
+async fn ac_gate_reheals_kernel_carrier_reset_drift() {
+    let cfg = ReconcileActorConfig {
+        apply_bum_enforcement: true,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_bridge_port(
+        "eth2",
+        10,
+        Some(rustbgpd_evpn_linux::ac_gate::BR_STATE_FORWARDING),
+    );
+
+    let esi = EthernetSegmentIdentifier::new([7; 10]);
+    h.intent_tx
+        .send(intent_with_bum_enforcement(
+            1,
+            EvpnInstanceTable::new(),
+            RemoteMacTable::new(),
+            ac_gate_table(esi, rustbgpd_evpn::AcGateState::Blocked),
+        ))
+        .unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert_eq!(h.handle.ac_port_states().get(&10), Some(&true));
+
+    // Simulate the kernel's carrier check re-enabling the port, then
+    // wake the actor (any reconcile trigger heals — kernel event,
+    // intent change, or the periodic dump).
+    h.handle.set_bridge_port(
+        "eth2",
+        10,
+        Some(rustbgpd_evpn_linux::ac_gate::BR_STATE_FORWARDING),
+    );
+    let before = h.handle.apply_count();
+    h.handle.push_event(KernelEvent::KernelStateChanged).await;
+    let _ = h.next_report().await;
+    assert!(
+        h.handle.apply_count() > before,
+        "drifted port must be re-blocked on the next pass"
+    );
+    assert_eq!(
+        h.handle.kernel_snapshot().bridge_ports["eth2"].state,
+        Some(rustbgpd_evpn_linux::ac_gate::BR_STATE_DISABLED),
+        "observed-state diff must re-emit the block after kernel drift"
+    );
+    h.shutdown().await;
+}
+
+// MixedRoles (RFC 8584 service carving split the DF roles across the
+// member VNIs) resolves to a forwarding port — the gate must not
+// break the VNIs this PE is DF for.
+#[tokio::test]
+async fn ac_gate_mixed_roles_keeps_port_forwarding() {
+    let cfg = ReconcileActorConfig {
+        apply_bum_enforcement: true,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_bridge_port(
+        "eth2",
+        10,
+        Some(rustbgpd_evpn_linux::ac_gate::BR_STATE_FORWARDING),
+    );
+
+    let esi = EthernetSegmentIdentifier::new([7; 10]);
+    h.intent_tx
+        .send(intent_with_bum_enforcement(
+            1,
+            EvpnInstanceTable::new(),
+            RemoteMacTable::new(),
+            ac_gate_table(esi, rustbgpd_evpn::AcGateState::MixedRoles),
+        ))
+        .unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert!(
+        h.handle.ac_port_states().is_empty(),
+        "a mixed-roles port already forwarding needs no op"
+    );
+    h.shutdown().await;
+}
+
+// Shutdown restores a gate-blocked port even with no owned FDB
+// entries — mirror of the BUM-flag drain contract.
+#[tokio::test]
+async fn shutdown_restores_ac_gate_even_without_owned_fdb_entries() {
+    let cfg = ReconcileActorConfig {
+        apply_bum_enforcement: true,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_bridge_port(
+        "eth2",
+        10,
+        Some(rustbgpd_evpn_linux::ac_gate::BR_STATE_FORWARDING),
+    );
+
+    let esi = EthernetSegmentIdentifier::new([7; 10]);
+    h.intent_tx
+        .send(intent_with_bum_enforcement(
+            1,
+            EvpnInstanceTable::new(),
+            RemoteMacTable::new(),
+            ac_gate_table(esi, rustbgpd_evpn::AcGateState::Blocked),
+        ))
+        .unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert_eq!(h.handle.ac_port_states().get(&10), Some(&true));
+
+    let handle = h.handle.clone();
+    h.shutdown().await;
+    assert_eq!(
+        handle.ac_port_states().get(&10),
+        Some(&false),
+        "shutdown drain must restore the gate-blocked AC port to forwarding"
+    );
+}

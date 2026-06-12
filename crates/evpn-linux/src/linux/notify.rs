@@ -563,6 +563,7 @@ mod tests {
             bridges,
             vxlan_ifindex_to_vni,
             bridge_port_to_vni,
+            bridge_ports_by_name: HashMap::new(),
         }
     }
 
