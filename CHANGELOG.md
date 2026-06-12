@@ -31,8 +31,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   informational, with one generous < 30 s hard bound: **~4.5 s on local
   hardware (both validation runs), AC-failure case** — dominated by the
   dataplane supervisor's 5 s RIB-poll cadence, not the swap itself
-  (one `NLM_F_REPLACE`); an event-driven intent recompute would shave
-  the repair to sub-second and is recorded in the ADR as follow-up.
+  (one `NLM_F_REPLACE`); the event-driven intent recompute shipped
+  below under *Changed* shaves the repair to ~0.3 s and tightens the
+  bound to 3 s.
   The PEs are GoBGP because no in-tree origin can emit the stimulus:
   rustbgpd originates the Single-Active flag fine but has no
   AC/interface binding for an ES (config-removal SIGHUP drains and
@@ -113,6 +114,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   consumer).
 
 ### Changed
+
+- **EVPN dataplane intent recompute is event-driven; single-active
+  failover repair drops from ~4.5 s to ~0.3 s.** The dataplane
+  supervisor now subscribes to the RIB's EVPN route-event broadcast
+  (the same stream the local-MAC originator and the segment
+  orchestrator consume) and re-projects 200 ms after the last event of
+  a burst, instead of waiting for its 5 s RIB-poll tick. Any EVPN
+  best-path change (Type 1/2/3/4/5 add/withdraw/best-change) triggers
+  the debounced recompute; the unchanged-intent early return keeps
+  spurious triggers free, and the 5 s poll is retained as the backstop
+  (lost subscription, sustained sub-debounce churn). M65 re-measured
+  the ADR-0083 single-active AC-failure blackout at **300 ms on local
+  hardware (both post-change runs, from 4500-4600 ms before)** —
+  including the driver's ~100-200 ms failure-injection serialization
+  gap — and its hard blackout bound tightens from 30 s to 3 s so a
+  regression back to poll-driven recompute fails CI.
 
 - **Operator-visible row shape for single-active remote MACs (ADR-0083
   slice 2).** `bridge fdb show` now reports `nhid <id>` (pointing at the

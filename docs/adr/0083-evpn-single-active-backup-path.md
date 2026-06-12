@@ -392,6 +392,11 @@ answer.**
        detection-to-repair term at the receiver. An event-driven
        intent recompute on EVPN RIB change would shave the remote
        repair to sub-second; recorded as follow-up, not done here.
+       *(Follow-up shipped post-ADR: the dataplane supervisor now
+       re-projects on the RIB's EVPN route-event broadcast after a
+       200 ms debounce, with the 5 s poll retained as backstop; M65
+       re-measured the AC-failure blackout at 300 ms — both runs —
+       and its hard bound tightened from 30 s to 3 s.)*
 - A future remote-VTEP liveness detector (BFD-to-VTEP or underlay
   route tracking) plugs into decision 5's eligibility function rather
   than inventing a new failover path.

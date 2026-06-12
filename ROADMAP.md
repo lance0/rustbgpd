@@ -183,9 +183,11 @@ has it, no broad performance sprints without profile evidence.
   with surviving eligible PEs swaps the group membership to the backup
   in one atomic netlink replace (MAC rows untouched); proven by M65
   with a measured ~4.5 s blackout. Follow-ups from the arc: (1)
-  event-driven intent recompute — the 5 s RIB-poll cadence dominates
-  the measured window; the swap itself is one netlink op, so this is
-  the gap between 4.5 s and genuinely sub-second; (2) Ethernet-Tag
+  event-driven intent recompute — **done:** the dataplane supervisor
+  subscribes to the RIB's EVPN route-event broadcast and re-projects
+  after a 200 ms debounce (5 s poll retained as backstop); M65
+  re-measured the AC-failure blackout at 300 ms (from ~4.5 s) and its
+  hard bound tightened from 30 s to 3 s; (2) Ethernet-Tag
   alignment — **done:** EAD-per-EVI now originates with
   `ethernet_tag = 0` and the VNI in the label field per RFC 7432 §6.1
   / RFC 8365 §5.1.3 (FRR parity), so rustbgpd-originated EAD-per-EVI
