@@ -118,14 +118,14 @@ as the backstop/initial-state source (subscription gap or missed
 message heals at the next poll). The parser keeps the established
 discipline: scalars out of `LinkMessage`, no enum round-tripping. This
 lands the ROADMAP "`RTNLGRP_LINK` eventing" item for the attributes
-this feature needs (ifindex, name, operstate); the wider inventory
-stays poll-based until something else needs eventing.
+this feature needs (ifindex, name, link flags / carrier); the wider
+inventory stays poll-based until something else needs eventing.
 
 ## Decision 5 — same-ESI local bias in the remote-MAC projection
 
-The binding gives the dataplane supervisor a per-ESI **local
-attachment health** snapshot (alongside the existing BUM-enforcement
-flow from the segment actor). Projection rule (`project_one`):
+The binding feeds a per-`(ESI, VNI)` **bias-eligibility** snapshot to
+the dataplane supervisor, published by the segment actor alongside the
+existing BUM-enforcement flow. Projection rule (`project_one`):
 
 - A remote MAC/MAC-IP route whose ESI is **locally attached, healthy,
   not drained — and for which this PE is entitled to forward** does
