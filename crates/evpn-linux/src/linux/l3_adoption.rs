@@ -16,9 +16,11 @@
 //! 2. **L3 neighbors** — `RTM_GETNEIGH` per address family (Inet,
 //!    Inet6), keeping rows on managed L3VXLAN ifindexes whose state
 //!    has `NUD_PERMANENT` and whose flags carry `NTF_EXT_LEARNED`,
-//!    and whose `NDA_PROTOCOL` — when present — is `RTPROT_BGP`
-//!    (ADR-0082; absence is accepted this release as the pre-stamp
-//!    legacy shape).
+//!    and whose `NDA_PROTOCOL` is `RTPROT_BGP` (the ADR-0082
+//!    ownership stamp; required by default now that the stamp-or-
+//!    legacy migration window has closed —
+//!    [`ADOPTION_ACCEPT_LEGACY_ENV`] restores legacy acceptance for
+//!    skip-version upgrades).
 //! 3. **L3VXLAN FDB rows** — `AF_BRIDGE` `RTM_GETNEIGH`, keeping
 //!    `extern_learn` + permanent-state rows on managed L3VXLAN
 //!    ifindexes. The existing bridge-FDB snapshot (`super::fdb`)
@@ -64,6 +66,64 @@ use super::routes::{
 /// constant in `super::l3` (the write side); both halves of the
 /// marker must read the same bit.
 const NUD_PERMANENT: u16 = 0x80;
+
+/// Escape hatch for the ADR-0082 strict L3-neighbor adoption rule.
+/// The stamp-or-legacy migration window (decision 4) closed after
+/// v0.38.0 shipped `NDA_PROTOCOL` stamping on every install site:
+/// [`classify_adoption_neighbor`] now requires the `RTPROT_BGP` stamp
+/// by default, so a stamp-less row — installed by a pre-stamp
+/// rustbgpd — is no longer adopted. Setting this to `1` or `true`
+/// restores the stamp-or-legacy rule for the run, which a
+/// skip-version upgrade (pre-stamp straight to strict, with kernel
+/// rows still live) needs for its first boot. Foreign stamps (any
+/// value other than `RTPROT_BGP`) disqualify a row in both modes.
+const ADOPTION_ACCEPT_LEGACY_ENV: &str = "RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY";
+
+/// Pure core of the [`ADOPTION_ACCEPT_LEGACY_ENV`] switch with the
+/// environment value injected, so the parse rule is unit-testable
+/// without touching process-global env state. `1` / `true`
+/// (ASCII-case-insensitive, surrounding whitespace ignored) enable
+/// legacy acceptance; unset, `0`, and `false` keep the strict
+/// default; anything else warns and keeps the strict default.
+fn accept_legacy_override(env: Option<&str>) -> bool {
+    let Some(raw) = env else {
+        return false;
+    };
+    let value = raw.trim();
+    if value.eq_ignore_ascii_case("1") || value.eq_ignore_ascii_case("true") {
+        return true;
+    }
+    if !(value.is_empty() || value.eq_ignore_ascii_case("0") || value.eq_ignore_ascii_case("false"))
+    {
+        tracing::warn!(
+            value = %raw,
+            "ignoring invalid {ADOPTION_ACCEPT_LEGACY_ENV} (expected 1/true or 0/false)"
+        );
+    }
+    false
+}
+
+/// Resolve the effective legacy-acceptance mode, reading
+/// [`ADOPTION_ACCEPT_LEGACY_ENV`] once at dataplane construction —
+/// never inside the per-row classifier.
+pub(super) fn adoption_accept_legacy() -> bool {
+    let env = match std::env::var(ADOPTION_ACCEPT_LEGACY_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!("ignoring non-unicode {ADOPTION_ACCEPT_LEGACY_ENV}");
+            None
+        }
+    };
+    let accept_legacy = accept_legacy_override(env.as_deref());
+    if accept_legacy {
+        tracing::warn!(
+            "{ADOPTION_ACCEPT_LEGACY_ENV} restores stamp-or-legacy L3 neighbor adoption \
+             (ADR-0082 migration escape hatch)"
+        );
+    }
+    accept_legacy
+}
 
 /// Verdict for one kernel route row against the ADR-0079 VRF-route
 /// marker (`RTPROT_BGP` + onlink, in a configured `table_id`).
@@ -127,19 +187,23 @@ pub(crate) fn classify_adoption_route(
 /// Pure L3-neighbor classifier: keep rows on a managed L3VXLAN
 /// ifindex whose state carries `NUD_PERMANENT` and whose flags carry
 /// `NTF_EXT_LEARNED` — exactly what `super::l3::apply_add_l3_neighbor`
-/// writes — and whose `NDA_PROTOCOL`, when present, is `RTPROT_BGP`
-/// (the ADR-0082 ownership stamp the same write side emits). A row
-/// stamped with any other protocol value is provably another
-/// controller's (zebra stamps `RTPROT_ZEBRA`) and is never adopted; a
-/// stamp-less row stays adoptable this release (stamp-or-legacy
-/// migration window, ADR-0082 decision 4 — rows installed by
-/// pre-stamp rustbgpd versions carry no protocol attribute).
+/// writes — and whose `NDA_PROTOCOL` is `RTPROT_BGP` (the ADR-0082
+/// ownership stamp the same write side emits). A row stamped with any
+/// other protocol value is provably another controller's (zebra
+/// stamps `RTPROT_ZEBRA`) and is never adopted. A stamp-less row is
+/// no longer adopted by default: the ADR-0082 decision 4
+/// stamp-or-legacy migration window closed once v0.38.0 shipped
+/// stamping on every install site, so absence now means "not ours".
+/// `accept_legacy` (the [`ADOPTION_ACCEPT_LEGACY_ENV`] escape hatch,
+/// read once at dataplane construction) restores the old rule for
+/// skip-version upgrades whose kernels still hold pre-stamp rows.
 /// Returns the `(ifindex, next_hop) → vrf_id` pair the
 /// adoption dump records, or `None` for foreign / unmanaged rows.
 #[must_use]
 pub(crate) fn classify_adoption_neighbor(
     msg: &NeighbourMessage,
     managed_l3vxlan: &HashMap<u32, IpVrfId>,
+    accept_legacy: bool,
 ) -> Option<((u32, IpAddr), IpVrfId)> {
     let ifindex = msg.header.ifindex;
     let vrf_id = managed_l3vxlan.get(&ifindex).copied()?;
@@ -148,7 +212,14 @@ pub(crate) fn classify_adoption_neighbor(
     {
         return None;
     }
-    if extract_protocol(msg).is_some_and(|p| p != RouteProtocol::Bgp) {
+    // Stamp rule: `RTPROT_BGP` is ours; any other stamp is provably
+    // another controller's; absence is only ours under the legacy
+    // escape hatch (pre-stamp rows, skip-version upgrades).
+    let stamp_ok = match extract_protocol(msg) {
+        Some(proto) => proto == RouteProtocol::Bgp,
+        None => accept_legacy,
+    };
+    if !stamp_ok {
         return None;
     }
     let next_hop = msg.attributes.iter().find_map(|attr| match attr {
@@ -247,6 +318,7 @@ fn extract_gateway(msg: &RouteMessage) -> Option<IpAddr> {
 pub(crate) async fn dump_l3_adoption_candidates(
     handle: &Handle,
     ip_vrfs: &IpVrfTable,
+    accept_legacy: bool,
 ) -> Option<L3AdoptionDump> {
     if ip_vrfs.is_empty() {
         return Some(L3AdoptionDump::default());
@@ -284,7 +356,8 @@ pub(crate) async fn dump_l3_adoption_candidates(
     if !managed_l3vxlan.is_empty() {
         for family in [AddressFamily::Inet, AddressFamily::Inet6] {
             if let Err(e) =
-                dump_neighbors_one_family(handle, family, &managed_l3vxlan, &mut out).await
+                dump_neighbors_one_family(handle, family, &managed_l3vxlan, accept_legacy, &mut out)
+                    .await
             {
                 tracing::warn!(error = %e, "L3 adoption: neighbor dump failed");
                 return None;
@@ -341,6 +414,7 @@ async fn dump_neighbors_one_family(
     handle: &Handle,
     family: AddressFamily,
     managed_l3vxlan: &HashMap<u32, IpVrfId>,
+    accept_legacy: bool,
     out: &mut L3AdoptionDump,
 ) -> Result<(), DataplaneError> {
     let mut req = handle.neighbours().get();
@@ -349,7 +423,9 @@ async fn dump_neighbors_one_family(
     while let Some(msg) = stream.try_next().await.map_err(|e| {
         DataplaneError::Other(format!("L3 adoption neighbor dump ({family:?}): {e}"))
     })? {
-        if let Some((key, vrf_id)) = classify_adoption_neighbor(&msg, managed_l3vxlan) {
+        if let Some((key, vrf_id)) =
+            classify_adoption_neighbor(&msg, managed_l3vxlan, accept_legacy)
+        {
             out.neighbors.insert(key, vrf_id);
         }
     }
@@ -563,33 +639,20 @@ mod tests {
     // ── neighbor classifier ──
 
     #[test]
-    fn permanent_ext_learned_neighbor_on_managed_ifindex_is_adopted() {
-        let msg = neigh_msg(
-            AddressFamily::Inet,
-            42,
-            NeighbourState::Permanent,
-            NeighbourFlags::ExtLearned,
-            Some(Ipv4Addr::new(10, 0, 0, 2)),
-            None,
-        );
-        assert_eq!(
-            classify_adoption_neighbor(&msg, &managed(&[(42, 101)])),
-            Some(((42, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))), vrf_id(101))),
-        );
-    }
-
-    #[test]
     fn neighbor_on_unmanaged_ifindex_is_skipped() {
-        let msg = neigh_msg(
-            AddressFamily::Inet,
-            7,
-            NeighbourState::Permanent,
-            NeighbourFlags::ExtLearned,
-            Some(Ipv4Addr::new(10, 0, 0, 2)),
-            None,
+        let msg = with_protocol(
+            neigh_msg(
+                AddressFamily::Inet,
+                7,
+                NeighbourState::Permanent,
+                NeighbourFlags::ExtLearned,
+                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                None,
+            ),
+            RouteProtocol::Bgp,
         );
         assert_eq!(
-            classify_adoption_neighbor(&msg, &managed(&[(42, 101)])),
+            classify_adoption_neighbor(&msg, &managed(&[(42, 101)]), false),
             None
         );
     }
@@ -597,31 +660,37 @@ mod tests {
     #[test]
     fn neighbor_missing_either_marker_half_is_skipped() {
         // ext_learn without permanent: kernel-learned-then-flagged
-        // shapes are not ours.
-        let not_permanent = neigh_msg(
-            AddressFamily::Inet,
-            42,
-            NeighbourState::Reachable,
-            NeighbourFlags::ExtLearned,
-            Some(Ipv4Addr::new(10, 0, 0, 2)),
-            None,
+        // shapes are not ours — even with our own stamp on the row.
+        let not_permanent = with_protocol(
+            neigh_msg(
+                AddressFamily::Inet,
+                42,
+                NeighbourState::Reachable,
+                NeighbourFlags::ExtLearned,
+                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                None,
+            ),
+            RouteProtocol::Bgp,
         );
         assert_eq!(
-            classify_adoption_neighbor(&not_permanent, &managed(&[(42, 101)])),
+            classify_adoption_neighbor(&not_permanent, &managed(&[(42, 101)]), false),
             None,
         );
         // permanent without ext_learn: operator `ip neigh add ...
         // nud permanent` — foreign, preserved.
-        let not_ext_learned = neigh_msg(
-            AddressFamily::Inet,
-            42,
-            NeighbourState::Permanent,
-            NeighbourFlags::empty(),
-            Some(Ipv4Addr::new(10, 0, 0, 2)),
-            None,
+        let not_ext_learned = with_protocol(
+            neigh_msg(
+                AddressFamily::Inet,
+                42,
+                NeighbourState::Permanent,
+                NeighbourFlags::empty(),
+                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                None,
+            ),
+            RouteProtocol::Bgp,
         );
         assert_eq!(
-            classify_adoption_neighbor(&not_ext_learned, &managed(&[(42, 101)])),
+            classify_adoption_neighbor(&not_ext_learned, &managed(&[(42, 101)]), false),
             None,
         );
     }
@@ -634,32 +703,11 @@ mod tests {
     }
 
     #[test]
-    fn neighbor_with_bgp_protocol_stamp_is_adopted() {
-        // A post-ADR-0082 install: the stamp matches our RTPROT_BGP
-        // identity, so the row stays a candidate.
-        let msg = with_protocol(
-            neigh_msg(
-                AddressFamily::Inet,
-                42,
-                NeighbourState::Permanent,
-                NeighbourFlags::ExtLearned,
-                Some(Ipv4Addr::new(10, 0, 0, 2)),
-                None,
-            ),
-            RouteProtocol::Bgp,
-        );
-        assert_eq!(
-            classify_adoption_neighbor(&msg, &managed(&[(42, 101)])),
-            Some(((42, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))), vrf_id(101))),
-        );
-    }
-
-    #[test]
-    fn neighbor_with_foreign_protocol_stamp_is_never_adopted() {
-        // Flags match ours exactly, but the stamp proves another
-        // controller wrote the row (zebra stamps RTPROT_ZEBRA = 11).
-        // Same verdict for an arbitrary unassigned protocol value.
-        for proto in [RouteProtocol::Zebra, RouteProtocol::Other(150)] {
+    fn neighbor_with_bgp_protocol_stamp_is_adopted_in_both_modes() {
+        // A v0.38.0+ install: the stamp matches our RTPROT_BGP
+        // identity, so the row is a candidate under the strict
+        // default and under the legacy escape hatch alike.
+        for accept_legacy in [false, true] {
             let msg = with_protocol(
                 neigh_msg(
                     AddressFamily::Inet,
@@ -669,22 +717,51 @@ mod tests {
                     Some(Ipv4Addr::new(10, 0, 0, 2)),
                     None,
                 ),
-                proto,
+                RouteProtocol::Bgp,
             );
             assert_eq!(
-                classify_adoption_neighbor(&msg, &managed(&[(42, 101)])),
-                None,
-                "protocol {proto:?} must disqualify the row",
+                classify_adoption_neighbor(&msg, &managed(&[(42, 101)]), accept_legacy),
+                Some(((42, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))), vrf_id(101))),
+                "accept_legacy={accept_legacy}",
             );
         }
     }
 
     #[test]
-    fn neighbor_without_protocol_stamp_is_adopted_as_legacy() {
-        // Rows installed by pre-stamp rustbgpd versions carry no
-        // NDA_PROTOCOL; the ADR-0082 decision 4 migration window
-        // keeps them adoptable this release (a strict flip is a
-        // later, separate release).
+    fn neighbor_with_foreign_protocol_stamp_is_never_adopted() {
+        // Flags match ours exactly, but the stamp proves another
+        // controller wrote the row (zebra stamps RTPROT_ZEBRA = 11).
+        // Same verdict for an arbitrary unassigned protocol value,
+        // and the legacy escape hatch must not weaken it — it only
+        // re-admits stamp-LESS rows, never foreign-stamped ones.
+        for accept_legacy in [false, true] {
+            for proto in [RouteProtocol::Zebra, RouteProtocol::Other(150)] {
+                let msg = with_protocol(
+                    neigh_msg(
+                        AddressFamily::Inet,
+                        42,
+                        NeighbourState::Permanent,
+                        NeighbourFlags::ExtLearned,
+                        Some(Ipv4Addr::new(10, 0, 0, 2)),
+                        None,
+                    ),
+                    proto,
+                );
+                assert_eq!(
+                    classify_adoption_neighbor(&msg, &managed(&[(42, 101)]), accept_legacy),
+                    None,
+                    "protocol {proto:?} must disqualify the row (accept_legacy={accept_legacy})",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn neighbor_without_protocol_stamp_is_rejected_by_default() {
+        // The ADR-0082 decision 4 migration window closed: every
+        // install site has stamped since v0.38.0, so a stamp-less
+        // row is no longer provably ours and the strict default
+        // classifies it NotOurs (never adopted, never reaped).
         let msg = neigh_msg(
             AddressFamily::Inet,
             42,
@@ -694,9 +771,48 @@ mod tests {
             None,
         );
         assert_eq!(
-            classify_adoption_neighbor(&msg, &managed(&[(42, 101)])),
+            classify_adoption_neighbor(&msg, &managed(&[(42, 101)]), false),
+            None,
+        );
+    }
+
+    #[test]
+    fn neighbor_without_protocol_stamp_is_adopted_under_the_legacy_hatch() {
+        // RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY=1 restores the
+        // stamp-or-legacy rule for skip-version upgrades whose
+        // kernels still hold pre-stamp rows.
+        let msg = neigh_msg(
+            AddressFamily::Inet,
+            42,
+            NeighbourState::Permanent,
+            NeighbourFlags::ExtLearned,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            None,
+        );
+        assert_eq!(
+            classify_adoption_neighbor(&msg, &managed(&[(42, 101)]), true),
             Some(((42, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))), vrf_id(101))),
         );
+    }
+
+    // ── ADOPTION_ACCEPT_LEGACY_ENV parse rule ──
+
+    #[test]
+    fn accept_legacy_parse_enables_on_1_and_true() {
+        assert!(accept_legacy_override(Some("1")));
+        assert!(accept_legacy_override(Some("true")));
+        assert!(accept_legacy_override(Some("TRUE")));
+        assert!(accept_legacy_override(Some(" 1 ")));
+    }
+
+    #[test]
+    fn accept_legacy_parse_keeps_strict_on_unset_0_false_and_garbage() {
+        assert!(!accept_legacy_override(None));
+        assert!(!accept_legacy_override(Some("0")));
+        assert!(!accept_legacy_override(Some("false")));
+        assert!(!accept_legacy_override(Some("")));
+        assert!(!accept_legacy_override(Some("yes")));
+        assert!(!accept_legacy_override(Some("garbage")));
     }
 
     // ── L3VXLAN FDB classifier ──

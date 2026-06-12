@@ -125,9 +125,11 @@ the sweep model is left as a future simplification, not a requirement.
   sweep's current discriminator is `extern_learn` on a VNI in our
   configured instance table — rows on unmanaged VNIs are never adopted
   or reaped — and the `NDA_PROTOCOL` ownership stamp (FRR's January 2026
-  model) shipped as ADR-0082: required-or-legacy at L3 *neighbor*
-  adoption now, prefer-mode on FDB until mainline kernels store the
-  attribute for AF_BRIDGE rows.
+  model) shipped as ADR-0082: required at L3 *neighbor* adoption
+  (strict by default since the post-v0.38.0 flip;
+  `RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY=1` restores the stamp-or-legacy
+  migration rule for skip-version upgrades), prefer-mode on FDB until
+  mainline kernels store the attribute for AF_BRIDGE rows.
 - **systemd-networkd reaps "foreign" state** (`ManageForeignRoutes`,
   `ManageForeignNextHops` default to yes and have deleted other daemons'
   NHGs in the wild). Deployment docs must require `ManageForeign*=no`
