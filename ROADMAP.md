@@ -200,14 +200,16 @@ has it, no broad performance sprints without profile evidence.
   state without replay, in-memory v1, and the M66 interop job proves
   the drain end-to-end as a service handover with rustbgpd on both
   sides (the rustbgpd-originated proof M65 had to fake with GoBGP);
-  the remaining piece is the
-  ES↔interface binding so an AC failure emits the
-  EAD-withdrawn-MACs-retained mass-withdraw shape automatically
-  (reuses the same drain primitive; ADR-0085 accepted — slice 1, the
-  `RTNLGRP_LINK` carrier monitor with poll backstop and runtime
-  watched-set replace, landed in `rustbgpd-evpn-linux`; binding
-  config, drain-coordinator wiring, and the same-ESI local bias
-  follow); a cross-vendor preference-DF smoke
+  the ES↔interface binding **landed** (ADR-0085
+  decisions 1–3, slice 2 on top of the slice-1 `RTNLGRP_LINK` carrier
+  monitor): `[[ethernet_segments]].interface` drives a `link` drain
+  reason through the same primitive — AC carrier loss emits the
+  EAD-withdrawn-MACs-retained mass-withdraw shape automatically,
+  recovery holds `recovery_delay_secs` (re-armed per up edge), and
+  operator/link reasons compose so neither trigger overrides the
+  other; remaining ADR-0085 slices: the same-ESI local bias in the
+  remote-MAC projection (decision 5) and the link-driven M66 sibling
+  proof; a cross-vendor preference-DF smoke
   against FRR; generalized runtime mixed-edit composer for add+delete/redefine
   candidates (pure additive build-up now commits live; generic mixed shapes still
   fail closed today); shape-aware EVPN `--diff` classification so the static diff

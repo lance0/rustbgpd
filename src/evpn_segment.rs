@@ -125,6 +125,37 @@ impl EvpnSegmentRuntimeControl {
     }
 }
 
+/// Test-only stand-in for a running segment actor: a runtime control
+/// whose watch receivers are held open so publishes succeed, plus the
+/// drained-ESI receiver for asserting actor-facing fanout. Used by the
+/// ADR-0085 link-drain coordinator tests.
+#[cfg(test)]
+pub(crate) struct EvpnSegmentControlProbe {
+    pub control: EvpnSegmentRuntimeControl,
+    pub drained_rx: watch::Receiver<Arc<BTreeSet<EthernetSegmentIdentifier>>>,
+    _instances_rx: watch::Receiver<Arc<EvpnInstanceTable>>,
+    _segments_rx: watch::Receiver<Arc<Vec<EthernetSegment>>>,
+}
+
+#[cfg(test)]
+impl EvpnSegmentControlProbe {
+    pub fn new() -> Self {
+        let (instances_tx, instances_rx) = watch::channel(Arc::new(EvpnInstanceTable::new()));
+        let (segments_tx, segments_rx) = watch::channel(Arc::new(Vec::new()));
+        let (drained_esis_tx, drained_rx) = watch::channel(Arc::new(BTreeSet::new()));
+        Self {
+            control: EvpnSegmentRuntimeControl {
+                instances_tx,
+                segments_tx,
+                drained_esis_tx,
+            },
+            drained_rx,
+            _instances_rx: instances_rx,
+            _segments_rx: segments_rx,
+        }
+    }
+}
+
 /// Handle returned to the daemon for shutdown coordination.
 #[derive(Debug)]
 pub struct EvpnSegmentHandle {

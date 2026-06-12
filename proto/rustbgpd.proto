@@ -2254,21 +2254,29 @@ message SetEthernetSegmentDrainRequest {
   // `00:11:22:33:44:55:66:77:88:99`.
   string esi = 1;
   // Desired drain state: true drains the segment, false undrains it.
+  // This RPC adds/removes the `operator` drain reason only (ADR-0085
+  // decision 2); a `link` reason held by the interface binding is
+  // never overridden by this request.
   bool drained = 2;
 }
 
 message SetEthernetSegmentDrainResponse {
-  // Applied drain state (mirrors the request on success).
+  // Composed drain state after the request: true while ANY drain
+  // reason is held (ADR-0085 decision 2). An operator undrain against
+  // a segment whose bound link is down reports drained = true.
   bool drained = 1;
-  // False when the request matched the current state (idempotent
-  // no-op — nothing was withdrawn or re-originated).
+  // False when the operator drain reason already matched the request
+  // (idempotent no-op for this RPC's reason).
   bool changed = 2;
   // Number of member VNIs of the targeted Ethernet Segment whose
-  // local Type 2 origination was drained / replayed.
+  // local Type 2 origination is governed by the drain.
   uint32 member_vni_count = 3;
   // Operator-facing summary, including the withdrawn (or
-  // re-originated) route classes.
+  // re-originated) route classes and any remaining drain reasons.
   string message = 4;
+  // Drain reasons held after the request, as lowercase strings
+  // (`operator`, `link`). Empty when the segment is not drained.
+  repeated string reasons = 5;
 }
 
 message ApplyEvpnRuntimeRequest {

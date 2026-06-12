@@ -877,6 +877,48 @@ impl Config {
         Ok(out)
     }
 
+    /// Resolve the ADR-0085 attachment-circuit bindings declared on
+    /// `[[ethernet_segments]]` entries (`interface` +
+    /// `recovery_delay_secs`) into the daemon-side map keyed by ESI.
+    ///
+    /// Deliberately separate from [`Self::resolve_ethernet_segments`]:
+    /// the binding is coordinator-side trigger state, not part of the
+    /// [`EthernetSegment`] domain type the segment actor diffs — a
+    /// binding-only edit must not register as a "redefined" segment
+    /// and re-originate its routes. Binding-field validation lives in
+    /// `parse_ethernet_segment` so every config path rejects malformed
+    /// bindings.
+    ///
+    /// # Errors
+    /// Surfaces a malformed ESI as
+    /// [`ConfigError::InvalidEthernetSegment`] (already rejected by
+    /// full validation; kept as an error so this resolver is safe to
+    /// call on any `Config`).
+    pub fn resolve_es_link_bindings(
+        &self,
+    ) -> Result<BTreeMap<EthernetSegmentIdentifier, EsLinkBinding>, ConfigError> {
+        let mut out = BTreeMap::new();
+        for cfg in &self.ethernet_segments {
+            let Some(interface) = cfg.interface.clone() else {
+                continue;
+            };
+            let esi = parse_esi(&cfg.esi).map_err(|e| ConfigError::InvalidEthernetSegment {
+                reason: format!("esi {:?}: {e}", cfg.esi),
+            })?;
+            out.insert(
+                esi,
+                EsLinkBinding {
+                    interface,
+                    recovery_delay: std::time::Duration::from_secs(
+                        cfg.recovery_delay_secs
+                            .unwrap_or(DEFAULT_ES_RECOVERY_DELAY_SECS),
+                    ),
+                },
+            );
+        }
+        Ok(out)
+    }
+
     /// Resolve `[[evpn_ip_vrfs]]` entries into runtime [`IpVrfTable`].
     ///
     /// Validates:
@@ -3382,13 +3424,37 @@ fn parse_mac_address(raw: &str) -> Result<MacAddress, &'static str> {
     Ok(MacAddress::new(bytes))
 }
 
+/// Default ADR-0085 decision 3 recovery hold-off: how long a bound
+/// ES's link drain is held after carrier returns. Mirrors the RFC
+/// 8584 §3 DF-wait rationale (don't attract traffic before the
+/// segment re-converges); FRR ships the same concept as its EVPN-MH
+/// startup/recovery delay.
+pub const DEFAULT_ES_RECOVERY_DELAY_SECS: u64 = 30;
+
+/// Upper bound for `recovery_delay_secs` (one hour). Beyond this an
+/// operator wants a manual ADR-0084 drain, not a timer.
+pub const MAX_ES_RECOVERY_DELAY_SECS: u64 = 3600;
+
+/// Resolved ADR-0085 attachment-circuit binding for one Ethernet
+/// Segment: the link whose carrier drives the ES's `Link` drain
+/// reason, plus the decision-3 recovery hold-off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EsLinkBinding {
+    /// Kernel link name (the operator contract — resolution is by
+    /// name on every transition; ifindex can be reused).
+    pub interface: String,
+    /// Hold-off between carrier return and link-drain release.
+    pub recovery_delay: std::time::Duration,
+}
+
 /// Parse one [`EthernetSegmentConfig`] entry into the runtime
 /// [`EthernetSegment`] domain type. Validates the ESI text form,
-/// rejects Type 0 (single-homed sentinel), and confirms every
-/// member VNI exists in the resolved EVPN instance set.
+/// rejects Type 0 (single-homed sentinel), confirms every member
+/// VNI exists in the resolved EVPN instance set, and validates the
+/// ADR-0085 `interface` / `recovery_delay_secs` binding fields.
 #[expect(
     clippy::too_many_lines,
-    reason = "linear ESI/member-VNI/DF-algorithm/preference/redundancy-mode validation reads clearest as one sequence"
+    reason = "linear ESI/member-VNI/DF-algorithm/preference/redundancy-mode/binding validation reads clearest as one sequence"
 )]
 fn parse_ethernet_segment(
     cfg: &EthernetSegmentConfig,
@@ -3513,6 +3579,52 @@ fn parse_ethernet_segment(
             .map_err(|e| ConfigError::InvalidEthernetSegment {
                 reason: format!("originator_ip {:?}: {e}", cfg.originator_ip),
             })?;
+
+    // ADR-0085 decision 1: the attachment-circuit binding. Validated
+    // here so EVERY config path (startup, SIGHUP, runtime apply)
+    // rejects a malformed binding; the resolved daemon-side map is
+    // built separately by `Config::resolve_es_link_bindings` so the
+    // domain type the segment actor diffs stays binding-free.
+    if let Some(interface) = cfg.interface.as_deref() {
+        if interface.is_empty() {
+            return Err(ConfigError::InvalidEthernetSegment {
+                reason: format!("esi {:?}: interface must not be empty", cfg.esi),
+            });
+        }
+        // IFNAMSIZ-1: a longer name can never exist in the kernel, so
+        // the binding would silently fail closed into a permanent
+        // drain — reject the typo at config load instead.
+        if interface.len() > 15 {
+            return Err(ConfigError::InvalidEthernetSegment {
+                reason: format!(
+                    "esi {:?}: interface {interface:?} exceeds the Linux IFNAMSIZ limit \
+                     of 15 characters; no kernel link can ever match it",
+                    cfg.esi
+                ),
+            });
+        }
+    }
+    if let Some(delay) = cfg.recovery_delay_secs {
+        if cfg.interface.is_none() {
+            return Err(ConfigError::InvalidEthernetSegment {
+                reason: format!(
+                    "esi {:?}: recovery_delay_secs is only meaningful with an \
+                     `interface` binding (ADR-0085); remove it or bind the \
+                     attachment-circuit link",
+                    cfg.esi
+                ),
+            });
+        }
+        if delay > MAX_ES_RECOVERY_DELAY_SECS {
+            return Err(ConfigError::InvalidEthernetSegment {
+                reason: format!(
+                    "esi {:?}: recovery_delay_secs {delay} outside the supported \
+                     range 0..={MAX_ES_RECOVERY_DELAY_SECS}",
+                    cfg.esi
+                ),
+            });
+        }
+    }
 
     Ok(EthernetSegment {
         esi,

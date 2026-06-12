@@ -389,8 +389,13 @@ pub async fn clear_duplicate_mac(
 ///
 /// Draining withdraws the ES's Type 4 + EAD routes and the member
 /// VNIs' local Type 2 routes ahead of access-circuit maintenance;
-/// undraining re-originates and replays. Drain state is in-memory:
-/// a daemon restart clears it.
+/// undraining re-originates and replays. This command owns the
+/// `operator` drain reason only (ADR-0085): a segment whose bound
+/// attachment-circuit link is down keeps its `link` reason — and
+/// stays drained — across an operator undrain. The response reports
+/// the composed state and the reason set. Drain state is in-memory:
+/// a daemon restart clears it (bound segments re-evaluate carrier at
+/// startup).
 pub async fn set_es_drain(
     connection: Connection,
     esi: String,
@@ -412,6 +417,7 @@ pub async fn set_es_drain(
                 "drained": resp.drained,
                 "changed": resp.changed,
                 "member_vni_count": resp.member_vni_count,
+                "reasons": resp.reasons,
                 "message": resp.message,
         }))?;
     } else {

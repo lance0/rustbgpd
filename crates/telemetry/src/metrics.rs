@@ -109,6 +109,7 @@ pub struct BgpMetrics {
     evpn_duplicate_mac_quarantine_active: IntGaugeVec,
     evpn_df_role: IntGaugeVec,
     evpn_df_role_changes: IntCounterVec,
+    evpn_es_drained: IntGaugeVec,
     evpn_ip_vrf_observed_routes: IntGaugeVec,
     evpn_ip_vrf_observed_routes_filtered: IntCounterVec,
     evpn_ip_vrf_origination_suppressed: IntCounterVec,
@@ -648,6 +649,19 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_es_drained = IntGaugeVec::new(
+            Opts::new(
+                "evpn_es_drained",
+                "EVPN Ethernet Segment drain reasons per (ESI, reason): 1 while that \
+                 drain reason is held, 0 after it is released (ADR-0085 decision 2). \
+                 reason=operator is the SetEthernetSegmentDrain RPC; reason=link is the \
+                 interface-binding carrier drain. The segment is drained while ANY \
+                 reason is 1. Series are removed when the ESI leaves the config.",
+            ),
+            &["esi", "reason"],
+        )
+        .expect("valid metric definition");
+
         let evpn_ip_vrf_observed_routes = IntGaugeVec::new(
             Opts::new(
                 "evpn_ip_vrf_observed_routes",
@@ -1089,6 +1103,9 @@ impl BgpMetrics {
             .register(Box::new(evpn_df_role_changes.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_es_drained.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(evpn_ip_vrf_observed_routes.clone()))
             .expect("metric not already registered");
         registry
@@ -1248,6 +1265,7 @@ impl BgpMetrics {
             evpn_duplicate_mac_quarantine_active,
             evpn_df_role,
             evpn_df_role_changes,
+            evpn_es_drained,
             evpn_ip_vrf_observed_routes,
             evpn_ip_vrf_observed_routes_filtered,
             evpn_ip_vrf_origination_suppressed,
@@ -1852,6 +1870,27 @@ impl BgpMetrics {
         self.evpn_df_role_changes
             .with_label_values(&[esi, vni.as_str()])
             .inc();
+    }
+
+    /// Set the EVPN Ethernet Segment drain gauge for one `(esi,
+    /// reason)` pair (ADR-0085 decision 2). `reason` is the lowercase
+    /// drain-reason string (`operator` / `link`). Series stay present
+    /// at 0 after a release so operators can see the transition;
+    /// removal is reserved for the ESI leaving the config
+    /// ([`Self::remove_evpn_es_drained`]).
+    pub fn set_evpn_es_drained(&self, esi: &str, reason: &str, drained: bool) {
+        self.evpn_es_drained
+            .with_label_values(&[esi, reason])
+            .set(i64::from(drained));
+    }
+
+    /// Drop every `evpn_es_drained` series for an ESI that left the
+    /// `[[ethernet_segments]]` config (ADR-0084 GC). Removing an
+    /// unknown label set is a no-op.
+    pub fn remove_evpn_es_drained(&self, esi: &str, reasons: &[&str]) {
+        for reason in reasons {
+            let _ = self.evpn_es_drained.remove_label_values(&[esi, reason]);
+        }
     }
 
     /// Set the EVPN IP-VRF observed-routes gauge for one VRF (Gate 9
