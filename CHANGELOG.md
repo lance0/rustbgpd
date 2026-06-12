@@ -11,6 +11,57 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **RIB distribution-health observability for the wedged
+  post-Established advertisement path (ROADMAP, observed in an M66 CI
+  run).** Root-cause analysis identified a silent failure mode:
+  `PeerUp`/`PeerDown` carry no session identity, so when two sessions
+  for one peer overlap during the RFC 4271 §6.8 collision window, a
+  stale collision-loser `PeerDown` processed after the winner's
+  `PeerUp` deregisters the live session's outbound sender — every
+  later advertisement is silently skipped (never dirty-marked, no
+  resync, no log) while the session stays Established on writer-owned
+  keepalives. A manager-level characterization test now pins the
+  mechanism. New metrics make the next occurrence self-diagnosing:
+  `bgp_rib_outbound_registered_peers` (gauge; fewer registered peers
+  than Established sessions = a wedged advertisement path),
+  `bgp_rib_outbound_registration_replaced_total{peer}` (a `PeerUp`
+  replaced a still-registered sender — the collision-overlap
+  precondition), `bgp_rib_dirty_resync_total{outcome}` (resync-timer
+  fires by `cleared`/`still_dirty`), and
+  `bgp_rib_ingest_channel_depth` (sampled RIB manager ingest queue
+  depth). The RIB manager also WARNs when a `PeerUp` replaces a live
+  registration and INFO-logs every outbound deregistration. The
+  session-identity fix itself is specified in the ROADMAP entry and
+  deliberately not shipped speculatively.
+- **Statement-level attribution in `rustbgpctl policy explain` — the
+  decision trace now names WHICH statement inside the matched import
+  chain decided, not just which policy.** Each `permit` / `deny`
+  match gains a `statements` trace: one step per policy the chain
+  evaluated, carrying the policy index + name, the index of the
+  matching statement (or a default-action fallthrough marker when
+  nothing matched), the action it contributed, the conditions the
+  statement matched (stable leading labels: `prefix`, `community`,
+  `as_path`, `neighbor_set`, `rpki`, `local_pref`, … or `any` for an
+  unconditional statement), and the attribute edits it contributes
+  rendered as `before -> after` against the route's pre-policy
+  values (`local_pref 100 -> 200`). A deny ends the trace at the
+  denying policy — later policies were never consulted and get no
+  step. The trace is re-derived at query time from the cached
+  pre-policy attributes (ADR-0073 decision cache) against the
+  session's import chain, so the inbound UPDATE hot path records
+  nothing new; the explain-only chain walk is pinned to the live
+  evaluator by an agreement matrix in the policy crate, and the
+  evaluation-time next-hop is now stored alongside the cached
+  attributes so the reconstruction is exact (MP-unicast next-hops
+  live in MP_REACH framing, which the stored attributes drop).
+  Statement traces attach only to current-generation `permit` /
+  `deny` outcomes: `stale` entries were decided by a chain that no
+  longer exists, `withdrawn` tombstones have shed their attributes,
+  and `evicted` / `not_seen` carry no decision. Surfaces:
+  `ExplainImportPolicy` gains `repeated ImportExplainStatementStep
+  statements` per match (no new RPC, authz unchanged), the CLI text
+  renderer prints a `statements:` section, and `--json` gains a
+  run-stable `statements` array per match.
 - **Single-active non-DF full AC blocking: the whole-port
   attachment-circuit gate.** RFC 7432 single-active redundancy
   requires the non-DF PE to block **all** traffic on the segment AC —

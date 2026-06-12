@@ -265,18 +265,51 @@ has it, no broad performance sprints without profile evidence.
   per-VLAN state would need `vlan_filtering` + per-VLAN STP state).
   Distinct from the deferred all-active local-bias item.
 - **Wedged post-Established advertisement path (observed once, CI,
-  2026-06-12).** During an M66 CI run, every advertisement pe1 issued
-  AFTER initial convergence (fresh Type 2 origination, drain
-  withdrawals) failed to reach the peer VTEP for minutes and across an
-  in-job re-run, while the session stayed Established (keepalives
-  flowing) and previously-advertised state kept forwarding. Bring-up
-  itself was instant, so this is not slow-runner convergence — it has
-  the shape of a stalled RIB→peer distribution / session TX path (or
-  VTEP RX) that heals on session replacement. One occurrence, not yet
-  reproduced; M67's fixture added carrier-monitor + gauge pins and
-  pe1-log dumps for diagnosability if it recurs. Investigate against
-  the ADR-0078 inbound-backpressure and hold-expiry re-arm work — a
-  TX-side sibling of those bugs would look exactly like this.
+  2026-06-12 — mechanism identified and reproduced 2026-06-12).**
+  During an M66 CI run, every advertisement pe1 issued AFTER initial
+  convergence (fresh Type 2 origination, drain withdrawals) failed to
+  reach the peer VTEP for ~10 minutes and across an in-job redeploy,
+  while the session stayed Established (keepalives flowing) and
+  previously-advertised state kept forwarding. Bring-up was instant.
+  **Root-cause analysis (code-verified):** `RibUpdate::PeerUp`/`PeerDown`
+  carry no session identity, and during the RFC 4271 §6.8 collision
+  window two live session tasks exist for one peer address (M66's pe1
+  and vtep dial each other simultaneously at container start). If the
+  collision loser reaches Established and its `CollisionDump`-driven
+  `PeerDown` is processed AFTER the winner's `PeerUp`, the stale
+  `PeerDown` removes the winner's `outbound_peers` registration —
+  `distribute_changes` iterates `outbound_peers` only, so the peer is
+  never visited, never marked dirty, no resync fires, and no warning
+  logs: a fully silent wedge while the session stays Established
+  (keepalives are writer-owned, ADR-0078, on BOTH sides — which is
+  exactly why neither hold timer fired). Bring-up advertisements ride
+  the first `PeerUp`'s initial dump, post-convergence ones are lost;
+  heal requires a new session (`PeerUp` re-registration), consistent
+  with the observed ~17:58 recovery. Alternatives ruled out: RIB
+  manager wedge (the vtep manager answered `ListEvpnRoutes` once per
+  second throughout; the manager loop has no production awaits);
+  dirty-resync starvation (1s persistent timer, and the wedge never
+  marks dirty at all); session-TX/writer (bulk-channel saturation
+  triggers a loud Cease/8 teardown, TCP backpressure would stall
+  keepalives too and trip the remote hold timer in 90s).
+  **Reproduced** at the manager level:
+  `stale_peer_down_after_replacement_peer_up_silently_wedges_distribution`
+  (crates/rib/src/manager/tests.rs) pins the silent-wedge end state and
+  is annotated to flip when the fix lands. **Shipped observability:**
+  `bgp_rib_outbound_registered_peers` gauge (Established sessions >
+  registered peers = this wedge), `bgp_rib_outbound_registration_replaced_total`
+  (the collision-overlap precondition), `bgp_rib_dirty_resync_total`,
+  `bgp_rib_ingest_channel_depth`, a WARN on same-peer registration
+  replacement, and an INFO on every outbound deregistration.
+  **Remaining fix (deliberately not shipped speculatively):** stamp
+  `PeerUp`/`PeerDown` with the transport session id, have
+  `handle_peer_down` ignore a `PeerDown` whose id doesn't match the
+  registered session, and treat a replacement `PeerUp` as a session
+  reset (clear Adj-RIB-In/Out for the peer before re-registering so
+  state from the dumped session can't linger). Evidence gap to close
+  before/while fixing: the M66 job logs contain no pe1-side daemon
+  logs, so the collision itself is inferred, not observed — the new
+  WARN/INFO lines and gauge make the next occurrence self-attributing.
 - **ES drain withdrawal-ordering guarantee.** The Ethernet Segment drain
   primitive fans out to two actors (segment orchestrator withdraws
   Type 1/4; local originator withdraws Type 2) over independent
@@ -380,15 +413,23 @@ has it, no broad performance sprints without profile evidence.
   now reap their label series.)
 - **Policy / explain follow-ups** *(operator polish, not feature).* Stable
   `reason` labels across the remaining ingress filter paths; per-feature counter
-  unit-test coverage; per-statement attribution within a matched import chain
-  (the `rustbgpctl policy explain --neighbor X --prefix Y` decision trace itself
-  shipped in v0.31.0, ADR-0073); best-path explain surfacing the tiebreaker step
-  that won (the RIB-side sibling to the export-side policy-clause attribution —
-  shipped in `[Unreleased]`: per-loser decisive step with compared values, the
-  winner's step vs the runner-up, multipath-cut classification, `NOT_FOUND` for
-  unknown prefixes).
-  Also: named-policy / statement identity in explain output; verbose policy
-  trace including non-match steps; route history / why-changed timeline;
+  unit-test coverage. Per-statement attribution within a matched import chain —
+  **shipped in `[Unreleased]`**: each `policy explain` permit/deny match carries
+  a statement trace (policy + statement identity, matched conditions with
+  stable labels, default-action fallthrough, `before -> after` attribute
+  edits), re-derived at query time from the ADR-0073 cached pre-policy
+  attributes so the live import path is untouched, agreement-tested against the
+  live evaluator (the decision trace itself shipped in v0.31.0; this also
+  covers the "named-policy / statement identity in explain output" item that
+  used to sit below — traces attach to current-generation permit/deny outcomes
+  only, not `stale`/`withdrawn`). Best-path explain surfacing the tiebreaker
+  step that won (the RIB-side sibling to the export-side policy-clause
+  attribution — shipped in `[Unreleased]`: per-loser decisive step with
+  compared values, the winner's step vs the runner-up, multipath-cut
+  classification, `NOT_FOUND` for unknown prefixes).
+  Also: verbose policy trace including non-match steps (the shipped trace
+  reports the deciding statement per policy, not every statement consulted);
+  route history / why-changed timeline;
   looking-glass integration for explain; `rustbgpd --diff` output formatted by
   reload class (cross-reference each diff line against `docs/reload-matrix.md`).
 - **Performance — remaining items.** The scale & memory sprint shipped

@@ -105,11 +105,36 @@ fn explain_modifications_to_proto(
     }
 }
 
+/// Map one statement-level trace step into its proto form. Indices and
+/// the action label are machine-stable; the rendered condition /
+/// modification strings carry stable leading labels with human detail
+/// (the policy crate owns that contract).
+fn statement_step_to_proto(
+    step: &rustbgpd_policy::StatementAttribution,
+) -> proto::ImportExplainStatementStep {
+    proto::ImportExplainStatementStep {
+        policy_index: u32::try_from(step.policy_index).unwrap_or(u32::MAX),
+        policy_name: step.policy_name.clone().unwrap_or_default(),
+        default_action: step.statement_index.is_none(),
+        statement_index: step
+            .statement_index
+            .and_then(|i| u32::try_from(i).ok())
+            .unwrap_or(0),
+        action: match step.action {
+            rustbgpd_policy::PolicyAction::Permit => "permit".to_string(),
+            rustbgpd_policy::PolicyAction::Deny => "deny".to_string(),
+        },
+        matched_conditions: step.matched_conditions.clone(),
+        modifications: step.modifications.clone(),
+    }
+}
+
 /// Render one resolved cache entry into the proto match. The echoed
 /// scope (`peer_address`, `prefix`, `prefix_length`, `afi_safi`) is
 /// stamped on every match; decision-specific fields are populated only
 /// for `Hit` / `Stale` (an `Evicted` / `NotSeen` entry has no recorded
-/// decision to render).
+/// decision to render). Statement steps arrive pre-gated from the
+/// session (current-generation PERMIT / DENY hits only).
 fn resolved_match_to_proto(
     peer_address: &str,
     prefix: &str,
@@ -130,6 +155,11 @@ fn resolved_match_to_proto(
         modifications: None,
         evaluated_at_unix_ns: 0,
         policy_generation: 0,
+        statements: resolved
+            .statements
+            .iter()
+            .map(statement_step_to_proto)
+            .collect(),
     };
     // `Hit` reports the recorded permit/deny/withdrawn outcome; `Stale`
     // keeps the same historical decision fields but overrides the
@@ -1321,6 +1351,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 ResolvedMatch {
                     path_id: req.path_id.unwrap_or(0),
                     result: LookupResult::NotSeen,
+                    statements: Vec::new(),
                 },
             ));
         }
@@ -1389,6 +1420,72 @@ mod tests {
         let proto = input_statement_to_proto(&input);
         let roundtrip = proto_statement_to_input(proto).unwrap();
         assert_eq!(roundtrip, input);
+    }
+
+    #[test]
+    fn resolved_match_maps_statement_trace_to_proto_steps() {
+        use rustbgpd_policy::{PolicyAction, StatementAttribution};
+        use rustbgpd_transport::{CachedDecision, CachedOutcome};
+        use rustbgpd_wire::{AspaValidation, RpkiValidation};
+        use std::time::SystemTime;
+
+        let resolved = ResolvedMatch {
+            path_id: 0,
+            result: LookupResult::Hit(CachedDecision {
+                outcome: CachedOutcome::Permit,
+                matched_policy: Some("edge-import".into()),
+                rpki: RpkiValidation::NotFound,
+                aspa: AspaValidation::Unknown,
+                pre_policy_attrs: Vec::new(),
+                next_hop: None,
+                modifications: rustbgpd_policy::RouteModifications::default(),
+                evaluated_at: SystemTime::UNIX_EPOCH,
+                policy_generation: 1,
+            }),
+            statements: vec![
+                StatementAttribution {
+                    policy_index: 0,
+                    policy_name: Some("edge-import".into()),
+                    statement_index: Some(2),
+                    action: PolicyAction::Permit,
+                    matched_conditions: vec!["community 65001:100".into()],
+                    modifications: vec!["local_pref 100 -> 200".into()],
+                },
+                StatementAttribution {
+                    policy_index: 1,
+                    policy_name: None,
+                    statement_index: None,
+                    action: PolicyAction::Permit,
+                    matched_conditions: vec![],
+                    modifications: vec![],
+                },
+            ],
+        };
+        let m = resolved_match_to_proto(
+            "10.0.0.2",
+            "192.0.2.0",
+            24,
+            proto::AddressFamily::Ipv4Unicast as i32,
+            resolved,
+        );
+        assert_eq!(m.statements.len(), 2);
+        let matched = &m.statements[0];
+        assert_eq!(matched.policy_index, 0);
+        assert_eq!(matched.policy_name, "edge-import");
+        assert!(!matched.default_action);
+        assert_eq!(matched.statement_index, 2);
+        assert_eq!(matched.action, "permit");
+        assert_eq!(matched.matched_conditions, vec!["community 65001:100"]);
+        assert_eq!(matched.modifications, vec!["local_pref 100 -> 200"]);
+        // Default-action fallthrough on an anonymous policy: the flag
+        // is set, the index is the 0 placeholder, the name is empty
+        // (operators read "inline").
+        let fallthrough = &m.statements[1];
+        assert_eq!(fallthrough.policy_index, 1);
+        assert!(fallthrough.policy_name.is_empty());
+        assert!(fallthrough.default_action);
+        assert_eq!(fallthrough.statement_index, 0);
+        assert_eq!(fallthrough.action, "permit");
     }
 
     #[test]

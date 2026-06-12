@@ -3023,6 +3023,33 @@ address = "127.0.0.1:11019"
 // Named policies + policy chaining
 // -----------------------------------------------------------------------
 
+#[test]
+fn empty_policy_definition_name_is_rejected() {
+    // The empty name is the inline-policy sentinel in the explain
+    // surface; a quoted-empty definition key must not collide with it.
+    let toml_str = format!(
+        r#"
+{GLOBAL_HEADER}
+
+[policy.definitions.""]
+default_action = "deny"
+[[policy.definitions."".statements]]
+action = "permit"
+prefix = "10.0.0.0/8"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+"#,
+        GLOBAL_HEADER = valid_toml()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::InvalidPolicyEntry { .. }),
+        "{err:?}"
+    );
+}
+
 fn named_policy_toml() -> String {
     format!(
         r#"

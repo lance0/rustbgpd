@@ -9704,6 +9704,112 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
     handle.await.unwrap();
 }
 
+/// Characterization of the wedged post-Established advertisement path
+/// (ROADMAP, observed in an M66 CI run): `PeerUp`/`PeerDown` carry no
+/// session identity, so when two sessions for the same peer address
+/// overlap (RFC 4271 §6.8 collision window) and the loser's `PeerDown`
+/// arrives AFTER the winner's `PeerUp`, the stale `PeerDown` deregisters
+/// the surviving session's outbound sender. From then on every
+/// advertisement to that peer is silently skipped — `distribute_changes`
+/// iterates `outbound_peers` only, so the peer is never visited, never
+/// marked dirty, and no resync ever fires — while the session itself
+/// stays Established (keepalives are writer-owned in transport).
+///
+/// This test asserts the CURRENT (buggy) end state to pin the mechanism
+/// and the observability that detects it. When `PeerUp`/`PeerDown` gain
+/// session-identity stamping (the fix), flip the trailing asserts:
+/// the imet must then be delivered on `winner_rx`.
+#[tokio::test]
+async fn stale_peer_down_after_replacement_peer_up_silently_wedges_distribution() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+    let peer_up = |outbound_tx: mpsc::Sender<OutboundRouteUpdate>| RibUpdate::PeerUp {
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    };
+
+    // Session A (collision loser) reaches Established first and registers.
+    let (loser_tx, mut loser_rx) = mpsc::channel(8);
+    tx.send(peer_up(loser_tx)).await.unwrap();
+    drain_eor(&mut loser_rx).await;
+
+    // Session B (collision winner) reaches Established while A is still
+    // registered — same peer address, fresh outbound channel. The session
+    // task keeps its own sender clone alive (it does in production), so a
+    // deregistration in the manager closes nothing.
+    let (winner_tx, mut winner_rx) = mpsc::channel(8);
+    let winner_session_tx = winner_tx.clone();
+    tx.send(peer_up(winner_tx)).await.unwrap();
+    drain_eor(&mut winner_rx).await;
+
+    // The dumped loser's teardown lands last: a bare-IP PeerDown.
+    tx.send(RibUpdate::PeerDown { peer }).await.unwrap();
+
+    // A post-convergence advertisement arrives from another RR client —
+    // the analogue of pe1's fresh Type 2 origination / drain withdrawals.
+    let (source_tx, mut source_rx) = mpsc::channel(8);
+    tx.send(RibUpdate::PeerUp {
+        peer: source,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        outbound_tx: source_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut source_rx).await;
+
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // The winner session is notionally still Established (its channel is
+    // open and drained), yet nothing arrives — not immediately and not
+    // via the 1s dirty-resync timer, because the stale PeerDown removed
+    // the peer from `outbound_peers` entirely. 3s > 2 resync intervals.
+    let delivered = tokio::time::timeout(Duration::from_secs(3), winner_rx.recv()).await;
+    assert!(
+        delivered.is_err(),
+        "BUG BEHAVIOR CHANGED: the stale PeerDown no longer wedges distribution — \
+         the session-identity fix has landed; flip this test to assert delivery \
+         instead"
+    );
+
+    drop(winner_session_tx);
+    drop(tx);
+    handle.await.unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // EVPN GR/LLGR tests (Gate 2) — mirror the unicast + FlowSpec GR/LLGR suite.
 // Each test spawns a RibManager with a cluster-id so iBGP reflection works,

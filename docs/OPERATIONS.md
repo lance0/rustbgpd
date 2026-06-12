@@ -380,6 +380,10 @@ Prometheus gauge.
 | `bgp_messages_sent_total` | Outbound BGP messages by type |
 | `bgp_route_refresh_in_progress{peer,afi_safi}` | Active inbound Enhanced Route Refresh window for a peer/family (1 = active, 0 = inactive) |
 | `bgp_route_refresh_stale_entries{peer,afi_safi}` | Routes still awaiting replacement before EoRR or timeout during an inbound Enhanced Route Refresh window |
+| `bgp_rib_outbound_registered_peers` | Peers currently registered for outbound route distribution. An Established session whose peer is missing here has a wedged advertisement path: keepalives still flow but no UPDATE can reach the peer until a new session re-registers |
+| `bgp_rib_outbound_registration_replaced_total{peer}` | `PeerUp` re-registrations that replaced a still-registered outbound sender for the same address — two sessions overlapped (collision window); a stale `PeerDown` after this can deregister the surviving session |
+| `bgp_rib_dirty_resync_total{outcome}` | Dirty-peer resync timer fires, by `cleared` / `still_dirty` |
+| `bgp_rib_ingest_channel_depth` | RIB manager ingest queue depth, sampled once per manager loop iteration; pegged at capacity means producers are parked on backpressure |
 
 ### Event Streams
 
@@ -856,6 +860,30 @@ Each result reports an outcome:
 | `evicted` | Was cached but pushed out by the per-peer cap — raise `cache_size`. |
 | `stale` | A decision exists but the peer's import policy has changed since; the historical decision is shown with its original generation. |
 | `not_seen` | The peer hasn't advertised this prefix on the current session (cache resets on flap / restart), or explain is disabled. |
+
+A `permit` / `deny` result additionally carries a **statement trace** —
+which statement inside the matched chain decided, per policy evaluated:
+
+```
+  permit
+    policy:  edge-import
+    ...
+    statements:
+      [0] policy edge-import statement 1 permit  match: prefix 192.0.2.0/24  set: local_pref 100 -> 200
+```
+
+One row per policy the chain consulted (a deny ends the trace at the
+denying policy — later policies were never evaluated). `default-action`
+rows mean no statement in that policy matched and its default decided.
+Matched conditions lead with stable labels (`prefix`, `community`,
+`as_path`, `neighbor_set`, `rpki`, `local_pref`, …; `any` for an
+unconditional statement) and attribute edits render as
+`before -> after` against the route's pre-policy values. The trace is
+re-derived on demand from the cached pre-policy attributes, so it
+attaches only to current-generation `permit` / `deny` results — a
+`stale` decision's chain no longer exists and a `withdrawn` tombstone
+has dropped the attributes the re-derivation needs. `--json` carries
+the same trace as a `statements` array per match.
 
 This is a side-effect-free read: it does not touch the RIB or move any
 policy counter. The cache is **diagnostic session state**, not durable

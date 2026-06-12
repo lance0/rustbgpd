@@ -255,6 +255,23 @@ struct JsonImportExplainMatch {
     modifications: Option<JsonImportExplainModifications>,
     evaluated_at_unix_ns: Option<i64>,
     policy_generation: Option<u64>,
+    // Unconditional key (run-stable): empty for outcomes that carry no
+    // statement trace (stale / withdrawn / evicted / not_seen, or a
+    // chain-less peer).
+    statements: Vec<JsonImportExplainStatement>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonImportExplainStatement {
+    policy_index: u32,
+    policy_name: Option<String>,
+    // `None` when the policy fell through to its default action
+    // (`default_action == true`).
+    statement_index: Option<u32>,
+    default_action: bool,
+    action: String,
+    matched_conditions: Vec<String>,
+    modifications: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -398,9 +415,40 @@ pub async fn explain_import(
                     println!("    mods:    {summary}");
                 }
             }
+            for (i, s) in m.statements.iter().enumerate() {
+                if i == 0 {
+                    println!("    statements:");
+                }
+                println!("      {}", statement_line(s));
+            }
         }
     }
     Ok(())
+}
+
+/// One text row per statement-trace step:
+/// `[0] policy lp-bump statement 1 permit  match: community 65001:100  set: local_pref 100 -> 200`
+/// or, for a default-action fallthrough,
+/// `[1] policy guard default-action deny`.
+fn statement_line(s: &proto::ImportExplainStatementStep) -> String {
+    let policy = if s.policy_name.is_empty() {
+        "inline"
+    } else {
+        &s.policy_name
+    };
+    let mut line = format!("[{}] policy {policy}", s.policy_index);
+    if s.default_action {
+        line.push_str(&format!(" default-action {}", s.action));
+    } else {
+        line.push_str(&format!(" statement {} {}", s.statement_index, s.action));
+        if !s.matched_conditions.is_empty() {
+            line.push_str(&format!("  match: {}", s.matched_conditions.join(", ")));
+        }
+        if !s.modifications.is_empty() {
+            line.push_str(&format!("  set: {}", s.modifications.join(", ")));
+        }
+    }
+    line
 }
 
 fn blank_dash(s: &str) -> &str {
@@ -431,6 +479,19 @@ fn match_to_json(m: &proto::ImportExplainMatch) -> JsonImportExplainMatch {
         },
         evaluated_at_unix_ns: has_decision.then_some(m.evaluated_at_unix_ns),
         policy_generation: has_decision.then_some(m.policy_generation),
+        statements: m.statements.iter().map(statement_to_json).collect(),
+    }
+}
+
+fn statement_to_json(s: &proto::ImportExplainStatementStep) -> JsonImportExplainStatement {
+    JsonImportExplainStatement {
+        policy_index: s.policy_index,
+        policy_name: (!s.policy_name.is_empty()).then(|| s.policy_name.clone()),
+        statement_index: (!s.default_action).then_some(s.statement_index),
+        default_action: s.default_action,
+        action: s.action.clone(),
+        matched_conditions: s.matched_conditions.clone(),
+        modifications: s.modifications.clone(),
     }
 }
 
@@ -872,6 +933,71 @@ mod tests {
         explain_import(text_conn, "192.0.2.1", "192.0.2.0/24", None, false)
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn statement_line_renders_match_and_set_clauses() {
+        let step = proto::ImportExplainStatementStep {
+            policy_index: 0,
+            policy_name: "edge-import".to_string(),
+            default_action: false,
+            statement_index: 1,
+            action: "permit".to_string(),
+            matched_conditions: vec![
+                "prefix 10.0.0.0/8 le 24".to_string(),
+                "community 65001:100".to_string(),
+            ],
+            modifications: vec!["local_pref 100 -> 200".to_string()],
+        };
+        assert_eq!(
+            statement_line(&step),
+            "[0] policy edge-import statement 1 permit  \
+             match: prefix 10.0.0.0/8 le 24, community 65001:100  \
+             set: local_pref 100 -> 200"
+        );
+    }
+
+    #[test]
+    fn statement_line_renders_default_action_and_inline_policy() {
+        let step = proto::ImportExplainStatementStep {
+            policy_index: 2,
+            policy_name: String::new(),
+            default_action: true,
+            statement_index: 0,
+            action: "deny".to_string(),
+            matched_conditions: vec![],
+            modifications: vec![],
+        };
+        assert_eq!(
+            statement_line(&step),
+            "[2] policy inline default-action deny"
+        );
+    }
+
+    #[test]
+    fn statement_to_json_nulls_index_on_default_action_only() {
+        let matched = proto::ImportExplainStatementStep {
+            policy_index: 0,
+            policy_name: "p".to_string(),
+            default_action: false,
+            statement_index: 3,
+            action: "permit".to_string(),
+            matched_conditions: vec!["any".to_string()],
+            modifications: vec![],
+        };
+        let j = statement_to_json(&matched);
+        assert_eq!(j.statement_index, Some(3));
+        assert_eq!(j.policy_name.as_deref(), Some("p"));
+
+        let fallthrough = proto::ImportExplainStatementStep {
+            default_action: true,
+            policy_name: String::new(),
+            action: "deny".to_string(),
+            ..Default::default()
+        };
+        let j = statement_to_json(&fallthrough);
+        assert_eq!(j.statement_index, None, "fallthrough has no statement");
+        assert_eq!(j.policy_name, None, "inline policy serializes as null");
     }
 
     #[tokio::test]
