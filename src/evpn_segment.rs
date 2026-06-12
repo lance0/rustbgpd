@@ -969,7 +969,10 @@ fn publish_enforcement_table(
             warn!(
                 esi = esi_str.as_str(),
                 interface = entry.interface.as_str(),
-                "single-active ES has split DF roles across its member VNIs                  (RFC 8584 service carving): the whole-port AC gate stays                  forwarding and only per-VNI BUM flood flags enforce —                  partial enforcement until the roles converge"
+                "single-active ES has split DF roles across its member VNIs \
+                 (RFC 8584 service carving): the whole-port AC gate stays \
+                 forwarding and only per-VNI BUM flood flags enforce — \
+                 partial enforcement until the roles converge"
             );
         }
     }

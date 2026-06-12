@@ -1881,7 +1881,13 @@ impl BgpMetrics {
     /// Set the single-active AC-gate state gauge for one ESI: the
     /// named state's label combination reads 1, the other two read 0.
     pub fn set_evpn_es_ac_gate(&self, esi: &str, state: &str) {
-        for candidate in ["blocked", "forwarding", "mixed-roles"] {
+        const KNOWN: [&str; 3] = ["blocked", "forwarding", "mixed-roles"];
+        debug_assert!(KNOWN.contains(&state), "unknown AC-gate state {state:?}");
+        if !KNOWN.contains(&state) {
+            tracing::warn!("unknown AC-gate state label {state:?}; gauge left untouched");
+            return;
+        }
+        for candidate in KNOWN {
             self.evpn_es_ac_gate
                 .with_label_values(&[esi, candidate])
                 .set(i64::from(candidate == state));

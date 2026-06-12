@@ -70,11 +70,14 @@ const IFLA_BRPORT_STATE: u16 = 1;
 /// attribute carrying the `BR_STATE_*` scalar, padded to the 4-byte
 /// netlink attribute alignment.
 fn protinfo_state_payload(state: u8) -> Vec<u8> {
-    let [type_lo, type_hi] = IFLA_BRPORT_STATE.to_le_bytes();
+    // NLA headers are NATIVE-endian (struct nlattr is host byte
+    // order on the wire) — not little-endian.
+    let [len_a, len_b] = 5u16.to_ne_bytes(); // NLA_HDRLEN (4) + 1 value byte
+    let [type_a, type_b] = IFLA_BRPORT_STATE.to_ne_bytes();
     vec![
-        5, 0, // nla_len = NLA_HDRLEN (4) + 1 value byte
-        type_lo, type_hi, // nla_type = IFLA_BRPORT_STATE
-        state,   // BR_STATE_* scalar
+        len_a, len_b, // nla_len
+        type_a, type_b, // nla_type = IFLA_BRPORT_STATE
+        state,  // BR_STATE_* scalar
         0, 0, 0, // NLA_ALIGNTO padding
     ]
 }
@@ -129,9 +132,13 @@ pub(crate) async fn apply_ac_port_state(
 /// `EINVAL` here mean "the ifindex is not (or no longer) a bridge
 /// port" rather than a kernel-version gap (`IFLA_BRPORT_STATE`
 /// predates every kernel rustbgpd supports), so they map to
-/// [`DataplaneError::InvalidArgument`] — a permanent class that
-/// suppresses retries until the op shape changes (the next link-dump
-/// re-resolve produces a fresh ifindex).
+/// a TRANSIENT class (`DataplaneError::Other`): "not currently a
+/// bridge port" legitimately heals at runtime (`nomaster`/`master`
+/// cycling keeps the SAME ifindex, so a per-op-fingerprint permanent
+/// suppression would latch the enforcement gate off silently forever
+/// — the wrong failure posture for a forwarding-correctness block).
+/// The cost is one retried netlink message per reconcile pass while
+/// the port stays un-enslaved.
 fn classify_set_state_error(msg: &str, ifindex: u32) -> DataplaneError {
     let lower = msg.to_lowercase();
     if lower.contains("permission denied")
@@ -149,7 +156,10 @@ fn classify_set_state_error(msg: &str, ifindex: u32) -> DataplaneError {
         || lower.contains("invalid argument")
         || lower.contains("einval")
     {
-        DataplaneError::InvalidArgument(format!("ifindex {ifindex} is not a bridge port ({msg})"))
+        DataplaneError::Other(format!(
+            "ifindex {ifindex} is not currently a bridge port ({msg}); \
+             retrying until it is re-enslaved"
+        ))
     } else {
         DataplaneError::Other(msg.to_string())
     }
@@ -236,24 +246,32 @@ mod tests {
     }
 
     #[test]
-    fn classifies_not_a_bridge_port_as_invalid_argument() {
-        // EOPNOTSUPP / EINVAL on this path mean "not a bridge port"
-        // (e.g. the link was unenslaved between snapshot and apply) —
-        // a permanent class, NOT KernelTooOld: IFLA_BRPORT_STATE
-        // predates every kernel rustbgpd supports.
+    fn classifies_not_a_bridge_port_as_transient() {
+        // EOPNOTSUPP / EINVAL on this path mean "not CURRENTLY a
+        // bridge port" (e.g. the link was unenslaved between snapshot
+        // and apply) — a TRANSIENT class, never permanent: the same
+        // ifindex can be re-enslaved at any time, and a permanent
+        // per-op-fingerprint suppression would latch the enforcement
+        // gate off silently. NOT KernelTooOld either:
+        // IFLA_BRPORT_STATE predates every kernel rustbgpd supports.
         for msg in [
             "Operation not supported (EOPNOTSUPP)",
             "Invalid argument (EINVAL)",
         ] {
             let err = classify_set_state_error(msg, 10);
+            assert_eq!(
+                err.class(),
+                crate::error::FailureClass::Transient,
+                "{err:?}"
+            );
             match err {
-                DataplaneError::InvalidArgument(detail) => {
+                DataplaneError::Other(detail) => {
                     assert!(
-                        detail.contains("not a bridge port"),
+                        detail.contains("not currently a bridge port"),
                         "expected the not-a-bridge-port hint, got {detail}"
                     );
                 }
-                other => panic!("expected InvalidArgument, got {other:?}"),
+                other => panic!("expected Other (transient), got {other:?}"),
             }
         }
     }
