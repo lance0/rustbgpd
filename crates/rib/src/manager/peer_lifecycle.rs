@@ -93,7 +93,16 @@ impl RibManager {
     /// (`peer_asn`/`peer_group`/`peer_bgp_id`) stay out: GR keeps them for
     /// the returning peer; `PeerDown` removes them at its call site.
     pub(super) fn clear_outbound_peer_state(&mut self, peer: IpAddr) {
-        self.outbound_peers.remove(&peer);
+        let was_registered = self.outbound_peers.remove(&peer).is_some();
+        // INFO, not debug: a `PeerDown` that clears an outbound
+        // registration is the only event that can silently wedge a
+        // still-Established session's advertisement path (stale
+        // collision-loser `PeerDown` after the winner's `PeerUp`), so
+        // the deregistration must be visible at default log level.
+        info!(%peer, was_registered, "peer outbound registration cleared");
+        self.metrics.set_rib_outbound_registered_peers(
+            i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),
+        );
         self.adj_ribs_out.remove(&peer);
         self.peer_export_policies.remove(&peer);
         self.peer_sendable_families.remove(&peer);
@@ -181,7 +190,28 @@ impl RibManager {
         let peer_label = peer.to_string();
         self.metrics.set_rib_prefixes(&peer_label, "all", 0);
         self.metrics.set_adj_rib_out_prefixes(&peer_label, "all", 0);
+        // Two live sessions for one peer address can overlap during the
+        // RFC 4271 §6.8 collision window, and `PeerUp`/`PeerDown` carry no
+        // session identity. If this `PeerUp` replaces a still-registered
+        // sender, a stale `PeerDown` from the dumped session arriving
+        // AFTER this point deregisters the surviving session: every later
+        // advertisement is then silently skipped while the session stays
+        // Established (keepalives are writer-owned). Surface the
+        // replacement loudly so the wedge signature is attributable.
+        if self.outbound_peers.contains_key(&peer) {
+            warn!(
+                %peer,
+                "peer up replaced a still-registered outbound sender — concurrent \
+                 sessions for this peer (collision window); a stale PeerDown after \
+                 this replacement would silently deregister the live session"
+            );
+            self.metrics
+                .record_rib_outbound_registration_replaced(&peer_label);
+        }
         self.outbound_peers.insert(peer, outbound_tx);
+        self.metrics.set_rib_outbound_registered_peers(
+            i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),
+        );
         self.peer_export_policies
             .insert(peer, export_policy.or_else(|| self.export_policy.clone()));
         self.peer_sendable_families.insert(peer, sendable_families);

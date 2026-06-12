@@ -11,6 +11,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **RIB distribution-health observability for the wedged
+  post-Established advertisement path (ROADMAP, observed in an M66 CI
+  run).** Root-cause analysis identified a silent failure mode:
+  `PeerUp`/`PeerDown` carry no session identity, so when two sessions
+  for one peer overlap during the RFC 4271 §6.8 collision window, a
+  stale collision-loser `PeerDown` processed after the winner's
+  `PeerUp` deregisters the live session's outbound sender — every
+  later advertisement is silently skipped (never dirty-marked, no
+  resync, no log) while the session stays Established on writer-owned
+  keepalives. A manager-level characterization test now pins the
+  mechanism. New metrics make the next occurrence self-diagnosing:
+  `bgp_rib_outbound_registered_peers` (gauge; fewer registered peers
+  than Established sessions = a wedged advertisement path),
+  `bgp_rib_outbound_registration_replaced_total{peer}` (a `PeerUp`
+  replaced a still-registered sender — the collision-overlap
+  precondition), `bgp_rib_dirty_resync_total{outcome}` (resync-timer
+  fires by `cleared`/`still_dirty`), and
+  `bgp_rib_ingest_channel_depth` (sampled RIB manager ingest queue
+  depth). The RIB manager also WARNs when a `PeerUp` replaces a live
+  registration and INFO-logs every outbound deregistration. The
+  session-identity fix itself is specified in the ROADMAP entry and
+  deliberately not shipped speculatively.
 - **M67 interop proof for the ADR-0085 link-driven Ethernet Segment
   drain: a real AC failure drives the failover end-to-end, no RPC in
   the path.** New `kernel-dataplane` CI job — the M66 sibling with
