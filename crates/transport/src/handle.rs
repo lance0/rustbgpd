@@ -244,6 +244,25 @@ pub enum PeerCommand {
     },
 }
 
+/// Outcome of a bounded session-state query
+/// ([`PeerHandle::query_state_outcome`]) that keeps "the task did not answer
+/// in time" separate from "the task is gone". The distinction is load-bearing
+/// for collision resolution: a dead task safely yields to a new inbound
+/// connection, while a merely unresponsive task may still be an Established
+/// session that RFC 4271 §6.8 says must win against the new connection.
+#[derive(Debug, Clone)]
+pub enum StateQueryOutcome {
+    /// The session task answered within the deadline.
+    State(PeerSessionState),
+    /// The deadline expired before the session task answered (or before the
+    /// bounded command channel accepted the query). The task may still be
+    /// alive and its session in any state, including Established.
+    TimedOut,
+    /// The session task has exited: the command channel is closed or the
+    /// reply was dropped during task teardown.
+    SessionGone,
+}
+
 /// Snapshot of a peer session's runtime state.
 #[derive(Debug, Clone)]
 pub struct PeerSessionState {
@@ -721,8 +740,46 @@ impl PeerHandle {
     /// task parked on TCP write back-pressure cannot service `QueryState`
     /// commands, and the unbounded variant will hang the caller for as long
     /// as the peer's outbound buffer stays full.
+    ///
+    /// `None` conflates "deadline expired" with "session task gone". Callers
+    /// whose action on a dead task differs from their action on a slow one
+    /// (e.g. collision resolution, where a timed-out task may still be an
+    /// Established session) must use [`Self::query_state_outcome`] instead.
     pub async fn query_state_timeout(&self, deadline: Duration) -> Option<PeerSessionState> {
         Self::query_state_with(self.commands.clone(), deadline).await
+    }
+
+    /// Bounded state query that distinguishes a deadline expiry from a dead
+    /// session task, unlike [`Self::query_state_timeout`] which flattens both
+    /// to `None`.
+    ///
+    /// - [`StateQueryOutcome::TimedOut`]: the deadline expired before the
+    ///   session task answered (or before the bounded command channel
+    ///   accepted the query). The task may still be alive — e.g. parked on
+    ///   TCP write back-pressure — so its session may be in any state,
+    ///   including Established.
+    /// - [`StateQueryOutcome::SessionGone`]: the session task has exited
+    ///   (command channel closed, or the reply was dropped during task
+    ///   teardown). There is no live session behind this handle.
+    pub async fn query_state_outcome(&self, deadline: Duration) -> StateQueryOutcome {
+        let queried = tokio::time::timeout(deadline, async {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if self
+                .commands
+                .send(PeerCommand::QueryState { reply: reply_tx })
+                .await
+                .is_err()
+            {
+                return None;
+            }
+            reply_rx.await.ok()
+        })
+        .await;
+        match queried {
+            Err(_elapsed) => StateQueryOutcome::TimedOut,
+            Ok(None) => StateQueryOutcome::SessionGone,
+            Ok(Some(state)) => StateQueryOutcome::State(state),
+        }
     }
 
     /// Driver-side variant of [`Self::query_state_timeout`] that takes an

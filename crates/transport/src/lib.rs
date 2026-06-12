@@ -33,6 +33,7 @@ pub use event_sink::{
 pub use handle::{
     PeerCommand, PeerHandle, PeerSessionState, SessionIdentity, SessionLifecycleNotification,
     SessionNotification, SessionNotificationDirection, SessionNotificationEvent, SessionRole,
+    StateQueryOutcome,
 };
 pub use listener::{AcceptedConnection, BgpListener, ListenerSocketOptions, TcpAoListenerKey};
 // ADR-0073: import-decision explain types crossing into the api +
