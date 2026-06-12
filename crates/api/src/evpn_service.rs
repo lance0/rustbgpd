@@ -488,7 +488,7 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
         }
         let req = request.into_inner();
         let esi = parse_esi(&req.esi)
-            .map_err(|err| Status::invalid_argument(format!("invalid ESI {:?}: {err}", req.esi)))?;
+            .map_err(|err| Status::invalid_argument(format!("invalid ESI {}: {err}", req.esi)))?;
         let drain = self.ethernet_segment_drain.as_ref().ok_or_else(|| {
             Status::unavailable("EVPN Ethernet Segment drain control is unavailable")
         })?;
@@ -554,11 +554,15 @@ fn ethernet_segment_drain_message(esi: &str, outcome: &EthernetSegmentDrainOutco
     let vnis = outcome.member_vni_count;
     match (outcome.drained, outcome.changed) {
         (true, true) => format!(
-            "Ethernet Segment {esi} drained: withdrew Type 4 (ES), EAD-per-ES, EAD-per-EVI,              and local Type 2 MAC/MAC+IP routes for {vnis} member VNI(s); new local-MAC              origination suppressed while drained"
+            "Ethernet Segment {esi} drained: withdrew Type 4 (ES), EAD-per-ES, EAD-per-EVI, \
+             and local Type 2 MAC/MAC+IP routes for {vnis} member VNI(s); new local-MAC \
+             origination suppressed while drained"
         ),
         (true, false) => format!("Ethernet Segment {esi} is already drained"),
         (false, true) => format!(
-            "Ethernet Segment {esi} undrained: re-originated Type 4 (ES), EAD-per-ES,              EAD-per-EVI, re-ran DF election, and replayed cached local MAC/MAC+IP state              for {vnis} member VNI(s)"
+            "Ethernet Segment {esi} undrained: re-originated Type 4 (ES), EAD-per-ES, \
+             EAD-per-EVI, re-ran DF election, and replayed cached local MAC/MAC+IP state \
+             for {vnis} member VNI(s)"
         ),
         (false, false) => format!("Ethernet Segment {esi} is not drained"),
     }
