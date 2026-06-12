@@ -265,10 +265,13 @@ impl PeerManager {
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         let peer = PeerKey::new(config.address, config.interface.clone());
         #[cfg(test)]
-        if self.inject_reconfigure_failure.as_ref() == Some(&peer) {
-            return Err(PeerLifecycleError::Internal(format!(
-                "injected reconfigure failure for {peer}"
-            )));
+        if let Some(remaining) = self.inject_reconfigure_failures.get_mut(&peer) {
+            if *remaining == 0 {
+                return Err(PeerLifecycleError::Internal(format!(
+                    "injected reconfigure failure for {peer}"
+                )));
+            }
+            *remaining -= 1;
         }
         let (was_enabled, graceful_shutdown) = self
             .peers
@@ -368,8 +371,11 @@ impl PeerManager {
                         Ok(()) => Err(PeerLifecycleError::Internal(format!(
                             "failed to reconfigure peer {peer}: {error}; prior peers restored"
                         ))),
+                        // The rollback error already names exactly which prior
+                        // members were left reshaped (and notes the rest were
+                        // restored), so compose it verbatim.
                         Err(restore_error) => Err(PeerLifecycleError::Internal(format!(
-                            "failed to reconfigure peer {peer}: {error}; restore prior peers failed: {restore_error}"
+                            "failed to reconfigure peer {peer}: {error}; {restore_error}"
                         ))),
                     };
                 }
@@ -386,15 +392,30 @@ impl PeerManager {
         // `reconfigure_peer` re-reads the live enabled / graceful-shutdown state
         // and re-applies it, so rollback preserves the peer's current admin and
         // GShut state rather than resurrecting a stale transient toggle.
+        //
+        // Best-effort: a failed restore does not stop the sweep — every prior
+        // is still attempted, so one stuck member cannot strand the others in
+        // the reshaped state. Per ADR-0081 the aggregated error names exactly
+        // which members were left reshaped; members it does not name were
+        // restored to their prior config.
+        let total = priors.len();
+        let mut failures = Vec::new();
         for prior in priors.into_iter().rev() {
             let peer = PeerKey::new(prior.address, prior.interface.clone());
-            self.reconfigure_peer(prior).await.map_err(|error| {
-                PeerLifecycleError::Internal(format!(
-                    "peer reshape rollback failed for {peer}: {error}"
-                ))
-            })?;
+            if let Err(error) = self.reconfigure_peer(prior).await {
+                failures.push(format!("{peer}: {error}"));
+            }
         }
-        Ok(())
+        if failures.is_empty() {
+            return Ok(());
+        }
+        Err(PeerLifecycleError::Internal(format!(
+            "peer reshape rollback failed for {} of {total} prior peers \
+             (unnamed priors were restored; each named member's state is \
+             described by its error): {}",
+            failures.len(),
+            failures.join("; ")
+        )))
     }
 
     async fn restore_reconfigured_peer(

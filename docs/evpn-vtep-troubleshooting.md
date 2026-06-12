@@ -381,16 +381,26 @@ or installs remote prefixes.
 ## Crash-restart adoption across upgrades (ADR-0082)
 
 rustbgpd stamps every EVPN FDB/neighbor install with
-`NDA_PROTOCOL = RTPROT_BGP`, so managed L3 neighbor rows show
-`proto bgp` in `ip neigh show` alongside `extern_learn`, and the
-crash-restart adoption sweep (ADR-0079) refuses rows stamped by
-another controller (e.g. zebra's `proto zebra`). Rows installed by
-pre-stamp rustbgpd versions carry no stamp; this release accepts them
-at adoption via the legacy `extern_learn` + permanent rule, and every
-re-claim rewrites the row with the stamp. A future release may require
-the stamp at L3 neighbor adoption — that flip is gated on having run
-this release once, so don't skip from a pre-stamp version directly to
-a strict-stamp one with kernel rows still live. FDB rows are
-unaffected either way: mainline kernels don't store the attribute for
-AF_BRIDGE entries, so FDB adoption stays flag-based until kernel
-support lands.
+`NDA_PROTOCOL = RTPROT_BGP` (since v0.38.0), so managed L3 neighbor
+rows show `proto bgp` in `ip neigh show` alongside `extern_learn`,
+and the crash-restart adoption sweep (ADR-0079) refuses rows stamped
+by another controller (e.g. zebra's `proto zebra`).
+
+L3 neighbor adoption now *requires* the stamp by default: the
+stamp-or-legacy migration window (v0.38.0) is closed, and a
+stamp-less `extern_learn` + permanent row — the shape a pre-stamp
+rustbgpd left behind — is no longer adopted (it is preserved
+untouched, like any other foreign row, but it will not be reaped
+when its route is withdrawn). The upgrade gate that follows:
+upgrading from v0.37.0 or earlier, run v0.38.0 at least once first —
+its converge re-writes every owned row with the stamp — before
+moving to a strict-default version. For a skip-version upgrade with
+pre-stamp kernel rows still live, set
+`RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY=1` for the first boot; it
+restores the stamp-or-legacy acceptance rule for that run (the
+re-claims stamp the rows, so the variable can be dropped on the next
+restart). Foreign stamps are refused in both modes.
+
+FDB rows are unaffected either way: mainline kernels don't store the
+attribute for AF_BRIDGE entries, so FDB adoption stays flag-based
+(with the stamp honored in prefer mode) until kernel support lands.
