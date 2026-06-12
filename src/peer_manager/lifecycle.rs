@@ -411,7 +411,8 @@ impl PeerManager {
         }
         Err(PeerLifecycleError::Internal(format!(
             "peer reshape rollback failed for {} of {total} prior peers \
-             (these members remain reshaped; unnamed priors were restored): {}",
+             (unnamed priors were restored; each named member's state is \
+             described by its error): {}",
             failures.len(),
             failures.join("; ")
         )))
