@@ -70,7 +70,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 pub use error::EventHistoryError;
-pub use storage::{PersistedEvent, QueryFilter};
+pub use storage::{PersistedEvent, QueryFilter, RetentionOutcome};
 
 /// Default capacity for each producer's mpsc channel into EHM.
 pub const DEFAULT_QUEUE_CAPACITY: usize = 4096;
@@ -515,6 +515,11 @@ pub struct EventHistoryManager {
     storage_join: Option<JoinHandle<()>>,
     daemon_boot_id: Arc<str>,
     state: Arc<EhmState>,
+    /// Configured retention caps, kept so
+    /// [`Self::run_retention_pass`] submits the same pass the actor's
+    /// interval timer would.
+    max_events: u64,
+    max_bytes: u64,
     /// Shared shutdown signal. `shutdown()` flips the watch value to
     /// `true`; every storage await + producer-receive in the actor
     /// loop is wrapped in a `tokio::select!` that races
@@ -795,6 +800,8 @@ impl EventHistoryManager {
             storage_join: Some(storage_join),
             daemon_boot_id,
             state,
+            max_events: config.max_events,
+            max_bytes: config.max_bytes,
             shutdown_tx,
         })
     }
@@ -839,6 +846,22 @@ impl EventHistoryManager {
         self.storage
             .query(from_event_id, to_event_id, limit, filter)
             .await
+    }
+
+    /// Run one retention pass immediately with the configured caps —
+    /// the same `StoreOp::Retain` the actor's interval timer submits,
+    /// processed in FIFO order behind any already-submitted appends.
+    /// Tests drive the count/byte-cap check through this instead of
+    /// sleeping on `retention_interval` (the timer cadence is
+    /// timing-sensitive on a loaded host); production wiring never
+    /// needs to call it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EventHistoryError::PassThrough`] when the storage
+    /// thread has exited.
+    pub async fn run_retention_pass(&self) -> Result<RetentionOutcome, EventHistoryError> {
+        self.storage.retain(self.max_events, self.max_bytes).await
     }
 
     /// Crate-internal: hand a live broadcast receiver to the cursor
