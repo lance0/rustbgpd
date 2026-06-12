@@ -84,7 +84,8 @@ const ADOPTION_ACCEPT_LEGACY_ENV: &str = "RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY";
 /// without touching process-global env state. `1` / `true`
 /// (ASCII-case-insensitive, surrounding whitespace ignored) enable
 /// legacy acceptance; unset, `0`, and `false` keep the strict
-/// default; anything else warns and keeps the strict default.
+/// default; anything else (including set-but-empty, a likely lost
+/// value) warns and keeps the strict default.
 fn accept_legacy_override(env: Option<&str>) -> bool {
     let Some(raw) = env else {
         return false;
@@ -93,8 +94,7 @@ fn accept_legacy_override(env: Option<&str>) -> bool {
     if value.eq_ignore_ascii_case("1") || value.eq_ignore_ascii_case("true") {
         return true;
     }
-    if !(value.is_empty() || value.eq_ignore_ascii_case("0") || value.eq_ignore_ascii_case("false"))
-    {
+    if !(value.eq_ignore_ascii_case("0") || value.eq_ignore_ascii_case("false")) {
         tracing::warn!(
             value = %raw,
             "ignoring invalid {ADOPTION_ACCEPT_LEGACY_ENV} (expected 1/true or 0/false)"
