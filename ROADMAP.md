@@ -315,10 +315,30 @@ has it, no broad performance sprints without profile evidence.
   `bgp_rib_stale_peer_down_ignored_total`), and treats a replacement
   `PeerUp` as a session reset (clears the prior session's
   Adj-RIB-In/Out before re-registering, except routes under GR/LLGR
-  stale retention, which stay deadline-bounded). Residual evidence
+  stale retention, which stay deadline-bounded).
+  **Completed for the symmetric interleaving (M66 failed on the fix
+  PR's own CI):** with the winner's `PeerUp` processed FIRST, the
+  loser's later `PeerUp` becomes the active registration (the
+  replacement reset clears the winner's Adj-RIB-In) and the loser's
+  `PeerDown` *matches* the registered id — the id gate alone runs the
+  full teardown against a peer that still has an Established session.
+  Session ids cannot arbitrate this (the §6.8 survivor is chosen by
+  BGP-ID comparison, not event order), so the RIB manager now tracks
+  every live session per address (bounded, collision window = 2) and
+  fails the registration over to the survivor on an active-session
+  down: re-register, re-dump the initial table, and request an inbound
+  ROUTE-REFRESH through the survivor's channel (`OutboundRouteUpdate::
+  request_refresh`; the session task enforces RFC 2918 capability) —
+  Adj-RIB-In is per-address and `RoutesReceived` is unstamped, so
+  inbound recovery must come from the peer. A GR-down of the active
+  session with a live survivor fails over instead of entering stale
+  retention. New `bgp_rib_outbound_registration_failover_total{peer}`.
+  Manager tests pin all interleavings of {PeerUp(W), PeerUp(L),
+  PeerDown(L)}. Residual evidence
   note: the M66 job logs contained no pe1-side daemon logs, so the
   collision itself was inferred, not observed — the WARN/INFO lines,
-  gauge and discard counter make any recurrence self-attributing.
+  gauge and discard/failover counters make any recurrence
+  self-attributing.
 - **ES drain withdrawal-ordering guarantee.** The Ethernet Segment drain
   primitive fans out to two actors (segment orchestrator withdraws
   Type 1/4; local originator withdraws Type 2) over independent

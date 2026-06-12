@@ -66,6 +66,7 @@ pub struct BgpMetrics {
     rib_outbound_registered_peers: IntGauge,
     rib_outbound_registration_replaced: IntCounterVec,
     rib_stale_peer_down_ignored: IntCounterVec,
+    rib_outbound_registration_failover: IntCounterVec,
     rib_dirty_resync: IntCounterVec,
     rib_ingest_channel_depth: IntGauge,
     blackhole_discard_installed: IntCounter,
@@ -413,6 +414,21 @@ impl BgpMetrics {
                  a stale teardown from a superseded session (collision loser \
                  processed after the winner's PeerUp). The surviving session's \
                  state is untouched.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let rib_outbound_registration_failover = IntCounterVec::new(
+            Opts::new(
+                "bgp_rib_outbound_registration_failover_total",
+                "Outbound registrations failed over to another live session for \
+                 the same peer address after the active session's \
+                 PeerDown/PeerGracefulRestart — the symmetric collision \
+                 interleaving where the loser's PeerUp replaced the winner's \
+                 registration before the loser went down. The survivor is \
+                 re-registered, re-sent the initial table, and asked for an \
+                 inbound ROUTE-REFRESH.",
             ),
             &["peer"],
         )
@@ -1087,6 +1103,9 @@ impl BgpMetrics {
             .register(Box::new(rib_stale_peer_down_ignored.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rib_outbound_registration_failover.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rib_dirty_resync.clone()))
             .expect("metric not already registered");
         registry
@@ -1325,6 +1344,7 @@ impl BgpMetrics {
             rib_outbound_registered_peers,
             rib_outbound_registration_replaced,
             rib_stale_peer_down_ignored,
+            rib_outbound_registration_failover,
             rib_dirty_resync,
             rib_ingest_channel_depth,
             blackhole_discard_installed,
@@ -1441,6 +1461,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.outbound_route_drops, peer);
         Self::reap_peer_series_from_vec(&self.rib_outbound_registration_replaced, peer);
         Self::reap_peer_series_from_vec(&self.rib_stale_peer_down_ignored, peer);
+        Self::reap_peer_series_from_vec(&self.rib_outbound_registration_failover, peer);
         Self::reap_peer_series_from_vec(&self.inbound_rib_backpressure, peer);
         Self::reap_peer_series_from_vec(&self.hold_timer_rearmed_pending_input, peer);
         Self::reap_peer_series_from_vec(&self.as_path_loop_detected, peer);
@@ -1734,6 +1755,17 @@ impl BgpMetrics {
     /// stale teardown from a superseded session).
     pub fn record_rib_stale_peer_down_ignored(&self, peer: &str) {
         self.rib_stale_peer_down_ignored
+            .with_label_values(&[peer])
+            .inc();
+    }
+
+    /// Record an outbound registration failover: the active session for a
+    /// peer address went down while another live session for the same
+    /// address remained, and the registration was handed to the survivor
+    /// instead of being torn down (collision-window interleaving where the
+    /// loser's `PeerUp` replaced the winner's registration).
+    pub fn record_rib_outbound_registration_failover(&self, peer: &str) {
+        self.rib_outbound_registration_failover
             .with_label_values(&[peer])
             .inc();
     }
@@ -3194,6 +3226,7 @@ mod tests {
         m.record_rib_outbound_registration_replaced("10.0.0.1");
         m.record_rib_outbound_registration_replaced("10.0.0.1");
         m.record_rib_stale_peer_down_ignored("10.0.0.1");
+        m.record_rib_outbound_registration_failover("10.0.0.1");
         m.record_rib_dirty_resync("still_dirty");
         m.record_rib_dirty_resync("cleared");
         m.set_rib_ingest_channel_depth(17);
@@ -3207,6 +3240,12 @@ mod tests {
         );
         assert_eq!(
             m.rib_stale_peer_down_ignored
+                .with_label_values(&["10.0.0.1"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.rib_outbound_registration_failover
                 .with_label_values(&["10.0.0.1"])
                 .get(),
             1
@@ -3243,6 +3282,7 @@ mod tests {
         m.record_hold_timer_rearmed_pending_input(peer);
         m.record_rib_outbound_registration_replaced(peer);
         m.record_rib_stale_peer_down_ignored(peer);
+        m.record_rib_outbound_registration_failover(peer);
         m.record_as_path_loop_detected(peer, 3);
         m.record_rr_loop_detected(peer);
         m.record_otc_routes_blocked(peer, "ingress_peer_mismatch", 2);
@@ -3284,8 +3324,8 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 29 peer-labeled families; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 30);
+        // 30 peer-labeled families; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 31);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -3295,7 +3335,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 30);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 31);
     }
 
     #[test]

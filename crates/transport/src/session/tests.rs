@@ -905,6 +905,7 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        request_refresh: vec![],
     });
 
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
@@ -912,6 +913,83 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
     };
     let parsed = msg.parse(true, false, &[]).unwrap();
     assert_eq!(parsed.announced.len(), 2);
+}
+
+/// `OutboundRouteUpdate::request_refresh` (the RIB manager's
+/// failover-driven inbound recovery) emits a plain RFC 2918 ROUTE-REFRESH
+/// request on the wire when the peer negotiated the capability and the
+/// family.
+#[tokio::test]
+async fn send_route_update_emits_route_refresh_request_when_negotiated() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.peer_route_refresh = true;
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    session.send_route_update(OutboundRouteUpdate {
+        announce: vec![],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+        request_refresh: vec![(Afi::Ipv4, Safi::Unicast)],
+    });
+
+    let Message::RouteRefresh(rr) = read_single_bgp_message(&mut server).await else {
+        panic!("expected ROUTE-REFRESH request");
+    };
+    assert_eq!(rr.afi_raw, Afi::Ipv4 as u16);
+    assert_eq!(rr.safi_raw, Safi::Unicast as u8);
+    assert_eq!(
+        rr.subtype_raw, 0,
+        "manager-initiated refresh must be a plain RFC 2918 request"
+    );
+}
+
+/// Without the negotiated Route Refresh capability the request is
+/// skipped (warned, not sent) — the rest of the update still goes out.
+#[tokio::test]
+async fn send_route_update_skips_route_refresh_request_without_capability() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let negotiated = negotiated_session(65002, false);
+    assert!(!negotiated.peer_route_refresh);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    session.send_route_update(OutboundRouteUpdate {
+        announce: vec![],
+        withdraw: vec![],
+        end_of_rib: vec![(Afi::Ipv4, Safi::Unicast)],
+        refresh_markers: vec![],
+        next_hop_override: vec![],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+        request_refresh: vec![(Afi::Ipv4, Safi::Unicast)],
+    });
+
+    // The first wire message must be the EoR UPDATE — no ROUTE-REFRESH
+    // was emitted ahead of it.
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected the EoR UPDATE, not a ROUTE-REFRESH");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    assert!(parsed.announced.is_empty());
+    assert!(parsed.withdrawn.is_empty());
 }
 
 #[tokio::test]
@@ -967,6 +1045,7 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        request_refresh: vec![],
     });
 
     let Message::Update(first) = read_single_bgp_message(&mut server).await else {
@@ -1026,6 +1105,7 @@ async fn send_route_update_uses_ipv6_specific_next_hop_override() {
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        request_refresh: vec![],
     });
 
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
@@ -2175,6 +2255,7 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        request_refresh: vec![],
     };
 
     session.send_route_update(update);
@@ -2221,6 +2302,7 @@ async fn unnumbered_ipv4_extended_nexthop_sends_link_local_mp_reach() {
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        request_refresh: vec![],
     };
 
     session.send_route_update(update);
@@ -2274,6 +2356,7 @@ async fn unnumbered_ipv4_recomputes_link_local_companion_after_next_hop_self() {
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        request_refresh: vec![],
     };
 
     session.send_route_update(update);
@@ -2327,6 +2410,7 @@ async fn extended_nexthop_clears_companion_when_primary_next_hop_is_rewritten() 
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        request_refresh: vec![],
     };
 
     session.send_route_update(update);
@@ -2374,6 +2458,7 @@ async fn unnumbered_ipv4_without_extended_nexthop_does_not_fallback_to_body_nlri
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        request_refresh: vec![],
     };
 
     session.send_route_update(update);
@@ -2433,6 +2518,7 @@ async fn route_server_client_ipv6_preserves_next_hop() {
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        request_refresh: vec![],
     };
 
     session.send_route_update(update);
@@ -2484,6 +2570,7 @@ async fn ipv6_next_hop_self_clears_stale_link_local_companion() {
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        request_refresh: vec![],
     };
 
     session.send_route_update(update);
@@ -2536,6 +2623,7 @@ async fn scoped_peer_does_not_send_ipv6_unicast_with_link_local_primary_next_hop
         flowspec_withdraw: vec![],
         evpn_announce: vec![],
         evpn_withdraw: vec![],
+        request_refresh: vec![],
     };
 
     session.send_route_update(update);

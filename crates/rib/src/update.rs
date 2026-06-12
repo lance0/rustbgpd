@@ -37,6 +37,18 @@ pub struct OutboundRouteUpdate {
     pub evpn_announce: Vec<EvpnRibRoute>,
     /// EVPN route keys to withdraw.
     pub evpn_withdraw: Vec<EvpnRouteKey>,
+    /// Families for which the session task should send a ROUTE-REFRESH
+    /// *request* toward the peer (RFC 2918), asking it to re-advertise
+    /// its routes. Used by the RIB manager's outbound-registration
+    /// failover: the survivor's Adj-RIB-In was cleared by the superseded
+    /// session's replacement reset (inbound `RoutesReceived` carries no
+    /// session identity, so per-session attribution is impossible) and
+    /// must be re-learned from the peer. The session task enforces the
+    /// negotiated Route Refresh capability and family set; for a peer
+    /// without the capability the request is skipped with a warning and
+    /// inbound state recovers only on the peer's natural
+    /// re-advertisement.
+    pub request_refresh: Vec<(Afi, Safi)>,
 }
 
 /// Aggregate route-policy evaluation counters for one neighbor.

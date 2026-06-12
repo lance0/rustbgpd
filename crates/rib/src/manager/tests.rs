@@ -3230,6 +3230,7 @@ async fn initial_dump_failure_resyncs_via_timer() {
             flowspec_withdraw: vec![],
             evpn_announce: vec![],
             evpn_withdraw: vec![],
+            request_refresh: vec![],
         })
         .await
         .unwrap();
@@ -10108,6 +10109,302 @@ async fn stale_graceful_restart_from_superseded_session_is_discarded() {
     assert!(
         delivered.evpn_announce.iter().any(|r| r.key() == imet_key),
         "delivered update must carry the post-convergence EVPN announce"
+    );
+
+    drop(winner_session_tx);
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// The SYMMETRIC collision interleaving to
+/// `stale_peer_down_after_replacement_peer_up_is_discarded`: the winner
+/// session registers FIRST, the loser's `PeerUp` arrives later (cross-task
+/// mpsc interleaving is arbitrary — per-sender FIFO only), and then the
+/// loser's `PeerDown` lands. The loser's `PeerUp` is treated as a
+/// replacement (clearing the winner's Adj-RIB-In and registering the
+/// loser's outbound channel + session id), so the loser's `PeerDown`
+/// MATCHES the registered id and runs the full teardown — leaving the
+/// winner Established but deregistered with its Adj-RIB-In destroyed.
+///
+/// The completed design keeps every live session for the peer address in a
+/// bounded per-peer map: when the active registration's session goes down
+/// while another live session remains, the registration FAILS OVER to the
+/// survivor (re-register its channel, re-run the initial table dump,
+/// request an inbound ROUTE-REFRESH through its channel) instead of
+/// tearing the peer down.
+#[tokio::test]
+#[expect(clippy::too_many_lines)]
+async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+    let peer_up =
+        |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
+            peer,
+            session_id,
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            outbound_tx,
+            export_policy: None,
+            sendable_families: evpn_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+        };
+
+    // Session W (collision winner) registers first.
+    let (winner_tx, mut winner_rx) = mpsc::channel(8);
+    let winner_session_tx = winner_tx.clone();
+    tx.send(peer_up(winner_tx, 1)).await.unwrap();
+    drain_eor(&mut winner_rx).await;
+
+    // W's session delivers a route into its Adj-RIB-In.
+    let imet_winner = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 2), 50);
+    let imet_winner_key = imet_winner.key();
+    tx.send(RibUpdate::RoutesReceived {
+        peer,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet_winner],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Session L (collision loser) reaches Established too; its PeerUp is
+    // processed AFTER the winner's. The manager treats it as a
+    // replacement and registers L's channel + id.
+    let (loser_tx, mut loser_rx) = mpsc::channel(8);
+    tx.send(peer_up(loser_tx, 2)).await.unwrap();
+    drain_eor(&mut loser_rx).await;
+
+    // The loser is torn down by collision resolution; its PeerDown is
+    // stamped with ITS session id — which matches the registration.
+    tx.send(RibUpdate::PeerDown {
+        peer,
+        session_id: 2,
+    })
+    .await
+    .unwrap();
+
+    // FAILOVER, half 1 — outbound: W's channel must be re-registered and
+    // receive the failover initial-table dump (at minimum an EoR for its
+    // sendable families).
+    let dump = tokio::time::timeout(Duration::from_secs(5), winner_rx.recv())
+        .await
+        .expect(
+            "PeerDown of the replacement (loser) session tore down the surviving \
+             (winner) session's registration — no failover dump reached the \
+             winner's outbound channel",
+        )
+        .expect("winner outbound channel closed unexpectedly");
+    assert!(
+        !dump.end_of_rib.is_empty() || !dump.request_refresh.is_empty(),
+        "first post-failover update must be the initial dump EoR or the inbound \
+         refresh request, got announce={} withdraw={}",
+        dump.announce.len(),
+        dump.withdraw.len(),
+    );
+
+    // FAILOVER, half 2 — inbound: W's Adj-RIB-In was cleared by the
+    // loser's replacement reset (RoutesReceived is unstamped, so the RIB
+    // cannot attribute inbound routes to a session). The manager must
+    // request an inbound ROUTE-REFRESH through W's channel so the peer
+    // re-advertises (the session task enforces the RFC 2918 capability).
+    let mut saw_refresh_request = dump.request_refresh.contains(&(Afi::L2Vpn, Safi::Evpn));
+    if !saw_refresh_request {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(250), winner_rx.recv()).await {
+                Ok(Some(update)) => {
+                    if update.request_refresh.contains(&(Afi::L2Vpn, Safi::Evpn)) {
+                        saw_refresh_request = true;
+                        break;
+                    }
+                }
+                Ok(None) => panic!("winner outbound channel closed unexpectedly"),
+                Err(_) => {}
+            }
+        }
+    }
+    assert!(
+        saw_refresh_request,
+        "failover must request an inbound ROUTE-REFRESH toward the surviving \
+         session for its negotiated families (its Adj-RIB-In was cleared by \
+         the replacement reset)"
+    );
+
+    // The peer answers the refresh: W's route lands back in the Loc-RIB.
+    let imet_again = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 2), 50);
+    tx.send(RibUpdate::RoutesReceived {
+        peer,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet_again],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let evpn_routes = query_evpn_routes(&tx).await;
+    assert!(
+        evpn_routes.iter().any(|r| r.key() == imet_winner_key),
+        "the surviving session's re-advertised route must land in the Loc-RIB"
+    );
+
+    // A post-convergence advertisement from another RR client must still
+    // reach W — the registration survived the whole interleaving.
+    let (source_tx, _source_rx) = mpsc::channel(8);
+    tx.send(RibUpdate::PeerUp {
+        peer: source,
+        session_id: 3,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        outbound_tx: source_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    let imet_key = imet.key();
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut delivered = false;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(250), winner_rx.recv()).await {
+            Ok(Some(update)) => {
+                if update.evpn_announce.iter().any(|r| r.key() == imet_key) {
+                    delivered = true;
+                    break;
+                }
+            }
+            Ok(None) => panic!("winner outbound channel closed unexpectedly"),
+            Err(_) => {}
+        }
+    }
+    assert!(
+        delivered,
+        "post-convergence advertisement must reach the surviving session's \
+         outbound channel after failover"
+    );
+
+    drop(winner_session_tx);
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// GR flavor of the registration failover: a `PeerGracefulRestart` from
+/// the ACTIVE (replacement) session while another live session remains
+/// must fail the registration over to the survivor — NOT enter GR
+/// stale-path retention. Retention bridges a session that is gone; here
+/// an Established session for the address exists and is refreshed
+/// immediately instead.
+#[tokio::test]
+async fn graceful_restart_of_replacement_session_fails_over_to_surviving_session() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let metrics = BgpMetrics::new();
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    let peer_up =
+        |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
+            peer,
+            session_id,
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            outbound_tx,
+            export_policy: None,
+            sendable_families: evpn_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+        };
+
+    // Winner registers first, loser's PeerUp replaces the registration.
+    let (winner_tx, mut winner_rx) = mpsc::channel(8);
+    let winner_session_tx = winner_tx.clone();
+    tx.send(peer_up(winner_tx, 1)).await.unwrap();
+    drain_eor(&mut winner_rx).await;
+
+    let (loser_tx, mut loser_rx) = mpsc::channel(8);
+    tx.send(peer_up(loser_tx, 2)).await.unwrap();
+    drain_eor(&mut loser_rx).await;
+
+    // The loser goes down WITH GR — stamped with the ACTIVE session id.
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer,
+        session_id: 2,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::L2Vpn, Safi::Evpn)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    // Failover, not retention: the winner's channel receives the failover
+    // initial dump and the inbound refresh request.
+    let mut saw_refresh_request = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(250), winner_rx.recv()).await {
+            Ok(Some(update)) => {
+                if update.request_refresh.contains(&(Afi::L2Vpn, Safi::Evpn)) {
+                    saw_refresh_request = true;
+                    break;
+                }
+            }
+            Ok(None) => panic!("winner outbound channel closed unexpectedly"),
+            Err(_) => {}
+        }
+    }
+    assert!(
+        saw_refresh_request,
+        "GR-down of the active session with a live survivor must fail over and \
+         request an inbound ROUTE-REFRESH toward the survivor"
+    );
+
+    // GR retention must NOT have been entered for the peer (no stale
+    // phase while an Established session holds the registration).
+    let gr_active = gauge_metric_value(&metrics, "bgp_gr_active_peers", &[("peer", "10.0.0.2")]);
+    assert!(
+        gr_active.abs() < f64::EPSILON,
+        "failover must not enter GR stale-path retention, gr_active = {gr_active}"
     );
 
     drop(winner_session_tx);

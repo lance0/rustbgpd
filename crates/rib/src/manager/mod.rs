@@ -49,8 +49,23 @@ pub struct RibManager {
     /// `handle_peer_graceful_restart` discard a teardown whose stamped id
     /// doesn't match, so a stale collision-loser `PeerDown` (RFC 4271
     /// §6.8 overlap, processed after the winner's `PeerUp`) cannot
-    /// destroy the surviving session's state.
+    /// destroy the surviving session's state. Invariant: equals the
+    /// `session_id` of the LAST entry in `live_sessions[peer]` whenever a
+    /// registration exists.
     outbound_session_ids: HashMap<IpAddr, u64>,
+    /// Every live transport session known for a peer address, in `PeerUp`
+    /// arrival order (last = the active registration), bounded by
+    /// [`MAX_LIVE_SESSIONS_PER_PEER`]. During the RFC 4271 §6.8 collision
+    /// window two session tasks can be Established for one address and
+    /// their `PeerUp`/`PeerDown` events interleave arbitrarily across the
+    /// shared mpsc (per-sender FIFO only). Keeping the superseded-but-
+    /// still-live session's registration material lets the manager FAIL
+    /// OVER to it when the active session goes down (the symmetric
+    /// interleaving `PeerUp(winner)` → `PeerUp(loser)` →
+    /// `PeerDown(loser)`) instead of tearing down a peer that still has
+    /// an Established session. Entries are removed by their session's own
+    /// `PeerDown`/GR-down or by full peer teardown.
+    live_sessions: HashMap<IpAddr, Vec<LiveSessionRecord>>,
     export_policy: Option<PolicyChain>,
     peer_export_policies: HashMap<IpAddr, Option<PolicyChain>>,
     /// Families the transport can actually serialize per peer.
@@ -207,6 +222,32 @@ pub struct RibManager {
     /// re-arm) becomes deterministically observable. `None` in
     /// production — the only cost when unset is an `is_some()` check.
     test_ingest_stall: Option<std::time::Duration>,
+}
+
+/// Bound on `live_sessions` entries per peer address. The RFC 4271 §6.8
+/// collision window realistically holds two concurrent sessions (one per
+/// connection direction); the bound only guards against a pathological
+/// emitter. When exceeded, the OLDEST (most-superseded) record is dropped
+/// — its eventual `PeerDown` is then discarded as stale.
+const MAX_LIVE_SESSIONS_PER_PEER: usize = 2;
+
+/// Registration material for one live transport session of a peer
+/// address, captured at `PeerUp`. Held in `RibManager::live_sessions` so
+/// an outbound-registration failover can re-register a surviving session
+/// (channel + negotiated metadata + initial table dump) after the active
+/// session goes down during the collision window.
+pub(super) struct LiveSessionRecord {
+    session_id: u64,
+    outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
+    peer_asn: u32,
+    peer_router_id: Ipv4Addr,
+    export_policy: Option<PolicyChain>,
+    sendable_families: Vec<(Afi, Safi)>,
+    is_ebgp: bool,
+    route_reflector_client: bool,
+    add_path_send_families: Vec<(Afi, Safi)>,
+    add_path_send_max: u32,
+    negotiated_orf_recv: Vec<(Afi, Safi)>,
 }
 
 const ROUTES_RECEIVED_CHUNK_SIZE: usize = 1024;
@@ -456,6 +497,7 @@ impl RibManager {
             adj_ribs_out: HashMap::new(),
             outbound_peers: HashMap::new(),
             outbound_session_ids: HashMap::new(),
+            live_sessions: HashMap::new(),
             export_policy,
             peer_export_policies: HashMap::new(),
             peer_sendable_families: HashMap::new(),

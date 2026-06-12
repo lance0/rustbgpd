@@ -485,7 +485,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   re-registering so dumped-session state can't linger — except routes
   under GR/LLGR stale retention, which remain deadline-bounded as on
   any GR reconnect. GR flap semantics are unchanged when the id
-  matches.
+  matches. The SYMMETRIC interleaving is covered too: when the
+  collision loser's `PeerUp` is processed AFTER the winner's (event
+  order across session tasks is arbitrary; which session survives is
+  decided by BGP-ID comparison, not order), the loser's `PeerUp`
+  becomes the active registration and its own `PeerDown` *matches* —
+  the id gate alone would tear down a peer that still has an
+  Established session. The RIB manager now keeps every live session
+  for an address (bounded map, collision window = 2) and, when the
+  active session goes down with another live session present, FAILS
+  OVER the registration to the survivor instead of tearing the peer
+  down: re-registers its channel, re-runs the initial table dump, and
+  requests an inbound ROUTE-REFRESH (RFC 2918) through it so the
+  Adj-RIB-In cleared by the replacement reset is re-learned from the
+  peer (inbound `RoutesReceived` carries no session identity, so
+  local recovery is impossible by construction; without the
+  negotiated Route Refresh capability the request is skipped with a
+  warning and inbound state recovers only on the peer's natural
+  re-advertisement). A GR-down of the active session with a live
+  survivor also fails over rather than entering stale retention —
+  retention bridges a session that is gone, and here one is present.
+  New `bgp_rib_outbound_registration_failover_total{peer}` counter.
 - **The EVPN local-MAC observation layer now detects in-place FDB
   port moves, so the originator's cache tracks the kernel instead of
   claiming MACs the kernel no longer holds locally.** When a remote

@@ -260,6 +260,57 @@ impl PeerSession {
                 })
         });
 
+        // ROUTE-REFRESH *requests* toward the peer (RFC 2918), asked for by
+        // the RIB manager (outbound-registration failover: the survivor's
+        // Adj-RIB-In must be re-learned from the peer). Gated on the
+        // negotiated capability and family set, mirroring
+        // `PeerCommand::SendRouteRefresh`; a peer without the capability
+        // cannot be asked, so the staleness window lasts until its next
+        // natural re-advertisement — surfaced by the warning.
+        let peer_route_refresh = self
+            .negotiated
+            .as_ref()
+            .is_some_and(|n| n.peer_route_refresh);
+        for (afi, safi) in update.request_refresh.iter().copied() {
+            if !peer_route_refresh {
+                warn!(
+                    peer = %self.peer_label,
+                    ?afi,
+                    ?safi,
+                    "ROUTE-REFRESH request skipped — peer lacks the Route Refresh \
+                     capability; inbound routes recover only on the peer's natural \
+                     re-advertisement"
+                );
+                continue;
+            }
+            if !self.negotiated_families.contains(&(afi, safi)) {
+                warn!(
+                    peer = %self.peer_label,
+                    ?afi,
+                    ?safi,
+                    "ROUTE-REFRESH request skipped — family not negotiated"
+                );
+                continue;
+            }
+            let msg = Message::RouteRefresh(RouteRefreshMessage::new(afi, safi));
+            if let Err(e) = self.enqueue_bulk(&msg) {
+                warn!(
+                    peer = %self.peer_label,
+                    error = %e,
+                    "failed to send ROUTE-REFRESH request"
+                );
+                return;
+            }
+            info!(
+                peer = %self.peer_label,
+                ?afi,
+                ?safi,
+                "sent ROUTE-REFRESH request (RIB-manager initiated)"
+            );
+            self.metrics
+                .record_message_sent(&self.peer_label, "route_refresh");
+        }
+
         if peer_err {
             for (afi, safi, subtype) in update
                 .refresh_markers

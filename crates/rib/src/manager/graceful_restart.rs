@@ -22,14 +22,28 @@ impl RibManager {
         peer_llgr_families: Vec<rustbgpd_wire::LlgrFamily>,
         llgr_stale_time: u32,
     ) {
-        // Same session-identity gate as `handle_peer_down`: a GR-down from
-        // a superseded session (RFC 4271 §6.8 collision loser processed
-        // after the winner's `PeerUp`) must not mark the surviving
-        // session's routes stale or deregister its outbound sender. When
-        // the id matches the registered session, GR stale-path retention
-        // proceeds exactly as before stamping.
-        if self.discard_stale_session_teardown(peer, session_id, "PeerGracefulRestart") {
-            return;
+        // Same session-identity dispatch as `handle_peer_down`: a GR-down
+        // from a superseded session (RFC 4271 §6.8 collision loser
+        // processed after the winner's `PeerUp`) must not mark the
+        // surviving session's routes stale or deregister its outbound
+        // sender. A GR-down of the ACTIVE session while another live
+        // session remains fails the registration over instead of entering
+        // GR retention: stale-path retention exists to bridge a session
+        // that is gone, but here an Established session for the address
+        // is present and can be refreshed immediately — strictly better
+        // than deadline-bounded staleness for a session that is not
+        // coming back. When the id matches the registered session and no
+        // other live session exists, GR stale-path retention proceeds
+        // exactly as before stamping.
+        use super::peer_lifecycle::SessionTeardownDisposition;
+        match self.classify_session_teardown(peer, session_id, "PeerGracefulRestart") {
+            SessionTeardownDisposition::DiscardStale => return,
+            SessionTeardownDisposition::FailOver => {
+                self.fail_over_registration(peer, session_id, "PeerGracefulRestart");
+                return;
+            }
+            SessionTeardownDisposition::NoRegistration
+            | SessionTeardownDisposition::TeardownActive => {}
         }
 
         info!(%peer, restart_time, stale_routes_time, llgr_stale_time, "peer entered graceful restart");
