@@ -279,10 +279,16 @@ has it, no broad performance sprints without profile evidence.
   Type 1/4; local originator withdraws Type 2) over independent
   channels, so the EAD-per-ES-before-MAC ordering that maximizes the
   remote receivers' single-active backup-swap window is convergent but
-  not guaranteed. A small cross-actor sequencing step (withdraw EADs,
-  then MACs) would pin the §8.2-style fast-signal ordering and shrink
-  the unknown-unicast gap during a drain handover. Polish on the drain
-  primitive, not correctness — either order converges.
+  not guaranteed. Assessed 2026-06-12: the coordinator already
+  PUBLISHES segment-side first (EADs before the originator's MAC
+  withdrawals — `apply_ethernet_segment_drain`), so the favorable
+  order is best-effort today; guaranteeing it needs a consumption
+  ack/generation-confirm seam in the segment actor before the
+  originator publish. Deferred: M67 measured the link-driven drain
+  blackout at 100-300 ms WITHOUT pinned ordering, so the ack plumbing
+  would buy a narrower transient that measurement says is already
+  acceptable. Revisit only if a soak or scale test shows the
+  unknown-unicast gap mattering. Either order converges.
 - **Kernel-state crash-restart reconciliation** *(from the 2026-06 deep
   audit; decided in ADR-0079 — startup adoption sweeps on kernel ownership
   markers, reap deferred until reconvergence, no new persisted files).*
