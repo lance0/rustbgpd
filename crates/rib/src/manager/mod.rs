@@ -1505,6 +1505,12 @@ impl RibManager {
         tokio::pin!(refresh_sleep);
 
         loop {
+            // Sample ingest-channel depth once per iteration — a gauge
+            // pegged at the channel capacity on scrape means producers
+            // (sessions, local originators) are parked on backpressure.
+            self.metrics
+                .set_rib_ingest_channel_depth(i64::try_from(self.rx.len()).unwrap_or(i64::MAX));
+
             // Arm the resync timer when dirty_peers transitions empty → non-empty.
             if !self.dirty_peers.is_empty() && !resync_armed {
                 resync_sleep
@@ -1551,8 +1557,10 @@ impl RibManager {
                 );
                 self.distribute_changes(&HashSet::new(), &HashSet::new());
                 if self.dirty_peers.is_empty() {
+                    self.metrics.record_rib_dirty_resync("cleared");
                     resync_armed = false;
                 } else {
+                    self.metrics.record_rib_dirty_resync("still_dirty");
                     resync_sleep
                         .as_mut()
                         .reset(tokio::time::Instant::now() + DIRTY_RESYNC_INTERVAL);
@@ -1627,8 +1635,10 @@ impl RibManager {
 
                         // Reset for next tick if still dirty, otherwise disarm.
                         if self.dirty_peers.is_empty() {
+                            self.metrics.record_rib_dirty_resync("cleared");
                             resync_armed = false;
                         } else {
+                            self.metrics.record_rib_dirty_resync("still_dirty");
                             resync_sleep.as_mut().reset(
                                 tokio::time::Instant::now() + DIRTY_RESYNC_INTERVAL,
                             );
